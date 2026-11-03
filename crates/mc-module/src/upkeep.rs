@@ -17,9 +17,10 @@
 //! lease: a vector is saved only while the memory still has the text it was
 //! computed from, so a duplicate run costs one request and changes nothing.
 //!
-//! Not here: vectors for summarized history, which the plugin also computes
-//! only when a search needs them, and the memory maintenance the plugin's
-//! scheduled model tasks do (verifying, curating and classifying memories).
+//! History chunks use the plugin's canonical raw conversation and windows,
+//! but only for sessions the module currently owns in this project.
+//! The plugin's scheduled model tasks (verifying, curating and classifying
+//! memories) remain separate.
 //!
 //! The database lock is never held across a request or a git run: rows are
 //! read, the lock released, the slow work done, and the results written in a
@@ -106,6 +107,7 @@ impl Plan {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Report {
     pub memories_embedded: usize,
+    pub chunks_embedded: usize,
     pub sweep: Option<Sweep>,
 }
 
@@ -139,9 +141,25 @@ pub async fn run_project(
     plan: &Plan,
     clock: &(impl Fn() -> i64 + Sync),
 ) -> Report {
+    run_project_scoped(db, project, root, plan, clock, &Vec::new).await
+}
+
+/// `owned` is read again inside every chunk write transaction, so a session
+/// moved to another project while the provider ran cannot leave misfiled rows.
+pub(crate) async fn run_project_scoped(
+    db: &ContextDb,
+    project: &str,
+    root: &Path,
+    plan: &Plan,
+    clock: &(impl Fn() -> i64 + Sync),
+    owned: &(impl Fn() -> Vec<(String, String)> + Sync),
+) -> Report {
     let mut report = Report::default();
     if let (true, Some(provider)) = (plan.memory, &plan.embedding) {
         report.memories_embedded = embed_memories(db, project, provider).await;
+    }
+    if let Some(provider) = &plan.embedding {
+        report.chunks_embedded = chunks::embed(db, project, provider, clock, owned).await;
     }
     if let Some(git) = plan.git {
         report.sweep =
@@ -149,6 +167,8 @@ pub async fn run_project(
     }
     report
 }
+
+mod chunks;
 
 /// Embed one batch of the project's active memories that have no vector for
 /// the provider's model. Returns how many vectors were saved.

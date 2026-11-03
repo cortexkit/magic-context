@@ -1,0 +1,652 @@
+{
+  "rows": [
+    {
+      "ordinal": 1,
+      "role": "user",
+      "content": "  Search\n history\tby meaning.﻿ "
+    },
+    {
+      "ordinal": 2,
+      "role": "user",
+      "content": "Keep adjacent user lines grouped. 中文 café 😀"
+    },
+    {
+      "ordinal": 3,
+      "role": "assistant",
+      "content": "Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. "
+    },
+    {
+      "ordinal": 4,
+      "role": "assistant",
+      "content": "\n\t "
+    },
+    {
+      "ordinal": 5,
+      "role": "tool",
+      "content": "Not conversation."
+    },
+    {
+      "ordinal": 6,
+      "role": "assistant",
+      "content": "Return matching ordinal ranges."
+    },
+    {
+      "ordinal": 7,
+      "role": "user",
+      "content": "And preserve the provider identity."
+    }
+  ],
+  "canonical": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+  "fallback": "Empty raw span\nUseful fallback.\nSecond line.",
+  "cases": [
+    {
+      "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+      "start": 1,
+      "end": 7,
+      "max": 512,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 7,
+          "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+          "chunkHash": "b72fca8b07de8fd1028dfcb3815dd72a295c4fdfedc0dc244fb5e55ffd07f2f2"
+        }
+      ]
+    },
+    {
+      "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+      "start": 1,
+      "end": 7,
+      "max": 80,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀",
+          "chunkHash": "9df7b382b452ce3b496f7e101e6f64fb525f7067da02654f700ae4f615768756"
+        },
+        {
+          "windowIndex": 1,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The",
+          "chunkHash": "49215624e6af36ced71eb6432c816f419668c70b1c23588035ebd48d01c6ab85"
+        },
+        {
+          "windowIndex": 2,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history.",
+          "chunkHash": "8286f9e427e330c5bb4fa78ab6d642c499b4a056545cdf90d8a17f170d3e237c"
+        },
+        {
+          "windowIndex": 3,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.",
+          "chunkHash": "4440ba8f57a12e16b8f4bdba322c42610fc1457fd636e14a8d97ccce4f0d4f7b"
+        },
+        {
+          "windowIndex": 4,
+          "startOrdinal": 7,
+          "endOrdinal": 7,
+          "text": "[7] U: And preserve the provider identity.",
+          "chunkHash": "9f4c3326602231a1baa3156f5a2b5aa672a390befceb472748738ca0247c90cf"
+        }
+      ]
+    },
+    {
+      "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+      "start": 1,
+      "end": 7,
+      "max": 24,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "[1-2] U: Search history by meaning. / Keep",
+          "chunkHash": "94169309c079cc3e7ac82787ff2c978724960861f23da39a667e3ae85d3e7f21"
+        },
+        {
+          "windowIndex": 1,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "adjacent user lines grouped. 中文 café 😀",
+          "chunkHash": "113d0f09d64766cf7f4cf20bcae21b76b590ac87ba3c6e470bf23486001b165a"
+        },
+        {
+          "windowIndex": 2,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "[3-6] A: Embed raw chunks, not the",
+          "chunkHash": "545185135479493eb626b9c525fc134e5f4157da013b127baf74a7b970a733fe"
+        },
+        {
+          "windowIndex": 3,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "paraphrase. The SQLite store keeps durable history. The",
+          "chunkHash": "4072b73b86357d426864d7f48f71dd15fce87c49e52bbba677620239b361ef1c"
+        },
+        {
+          "windowIndex": 4,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps durable history. The SQLite store keeps",
+          "chunkHash": "152b855667ffe8e8f81c16b5af284646428fac507e77eecde8b0c9c28cd0ad66"
+        },
+        {
+          "windowIndex": 5,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The SQLite store keeps durable history.",
+          "chunkHash": "308ddb2f348fb6c7bbeffe8ed920d34df6f4e3fc6e98391e898510da1679877f"
+        },
+        {
+          "windowIndex": 6,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "The SQLite store keeps durable history. The SQLite store",
+          "chunkHash": "e6620bf7ccfe65c19e9cdcb94614e95cab3ab1cd41e5c76dc655a94669875ef0"
+        },
+        {
+          "windowIndex": 7,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "keeps durable history. The SQLite store keeps durable",
+          "chunkHash": "38c980f203235af70e1d118c30390b806429d7fecbb66fa30f7c15c4583d3787"
+        },
+        {
+          "windowIndex": 8,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "history. The SQLite store keeps durable history. The SQLite",
+          "chunkHash": "d884efd4323be4f65a59829a62a85d35856f28864780916528eab6741e470a23"
+        },
+        {
+          "windowIndex": 9,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "store keeps durable history. The SQLite store keeps",
+          "chunkHash": "4543269f300003079cfe595b508acc580620193d4f41a1607551cf5328f22aab"
+        },
+        {
+          "windowIndex": 10,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The SQLite store keeps durable history.",
+          "chunkHash": "308ddb2f348fb6c7bbeffe8ed920d34df6f4e3fc6e98391e898510da1679877f"
+        },
+        {
+          "windowIndex": 11,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "The SQLite store keeps durable history. / Return matching",
+          "chunkHash": "7b8e030a33ae13f94afcb0c8e097dec6996b70daef8fc2070a948ed28ce7c9fb"
+        },
+        {
+          "windowIndex": 12,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "ordinal ranges.",
+          "chunkHash": "abc0d53728fe149e7da3f854b0320d5385c0a9d7bd6da756ab7c6d9559258e5e"
+        },
+        {
+          "windowIndex": 13,
+          "startOrdinal": 7,
+          "endOrdinal": 7,
+          "text": "[7] U: And preserve the provider identity.",
+          "chunkHash": "9f4c3326602231a1baa3156f5a2b5aa672a390befceb472748738ca0247c90cf"
+        }
+      ]
+    },
+    {
+      "text": "[1-2] U: Search history by meaning. / Keep adjacent user lines grouped. 中文 café 😀\n[3-6] A: Embed raw chunks, not the paraphrase. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. The SQLite store keeps durable history. / Return matching ordinal ranges.\n[7] U: And preserve the provider identity.",
+      "start": 1,
+      "end": 7,
+      "max": 8,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "[1-2]",
+          "chunkHash": "1be18f72919ce84a40573f99b018378d38c3f4f43a95d825b3f14a9262d5e1c4"
+        },
+        {
+          "windowIndex": 1,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "U: Search history",
+          "chunkHash": "7aecfd8b66b9490f7e5992a6f94aa7bc63e614ede4c1d3b0a3d4a8abef13c2c4"
+        },
+        {
+          "windowIndex": 2,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "by meaning. /",
+          "chunkHash": "6c6524b109c96a7fe9aa0ff8812118372f486f5f39bb5745fcb4ac1403d8250c"
+        },
+        {
+          "windowIndex": 3,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "Keep adjacent user lines",
+          "chunkHash": "afe261424ec8ece4cc84dc206e39ca321752d3ddc806ddd3f7dfd5c7b09e5f52"
+        },
+        {
+          "windowIndex": 4,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "grouped. 中文 café",
+          "chunkHash": "7432d663d6f2f3860e489b49e97c5c75456e3e4d179617a9f35abe579e6f8d2e"
+        },
+        {
+          "windowIndex": 5,
+          "startOrdinal": 1,
+          "endOrdinal": 2,
+          "text": "😀",
+          "chunkHash": "f0443a342c5ef54783a111b51ba56c938e474c32324d90c3a60c9c8e3a37e2d9"
+        },
+        {
+          "windowIndex": 6,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "[3-6]",
+          "chunkHash": "37389bf0741eab8e4b2330f8ce4a31e1428540a35522c5c78ce73c5f4133db58"
+        },
+        {
+          "windowIndex": 7,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "A: Embed raw",
+          "chunkHash": "bae78c00f148f7d605a1e04c7c72cae110b71a2123f6b283586628d263dec16b"
+        },
+        {
+          "windowIndex": 8,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "chunks, not the",
+          "chunkHash": "1ef2039d44169c96182421b1ae4138348568319011061111d646fc85c0818e0d"
+        },
+        {
+          "windowIndex": 9,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "paraphrase. The",
+          "chunkHash": "d71bc72d4f919451a5e9f86ad326d4deaaa5343218c3ac61a0a851c381b7ba59"
+        },
+        {
+          "windowIndex": 10,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 11,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 12,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 13,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 14,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 15,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 16,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 17,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 18,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 19,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 20,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 21,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 22,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 23,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 24,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 25,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 26,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 27,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 28,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 29,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 30,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 31,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. The",
+          "chunkHash": "949beb937a68ea0979fad9dc674779893ce60ae5be01ef45470e7c111e9366ff"
+        },
+        {
+          "windowIndex": 32,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "SQLite store keeps",
+          "chunkHash": "613a41bae4d3712a20b10d41d87452c03e97fae382fd4e5073c0c4d8801baac7"
+        },
+        {
+          "windowIndex": 33,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "durable history. /",
+          "chunkHash": "534e26159ae7f9581178054beac50c6990c62e97dc6748c44fe8c122fde21d61"
+        },
+        {
+          "windowIndex": 34,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "Return matching ordinal",
+          "chunkHash": "17283f6a52d471f5bd0ee183f392f265c7a34d56a470d2ed769e2d7442ac74f1"
+        },
+        {
+          "windowIndex": 35,
+          "startOrdinal": 3,
+          "endOrdinal": 6,
+          "text": "ranges.",
+          "chunkHash": "106a90d94e4fa60fde5642cb265613972c2769bc31c42c416f5911275ae9b7d0"
+        },
+        {
+          "windowIndex": 36,
+          "startOrdinal": 7,
+          "endOrdinal": 7,
+          "text": "[7] U:",
+          "chunkHash": "5203e13818de96310a9c8716ce7f08f124b1c8ee1852338850c15fec2318b532"
+        },
+        {
+          "windowIndex": 37,
+          "startOrdinal": 7,
+          "endOrdinal": 7,
+          "text": "And preserve the provider",
+          "chunkHash": "c555aa602ae4953ede465602045b8477bf2cf7fb1026fe2eeae0ea183da2d854"
+        },
+        {
+          "windowIndex": 38,
+          "startOrdinal": 7,
+          "endOrdinal": 7,
+          "text": "identity.",
+          "chunkHash": "3eacde4d3ef6b2e877ea9402719b96ec29d7b7c6f9cd35f0fbb380ef2af2a911"
+        }
+      ]
+    },
+    {
+      "text": "Empty raw span\nUseful fallback.\nSecond line.",
+      "start": 8,
+      "end": 10,
+      "max": 512,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 8,
+          "endOrdinal": 10,
+          "text": "Empty raw span\nUseful fallback.\nSecond line.",
+          "chunkHash": "1ffab7ff3ff212a53b2bbe5e0019296d8091c40a51797ee090beb72291093e55"
+        }
+      ]
+    },
+    {
+      "text": "[1] A: a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!a1!",
+      "start": 1,
+      "end": 1,
+      "max": 16,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "[1] A:",
+          "chunkHash": "1f88842411cd261933a2164c7afb350da99bfd49e01340970404fe3e9a728915"
+        },
+        {
+          "windowIndex": 1,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "a1!a1!a1!a1!a1",
+          "chunkHash": "0948dd610d9a17144511a66f7a33d2a72b275d3cdbb96051210c7c1d30eb4037"
+        },
+        {
+          "windowIndex": 2,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "!a1!a1!a1!a1!a",
+          "chunkHash": "0b59430d13f726fcf6c61f5c53490ce5cb99d478f82732ca25c400597cf7d0f3"
+        },
+        {
+          "windowIndex": 3,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "1!a1!a1!a1!a1!",
+          "chunkHash": "8cc5abeb16564a8dc1678aac5bf4fa89a8ddfd73c515991b758eb2402f203de4"
+        },
+        {
+          "windowIndex": 4,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "a1!a1!a1!a1!a1",
+          "chunkHash": "0948dd610d9a17144511a66f7a33d2a72b275d3cdbb96051210c7c1d30eb4037"
+        },
+        {
+          "windowIndex": 5,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "!a1!a1!a1!a1!a",
+          "chunkHash": "0b59430d13f726fcf6c61f5c53490ce5cb99d478f82732ca25c400597cf7d0f3"
+        },
+        {
+          "windowIndex": 6,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "1!a1!a1!a1!a1!",
+          "chunkHash": "8cc5abeb16564a8dc1678aac5bf4fa89a8ddfd73c515991b758eb2402f203de4"
+        },
+        {
+          "windowIndex": 7,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "a1!a1!a1!a1!a1",
+          "chunkHash": "0948dd610d9a17144511a66f7a33d2a72b275d3cdbb96051210c7c1d30eb4037"
+        },
+        {
+          "windowIndex": 8,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "!a1!a1!a1!a1!a",
+          "chunkHash": "0b59430d13f726fcf6c61f5c53490ce5cb99d478f82732ca25c400597cf7d0f3"
+        },
+        {
+          "windowIndex": 9,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "1!a1!a1!a1!a1!",
+          "chunkHash": "8cc5abeb16564a8dc1678aac5bf4fa89a8ddfd73c515991b758eb2402f203de4"
+        },
+        {
+          "windowIndex": 10,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "a1!a1!a1!a1!a1",
+          "chunkHash": "0948dd610d9a17144511a66f7a33d2a72b275d3cdbb96051210c7c1d30eb4037"
+        },
+        {
+          "windowIndex": 11,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "!a1!a1!a1!",
+          "chunkHash": "2a8664906b5aedd5a948671450f9de74d4eb4dfc6dc2428c99f1f361252845db"
+        }
+      ]
+    },
+    {
+      "text": "[1] U: 中文😀中文😀中文😀中文😀中文😀中文😀中文😀中文😀中文😀中文😀",
+      "start": 1,
+      "end": 1,
+      "max": 8,
+      "windows": [
+        {
+          "windowIndex": 0,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "[1] U:",
+          "chunkHash": "bae98aa5b358a0e57c74e7832b8da5cd4cb41096b977d739d07edbd5ffab8dca"
+        },
+        {
+          "windowIndex": 1,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "中文😀中文�",
+          "chunkHash": "c2bf65b37ceb8d5f13cb75c8f4c090e82ffccb1203cf184313f0c2591e541813"
+        },
+        {
+          "windowIndex": 2,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "�中文😀中文",
+          "chunkHash": "993adedc977f7f23d7db91a620cbd369a4e3070a4bb848101e9b30ea93f80667"
+        },
+        {
+          "windowIndex": 3,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "😀中文😀中",
+          "chunkHash": "8db3f948fbf9d3a7a196ee3451c8d3eff9ddbde745cdc89356edada66fc3ca97"
+        },
+        {
+          "windowIndex": 4,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "文😀中文😀",
+          "chunkHash": "f817048bc5f3b18cd6226f45708493ee361569dcce6cef77164181a20a2135ab"
+        },
+        {
+          "windowIndex": 5,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "中文😀中文�",
+          "chunkHash": "c2bf65b37ceb8d5f13cb75c8f4c090e82ffccb1203cf184313f0c2591e541813"
+        },
+        {
+          "windowIndex": 6,
+          "startOrdinal": 1,
+          "endOrdinal": 1,
+          "text": "�中文😀",
+          "chunkHash": "20ac80506dd73a7b818931841bc65638562d226b448b99855371ce5db9818c70"
+        }
+      ]
+    }
+  ]
+}

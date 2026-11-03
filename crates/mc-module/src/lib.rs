@@ -43,6 +43,7 @@ pub mod calibration;
 pub mod catalog;
 pub mod caveman;
 pub mod child_scopes;
+mod chunk_embedding;
 pub mod client;
 pub mod config;
 pub mod content_language;

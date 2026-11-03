@@ -185,6 +185,12 @@ impl Provider {
         format!("{provider}:chunk:{}", &digest[..16])
     }
 
+    /// The same ceiling used in the chunk recipe and the document request.
+    pub(crate) fn chunk_max_input_tokens(&self) -> u64 {
+        self.max_input_tokens
+            .unwrap_or(DEFAULT_CHUNK_MAX_INPUT_TOKENS)
+    }
+
     fn document_prefix(&self) -> String {
         if let Some(prefix) = &self.document_prefix {
             return prefix.clone();
