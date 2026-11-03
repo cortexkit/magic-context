@@ -208,6 +208,30 @@ pub struct ViewObservation {
     /// payloads: large images can otherwise exhaust the report's wire frame budget.
     pub inserted_text: Vec<String>,
     pub image_count: usize,
+    /// Every edit of the view in one short line each: the version that
+    /// introduced it, its kind, what it targets and a hash of the whole op.
+    /// Comparing two views' lists shows what a publication changed without
+    /// carrying the edits' payloads.
+    #[serde(default)]
+    pub edits: Vec<String>,
+}
+
+/// One edit as a short, comparable line.
+fn edit_line(edit: &cortexkit_role_compaction::view::Edit) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let op = serde_json::to_string(&edit.op).unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    op.hash(&mut hasher);
+    let target = match &edit.op {
+        EditOp::Insert { message, .. } => format!("insert {}", message.id),
+        EditOp::Cut { through } => format!("cut {through}"),
+        EditOp::Drop { mid, part } => format!("drop {mid}/{}", part.as_deref().unwrap_or("*")),
+        EditOp::Replace {
+            mid, part, field, ..
+        } => format!("replace {mid}/{part}.{field}"),
+        _ => "other".to_owned(),
+    };
+    format!("{} {target} {:016x}", edit.since, hasher.finish())
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -246,6 +270,7 @@ impl ObservationLog {
             adopted_ms: None,
             inserted_text: Vec::new(),
             image_count: 0,
+            edits: view.edits.iter().map(edit_line).collect(),
         };
         if self.values.views.is_empty() {
             for edit in &view.edits {

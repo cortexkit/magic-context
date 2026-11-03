@@ -210,6 +210,12 @@ fn print_report(report: &Report) {
         .observations
         .as_ref()
         .expect("mock runner must support MC_MOCK_OBSERVE=1; rebuild its staged binary");
+    // The whole observation set, including every view's edit lines, for
+    // reading what each publication changed.
+    if let Some(path) = std::env::var_os("MC_REHEARSAL_OBSERVATIONS") {
+        std::fs::write(&path, serde_json::to_vec_pretty(observed).unwrap())
+            .expect("MC_REHEARSAL_OBSERVATIONS names a writable file");
+    }
     let setup = observed.setups.first().expect("no Setup observation");
     measure("setup_ms", setup.elapsed_ms);
     measure("setup_answer", &setup.answer);

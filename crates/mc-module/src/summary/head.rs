@@ -25,8 +25,8 @@ use super::render::{
 use crate::context_db::{StoredCompartment, StoredMemory};
 use crate::memory;
 
-const M0_ID: &str = "magic-context:m0";
-const M1_ID: &str = "magic-context:m1";
+pub(crate) const M0_ID: &str = "magic-context:m0";
+pub(crate) const M1_ID: &str = "magic-context:m1";
 const HISTORY_EMPTY: &str = "<session-history></session-history>";
 const M1_EMPTY: &str =
     "<session-history-since>(no new content since last materialization)</session-history-since>";

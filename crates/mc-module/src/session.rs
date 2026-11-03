@@ -2518,15 +2518,14 @@ impl Session {
     /// it covers.
     fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
         let version = self.version + 1;
-        // With no summary left, the head and the cut go with them.
-        let no_history = self.summaries.is_empty();
+        let retire = retired_history(self.summaries.is_empty(), &ops);
         let built = view_builder::next_view(
             self.latest.as_ref(),
             self.index.entries(),
             ops,
             &self.conditions.rules,
             version,
-            |op| no_history && (head::is_head(op) || matches!(op, EditOp::Cut { .. })),
+            retire,
         );
         match built {
             Ok(Some(view)) => {
@@ -3205,6 +3204,81 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
+}
+
+/// Which of the previous view's history edits (the history head's two
+/// messages and the cut) leave the next view. When an undo takes away a
+/// session's last summary, the cut goes and so does a head this pass no
+/// longer renders. A head this pass renders again stays as it was, with the
+/// version that introduced it: the head also carries project docs and
+/// memories, so a session with no summaries yet still shows one. Retiring
+/// and re-adding it on every pass would give it a newer version each time,
+/// which publishes a view on every execute pass and, under signed thinking,
+/// makes every later thinking block look invalid.
+fn retired_history(no_summaries: bool, ops: &[EditOp]) -> impl Fn(&EditOp) -> bool {
+    let rendered: Vec<EditOp> = ops
+        .iter()
+        .filter(|op| head::is_head(op) || matches!(op, EditOp::Cut { .. }))
+        .cloned()
+        .collect();
+    move |op| {
+        no_summaries
+            && (head::is_head(op) || matches!(op, EditOp::Cut { .. }))
+            && !rendered.contains(op)
+    }
+}
+
+#[cfg(test)]
+mod retired_history_tests {
+    use super::*;
+    use cortexkit_role_compaction::view::{Edit, InsertAt, InsertedMessage};
+
+    fn head_insert(id: &str, text: &str) -> EditOp {
+        EditOp::Insert {
+            at: InsertAt::Start,
+            message: InsertedMessage::new(
+                id,
+                cortexkit_role_compaction::read::Role::User,
+                vec![text.to_owned()],
+            ),
+        }
+    }
+
+    #[test]
+    fn a_head_rendered_again_without_summaries_keeps_its_version() {
+        let m0 = head_insert(head::M0_ID, "<project-docs>One crate.</project-docs>");
+        let m1 = head_insert(head::M1_ID, "<session-history-since>(no new content)");
+        let previous = View::seal(1, vec![Edit::new(1, m0.clone()), Edit::new(1, m1.clone())]);
+        let ops = vec![m0.clone(), m1.clone()];
+        let retire = retired_history(true, &ops);
+        let next = view_builder::next_view(
+            Some(&previous),
+            &[],
+            ops,
+            &cortexkit_role_compaction::rules::ProviderRules::new(
+                cortexkit_role_compaction::rules::SignedParts::None,
+                cortexkit_role_compaction::rules::EditCost::Suffix,
+            ),
+            2,
+            retire,
+        )
+        .unwrap();
+        assert!(next.is_none(), "an unchanged head must publish nothing");
+    }
+
+    #[test]
+    fn a_head_or_cut_no_longer_rendered_leaves_once_the_summaries_are_gone() {
+        let m0 = head_insert(head::M0_ID, "<session-history>…");
+        let cut = EditOp::Cut {
+            through: "m9".into(),
+        };
+        let retire = retired_history(true, &[]);
+        assert!(retire(&m0) && retire(&cut));
+        // With summaries, nothing is retired here; a newer head replaces the
+        // old one through the view builder.
+        let retire = retired_history(false, &[]);
+        assert!(!retire(&m0) && !retire(&cut));
+    }
 }
 
 #[cfg(test)]
