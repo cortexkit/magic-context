@@ -698,6 +698,115 @@ pub(crate) fn input_schema(tool: &ToolDefinition, surface: Surface) -> Result<Va
     Ok(schema)
 }
 
+/// Why a call's schema pin can't be honoured: the published refusal code and
+/// its `{tool, expected, current}` detail.
+pub(crate) struct PinRefusal {
+    pub code: &'static str,
+    pub detail: Value,
+}
+
+/// Check a call's parsed schema pin against what ck-mc serves now. A pinned
+/// schema is honoured when it is one this build renders for the tool, on
+/// either surface and with or without the smart-note fields: every variant
+/// takes the same arguments, so a session that froze any of them can still
+/// call the tool. The semantics must be the tool's current version.
+pub(crate) fn check_pin(
+    pin: &cortexkit_role_tool_provider::call::SchemaPin,
+) -> Result<(), PinRefusal> {
+    let Some(tool) = definition().tool(&pin.tool) else {
+        // An unknown tool is refused by name elsewhere.
+        return Ok(());
+    };
+    let mut current = Vec::new();
+    for surface in [Surface::Full, Surface::Light] {
+        let Ok(schema) = input_schema(tool, surface) else {
+            continue;
+        };
+        let mut variants = vec![schema.clone()];
+        if tool.name == "ctx_note" {
+            let mut without = schema;
+            disable_smart_note_schema(&mut without);
+            variants.push(without);
+        }
+        current.extend(
+            variants
+                .iter()
+                .filter_map(|schema| catalog::schema_digest(schema).ok()),
+        );
+    }
+    if !current.contains(&pin.schema_digest) {
+        return Err(PinRefusal {
+            code: cortexkit_role_tool_provider::errors::TOOL_SCHEMA_CHANGED,
+            detail: json!({
+                "tool": tool.name,
+                "expected": pin.schema_digest,
+                "current": current.first(),
+            }),
+        });
+    }
+    if pin.semantics != tool.semantics {
+        return Err(PinRefusal {
+            code: cortexkit_role_tool_provider::errors::TOOL_SEMANTICS_CHANGED,
+            detail: json!({
+                "tool": tool.name,
+                "expected": pin.semantics,
+                "current": tool.semantics,
+            }),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use cortexkit_role_tool_provider::call::SchemaPin;
+
+    fn current(name: &str, surface: Surface, smart_notes: bool) -> String {
+        let tool = definition().tool(name).unwrap();
+        let mut schema = input_schema(tool, surface).unwrap();
+        if !smart_notes {
+            disable_smart_note_schema(&mut schema);
+        }
+        catalog::schema_digest(&schema).unwrap()
+    }
+
+    #[test]
+    fn every_schema_variant_this_build_serves_is_honoured() {
+        let semantics = definition().tool("ctx_note").unwrap().semantics;
+        for (surface, smart_notes) in [
+            (Surface::Full, true),
+            (Surface::Light, true),
+            (Surface::Full, false),
+        ] {
+            let pin = SchemaPin::new(
+                "ctx_note",
+                current("ctx_note", surface, smart_notes),
+                semantics,
+            );
+            assert!(check_pin(&pin).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_pin_this_build_cannot_serve_is_refused_by_name() {
+        let tool = definition().tool("ctx_note").unwrap();
+        let stale = SchemaPin::new("ctx_note", "0".repeat(64), tool.semantics);
+        let refused = check_pin(&stale).err().unwrap();
+        assert_eq!(refused.code, "tool_schema_changed");
+        assert_eq!(refused.detail["tool"], "ctx_note");
+        let newer = SchemaPin::new(
+            "ctx_note",
+            current("ctx_note", Surface::Full, true),
+            tool.semantics + 1,
+        );
+        assert_eq!(
+            check_pin(&newer).err().unwrap().code,
+            "tool_semantics_changed"
+        );
+    }
+}
+
 fn catalog_tool(
     tool: &ToolDefinition,
     surface: Surface,

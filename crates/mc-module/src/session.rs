@@ -2012,12 +2012,29 @@ impl Session {
             return (Vec::new(), None);
         }
         let mut ops = self.render_head(settings);
-        let cut = self.summaries.last().and_then(|last| {
+        // A head kept as the latest view shows it (a read it needs failed,
+        // see `head_as_shown`, which leaves no next baseline) carries no
+        // newer summary. The cut then stays where that view has it: moving
+        // it would hide messages whose summary the head does not show.
+        let held = self.next_baseline.is_none();
+        let through = if held {
+            self.latest.as_ref().and_then(|view| {
+                view.edits.iter().find_map(|edit| match &edit.op {
+                    EditOp::Cut { through } => Some(through.clone()),
+                    _ => None,
+                })
+            })
+        } else {
+            self.summaries
+                .last()
+                .map(|last| last.end_message_id.clone())
+        };
+        let cut = through.and_then(|through| {
             self.index
                 .entries()
                 .iter()
-                .find(|entry| entry.mid == last.end_message_id)
-                .map(|entry| (entry.ordinal, last.end_message_id.clone()))
+                .find(|entry| entry.mid == through)
+                .map(|entry| (entry.ordinal, through))
         });
         if let Some((_, through)) = &cut {
             ops.push(EditOp::Cut {
@@ -2121,8 +2138,12 @@ impl Session {
             base.shape = Some(shape.clone());
             base
         };
+        let mut fresh_fold = true;
         let mut base = match (&self.baseline, self.fold_due) {
-            (Some(baseline), false) => baseline.clone(),
+            (Some(baseline), false) => {
+                fresh_fold = false;
+                baseline.clone()
+            }
             _ => folded(&fold_inputs),
         };
         let gone = match gone_from(&base) {
@@ -2141,6 +2162,7 @@ impl Session {
             && head::needs_refold(&base, pressure, history_budget_tokens, fold_inputs.counter)
         {
             base = folded(&fold_inputs);
+            fresh_fold = true;
             // A fresh fold shows every current memory, so none is gone.
             (m1, next, _) = head::delta(&base, &fold_inputs);
         }
@@ -2148,7 +2170,29 @@ impl Session {
             self.keep_mural(mural);
         }
         let image = next.mural.as_deref().and_then(|hash| self.mural_png(hash));
-        let ops = head::head_ops(&next.m0, &m1, image);
+        let mut ops = head::head_ops(&next.m0, &m1, image);
+        // Between folds `m[0]` is exactly what the runner last applied. That
+        // is normally what the baseline renders, but not after ck-mc adopted
+        // a newer view from the runner (its own saved state was older, as
+        // after a restore): re-rendering the older baseline would rewrite
+        // the cached prefix from its start. The older baseline still drives
+        // `m[1]`, which may then repeat what `m[0]` shows until the next fold.
+        if !fresh_fold {
+            if let Some(shown) = self.latest.as_ref().and_then(|view| {
+                view.edits.iter().find_map(|edit| match &edit.op {
+                    EditOp::Insert { message, .. } if message.id == head::M0_ID => {
+                        Some(edit.op.clone())
+                    }
+                    _ => None,
+                })
+            }) {
+                if let Some(m0) = ops.iter_mut().find(
+                    |op| matches!(op, EditOp::Insert { message, .. } if message.id == head::M0_ID),
+                ) {
+                    *m0 = shown;
+                }
+            }
+        }
         self.next_baseline = Some(next);
         ops
     }
@@ -2408,7 +2452,7 @@ impl Session {
         ));
         wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
-        wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark));
+        wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark, cutoff));
         let model = &self.conditions.model;
         let anthropic = model.provider.contains("anthropic") || model.model.contains("claude");
         wanted.extend(lanes::reasoning_over_budget(
@@ -2417,6 +2461,10 @@ impl Session {
             anthropic,
         ));
         wanted.retain(|(key, _)| !self.failed_parts.contains(key));
+        // On a `ctx_keep` pass the parts the model chose stay whole: the
+        // other lanes still land, but none of them takes a kept part.
+        let kept = |key: &lanes::PartKey| keep.is_some_and(|kept| kept.contains(key));
+        wanted.retain(|(key, _)| !kept(key));
         let (mut ops, mut covered) = lanes::drop_ops(&context, &wanted);
         // Another rewrite on this pass: a lane edit, a history head or cut
         // that changes, or a ride whose cache is lost anyway.
@@ -2438,7 +2486,8 @@ impl Session {
                 over_limit: over_limit.is_some(),
                 priced,
             };
-            let selected = lanes::emergency_drop(&context, cutoff, &emergency);
+            let mut selected = lanes::emergency_drop(&context, cutoff, &emergency);
+            selected.retain(|(key, _)| !kept(key));
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
                 // earlier lane asked for.
@@ -2455,6 +2504,11 @@ impl Session {
         }
         // Answered images go once content at least as new has been dropped,
         // by an earlier view or by this pass.
+        let image_skip: Vec<lanes::PartKey> = covered
+            .iter()
+            .chain(keep.into_iter().flatten())
+            .cloned()
+            .collect();
         let images = lanes::Images {
             outputs: &self.image_outputs,
             watermark: edited
@@ -2462,13 +2516,14 @@ impl Session {
                 .max(lanes::ops_watermark(&self.index, &ops)),
             cutoff,
             over_limit: over_limit.is_some(),
-            skip: &covered,
+            skip: &image_skip,
         };
         let (image_ops, image_parts) = lanes::answered_images(&context, &images);
         let caveman_skip: Vec<lanes::PartKey> = covered
             .iter()
             .filter(|key| !stripped_only.contains(key))
             .cloned()
+            .chain(keep.into_iter().flatten().cloned())
             .collect();
         ops.extend(image_ops);
         covered.extend(image_parts);
@@ -2503,7 +2558,7 @@ impl Session {
         // relief too, or every session would be asked for ctx_keep on its
         // first crossing.
         let lined_up: Vec<lanes::PartKey> =
-            lanes::age_sweep(&context, bookmark.max(self.reclaim_bookmark))
+            lanes::age_sweep(&context, bookmark.max(self.reclaim_bookmark), cutoff)
                 .into_iter()
                 .map(|(key, _)| key)
                 .filter(|key| !covered.contains(key))

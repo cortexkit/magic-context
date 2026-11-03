@@ -549,16 +549,42 @@ fn lifecycle_context_writes_wait_briefly_for_an_external_writer() {
 #[tokio::test]
 async fn lifecycle_refused_automatic_drops_are_not_offered_on_every_pass() {
     let (mut session, client, _, _, settings) = fixture();
-    let mut tool: Part = serde_json::from_value(serde_json::json!({
-        "id":"p", "kind":"tool", "call_id":"c", "name":"read", "input":{},
-        "status":"completed", "output":"large result", "output_bytes":40000, "digest":""
-    }))
-    .unwrap();
-    tool.tag = Some(2);
+    // The old output sits outside the protected tail: three newer calls, and
+    // no token floor beyond them.
+    let settings = Settings {
+        protected_tokens: Some(0),
+        ..settings
+    };
+    let tool_part = |id: &str, tag: u64, output_bytes: u64| -> Part {
+        let mut part: Part = serde_json::from_value(serde_json::json!({
+            "id":id, "kind":"tool", "call_id":id, "name":"read", "input":{"path": id},
+            "status":"completed", "output":"result", "output_bytes":output_bytes, "digest":""
+        }))
+        .unwrap();
+        part.tag = Some(tag);
+        part
+    };
     session.index.extend(vec![
         text(1, "task"),
-        Entry::new(2, "tool", Role::Assistant, 2, vec![tool]),
+        Entry::new(
+            2,
+            "tool",
+            Role::Assistant,
+            2,
+            vec![tool_part("p", 2, 40000)],
+        ),
         text(3, "next"),
+        Entry::new(
+            4,
+            "newer",
+            Role::Assistant,
+            4,
+            vec![
+                tool_part("q", 4, 10),
+                tool_part("r", 5, 10),
+                tool_part("s", 6, 10),
+            ],
+        ),
     ]);
     session.reclaim_bookmark = 2;
     *client.refuse.lock().unwrap() = true;

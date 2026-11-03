@@ -42,8 +42,9 @@ fn probes_need_no_connection_and_create_no_files() {
             assert_eq!(
                 line,
                 format!(
-                    "context.db={} mode3.db=1\n",
-                    mc_module::context_db::SCHEMA_VERSION
+                    "context.db={} mode3.db={}\n",
+                    mc_module::context_db::SCHEMA_VERSION,
+                    mc_module::store::SCHEMA_VERSION
                 )
             );
         }

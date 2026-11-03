@@ -521,7 +521,11 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
 
 /// The age sweep: tool outputs at or below `bookmark` (recorded by the
 /// previous rebuild), worth dropping, and not protected.
-pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
+/// Tool outputs at or below the bookmark, outside the protected tail. The
+/// plugin applies its age reclaim through the same protected-tail veto as
+/// every other drop (`pendingDropVeto`), so an output that is far behind by
+/// user turns but still among the newest calls stays.
+pub fn age_sweep(context: &Context, bookmark: u64, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
     if bookmark == 0 {
         return Vec::new();
     }
@@ -534,6 +538,7 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
             };
             let key = (entry.mid.clone(), part.id.clone());
             if tag > bookmark
+                || in_tail(part, cutoff)
                 || context.edited.covers(&entry.mid, &part.id)
                 || protected.contains(&key)
                 || reclaimable_tokens(context, entry, part) < AGE_SWEEP_MIN_TOKENS
@@ -1445,7 +1450,7 @@ mod tests {
         let none = BTreeMap::new();
         // The outputs numbered 2 and 3 (`m2/p2`, `m3/p3` above) are 10 tokens
         // each, under the 250-token floor.
-        let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6)
+        let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6, None)
             .into_iter()
             .map(|(key, _)| key)
             .collect();
@@ -1455,7 +1460,7 @@ mod tests {
         // age sweep and not a drop another lane asks for.
         let one_read = BTreeMap::from([("read".to_owned(), 1)]);
         let protected = context(&index, &edited, &one_read);
-        let swept: Vec<PartKey> = age_sweep(&protected, 6)
+        let swept: Vec<PartKey> = age_sweep(&protected, 6, None)
             .into_iter()
             .map(|(key, _)| key)
             .collect();
@@ -1571,7 +1576,7 @@ mod tests {
         let edited = Edited::default();
         let none = BTreeMap::new();
         // 100 output tokens, under the floor, though the whole part is over.
-        assert!(age_sweep(&context(&index, &edited, &none), 3).is_empty());
+        assert!(age_sweep(&context(&index, &edited, &none), 3, None).is_empty());
     }
 
     /// An edit an earlier view dropped does not make the edit before it of

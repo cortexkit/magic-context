@@ -783,6 +783,20 @@ impl Handler {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
             return Err(Refusal::new(&error.code, error.message, None));
         }
+        // A malformed call key or pin, or a pin naming another tool, is
+        // refused before anything runs; a pin ck-mc can no longer honour is
+        // refused by name, and the runner records it as the call's result.
+        let pin = cortexkit_role_tool_provider::call::check_call(&call)
+            .map_err(|error| Refusal::new(&error.code, error.message, error.detail))?;
+        if let Some(pin) = pin {
+            if let Err(refused) = crate::catalog::check_pin(&pin) {
+                return Err(Refusal::new(
+                    refused.code,
+                    format!("{} can no longer honour this call's schema pin", pin.tool),
+                    Some(refused.detail),
+                ));
+            }
+        }
         let (text, is_error) = match self.module.tool(route, &call.name, call.arguments).await {
             Ok(output) => (output, false),
             Err(ModuleError::Tool(output)) => (output, true),
@@ -1113,6 +1127,50 @@ mod config_tests {
 
 #[cfg(test)]
 mod agent_surface_tests {
+    use super::*;
+
+    /// The schema-pin checks run before a tool does: a pin naming another
+    /// tool is a malformed call, and a pin this build can't serve is refused
+    /// by name.
+    #[tokio::test]
+    async fn a_call_is_checked_against_its_schema_pin_before_it_runs() {
+        let handler = Handler::new(Module::new(
+            SubcRunnerClient::new(
+                std::env::temp_dir().join("ck-mc-pin-unused"),
+                Arc::new(ChildScopes::new("test-pin")),
+            ),
+            crate::config::Config::from(crate::pass::Settings::default()),
+            None,
+            None,
+        ));
+        let route = Route {
+            session: SessionRef::new("runner", "test", "pin"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let call = |pin: &str| {
+            serde_json::to_vec(&json!({
+                "name": "ctx_note",
+                "arguments": {"action": "read"},
+                "schema_pin": pin,
+            }))
+            .unwrap()
+        };
+        let other =
+            cortexkit_role_tool_provider::call::SchemaPin::new("ctx_memory", "0".repeat(64), 1)
+                .encode()
+                .unwrap();
+        let refused = handler.tool(&route, &call(&other)).await.err().unwrap();
+        assert_eq!(refused.code, "invalid_request");
+        let stale =
+            cortexkit_role_tool_provider::call::SchemaPin::new("ctx_note", "0".repeat(64), 1)
+                .encode()
+                .unwrap();
+        let refused = handler.tool(&route, &call(&stale)).await.err().unwrap();
+        assert_eq!(refused.code, "tool_schema_changed");
+    }
+
     #[test]
     fn unknown_tool_is_a_protocol_refusal() {
         let refusal = super::refusal(crate::module::ModuleError::UnknownTool(

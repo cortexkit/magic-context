@@ -905,10 +905,16 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
     // after the fourth read (the fifth request) is the first over the
     // threshold. The pass after it sees 3 and 5 far behind (more than a
     // quarter of the usable window, 9,750 tokens, of newer content) and only
-    // records that; the pass after the sixth request drops them, so the
-    // seventh request is the first under a view. Reasoning is too small to
-    // matter here.
-    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    // records that; the pass after the sixth request drops 3, so the seventh
+    // request is the first under a view. 5 stays: the newest three calls
+    // (5, 7 and 9) are the protected tail, which the age sweep never takes,
+    // as in the plugin. Reasoning is too small to matter here, and the
+    // request for `ctx_keep` is off so only the age sweep acts.
+    let settings = Settings {
+        keep_min_recovery_percentage: 0.0,
+        ..Settings::default()
+    };
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), settings).await;
     runner
         .play(&[
             user("Review the module."),
@@ -928,7 +934,7 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
     assert_eq!(requests[6].view, Some(1));
     let host = runner.host();
     assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
-    assert_eq!(seen(host, 5).as_deref(), Some(placeholder(5).as_str()));
+    assert!(seen(host, 5).unwrap().starts_with("§5§ xxx"));
     assert!(seen(host, 7).unwrap().starts_with("§7§ xxx"));
     assert!(seen(host, 9).unwrap().starts_with("§9§ xxx"));
 }
@@ -936,8 +942,11 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
 #[tokio::test]
 async fn reasoning_beyond_the_budget_goes_on_the_first_execute_pass() {
     for (kind, rules) in [(Kind::OpenAi, free()), (Kind::Anthropic, bound())] {
+        // The request for `ctx_keep` is off, so the one view is the
+        // threshold pass's own.
         let settings = Settings {
             keep_reasoning_tokens: 1_000,
+            keep_min_recovery_percentage: 0.0,
             ..Settings::default()
         };
         let mut runner = start_with(config("worker", kind, rules), settings).await;
@@ -1117,7 +1126,13 @@ async fn injected_text_leaves_older_messages_and_the_rest_of_each_message_stays(
 
 #[tokio::test]
 async fn answered_images_go_once_newer_content_is_dropped() {
-    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    // The request for `ctx_keep` is off: its extra pass would let the age
+    // sweep take the screenshot's result whole before the first view.
+    let settings = Settings {
+        keep_min_recovery_percentage: 0.0,
+        ..Settings::default()
+    };
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), settings).await;
     runner
         .play(&[
             user("Look at the screen."),
