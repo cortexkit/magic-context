@@ -23,9 +23,48 @@ pub struct Child {
     pub project_root: Option<String>,
 }
 
-/// A call to the runner that got no answer.
+/// A call to the runner that got no answer, or a refusal.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientError(pub String);
+pub struct ClientError {
+    pub message: String,
+    /// The refusal's code, when the runner or the daemon refused the call or
+    /// its route by name.
+    pub code: Option<String>,
+}
+
+impl ClientError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    pub fn refused(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: Some(code.into()),
+        }
+    }
+
+    /// The runner no longer lets ck-mc act as this session's compaction
+    /// provider: its plan names another provider or none, or it holds no such
+    /// session. Whatever the reason, ck-mc stops working on the session until
+    /// the runner's next Setup.
+    pub fn not_permitted(&self) -> bool {
+        self.code.as_deref()
+            == Some(cortexkit_role_compaction::wire::codes::COMPACTION_NOT_PERMITTED)
+    }
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.code {
+            Some(code) => write!(f, "{code}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
 
 /// Each call concerns one session: the transport sends it on a route bound to
 /// that session, so the request itself never names it.

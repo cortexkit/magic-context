@@ -58,7 +58,7 @@ impl RunnerClient for Client {
     ) -> Result<SendReply, crate::client::ClientError> {
         self.sends.lock().unwrap().push(request);
         if std::mem::take(&mut *self.fail.lock().unwrap()) {
-            Err(crate::client::ClientError("send failed".into()))
+            Err(crate::client::ClientError::new("send failed"))
         } else {
             Ok(SendReply::new("pending"))
         }

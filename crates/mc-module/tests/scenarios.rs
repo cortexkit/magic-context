@@ -94,7 +94,7 @@ impl HostClient {
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| ClientError("runner not attached".into()))
+            .ok_or_else(|| ClientError::new("runner not attached"))
     }
 }
 
@@ -161,7 +161,7 @@ fn read_wrapped<T: serde::Serialize, A: serde::de::DeserializeOwned>(
 ) -> Result<A, ClientError> {
     let body = cortexkit_role_llm_runner::wire::reply_body(answer).expect("answers serialize");
     cortexkit_role_llm_runner::wire::read_reply(&body)
-        .map_err(|error| ClientError(format!("{error:?}")))
+        .map_err(|error| ClientError::new(format!("{error:?}")))
 }
 
 impl RunnerClient for HostClient {
@@ -174,7 +174,7 @@ impl RunnerClient for HostClient {
         let page = self
             .host()?
             .read(&request)
-            .map_err(|refusal| ClientError(format!("{refusal:?}")))?;
+            .map_err(|refusal| ClientError::new(format!("{refusal:?}")))?;
         if let (
             cortexkit_role_compaction::read::Detail::Compact,
             cortexkit_role_compaction::read::Select::After { after_ordinal, .. },
@@ -237,7 +237,7 @@ impl RunnerClient for HostClient {
         let reply = self
             .host()?
             .send(&session.session, request)
-            .map_err(|refusal| ClientError(format!("{refusal:?}")))?;
+            .map_err(|refusal| ClientError::new(format!("{refusal:?}")))?;
         read_wrapped(&reply)
     }
 
@@ -267,7 +267,7 @@ impl RunnerClient for HostClient {
         let result = self
             .host()?
             .run_result(&request)
-            .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))?;
+            .ok_or_else(|| ClientError::new(format!("unknown run {}", request.run_id)))?;
         read_wrapped(&result)
     }
 
@@ -3338,7 +3338,7 @@ impl RunnerClient for StuckClient {
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
         std::future::pending::<()>().await;
-        Err(ClientError(format!("no run {}", request.run_id)))
+        Err(ClientError::new(format!("no run {}", request.run_id)))
     }
 }
 
@@ -3876,7 +3876,7 @@ impl RunnerClient for SynapseClient {
         _: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
-        Err(ClientError(format!("no run {}", request.run_id)))
+        Err(ClientError::new(format!("no run {}", request.run_id)))
     }
 
     async fn synapse_call(

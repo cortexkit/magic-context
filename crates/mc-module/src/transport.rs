@@ -125,7 +125,7 @@ impl SubcRunnerClient {
         params: &P,
     ) -> Result<A, ClientError> {
         let root = child.project_root.as_deref().ok_or_else(|| {
-            ClientError(format!(
+            ClientError::new(format!(
                 "{method}: the session has no project folder, so its summarizer has no child scope"
             ))
         })?;
@@ -135,19 +135,19 @@ impl SubcRunnerClient {
                 .child_scopes
                 .for_project(root)
                 .await
-                .map_err(|error| ClientError(format!("{method}: child scope: {error}")))?;
+                .map_err(|error| ClientError::new(format!("{method}: child scope: {error}")))?;
             match self
                 .call_raw(&child.session, LLM_RUNNER_ROLE, method, params, Some(scope))
                 .await
             {
-                Err(error) if !synced_again && error.0.contains("scope_not_synced") => {
+                Err(error) if !synced_again && error.message.contains("scope_not_synced") => {
                     self.child_scopes.forget_sync().await;
                     synced_again = true;
                 }
                 Err(error) => return Err(error),
                 Ok(reply) => {
                     return cortexkit_role_llm_runner::wire::read_reply(&reply)
-                        .map_err(|error| ClientError(format!("{method} answer: {error:?}")))
+                        .map_err(|error| ClientError::new(format!("{method} answer: {error:?}")))
                 }
             }
         }
@@ -168,10 +168,10 @@ impl SubcRunnerClient {
         let reply = self.call_raw(session, role, method, params, None).await?;
         if role == LLM_RUNNER_ROLE {
             return cortexkit_role_llm_runner::wire::read_reply(&reply)
-                .map_err(|error| ClientError(format!("{method} answer: {error:?}")));
+                .map_err(|error| ClientError::new(format!("{method} answer: {error:?}")));
         }
         serde_json::from_slice(&reply)
-            .map_err(|error| ClientError(format!("{method} answer: {error}")))
+            .map_err(|error| ClientError::new(format!("{method} answer: {error}")))
     }
 
     /// One call on the route to `session` for `role`: an unscoped route for
@@ -190,7 +190,7 @@ impl SubcRunnerClient {
                 SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
             })
             .await
-            .map_err(|error| ClientError(format!("connect: {error:?}")))?;
+            .map_err(|error| ClientError::new(format!("connect: {error:?}")))?;
         let target = RouteTarget::ManagementSurface {
             module_id: session.runner.clone(),
         };
@@ -210,11 +210,11 @@ impl SubcRunnerClient {
                 let route = consumer
                     .open_route_scoped(target, identity, scope, options.clone())
                     .await
-                    .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
+                    .map_err(|error| call_error(method, &error))?;
                 consumer.request(&route, body, options).await
             }
         }
-        .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
+        .map_err(|error| call_error(method, &error))?;
         Ok(reply)
     }
 }
@@ -833,6 +833,19 @@ impl ModuleHandler for Handler {
                 },
             },
         }
+    }
+}
+
+/// A failed runner call, keeping the refusal's code when the runner refused
+/// the route at bind or the call itself.
+fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
+    let code = error
+        .route_open_refusal()
+        .map(|body| body.code.clone())
+        .or_else(|| error.code().map(str::to_owned));
+    ClientError {
+        message: format!("{method}: {error:?}"),
+        code,
     }
 }
 

@@ -74,14 +74,14 @@ impl RunnerClient for Client {
         _: &crate::client::Child,
         _: SendRequest,
     ) -> Result<SendReply, crate::client::ClientError> {
-        Err(crate::client::ClientError("no child".into()))
+        Err(crate::client::ClientError::new("no child"))
     }
     async fn child_result(
         &self,
         _: &crate::client::Child,
         _: RunResultRequest,
     ) -> Result<RunResult, crate::client::ClientError> {
-        Err(crate::client::ClientError("no child".into()))
+        Err(crate::client::ClientError::new("no child"))
     }
 }
 
@@ -162,7 +162,7 @@ async fn lifecycle_failed_catchup_preserves_held_work_and_publishes_nothing() {
         .pages
         .lock()
         .unwrap()
-        .push_back(Err(crate::client::ClientError("read unavailable".into())));
+        .push_back(Err(crate::client::ClientError::new("read unavailable")));
     let mut request = notice(&session, 1, Some(cursor(&text(4, "d"))));
     request.conditions.last_prompt_tokens = Some(90_000);
     session.notice(&client, &settings, request).await;
@@ -696,4 +696,46 @@ fn a_restarted_session_serves_the_same_mural_image_from_the_store() {
     // A mural the store doesn't hold is left out, not invented.
     assert_eq!(restarted.mural_png("layout-2"), None);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_a_refused_provider_does_no_work_until_the_next_setup() {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    let entries = vec![text(1, "a"), text(2, "b")];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    // The runner's plan no longer names ck-mc as the session's provider.
+    client
+        .pages
+        .lock()
+        .unwrap()
+        .push_back(Err(crate::client::ClientError::refused(
+            cortexkit_role_compaction::wire::codes::COMPACTION_NOT_PERMITTED,
+            "provider_mismatch",
+        )));
+    let request = notice(&session, 1, Some(cursor(&text(3, "c"))));
+    session.notice(&client, &settings, request).await;
+    assert!(session.suspended);
+
+    // Later notices read nothing and publish nothing, even under pressure,
+    // and a ride answers nothing.
+    let reads = client.reads.lock().unwrap().len();
+    let mut request = notice(&session, 2, Some(cursor(&text(3, "c"))));
+    request.conditions.last_prompt_tokens = Some(99_000);
+    let conditions = request.conditions.clone();
+    session.notice(&client, &settings, request).await;
+    let ride = RideRequest::new(vec![RideCause::CacheExpired], 1_000, conditions);
+    assert!(session.ride(&settings, &ride).is_none());
+    assert_eq!(client.reads.lock().unwrap().len(), reads);
+    assert!(client.offered.lock().unwrap().is_empty());
+
+    // The runner's next Setup lifts it, and work resumes from the state kept.
+    *client.entries.lock().unwrap() = vec![text(1, "a"), text(2, "b"), text(3, "c")];
+    setup.newest = Some(cursor(&text(3, "c")));
+    session
+        .setup(&client, &settings, &route, &setup, session.features)
+        .await;
+    assert!(!session.suspended);
+    assert!(session.index_ready);
+    assert_eq!(session.index.entries().len(), 3);
 }

@@ -45,6 +45,12 @@ pub struct Session {
     index: Index,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
+    /// The runner refused ck-mc as this session's compaction provider
+    /// (`compaction_not_permitted`: its plan names another provider or none,
+    /// or it no longer holds the session). ck-mc keeps the session's state but
+    /// does no work on it, publishes nothing and answers rides with nothing,
+    /// until the runner's next Setup for the session.
+    suspended: bool,
     /// The newest view the runner accepted (or took with a ride answer). The
     /// next view carries its edits forward.
     latest: Option<View>,
@@ -211,6 +217,7 @@ impl Session {
             conditions: conditions_of(request),
             index: Index::default(),
             index_ready: true,
+            suspended: false,
             latest: None,
             version: 0,
             queued: BTreeSet::new(),
@@ -446,6 +453,7 @@ impl Session {
         self.features = features;
         self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");
         self.tools_only = false;
+        self.suspended = false;
         self.conditions = conditions_of(request);
         self.project = route.project.clone();
         self.workdir = folder_of(route);
@@ -485,7 +493,7 @@ impl Session {
         // Not newer than the last notice handled since Setup (compaction contract N5). Setup sets
         // the count to 0 and a runner's first notice after it is 1, so this
         // also ignores a notice numbered 0.
-        if notice.seq <= self.seq {
+        if notice.seq <= self.seq || self.suspended {
             return None;
         }
         let version = self.latest.as_ref().map(|view| view.version);
@@ -1332,7 +1340,7 @@ impl Session {
     /// A ride: the runner is about to send a request that rewrites the cache
     /// anyway, or would not fit. Everything held lands now.
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
-        if !self.index_ready {
+        if !self.index_ready || self.suspended {
             return None;
         }
         self.conditions = ride.conditions.clone();
@@ -2415,7 +2423,7 @@ impl Session {
     /// restarted ck-mc knows the view may be in the runner's hands. A view
     /// the runner refuses, or a call that fails, puts the state back.
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
-        if self.refuse_oversized(&view) {
+        if self.suspended || self.refuse_oversized(&view) {
             return;
         }
         self.accept(view.clone());
@@ -2456,10 +2464,7 @@ impl Session {
                 self.adopt_runner_view(client).await;
             }
             Err(error) => {
-                eprintln!(
-                    "ck-mc: session {}: session.apply_view failed: {error:?}",
-                    self.key.session
-                );
+                self.runner_call_failed("session.apply_view", &error);
                 self.roll_back(view.version, false);
             }
         }
@@ -2497,10 +2502,7 @@ impl Session {
                 self.roll_back(oldest, false);
             }
             Err(error) => {
-                eprintln!(
-                    "ck-mc: session {}: offering view {} again failed: {error:?}",
-                    self.key.session, view.version
-                );
+                self.runner_call_failed(&format!("offering view {} again", view.version), &error);
                 self.roll_back(oldest, false);
             }
         }
@@ -2689,10 +2691,25 @@ impl Session {
                 }
                 self.latest = answer.view;
             }
-            Err(error) => eprintln!(
-                "ck-mc: session {}: session.applied_view failed: {error:?}",
+            Err(error) => self.runner_call_failed("session.applied_view", &error),
+        }
+    }
+
+    /// Log a failed call to the runner's compaction ops. A
+    /// `compaction_not_permitted` refusal suspends the session (see
+    /// `suspended`); any other failure leaves it to the next notice.
+    fn runner_call_failed(&mut self, what: &str, error: &crate::client::ClientError) {
+        eprintln!(
+            "ck-mc: session {}: {what} failed: {error}",
+            self.key.session
+        );
+        if error.not_permitted() && !self.suspended {
+            eprintln!(
+                "ck-mc: session {}: the runner refused ck-mc as its compaction provider; suspended until its next Setup",
                 self.key.session
-            ),
+            );
+            self.suspended = true;
+            self.index_ready = false;
         }
     }
 
@@ -2741,10 +2758,7 @@ impl Session {
             let page = match client.read(&self.key, request).await {
                 Ok(page) => page,
                 Err(error) => {
-                    eprintln!(
-                        "ck-mc: session {}: session.read failed: {error:?}",
-                        self.key.session
-                    );
+                    self.runner_call_failed("session.entries", &error);
                     return false;
                 }
             };

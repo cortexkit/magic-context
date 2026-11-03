@@ -56,11 +56,11 @@ impl RunnerClient for Fixed {
     }
 
     async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
-        Err(ClientError("no child runs here".into()))
+        Err(ClientError::new("no child runs here"))
     }
 
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
-        Err(ClientError("no child runs here".into()))
+        Err(ClientError::new("no child runs here"))
     }
 }
 

@@ -695,7 +695,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
         // No contract declares `generation.temperature`, so a runner may
         // refuse it by name (llm-runner §9). A refused send starts nothing:
         // send again without it, and leave it out for that runner from now on.
-        Err(error) if with_temperature && error.0.contains("generation.temperature") => {
+        Err(error) if with_temperature && error.message.contains("generation.temperature") => {
             remember_temperature_refused(runner);
             client.send_child(child, send(false)).await
         }
