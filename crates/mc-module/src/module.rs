@@ -524,8 +524,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 .as_ref()
                                 .and_then(|store| store.load(&route.session))
                             {
-                                fresh.restore(durable);
+                                // Summaries first: restoring checks the saved
+                                // state against them.
                                 fresh.load_summaries();
+                                fresh.restore(durable);
                                 fresh.restore_for_tools(&inner.client).await;
                             }
                             session = Some(fresh);

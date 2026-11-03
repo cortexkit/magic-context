@@ -359,8 +359,8 @@ async fn lifecycle_setup_reconciles_a_revert_acknowledged_before_a_crash() {
     let durable = session.durable();
     let (mut restored, _, _, _, _) = fixture();
     restored.db = session.db.clone();
-    restored.restore(durable);
     restored.load_summaries();
+    restored.restore(durable);
     *client.entries.lock().unwrap() = vec![text(1, "a"), text(2, "replacement")];
     request.newest = client.entries.lock().unwrap().last().map(cursor);
     restored
@@ -738,4 +738,79 @@ async fn lifecycle_a_refused_provider_does_no_work_until_the_next_setup() {
     assert!(!session.suspended);
     assert!(session.index_ready);
     assert_eq!(session.index.entries().len(), 3);
+}
+
+#[tokio::test]
+async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
+    // A backup can pair a fresh mode3.db with an older context.db. Here the
+    // saved state cuts through message d, behind a summary context.db no
+    // longer has.
+    let (mut session, client, route, mut request, settings) = fixture();
+    let dir = scratch("store-ahead");
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness)
+             VALUES ('s1', 1, 1, 2, 'a', 'b', 'first', 'first part', 'first part', 1, 'mock'),
+                    ('s1', 2, 3, 4, 'c', 'd', 'second', 'second part', 'second part', 1, 'mock');",
+        )
+        .map_err(|e| e.to_string())
+    })
+    .unwrap();
+    session.db = Some(Arc::new(db));
+    session.features.summarizer = true;
+    session.load_summaries();
+    let entries = vec![
+        text(1, "a"),
+        text(2, "b"),
+        text(3, "c"),
+        text(4, "d"),
+        text(5, "e"),
+    ];
+    session.index.extend(entries.clone());
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.unwrap();
+    session.accept(view.clone());
+    assert_eq!(session.cut, Some(4));
+    let durable = session.durable();
+    session
+        .db
+        .as_ref()
+        .unwrap()
+        .with_connection(|conn| conn.execute("DELETE FROM compartments WHERE sequence = 2", []))
+        .unwrap();
+
+    let (mut restored, _, _, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.load_summaries();
+    restored.restore(durable);
+    assert_eq!(
+        restored.cut,
+        Some(2),
+        "the cut follows context.db's summaries"
+    );
+    assert!(restored.baseline.is_none());
+    assert!(restored.head_stale);
+
+    // The runner still applies the old view; adopting it keeps ck-mc's cut,
+    // and the next view moves the runner's cut back to message b.
+    *client.entries.lock().unwrap() = entries;
+    request.newest = client.entries.lock().unwrap().last().map(cursor);
+    restored.apply_cut(&view);
+    assert_eq!(restored.cut, Some(2));
+    restored
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    let notice = notice(&restored, 1, request.newest.clone());
+    restored.notice(&client, &settings, notice).await;
+    let offered = client.offered.lock().unwrap();
+    let cut = offered.last().and_then(|view| {
+        view.edits.iter().find_map(|edit| match &edit.op {
+            EditOp::Cut { through } => Some(through.clone()),
+            _ => None,
+        })
+    });
+    assert_eq!(cut.as_deref(), Some("b"), "{offered:?}");
+    drop(offered);
+    std::fs::remove_dir_all(dir).unwrap();
 }

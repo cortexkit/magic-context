@@ -409,9 +409,10 @@ impl Session {
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
         self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
+        self.distrust_state_ahead_of_summaries();
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
-        self.index = Index::starting_at(durable.cut.unwrap_or(1));
+        self.index = Index::starting_at(self.cut.unwrap_or(1));
         self.index_ready = false;
     }
 
@@ -419,6 +420,41 @@ impl Session {
     /// first notice. This does not count as Setup in the current process.
     pub async fn restore_for_tools<C: RunnerClient>(&mut self, client: &C) {
         self.index_ready = self.read_until(client, None, true).await;
+    }
+
+    /// `mode3.db` and `context.db` are backed up separately, and a restore
+    /// can pair this store with an older `context.db` (a night whose
+    /// `context.db` capture failed keeps the previous one). Restored state
+    /// may then cut, or show in `m[0]`, summaries `context.db` no longer
+    /// has; those messages would be neither summarized nor shown. ck-mc
+    /// trusts `context.db`: reading starts where its summaries end, `m[0]` is
+    /// rendered again, views not yet confirmed are dropped, and the next view
+    /// moves the cut back, so the summarizer covers those messages again.
+    fn distrust_state_ahead_of_summaries(&mut self) {
+        let covered = self.summarized_through();
+        let cut_ahead = self
+            .cut
+            .is_some_and(|cut| covered.is_none_or(|covered| cut > covered));
+        let last_sequence = self.summaries.last().map(|summary| summary.sequence);
+        let head_ahead = self.baseline.as_ref().is_some_and(|baseline| {
+            last_sequence.is_none_or(|last| baseline.through_sequence > last)
+        });
+        if !cut_ahead && !head_ahead {
+            return;
+        }
+        eprintln!(
+            "ck-mc: session {}: saved state is ahead of context.db's summaries (cut {:?}, summaries through {covered:?}); rebuilding from context.db",
+            self.key.session, self.cut
+        );
+        if cut_ahead {
+            self.cut = covered;
+        }
+        if head_ahead {
+            self.baseline = None;
+        }
+        self.unconfirmed.clear();
+        self.latest = None;
+        self.head_stale = true;
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -1219,6 +1255,17 @@ impl Session {
         }) else {
             return;
         };
+        // A cut ends where a summary ends. A runner's cut past the summaries
+        // `context.db` holds comes from state newer than it (see
+        // `distrust_state_ahead_of_summaries`): the index keeps those
+        // messages, and the next view moves the cut back.
+        if self
+            .summarized_through()
+            .is_none_or(|covered| ordinal > covered)
+        {
+            self.head_stale = true;
+            return;
+        }
         self.cut = Some(ordinal);
         let gone = self.index.prune_before(ordinal);
         self.pruned_turns += crate::nudges::person_turns(&gone);
