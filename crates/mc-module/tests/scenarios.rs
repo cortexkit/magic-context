@@ -31,6 +31,9 @@ use mc_module::routing::{RouteError, Router};
 use mc_module::store::Store;
 use serde_json::{json, Value};
 
+#[path = "scenarios/agent_surface.rs"]
+mod agent_surface;
+
 /// ck-mc's calls back into the mock runner. The runner exists only after its
 /// Setup call, so the host is attached right after it starts.
 /// A catch-up read: the ordinal it read after, and how many entries it got.
@@ -3104,7 +3107,10 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     )
     .await
     .expect("the free session answered its tool call");
-    assert!(reply.is_err(), "{reply:?}");
+    assert_eq!(
+        reply,
+        Ok("Error: Unknown tag(s) §1§. Check available tags in conversation.".into())
+    );
 }
 
 #[tokio::test]

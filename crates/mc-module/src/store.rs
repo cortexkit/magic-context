@@ -21,6 +21,9 @@ use crate::summary::head::Baseline;
 /// What a session keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Durable {
+    /// Reserved reminder ids, independent of the runner's notice numbering.
+    #[serde(default)]
+    pub reminder_counter: u64,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
     /// Parts the model asked to drop that no view carries yet.
@@ -111,7 +114,7 @@ impl Store {
         text.and_then(|text| serde_json::from_str(&text).ok())
     }
 
-    pub fn save(&self, key: &SessionRef, state: &Durable) {
+    pub fn save(&self, key: &SessionRef, state: &Durable) -> bool {
         let text = serde_json::to_string(state).expect("state serializes");
         let result = self.lock().execute(
             "INSERT INTO sessions (runner, harness, session, state) VALUES (?1, ?2, ?3, ?4)
@@ -123,7 +126,9 @@ impl Store {
                 "ck-mc: session {}: saving its state failed: {error}",
                 key.session
             );
+            return false;
         }
+        true
     }
 
     /// The memory context stored for the session (spec 3c, ML1), if any.

@@ -84,9 +84,45 @@ pub fn prompt_text(raw: &str) -> String {
     text.trim().to_owned()
 }
 
+/// Text blocks eligible for additions before the runner stores a prompt.
+pub(crate) fn person_blocks(
+    subject: &cortexkit_role_step_transform_provider::hook::Subject,
+) -> Option<&[String]> {
+    match subject {
+        cortexkit_role_step_transform_provider::hook::Subject::PreUser {
+            blocks,
+            delivery: None,
+            mark: None,
+        } if !blocks.is_empty() => Some(blocks),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_delivered_or_marked_prompts_are_not_person_messages() {
+        use cortexkit_role_step_transform_provider::hook::Subject;
+        use serde_json::json;
+        let human: Subject =
+            serde_json::from_value(json!({"hook":"pre_user","blocks":["Fix the parser"]})).unwrap();
+        assert!(person_blocks(&human).is_some());
+        for extra in [
+            json!({"delivery":"steer"}),
+            json!({"delivery":"queue"}),
+            json!({"mark":{"kind":"notice"}}),
+        ] {
+            let mut value = json!({"hook":"pre_user","blocks":["Fix the parser"]});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let subject: Subject = serde_json::from_value(value).unwrap();
+            assert!(person_blocks(&subject).is_none());
+        }
+    }
 
     #[test]
     fn markers_follow_the_plugin_format() {

@@ -1,6 +1,6 @@
 {
-  "generation": "f94a4c1d6ae274dd917214ae120e3611790b376de23f25f7020f116362f7be6c",
-  "catalog_digest": "f94a4c1d6ae274dd917214ae120e3611790b376de23f25f7020f116362f7be6c",
+  "generation": "e4574da43e182a4e3db64ff04148692f3933b19a0ca28f7175b64fe32162debd",
+  "catalog_digest": "e4574da43e182a4e3db64ff04148692f3933b19a0ca28f7175b64fe32162debd",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -189,7 +189,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "d4d45c27535c544d12f421b5ac4c4b41b0669edc28be7cf3218515da8a9ec029",
+    "preflight_digest": "46dd9f0e3ae7ff0552d5a2ebb9f9a019afb3dad374e658e29302a49999a86e2a",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

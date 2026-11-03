@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use step::answer::{HookAnswer, Operation};
-use step::hook::{HookCall, Subject};
+use step::hook::HookCall;
 use step::subscription::{
     Declaration, DeclareRequest, DeclaredSubscription, Hook, OnUnavailable, Op,
 };
@@ -642,8 +642,8 @@ impl Handler {
                     ));
                 }
                 let session = route.session.clone();
-                let answer = match &call.subject {
-                    Subject::PreUser { blocks, .. } if !blocks.is_empty() => {
+                let answer = match crate::pre_user::person_blocks(&call.subject) {
+                    Some(blocks) => {
                         let addition = self
                             .module
                             .pre_user(&session, &blocks.join("\n"), now_ms())
@@ -737,6 +737,10 @@ fn refusal(error: ModuleError) -> Refusal {
     match error {
         ModuleError::UnknownSession => Refusal::unknown_session(),
         ModuleError::UnknownPreset(preset) => Refusal::unknown_preset(&preset),
+        ModuleError::UnknownTool(name) => {
+            let error = cortexkit_role_tool_provider::errors::unknown_tool(&name);
+            Refusal::new(&error.code, error.message, None)
+        }
         other => Refusal::new("internal", format!("{other:?}"), None),
     }
 }
@@ -821,5 +825,16 @@ impl ModuleHandler for Handler {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_surface_tests {
+    #[test]
+    fn unknown_tool_is_a_protocol_refusal() {
+        let refusal = super::refusal(crate::module::ModuleError::UnknownTool(
+            "ctx_missing".into(),
+        ));
+        assert_eq!(refusal.code, "unknown_tool");
     }
 }

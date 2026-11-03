@@ -360,7 +360,7 @@ fn searchable_notes(
     conn: &Connection,
     harness: &str,
     session: &str,
-    project: &str,
+    project: Option<&str>,
 ) -> rusqlite::Result<Vec<Note>> {
     let mut statement = conn.prepare_cached(
         "SELECT id, status, created_at, anchor_ordinal, session_id, content, ready_reason FROM notes
@@ -463,7 +463,7 @@ pub fn search_notes(
     conn: &Connection,
     harness: &str,
     session: &str,
-    project: &str,
+    project: Option<&str>,
     wanted: &Query,
 ) -> Vec<NoteHit> {
     let Query {
@@ -471,6 +471,7 @@ pub fn search_notes(
         limit,
         probes,
         dates,
+        ..
     } = *wanted;
     let notes: Vec<Note> = searchable_notes(conn, harness, session, project)
         .unwrap_or_default()

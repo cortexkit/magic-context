@@ -6,7 +6,7 @@
 //! searching the rows the plugin wrote before the move. Only user and
 //! assistant text is indexed; tool output, reasoning and notices are not.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Entry, Role};
@@ -239,6 +239,8 @@ pub struct Query<'a> {
     /// Literal probes from the query (see [`super::text::literal_probes`]).
     pub probes: &'a [String],
     pub dates: Option<DateRange>,
+    /// Message ordinals with at least one original part still in view.
+    pub visible: Option<&'a BTreeSet<i64>>,
 }
 
 /// An inclusive millisecond range.
@@ -264,6 +266,7 @@ fn query_rows(
     limit: usize,
     cutoff: i64,
     dates: Option<DateRange>,
+    visible: Option<&BTreeSet<i64>>,
 ) -> Vec<Row> {
     if fts.is_empty() {
         return Vec::new();
@@ -284,6 +287,7 @@ fn query_rows(
            FROM message_history_fts {join}
           WHERE message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
             AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3 {date_filter}
+            AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?7))
           ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC
           LIMIT ?4"
     );
@@ -303,24 +307,22 @@ fn query_rows(
                 content: row.get(3)?,
             })
         };
-        let rows = match dates {
-            Some(dates) => statement
-                .query_map(
-                    params![
-                        session,
-                        matching,
-                        cutoff,
-                        limit as i64,
-                        dates.from,
-                        dates.to
-                    ],
-                    map,
-                )?
-                .collect::<Result<Vec<_>, _>>()?,
-            None => statement
-                .query_map(params![session, matching, cutoff, limit as i64], map)?
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+        let visible = serde_json::to_string(&visible.cloned().unwrap_or_default())
+            .expect("ordinals serialize");
+        let rows = statement
+            .query_map(
+                params![
+                    session,
+                    matching,
+                    cutoff,
+                    limit as i64,
+                    dates.map(|dates| dates.from),
+                    dates.map(|dates| dates.to),
+                    visible
+                ],
+                map,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
             .filter(|row| row.number >= 0 && row.number <= cutoff)
@@ -337,11 +339,14 @@ fn count_matches(
     fts: &str,
     cutoff: i64,
     dates: Option<DateRange>,
+    visible: Option<&BTreeSet<i64>>,
 ) -> u64 {
     if fts.is_empty() {
         return 0;
     }
     let matching = format!("content : ({fts})");
+    let visible =
+        serde_json::to_string(&visible.cloned().unwrap_or_default()).expect("ordinals serialize");
     let result = match dates {
         Some(dates) => conn.query_row(
             "SELECT COUNT(*) FROM message_history_fts
@@ -349,15 +354,17 @@ fn count_matches(
                 AND map.fts_rowid = message_history_fts.rowid
               WHERE message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
                 AND map.message_time_ms BETWEEN ?3 AND ?4
-                AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5",
-            params![session, matching, dates.from, dates.to, cutoff],
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))",
+            params![session, matching, dates.from, dates.to, cutoff, visible],
             |row| row.get::<_, i64>(0),
         ),
         None => conn.query_row(
             "SELECT COUNT(*) FROM message_history_fts
               WHERE session_id = ?1 AND message_history_fts MATCH ?2
-                AND CAST(message_ordinal AS INTEGER) <= ?3",
-            params![session, matching, cutoff],
+                AND CAST(message_ordinal AS INTEGER) <= ?3
+                AND CAST(message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))",
+            params![session, matching, cutoff, visible],
             |row| row.get::<_, i64>(0),
         ),
     };
@@ -372,10 +379,11 @@ pub fn count_live_matches(
     query: &str,
     cutoff: i64,
     dates: Option<DateRange>,
+    visible: Option<&BTreeSet<i64>>,
 ) -> u64 {
     let fts = sanitize_fts_query(query.trim());
-    let total = count_matches(conn, session, &fts, i64::MAX, dates);
-    total.saturating_sub(count_matches(conn, session, &fts, cutoff, dates))
+    let total = count_matches(conn, session, &fts, i64::MAX, dates, None);
+    total.saturating_sub(count_matches(conn, session, &fts, cutoff, dates, visible))
 }
 
 fn linear_decay(rank: usize, total: usize) -> f64 {
@@ -416,11 +424,12 @@ pub fn search(
         limit,
         probes,
         dates,
+        visible,
     } = *wanted;
     let fetch = limit * 3;
     let base = sanitize_fts_query(query.trim());
     if probes.is_empty() {
-        let mut rows = query_rows(conn, session, &base, fetch, cutoff, dates);
+        let mut rows = query_rows(conn, session, &base, fetch, cutoff, dates, visible);
         if rows.is_empty() && relaxed {
             rows = query_rows(
                 conn,
@@ -429,6 +438,7 @@ pub fn search(
                 fetch,
                 cutoff,
                 dates,
+                visible,
             );
         }
         rows.truncate(limit);
@@ -442,7 +452,10 @@ pub fn search(
     let corpus = watermark(conn, session).unwrap_or(0).min(cutoff.max(0)) as f64;
     let mut lists: Vec<(Vec<Row>, f64)> = Vec::new();
     if !base.is_empty() {
-        lists.push((query_rows(conn, session, &base, fetch, cutoff, dates), 1.0));
+        lists.push((
+            query_rows(conn, session, &base, fetch, cutoff, dates, visible),
+            1.0,
+        ));
     }
     let mut weights: HashMap<&str, f64> = HashMap::new();
     for probe in probes {
@@ -450,7 +463,7 @@ pub fn search(
         if fts.is_empty() {
             continue;
         }
-        let df = count_matches(conn, session, &fts, cutoff, dates) as f64;
+        let df = count_matches(conn, session, &fts, cutoff, dates, visible) as f64;
         let weight = if corpus <= 0.0 || df <= 0.0 {
             1.0
         } else {
@@ -458,7 +471,7 @@ pub fn search(
         };
         weights.insert(probe.as_str(), weight);
         lists.push((
-            query_rows(conn, session, &fts, fetch, cutoff, dates),
+            query_rows(conn, session, &fts, fetch, cutoff, dates, visible),
             weight,
         ));
     }

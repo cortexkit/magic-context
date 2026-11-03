@@ -423,7 +423,7 @@ async fn verbose_range<C: RunnerClient>(
         String::new(),
         blocks.join("\n\n"),
     ];
-    if truncated || last < end {
+    if truncated {
         out.push(String::new());
         out.push(format!(
             "Truncated at message {last} (budget: ~{TOKEN_BUDGET} tokens). Call again with start={} end={end} verbose=true for more.",

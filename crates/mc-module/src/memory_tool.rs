@@ -12,12 +12,19 @@ use serde_json::Value;
 use crate::memory_writes::{self, MutationError, Operation, Refused, Writer};
 
 /// Categories a write may name.
-const CATEGORIES: [&str; 5] = [
+const CATEGORIES: [&str; 12] = [
     "PROJECT_RULES",
     "ARCHITECTURE",
     "CONSTRAINTS",
     "CONFIG_VALUES",
     "NAMING",
+    "ARCHITECTURE_DECISIONS",
+    "CONFIG_DEFAULTS",
+    "USER_PREFERENCES",
+    "USER_DIRECTIVES",
+    "ENVIRONMENT",
+    "WORKFLOW_RULES",
+    "KNOWN_ISSUES",
 ];
 const GET_MAX_IDS: usize = 20;
 
