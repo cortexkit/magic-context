@@ -43,12 +43,39 @@ pub struct Index {
     /// Ordinals count from 1.
     base: u64,
     entries: Vec<Entry>,
+    /// The token family the held entries' counts were made in (compaction
+    /// contract W4.11): the family named by the last page or notice that
+    /// carried counts.
+    family: Option<String>,
 }
 
 /// An empty index that holds the whole transcript, from its first entry.
 impl Default for Index {
     fn default() -> Self {
         Self::starting_at(1)
+    }
+}
+
+/// Forget an entry's token counts: they belong to a family the index no
+/// longer holds, or came without the family that gives them meaning.
+fn clear_counts(entry: &mut Entry) {
+    entry.reasoning_tokens = None;
+    for part in &mut entry.parts {
+        part.tokens = None;
+    }
+}
+
+/// Take `new`'s counts into `held`, the same message with the same content.
+/// Counts sit outside the checksum, so they can arrive after the message, or
+/// change when the family does; a count `new` lacks is kept.
+fn refresh_counts(held: &mut Entry, new: &Entry) {
+    if new.reasoning_tokens.is_some() {
+        held.reasoning_tokens = new.reasoning_tokens;
+    }
+    for (held, new) in held.parts.iter_mut().zip(&new.parts) {
+        if held.id == new.id && new.tokens.is_some() {
+            held.tokens = new.tokens;
+        }
     }
 }
 
@@ -71,6 +98,7 @@ impl Index {
         Self {
             base,
             entries: Vec::new(),
+            family: None,
         }
     }
 
@@ -98,7 +126,28 @@ impl Index {
     /// Add entries in transcript order. Stops at the first one that does not
     /// fit and says why; entries before it are kept.
     pub fn extend(&mut self, incoming: impl IntoIterator<Item = Entry>) -> Extend {
-        for entry in incoming {
+        self.extend_counted(incoming, None)
+    }
+
+    /// [`Index::extend`] with the token family the page or notice named for
+    /// the counts its entries carry. As the contract asks of a reader, a new
+    /// family discards every count held in another one (they are estimated
+    /// until the runner sends new ones), and counts that arrive without a
+    /// family are dropped. A response with no family carries no counts and
+    /// leaves the held ones alone.
+    pub fn extend_counted(
+        &mut self,
+        incoming: impl IntoIterator<Item = Entry>,
+        family: Option<&str>,
+    ) -> Extend {
+        if let Some(family) = family.filter(|family| self.family.as_deref() != Some(*family)) {
+            self.entries.iter_mut().for_each(clear_counts);
+            self.family = Some(family.to_owned());
+        }
+        for mut entry in incoming {
+            if family.is_none() {
+                clear_counts(&mut entry);
+            }
             let next = self.base + self.entries.len() as u64;
             // Before the base: a message the view already cut.
             if entry.ordinal < self.base {
@@ -119,6 +168,7 @@ impl Index {
                 if entry.completed_at.is_some() {
                     held.completed_at = entry.completed_at;
                 }
+                refresh_counts(held, &entry);
                 continue;
             }
             // The newest message may still be written; an older one changes
@@ -240,6 +290,42 @@ mod tests {
         finished.completed_at = Some(42);
         assert_eq!(index.extend([finished]), Extend::Continued);
         assert_eq!(index.entries()[0].completed_at, Some(42));
+    }
+
+    fn counted(ordinal: u64, mid: &str, text: &str, count: u64) -> Entry {
+        let mut entry = entry(ordinal, mid, text);
+        entry.parts[0].tokens = Some(cortexkit_role_compaction::tokens::PartTokens::count(count));
+        entry
+    }
+
+    fn counts(index: &Index) -> Vec<u64> {
+        index
+            .entries()
+            .iter()
+            .map(|entry| crate::tokens::part(&entry.parts[0]))
+            .collect()
+    }
+
+    #[test]
+    fn runner_counts_are_kept_per_family_and_estimated_without_one() {
+        let mut index = Index::default();
+        // "one two three four" estimates to 5 at four bytes a token.
+        let text = "one two three four";
+        index.extend_counted([counted(1, "a", text, 4)], Some("claude-v5/1"));
+        assert_eq!(counts(&index), [4]);
+        // A repeat that brings no count keeps the held one; one that brings a
+        // count refreshes it.
+        index.extend_counted([entry(1, "a", text)], Some("claude-v5/1"));
+        assert_eq!(counts(&index), [4]);
+        index.extend_counted([counted(1, "a", text, 3)], Some("claude-v5/1"));
+        assert_eq!(counts(&index), [3]);
+        // A response with no family carries no counts: held ones stay, and
+        // counts on its entries are dropped.
+        index.extend_counted([counted(2, "b", text, 9)], None);
+        assert_eq!(counts(&index), [3, 5]);
+        // A new family discards every count held in the old one.
+        index.extend_counted([counted(3, "c", text, 7)], Some("o200k/1"));
+        assert_eq!(counts(&index), [5, 5, 7]);
     }
 
     #[test]

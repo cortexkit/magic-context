@@ -381,7 +381,7 @@ pub fn reclaimable_tokens(context: &Context, entry: &Entry, part: &Part) -> u64 
             && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES
     });
     if small_recent || ends_transcript(entry, part, newest_mid) {
-        tokens::tool_result(tool)
+        tokens::tool_result(part, tool)
     } else {
         tokens::part(part)
     }
@@ -550,7 +550,10 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
 /// reasoning with no reported count and no visible text.
 pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 
-/// What one assistant entry's reasoning costs, counting all of its reasoning.
+/// How much reasoning one assistant step produced, counting all of its
+/// reasoning: what the signed-thinking hold calls heavy reasoning. It is the
+/// step's own reported count first, since the hold is about how hard the
+/// model just thought, not about what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
     let reasoning: Vec<&Part> = entry
         .parts
@@ -560,18 +563,36 @@ pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
     if reasoning.is_empty() {
         return 0;
     }
-    reasoning_cost(entry, &reasoning)
+    generated_cost(entry)
+        .or_else(|| entry.reasoning_tokens.map(|counted| counted.count))
+        .unwrap_or_else(|| visible_cost(&reasoning))
 }
 
-/// What one assistant entry's reasoning costs: the count the provider
-/// reported, else the visible text, else a fixed estimate for reasoning that
-/// has no visible text.
+/// What one assistant entry's reasoning costs in the requests that send it
+/// again, which is what clearing it frees: the runner's count (measured, or
+/// its estimate), else the count the provider reported for the step, else
+/// the visible text, else a fixed estimate for reasoning that has no visible
+/// text. A runner count of zero stands: reasoning the provider doesn't send
+/// again costs nothing.
 fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
-    if let Some(reported) = entry.usage.and_then(|usage| usage.reasoning_tokens) {
-        if reported > 0 {
-            return reported;
-        }
-    }
+    entry
+        .reasoning_tokens
+        .map(|counted| counted.count)
+        .or_else(|| generated_cost(entry))
+        .unwrap_or_else(|| visible_cost(reasoning))
+}
+
+/// The step's reported reasoning count, when the provider gave a non-zero one.
+fn generated_cost(entry: &Entry) -> Option<u64> {
+    entry
+        .usage
+        .and_then(|usage| usage.reasoning_tokens)
+        .filter(|reported| *reported > 0)
+}
+
+/// An estimate from the reasoning's visible text, or a fixed amount for
+/// reasoning with none.
+fn visible_cost(reasoning: &[&Part]) -> u64 {
     let mut visible = 0;
     let mut opaque = false;
     for part in reasoning {
@@ -693,9 +714,7 @@ pub fn protected_cutoff(context: &Context, floor: u64) -> Option<u64> {
         .rev()
         .flat_map(|entry| entry.parts.iter().rev())
         .filter_map(|part| match (&part.body, part.tag) {
-            (PartBody::Tool(tool), Some(tag)) => {
-                Some((tag, tokens::bytes(tool.output_bytes.unwrap_or(0))))
-            }
+            (PartBody::Tool(tool), Some(tag)) => Some((tag, tokens::tool_output(part, tool))),
             _ => None,
         })
         .collect();
@@ -1489,6 +1508,30 @@ mod tests {
             .map(|(key, _)| key)
             .collect();
         assert_eq!(cleared, [key("m2", "r2"), key("m3", "r3")]);
+    }
+
+    /// The budget weighs reasoning by what sending it again costs, the
+    /// runner's count first; the signed-thinking hold weighs how much the
+    /// step produced, the provider's reported count first.
+    #[test]
+    fn the_budget_uses_the_replay_count_and_the_hold_the_generated_one() {
+        let mut step = entry(1, Role::Assistant, vec![reasoning("r1", 400)]);
+        // Visible text alone: 100 for both.
+        assert_eq!(step_reasoning_tokens(&step), 100);
+        assert_eq!(reasoning_cost(&step, &[&step.parts[0].clone()]), 100);
+        step.usage = Some(
+            cortexkit_role_compaction::read::StepUsage::default().with_reasoning_tokens(2_000),
+        );
+        step.reasoning_tokens = Some(cortexkit_role_compaction::tokens::ReasoningTokens::new(
+            0, true,
+        ));
+        let parts = [&step.parts[0].clone()];
+        assert_eq!(step_reasoning_tokens(&step), 2_000);
+        assert_eq!(reasoning_cost(&step, &parts), 0);
+        step.reasoning_tokens = Some(cortexkit_role_compaction::tokens::ReasoningTokens::new(
+            1_800, false,
+        ));
+        assert_eq!(reasoning_cost(&step, &parts), 1_800);
     }
 
     /// When the newest assistant has no reasoning, the newest one that has

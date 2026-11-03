@@ -637,7 +637,9 @@ impl Session {
         let omitted = notice.entries.is_empty();
         // No newest entry: the transcript is empty, and the read empties the
         // index.
-        let extended = self.index.extend(notice.entries);
+        let extended = self
+            .index
+            .extend_counted(notice.entries, notice.token_family.as_deref());
         if extended == Extend::Diverged || !self.index_ready {
             self.index = Index::starting_at(self.cut.unwrap_or(1));
             self.index_ready = self.read_until(client, notice.newest.as_ref(), true).await;
@@ -2872,7 +2874,10 @@ impl Session {
                 self.restart_index(&mut rebuilt, &mut after);
                 continue;
             }
-            match self.index.extend(page.entries) {
+            match self
+                .index
+                .extend_counted(page.entries, page.token_family.as_deref())
+            {
                 Extend::Continued => match page.next_after {
                     Some(next) => after = Some(next),
                     None => {
