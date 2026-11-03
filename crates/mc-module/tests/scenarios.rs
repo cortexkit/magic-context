@@ -49,6 +49,8 @@ struct HostClient {
     refuse_views: Arc<Mutex<u32>>,
     /// The version of every view handed over, refused or not.
     offered: Arc<Mutex<Vec<u64>>>,
+    /// The checksum of every view handed over, by version, the latest kept.
+    offered_checksums: Arc<Mutex<std::collections::BTreeMap<u64, Vec<String>>>>,
     /// The project folder of every summarizer child send, for its scope.
     child_scopes: Arc<Mutex<Vec<Option<String>>>>,
     /// What the stand-in Entorhinal answers `context.project` with (the
@@ -56,6 +58,10 @@ struct HostClient {
     entorhinal: Arc<Mutex<Option<Value>>>,
     /// Every Entorhinal read ck-mc made: its method and folder or agent.
     entorhinal_reads: Arc<Mutex<Vec<(String, String)>>>,
+    /// When set, each view handed over first copies ck-mc's store from this
+    /// folder to `store-at-<version>.db` there: the store as a crash right
+    /// after the hand-over would leave it.
+    snapshot_store: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -170,6 +176,20 @@ impl RunnerClient for HostClient {
         request: ApplyViewRequest,
     ) -> Result<ApplyViewAnswer, ClientError> {
         self.offered.lock().unwrap().push(request.view.version);
+        self.offered_checksums
+            .lock()
+            .unwrap()
+            .entry(request.view.version)
+            .or_default()
+            .push(request.view.checksum.clone());
+        if let Some(dir) = self.snapshot_store.lock().unwrap().clone() {
+            let snapshot = dir.join(format!("store-at-{}.db", request.view.version));
+            let _ = std::fs::remove_file(&snapshot);
+            rusqlite::Connection::open(dir.join("mode3.db"))
+                .unwrap()
+                .execute("VACUUM INTO ?1", [snapshot.to_string_lossy()])
+                .unwrap();
+        }
         {
             let mut refuse = self.refuse_views.lock().unwrap();
             if *refuse > 0 {
@@ -293,6 +313,13 @@ impl InProcess {
     /// until runners call Setup again.
     fn restart(&self) {
         self.restart_with(self.settings.clone());
+    }
+
+    /// Restart ck-mc on the stores in `dir` instead of its own, as after a
+    /// crash that left them as they are there.
+    fn restart_from(&self, dir: &std::path::Path) {
+        *self.module.lock().unwrap() =
+            Self::new_module(self.client.clone(), self.settings.clone(), Some(dir));
     }
 
     /// Restart ck-mc with different settings, as after a config edit.
@@ -605,6 +632,27 @@ async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_n
     // The drops the refused view carried landed with the next one.
     assert_eq!(seen(host, 2).as_deref(), Some(placeholder(2).as_str()));
     assert_eq!(seen(host, 4).as_deref(), Some(placeholder(4).as_str()));
+}
+
+/// A view the runner takes and then refuses at its step boundary is undone
+/// in ck-mc too (spec 4, WK3 and NT3). Here the runner refuses every view
+/// that drops tag 2. Kept as applied, the refused view's drop would be
+/// carried into every later view and refused with it, so no view would ever
+/// land again. Undone, its drops are queued again, forgotten after a second
+/// refusal (spec 2, QD7), and a later drop lands.
+#[tokio::test]
+async fn a_view_refused_at_the_step_boundary_is_undone_so_later_views_land() {
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    runner.host().refuse_tag_at_boundary(2);
+    runner.play(&reads_then_drop_sentences()).await;
+    runner
+        .play(&[read_file(50), answer(), answer(), answer()])
+        .await;
+    let refusals = runner.report.view_refusals.len();
+    assert!(refusals >= 1, "the runner never refused a view");
+    let host = runner.host();
+    assert!(host.applied_version().is_some(), "no view ever landed");
+    assert_eq!(seen(host, 2).as_deref(), Some("§2§ Reading the next file."));
 }
 
 #[tokio::test]
@@ -2027,6 +2075,115 @@ async fn a_restarted_ck_mc_keeps_queued_drops_and_the_view_the_runner_applies() 
     assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
     assert_eq!(seen(host, 5).as_deref(), Some(placeholder(5).as_str()));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ck-mc crashes right after handing over the view that cuts summarized
+/// history, before the end of the job saves its state. The state saved before
+/// the hand-over names that view, so after the restart ck-mc keeps the same
+/// `m[0]` and reads only from the cut (spec 4, DS2 and ST2).
+#[tokio::test]
+async fn a_crash_right_after_handing_over_a_view_keeps_its_cut_and_baseline() {
+    let dir = scratch("crash-after-view");
+    let mut runner = start_full(
+        config("head", Kind::OpenAi, free()),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    *runner.provider().client.snapshot_store.lock().unwrap() = Some(dir.clone());
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    *runner.provider().client.snapshot_store.lock().unwrap() = None;
+    let (m0_before, _) = head_texts(runner.host());
+    // The last view handed over; the runner may not have applied it yet.
+    let handed = *runner
+        .provider()
+        .client
+        .offered
+        .lock()
+        .unwrap()
+        .last()
+        .expect("a view was handed over");
+    let cut = runner
+        .host()
+        .entries()
+        .iter()
+        .find(|entry| {
+            runner.host().applied_view().view.is_some_and(|view| {
+                view.edits.iter().any(|edit| {
+                    matches!(&edit.op, cortexkit_role_compaction::view::EditOp::Cut { through } if *through == entry.mid)
+                })
+            })
+        })
+        .expect("the head cuts the summarized messages")
+        .ordinal;
+
+    // The store, as the view left ck-mc, already names it: whatever happens
+    // to the call, a restarted ck-mc knows the runner may hold it.
+    let saved: String = rusqlite::Connection::open(dir.join(format!("store-at-{handed}.db")))
+        .unwrap()
+        .query_row("SELECT state FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["version"], handed, "{saved}");
+    assert_eq!(
+        saved["unconfirmed"]
+            .as_array()
+            .and_then(|list| list.last())
+            .map(|pending| pending["view"]["version"].clone()),
+        Some(json!(handed)),
+        "{saved}"
+    );
+    // The crash: a new ck-mc on the store as it was when that view left.
+    let crashed = scratch("crash-after-view-restore");
+    std::fs::copy(
+        dir.join(format!("store-at-{handed}.db")),
+        crashed.join("mode3.db"),
+    )
+    .unwrap();
+    std::fs::copy(dir.join("context.db"), crashed.join("context.db")).unwrap();
+    runner.provider().client.reads.lock().unwrap().clear();
+    runner.provider().client.offered.lock().unwrap().clear();
+    runner.provider().restart_from(&crashed);
+    let mut steps = Vec::new();
+    for prompt in ["Then d.rs.", "Last e.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (m0_after, _) = head_texts(runner.host());
+    assert_eq!(
+        m0_before, m0_after,
+        "m[0] was rendered again after the crash"
+    );
+    // ck-mc knew the runner might hold that view: it offered that same view
+    // again at most, and never a different view under its version or an
+    // older one.
+    let offered = runner.provider().client.offered.lock().unwrap().clone();
+    assert!(
+        offered.iter().all(|version| *version >= handed),
+        "view {handed} was handed over before the crash; offered after it: {offered:?}"
+    );
+    let checksums = runner.provider().client.offered_checksums.lock().unwrap()[&handed].clone();
+    assert!(
+        checksums.iter().all(|checksum| *checksum == checksums[0]),
+        "a different view {handed} after the crash: {checksums:?}"
+    );
+    let reads = runner.provider().client.reads.lock().unwrap().clone();
+    assert!(!reads.is_empty());
+    for (after, _) in &reads {
+        assert!(
+            after.unwrap_or(0) + 1 >= cut,
+            "a read from before the cut {cut}: {reads:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&crashed);
 }
 
 #[tokio::test]

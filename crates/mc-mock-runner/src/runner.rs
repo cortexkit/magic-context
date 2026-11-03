@@ -213,6 +213,14 @@ struct State {
     /// A view accepted since the last request; it applies at the next step
     /// boundary.
     pending: Option<View>,
+    /// How many of the next views to refuse at the step boundary, after
+    /// accepting them, as a runner whose transcript moved on would: for
+    /// tests of a provider's rollback.
+    refuse_at_boundary: u32,
+    /// Refuse, at the step boundary, every view with an edit of the part
+    /// numbered with this tag, as a runner would that keeps finding that
+    /// part changed: for tests of a refusal that would repeat.
+    refuse_tag_at_boundary: Option<u64>,
     /// Reasoning tokens per reasoning part, as reported when produced.
     reasoning_tokens: HashMap<String, u64>,
     reminders: Vec<Reminder>,
@@ -415,6 +423,18 @@ impl Host {
         self.lock().render()
     }
 
+    /// Refuse the next `count` views at the step boundary, after accepting
+    /// them in `session.apply_view`, with a `view_refused` event.
+    pub fn refuse_at_boundary(&self, count: u32) {
+        self.lock().refuse_at_boundary = count;
+    }
+
+    /// Refuse, at the step boundary, every view that edits the part with
+    /// `tag` (`stale_part`).
+    pub fn refuse_tag_at_boundary(&self, tag: u64) {
+        self.lock().refuse_tag_at_boundary = Some(tag);
+    }
+
     pub fn applied_version(&self) -> Option<u64> {
         self.lock().applied.as_ref().map(|view| view.version)
     }
@@ -453,6 +473,8 @@ impl<P: Provider> Runner<P> {
             config,
             applied,
             pending: None,
+            refuse_at_boundary: 0,
+            refuse_tag_at_boundary: None,
             reasoning_tokens: HashMap::new(),
             reminders: Vec::new(),
             runs: crate::child::Runs::default(),
@@ -898,9 +920,41 @@ impl<P: Provider> Runner<P> {
             // The transcript may have grown since the view was checked; check
             // again against what will be rendered.
             let previous = state.applied.take();
+            let forced = state.refuse_at_boundary > 0;
+            if forced {
+                state.refuse_at_boundary -= 1;
+            }
+            let stale = state.refuse_tag_at_boundary.and_then(|tag| {
+                let (mid, part) = state.transcript.entries().iter().find_map(|entry| {
+                    entry
+                        .parts
+                        .iter()
+                        .find(|part| part.tag == Some(tag))
+                        .map(|part| (entry.mid.clone(), part.id.clone()))
+                })?;
+                view.edits
+                    .iter()
+                    .any(|edit| match &edit.op {
+                        EditOp::Drop {
+                            mid: target,
+                            part: Some(target_part),
+                        }
+                        | EditOp::Replace {
+                            mid: target,
+                            part: target_part,
+                            ..
+                        } => *target == mid && *target_part == part,
+                        _ => false,
+                    })
+                    .then_some(ViewRefusal::StalePart { mid, part })
+            });
             let result = {
                 let latest = previous.as_ref().map_or(0, |view| view.version);
-                if view.version <= latest {
+                if forced {
+                    Err(ViewRefusal::BadSince)
+                } else if let Some(refusal) = stale {
+                    Err(refusal)
+                } else if view.version <= latest {
                     Err(ViewRefusal::StaleVersion {
                         version: view.version,
                         latest,

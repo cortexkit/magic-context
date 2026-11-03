@@ -11,7 +11,7 @@ use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, Sessi
 use cortexkit_role_compaction::ride::{RideCause, RideRequest};
 use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
-    ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
+    AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, View, ViewRefusal, MAX_VIEW_BYTES,
 };
 use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
@@ -140,6 +140,44 @@ pub struct Session {
     /// memory write (spec 3c, ML1), and what its writes record from it.
     memory_context: Option<crate::memory_profile::MemoryContext>,
     authority: Option<crate::memory_levels::Authority>,
+    /// Views the runner took but has not yet confirmed it applies, oldest
+    /// first, each with the state its acceptance replaced (spec 4, WK3).
+    unconfirmed: Vec<Unconfirmed>,
+    /// Where the session's state is saved before a view leaves ck-mc, so a
+    /// crash never leaves the runner holding a view ck-mc has forgotten.
+    store: Option<Arc<crate::store::Store>>,
+}
+
+/// A view the runner took (an `apply_view` it accepted, or a ride's answer)
+/// and has not yet reported applying. The runner can still refuse it at a
+/// step boundary (a `view_refused` event), and then ck-mc puts back what
+/// accepting it changed: the queued drops it carried, the emergency latch,
+/// the baseline, the caveman levels and the cut.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Unconfirmed {
+    pub view: View,
+    /// The queued drops the view carried.
+    covered: Vec<lanes::PartKey>,
+    before: Before,
+}
+
+/// The state a view's acceptance replaced.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Before {
+    latest: Option<View>,
+    queued: BTreeSet<lanes::PartKey>,
+    refused_once: BTreeSet<lanes::PartKey>,
+    emergency_latched: bool,
+    baseline: Option<Baseline>,
+    fold_due: bool,
+    caveman: lanes::CavemanState,
+    cut: Option<u64>,
+    pruned_turns: u64,
+}
+
+/// Whether the runner reports applying `view`.
+fn same(applied: &AppliedView, view: &View) -> bool {
+    applied.version == view.version && applied.checksum == view.checksum
 }
 
 impl Session {
@@ -188,7 +226,14 @@ impl Session {
             image_outputs: std::collections::BTreeMap::new(),
             memory_context: None,
             authority: None,
+            unconfirmed: Vec::new(),
+            store: None,
         }
+    }
+
+    /// Save the session's state here before each view it hands over.
+    pub fn set_store(&mut self, store: Option<Arc<crate::store::Store>>) {
+        self.store = store;
     }
 
     /// Whether the session's memory context is known yet.
@@ -276,6 +321,7 @@ impl Session {
             drain: self.drain.clone(),
             no_progress: self.no_progress.clone(),
             floor_lifted_for: self.floor_lifted_for.clone(),
+            unconfirmed: self.unconfirmed.clone(),
         }
     }
 
@@ -294,6 +340,10 @@ impl Session {
         self.drain = durable.drain;
         self.no_progress = durable.no_progress;
         self.floor_lifted_for = durable.floor_lifted_for;
+        self.unconfirmed = durable.unconfirmed;
+        // A view handed over before the restart is the one ck-mc expects
+        // the runner to show; Setup settles it.
+        self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(durable.cut.unwrap_or(1));
@@ -334,11 +384,14 @@ impl Session {
         self.project = route.project.clone();
         self.workdir = folder_of(route);
         self.seq = 0;
-        let ours = self.latest.as_ref().map(View::applied);
-        if ours != request.applied_view {
+        self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
+        self.offer_unconfirmed_again(client).await;
+        self.sync(client, request.newest.as_ref()).await;
+        // After the read, so the cut message of the view the runner applies
+        // is in the index (spec 4, ST2).
+        if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
         }
-        self.sync(client, request.newest.as_ref()).await;
         if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
@@ -379,7 +432,17 @@ impl Session {
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
-        let mut refused = false;
+        // What the runner says about the views it took comes first: a
+        // rollback restores the state before the events below change it.
+        let refused: Vec<u64> = notice
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ViewRefused { version, .. } => Some(*version),
+                _ => None,
+            })
+            .collect();
+        self.settle_unconfirmed(notice.applied_view.as_ref(), &refused);
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
@@ -409,7 +472,7 @@ impl Session {
                         }
                     }
                 }
-                Event::ViewRefused { .. } => refused = true,
+                Event::ViewRefused { .. } => {}
                 Event::MarkerWritten { .. } => {}
                 // An event the contract may add later: its reach is unknown,
                 // so the index is read again from the cut, the oldest message
@@ -423,9 +486,6 @@ impl Session {
                 }
             }
         }
-        if refused || self.newer_runner_view(&notice) {
-            self.adopt_runner_view(client).await;
-        }
         // A notice leaves its entries out when they are too large (compaction contract W5.2), and
         // then a change to an older message is not in it either: read from
         // the oldest entry that may have changed.
@@ -438,6 +498,12 @@ impl Session {
             self.sync(client, notice.newest.as_ref()).await;
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
             self.sync_from_changeable(client, newest).await;
+        }
+        // A view the runner applies that ck-mc does not expect (it lost one,
+        // or restored an older one) is taken as ck-mc's own. After the read,
+        // so the view's cut message is in the index.
+        if self.runner_differs(notice.applied_view.as_ref()) {
+            self.adopt_runner_view(client).await;
         }
         self.forget_missing();
         self.update_search_index();
@@ -1063,6 +1129,7 @@ impl Session {
     /// anyway, or would not fit. Everything held lands now.
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         self.conditions = ride.conditions.clone();
+        self.settle_unconfirmed(ride.applied_view.as_ref(), &[]);
         let over_limit = ride
             .has(RideCause::OverLimit)
             .then_some(ride.request_tokens.unwrap_or(0));
@@ -1905,44 +1972,102 @@ impl Session {
         true
     }
 
+    /// Hand `view` to the runner. It is accepted first, as unconfirmed, and
+    /// the session's state saved, so that whatever happens to the call, a
+    /// restarted ck-mc knows the view may be in the runner's hands. A view
+    /// the runner refuses, or a call that fails, puts the state back.
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
         if self.refuse_oversized(&view) {
             return;
         }
+        self.accept(view.clone());
+        self.save();
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
-            Ok(ApplyViewAnswer::Accepted) => self.accept(view),
+            Ok(ApplyViewAnswer::Accepted) => {}
             Ok(ApplyViewAnswer::Refused { refusal }) => {
-                self.next_baseline = None;
-                self.next_caveman = None;
-                self.keep_refused_drops();
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
                     self.key.session, view.version
                 );
+                // The runner holds a newer view than ck-mc knows (one handed
+                // over before a crash): the next view must be newer still,
+                // and the drops this one carried were not at fault.
+                let stale = match &refusal {
+                    ViewRefusal::StaleVersion { latest, .. } => {
+                        self.version = self.version.max(*latest);
+                        true
+                    }
+                    _ => false,
+                };
+                self.roll_back(view.version, !stale);
             }
             // An answer the contract may add later leaves the outcome
-            // unconfirmed (compaction contract W1.5): the view is not sent again, and ck-mc takes
-            // whatever view the runner applies.
+            // unknown (compaction contract W1.5): the view is not sent again,
+            // and ck-mc takes whatever view the runner applies.
             Ok(other) => {
-                self.next_baseline = None;
-                self.next_caveman = None;
-                self.keep_refused_drops();
                 eprintln!(
                     "ck-mc: session {}: unknown answer to view {}: {other:?}",
                     self.key.session, view.version
                 );
+                self.roll_back(view.version, false);
                 self.adopt_runner_view(client).await;
             }
             Err(error) => {
-                self.next_baseline = None;
-                self.next_caveman = None;
-                self.keep_refused_drops();
                 eprintln!(
                     "ck-mc: session {}: session.apply_view failed: {error:?}",
                     self.key.session
                 );
+                self.roll_back(view.version, false);
             }
+        }
+    }
+
+    /// A view handed over before ck-mc restarted that the runner does not
+    /// report applying: it may never have arrived, so it is offered again.
+    /// A runner that already holds it refuses it as not newer, which
+    /// confirms nothing but loses nothing; any other refusal rolls it back.
+    async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
+        let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
+            return;
+        };
+        let oldest = self.unconfirmed[0].view.version;
+        match client
+            .apply_view(&self.key, ApplyViewRequest::new(view.clone()))
+            .await
+        {
+            Ok(ApplyViewAnswer::Accepted) => {}
+            Ok(ApplyViewAnswer::Refused {
+                refusal: ViewRefusal::StaleVersion { latest, .. },
+            }) if latest == view.version => {}
+            Ok(ApplyViewAnswer::Refused { refusal }) => {
+                eprintln!(
+                    "ck-mc: session {}: runner refused view {} offered again: {refusal:?}",
+                    self.key.session, view.version
+                );
+                self.roll_back(oldest, true);
+            }
+            Ok(other) => {
+                eprintln!(
+                    "ck-mc: session {}: unknown answer to view {} offered again: {other:?}",
+                    self.key.session, view.version
+                );
+                self.roll_back(oldest, false);
+            }
+            Err(error) => {
+                eprintln!(
+                    "ck-mc: session {}: offering view {} again failed: {error:?}",
+                    self.key.session, view.version
+                );
+                self.roll_back(oldest, false);
+            }
+        }
+    }
+
+    /// Save the session's state now, where a store is set.
+    fn save(&self) {
+        if let Some(store) = &self.store {
+            store.save(&self.key, &self.durable());
         }
     }
 
@@ -1973,8 +2098,26 @@ impl Session {
         }
     }
 
+    /// Take `view` as the one the runner shows, unconfirmed until a notice
+    /// reports it applied (see [`Unconfirmed`]).
     fn accept(&mut self, view: View) {
         let covered = std::mem::take(&mut self.next_covered);
+        let before = Before {
+            latest: self.latest.clone(),
+            queued: self.queued.clone(),
+            refused_once: self.refused_once.clone(),
+            emergency_latched: self.emergency_latched,
+            baseline: self.baseline.clone(),
+            fold_due: self.fold_due,
+            caveman: self.caveman.clone(),
+            cut: self.cut,
+            pruned_turns: self.pruned_turns,
+        };
+        self.unconfirmed.push(Unconfirmed {
+            view: view.clone(),
+            covered: covered.clone(),
+            before,
+        });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
             self.emergency_latched = true;
@@ -1991,17 +2134,93 @@ impl Session {
         self.latest = Some(view);
     }
 
-    /// Whether the runner applies a view ck-mc does not hold: newer than its
-    /// latest, or a different one under the same version.
-    fn newer_runner_view(&self, notice: &NoticeRequest) -> bool {
-        match (&notice.applied_view, &self.latest) {
-            (Some(applied), Some(latest)) => {
-                applied.version > latest.version
-                    || (applied.version == latest.version && applied.checksum != latest.checksum)
+    /// Settle the unconfirmed views against what the runner reports: each
+    /// one it applies (or a later one it applies) is confirmed, and one it
+    /// refused is rolled back with every view built on it.
+    fn settle_unconfirmed(&mut self, applied: Option<&AppliedView>, refused: &[u64]) {
+        if let Some(applied) = applied {
+            // Views are cumulative: applying a view applies every edit of the
+            // unconfirmed ones before it.
+            if let Some(at) = self
+                .unconfirmed
+                .iter()
+                .position(|pending| same(applied, &pending.view))
+            {
+                self.unconfirmed.drain(..=at);
             }
-            (Some(_), None) => true,
-            (None, _) => false,
         }
+        if let Some(version) = refused
+            .iter()
+            .filter(|version| {
+                self.unconfirmed
+                    .iter()
+                    .any(|pending| pending.view.version == **version)
+            })
+            .min()
+        {
+            self.roll_back(*version, true);
+        }
+    }
+
+    /// Put back what accepting the view `version`, and every view built on
+    /// it, changed. Its queued drops are queued again, except one that a
+    /// refused view already carried once: a drop the runner keeps refusing
+    /// must not make every later pass build a view it refuses.
+    fn roll_back(&mut self, version: u64, refused: bool) {
+        let Some(at) = self
+            .unconfirmed
+            .iter()
+            .position(|pending| pending.view.version == version)
+        else {
+            return;
+        };
+        let undone = self.unconfirmed.split_off(at);
+        let first = &undone[0];
+        let before = first.before.clone();
+        let covered: Vec<lanes::PartKey> = undone
+            .iter()
+            .flat_map(|pending| pending.covered.iter().cloned())
+            .collect();
+        let cut_moved = self.cut != before.cut;
+        self.latest = before.latest;
+        self.queued = before.queued;
+        self.refused_once = before.refused_once;
+        self.emergency_latched = before.emergency_latched;
+        self.baseline = before.baseline;
+        self.fold_due = before.fold_due;
+        self.caveman = before.caveman;
+        self.cut = before.cut;
+        self.pruned_turns = before.pruned_turns;
+        if cut_moved {
+            // The index already forgot what the cut removed; read it again
+            // from the cut the runner still shows.
+            self.index = Index::starting_at(self.cut.unwrap_or(1));
+        }
+        if refused {
+            self.next_covered = covered;
+            self.keep_refused_drops();
+        }
+    }
+
+    /// A ride's view whose answer never reached the runner (its deadline
+    /// passed): the runner never had it.
+    pub fn ride_undelivered(&mut self, version: u64) {
+        self.roll_back(version, false);
+    }
+
+    /// Whether the runner applies a view ck-mc does not expect: neither its
+    /// latest nor, while views wait for confirmation, the one before them.
+    fn runner_differs(&self, applied: Option<&AppliedView>) -> bool {
+        let expected = |view: Option<&View>| match (applied, view) {
+            (Some(applied), Some(view)) => same(applied, view),
+            (None, None) => true,
+            _ => false,
+        };
+        let waiting = self
+            .unconfirmed
+            .first()
+            .map(|pending| pending.before.latest.as_ref());
+        !(expected(self.latest.as_ref()) || waiting.is_some_and(expected))
     }
 
     /// Take the view the runner applies as ck-mc's own: after a refusal, or
@@ -2009,6 +2228,8 @@ impl Session {
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
         match client.applied_view(&self.key).await {
             Ok(answer) => {
+                // The runner's view now stands for itself.
+                self.unconfirmed.clear();
                 if let Some(view) = &answer.view {
                     self.version = self.version.max(view.version);
                     self.apply_cut(view);

@@ -79,7 +79,7 @@ struct Inner<C> {
     /// only tests want.
     db: Option<Arc<ContextDb>>,
     /// Where each session's own decisions survive a restart.
-    store: Option<Store>,
+    store: Option<Arc<Store>>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
@@ -122,7 +122,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 client,
                 config: config.into(),
                 db: db.map(Arc::new),
-                store,
+                store: store.map(Arc::new),
                 workers: Mutex::new(HashMap::new()),
                 summaries_running: Mutex::new(0),
                 session_projects: Mutex::new(HashMap::new()),
@@ -414,6 +414,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         _ => {
                             let mut fresh =
                                 Session::new(&route, &request, features, inner.db.clone());
+                            fresh.set_store(inner.store.clone());
                             fresh.load_summaries();
                             if let Some(durable) = inner
                                 .store
@@ -451,10 +452,28 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                     }
                     Job::Ride(ride, reply) => {
+                        // Past its deadline the runner already sends without
+                        // a view: build none.
+                        if reply.is_closed() {
+                            continue;
+                        }
                         let view = session
                             .as_mut()
                             .and_then(|session| session.ride(settings, &ride));
-                        let _ = reply.send(view);
+                        // Saved before the answer leaves, as for a pushed
+                        // view: the runner may hold it from here on.
+                        if let (Some(store), Some(session), Some(_)) =
+                            (&inner.store, session.as_ref(), view.as_ref())
+                        {
+                            let durable = session.durable();
+                            store.save(session.key(), &durable);
+                            saved = Some(durable);
+                        }
+                        if let Err(Some(view)) = reply.send(view) {
+                            if let Some(session) = session.as_mut() {
+                                session.ride_undelivered(view.version);
+                            }
+                        }
                     }
                     Job::Tool {
                         route,

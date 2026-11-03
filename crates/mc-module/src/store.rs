@@ -19,7 +19,7 @@ use crate::memory_profile::MemoryContext;
 use crate::summary::head::Baseline;
 
 /// What a session keeps across a restart.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Durable {
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
@@ -55,6 +55,11 @@ pub struct Durable {
     /// it twice.
     #[serde(default)]
     pub floor_lifted_for: Option<String>,
+    /// Views handed to the runner that it has not yet confirmed applying,
+    /// with the state each replaced, so a refusal after a restart can
+    /// still put it back.
+    #[serde(default)]
+    pub unconfirmed: Vec<crate::session::Unconfirmed>,
 }
 
 pub struct Store {
