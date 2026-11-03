@@ -2,8 +2,8 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import prefixBoundGolden from "../../../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
-import budgetGolden from "../../../../../crates/mc-module/testdata/reasoning-budget-trim.json";
+import prefixBoundGolden from "../../../test-fixtures/runtime/prefix-bound-reasoning-trim.json";
+import budgetGolden from "../../../test-fixtures/runtime/reasoning-budget-trim.json";
 import {
     observeSessionMetaCollectionWrites,
     rejectSessionMetaCollectionWrites,

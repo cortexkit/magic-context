@@ -22,7 +22,7 @@ describe("historian category vocabulary drift", () => {
     });
 
     it("keeps the Rust parser's vendored category list in sync", () => {
-        const rust = read("crates/mc-module/src/historian_validate.rs");
+        const rust = read("crates/mc-module/src/summary/validate.rs");
         const list = rust.match(/const HISTORIAN_CATEGORIES: &\[&str\] = &\[([^\]]+)\];/)?.[1];
         expect(list).toBeDefined();
         expect([...list!.matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1])).toEqual(names);

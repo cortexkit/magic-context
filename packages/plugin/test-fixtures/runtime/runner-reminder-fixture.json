@@ -1,0 +1,820 @@
+{
+  "schema": 1,
+  "generator": "crates/mc-module/gen/gen-runner-reminder-fixture.ts",
+  "reduce": [
+    {
+      "kind": "gentle",
+      "tokens": 0,
+      "count": 0,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nHousekeeping: spent tool outputs (~0k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: spent tool outputs (~0k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: spent tool outputs (~0k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: spent tool outputs (~0k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: spent tool outputs (~0k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 1 spent tool output (~25k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 1 spent tool output (~25k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 1 spent tool output (~25k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 1 spent tool output (~25k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 1 spent tool output (~25k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 7 spent tool outputs (~51k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 7 spent tool outputs (~51k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 7 spent tool outputs (~51k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 7 spent tool outputs (~51k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "gentle",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 7 spent tool outputs (~51k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 0,
+      "count": 0,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "firm",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 0,
+      "count": 0,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nspent tool outputs (~0k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\n1 spent tool output (~25k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "urgent",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\n7 spent tool outputs (~51k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 0,
+      "count": 0,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: spent tool outputs (~0k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: spent tool outputs (~0k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: spent tool outputs (~0k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: spent tool outputs (~0k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: spent tool outputs (~0k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 1 spent tool output (~25k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 1 spent tool output (~25k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 1 spent tool output (~25k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 1 spent tool output (~25k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 1 spent tool output (~25k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 7 spent tool outputs (~51k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 7 spent tool outputs (~51k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 7 spent tool outputs (~51k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 7 spent tool outputs (~51k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 7 spent tool outputs (~51k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 0,
+      "count": 0,
+      "tags": [],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~0k tokens)). Then continue your task.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~0k tokens)). Then continue your task.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~0k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~0k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 0,
+      "count": 0,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~0k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~25k tokens)). Then continue your task.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~25k tokens)). Then continue your task.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~25k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~25k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 25499,
+      "count": 1,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~25k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (7 spent tool outputs (~51k tokens)). Then continue your task.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (7 spent tool outputs (~51k tokens)). Then continue your task.\noldest reclaimable: §12§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (7 spent tool outputs (~51k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (7 spent tool outputs (~51k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§.\n</system-reminder>"
+    },
+    {
+      "kind": "channel2",
+      "tokens": 50500,
+      "count": 7,
+      "tags": [
+        12,
+        15,
+        18,
+        21
+      ],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (7 spent tool outputs (~51k tokens)). Then continue your task.\noldest reclaimable: §12§ · §15§ · §18§ · §21§.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50000,
+      "count": 2,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 2 spent tool outputs (~50k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50000,
+      "count": 2,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 2 spent tool outputs (~50k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    },
+    {
+      "kind": "sticky",
+      "tokens": 50000,
+      "count": 2,
+      "tags": [],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 2 spent tool outputs (~50k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+    }
+  ],
+  "time": [
+    {
+      "gap_ms": -1000,
+      "expected": null
+    },
+    {
+      "gap_ms": 0,
+      "expected": null
+    },
+    {
+      "gap_ms": 299000,
+      "expected": null
+    },
+    {
+      "gap_ms": 300000,
+      "expected": "<!-- +5m -->\n"
+    },
+    {
+      "gap_ms": 3599000,
+      "expected": "<!-- +59m -->\n"
+    },
+    {
+      "gap_ms": 3600000,
+      "expected": "<!-- +1h -->\n"
+    },
+    {
+      "gap_ms": 3660000,
+      "expected": "<!-- +1h 1m -->\n"
+    },
+    {
+      "gap_ms": 86399000,
+      "expected": "<!-- +23h 59m -->\n"
+    },
+    {
+      "gap_ms": 86400000,
+      "expected": "<!-- +1d -->\n"
+    },
+    {
+      "gap_ms": 90000000,
+      "expected": "<!-- +1d 1h -->\n"
+    },
+    {
+      "gap_ms": 604799000,
+      "expected": "<!-- +6d 23h -->\n"
+    },
+    {
+      "gap_ms": 604800000,
+      "expected": "<!-- +1w -->\n"
+    },
+    {
+      "gap_ms": 691200000,
+      "expected": "<!-- +1w 1d -->\n"
+    },
+    {
+      "gap_ms": 1209600000,
+      "expected": "<!-- +2w -->\n"
+    }
+  ]
+}

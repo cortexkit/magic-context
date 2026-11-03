@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import edgeCases from "../../../../../../crates/mc-store/testdata/s02-review-score-cases.json";
+import edgeCases from "../../../../test-fixtures/runtime/s02-review-score-cases.json";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";

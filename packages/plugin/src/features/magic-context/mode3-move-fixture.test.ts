@@ -9,7 +9,7 @@ import { buildMode3MoveFixture } from "./__tests__/mode3-move-fixture";
 
 const FIXTURE_PATH = join(
     import.meta.dir,
-    "../../../../../crates/mc-module/testdata/mode3_move_fixture.json",
+    "../../../test-fixtures/runtime/mode3_move_fixture.json",
 );
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const dirs: string[] = [];

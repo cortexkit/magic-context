@@ -1,0 +1,9 @@
+[
+  {"label":"custom normalized tool drop waits for rotation","tools":["custom","mcp_CUSTOM","custom"],"protected_tools":{"MCP_CUSTOM":2},"drop":2,"new_tool":"CUSTOM"},
+  {"label":"default todowrite drop waits for rotation","tools":["todowrite","TODOWRITE"],"protected_tools":{},"drop":2,"new_tool":"mcp_todowrite"},
+  {"label":"newest three custom results hold agent drops","tools":["custom","custom","MCP_CUSTOM","custom"],"protected_tools":{"custom":3},"drop":2,"new_tool":"custom"},
+  {"label":"historian queued protected drop holds until fold trim","tools":["custom","custom"],"protected_tools":{"custom":1},"drop":2,"new_tool":"custom","historian":true},
+  {"label":"newest three ctx_reduce results hold historian drops","tools":["ctx_reduce","ctx_reduce","MCP_CTX_REDUCE","ctx_reduce"],"protected_tools":{},"drop":2,"new_tool":"ctx_reduce","historian":true,"protected_after_trim":[1,3,4]},
+  {"label":"agent ctx_reduce self-stamp is skipped while protected","tools":["ctx_reduce","ctx_reduce"],"protected_tools":{},"drop":2,"new_tool":"ctx_reduce","agent_self_stamp":true},
+  {"label":"agent ctx_reduce self-stamp is skipped without protection","tools":["ctx_reduce","ctx_reduce"],"protected_tools":{"ctx_reduce":0},"drop":2,"new_tool":"ctx_reduce","agent_self_stamp":true}
+]

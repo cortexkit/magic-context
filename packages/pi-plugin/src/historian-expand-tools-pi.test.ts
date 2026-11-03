@@ -3,7 +3,7 @@ import {
 	readSessionChunk,
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import fixture from "../../../crates/mc-module/testdata/historian-tool-expansions.json";
+import fixture from "../../plugin/test-fixtures/runtime/historian-tool-expansions.json";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
 test("Pi historian preserves long room posts and message-id replies through native tool entries", () => {

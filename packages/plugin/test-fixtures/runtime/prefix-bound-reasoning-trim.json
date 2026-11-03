@@ -1,0 +1,41 @@
+{
+  "description": "Oldest-prefix reasoning removal on prefix-bound models (Fable 5.1, Opus 5.5, Sonnet 5.5), shared by the OpenCode TypeScript lane, the Pi lane and the Rust module. Anthropic's preserved-thinking table: \"Remove `thinking` blocks from the start of the history, from the end, or all of them\" is valid; \"Remove a `thinking` block from the middle of the history and keep later ones\" is invalid for every later thinking block. A session is one user message (tag 1) followed by `steps` assistant steps a0..a{steps-1}; step i carries signed thinking and visible content and owns tag i + 2, except the `untagged` steps, which own no tag. `already_removed` lists steps whose reasoning earlier passes already took off the wire. `removed_after` is every step whose reasoning is off the wire after the pass: the earlier removals plus the new ones.",
+  "cases": [
+    {
+      "name": "a contiguous oldest prefix up to the age cutoff",
+      "steps": 8,
+      "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
+      "untagged": [],
+      "already_removed": [],
+      "removed_after": ["a0", "a1", "a2", "a3", "a4"]
+    },
+    {
+      "name": "the walk stops at the first step it may not remove",
+      "steps": 8,
+      "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
+      "untagged": ["a2"],
+      "already_removed": [],
+      "removed_after": ["a0", "a1"]
+    },
+    {
+      "name": "steps already removed are passed over, never restored",
+      "steps": 8,
+      "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
+      "untagged": ["a2"],
+      "already_removed": ["a0", "a1", "a2"],
+      "removed_after": ["a0", "a1", "a2", "a3", "a4"]
+    },
+    {
+      "name": "the newest assistant is never removed",
+      "steps": 8,
+      "clear_reasoning_age": 0,
+      "keep_reasoning_tokens": 0,
+      "untagged": [],
+      "already_removed": [],
+      "removed_after": ["a0", "a1", "a2", "a3", "a4", "a5", "a6"]
+    }
+  ]
+}

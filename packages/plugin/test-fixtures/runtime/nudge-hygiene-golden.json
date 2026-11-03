@@ -1,0 +1,1130 @@
+{
+  "schema": 2,
+  "provenance": {
+    "generator": "crates/mc-module/gen/gen-nudge-hygiene-golden.ts",
+    "generator_version": "nudge-hygiene-ts-v3",
+    "input_sha256": "23d105a6a21743b464a97e10da33a80e68f9f6ff483adfee620ad0d3f7c1db92"
+  },
+  "cases": [
+    {
+      "id": "live-incident-mixed-tail",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "conversation",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "prose ",
+              "repeat": 302195
+            }
+          ]
+        },
+        {
+          "mid": "tool-owner",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "call-live",
+              "name": "read",
+              "input": {
+                "path": "fixture"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "tool-result",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "call-live",
+              "name": "read",
+              "unit": "result ",
+              "repeat": 162000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 0,
+          "block_id": "conversation#0",
+          "kind": "message",
+          "token_count": 302197
+        },
+        {
+          "tag_number": 1,
+          "block_id": "tool-result#0",
+          "kind": "tool",
+          "token_count": 162006
+        }
+      ],
+      "expected": {
+        "u": 302197,
+        "t": 464203,
+        "band": "urgent"
+      }
+    },
+    {
+      "id": "queued-tool-arc-full-mass",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "queued-owner",
+          "ordinal": 1,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "queued-call",
+              "name": "read",
+              "input": {
+                "payload": "queued input has attributed mass"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "queued-result",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "queued-call",
+              "name": "read",
+              "unit": "queued output ",
+              "repeat": 4000
+            }
+          ]
+        },
+        {
+          "mid": "kept-owner-1",
+          "ordinal": 3,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "kept-call-1",
+              "name": "read",
+              "input": {
+                "path": "one"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "kept-result-1",
+          "ordinal": 4,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "kept-call-1",
+              "name": "read",
+              "unit": "kept one ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "kept-owner-2",
+          "ordinal": 5,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "kept-call-2",
+              "name": "read",
+              "input": {
+                "path": "two"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "kept-result-2",
+          "ordinal": 6,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "kept-call-2",
+              "name": "read",
+              "unit": "kept two ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "kept-owner-3",
+          "ordinal": 7,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "kept-call-3",
+              "name": "read",
+              "input": {
+                "path": "three"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "kept-result-3",
+          "ordinal": 8,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "kept-call-3",
+              "name": "read",
+              "unit": "kept three ",
+              "repeat": 2000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 7,
+          "block_id": "queued-result#0",
+          "kind": "tool",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 8,
+          "block_id": "kept-result-1#0",
+          "kind": "tool",
+          "token_count": 6000
+        },
+        {
+          "tag_number": 9,
+          "block_id": "kept-result-2#0",
+          "kind": "tool",
+          "token_count": 6000
+        },
+        {
+          "tag_number": 10,
+          "block_id": "kept-result-3#0",
+          "kind": "tool",
+          "token_count": 6000
+        }
+      ],
+      "pending_drop_tag_numbers": [
+        7
+      ],
+      "expected": {
+        "u": 0,
+        "t": 20028,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "protected-recency-reserve",
+      "protected_tags": 1,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "old",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "old reclaimable ",
+              "repeat": 24000
+            }
+          ]
+        },
+        {
+          "mid": "recent-owner",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "recent-call",
+              "name": "read",
+              "input": {
+                "path": "recent"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "recent-result",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "recent-call",
+              "name": "read",
+              "unit": "recent protected ",
+              "repeat": 24000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "old#0",
+          "kind": "message",
+          "token_count": 96001
+        },
+        {
+          "tag_number": 2,
+          "block_id": "recent-result#0",
+          "kind": "tool",
+          "token_count": 48001
+        }
+      ],
+      "expected": {
+        "u": 96001,
+        "t": 144007,
+        "band": "urgent"
+      }
+    },
+    {
+      "id": "protected-token-window-spans-more-than-one-tag",
+      "protected_tags": 1,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "older-visible",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "visible backlog ",
+              "repeat": 20000
+            }
+          ]
+        },
+        {
+          "mid": "owner-1",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "window-1",
+              "name": "read",
+              "input": {
+                "path": "one"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-1",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "window-1",
+              "name": "read",
+              "unit": "window one ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "owner-2",
+          "ordinal": 4,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "window-2",
+              "name": "read",
+              "input": {
+                "path": "two"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-2",
+          "ordinal": 5,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "window-2",
+              "name": "read",
+              "unit": "window two ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "owner-3",
+          "ordinal": 6,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "window-3",
+              "name": "read",
+              "input": {
+                "path": "three"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-3",
+          "ordinal": 7,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "window-3",
+              "name": "read",
+              "unit": "window three ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "owner-4",
+          "ordinal": 8,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "window-4",
+              "name": "read",
+              "input": {
+                "path": "four"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-4",
+          "ordinal": 9,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "window-4",
+              "name": "read",
+              "unit": "window four ",
+              "repeat": 2000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 0,
+          "block_id": "older-visible#0",
+          "kind": "message",
+          "token_count": 40001
+        },
+        {
+          "tag_number": 1,
+          "block_id": "result-1#0",
+          "kind": "tool",
+          "token_count": 4000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "result-2#0",
+          "kind": "tool",
+          "token_count": 4000
+        },
+        {
+          "tag_number": 3,
+          "block_id": "result-3#0",
+          "kind": "tool",
+          "token_count": 4000
+        },
+        {
+          "tag_number": 4,
+          "block_id": "result-4#0",
+          "kind": "tool",
+          "token_count": 4000
+        }
+      ],
+      "expected": {
+        "u": 60001,
+        "t": 76025,
+        "band": "channel2"
+      }
+    },
+    {
+      "id": "empty-protected-token-window",
+      "protected_tags": 99,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "message-only",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "message only ",
+              "repeat": 4000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "message-only#0",
+          "kind": "message",
+          "token_count": 8001
+        }
+      ],
+      "expected": {
+        "u": 8001,
+        "t": 8001,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "reasoning-excluded-both-terms",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "visible",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "visible work ",
+              "repeat": 30000
+            }
+          ]
+        },
+        {
+          "mid": "thinking",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "reasoning",
+              "unit": "private chain ",
+              "repeat": 80000
+            }
+          ]
+        },
+        {
+          "mid": "answer",
+          "ordinal": 3,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "answer prose ",
+              "repeat": 30000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "visible#0",
+          "kind": "message",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "answer#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 120002,
+        "t": 120002,
+        "band": "channel2"
+      }
+    },
+    {
+      "id": "synthetic-carrier-excluded",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "m0",
+          "ordinal": 1,
+          "role": "user",
+          "synthetic": true,
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "synthetic memory ",
+              "repeat": 100000
+            }
+          ]
+        },
+        {
+          "mid": "real",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "small real tail ",
+              "repeat": 500
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "m0#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 0,
+        "t": 1501,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "dropped-tool-arc-excluded",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "owner",
+          "ordinal": 1,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "call-drop",
+              "name": "read",
+              "input": {
+                "payload": "original-large-input"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "call-drop",
+              "name": "read",
+              "unit": "[truncated §2§]",
+              "repeat": 1
+            }
+          ]
+        },
+        {
+          "mid": "kept",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "kept prose ",
+              "repeat": 2000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "result#0",
+          "kind": "tool",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "kept#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 4001,
+        "t": 4001,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "caveman-rendered-not-original-weight",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "caveman",
+          "ordinal": 1,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "[caveman depth=2] compacted sentence. ",
+              "repeat": 4000
+            }
+          ]
+        },
+        {
+          "mid": "untagged-context",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "visible context ",
+              "repeat": 2000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "caveman#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 44001,
+        "t": 48002,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "channel1-reminder-span-excluded",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "reminder-owner",
+          "ordinal": 1,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "call-reminder",
+              "name": "read",
+              "input": {
+                "path": "reminder"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "reminder-result",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "call-reminder",
+              "name": "read",
+              "unit": "kept output\n\n<system-reminder>\nreasoning-sized reminder bytes must not count\n</system-reminder>",
+              "repeat": 1
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "reminder-result#0",
+          "kind": "tool",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 0,
+        "t": 7,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "user-reminder-span-excluded-from-both-terms",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "user-reminder",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "kept prompt\n\n<system-reminder>\nreminder bytes are excluded on ordinary text\n</system-reminder>",
+              "repeat": 1
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "user-reminder#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 2,
+        "t": 2,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "post-fold-fresh-tail",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "fold-summary",
+          "ordinal": 1,
+          "role": "user",
+          "synthetic": true,
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "compacted history ",
+              "repeat": 100000
+            }
+          ]
+        },
+        {
+          "mid": "fresh-tail",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "fresh visible tail ",
+              "repeat": 10000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "fresh-tail#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 30001,
+        "t": 30001,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "tiny-t-minimum-guard",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "tiny",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "x ",
+              "repeat": 59000
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "tiny#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 59001,
+        "t": 59001,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "image-and-file-total",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "image",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "file",
+              "mime": "image/png",
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+            }
+          ]
+        },
+        {
+          "mid": "file",
+          "ordinal": 2,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "file",
+              "mime": "text/plain",
+              "url": "file content"
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "image#0",
+          "kind": "file",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "file#0",
+          "kind": "file",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 3,
+        "t": 3,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "unambiguous-legacy-orphan",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "before",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "before ",
+              "repeat": 500
+            }
+          ]
+        },
+        {
+          "mid": "orphan-owner",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "legacy-call",
+              "name": "read",
+              "input": {
+                "path": "legacy"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "orphan-result",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "legacy-call",
+              "name": "read",
+              "unit": "legacy output ",
+              "repeat": 4000
+            }
+          ]
+        },
+        {
+          "mid": "after",
+          "ordinal": 4,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "after ",
+              "repeat": 500
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "before#0",
+          "kind": "message",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "legacy-call",
+          "kind": "tool",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 3,
+          "block_id": "after#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 1002,
+        "t": 9008,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "recurring-call-id-ambiguous",
+      "protected_tags": 0,
+      "protected_tokens_effective": 16000,
+      "messages": [
+        {
+          "mid": "before",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "before ",
+              "repeat": 500
+            }
+          ]
+        },
+        {
+          "mid": "owner-a",
+          "ordinal": 2,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "repeat",
+              "name": "read",
+              "input": {
+                "path": "a"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-a",
+          "ordinal": 3,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "repeat",
+              "name": "read",
+              "unit": "first output ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "owner-b",
+          "ordinal": 4,
+          "role": "assistant",
+          "blocks": [
+            {
+              "type": "tool_call",
+              "id": "repeat",
+              "name": "read",
+              "input": {
+                "path": "b"
+              }
+            }
+          ]
+        },
+        {
+          "mid": "result-b",
+          "ordinal": 5,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "tool_result",
+              "id": "repeat",
+              "name": "read",
+              "unit": "second output ",
+              "repeat": 2000
+            }
+          ]
+        },
+        {
+          "mid": "after",
+          "ordinal": 6,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "after ",
+              "repeat": 500
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "before#0",
+          "kind": "message",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 2,
+          "block_id": "repeat",
+          "kind": "tool",
+          "token_count": 8000
+        },
+        {
+          "tag_number": 3,
+          "block_id": "after#0",
+          "kind": "message",
+          "token_count": 8000
+        }
+      ],
+      "expected": {
+        "u": 1002,
+        "t": 9014,
+        "band": "quiet"
+      }
+    }
+  ]
+}

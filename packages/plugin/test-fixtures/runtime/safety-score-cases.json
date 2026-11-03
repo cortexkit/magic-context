@@ -1,0 +1,6 @@
+[
+  { "flag": null, "score": 40, "expected": 40 },
+  { "flag": false, "score": 40, "expected": 40 },
+  { "flag": true, "score": 40, "expected": 80 },
+  { "flag": true, "score": 95, "expected": 95 }
+]

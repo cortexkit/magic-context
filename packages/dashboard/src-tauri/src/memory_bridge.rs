@@ -5,7 +5,7 @@ use std::path::Path;
 /// Route exactly once. A rejected module response is never an invitation to local SQL.
 pub async fn request(path: &Path, method: &str, params: Value) -> Result<Value, String> {
     if matches!(method, "memory.edit" | "memory.restore") {
-        mc_store::memory_history::validate_write_request(method, &params)?;
+        crate::memory_history::validate_write_request(method, &params)?;
     }
     let project = params["projectPath"].as_str().ok_or("invalid_request")?;
     pub fn readonly_memory_host_refusal(params: &Value, method: &str) -> Value {
@@ -24,9 +24,9 @@ pub async fn request(path: &Path, method: &str, params: Value) -> Result<Value, 
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_millis() as i64;
-        return mc_store::memory_history::readonly_rpc(&mut conn, method, &params, now);
+        return crate::memory_history::readonly_rpc(&mut conn, method, &params, now);
     }
-    let local = mc_store::memory_history::local_owns(&conn, project)?;
+    let local = crate::memory_history::local_owns(&conn, project)?;
     if local {
         drop(conn);
         let mut conn =
@@ -115,7 +115,7 @@ pub async fn request(path: &Path, method: &str, params: Value) -> Result<Value, 
         return Err("invalid_module_receipt".into());
     }
     if matches!(method, "memory.edit" | "memory.restore")
-        && !mc_store::memory_history::valid_receipt(method, &params, &value)
+        && !crate::memory_history::valid_receipt(method, &params, &value)
     {
         return Err("invalid_module_receipt".into());
     }
@@ -128,33 +128,33 @@ pub fn local_request(conn: &mut Connection, method: &str, params: &Value) -> Res
         .as_millis() as i64;
     match method {
         "memory.edit" => {
-            let parsed: mc_store::memory_history::EditRequest =
+            let parsed: crate::memory_history::EditRequest =
                 serde_json::from_value(params.clone()).map_err(|_| "invalid_request")?;
-            mc_store::memory_history::local_write(
+            crate::memory_history::local_write(
                 conn,
                 &serde_json::to_value(parsed).map_err(|error| error.to_string())?,
                 now,
             )
         }
         "memory.restore" => {
-            let parsed: mc_store::memory_history::RestoreRequest =
+            let parsed: crate::memory_history::RestoreRequest =
                 serde_json::from_value(params.clone()).map_err(|_| "invalid_request")?;
-            mc_store::memory_history::local_write(
+            crate::memory_history::local_write(
                 conn,
                 &serde_json::to_value(parsed).map_err(|error| error.to_string())?,
                 now,
             )
         }
-        "memory.history" => mc_store::memory_history::history(
+        "memory.history" => crate::memory_history::history(
             conn,
             &serde_json::from_value(params.clone()).map_err(|_| "invalid_request")?,
         ),
-        "memory.restore.preview" => mc_store::memory_history::preview(
+        "memory.restore.preview" => crate::memory_history::preview(
             conn,
             params["projectPath"].as_str().ok_or("invalid_request")?,
             params["decisionKey"].as_str().ok_or("invalid_request")?,
             now,
-            mc_store::memory_history::MemoryWriter::Local,
+            crate::memory_history::MemoryWriter::Local,
         ),
         _ => Err("unknown_memory_method".into()),
     }
@@ -163,7 +163,7 @@ pub fn edit_request(
     project: &str,
     operation: &str,
     ids: &[i64],
-    expectations: &[mc_store::memory_history::RevisionExpectation],
+    expectations: &[crate::memory_history::RevisionExpectation],
     field: &str,
     value: &str,
 ) -> Value {

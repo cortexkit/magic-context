@@ -5,16 +5,17 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
-# subc-core must come from git: CI builds the test daemon from its locked revision.
-# Other CortexKit crates may also be git-pinned (unpublished commons role crates), as
-# long as each one resolves to a single locked revision.
-REQUIRED_GIT_CRATES = {"subc-core"}
+# The daemon is an integration-test tool, not a dependency of the registry SDK.
+# Its full revision remains pinned in the workspace even when Cargo omits the
+# unused subc-core dependency from the runtime lockfile.
+DAEMON_REPOSITORY = "https://github.com/cortexkit/subconscious"
 PACKAGE_FIELDS = re.compile(r'^(name|version|source) = "([^"]*)"$', re.MULTILINE)
 
 
 def package_entries(lock_text: str) -> list[dict[str, str]]:
-    sections = re.split(r"(?m)^\[\[package\]\]\s*$", lock_text)[1:]
+    sections = re.findall(r"(?ms)^\[\[package\]\][ \t]*\r?\n(.*?)(?=^\[\[|\Z)", lock_text)
     packages = []
     for section in sections:
         fields = dict(PACKAGE_FIELDS.findall(section))
@@ -24,7 +25,37 @@ def package_entries(lock_text: str) -> list[dict[str, str]]:
     return packages
 
 
-def lock_pins(lock_text: str) -> tuple[str, str]:
+def workspace_pins(manifest_text: str) -> dict:
+    """Read only the exact pin forms we support; unfamiliar TOML fails closed.
+
+    Keep this standalone check usable with Python 3.9, without a TOML package or
+    a dependency on Bun/Cargo just to identify the integration daemon revision.
+    """
+    tables = list(re.finditer(r"(?m)^\[workspace\.dependencies\][ \t]*(?:#[^\n]*)?$", manifest_text))
+    if len(tables) != 1:
+        raise ValueError("expected one workspace dependency table")
+    block = re.split(r"(?m)^\[", manifest_text[tables[0].end():], maxsplit=1)[0]
+
+    def entry(name: str, pattern: str) -> str:
+        matches = re.findall(rf'(?m)^{re.escape(name)}\s*=\s*({pattern})[ \t]*(?:#[^\n]*)?$', block)
+        if len(matches) != 1:
+            raise ValueError(f"expected one supported workspace pin for {name}")
+        return matches[0]
+
+    daemon = entry("subc-core", r'\{[^\n}]*\}')
+    fields = re.findall(r'(git|rev)\s*=\s*"([^"\\]*)"', daemon)
+    if len(fields) != 2 or {key for key, _ in fields} != {"git", "rev"}:
+        raise ValueError("expected git and rev in workspace subc-core pin")
+    remainder = re.sub(r'(git|rev)\s*=\s*"[^"\\]*"', "", daemon[1:-1])
+    if re.sub(r"[\s,]", "", remainder):
+        raise ValueError("unsupported workspace subc-core pin syntax")
+    return {
+        "subc-core": dict(fields),
+        **{name: entry(name, r'"[^"\\]*"')[1:-1] for name in ("subc-client-rs", "subc-protocol")},
+    }
+
+
+def lock_pins(lock_text: str, manifest_text: Optional[str] = None) -> tuple[str, str]:
     packages = package_entries(lock_text)
     pinned = []
     git_revisions: dict[str, set[str]] = {}
@@ -42,13 +73,33 @@ def lock_pins(lock_text: str) -> tuple[str, str]:
         else:
             pinned.append(f"{name}={package['version']}")
 
-    missing = REQUIRED_GIT_CRATES - set(git_revisions)
-    if missing:
-        raise ValueError(f"expected a locked git revision for {sorted(missing)}, got {git_revisions}")
     split = {name: revisions for name, revisions in git_revisions.items() if len(revisions) != 1}
     if split:
         raise ValueError(f"expected one locked git revision per crate, got {split}")
-    subc_revision = next(iter(git_revisions["subc-core"]))
+    locked_daemon = git_revisions.get("subc-core", set())
+    if manifest_text is None:
+        if not locked_daemon:
+            raise ValueError("expected a locked subc-core revision or a workspace daemon pin")
+        subc_revision = next(iter(locked_daemon))
+    else:
+        dependencies = workspace_pins(manifest_text)
+        daemon = dependencies["subc-core"]
+        subc_revision = daemon.get("rev", "")
+        if daemon.get("git") != DAEMON_REPOSITORY or not re.fullmatch(r"[0-9a-f]{40}", subc_revision):
+            raise ValueError("workspace subc-core must pin the daemon repository at a full git revision")
+        if locked_daemon and locked_daemon != {subc_revision}:
+            raise ValueError("Cargo.lock subc-core and the workspace daemon pin disagree")
+        if not locked_daemon:
+            if any(package["name"] == "subc-core" for package in packages):
+                raise ValueError("subc-core must not resolve from a registry")
+            for name in ("subc-client-rs", "subc-protocol"):
+                spec = dependencies[name]
+                locked = [package for package in packages if package["name"] == name]
+                if not isinstance(spec, str) or not spec.startswith("=") or len(locked) != 1:
+                    raise ValueError(f"expected one exactly pinned registry SDK package for {name}")
+                if locked[0]["version"] != spec[1:] or locked[0].get("source") != "registry+https://github.com/rust-lang/crates.io-index":
+                    raise ValueError(f"{name} does not match its workspace registry pin")
+            pinned.append(f"subc-core=integration@{subc_revision}")
     return subc_revision, ",".join(sorted(pinned))
 
 
@@ -123,7 +174,50 @@ source = "git+https://github.com/cortexkit/commons?rev={role_revision}#{role_rev
     print("PASS test_invalid_git_revision_refused")
     print("PASS test_missing_subc_core_refused")
     print("PASS test_split_git_revision_refused")
-    print("All 4 Cargo.lock pin self-tests passed.")
+    manifest = f'''[workspace.dependencies]
+subc-core = {{ git = "{DAEMON_REPOSITORY}", rev = "{subc_revision}" }}
+subc-client-rs = "=0.33.0"
+subc-protocol = "=0.29.1"
+'''
+    registry = fixture[fixture.index('[[package]]\nname = "cortexkit-cache-core"'):]
+    registry += '''\n[[package]]
+name = "subc-client-rs"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+'''
+    registry_test = "test_registry_sdk_and_workspace_daemon_pin"
+    try:
+        revision, crates = lock_pins(registry, manifest)
+        assert revision == subc_revision
+        assert f"subc-core=integration@{subc_revision}" in crates
+        print("PASS test_registry_sdk_and_workspace_daemon_pin")
+        registry_test = "test_unused_patches_are_not_runtime_packages"
+        unused = registry + '''\n[[patch.unused]]
+name = "subc-core"
+version = "0.1.0"
+source = "git+https://example.com/unused#invalid"
+'''
+        assert lock_pins(unused, manifest) == (revision, crates)
+        print("PASS test_unused_patches_are_not_runtime_packages")
+        registry_test = "test_invalid_registry_sdk_or_daemon_pin_refused"
+        invalid = [
+            (registry, manifest.replace(subc_revision, "main")),
+            (registry, manifest.replace(DAEMON_REPOSITORY, "https://example.com/other")),
+            (fixture, manifest.replace(subc_revision, "0" * 40)),
+            (registry.replace('version = "0.33.0"', 'version = "0.33.1"'), manifest),
+            (registry.replace('name = "subc-client-rs"', 'name = "unrelated"'), manifest),
+        ]
+        for lock, workspace in invalid:
+            try:
+                lock_pins(lock, workspace)
+            except (KeyError, ValueError):
+                continue
+            raise AssertionError("invalid SDK/daemon provenance was accepted")
+        print("PASS test_invalid_registry_sdk_or_daemon_pin_refused (5 cases)")
+    except (KeyError, ValueError, AssertionError) as error:
+        print(f"FAIL {registry_test}: {error}", file=sys.stderr)
+        return 1
+    print("All 11 Cargo provenance self-test cases passed.")
     return 0
 
 
@@ -134,7 +228,10 @@ def main() -> int:
     if args.self_test:
         return run_self_test()
     try:
-        revision, crates = lock_pins(Path("Cargo.lock").read_text(encoding="utf-8"))
+        revision, crates = lock_pins(
+            Path("Cargo.lock").read_text(encoding="utf-8"),
+            Path("Cargo.toml").read_text(encoding="utf-8"),
+        )
     except (OSError, KeyError, ValueError) as error:
         print(f"ERROR: cannot read Cargo.lock provenance: {error}", file=sys.stderr)
         return 1

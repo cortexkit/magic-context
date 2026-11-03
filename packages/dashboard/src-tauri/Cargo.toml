@@ -19,7 +19,6 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-mc-store = { path = "../../../crates/mc-store" }
 notify = { version = "6", features = ["macos_fsevent"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
@@ -43,7 +42,6 @@ subc-client-rs = "=0.26.1"
 subc-protocol = "=0.29.1"
 
 [dev-dependencies]
-mc-store = { path = "../../../crates/mc-store", features = ["test-support"] }
 tempfile = "3"
 subc-control = "=0.28.0"
 subc-transport = "=0.10.0"

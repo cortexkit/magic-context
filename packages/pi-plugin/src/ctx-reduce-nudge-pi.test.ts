@@ -42,7 +42,7 @@ const reminderCopyGolden = JSON.parse(
 	readFileSync(
 		join(
 			import.meta.dir,
-			"../../../crates/mc-module/testdata/ctx-reduce-nudge-copy-golden.json",
+			"../../plugin/test-fixtures/runtime/ctx-reduce-nudge-copy-golden.json",
 		),
 		"utf8",
 	),

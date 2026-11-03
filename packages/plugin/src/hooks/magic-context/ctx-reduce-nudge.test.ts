@@ -316,7 +316,7 @@ type ReminderCopyGolden = {
 const reminderCopyGolden = JSON.parse(
     readFileSync(
         new URL(
-            "../../../../../crates/mc-module/testdata/ctx-reduce-nudge-copy-golden.json",
+            "../../../test-fixtures/runtime/ctx-reduce-nudge-copy-golden.json",
             import.meta.url,
         ),
         "utf8",

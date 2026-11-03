@@ -13,10 +13,7 @@ interface HistorianWireCase {
 
 const historianWireCorpus: HistorianWireCase[] = JSON.parse(
     readFileSync(
-        new URL(
-            "../../../../../../crates/mc-module/testdata/historian-wire-corpus.json",
-            import.meta.url,
-        ),
+        new URL("../../../../test-fixtures/runtime/historian-wire-corpus.json", import.meta.url),
         "utf8",
     ),
 );

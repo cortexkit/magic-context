@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import cases from "../../../../../../crates/mc-store/testdata/s02-merge-safety-cases.json";
+import cases from "../../../../test-fixtures/runtime/s02-merge-safety-cases.json";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";

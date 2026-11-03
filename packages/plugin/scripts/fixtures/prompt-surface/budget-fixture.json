@@ -128,7 +128,7 @@
     "One built-in full top-level description for every active ctx_* tool above.",
     "The same raw-text tokenizer method for built-in light guidance and descriptions.",
     "All four runtime serving combinations: full/full, full/light, light/full, and light/light guidance/description pairs.",
-    "Claude Code built-in guidance_light_primary.txt and guidance_light_no_reduce.txt assets."
+    "Claude Code light head/reduce/light and head/no_reduce/light guidance rendered from the shared tool catalog."
   ],
   "excludedSurfaces": [
     "Serialized parameter schemas; they are reported separately and added only to provider-visible totals.",

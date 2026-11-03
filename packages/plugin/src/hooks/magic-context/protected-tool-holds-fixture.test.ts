@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import fixture from "../../../../../crates/mc-module/tests/fixtures/protected-tool-holds.json";
+import fixture from "../../../test-fixtures/runtime/protected-tool-holds.json";
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
 import {
     getActiveTagsBySession,

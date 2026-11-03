@@ -119,7 +119,7 @@ struct MemoryIdArgs {
 struct BulkMemoryStatusArgs {
     project_path: String,
     operation_id: String,
-    expected_revisions: Vec<mc_store::memory_history::RevisionExpectation>,
+    expected_revisions: Vec<crate::memory_history::RevisionExpectation>,
     memory_ids: Vec<i64>,
     status: String,
 }
@@ -129,7 +129,7 @@ struct BulkMemoryStatusArgs {
 struct BulkMemoryIdsArgs {
     project_path: String,
     operation_id: String,
-    expected_revisions: Vec<mc_store::memory_history::RevisionExpectation>,
+    expected_revisions: Vec<crate::memory_history::RevisionExpectation>,
     memory_ids: Vec<i64>,
 }
 
@@ -412,7 +412,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 &a.project_path,
                 &a.operation_id,
                 &[a.memory_id],
-                &[mc_store::memory_history::RevisionExpectation {
+                &[crate::memory_history::RevisionExpectation {
                     memory_id: a.memory_id,
                     revision: a.expected_revision,
                 }],
@@ -435,7 +435,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 &a.project_path,
                 &a.operation_id,
                 &[a.memory_id],
-                &[mc_store::memory_history::RevisionExpectation {
+                &[crate::memory_history::RevisionExpectation {
                     memory_id: a.memory_id,
                     revision: a.expected_revision,
                 }],
@@ -458,7 +458,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 &a.project_path,
                 &a.operation_id,
                 &[a.memory_id],
-                &[mc_store::memory_history::RevisionExpectation {
+                &[crate::memory_history::RevisionExpectation {
                     memory_id: a.memory_id,
                     revision: a.expected_revision,
                 }],
@@ -481,7 +481,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 &a.project_path,
                 &a.operation_id,
                 &[a.memory_id],
-                &[mc_store::memory_history::RevisionExpectation {
+                &[crate::memory_history::RevisionExpectation {
                     memory_id: a.memory_id,
                     revision: a.expected_revision,
                 }],

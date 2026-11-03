@@ -6,10 +6,12 @@
 // `ops.call`, `kv` and `sink`; its op answers from the same SQLite rows with the
 // queries the script runs itself.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../src/shared/sqlite";
+import { initializeDatabase } from "../src/features/magic-context/storage-db";
+import { runMigrations } from "../src/features/magic-context/migrations";
 
 import {
     type Alert,
@@ -66,7 +68,8 @@ beforeEach(() => {
     db = new Database(join(root, "context.db"));
     // Fixture rows need no durability; without fsyncs the 5,000-row cases stay quick.
     db.exec("PRAGMA synchronous = OFF");
-    db.exec(readFileSync(join(import.meta.dir, "../../../crates/mc-module/tests/fixtures/context-db-schema.sql"), "utf8"));
+    initializeDatabase(db);
+    runMigrations(db);
     serial = 0;
     kvStore = new Map();
     opCalls = [];
@@ -74,15 +77,15 @@ beforeEach(() => {
     oldWakes = [];
     pageRows = 7;
 });
-afterEach(() => { db.close(false); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
 
 function add(status: string, time = NOW - 1_000, error = "failure code 42", task = "historian", subagent = "historian") {
     serial++;
-    db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?)")
+    db.prepare("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?)")
         .run(`session-${serial}`, subagent, task, time - 100, time, status, error);
 }
 function attempt(fields: { session: string; status: string; time: number; error?: string | null; task?: string | null; parent?: number | null; subagent?: string }): number {
-    const row = db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+    const row = db.prepare("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?, ?) RETURNING id")
         .get(fields.session, fields.subagent ?? "historian", fields.task ?? null, fields.time - 100, fields.time, fields.status, fields.error ?? null, fields.parent ?? null) as { id: number };
     return row.id;
 }
@@ -102,7 +105,7 @@ function fakeOp(module: string, op: string, args: Record<string, unknown>) {
         expect(limit >= 1 && limit <= 500).toBe(true);
         const cursor = args.cursor as { ended_at: number; id: number };
         expect(Object.keys(cursor).sort()).toEqual(["ended_at", "id"]);
-        rows = db.query(`SELECT ${FIELDS} FROM subagent_invocations WHERE ended_at IS NOT NULL AND ended_at <= ? AND (ended_at > ? OR (ended_at = ? AND id > ?)) ORDER BY ended_at, id LIMIT ?`)
+        rows = db.prepare(`SELECT ${FIELDS} FROM subagent_invocations WHERE ended_at IS NOT NULL AND ended_at <= ? AND (ended_at > ? OR (ended_at = ? AND id > ?)) ORDER BY ended_at, id LIMIT ?`)
             .all(args.settled_before as number, cursor.ended_at, cursor.ended_at, cursor.id, limit + 1) as Row[];
     } else {
         expect(args.query).toBe("window");
@@ -110,7 +113,7 @@ function fakeOp(module: string, op: string, args: Record<string, unknown>) {
         const keys = Object.keys(args).sort();
         expect(keys).toEqual(args.before ? ["after", "before", "limit", "query", "until"] : ["after", "limit", "query", "until"]);
         const before = (args.before as { ended_at: number; id: number } | undefined) ?? { ended_at: (args.until as number) + 1, id: Number.MIN_SAFE_INTEGER };
-        rows = db.query(`SELECT ${FIELDS} FROM subagent_invocations WHERE ended_at > ? AND ended_at <= ? AND (ended_at < ? OR (ended_at = ? AND id < ?)) ORDER BY ended_at DESC, id DESC LIMIT ?`)
+        rows = db.prepare(`SELECT ${FIELDS} FROM subagent_invocations WHERE ended_at > ? AND ended_at <= ? AND (ended_at < ? OR (ended_at = ? AND id < ?)) ORDER BY ended_at DESC, id DESC LIMIT ?`)
             .all(args.after as number, args.until as number, before.ended_at, before.ended_at, before.id, limit + 1) as Row[];
     }
     const kept = rows.slice(0, Math.min(limit, pageRows));
@@ -678,7 +681,7 @@ for (const middleStatus of ["failed", "empty", "aborted"] as const) {
         await step(at(NOW + HOUR));
 
         const later = attempt({ session: "chain", status: "timed_out", time: NOW + 2 * HOUR, error: "prompt timed out after 3600000ms", task: "fallback" });
-        db.query("UPDATE subagent_invocations SET started_at=(SELECT ended_at+1000 FROM subagent_invocations WHERE id=?) WHERE id=?").run(middle, later);
+        db.prepare("UPDATE subagent_invocations SET started_at=(SELECT ended_at+1000 FROM subagent_invocations WHERE id=?) WHERE id=?").run(middle, later);
         attempt({ session: "chain", status: "completed", time: NOW + 3 * HOUR, task: "fallback", parent: later });
         for (let index = 1; index <= 6; index++)
             attempt({ session: `other-${index}`, status: "completed", time: NOW + 3 * HOUR + index * 1_000, task: "chain-main" });

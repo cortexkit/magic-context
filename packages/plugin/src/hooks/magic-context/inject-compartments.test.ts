@@ -4318,7 +4318,7 @@ describe("m[0]/m[1] materialization", () => {
             readFileSync(
                 join(
                     import.meta.dir,
-                    "../../../../../crates/mc-module/testdata/memory-update-delta-parity.json",
+                    "../../../test-fixtures/runtime/memory-update-delta-parity.json",
                 ),
                 "utf8",
             ),

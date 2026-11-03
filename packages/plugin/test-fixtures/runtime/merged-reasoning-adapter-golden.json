@@ -1,0 +1,1160 @@
+{
+  "generator_version": 6,
+  "cases": [
+    {
+      "name": "reasoning",
+      "target_mid": "reasoning-target",
+      "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
+      "raw_messages": [
+        {
+          "info": {
+            "id": "reasoning-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "first answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "reasoning-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "reasoning",
+              "text": "reasoning trace",
+              "signature": "sig-reasoning"
+            },
+            {
+              "type": "text",
+              "text": "target answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "reasoning-newest",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "newest answer"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "reasoning-newest",
+      "target_reasoning_index": 0,
+      "encoded_input": [
+        {
+          "mid": "reasoning-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "first answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "reasoning-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "reasoning trace",
+                  "signature": "sig-reasoning"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "target answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "reasoning-newest",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "newest answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning-newest",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "thinking",
+      "target_mid": "thinking-target",
+      "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
+      "raw_messages": [
+        {
+          "info": {
+            "id": "thinking-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "first answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "thinking-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "thinking",
+              "thinking": "thinking trace",
+              "signature": "sig-thinking"
+            },
+            {
+              "type": "text",
+              "text": "target answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "thinking-newest",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "newest answer"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "thinking-newest",
+      "target_reasoning_index": 0,
+      "encoded_input": [
+        {
+          "mid": "thinking-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "first answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "thinking-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "thinking-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "thinking trace",
+                  "signature": "sig-thinking"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "target answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "thinking-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "thinking-newest",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "newest answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "thinking-newest",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "redacted_thinking",
+      "target_mid": "redacted_thinking-target",
+      "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
+      "raw_messages": [
+        {
+          "info": {
+            "id": "redacted_thinking-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "first answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "redacted_thinking-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "redacted_thinking",
+              "data": "redacted payload"
+            },
+            {
+              "type": "text",
+              "text": "target answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "redacted_thinking-newest",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "newest answer"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "redacted_thinking-newest",
+      "target_reasoning_index": 0,
+      "encoded_input": [
+        {
+          "mid": "redacted_thinking-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "first answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "redacted_thinking-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "redacted_thinking-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "redacted_reasoning",
+                  "data": "redacted payload"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "target answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "redacted_thinking-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "redacted_thinking-newest",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "newest answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "redacted_thinking-newest",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "reasoning_cache_control",
+      "target_mid": "reasoning_cache_control-target",
+      "expect_strip": false,
+      "expected_sentinel": {
+        "type": "text",
+        "text": "",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      },
+      "raw_messages": [
+        {
+          "info": {
+            "id": "reasoning_cache_control-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "first answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "reasoning_cache_control-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "reasoning",
+              "text": "cached reasoning trace",
+              "signature": "sig-cache-control",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "target answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "reasoning_cache_control-newest",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "newest answer"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "reasoning_cache_control-newest",
+      "target_reasoning_index": 0,
+      "encoded_input": [
+        {
+          "mid": "reasoning_cache_control-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "first answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning_cache_control-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "reasoning_cache_control-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "cached reasoning trace",
+                  "signature": "sig-cache-control"
+                },
+                "provider_extras": {
+                  "opencode": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "target answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning_cache_control-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "reasoning_cache_control-newest",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "newest answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "reasoning_cache_control-newest",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "live_tool_continuation_request_shell",
+      "target_mid": "live-continuation-target",
+      "expect_strip": false,
+      "raw_messages": [
+        {
+          "info": {
+            "id": "live-continuation-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "reasoning",
+              "text": "older thinking",
+              "metadata": {
+                "anthropic": {
+                  "signature": "sig-older"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "text": "older status"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "live-continuation-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "type": "reasoning",
+              "text": "signed live thinking",
+              "metadata": {
+                "anthropic": {
+                  "signature": "sig-live"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "text": "status before tool"
+            },
+            {
+              "type": "tool",
+              "callID": "call-live",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "true"
+                },
+                "output": "done"
+              }
+            },
+            {
+              "type": "step-finish"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "live-continuation-request-shell",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "live-continuation-target",
+      "target_reasoning_index": 1,
+      "encoded_input": [
+        {
+          "mid": "live-continuation-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "older thinking"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "older status"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "live-continuation-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "signed live thinking"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "status before tool"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-live",
+                  "name": "bash",
+                  "input": {
+                    "command": "true"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "call-live",
+                  "tool_name": "bash",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "done"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "live-continuation-request-shell",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-request-shell",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "incident_astro_signed_reasoning_tool_without_text",
+      "target_mid": "msg_03724c745001WO47gldfQGbrqY",
+      "target_reasoning_index": 1,
+      "provider_error_path": "messages.151.content.26",
+      "failing_provider_part_types": [
+        "text",
+        "thinking",
+        "thinking",
+        "tool_use"
+      ],
+      "expect_strip": false,
+      "source_part_types": [
+        "step-start",
+        "reasoning",
+        "tool",
+        "step-finish"
+      ],
+      "expected_native_part_types": [
+        "step-start",
+        "reasoning",
+        "tool",
+        "step-finish"
+      ],
+      "raw_messages": [
+        {
+          "info": {
+            "id": "msg_03724c745001WO47gldfQGbrqY",
+            "sessionID": "ses_08df2045bffeBcWcqw60elghER",
+            "role": "assistant",
+            "finish": "tool-calls"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "type": "reasoning",
+              "text": "[redacted signed live thinking]",
+              "metadata": {
+                "anthropic": {
+                  "signature": "[redacted signature]"
+                }
+              }
+            },
+            {
+              "type": "tool",
+              "callID": "toolu_01HhvtLQasFDWBB19QP5WvqK",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "[redacted]"
+                },
+                "output": "[redacted tool result]"
+              }
+            },
+            {
+              "type": "step-finish",
+              "reason": "tool-calls"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "incident-astro-request-shell",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "msg_03724c745001WO47gldfQGbrqY",
+      "encoded_input": [
+        {
+          "mid": "msg_03724c745001WO47gldfQGbrqY",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "[redacted signed live thinking]"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "toolu_01HhvtLQasFDWBB19QP5WvqK",
+                  "name": "read",
+                  "input": {
+                    "filePath": "[redacted]"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "toolu_01HhvtLQasFDWBB19QP5WvqK",
+                  "tool_name": "read",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "[redacted tool result]"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "msg_03724c745001WO47gldfQGbrqY",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "finish": "tool-calls"
+            }
+          }
+        },
+        {
+          "mid": "incident-astro-request-shell",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "incident-astro-request-shell",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "incident_engram_text_after_tool_recurrence",
+      "target_mid": "msg_0348483e9001xBB7Ya0H5bfkvm",
+      "target_reasoning_index": 1,
+      "expect_strip": false,
+      "source_part_types": [
+        "step-start",
+        "reasoning",
+        "text",
+        "tool",
+        "step-finish"
+      ],
+      "expected_native_part_types": [
+        "step-start",
+        "text",
+        "tool",
+        "step-finish"
+      ],
+      "raw_messages": [
+        {
+          "info": {
+            "id": "msg_0348483e9001xBB7Ya0H5bfkvm",
+            "sessionID": "ses_0ad83017cffexe0g5N8UG0y3LZ",
+            "role": "assistant",
+            "finish": "tool-calls"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "type": "reasoning",
+              "text": "[redacted signed live thinking]",
+              "metadata": {
+                "anthropic": {
+                  "signature": "[redacted signature]"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "text": "Three construction sites, plus a third upstream break in the same window."
+            },
+            {
+              "type": "tool",
+              "callID": "toolu_01AveJRXHJBnmXzSD16U5zmi",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "[redacted]"
+                },
+                "output": "[redacted tool result]"
+              }
+            },
+            {
+              "type": "step-finish",
+              "reason": "tool-calls"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "msg_0348483e9001xBB7Ya0H5bfkvm",
+      "encoded_input": [
+        {
+          "mid": "msg_0348483e9001xBB7Ya0H5bfkvm",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "[redacted signed live thinking]"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Three construction sites, plus a third upstream break in the same window."
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "toolu_01AveJRXHJBnmXzSD16U5zmi",
+                  "name": "bash",
+                  "input": {
+                    "command": "[redacted]"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "toolu_01AveJRXHJBnmXzSD16U5zmi",
+                  "tool_name": "bash",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "[redacted tool result]"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "msg_0348483e9001xBB7Ya0H5bfkvm",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "finish": "tool-calls"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "incident_337_text_before_tool",
+      "target_mid": "msg_034356b50001Cbvu81faDbQTRW",
+      "expect_strip": false,
+      "source_part_order": [
+        "prt_034358925001Rh1YRViacgqaW7",
+        "prt_034358930001DHhVVQmRKFziFN",
+        "prt_034358991001ZC7E9bfKiYXbTH",
+        "prt_034358b2b001x9lN3yC9zUfB0J",
+        "prt_034358edc001qEZnQkRNpR0y5C"
+      ],
+      "source_part_types": [
+        "step-start",
+        "reasoning",
+        "text",
+        "tool",
+        "step-finish"
+      ],
+      "expected_native_part_types": [
+        "step-start",
+        "text",
+        "text",
+        "tool",
+        "step-finish"
+      ],
+      "raw_messages": [
+        {
+          "info": {
+            "id": "msg_034356b50001Cbvu81faDbQTRW",
+            "sessionID": "ses_0ad83017cffexe0g5N8UG0y3LZ",
+            "role": "assistant",
+            "finish": "tool-calls"
+          },
+          "parts": [
+            {
+              "id": "prt_034358925001Rh1YRViacgqaW7",
+              "type": "step-start"
+            },
+            {
+              "id": "prt_034358930001DHhVVQmRKFziFN",
+              "type": "reasoning",
+              "text": "All three values match, but hardcoding them is risky...",
+              "metadata": {
+                "anthropic": {
+                  "signature": "[redacted signature]"
+                }
+              }
+            },
+            {
+              "id": "prt_034358991001ZC7E9bfKiYXbTH",
+              "type": "text",
+              "text": "All three match the live keystore..."
+            },
+            {
+              "id": "prt_034358b2b001x9lN3yC9zUfB0J",
+              "type": "tool",
+              "callID": "toolu_019MxMREqQYT875aJy8Q5w6W",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "[redacted]"
+                },
+                "output": "[redacted tool result]"
+              }
+            },
+            {
+              "id": "prt_034358edc001qEZnQkRNpR0y5C",
+              "type": "step-finish",
+              "reason": "tool-calls"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "msg_034356b50001Cbvu81faDbQTRW",
+      "target_reasoning_index": 1,
+      "encoded_input": [
+        {
+          "mid": "msg_034356b50001Cbvu81faDbQTRW",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "id": "prt_034358925001Rh1YRViacgqaW7",
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "All three values match, but hardcoding them is risky..."
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "All three match the live keystore..."
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "toolu_019MxMREqQYT875aJy8Q5w6W",
+                  "name": "read",
+                  "input": {
+                    "filePath": "[redacted]"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "toolu_019MxMREqQYT875aJy8Q5w6W",
+                  "tool_name": "read",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "[redacted tool result]"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "msg_034356b50001Cbvu81faDbQTRW",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "finish": "tool-calls"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

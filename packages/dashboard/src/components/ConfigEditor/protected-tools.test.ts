@@ -61,16 +61,16 @@ describe("protected tools editor", () => {
     expect(protectedToolsConfig([{ name: "  ", count: "1" }])).toBeNull();
   });
 
-  it("built-in defaults match the plugin and the Rust selection module", () => {
+  it("built-in defaults match the plugin and the Rust settings", () => {
     expect(DEFAULT_PROTECTED_TOOLS).toEqual({ todowrite: 1, ctx_reduce: 3 });
     expect(DEFAULT_PROTECTED_TOOLS).toEqual({ ...PLUGIN_DEFAULTS });
     const rust = readFileSync(
-      resolve(import.meta.dir, "../../../../../crates/mc-module/src/selection.rs"),
+      resolve(import.meta.dir, "../../../../../crates/mc-module/src/pass.rs"),
       "utf8",
     );
-    const body = /fn default_protected_tools\(\)[^{]*\{([^}]*)\}/.exec(rust)?.[1] ?? "";
+    const body = /protected_tools:\s*BTreeMap::from\(\[([\s\S]*?)\]\)/.exec(rust)?.[1] ?? "";
     const entries = Object.fromEntries(
-      [...body.matchAll(/\("([^"]+)"\.to_string\(\),\s*(\d+)\)/g)].map((m) => [m[1], Number(m[2])]),
+      [...body.matchAll(/\("([^"]+)"\.into\(\),\s*(\d+)\)/g)].map((m) => [m[1], Number(m[2])]),
     );
     expect(entries).toEqual({ ...DEFAULT_PROTECTED_TOOLS });
   });

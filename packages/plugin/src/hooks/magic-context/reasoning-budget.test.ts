@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import golden from "../../../../../crates/mc-module/testdata/reasoning-budget-trim.json";
+import golden from "../../../test-fixtures/runtime/reasoning-budget-trim.json";
 import { parsePluginConfig } from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import {

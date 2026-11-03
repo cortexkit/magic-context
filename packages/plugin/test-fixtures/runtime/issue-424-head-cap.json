@@ -1,0 +1,125 @@
+{
+	"_comment": "The k3 publication floor is identical: TypeScript sets offset = Math.max(1, lastCompartmentEndOrdinal + 1) in protected-tail-boundary.ts:527, while Rust compartment_offset maps end to end.saturating_add(1) in boundary.rs:359-360, so Rust offset is lastCompartmentEnd + 1 by definition.",
+	"cases": [
+		{
+			"label": "six-cap parallel first batch",
+			"tokens": [100, 20, 100000, 100000, 20, 1000, 20, 1000],
+			"offset": 2,
+			"protected_tail_start": 7,
+			"cap_tokens": 30970,
+			"recent_open_arc_cutoff": 7,
+			"arcs": [
+				{ "invOrdinal": 2, "resOrdinal": 3 },
+				{ "invOrdinal": 2, "resOrdinal": 4 },
+				{ "invOrdinal": 5, "resOrdinal": 6 }
+			],
+			"expected_end": 5,
+			"expected_oversize": true
+		},
+		{
+			"label": "protected tail prevents oversize admission",
+			"tokens": [100, 20, 100000, 100000, 20, 1000, 20, 1000],
+			"offset": 2,
+			"protected_tail_start": 4,
+			"cap_tokens": 30970,
+			"recent_open_arc_cutoff": 4,
+			"arcs": [
+				{ "invOrdinal": 2, "resOrdinal": 3 },
+				{ "invOrdinal": 2, "resOrdinal": 4 }
+			],
+			"expected_end": 2,
+			"expected_oversize": false
+		},
+		{
+			"label": "recent open invocation retracts admitted component",
+			"tokens": [100, 20, 100000, 100000, 20, 1000, 20, 1000],
+			"offset": 2,
+			"protected_tail_start": 7,
+			"cap_tokens": 30970,
+			"recent_open_arc_cutoff": 3,
+			"arcs": [
+				{ "invOrdinal": 2, "resOrdinal": 4 },
+				{ "invOrdinal": 3, "resOrdinal": null }
+			],
+			"expected_end": 2,
+			"expected_oversize": true
+		},
+		{
+			"label": "nonoverlapping batches stay separate",
+			"tokens": [100, 20, 5000, 5000, 20, 5000, 5000, 20, 5000, 5000],
+			"offset": 2,
+			"protected_tail_start": 11,
+			"cap_tokens": 21000,
+			"recent_open_arc_cutoff": 11,
+			"arcs": [
+				{ "invOrdinal": 2, "resOrdinal": 3 },
+				{ "invOrdinal": 2, "resOrdinal": 4 },
+				{ "invOrdinal": 5, "resOrdinal": 6 },
+				{ "invOrdinal": 5, "resOrdinal": 7 },
+				{ "invOrdinal": 8, "resOrdinal": 9 },
+				{ "invOrdinal": 8, "resOrdinal": 10 }
+			],
+			"expected_end": 8,
+			"expected_oversize": false
+		},
+		{
+			"label": "overlapping pairs stay one indivisible component",
+			"tokens": [100, 20, 20, 100000, 100000, 20, 1000, 20, 1000],
+			"offset": 2,
+			"protected_tail_start": 9,
+			"cap_tokens": 30970,
+			"recent_open_arc_cutoff": 9,
+			"arcs": [
+				{ "invOrdinal": 2, "resOrdinal": 4 },
+				{ "invOrdinal": 3, "resOrdinal": 5 },
+				{ "invOrdinal": 6, "resOrdinal": 7 }
+			],
+			"expected_end": 6,
+			"expected_oversize": true
+		},
+		{
+			"label": "completed component ends exactly at the cap boundary (hand-derived end 4)",
+			"tokens": [100, 10, 10, 5],
+			"offset": 2,
+			"protected_tail_start": 5,
+			"cap_tokens": 20,
+			"recent_open_arc_cutoff": 5,
+			"arcs": [{ "invOrdinal": 2, "resOrdinal": 3 }],
+			"expected_end": 4,
+			"expected_oversize": false
+		},
+		{
+			"label": "component result equals protectedTailStart and cannot be admitted (hand-derived end 2)",
+			"tokens": [100, 10, 100, 10, 5],
+			"offset": 2,
+			"protected_tail_start": 4,
+			"cap_tokens": 15,
+			"recent_open_arc_cutoff": 4,
+			"arcs": [{ "invOrdinal": 2, "resOrdinal": 4 }],
+			"expected_end": 2,
+			"expected_oversize": false
+		},
+		{
+			"label": "errored tool part is the arc result (hand-derived end 4)",
+			"tokens": [100, 100, 100, 5],
+			"offset": 2,
+			"protected_tail_start": 5,
+			"cap_tokens": 50,
+			"recent_open_arc_cutoff": 5,
+			"arcs": [{ "invOrdinal": 2, "resOrdinal": 3, "result_shape": "error" }],
+			"expected_end": 4,
+			"expected_oversize": true
+		},
+		{
+			"label": "empty output is still an arc result (hand-derived end 4)",
+			"tokens": [100, 10, 10, 5],
+			"offset": 2,
+			"protected_tail_start": 5,
+			"cap_tokens": 15,
+			"recent_open_arc_cutoff": 5,
+			"arcs": [{ "invOrdinal": 2, "resOrdinal": 3, "result_shape": "empty" }],
+			"expected_end": 4,
+			"expected_oversize": true
+		}
+	]
+}

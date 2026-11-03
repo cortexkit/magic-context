@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "bun:test";
-import golden from "../../../../../crates/mc-module/tests/fixtures/protected-tool-refusal.json";
-import signedTurnGolden from "../../../../../crates/mc-module/tests/fixtures/signed-turn-refusal.json";
+import golden from "../../../test-fixtures/runtime/protected-tool-refusal.json";
+import signedTurnGolden from "../../../test-fixtures/runtime/signed-turn-refusal.json";
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import {
     __resetToolDefinitionMeasurements,

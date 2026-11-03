@@ -1,0 +1,16 @@
+{
+  "default": "5m",
+  "models": {
+    "anthropic/claude-opus-4-8": "300m",
+    "gpt-5.6-sol": "30m",
+    "openai/gpt-4o": "1h",
+    "google/*": "never"
+  },
+  "cases": [
+    { "name": "exact", "modelKey": "anthropic/claude-opus-4-8", "expected": "300m" },
+    { "name": "bare", "modelKey": "openai/gpt-5.6-sol", "expected": "30m" },
+    { "name": "dash-stripped", "modelKey": "openai/gpt-4o-mini", "expected": "1h" },
+    { "name": "provider-wildcard", "modelKey": "google/gemini-2.5-pro", "expected": "never" },
+    { "name": "default", "modelKey": "unknown/model", "expected": "5m" }
+  ]
+}

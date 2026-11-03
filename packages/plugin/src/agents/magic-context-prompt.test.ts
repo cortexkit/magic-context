@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { enabledCatalogGuidance } from "../../scripts/catalog-guidance.fixture";
 import { buildMagicContextSection } from "./magic-context-prompt";
 
 const CAVEMAN_MARKER = "BEWARE";
@@ -429,23 +431,51 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
     });
 });
 
-/**
- * The Rust module (crates/mc-module) serves guidance from static text assets
- * instead of calling this builder, so the two copies can drift silently. Each
- * asset is the builder's output with memory, dreamer, and temporal awareness on.
- */
-describe("buildMagicContextSection — Rust guidance asset parity", () => {
-    const assetDir = join(import.meta.dir, "../../../../crates/mc-module/assets");
+/** The Rust catalog consumes this matrix too, independently checking the rendered bytes. */
+describe("buildMagicContextSection — Rust catalog guidance parity", () => {
+    const matrix = JSON.parse(
+        readFileSync(
+            join(
+                import.meta.dir,
+                "../../../../crates/mc-module/testdata/tool-catalog-guidance-matrix.json",
+            ),
+            "utf8",
+        ),
+    ) as {
+        cases: {
+            variant: string;
+            surface: string;
+            override: boolean;
+            memory: boolean;
+            dreamer: boolean;
+            temporal: boolean;
+            caveman: boolean;
+            language: string | null;
+            bytes: number;
+            sha256: string;
+        }[];
+    };
     const cases = [
-        { file: "guidance_primary.txt", reduce: true, preset: "full" },
-        { file: "guidance_no_reduce.txt", reduce: false, preset: "full" },
-        { file: "guidance_light_primary.txt", reduce: true, preset: "light" },
-        { file: "guidance_light_no_reduce.txt", reduce: false, preset: "light" },
+        { reduce: true, preset: "full" },
+        { reduce: false, preset: "full" },
+        { reduce: true, preset: "light" },
+        { reduce: false, preset: "light" },
     ] as const;
 
-    for (const { file, reduce, preset } of cases) {
-        it(`${file} is byte-identical to the TypeScript guidance`, () => {
-            const asset = readFileSync(join(assetDir, file), "utf8");
+    for (const { reduce, preset } of cases) {
+        it(`${preset}/${reduce ? "reduce" : "no_reduce"} is byte-identical to the TypeScript guidance`, () => {
+            const row = matrix.cases.find(
+                (entry) =>
+                    entry.variant === `primary/${reduce ? "reduce" : "no_reduce"}` &&
+                    entry.surface === preset &&
+                    !entry.override &&
+                    entry.memory &&
+                    entry.dreamer &&
+                    entry.temporal &&
+                    !entry.caveman &&
+                    entry.language === null,
+            );
+            if (!row) throw new Error("missing guidance matrix case");
             const rendered = buildMagicContextSection(
                 null,
                 20,
@@ -458,7 +488,9 @@ describe("buildMagicContextSection — Rust guidance asset parity", () => {
                 true,
                 preset,
             );
-            expect(asset).toBe(rendered);
+            expect(Buffer.byteLength(rendered, "utf8")).toBe(row.bytes);
+            expect(enabledCatalogGuidance(reduce, preset)).toBe(rendered);
+            expect(createHash("sha256").update(rendered, "utf8").digest("hex")).toBe(row.sha256);
         });
     }
 });

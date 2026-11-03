@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import golden from "../../../../../crates/mc-module/testdata/processed-image-trim.json";
+import golden from "../../../test-fixtures/runtime/processed-image-trim.json";
 import { createEditAdmission, isAdmissionUser, thinkingAnchor } from "./edit-admission";
 import { stripProcessedImages } from "./strip-content";
 import type { MessageLike } from "./tag-messages";

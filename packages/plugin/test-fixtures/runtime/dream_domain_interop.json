@@ -1,0 +1,158 @@
+[
+  {
+    "name": "ts-acquire-memory", "op": "acquire", "holder": "typescript", "key": "memory:project", "now_ms": 1000, "generation": 1, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "1000",
+      "lease:memory:project:expiry": "121000", "lease:memory:project:generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "rust-refused-by-ts", "op": "acquire", "holder": "rust", "key": "memory:project", "now_ms": 1010, "result": false,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "1000",
+      "lease:memory:project:expiry": "121000", "lease:memory:project:generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-renew-memory", "op": "renew", "holder": "typescript", "key": "memory:project", "now_ms": 1020, "generation": 1, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "1020",
+      "lease:memory:project:expiry": "121020", "lease:memory:project:generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "rust-acquire-legacy", "op": "acquire", "holder": "rust", "key": "dreaming", "now_ms": 1030, "generation": 1, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "1020",
+      "lease:memory:project:expiry": "121020", "lease:memory:project:generation": "1",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": true } }
+  },
+  {
+    "name": "ts-release-memory", "op": "release", "holder": "typescript", "key": "memory:project", "now_ms": 1040,
+    "rows": {
+      "lease:memory:project:generation": "1",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": true } }
+  },
+  {
+    "name": "rust-acquire-memory", "op": "acquire", "holder": "rust", "key": "memory:project", "now_ms": 1050, "generation": 2, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "rust", "lease:memory:project:heartbeat": "1050",
+      "lease:memory:project:expiry": "121050", "lease:memory:project:generation": "2",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": true }, "dreaming": { "typescript": false, "rust": true } }
+  },
+  {
+    "name": "ts-refused-by-rust", "op": "acquire", "holder": "typescript", "key": "memory:project", "now_ms": 1060, "result": false,
+    "rows": {
+      "lease:memory:project:holder": "rust", "lease:memory:project:heartbeat": "1050",
+      "lease:memory:project:expiry": "121050", "lease:memory:project:generation": "2",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": true }, "dreaming": { "typescript": false, "rust": true } }
+  },
+  {
+    "name": "rust-renew-memory", "op": "renew", "holder": "rust", "key": "memory:project", "now_ms": 1070, "generation": 2, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "rust", "lease:memory:project:heartbeat": "1070",
+      "lease:memory:project:expiry": "121070", "lease:memory:project:generation": "2",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": true }, "dreaming": { "typescript": false, "rust": true } }
+  },
+  {
+    "name": "rust-memory-expires", "op": "expire", "holder": "rust", "key": "memory:project", "now_ms": 121071,
+    "rows": {
+      "lease:memory:project:holder": "rust", "lease:memory:project:heartbeat": "1070",
+      "lease:memory:project:expiry": "121070", "lease:memory:project:generation": "2",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "expired-rust-renew-refused", "op": "renew", "holder": "rust", "key": "memory:project", "now_ms": 121072, "generation": 2, "result": false,
+    "rows": {
+      "lease:memory:project:holder": "rust", "lease:memory:project:heartbeat": "1070",
+      "lease:memory:project:expiry": "121070", "lease:memory:project:generation": "2",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-takes-expired-memory", "op": "acquire", "holder": "typescript", "key": "memory:project", "now_ms": 121073, "generation": 3, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "121073",
+      "lease:memory:project:expiry": "241073", "lease:memory:project:generation": "3",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "stale-rust-release-preserves-ts", "op": "release", "holder": "rust", "key": "memory:project", "now_ms": 121074,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "121073",
+      "lease:memory:project:expiry": "241073", "lease:memory:project:generation": "3",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-release-successor", "op": "release", "holder": "typescript", "key": "memory:project", "now_ms": 121075,
+    "rows": {
+      "lease:memory:project:generation": "3",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-reacquire-increments-generation", "op": "acquire", "holder": "typescript", "key": "memory:project", "now_ms": 121076, "generation": 4, "result": true,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "121076",
+      "lease:memory:project:expiry": "241076", "lease:memory:project:generation": "4",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-stale-generation-renew-refused", "op": "renew", "holder": "typescript", "key": "memory:project", "now_ms": 121077, "generation": 3, "result": false,
+    "rows": {
+      "lease:memory:project:holder": "typescript", "lease:memory:project:heartbeat": "121076",
+      "lease:memory:project:expiry": "241076", "lease:memory:project:generation": "4",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": true, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "ts-release-reacquired", "op": "release", "holder": "typescript", "key": "memory:project", "now_ms": 121078,
+    "rows": {
+      "lease:memory:project:generation": "4",
+      "dreaming_lease_holder": "rust", "dreaming_lease_heartbeat": "1030",
+      "dreaming_lease_expiry": "121030", "dreaming_lease_generation": "1"
+    },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  },
+  {
+    "name": "rust-release-legacy", "op": "release", "holder": "rust", "key": "dreaming", "now_ms": 121079,
+    "rows": { "lease:memory:project:generation": "4", "dreaming_lease_generation": "1" },
+    "owns": { "memory:project": { "typescript": false, "rust": false }, "dreaming": { "typescript": false, "rust": false } }
+  }
+]

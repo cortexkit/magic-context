@@ -33,10 +33,7 @@ type InteropStep = InteropState &
 // needs to launch the other runtime or derive expected row names from its code.
 const steps = JSON.parse(
     readFileSync(
-        new URL(
-            "../../../../../../crates/mc-module/testdata/dream_domain_interop.json",
-            import.meta.url,
-        ),
+        new URL("../../../../test-fixtures/runtime/dream_domain_interop.json", import.meta.url),
         "utf8",
     ),
 ) as InteropStep[];

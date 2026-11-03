@@ -629,45 +629,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cortexkit-cache-core"
-version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cortexkit-lease"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a0fc0f64f4fa68109464728f7c4d2afd5b676ff8d11d1e99cd2d022f6bc02a1"
-dependencies = [
- "fs2",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "cortexkit-store"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df7beeeeaf1f244870ff160eff79a6f6b2eb8f2d234da9a1f6aa2c60a8a93c93"
-dependencies = [
- "cortexkit-lease",
- "cortexkit-store-types",
- "rusqlite",
-]
-
-[[package]]
-name = "cortexkit-store-types"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94feb32be066be355bd3191fdf3de1f733a54a9cb84932413145b7b7f4b2135e"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1227,16 +1188,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -2351,7 +2302,6 @@ dependencies = [
  "image",
  "lazy_static",
  "libc",
- "mc-store",
  "md5",
  "notify",
  "open",
@@ -2392,22 +2342,6 @@ name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
-
-[[package]]
-name = "mc-store"
-version = "0.49.31"
-dependencies = [
- "cortexkit-cache-core",
- "cortexkit-store",
- "cortexkit-store-types",
- "flate2",
- "md5",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
-]
 
 [[package]]
 name = "md5"

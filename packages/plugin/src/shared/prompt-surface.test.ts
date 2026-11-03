@@ -102,12 +102,12 @@ describe("prompt-surface resolution", () => {
         ).not.toBe(right);
     });
 
-    it("matches the Rust cache_ttl resolver over shared routing vectors", () => {
+    it("resolves cache_ttl routing against the committed standalone vectors", () => {
         const vectors = JSON.parse(
             readFileSync(
                 resolve(
                     import.meta.dir,
-                    "../../../../crates/mc-module/testdata/cache-ttl-routing-vectors.json",
+                    "../../test-fixtures/runtime/cache-ttl-routing-vectors.json",
                 ),
                 "utf8",
             ),

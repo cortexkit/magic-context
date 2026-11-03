@@ -64,7 +64,7 @@ type Golden = {
 const golden = JSON.parse(
 	readFileSync(
 		new URL(
-			"../../../crates/mc-module/testdata/nudge-hygiene-golden.json",
+			"../../plugin/test-fixtures/runtime/nudge-hygiene-golden.json",
 			import.meta.url,
 		),
 		"utf8",

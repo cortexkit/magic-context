@@ -1,0 +1,12 @@
+{
+  "note": "User-tier configs and whether the historian collects (and is asked for) user observations. Read by crates/mc-module/src/config.rs tests and packages/plugin/src/features/magic-context/dreamer/user-memory-collection-parity.test.ts so the Rust module and the plugin agree.",
+  "cases": [
+    { "label": "no dreamer block", "user": {}, "collect": false, "requested": false },
+    { "label": "dreamer on, review schedule unset (schema default)", "user": { "dreamer": {} }, "collect": true, "requested": true },
+    { "label": "dreamer on, review schedule empty", "user": { "dreamer": { "tasks": { "review-user-memories": { "schedule": "" } } } }, "collect": false, "requested": true },
+    { "label": "dreamer on, review schedule set", "user": { "dreamer": { "tasks": { "review-user-memories": { "schedule": "0 4 * * *" } } } }, "collect": true, "requested": true },
+    { "label": "dreamer explicitly enabled, schedule unset", "user": { "dreamer": { "disable": false } }, "collect": true, "requested": true },
+    { "label": "dreamer disabled, schedule unset", "user": { "dreamer": { "disable": true } }, "collect": false, "requested": false },
+    { "label": "dreamer disabled, schedule set", "user": { "dreamer": { "disable": true, "tasks": { "review-user-memories": { "schedule": "0 4 * * *" } } } }, "collect": false, "requested": false }
+  ]
+}

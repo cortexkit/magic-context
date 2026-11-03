@@ -61,10 +61,10 @@ function replaceCurrentManifest(db: Database, content = "current mural"): string
 describe("m[0] mural image fold (on-demand render → wire)", () => {
     it("keeps the Rust mural block byte-equal and the system prompt unchanged", () => {
         const rust = readFileSync(
-            new URL("../../../../../crates/mc-module/src/m0_compose.rs", import.meta.url),
+            new URL("../../../../../crates/mc-module/src/mural/mod.rs", import.meta.url),
             "utf8",
         );
-        const literal = rust.match(/const MEMORY_MURAL_BLOCK: &str =\s*("[^;]+");/)![1]!;
+        const literal = rust.match(/const BLOCK: &str =\s*("[^;]+");/)![1]!;
         expect(JSON.parse(literal)).toBe(MEMORY_MURAL_BLOCK);
         expect(buildMagicContextSection(null, 0)).not.toContain(MEMORY_MURAL_GUIDANCE);
     });

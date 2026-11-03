@@ -1,0 +1,5 @@
+{
+  "first_delta": "<memory-updates>\nThese memories changed since the snapshot below — trust these:\n  <updated id=\"1\" category=\"CONSTRAINTS\">updated &lt;alpha&gt; &amp; stable</updated>\n  <removed id=\"2\"/>\n</memory-updates>",
+  "second_delta": "<memory-updates>\nThese memories changed since the snapshot below — trust these:\n  <updated id=\"1\" category=\"CONSTRAINTS\">updated &lt;alpha&gt; &amp; stable</updated>\n  <removed id=\"2\"/>\n  <superseded id=\"3\" by=\"4\"/>\n  <updated id=\"4\" category=\"CONSTRAINTS\">merged &lt;delta&gt; &amp; sources</updated>\n</memory-updates>",
+  "reconciled_m0": "<project-memory>\n<CONSTRAINTS>\n#1: updated &lt;alpha&gt; &amp; stable\n#4: merged &lt;delta&gt; &amp; sources\n</CONSTRAINTS>\n</project-memory>"
+}

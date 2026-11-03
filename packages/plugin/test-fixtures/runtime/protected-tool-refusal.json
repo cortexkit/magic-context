@@ -1,0 +1,1 @@
+{"code":"protected_tool_results_over_limit","message":"The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts."}

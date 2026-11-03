@@ -822,57 +822,6 @@ describe("MC decision store joins", () => {
         });
     });
 
-    // The pass-trace half of store migration 63, exactly as ck-mc runs it.
-    const migration63PassTrace = readFileSync(
-        join(
-            import.meta.dir,
-            "../../../crates/mc-store/src/migrations/store_063_pass_trace_ring.sql",
-        ),
-        "utf8",
-    );
-
-    test("reads rust scheduler history from migration 63 ring rows", () => {
-        const directory = temporaryDirectory("cache-bust-sentinel-ring-");
-        const storePath = join(directory, "store.db");
-        const store = new Database(storePath);
-        store.exec(`
-            CREATE TABLE mc_pass_trace (
-                session_id TEXT PRIMARY KEY,
-                scheduler_history TEXT NOT NULL DEFAULT '[]',
-                scheduler_interesting_history TEXT NOT NULL DEFAULT '[]'
-            );
-        `);
-        store.query("INSERT INTO mc_pass_trace VALUES (?, ?, ?)").run(
-            "ses_sentinel",
-            JSON.stringify([
-                {
-                    timestamp_ms: 20_200,
-                    request_observed_at_ms: 20_100,
-                    scheduler_decision: "Execute",
-                    canonical_decision: "execute",
-                    applied_drop_count: 2,
-                },
-            ]),
-            "[]",
-        );
-        store.exec(migration63PassTrace);
-        const columns = (
-            store.query("PRAGMA table_info(mc_pass_trace)").all() as Array<{ name: string }>
-        ).map((row) => row.name);
-        expect(columns).not.toContain("scheduler_history");
-        store.close(false);
-
-        const loaded = loadSessionDecisions(activeSession, {
-            ...options(join(directory, "state.json")),
-            databasePath: join(directory, "context.db"),
-            rustStorePath: storePath,
-        });
-
-        expect(nearestCacheBustDecision(loaded, 20_100)).toMatchObject({
-            canonicalDecision: "execute",
-            droppedCount: 2,
-        });
-    });
 
     test("reports an error, not zero rows, for a trace row with no readable history", () => {
         const directory = temporaryDirectory("cache-bust-sentinel-no-history-");

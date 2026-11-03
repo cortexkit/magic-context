@@ -1,0 +1,556 @@
+{
+  "generator": "packages/plugin/src/shared/historian-config-resolution.test.ts (set MC_REGENERATE_HISTORIAN_CONFIG_FIXTURE=1 to rewrite)",
+  "cases": [
+    {
+      "name": "empty config",
+      "harness": "opencode",
+      "config": {},
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "empty historian block",
+      "harness": "opencode",
+      "config": {
+        "historian": {}
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "historian is not an object",
+      "harness": "opencode",
+      "config": {
+        "historian": "x"
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "harness block is an array",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": []
+        }
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "primary only",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "primary object with its own variant",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": {
+              "model": "fixture-a/main",
+              "variant": "high"
+            }
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/main": "high"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "primary takes the block variant",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main",
+            "variant": "medium"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/main": "medium"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "fallbacks with variants, duplicates and invalid entries",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": {
+              "model": "fixture-a/main",
+              "variant": "high"
+            },
+            "variant": "low",
+            "fallback_models": [
+              "fixture-a/main",
+              {
+                "model": "fixture-a/main",
+                "variant": "high"
+              },
+              {
+                "model": "fixture-a/main",
+                "variant": "low"
+              },
+              "fixture-b/fallback",
+              "fixture-b/fallback",
+              "invalid",
+              " ",
+              "/no-provider",
+              "no-model/",
+              {
+                "model": "fixture-c/second",
+                "variant": "max"
+              },
+              {
+                "model": "fixture-c/third",
+                "thinking_level": "ignored-on-opencode"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main",
+          "fixture-b/fallback",
+          "fixture-c/second",
+          "fixture-c/third"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {},
+          "fixture-b/fallback": {},
+          "fixture-c/second": {},
+          "fixture-c/third": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/main": "high",
+          "fixture-c/second": "max"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "single fallback string",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main",
+            "fallback_models": "fixture-b/backup"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main",
+          "fixture-b/backup"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {},
+          "fixture-b/backup": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "fallbacks without a primary",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "fallback_models": [
+              "fixture-a/one",
+              "fixture-b/two"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/one",
+          "fixture-b/two"
+        ],
+        "historian_model_limits": {
+          "fixture-a/one": {},
+          "fixture-b/two": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "fallback repeats the primary",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main",
+            "fallback_models": [
+              "fixture-a/main",
+              "fixture-b/two"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main",
+          "fixture-b/two"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {},
+          "fixture-b/two": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "variant only on a later attempt of the same model",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main",
+            "fallback_models": [
+              {
+                "model": "fixture-a/main",
+                "variant": "x"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "blank primary keeps the fallbacks",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": {
+              "model": " "
+            },
+            "variant": "high",
+            "fallback_models": [
+              "fixture-b/two"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-b/two"
+        ],
+        "historian_model_limits": {
+          "fixture-b/two": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "non-string models are skipped",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": 42,
+            "fallback_models": [
+              7,
+              {
+                "model": ""
+              },
+              null,
+              "fixture-b/ok"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-b/ok"
+        ],
+        "historian_model_limits": {
+          "fixture-b/ok": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "unknown models keep their place",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "unknown-model-without-provider",
+            "fallback_models": [
+              "fixture-unknown/model:tag",
+              "fixture-unknown/other"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "unknown-model-without-provider",
+          "fixture-unknown/model:tag",
+          "fixture-unknown/other"
+        ],
+        "historian_model_limits": {
+          "unknown-model-without-provider": {},
+          "fixture-unknown/model:tag": {},
+          "fixture-unknown/other": {}
+        },
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "pi thinking levels",
+      "harness": "pi",
+      "config": {
+        "historian": {
+          "pi": {
+            "model": "fixture-a/pi",
+            "thinking_level": "high",
+            "fallback_models": [
+              {
+                "model": "fixture-b/backup",
+                "thinking_level": "low",
+                "variant": "ignored"
+              },
+              "fixture-a/pi"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/pi",
+          "fixture-b/backup"
+        ],
+        "historian_model_limits": {
+          "fixture-a/pi": {},
+          "fixture-b/backup": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/pi": "high",
+          "fixture-b/backup": "low"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "omp falls back to the pi block",
+      "harness": "omp",
+      "config": {
+        "historian": {
+          "pi": {
+            "model": "fixture-a/pi",
+            "thinking_level": "medium",
+            "fallback_models": [
+              "fixture-b/f"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/pi",
+          "fixture-b/f"
+        ],
+        "historian_model_limits": {
+          "fixture-a/pi": {},
+          "fixture-b/f": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/pi": "medium"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "omp uses its own block",
+      "harness": "omp",
+      "config": {
+        "historian": {
+          "omp": {
+            "model": "fixture-a/omp",
+            "thinking_level": "low"
+          },
+          "pi": {
+            "model": "fixture-a/pi"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/omp"
+        ],
+        "historian_model_limits": {
+          "fixture-a/omp": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/omp": "low"
+        },
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "another harness's block is ignored",
+      "harness": "opencode",
+      "config": {
+        "historian": {
+          "pi": {
+            "model": "fixture-a/pi"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "harness with no historian block",
+      "harness": "claude-code",
+      "config": {
+        "historian": {
+          "opencode": {
+            "model": "fixture-a/main"
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 600000
+      }
+    },
+    {
+      "name": "per-model limits, timeout and output cap",
+      "harness": "opencode",
+      "config": {
+        "historian_timeout_ms": 90000,
+        "output_reserve": {
+          "fixture-a/main": 4000,
+          "default": 1000
+        },
+        "historian": {
+          "maxTokens": 12000,
+          "opencode": {
+            "model": {
+              "model": "fixture-a/main",
+              "variant": "high"
+            },
+            "fallback_models": [
+              "fixture-b/fallback"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "historian_model_chain": [
+          "fixture-a/main",
+          "fixture-b/fallback"
+        ],
+        "historian_model_limits": {
+          "fixture-a/main": {},
+          "fixture-b/fallback": {}
+        },
+        "historian_model_variants": {
+          "fixture-a/main": "high"
+        },
+        "historian_timeout_ms": 90000,
+        "historian_max_output_tokens": 12000
+      }
+    },
+    {
+      "name": "timeout without a chain",
+      "harness": "pi",
+      "config": {
+        "historian_timeout_ms": 120000,
+        "historian": {
+          "maxTokens": 8000
+        }
+      },
+      "expected": {
+        "historian_model_chain": [],
+        "historian_model_limits": {},
+        "historian_model_variants": {},
+        "historian_timeout_ms": 120000,
+        "historian_max_output_tokens": 8000
+      }
+    }
+  ]
+}

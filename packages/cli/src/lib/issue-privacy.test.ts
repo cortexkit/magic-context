@@ -422,7 +422,7 @@ it("keeps source-owned log wording while omitting interpolated content", () => {
     expect(output).not.toContain("CustomerPayrollError");
 });
 
-it("keeps the allowlisted log templates tied to their source wording", () => {
+it("ties current log templates to source and pins historical Rust wording", () => {
     const sources = [
         {
             path: new URL(
@@ -451,17 +451,19 @@ it("keeps the allowlisted log templates tied to their source wording", () => {
                 "historian post-publish step failed; publication stands:",
             ],
         },
-        {
-            path: new URL("../../../../crates/mc-module/src/lib.rs", import.meta.url),
-            fragments: [
-                "mc-module: store open failed:",
-                "mc-module: historian firing failed for ",
-                ":",
-            ],
-        },
     ];
 
-    const sourceFragments = sources.flatMap(({ fragments }) => fragments);
+    // Bundles may include logs from before the module rewrite. Keep their safe
+    // template wording, but do not require the replacement module to emit it.
+    const historicalRustFragments = [
+        "mc-module: store open failed:",
+        "mc-module: historian firing failed for ",
+        ":",
+    ];
+    const sourceFragments = [
+        ...sources.flatMap(({ fragments }) => fragments),
+        ...historicalRustFragments,
+    ];
     const configuredFragments = ISSUE_LOG_TEMPLATES.flatMap(({ parts }) => parts);
     expect([...configuredFragments].sort()).toEqual([...sourceFragments].sort());
 
