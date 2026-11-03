@@ -16,7 +16,10 @@ use mc_module::move_renumber::{renumber, HostMessage, Numbering};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [db, harness, session, messages] = args.as_slice() else {
-        return Err("usage: renumber_rehearsal <context.db copy> <harness> <session> <messages.json>".into());
+        return Err(
+            "usage: renumber_rehearsal <context.db copy> <harness> <session> <messages.json>"
+                .into(),
+        );
     };
     let messages: Vec<HostMessage> = serde_json::from_reader(std::fs::File::open(messages)?)?;
     let newest = messages
@@ -27,6 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let numbering = Numbering::opencode(&messages, &Cursor::new(newest.1, &newest.0, ""))?;
     let mut conn = rusqlite::Connection::open(db)?;
     renumber(&mut conn, harness, session, &numbering)?;
-    println!("renumbered {session}: newest entry {} ({})", newest.1, newest.0);
+    println!(
+        "renumbered {session}: newest entry {} ({})",
+        newest.1, newest.0
+    );
     Ok(())
 }
