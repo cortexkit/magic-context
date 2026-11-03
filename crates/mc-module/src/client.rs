@@ -80,9 +80,9 @@ pub trait RunnerClient: Send + Sync + 'static {
         async { Err("missing_synapse".to_owned()) }
     }
     /// One read from Entorhinal's management surface on the session's behalf
-    /// (`context.project`, `context.session`), for the session's memory context
-    /// (spec 3c, ML1). `params` is the whole request body. The answer is the
-    /// reply's bytes; `Err` carries a refusal as `(code, message, detail)`, and
+    /// (`context.project`, `context.session`), for the session's memory context.
+    /// `params` is the whole request body. The answer is the reply's bytes;
+    /// `Err` carries a refusal as `(code, message, detail)`, and
     /// `None` means Entorhinal did not answer. Without Entorhinal no read
     /// answers, which is the default here.
     fn entorhinal_call(
@@ -93,7 +93,7 @@ pub trait RunnerClient: Send + Sync + 'static {
         async { None }
     }
     /// One call to Engram's device-stream service (`stream.heads`,
-    /// `stream.append`), for syncing new memories (spec 3c, ML3). The answer
+    /// `stream.append`), for syncing new memories. The answer
     /// is the reply's JSON; an error is a fixed reason such as the service's
     /// refusal code. Without Engram nothing syncs, which is the default here.
     fn engram_call(

@@ -1,5 +1,5 @@
 //! Engram's device-stream service: the account's per-device op streams that
-//! new memories are appended to (spec 3c, ML3.3).
+//! new memories are appended to.
 
 use std::future::Future;
 

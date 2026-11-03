@@ -342,8 +342,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
-    /// Append new memories' sync records to Engram in the background
-    /// (spec 3c, ML3). Without `context.db` nothing is ever queued.
+    /// Append new memories' sync records to Engram in the background.
+    /// Without `context.db` nothing is ever queued.
     pub fn spawn_memory_sync(&self) {
         if self.inner.db.is_none() {
             return;
@@ -571,7 +571,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     }
 }
 
-/// Give `session` its memory context (spec 3c, ML1): the one stored for it,
+/// Give `session` its memory context: the one stored for it,
 /// or one read from Entorhinal now and stored for good. A session without a
 /// folder has none, and its new memories stay unplaced.
 async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>(

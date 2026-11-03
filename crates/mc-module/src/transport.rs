@@ -398,7 +398,7 @@ impl RunnerClient for SubcRunnerClient {
 
     /// On Entorhinal's management surface, bound to the session's own
     /// identity, as Entorhinal attributes a context read to the session that
-    /// asks (spec 3c, ML1). The caller bounds the wait.
+    /// asks. The caller bounds the wait.
     async fn entorhinal_call(
         &self,
         session: &SessionRef,
@@ -432,7 +432,7 @@ impl RunnerClient for SubcRunnerClient {
     }
 
     /// On Engram's device-stream service, under a fixed identity: the stream
-    /// belongs to the device, not to a session (spec 3c, ML3).
+    /// belongs to the device, not to a session.
     async fn engram_call(&self, method: &str, params: Value) -> Result<Value, String> {
         let consumer = self
             .consumer()

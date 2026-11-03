@@ -1,8 +1,8 @@
-//! The level record of each new memory (spec 3c, ML2): the row in
+//! The level record of each new memory: the row in
 //! `memory_placement` that says a memory belongs to a project, which profile
 //! wrote it and under which category id. Written in the same transaction as
-//! the memory row, followed by the memory's sync record when it is a create
-//! (ML3). Ported from the memory-levels card
+//! the memory row, followed by the memory's sync record when it is a create.
+//! Ported from the memory-levels card
 //! (`crates/mc-store/src/memory_levels/placement.rs` at `75adf757`).
 
 use std::collections::BTreeMap;
@@ -66,7 +66,7 @@ impl Authority {
 pub enum CreateKind {
     /// A memory nobody had written before.
     Create,
-    /// The row a merge or a replacement leaves; never synced (ML3).
+    /// The row a merge or a replacement leaves; never synced.
     MergeSurvivor,
 }
 
@@ -150,7 +150,7 @@ pub fn placement_owner(conn: &Connection, id: i64) -> rusqlite::Result<Option<Ow
 /// The owner every source of a merge shares, resolved before any of them
 /// changes. An unplaced source belongs to the writer's project only when its
 /// row does; otherwise it has no owner, which never matches a placed one.
-/// Sources that disagree refuse as `merge_owner_mismatch` (ML2.3).
+/// Sources that disagree refuse as `merge_owner_mismatch`.
 pub fn merge_owner(
     conn: &Connection,
     ids: &[i64],
@@ -186,7 +186,7 @@ pub fn merge_owner(
 }
 
 /// Record a new memory row: its level record, then, for a create, its sync
-/// record (ML2, ML3). Call it inside the transaction that inserted the row,
+/// record. Call it inside the transaction that inserted the row,
 /// right after the insert. Without an authority or a project id the row stays
 /// unplaced and unsynced, and the write still succeeds.
 pub fn created(

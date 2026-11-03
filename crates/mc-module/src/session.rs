@@ -141,11 +141,11 @@ pub struct Session {
     /// removed image ([`lanes::image_results`]).
     image_outputs: std::collections::BTreeMap<lanes::PartKey, String>,
     /// The session's memory context, fixed at its first Setup or first
-    /// memory write (spec 3c, ML1), and what its writes record from it.
+    /// memory write, and what its writes record from it.
     memory_context: Option<crate::memory_profile::MemoryContext>,
     authority: Option<crate::memory_levels::Authority>,
     /// Views the runner took but has not yet confirmed it applies, oldest
-    /// first, each with the state its acceptance replaced (spec 4, WK3).
+    /// first, each with the state its acceptance replaced.
     unconfirmed: Vec<Unconfirmed>,
     /// Where the session's state is saved before a view leaves ck-mc, so a
     /// crash never leaves the runner holding a view ck-mc has forgotten.
@@ -261,7 +261,7 @@ impl Session {
 
     /// Whether the summarizer may read and admit memories: configured, and
     /// the session's memory profile was not refused. A refused profile keeps
-    /// existing memories in the head (spec 3c, ML1.6).
+    /// existing memories in the head.
     fn memory_admissions(&self, settings: &Settings) -> bool {
         settings.memory_enabled
             && !self.memory_context.as_ref().is_some_and(|context| {
@@ -454,7 +454,7 @@ impl Session {
             return;
         }
         // After the read, so the cut message of the view the runner applies
-        // is in the index (spec 4, ST2).
+        // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
         }
