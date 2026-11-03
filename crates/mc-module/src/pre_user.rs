@@ -84,16 +84,18 @@ pub fn prompt_text(raw: &str) -> String {
     text.trim().to_owned()
 }
 
-/// Text blocks eligible for additions before the runner stores a prompt.
+/// Text blocks eligible for additions before the runner stores a prompt,
+/// with the message's time from the runner's machine when it sends one.
 pub(crate) fn person_blocks(
     subject: &cortexkit_role_step_transform_provider::hook::Subject,
-) -> Option<&[String]> {
+) -> Option<(&[String], Option<u64>)> {
     match subject {
         cortexkit_role_step_transform_provider::hook::Subject::PreUser {
             blocks,
             delivery: None,
             mark: None,
-        } if !blocks.is_empty() => Some(blocks),
+            at_ms,
+        } if !blocks.is_empty() => Some((blocks, *at_ms)),
         _ => None,
     }
 }
@@ -108,7 +110,12 @@ mod tests {
         use serde_json::json;
         let human: Subject =
             serde_json::from_value(json!({"hook":"pre_user","blocks":["Fix the parser"]})).unwrap();
-        assert!(person_blocks(&human).is_some());
+        assert_eq!(person_blocks(&human).map(|(_, at)| at), Some(None));
+        let stamped: Subject = serde_json::from_value(
+            json!({"hook":"pre_user","blocks":["Fix the parser"],"at_ms":42}),
+        )
+        .unwrap();
+        assert_eq!(person_blocks(&stamped).map(|(_, at)| at), Some(Some(42)));
         for extra in [
             json!({"delivery":"steer"}),
             json!({"delivery":"queue"}),

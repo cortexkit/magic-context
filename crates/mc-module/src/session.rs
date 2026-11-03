@@ -1593,10 +1593,11 @@ impl Session {
         }
         if self.features.time_marker && settings.temporal_awareness {
             // The gap runs from the newest message the session holds, the one
-            // this message follows, to now, when the message is written.
+            // this message follows, to now, when the message is written. A
+            // message the host finished counts from when it finished.
             if let Some(previous) = self.index.entries().last() {
-                answer.prepend =
-                    crate::pre_user::time_marker(now_ms.saturating_sub(previous.written_at));
+                let since = previous.completed_at.unwrap_or(previous.written_at);
+                answer.prepend = crate::pre_user::time_marker(now_ms.saturating_sub(since));
             }
         }
         let auto = &settings.auto_search;

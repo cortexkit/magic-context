@@ -20,7 +20,7 @@ tokio = { workspace = true }
 # Model tool calls and the edit to a person's message come through these
 # published contracts, each on a route of its own.
 cortexkit-role-tool-provider = "=0.14.6"
-cortexkit-role-step-transform-provider = "=0.4.2"
+cortexkit-role-step-transform-provider = "=0.5.0"
 
 [[bin]]
 name = "ck-mock-runner"

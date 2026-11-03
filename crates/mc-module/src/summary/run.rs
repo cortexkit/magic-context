@@ -686,6 +686,9 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     let send = |temperature: bool| {
         let mut request = SendRequest::new(prompt, send_id.to_owned());
         request.runner_params = run_params(how, temperature);
+        // The routing decision is a typed send field: the runner fixes it
+        // for the run and forwards it when it gets an account from routing.
+        request.route_decision_id = Some(how.decision_id.to_owned());
         request
     };
     let reply = match client.send_child(child, send(with_temperature)).await {
@@ -743,7 +746,6 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
         "generation": generation,
         "stop_when": {"max_steps": 1},
         "tools": [],
-        "route_decision_id": how.decision_id,
     }) else {
         unreachable!("an object literal");
     };

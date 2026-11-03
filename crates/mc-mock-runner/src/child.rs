@@ -98,6 +98,7 @@ impl Runs {
             serde_json::from_value(serde_json::Value::Object(request.runner_params.clone()))
                 .map_err(|error| error.to_string())?;
         settings.child = child.to_owned();
+        settings.route_decision_id = request.route_decision_id.clone();
         let prompt = request.prompt_text().to_owned();
         let run_id = format!("run-{}", self.runs.len() + 1);
         let reply = responder(&settings, &prompt);

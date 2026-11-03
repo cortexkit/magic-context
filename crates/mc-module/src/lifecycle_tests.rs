@@ -652,3 +652,24 @@ fn lifecycle_the_index_keeps_compact_sizes_tags_and_full_checksums() {
     );
     assert_eq!(held.parts[1].tag, Some(42));
 }
+
+#[tokio::test]
+async fn a_time_marker_counts_from_when_the_previous_message_finished() {
+    let marker = |completed_at: Option<u64>| async move {
+        let (mut session, _, _, _, settings) = fixture();
+        session.features.time_marker = true;
+        let mut reply = text(1, "reply");
+        reply.written_at = 0;
+        reply.completed_at = completed_at;
+        session.index.extend(vec![reply]);
+        session
+            .pre_user(&settings, "Carry on with the parser fix", 12 * 60_000)
+            .await
+            .prepend
+    };
+    // Written at minute 0 and finished at minute 10: the next message two
+    // minutes later gets no marker.
+    assert_eq!(marker(Some(10 * 60_000)).await, None);
+    // Without a finish stamp the gap runs from when it was written.
+    assert_eq!(marker(None).await.as_deref(), Some("<!-- +12m -->\n"));
+}

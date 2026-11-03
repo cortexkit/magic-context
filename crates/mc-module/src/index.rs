@@ -113,6 +113,12 @@ impl Index {
             }
             let held = &mut self.entries[(entry.ordinal - self.base) as usize];
             if held.digest == entry.digest && held.mid == entry.mid {
+                // The host's finish stamp can arrive after the message was
+                // first read. It isn't part of the transcript, so it only
+                // fills in the held copy.
+                if entry.completed_at.is_some() {
+                    held.completed_at = entry.completed_at;
+                }
                 continue;
             }
             // The newest message may still be written; an older one changes
@@ -223,6 +229,17 @@ mod tests {
             PartBody::Text { text: text.into() },
         )];
         Entry::new(ordinal, mid, Role::User, 0, parts)
+    }
+
+    #[test]
+    fn a_repeated_message_fills_in_its_finish_stamp() {
+        let mut index = Index::default();
+        index.extend([entry(1, "a", "one")]);
+        assert_eq!(index.entries()[0].completed_at, None);
+        let mut finished = entry(1, "a", "one");
+        finished.completed_at = Some(42);
+        assert_eq!(index.extend([finished]), Extend::Continued);
+        assert_eq!(index.entries()[0].completed_at, Some(42));
     }
 
     #[test]

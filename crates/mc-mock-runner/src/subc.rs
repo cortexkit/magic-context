@@ -154,7 +154,10 @@ impl Role {
         let (role, version) = match self {
             Self::Compaction => COMPACTION_ROLE,
             Self::Tools => ("tool-provider", "v1"),
-            Self::Hooks => ("step-transform-provider", "v1"),
+            Self::Hooks => (
+                cortexkit_role_step_transform_provider::ROLE,
+                cortexkit_role_step_transform_provider::VERSION,
+            ),
         };
         BTreeMap::from([(role.to_owned(), version.to_owned())])
     }
@@ -280,15 +283,14 @@ impl Provider for SubcProvider {
         }
     }
 
-    /// The `pre_user` hook in the published step-transform shape. The
-    /// provider uses its own clock; `_now` is the scenario's, which only an
-    /// in-process provider can share.
-    async fn pre_user(&self, text: &str, _now: u64) -> Result<UserEdit, CallError> {
+    /// The `pre_user` hook in the published step-transform v2 shape: the
+    /// route names the session, and `at_ms` carries the message's time on
+    /// the runner's clock, which is the scenario's.
+    async fn pre_user(&self, text: &str, now: u64) -> Result<UserEdit, CallError> {
         let call = json!({
-            "session": self.session.session,
-            "harness": self.session.harness,
             "hook": "pre_user",
             "blocks": [text],
+            "at_ms": now,
         });
         let answer: HookAnswer = self
             .call(Role::Hooks, step::ops::TRANSFORM_HOOK, &call)
@@ -310,7 +312,8 @@ pub fn user_edit(answer: HookAnswer) -> UserEdit {
                 Operation::Append { text, .. } => {
                     edit.append = Some(edit.append.unwrap_or_default() + &text);
                 }
-                Operation::Replace { .. } => {}
+                // A one-block message has nothing else to edit.
+                _ => {}
             }
         }
     }

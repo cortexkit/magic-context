@@ -163,9 +163,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-compaction-view"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7894fbe22a9ef50efa730334f35a25de726a61b120d662a1298c9e1c5a66acc2"
+checksum = "539283b66e7bb5a0c3a0bb0d3b558098076b5eaad4c82e2a6b244b3428ee880f"
 dependencies = [
  "cortexkit-role-compaction",
  "serde",
@@ -193,9 +193,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-compaction"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f977a4e22f1cfb84c1411f67342786be2f1d5785d5f17368486166335d232f7"
+checksum = "5fefb6a65af74d04d4aae56bf1835c90b3ffe6808ad6ba673530b86b498699bd"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -205,11 +205,12 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner"
-version = "0.7.48"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6de7e5d6e67be031c3049e40f41a3fa78b3bff821bd35dc8c6cf21328593112"
+checksum = "64f7de0690d84f63c1a830c8dedf99bc609cc3831589f13eedf8a7904dfcd7d3"
 dependencies = [
  "cortexkit-rich-ui-syntax",
+ "cortexkit-role-tool-provider 0.15.0",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -228,9 +229,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-step-transform-provider"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b05818c4acd643f330f911dadc0b9bad107ef56b0e82f9996d304a914491b7"
+checksum = "f5b7e30ac9b2ed17eddc93876f71cd5b6ebd5c6af415ef58aa679f017ed5d3f0"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -255,6 +256,20 @@ name = "cortexkit-role-tool-provider"
 version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d54ebd86c54e15c398e46507efaa83747c393a294bb3f58575c248cc2045bcf"
+dependencies = [
+ "cortexkit-role-tool-display",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "subc-protocol",
+]
+
+[[package]]
+name = "cortexkit-role-tool-provider"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a4f8d0c4c27735951c321f21de4bf95eb172df1910af8043255c0eb5a0f4ceb"
 dependencies = [
  "cortexkit-role-tool-display",
  "serde",
@@ -758,7 +773,7 @@ dependencies = [
  "cortexkit-role-llm-runner",
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
- "cortexkit-role-tool-provider",
+ "cortexkit-role-tool-provider 0.14.6",
  "serde",
  "serde_json",
  "sha2",
@@ -778,7 +793,7 @@ dependencies = [
  "cortexkit-role-llm-runner",
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
- "cortexkit-role-tool-provider",
+ "cortexkit-role-tool-provider 0.14.6",
  "mc-mock-runner",
  "mc-tokenizer",
  "md5",

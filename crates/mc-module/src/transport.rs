@@ -475,7 +475,7 @@ pub struct Handler {
 /// The roles of the two published contracts a runner also reaches ck-mc
 /// through, each on a route of its own.
 const TOOL_ROLE: (&str, &str) = ("tool-provider", "v1");
-const HOOK_ROLE: (&str, &str) = ("step-transform-provider", "v1");
+const HOOK_ROLE: (&str, &str) = (step::ROLE, step::VERSION);
 
 /// A bound route: the session it concerns and the role it was opened for.
 #[derive(Clone)]
@@ -619,11 +619,9 @@ impl Handler {
         Ok(serde_json::to_vec(&result).expect("answers serialize"))
     }
 
-    /// A hook op (`step-transform-provider/v1`). That contract names the
-    /// session in the body, on a route that may serve all of a runner's
-    /// sessions. The body only picks among the sessions of the runner the
-    /// daemon attests for the route, so one runner never reaches another's;
-    /// on a route bound to one session, the body must name that session.
+    /// A hook op (`step-transform-provider/v2`). A hook concerns the session
+    /// its route is bound to; a route bound to no session answers discovery
+    /// only.
     async fn hook(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
         let (method, params) = wire::decode(body)?;
         match method.as_str() {
@@ -647,10 +645,13 @@ impl Handler {
                 }
                 let session = route.session.clone();
                 let answer = match crate::pre_user::person_blocks(&call.subject) {
-                    Some(blocks) => {
+                    Some((blocks, at_ms)) => {
+                        // The runner's clock when it sends one, so the gap
+                        // since the previous message is measured on one
+                        // machine's clock; ck-mc's own otherwise.
                         let addition = self
                             .module
-                            .pre_user(&session, &blocks.join("\n"), now_ms())
+                            .pre_user(&session, &blocks.join("\n"), at_ms.unwrap_or_else(now_ms))
                             .await;
                         hook_answer(addition, blocks.len())
                     }
@@ -687,10 +688,7 @@ fn declare(preset: &str) -> Option<Declaration> {
         vec![DeclaredSubscription::new(Hook::PreUser, ops, budget)
             .with_on_unavailable(OnUnavailable::Pass)]
     };
-    Some(Declaration {
-        subscriptions,
-        claude_code: None,
-    })
+    Some(Declaration::new(subscriptions))
 }
 
 /// The hook answer for an addition: the time marker before the first block,
@@ -766,7 +764,7 @@ impl ModuleHandler for Handler {
         let Some(role) = RouteRole::declared(request.role_versions.as_ref()) else {
             return BindDecision::reject(
                 codes::UNKNOWN_ROUTE_ROLE,
-                "open the route for exactly one of compaction-provider/v2, tool-provider/v1 or step-transform-provider/v1",
+                "open the route for exactly one of compaction-provider/v2, tool-provider/v1 or step-transform-provider/v2",
             );
         };
         // A hook route may open unbound, for discovery (`role.describe`,
