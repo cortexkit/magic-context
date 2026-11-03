@@ -89,6 +89,7 @@ fn setup(fixed: &Fixed, context_window: u64) -> (Route, SetupRequest) {
         session: SessionRef::new("audit-runner", "mock", "audit"),
         project: None,
         workdir: None,
+        agent_id: None,
     };
     let mut request = SetupRequest::new(
         "worker",

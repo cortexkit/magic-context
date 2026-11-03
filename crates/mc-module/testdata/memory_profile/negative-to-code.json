@@ -1,0 +1,198 @@
+[
+  {
+    "name": "unknown body field",
+    "expect": "unknown field load_mode",
+    "code": "profile_schema_invalid",
+    "source": "resolved-swe/resolve.ts:814",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:628"
+  },
+  {
+    "name": "category id without namespace",
+    "expect": "does not match",
+    "code": "profile_schema_invalid",
+    "source": "resolved-swe/resolve.ts:815",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:628"
+  },
+  {
+    "name": "new category in another layer's namespace",
+    "expect": "must use the namespace `swe:`",
+    "code": "namespace_violation",
+    "source": "resolved-swe/resolve.ts:816",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:631"
+  },
+  {
+    "name": "redeclared base category without override",
+    "expect": "without `override: true`",
+    "code": "namespace_violation",
+    "source": "resolved-swe/resolve.ts:817",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:631"
+  },
+  {
+    "name": "duplicate tag",
+    "expect": "duplicate tag COMMUNICATION",
+    "code": "tag_conflict",
+    "source": "resolved-swe/resolve.ts:818",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:633"
+  },
+  {
+    "name": "reserved tag",
+    "expect": "reserved by MC",
+    "code": "tag_conflict",
+    "source": "resolved-swe/resolve.ts:819",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:633"
+  },
+  {
+    "name": "category cap",
+    "expect": "exceed the cap of 24",
+    "code": "category_cap",
+    "source": "resolved-swe/resolve.ts:820",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:634"
+  },
+  {
+    "name": "sensitive category visible to every profile",
+    "expect": "sensitive category",
+    "code": "category_invalid",
+    "source": "resolved-swe/resolve.ts:821",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:635"
+  },
+  {
+    "name": "unknown decay class",
+    "expect": "unknown decay class",
+    "code": "category_invalid",
+    "source": "resolved-swe/resolve.ts:822",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:635"
+  },
+  {
+    "name": "default level not allowed",
+    "expect": "not in allowed_levels",
+    "code": "category_invalid",
+    "source": "resolved-swe/resolve.ts:823",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:635"
+  },
+  {
+    "name": "event kind without consumer",
+    "expect": "no enabled consumer",
+    "code": "event_kind_invalid",
+    "source": "resolved-swe/resolve.ts:824",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:638"
+  },
+  {
+    "name": "event kind whose consumer is disabled",
+    "expect": "no enabled consumer",
+    "code": "event_kind_invalid",
+    "source": "resolved-swe/resolve.ts:825",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:638"
+  },
+  {
+    "name": "event kind the consumer does not list",
+    "expect": "consumer swe:curate does not list it",
+    "code": "event_kind_invalid",
+    "source": "resolved-swe/resolve.ts:826",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:638"
+  },
+  {
+    "name": "event field not described",
+    "expect": "not described in its definition",
+    "code": "event_kind_invalid",
+    "source": "resolved-swe/resolve.ts:827",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:638"
+  },
+  {
+    "name": "task action outside its interface",
+    "expect": "is not in the curate interface",
+    "code": "task_interface_mismatch",
+    "source": "resolved-swe/resolve.ts:828",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:637"
+  },
+  {
+    "name": "task reading outside its interface",
+    "expect": "outside the curate interface",
+    "code": "task_interface_mismatch",
+    "source": "resolved-swe/resolve.ts:829",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:637"
+  },
+  {
+    "name": "task prompt role missing",
+    "expect": "prompt role gate_system missing",
+    "code": "task_interface_mismatch",
+    "source": "resolved-swe/resolve.ts:830",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:637"
+  },
+  {
+    "name": "task prompt without its output contract",
+    "expect": "must contain the MC frame curate.memory-operations",
+    "code": "task_interface_mismatch",
+    "source": "resolved-swe/resolve.ts:831",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:637"
+  },
+  {
+    "name": "task setting outside its interface",
+    "expect": "setting min_proof_count is not in",
+    "code": "task_interface_mismatch",
+    "source": "resolved-swe/resolve.ts:832",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:637"
+  },
+  {
+    "name": "disabling a base task by override",
+    "expect": "an override may not disable",
+    "code": "override_not_allowed",
+    "source": "resolved-swe/resolve.ts:833",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:632"
+  },
+  {
+    "name": "overriding the global review",
+    "expect": "never overridden",
+    "code": "override_not_allowed",
+    "source": "resolved-swe/resolve.ts:834",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:632"
+  },
+  {
+    "name": "user category the global review does not cover",
+    "expect": "curated by the one global review",
+    "code": "user_category_uncovered",
+    "source": "resolved-swe/resolve.ts:835",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:639"
+  },
+  {
+    "name": "overriding an MC frame",
+    "expect": "MC-owned sections cannot be overridden",
+    "code": "override_not_allowed",
+    "source": "resolved-swe/resolve.ts:836",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:632"
+  },
+  {
+    "name": "profile-supplied tool description",
+    "expect": "MC-owned",
+    "code": "prompt_invalid",
+    "source": "resolved-swe/resolve.ts:837",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:642"
+  },
+  {
+    "name": "foreign-scope domain default",
+    "expect": "default_scope_mismatch",
+    "code": "default_scope_mismatch",
+    "source": "resolved-swe/resolve.ts:838",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:643"
+  },
+  {
+    "name": "abstract layer as agent profile",
+    "expect": "abstract profile",
+    "code": "profile_chain_invalid",
+    "source": "resolved-swe/resolve.ts:839",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:629"
+  },
+  {
+    "name": "extends missing from requires.packages",
+    "expect": "body_ref_missing",
+    "code": "body_ref_missing",
+    "source": "resolved-swe/resolve.ts:840",
+    "rule": "package stage, \u00a77.1:617 (not in the \u00a77.2 table); resolved-swe/resolve.ts:840"
+  },
+  {
+    "name": "base version outside the range",
+    "expect": "does not satisfy",
+    "code": "base_version_mismatch",
+    "source": "resolved-swe/resolve.ts:841",
+    "rule": "mc-memory-profile-v1.md:\u00a77.2:630"
+  }
+]

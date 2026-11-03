@@ -51,6 +51,11 @@ struct HostClient {
     offered: Arc<Mutex<Vec<u64>>>,
     /// The project folder of every summarizer child send, for its scope.
     child_scopes: Arc<Mutex<Vec<Option<String>>>>,
+    /// What the stand-in Entorhinal answers `context.project` with (the
+    /// reply's `result`); without one it does not answer.
+    entorhinal: Arc<Mutex<Option<Value>>>,
+    /// Every Entorhinal read ck-mc made: its method and folder or agent.
+    entorhinal_reads: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -221,6 +226,27 @@ impl RunnerClient for HostClient {
             .run_result(&request)
             .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))?;
         read_wrapped(&result)
+    }
+
+    async fn entorhinal_call(
+        &self,
+        _: &SessionRef,
+        body: Vec<u8>,
+    ) -> Option<Result<Vec<u8>, mc_module::client::EntorhinalRefusal>> {
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        let method = request["method"].as_str().unwrap().to_owned();
+        let subject = request["params"]["folder"]
+            .as_str()
+            .or(request["params"]["agent_id"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        self.entorhinal_reads
+            .lock()
+            .unwrap()
+            .push((method.clone(), subject));
+        let result = self.entorhinal.lock().unwrap().clone()?;
+        (method == "context.project")
+            .then(|| Ok(serde_json::to_vec(&json!({"result": result})).unwrap()))
     }
 }
 
@@ -398,7 +424,27 @@ async fn start_runner_with(
     pre_user: bool,
     adjust: impl FnOnce(&mut Route),
 ) -> Runner<InProcess> {
-    let client = HostClient::default();
+    start_with_client(
+        HostClient::default(),
+        config,
+        settings,
+        stores,
+        pre_user,
+        adjust,
+    )
+    .await
+}
+
+/// As [`start_runner_with`], with a client the scenario set up first, for
+/// stand-ins ck-mc reads at Setup.
+async fn start_with_client(
+    client: HostClient,
+    config: SessionConfig,
+    settings: Settings,
+    stores: Option<std::path::PathBuf>,
+    pre_user: bool,
+    adjust: impl FnOnce(&mut Route),
+) -> Runner<InProcess> {
     let mut route = Route {
         session: config.session.clone(),
         project: config.project.as_ref().map(|project| RouteProject {
@@ -406,6 +452,7 @@ async fn start_runner_with(
             root: project.root.clone(),
         }),
         workdir: config.project.as_ref().map(|project| project.root.clone()),
+        agent_id: None,
     };
     adjust(&mut route);
     let provider = InProcess {
@@ -2406,6 +2453,104 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A session's memory context is read from Entorhinal once, at its first
+/// Setup, and kept across a ck-mc restart; every memory the session saves is
+/// recorded at its project's level with the profile and category id it was
+/// written under (spec 3c, ML1 and ML2).
+#[tokio::test]
+async fn saved_memories_record_their_project_level_from_a_context_read_once() {
+    let dir = scratch("memory-levels");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    let root = dir.to_string_lossy().into_owned();
+    let mut config = config("head", Kind::OpenAi, free());
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: root.clone(),
+    });
+    let records: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/entorhinal-memory-context-v1/context-project.json"
+    ))
+    .unwrap();
+    let mut result = records[0]["reply"]["result"].clone();
+    // No domain: the bundled software profile.
+    result["domain"] = Value::Null;
+    let client = HostClient::default();
+    *client.entorhinal.lock().unwrap() = Some(result);
+    let mut runner = start_with_client(
+        client.clone(),
+        config,
+        Settings::default(),
+        Some(dir.clone()),
+        false,
+        |route| route.agent_id = Some("agent-1".into()),
+    )
+    .await;
+    let memory = |content: &str| {
+        Step::Model(Turn {
+            text: Some("Remembering.".into()),
+            tools: vec![ToolCall::ok(
+                "ctx_memory",
+                json!({"action": "write", "category": "NAMING", "content": content, "ids": []}),
+                "",
+            )],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    runner
+        .play(&[user("Hello."), memory("Crates use kebab-case."), answer()])
+        .await;
+    runner.provider().restart();
+    runner
+        .play(&[user("Again."), memory("Modules use snake_case."), answer()])
+        .await;
+    assert_clean(&runner);
+    assert_eq!(
+        *client.entorhinal_reads.lock().unwrap(),
+        [
+            ("context.project".to_owned(), root),
+            ("context.session".to_owned(), "agent-1".to_owned()),
+        ],
+        "one context read, kept across the restart"
+    );
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let placements: Vec<(String, String, String, String, String)> = db
+        .prepare(
+            "SELECT m.content, p.level, p.owner_id, p.origin_profile_name, p.origin_category
+             FROM memory_placement p JOIN memories m ON m.id = p.memory_id ORDER BY m.id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let placed = |content: &str| {
+        (
+            content.to_owned(),
+            "project".to_owned(),
+            "served-project".to_owned(),
+            "@cortexkit/memory-swe".to_owned(),
+            "swe:naming".to_owned(),
+        )
+    };
+    assert_eq!(
+        placements,
+        [
+            placed("Crates use kebab-case."),
+            placed("Modules use snake_case.")
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn ctx_search_finds_summarized_messages_notes_and_hidden_memories_but_not_what_the_model_sees(
 ) {
@@ -2905,6 +3050,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         session: session(name),
         project: None,
         workdir: None,
+        agent_id: None,
     };
     let setup = |newest: Option<cortexkit_role_compaction::read::Cursor>| {
         let mut request = SetupRequest::new(
@@ -3219,6 +3365,7 @@ async fn a_session_with_no_setup_gets_its_tools_but_none_that_act_on_a_transcrip
             root: dir.to_string_lossy().into_owned(),
         }),
         workdir: Some(dir.to_string_lossy().into_owned()),
+        agent_id: None,
     };
     let saved = module
         .tool(
@@ -3483,6 +3630,7 @@ async fn a_prose_search_answers_in_the_rerankers_order() {
             root: root.clone(),
         }),
         workdir: Some(root),
+        agent_id: None,
     };
     let query = json!({"query": "how does the parser treat quoted text"});
     let position = |text: &str, needle: &str| text.find(needle).unwrap_or(usize::MAX);

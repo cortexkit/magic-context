@@ -395,6 +395,74 @@ impl RunnerClient for SubcRunnerClient {
             })?;
         serde_json::from_slice(&reply).map_err(|_| "validation".to_owned())
     }
+
+    /// On Entorhinal's management surface, bound to the session's own
+    /// identity, as Entorhinal attributes a context read to the session that
+    /// asks (spec 3c, ML1). The caller bounds the wait.
+    async fn entorhinal_call(
+        &self,
+        session: &SessionRef,
+        body: Vec<u8>,
+    ) -> Option<Result<Vec<u8>, crate::client::EntorhinalRefusal>> {
+        let consumer = self.consumer().await.ok()?;
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: "entorhinal".to_owned(),
+                },
+                BindIdentity::new(session.harness.clone(), session.session.clone()),
+                body,
+                CallOptions {
+                    timeout: crate::memory_context::DEADLINE,
+                    ..CallOptions::default()
+                },
+            )
+            .await;
+        match reply {
+            Ok(bytes) => Some(Ok(bytes)),
+            Err(subc_client_rs::CallError::Module(body)) => {
+                Some(Err(crate::client::EntorhinalRefusal {
+                    code: body.code,
+                    message: body.message,
+                    detail: body.detail,
+                }))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// On Engram's device-stream service, under a fixed identity: the stream
+    /// belongs to the device, not to a session (spec 3c, ML3).
+    async fn engram_call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let consumer = self
+            .consumer()
+            .await
+            .map_err(|_| "unavailable".to_owned())?;
+        let reply = consumer
+            .call(
+                RouteTarget::InternalService {
+                    module_id: "engram".to_owned(),
+                    service_id: "device-streams".to_owned(),
+                },
+                BindIdentity::new("memory-sync", "memory-sync"),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout: crate::memory_sync::ENGRAM_DEADLINE,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                subc_client_rs::CallError::Module(body) => body.code,
+                _ => "unavailable".to_owned(),
+            })?;
+        let value: Value =
+            serde_json::from_slice(&reply).map_err(|_| "malformed_reply".to_owned())?;
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(error.to_owned());
+        }
+        Ok(value)
+    }
 }
 
 /// Serves the provider ops for the daemon.
@@ -726,6 +794,10 @@ impl ModuleHandler for Handler {
                 .scope
                 .as_ref()
                 .and_then(|scope| scope.workdir.clone()),
+            agent_id: request
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.attributes.agent_id.clone()),
         };
         self.bound
             .lock()

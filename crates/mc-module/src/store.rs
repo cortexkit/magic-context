@@ -15,6 +15,7 @@ use cortexkit_role_compaction::read::SessionRef;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::memory_profile::MemoryContext;
 use crate::summary::head::Baseline;
 
 /// What a session keeps across a restart.
@@ -76,6 +77,13 @@ impl Store {
                      session TEXT NOT NULL,
                      state TEXT NOT NULL,
                      PRIMARY KEY (runner, harness, session)
+                 );
+                 CREATE TABLE IF NOT EXISTS memory_contexts (
+                     runner TEXT NOT NULL,
+                     harness TEXT NOT NULL,
+                     session TEXT NOT NULL,
+                     context TEXT NOT NULL,
+                     PRIMARY KEY (runner, harness, session)
                  );",
             )
             .map_err(|error| format!("store {}: {error}", path.display()))?;
@@ -116,6 +124,47 @@ impl Store {
                 key.session
             );
         }
+    }
+
+    /// The memory context stored for the session (spec 3c, ML1), if any.
+    /// It is kept apart from [`Durable`] because a session that only calls
+    /// tools has one too.
+    pub fn memory_context(&self, key: &SessionRef) -> Option<MemoryContext> {
+        let text: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT context FROM memory_contexts WHERE runner = ?1 AND harness = ?2 AND session = ?3",
+                params![key.runner, key.harness, key.session],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "ck-mc: session {}: loading its memory context failed: {error}",
+                    key.session
+                );
+                None
+            });
+        text.and_then(|text| serde_json::from_str(&text).ok())
+    }
+
+    /// Store a session's memory context once. If one is already stored, that
+    /// one is kept and returned: a session's context never changes.
+    pub fn keep_memory_context(&self, key: &SessionRef, context: MemoryContext) -> MemoryContext {
+        let text = serde_json::to_string(&context).expect("memory context serializes");
+        let result = self.lock().execute(
+            "INSERT INTO memory_contexts (runner, harness, session, context) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (runner, harness, session) DO NOTHING",
+            params![key.runner, key.harness, key.session, text],
+        );
+        if let Err(error) = result {
+            eprintln!(
+                "ck-mc: session {}: saving its memory context failed: {error}",
+                key.session
+            );
+            return context;
+        }
+        self.memory_context(key).unwrap_or(context)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {

@@ -79,4 +79,36 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
         async { Err("missing_synapse".to_owned()) }
     }
+    /// One read from Entorhinal's management surface on the session's behalf
+    /// (`context.project`, `context.session`), for the session's memory context
+    /// (spec 3c, ML1). `params` is the whole request body. The answer is the
+    /// reply's bytes; `Err` carries a refusal as `(code, message, detail)`, and
+    /// `None` means Entorhinal did not answer. Without Entorhinal no read
+    /// answers, which is the default here.
+    fn entorhinal_call(
+        &self,
+        _session: &SessionRef,
+        _body: Vec<u8>,
+    ) -> impl Future<Output = Option<Result<Vec<u8>, EntorhinalRefusal>>> + Send {
+        async { None }
+    }
+    /// One call to Engram's device-stream service (`stream.heads`,
+    /// `stream.append`), for syncing new memories (spec 3c, ML3). The answer
+    /// is the reply's JSON; an error is a fixed reason such as the service's
+    /// refusal code. Without Engram nothing syncs, which is the default here.
+    fn engram_call(
+        &self,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
+        async { Err("unavailable".to_owned()) }
+    }
+}
+
+/// Entorhinal's refusal of a context read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntorhinalRefusal {
+    pub code: String,
+    pub message: String,
+    pub detail: Option<serde_json::Value>,
 }

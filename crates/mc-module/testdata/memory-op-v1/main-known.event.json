@@ -1,0 +1,25 @@
+{
+  "kind": "Create",
+  "actor": "main_agent",
+  "session_id": "session-example",
+  "ordinals": [
+    12
+  ],
+  "memory_id": 7,
+  "writer_project_id": "served-project",
+  "owner": {
+    "kind": "project",
+    "id": "served-project"
+  },
+  "category_tag": "NAMING",
+  "effective_category_id": "swe:naming",
+  "importance": 80,
+  "expires_at": null,
+  "content": "Keep exact bytes: café\nDo not trim.",
+  "origin_profile": {
+    "name": "@cortexkit/memory-swe",
+    "version": "1.0.0",
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "snapshot_digest": "0135e919d0cbcb525ee3c10fdac3d433e6912d31e09a3ea6e17e2c236810d48a"
+}

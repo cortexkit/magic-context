@@ -113,6 +113,7 @@ pub fn move_in(
         session: key.clone(),
         project: request.project.clone(),
         workdir: request.project.as_ref().map(|project| project.root.clone()),
+        agent_id: None,
     };
     let db = Arc::new(db);
     let mut session = Session::new(&route, &setup, features, Some(Arc::clone(&db)));

@@ -74,6 +74,8 @@ pub struct Job {
     pub memory_enabled: bool,
     pub auto_promote: bool,
     pub embedding: Option<crate::embedding::Provider>,
+    /// The session's writer authority, for new memories' level records.
+    pub authority: Option<crate::memory_levels::Authority>,
 }
 
 /// How a second turn ended.
@@ -704,6 +706,7 @@ struct Resolver<'a, C> {
     carrier: Carrier,
     memory_enabled: bool,
     auto_promote: bool,
+    authority: Option<crate::memory_levels::Authority>,
 }
 
 /// A check's outcome could not be known: the stage stops with the rest of
@@ -954,6 +957,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                                 conflict_target: decision.target_id.filter(|_| conflict),
                                 fact_id: fact.id,
                                 reservation: Some(reservation),
+                                authority: self.authority.as_ref(),
                             },
                         )
                     })
@@ -1238,7 +1242,14 @@ impl<C: RunnerClient> Resolver<'_, C> {
         }
         self.db
             .with_connection(|conn| {
-                applier::commit_revision(conn, &revision, &plan, fact.id, Some(reservation))
+                applier::commit_revision(
+                    conn,
+                    &revision,
+                    &plan,
+                    fact.id,
+                    Some(reservation),
+                    self.authority.as_ref(),
+                )
             })
             .map(|_| Ok(()))
             .map_err(|error| error.to_string())
@@ -1615,6 +1626,7 @@ async fn recover_one<C: RunnerClient>(
         carrier,
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
+        authority: job.authority.clone(),
     };
     if resolver.stage(stage).await?.is_err() {
         let visits = db
@@ -1744,6 +1756,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         carrier,
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
+        authority: job.authority.clone(),
     };
     let done = resolver.stage(&reserved.stage).await?;
     let reserved_left = db

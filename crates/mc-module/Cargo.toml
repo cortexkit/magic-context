@@ -31,6 +31,12 @@ cortexkit-role-step-transform-provider = "=0.4.2"
 # The routing capability that picks the summarizer's model (spec 3, CH9).
 cortexkit-role-routing = "=0.5.7"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
+# A session's memory context comes from Entorhinal (spec 3c, ML1), in these
+# published request and reply types.
+cortexkit-agent-identity = "=0.1.0"
+cortexkit-project-identity = "=0.1.3"
+# Profile versions compare as semantic versions.
+semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]

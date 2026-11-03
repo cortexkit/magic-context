@@ -469,6 +469,7 @@ pub fn promote_facts(
     project: &str,
     session: &str,
     facts: &[(String, String)],
+    placer: &crate::memory_levels::Placer,
 ) -> rusqlite::Result<usize> {
     let mut promoted = 0;
     for (category, content) in facts {
@@ -508,6 +509,14 @@ pub fn promote_facts(
                     params![memory.id, now_ms() + ttl],
                 )?;
             }
+            crate::memory_levels::created(
+                tx,
+                placer,
+                memory.id,
+                crate::memory_levels::CreateKind::Create,
+                None,
+                now_ms(),
+            )?;
         }
         promoted += 1;
     }
@@ -519,6 +528,22 @@ pub struct Writer<'a> {
     pub harness: &'a str,
     pub session: &'a str,
     pub project: &'a str,
+    /// What the session's memory context says about the writer, for the
+    /// level record of each new memory (spec 3c, ML2). `None` leaves new
+    /// memories unplaced.
+    pub authority: Option<&'a crate::memory_levels::Authority>,
+}
+
+impl Writer<'_> {
+    /// The main agent writing through `ctx_memory`; it cites no messages.
+    fn placer(&self) -> crate::memory_levels::Placer<'_> {
+        crate::memory_levels::Placer {
+            authority: self.authority,
+            actor: crate::memory_levels::Actor::MainAgent,
+            session: Some(self.session),
+            ordinals: &[],
+        }
+    }
 }
 
 fn immediate(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
@@ -589,15 +614,26 @@ pub fn save(
             )?;
             get_memory(&tx, memory.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?
         }
-        None => insert_memory(
-            &tx,
-            who.project,
-            category,
-            content,
-            who.session,
-            "agent",
-            Some(50),
-        )?,
+        None => {
+            let memory = insert_memory(
+                &tx,
+                who.project,
+                category,
+                content,
+                who.session,
+                "agent",
+                Some(50),
+            )?;
+            crate::memory_levels::created(
+                &tx,
+                &who.placer(),
+                memory.id,
+                crate::memory_levels::CreateKind::Create,
+                None,
+                now_ms(),
+            )?;
+            memory
+        }
     };
     let reason = if matched.is_some() {
         "live_match"
@@ -733,6 +769,23 @@ pub fn mutate(
             return Err(MutationError::Refused(Refused::Duplicate(duplicate.id)));
         }
     }
+    // A merge's sources must share one owner, settled before any of them
+    // changes; its survivor takes that owner (spec 3c, ML2.3).
+    let merge_owner = if operation == Operation::Merge {
+        let ids: Vec<i64> = sources.iter().map(|source| source.id).collect();
+        match crate::memory_levels::merge_owner(&tx, &ids, who.project, who.authority) {
+            Ok(owner) => owner,
+            Err(error)
+                if crate::memory_levels::refusal_code(&error).as_deref()
+                    == Some("merge_owner_mismatch") =>
+            {
+                return refuse(tx, "merge_owner_mismatch");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
     let mut before: Vec<Option<Value>> = Vec::new();
     for source in &sources {
         before.push(history_snapshot(&tx, source.id)?);
@@ -794,7 +847,7 @@ pub fn mutate(
                 Some(duplicate) => duplicate.clone(),
                 None => {
                     before.push(None);
-                    insert_memory(
+                    let survivor = insert_memory(
                         &tx,
                         who.project,
                         &category,
@@ -802,7 +855,16 @@ pub fn mutate(
                         who.session,
                         "agent",
                         None,
-                    )?
+                    )?;
+                    crate::memory_levels::created(
+                        &tx,
+                        &who.placer(),
+                        survivor.id,
+                        crate::memory_levels::CreateKind::MergeSurvivor,
+                        merge_owner.as_ref(),
+                        now_ms(),
+                    )?;
+                    survivor
                 }
             };
             if survivor.content != content || survivor.normalized_hash != hash {
@@ -1094,7 +1156,17 @@ mod tests {
             ("CONSTRAINTS".to_owned(), "Never force-push.".to_owned()),
             ("ARCHITECTURE".to_owned(), "Views name edits.".to_owned()),
         ];
-        assert_eq!(promote_facts(&tx, "pj", "s", &facts).unwrap(), 2);
+        assert_eq!(
+            promote_facts(
+                &tx,
+                "pj",
+                "s",
+                &facts,
+                &crate::memory_levels::Placer::unplaced()
+            )
+            .unwrap(),
+            2
+        );
         tx.commit().unwrap();
         let rows = rows(&conn);
         assert_eq!(rows.len(), 4, "{rows:?}");

@@ -1,0 +1,942 @@
+{
+  "schema": "ck-package/v1",
+  "name": "@cortexkit/memory-swe",
+  "version": "1.0.0",
+  "kind": "memory-profile",
+  "summary": "Software-engineering memory profile: project rules, architecture, external constraints, config values and naming, plus the dreamer tasks that verify and curate them against the repository.",
+  "license": "MIT",
+  "source": "https://github.com/cortexkit/magic-context",
+  "requires": {
+    "capabilities": [],
+    "packages": {
+      "@cortexkit/memory-base": "^1.0.0"
+    }
+  },
+  "body": {
+    "schema": "mc/memory-profile@1",
+    "abstract": false,
+    "extends": "@cortexkit/memory-base",
+    "serves": [
+      "@cortexkit/domain-software"
+    ],
+    "default_for": [
+      "@cortexkit/domain-software"
+    ],
+    "categories": [
+      {
+        "id": "swe:project-rules",
+        "tag": "PROJECT_RULES",
+        "stream": "fact",
+        "description": "durable process/workflow rules for this repo (releases, commits, testing, debugging conventions).",
+        "test": "Should a new developer/agent follow this to avoid breaking things during normal recurring work?",
+        "definition": "A durable behavioral expectation for the project — how the developer/agent should approach recurring activities like commits, releases, debugging, dogfooding, benchmarks.",
+        "definition_file": "prompts/categories/project-rules.historian.md",
+        "routing_question": "Is this a recurring developer/agent behavior?",
+        "default_level": "project",
+        "allowed_levels": [
+          "project",
+          "workspace"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 0,
+        "fact_shape": "assertion",
+        "guidance_hint": "a project rule",
+        "guidance_hint_light": "a rule",
+        "mural_rgb": [
+          24,
+          58,
+          112
+        ]
+      },
+      {
+        "id": "swe:architecture",
+        "tag": "ARCHITECTURE",
+        "stream": "fact",
+        "description": "load-bearing design decisions and WHY they hold (not WHAT a file does).",
+        "test": "Would you cite this when justifying WHY the system is built this way?",
+        "definition": "A load-bearing design choice. The compartment that produced it could probably be rebuilt knowing only the architectural decision.",
+        "definition_file": "prompts/categories/architecture.historian.md",
+        "routing_question": "Is this a WHY justifying the system's shape?",
+        "default_level": "project",
+        "allowed_levels": [
+          "project",
+          "workspace"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 1,
+        "fact_shape": "assertion",
+        "guidance_hint": "an architectural fact",
+        "guidance_hint_light": "an architecture fact",
+        "mural_rgb": [
+          0,
+          88,
+          92
+        ]
+      },
+      {
+        "id": "swe:constraints",
+        "tag": "CONSTRAINTS",
+        "stream": "fact",
+        "description": "hard limits imposed by EXTERNAL systems (APIs, providers, platforms, protocols). Not our own code's behavior.",
+        "test": "Is this a discovered hard limit of an EXTERNAL system that we cannot change ourselves and that constrains future code/design?",
+        "definition": "A discovered limit, behavior, or quirk of an **external** system (provider API, host SDK, language parser, package registry, OS, runtime) that we have to work around because we don't control the source.",
+        "definition_file": "prompts/categories/constraints.historian.md",
+        "routing_question": "Is this a discovered limit or external gotcha?",
+        "default_level": "workspace",
+        "allowed_levels": [
+          "project",
+          "workspace"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 2,
+        "fact_shape": "assertion",
+        "guidance_hint": "a hard-won constraint",
+        "guidance_hint_light": "a constraint",
+        "mural_rgb": [
+          126,
+          76,
+          16
+        ]
+      },
+      {
+        "id": "swe:config-values",
+        "tag": "CONFIG_VALUES",
+        "stream": "fact",
+        "description": "stable configuration keys/values and conventions. Not transient measurements (test counts, sizes, versions).",
+        "test": "Is this a DURABLE configuration value — a path, threshold, default, supported range, schema field, semantic constant — that the agent needs to reference correctly in future sessions?",
+        "definition": "A specific value that future work needs to know exactly, AND that is intended to be stable across sessions (not a snapshot measurement).",
+        "definition_file": "prompts/categories/config-values.historian.md",
+        "routing_question": "Is this a concrete reusable value?",
+        "default_level": "project",
+        "allowed_levels": [
+          "project",
+          "workspace"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 3,
+        "fact_shape": "key-value",
+        "guidance_hint": "a config value",
+        "guidance_hint_light": "a config value",
+        "mural_rgb": [
+          88,
+          52,
+          132
+        ]
+      },
+      {
+        "id": "swe:naming",
+        "tag": "NAMING",
+        "stream": "fact",
+        "description": "naming conventions and canonical names. Not inventories.",
+        "test": "Is this a naming convention, prefix/suffix pattern, or an intentional rename that future work needs to know to use the right name?",
+        "definition": "NAMING captures **conventions and renames**, not inventories of current names.",
+        "definition_file": "prompts/categories/naming.historian.md",
+        "routing_question": "Is this a name we chose?",
+        "default_level": "project",
+        "allowed_levels": [
+          "project",
+          "workspace"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 4,
+        "fact_shape": "canonical-name",
+        "guidance_hint": "a naming convention",
+        "guidance_hint_light": "a naming convention",
+        "mural_rgb": [
+          28,
+          98,
+          58
+        ]
+      },
+      {
+        "id": "swe:engineering-practice",
+        "tag": "ENGINEERING_PRACTICE",
+        "stream": "user-observation",
+        "description": "how the user does and wants software engineering done in every codebase: debugging, testing, review, delivery, agent workflow.",
+        "test": "Does this describe how the user does or wants software engineering done, in any codebase of theirs?",
+        "definition_file": "prompts/categories/engineering-practice.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "workspace",
+          "agent"
+        ],
+        "visibility": "own-profile",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 5,
+        "fact_shape": "assertion"
+      },
+      {
+        "id": "swe:dev-environment",
+        "tag": "DEV_ENVIRONMENT",
+        "stream": "user-observation",
+        "description": "the user's own development setup shared by their coding projects: stack, runtimes, package managers, editor, shell, OS.",
+        "test": "Is this about the user's own development setup, shared by every coding project of theirs?",
+        "definition_file": "prompts/categories/dev-environment.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "workspace"
+        ],
+        "visibility": "own-profile",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 6,
+        "fact_shape": "assertion"
+      }
+    ],
+    "extraction": {
+      "events": [
+        {
+          "id": "swe:causal-incident",
+          "tag": "causal_incident",
+          "definition_file": "prompts/events/causal_incident.historian.md",
+          "consumer": "swe:reflect-patterns",
+          "anchor": "message-ids",
+          "fields": {
+            "required": [
+              "summary",
+              "affected_surface",
+              "symptom",
+              "cause_summary",
+              "disposition",
+              "evidence",
+              "at_compartment"
+            ],
+            "optional": [
+              "fix_summary",
+              "model_or_provider_involved",
+              "ord_span",
+              "produced_fact"
+            ]
+          },
+          "enums": {
+            "affected_surface": [
+              "ui",
+              "provider_sdk",
+              "model_behavior",
+              "tool_protocol",
+              "host_integration",
+              "historian_pipeline",
+              "edit_pipeline",
+              "environment",
+              "undocumented_internal",
+              "other"
+            ],
+            "disposition": [
+              "fixed",
+              "workaround",
+              "external_blocker",
+              "contained_failure",
+              "deferred"
+            ]
+          },
+          "shape_fields": [
+            "summary",
+            "affected_surface",
+            "symptom",
+            "cause_summary",
+            "disposition",
+            "evidence",
+            "fix_summary",
+            "produced_fact"
+          ]
+        },
+        {
+          "id": "swe:trajectory-correction",
+          "tag": "trajectory_correction",
+          "definition_file": "prompts/events/trajectory_correction.historian.md",
+          "consumer": "swe:reflect-patterns",
+          "anchor": "message-ids",
+          "fields": {
+            "required": [
+              "summary",
+              "before_strategy",
+              "correction_source",
+              "correction_signal",
+              "after_strategy",
+              "evidence",
+              "at_compartment"
+            ],
+            "optional": [
+              "reason_for_change",
+              "ord_span"
+            ]
+          },
+          "enums": {
+            "correction_source": [
+              "user",
+              "test_result",
+              "tool_result",
+              "self_review"
+            ]
+          },
+          "shape_fields": [
+            "summary",
+            "before_strategy",
+            "correction_source",
+            "correction_signal",
+            "after_strategy",
+            "evidence"
+          ]
+        }
+      ]
+    },
+    "overrides": {
+      "extraction.episode_types": [
+        "bug",
+        "feature",
+        "release",
+        "refactor",
+        "infra",
+        "design",
+        "investigation",
+        "docs"
+      ],
+      "extraction.primer_candidates": {
+        "consumer": "mc:promote-primers",
+        "answered_by": "swe:refresh-primers",
+        "max_per_chunk": 1
+      },
+      "calibration": {
+        "file": "prompts/historian/reference-seeds.json",
+        "per_call": 3
+      }
+    },
+    "extend": [
+      {
+        "path": "render_slots.about-the-user.categories",
+        "append": [
+          "swe:engineering-practice",
+          "swe:dev-environment"
+        ]
+      },
+      {
+        "path": "tasks.base:review-user-memories.categories",
+        "append": [
+          "swe:engineering-practice",
+          "swe:dev-environment"
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "swe:map-memories",
+        "kind": "map-memories",
+        "enabled": true,
+        "reads": [
+          "memory-pool",
+          "repo-files"
+        ],
+        "evidence": [
+          "repo-files"
+        ],
+        "actions": [
+          "record-mapping"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:map-memories/system",
+          "user": "dreamer/swe:map-memories/user"
+        },
+        "settings": {
+          "map_extensions": [
+            "ts",
+            "tsx",
+            "js",
+            "jsx",
+            "mjs",
+            "cjs",
+            "rs",
+            "go",
+            "py",
+            "json",
+            "jsonc",
+            "sql",
+            "toml",
+            "sh"
+          ],
+          "seed_paths_per_memory": 3
+        }
+      },
+      {
+        "id": "swe:verify",
+        "kind": "verify",
+        "enabled": true,
+        "reads": [
+          "memory-pool",
+          "repo-files",
+          "git"
+        ],
+        "evidence": [
+          "repo-files",
+          "git"
+        ],
+        "actions": [
+          "mark-verified",
+          "update",
+          "archive",
+          "skip"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:verify/system",
+          "user": "dreamer/swe:verify/user.diff-evidence",
+          "user_without_diff": "dreamer/swe:verify-broad/user"
+        }
+      },
+      {
+        "id": "swe:verify-broad",
+        "kind": "verify-broad",
+        "enabled": true,
+        "reads": [
+          "memory-pool",
+          "repo-files"
+        ],
+        "evidence": [
+          "repo-files"
+        ],
+        "actions": [
+          "mark-verified",
+          "update",
+          "archive",
+          "skip"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:verify/system",
+          "user": "dreamer/swe:verify-broad/user"
+        }
+      },
+      {
+        "id": "swe:curate",
+        "kind": "curate",
+        "enabled": true,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "merge",
+          "update",
+          "write-split",
+          "archive"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:curate/system",
+          "user": "dreamer/swe:curate/user"
+        }
+      },
+      {
+        "id": "swe:compress-cues",
+        "kind": "compress-cues",
+        "enabled": true,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "set-cue"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:compress-cues/system",
+          "user": "dreamer/swe:compress-cues/user"
+        },
+        "settings": {
+          "cue_chars_high": 90,
+          "cue_chars_low": 50,
+          "cue_high_from": 70
+        }
+      },
+      {
+        "id": "swe:classify-memories",
+        "kind": "classify-memories",
+        "enabled": true,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "set-importance",
+          "set-scope",
+          "set-shareable",
+          "set-safety-critical"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:classify-memories/system",
+          "user": "dreamer/swe:classify-memories/user"
+        }
+      },
+      {
+        "id": "swe:reflect-patterns",
+        "kind": "reflect-events",
+        "enabled": true,
+        "replaces_builtin": "retrospective",
+        "reads": [
+          "historian-events",
+          "session-transcripts",
+          "memory-pool"
+        ],
+        "evidence": [
+          "historian-events",
+          "session-transcripts"
+        ],
+        "actions": [
+          "write-memory",
+          "write-observation-candidate"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming",
+          "swe:engineering-practice",
+          "swe:dev-environment",
+          "base:communication",
+          "base:preferences",
+          "base:boundaries",
+          "base:working-style",
+          "base:identity"
+        ],
+        "event_kinds": [
+          "swe:causal-incident",
+          "swe:trajectory-correction"
+        ],
+        "prompts": {
+          "gate_system": "dreamer/swe:reflect-patterns/gate.system",
+          "gate_user": "dreamer/swe:reflect-patterns/gate.user",
+          "system": "dreamer/swe:reflect-patterns/system",
+          "user": "dreamer/swe:reflect-patterns/user"
+        },
+        "settings": {
+          "min_proof_count": 2,
+          "group_events_by": [
+            "affected_surface",
+            "correction_source"
+          ]
+        }
+      },
+      {
+        "id": "swe:maintain-docs",
+        "kind": "maintain-docs",
+        "enabled": false,
+        "reads": [
+          "repo-files",
+          "git"
+        ],
+        "evidence": [
+          "repo-files",
+          "git"
+        ],
+        "actions": [
+          "propose-doc-change"
+        ],
+        "categories": [],
+        "prompts": {
+          "system": "dreamer/swe:maintain-docs/system",
+          "user": "dreamer/swe:maintain-docs/user"
+        }
+      },
+      {
+        "id": "swe:refresh-primers",
+        "kind": "refresh-primers",
+        "enabled": true,
+        "reads": [
+          "primers",
+          "repo-files",
+          "session-transcripts"
+        ],
+        "evidence": [
+          "repo-files",
+          "session-transcripts"
+        ],
+        "actions": [
+          "set-primer-answer"
+        ],
+        "categories": [],
+        "prompts": {
+          "system": "dreamer/swe:refresh-primers/system",
+          "user_raw": "dreamer/swe:refresh-primers/user.raw",
+          "user_closed_book": "dreamer/swe:refresh-primers/user.closed-book"
+        }
+      }
+    ],
+    "retention": {
+      "category_ttl_ms": {
+        "swe:project-rules": null,
+        "swe:architecture": null,
+        "swe:constraints": null,
+        "swe:config-values": null,
+        "swe:naming": null,
+        "swe:engineering-practice": null,
+        "swe:dev-environment": null
+      },
+      "legacy_ttl_ms": {
+        "USER_DIRECTIVES": null,
+        "USER_PREFERENCES": null,
+        "CONFIG_DEFAULTS": null,
+        "ARCHITECTURE_DECISIONS": null,
+        "ENVIRONMENT": null,
+        "WORKFLOW_RULES": 7776000000,
+        "KNOWN_ISSUES": 2592000000
+      }
+    },
+    "category_map": {
+      "PROJECT_RULES": "swe:project-rules",
+      "ARCHITECTURE": "swe:architecture",
+      "CONSTRAINTS": "swe:constraints",
+      "CONFIG_VALUES": "swe:config-values",
+      "NAMING": "swe:naming",
+      "USER_DIRECTIVES": "swe:project-rules",
+      "USER_PREFERENCES": "swe:project-rules",
+      "CONFIG_DEFAULTS": "swe:config-values",
+      "ARCHITECTURE_DECISIONS": "swe:architecture",
+      "ENVIRONMENT": "swe:config-values",
+      "WORKFLOW_RULES": "swe:project-rules",
+      "KNOWN_ISSUES": "swe:constraints"
+    },
+    "main_agent": {
+      "memory_examples": [
+        {
+          "category": "swe:config-values",
+          "content": "OpenCode source is at ~/Work/OSS/opencode"
+        },
+        {
+          "category": "swe:constraints",
+          "content": "Dashboard Tauri build needs RGBA PNGs, not grayscale"
+        }
+      ]
+    },
+    "prompts": {
+      "historian/system": {
+        "sections": [
+          {
+            "id": "persona",
+            "override": true,
+            "file": "prompts/historian/system/persona.md"
+          },
+          {
+            "id": "how-magic-context-works",
+            "override": true,
+            "file": "prompts/historian/system/how-magic-context-works.md"
+          },
+          {
+            "id": "what-you-produce",
+            "override": true,
+            "file": "prompts/historian/system/what-you-produce.md"
+          },
+          {
+            "id": "world-experience-split",
+            "override": true,
+            "file": "prompts/historian/system/world-experience-split.md"
+          },
+          {
+            "id": "compartment-boundaries",
+            "override": true,
+            "file": "prompts/historian/system/compartment-boundaries.md"
+          },
+          {
+            "id": "episode-type",
+            "override": true,
+            "file": "prompts/historian/system/episode-type.md"
+          },
+          {
+            "id": "boundary-other-rules",
+            "override": true,
+            "file": "prompts/historian/system/boundary-other-rules.md"
+          },
+          {
+            "id": "importance-bands",
+            "override": true,
+            "file": "prompts/historian/system/importance-bands.md"
+          },
+          {
+            "id": "importance-cross-check",
+            "override": true,
+            "file": "prompts/historian/system/importance-cross-check.md"
+          },
+          {
+            "id": "tiers-voice-and-cross-tier",
+            "override": true,
+            "file": "prompts/historian/system/tiers-voice-and-cross-tier.md"
+          },
+          {
+            "id": "tiers-p1-to-p4",
+            "override": true,
+            "file": "prompts/historian/system/tiers-p1-to-p4.md"
+          },
+          {
+            "id": "p4-shapes",
+            "override": true,
+            "file": "prompts/historian/system/p4-shapes.md"
+          },
+          {
+            "id": "anchor-decay",
+            "override": true,
+            "file": "prompts/historian/system/anchor-decay.md"
+          },
+          {
+            "id": "facts-general-rules",
+            "override": true,
+            "file": "prompts/historian/system/facts-general-rules.md"
+          },
+          {
+            "id": "events-intro",
+            "after": "fact-routing-test",
+            "requires": "event_kinds",
+            "file": "prompts/historian/system/events-intro.md"
+          },
+          {
+            "id": "event-definitions",
+            "after": "events-intro",
+            "requires": "event_kinds",
+            "file": "prompts/historian/system/event-definitions.md"
+          },
+          {
+            "id": "event-extraction-gates",
+            "after": "event-definitions",
+            "requires": "event_kinds",
+            "file": "prompts/historian/system/event-extraction-gates.md"
+          },
+          {
+            "id": "user-observations-swe",
+            "after": "user-observations",
+            "file": "prompts/historian/system/user-observations-swe.md"
+          },
+          {
+            "id": "primer-candidates",
+            "after": "user-observations-end",
+            "requires": "primer_candidates",
+            "file": "prompts/historian/system/primer-candidates.md"
+          }
+        ]
+      },
+      "dreamer/base:review-user-memories/user": {
+        "sections": [
+          {
+            "id": "swe-categories",
+            "after": "category-rules",
+            "file": "prompts/dreamer/review-user-memories/user.swe-categories.md"
+          }
+        ]
+      },
+      "dreamer/swe:map-memories/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/map-memories/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:map-memories/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/map-memories/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:verify/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/verify/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:verify/user.diff-evidence": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/verify/user.diff-evidence.md"
+          }
+        ]
+      },
+      "dreamer/swe:verify-broad/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/verify-broad/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:compress-cues/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/compress-cues/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:compress-cues/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/compress-cues/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:classify-memories/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/classify-memories/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:classify-memories/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/classify-memories/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:reflect-patterns/gate.system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/reflect-patterns/gate.system.md"
+          }
+        ]
+      },
+      "dreamer/swe:reflect-patterns/gate.user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/reflect-patterns/gate.user.md"
+          }
+        ]
+      },
+      "dreamer/swe:reflect-patterns/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/reflect-patterns/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:reflect-patterns/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/reflect-patterns/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:maintain-docs/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/maintain-docs/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:maintain-docs/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/maintain-docs/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:refresh-primers/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/refresh-primers/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:refresh-primers/user.raw": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/refresh-primers/user.raw.md"
+          }
+        ]
+      },
+      "dreamer/swe:refresh-primers/user.closed-book": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/refresh-primers/user.closed-book.md"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "admission": "main_agent",
+  "facade_save": "main_agent",
+  "facade_canonical_merge": "ineligible",
+  "host_store_admission": "main_agent",
+  "action_write": "main_agent",
+  "action_canonical_merge": "ineligible",
+  "historian_promotion": "historian",
+  "historian_fold": "historian",
+  "dreamer_create": "dreamer",
+  "dedup_reuse": "ineligible"
+}

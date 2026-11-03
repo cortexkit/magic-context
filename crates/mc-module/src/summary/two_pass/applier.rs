@@ -300,6 +300,19 @@ pub struct Admission<'a> {
     pub conflict_target: Option<i64>,
     pub fact_id: i64,
     pub reservation: Option<&'a Reservation>,
+    /// The session's writer authority, for a new memory's level record
+    /// (spec 3c, ML2).
+    pub authority: Option<&'a crate::memory_levels::Authority>,
+}
+
+/// The message ordinals a fact's evidence blocks cover.
+fn fact_ordinals(tx: &Transaction, fact: i64) -> rusqlite::Result<Vec<(u64, u64)>> {
+    tx.prepare_cached(
+        "SELECT b.start_ordinal, b.end_ordinal FROM memory_fact_block_links l
+         JOIN memory_fact_blocks b ON b.id = l.block_id WHERE l.fact_id = ?1",
+    )?
+    .query_map(params![fact], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .collect()
 }
 
 /// Copy a memory's clause evidence from one revision to the next one, for a
@@ -429,6 +442,22 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                         params![memory.id, now_ms() + ttl],
                     )?;
                 }
+                // Turn two's `new` is the two-pass form of fact promotion, so
+                // it is placed the same way (spec 3c, ML2.1).
+                let ordinals = fact_ordinals(&tx, admission.fact_id)?;
+                crate::memory_levels::created(
+                    &tx,
+                    &crate::memory_levels::Placer {
+                        authority: admission.authority,
+                        actor: crate::memory_levels::Actor::Historian,
+                        session: Some(admission.source_session),
+                        ordinals: &ordinals,
+                    },
+                    memory.id,
+                    crate::memory_levels::CreateKind::Create,
+                    None,
+                    now_ms(),
+                )?;
                 memory.id
             }
         };
@@ -598,6 +627,7 @@ pub fn commit_revision(
     plan: &Plan,
     fact_id: i64,
     reservation: Option<&Reservation>,
+    authority: Option<&crate::memory_levels::Authority>,
 ) -> Result<Receipt, Error> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = read_receipt(&tx, &decision.key)? {
@@ -625,6 +655,25 @@ pub fn commit_revision(
         tx.commit()?;
         return Ok(receipt);
     }
+    // A replacement's sources must share one owner, which the new row takes
+    // (spec 3c, ML2.3).
+    let owner = if decision.action == "replaces" {
+        let ids: Vec<i64> = current.iter().map(|source| source.id).collect();
+        match crate::memory_levels::merge_owner(&tx, &ids, &decision.project, authority) {
+            Ok(owner) => owner,
+            Err(error)
+                if crate::memory_levels::refusal_code(&error).as_deref()
+                    == Some("merge_owner_mismatch") =>
+            {
+                let receipt = failure(&tx, &request, "merge_owner_mismatch", false)?;
+                tx.commit()?;
+                return Ok(receipt);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
     let mut before: Vec<Option<Value>> = Vec::new();
     for source in &current {
         before.push(history_snapshot(&tx, source.id)?);
@@ -663,6 +712,19 @@ pub fn commit_revision(
         tx.execute(
             "UPDATE memories SET expires_at = ?2, source_session_id = NULL WHERE id = ?1",
             params![inserted.id, expires],
+        )?;
+        crate::memory_levels::created(
+            &tx,
+            &crate::memory_levels::Placer {
+                authority,
+                actor: crate::memory_levels::Actor::Historian,
+                session: None,
+                ordinals: &[],
+            },
+            inserted.id,
+            crate::memory_levels::CreateKind::MergeSurvivor,
+            owner.as_ref(),
+            now_ms(),
         )?;
         inserted.id
     } else {

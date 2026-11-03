@@ -1,0 +1,393 @@
+{
+  "schema": "ck-package/v1",
+  "name": "@cortexkit/memory-base",
+  "version": "1.0.0",
+  "kind": "memory-profile",
+  "summary": "Base memory profile: the global user categories, the one user-memory review, and the domain-neutral historian sections every CortexKit memory profile builds on.",
+  "license": "MIT",
+  "source": "https://github.com/cortexkit/magic-context",
+  "requires": {
+    "capabilities": [],
+    "packages": {}
+  },
+  "body": {
+    "schema": "mc/memory-profile@1",
+    "abstract": true,
+    "extends": null,
+    "serves": [],
+    "default_for": [],
+    "decay_classes": [
+      {
+        "id": "stable",
+        "meaning": "True until contradicted (a name, a standing boundary, a load-bearing design reason)."
+      },
+      {
+        "id": "drifting",
+        "meaning": "Likely to change over months (tastes, current focus, tool choices, external limits that vendors lift)."
+      },
+      {
+        "id": "bounded",
+        "meaning": "Has a known validity window; hidden after it ends, history kept."
+      },
+      {
+        "id": "recurring",
+        "meaning": "Repeats by rule; freshness follows the next occurrence."
+      },
+      {
+        "id": "open_until_resolved",
+        "meaning": "Commitments and situations; ends on a resolution event, never silently."
+      },
+      {
+        "id": "dated_permanent",
+        "meaning": "Past milestones; constant freshness."
+      }
+    ],
+    "categories": [
+      {
+        "id": "base:communication",
+        "tag": "COMMUNICATION",
+        "stream": "user-observation",
+        "description": "how the user wants agents to talk to them in any work: length, tone, format, reply language, how much to explain.",
+        "test": "Does this change how an agent should talk to the user — length, tone, format, language, or how much to explain?",
+        "definition_file": "prompts/categories/communication.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "agent"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 0,
+        "fact_shape": "assertion"
+      },
+      {
+        "id": "base:preferences",
+        "tag": "PREFERENCES",
+        "stream": "user-observation",
+        "description": "likes and dislikes the user holds everywhere, including design and visual taste.",
+        "test": "Is this a like or dislike the user holds everywhere, one that should shape what an agent chooses or proposes?",
+        "definition_file": "prompts/categories/preferences.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "workspace",
+          "agent"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 1,
+        "fact_shape": "assertion"
+      },
+      {
+        "id": "base:boundaries",
+        "tag": "BOUNDARIES",
+        "stream": "user-observation",
+        "description": "what the user wants to confirm before an agent acts, and what they never want done.",
+        "test": "Would acting here without asking first break the user's trust?",
+        "definition_file": "prompts/categories/boundaries.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "workspace",
+          "agent"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 2,
+        "fact_shape": "assertion"
+      },
+      {
+        "id": "base:working-style",
+        "tag": "WORKING_STYLE",
+        "stream": "user-observation",
+        "description": "how the user works with agents whatever the task: pace, planning, review habits, decision style, feedback.",
+        "test": "Does this describe how the user likes to work with an agent, whatever the task?",
+        "definition_file": "prompts/categories/working-style.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global",
+          "agent"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "drifting",
+        "sensitive": false,
+        "render_order": 3,
+        "fact_shape": "assertion"
+      },
+      {
+        "id": "base:identity",
+        "tag": "IDENTITY",
+        "stream": "user-observation",
+        "description": "who the user is: name and form of address, time zone, languages, profession and current main focus.",
+        "test": "Is this a stable fact about who the user is that any agent needs to address and serve them correctly?",
+        "definition_file": "prompts/categories/identity.historian.md",
+        "default_level": "global",
+        "allowed_levels": [
+          "global"
+        ],
+        "visibility": "all-profiles",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 4,
+        "fact_shape": "assertion"
+      }
+    ],
+    "extraction": {
+      "episode_types": [
+        "research",
+        "planning",
+        "decision",
+        "task",
+        "review",
+        "conversation"
+      ],
+      "events": [],
+      "primer_candidates": null
+    },
+    "calibration": null,
+    "tasks": [
+      {
+        "id": "base:review-user-memories",
+        "kind": "review-user-memories",
+        "enabled": true,
+        "reads": [
+          "historian-user-observations",
+          "user-profile"
+        ],
+        "evidence": [
+          "historian-user-observations"
+        ],
+        "actions": [
+          "promote",
+          "update",
+          "dismiss",
+          "consume-candidates"
+        ],
+        "categories": [
+          "base:communication",
+          "base:preferences",
+          "base:boundaries",
+          "base:working-style",
+          "base:identity"
+        ],
+        "prompts": {
+          "system": "dreamer/base:review-user-memories/system",
+          "user": "dreamer/base:review-user-memories/user"
+        }
+      }
+    ],
+    "retention": {
+      "default_ttl_ms": null,
+      "category_ttl_ms": {
+        "base:communication": null,
+        "base:preferences": null,
+        "base:boundaries": null,
+        "base:working-style": null,
+        "base:identity": null
+      },
+      "legacy_ttl_ms": {}
+    },
+    "category_map": {},
+    "render_slots": [
+      {
+        "id": "about-the-user",
+        "tag": "user-profile",
+        "level": "global",
+        "layout": "flat-bullets",
+        "categories": [
+          "base:communication",
+          "base:preferences",
+          "base:boundaries",
+          "base:working-style",
+          "base:identity"
+        ]
+      }
+    ],
+    "main_agent": {
+      "memory_examples": []
+    },
+    "prompts": {
+      "historian/system": {
+        "variants": [
+          "xml",
+          "combined"
+        ],
+        "sections": [
+          {
+            "id": "persona",
+            "file": "prompts/historian/system/persona.md"
+          },
+          {
+            "id": "how-magic-context-works",
+            "file": "prompts/historian/system/how-magic-context-works.md"
+          },
+          {
+            "id": "what-you-produce",
+            "file": "prompts/historian/system/what-you-produce.md"
+          },
+          {
+            "id": "world-experience-split",
+            "file": "prompts/historian/system/world-experience-split.md"
+          },
+          {
+            "id": "inputs",
+            "file": "prompts/historian/system/inputs.md"
+          },
+          {
+            "id": "input-notation",
+            "mc": "historian/input-notation"
+          },
+          {
+            "id": "compartment-boundaries",
+            "file": "prompts/historian/system/compartment-boundaries.md"
+          },
+          {
+            "id": "episode-type",
+            "file": "prompts/historian/system/episode-type.md"
+          },
+          {
+            "id": "boundary-other-rules",
+            "file": "prompts/historian/system/boundary-other-rules.md"
+          },
+          {
+            "id": "importance-bands",
+            "file": "prompts/historian/system/importance-bands.md"
+          },
+          {
+            "id": "importance-cross-check",
+            "file": "prompts/historian/system/importance-cross-check.md"
+          },
+          {
+            "id": "importance-trap",
+            "file": "prompts/historian/system/importance-trap.md"
+          },
+          {
+            "id": "tiers-voice-and-cross-tier",
+            "file": "prompts/historian/system/tiers-voice-and-cross-tier.md"
+          },
+          {
+            "id": "tiers-p1-to-p4",
+            "file": "prompts/historian/system/tiers-p1-to-p4.md"
+          },
+          {
+            "id": "p4-shapes",
+            "file": "prompts/historian/system/p4-shapes.md"
+          },
+          {
+            "id": "u-lines",
+            "file": "prompts/historian/system/u-lines.md"
+          },
+          {
+            "id": "anchor-decay",
+            "file": "prompts/historian/system/anchor-decay.md"
+          },
+          {
+            "id": "construction-order",
+            "file": "prompts/historian/system/construction-order.md"
+          },
+          {
+            "id": "facts-general-rules",
+            "requires": "fact_categories",
+            "file": "prompts/historian/system/facts-general-rules.md"
+          },
+          {
+            "id": "time-and-certainty",
+            "file": "prompts/historian/system/time-and-certainty.md"
+          },
+          {
+            "id": "categories-intro",
+            "requires": "fact_categories",
+            "file": "prompts/historian/system/categories-intro.md"
+          },
+          {
+            "id": "fact-category-definitions",
+            "requires": "fact_categories",
+            "file": "prompts/historian/system/fact-category-definitions.md"
+          },
+          {
+            "id": "fact-routing-test",
+            "requires": "fact_categories",
+            "file": "prompts/historian/system/fact-routing-test.md"
+          },
+          {
+            "id": "user-observations",
+            "requires": "user_categories",
+            "file": "prompts/historian/system/user-observations.md"
+          },
+          {
+            "id": "user-observations-end",
+            "requires": "user_categories",
+            "file": "prompts/historian/system/user-observations-end.md"
+          },
+          {
+            "id": "output",
+            "mc": "historian/output-contract"
+          }
+        ]
+      },
+      "dreamer/base:review-user-memories/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/review-user-memories/system.md"
+          }
+        ]
+      },
+      "dreamer/base:review-user-memories/user": {
+        "sections": [
+          {
+            "id": "intro",
+            "file": "prompts/dreamer/review-user-memories/user.intro.md"
+          },
+          {
+            "id": "inputs",
+            "mc": "dreamer/review-user-memories.input"
+          },
+          {
+            "id": "safety-rules",
+            "file": "prompts/dreamer/review-user-memories/user.safety-heading.md"
+          },
+          {
+            "id": "safety-rules-body",
+            "mc": "dreamer/review-user-memories.safety-rules"
+          },
+          {
+            "id": "category-rules",
+            "file": "prompts/dreamer/review-user-memories/user.category-rules.md"
+          },
+          {
+            "id": "output",
+            "mc": "dreamer/review-user-memories.output-contract"
+          }
+        ]
+      },
+      "main-agent/system.memory-guidance.full": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/main-agent/system.memory-guidance.full.md"
+          }
+        ]
+      },
+      "main-agent/system.memory-guidance.light": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/main-agent/system.memory-guidance.light.md"
+          }
+        ]
+      },
+      "main-agent/system.memory-mural-guidance": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/main-agent/system.memory-mural-guidance.md"
+          }
+        ]
+      }
+    }
+  }
+}

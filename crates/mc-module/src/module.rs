@@ -326,6 +326,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
+    /// Append new memories' sync records to Engram in the background
+    /// (spec 3c, ML3). Without `context.db` nothing is ever queued.
+    pub fn spawn_memory_sync(&self) {
+        if self.inner.db.is_none() {
+            return;
+        }
+        let module = self.clone();
+        tokio::spawn(async move {
+            let db = module.inner.db.as_ref().expect("checked above");
+            crate::memory_sync::run(&module.inner.client, db).await;
+        });
+    }
+
     /// Mark the session's project active now.
     fn touch(&self, session: &SessionRef) {
         let project = self
@@ -393,6 +406,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         // A session that so far only called tools starts
                         // afresh below, like any new one.
                         Some(existing) if existing.compacting() => {
+                            ensure_memory_context(&inner, &route, existing).await;
                             existing
                                 .setup(&inner.client, settings, &route, &request, features)
                                 .await
@@ -408,6 +422,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             {
                                 fresh.restore(durable);
                             }
+                            ensure_memory_context(&inner, &route, &mut fresh).await;
                             fresh
                                 .setup(&inner.client, settings, &route, &request, features)
                                 .await;
@@ -449,6 +464,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     } => {
                         let session = session
                             .get_or_insert_with(|| Session::tools_only(&route, inner.db.clone()));
+                        if name == "ctx_memory" {
+                            ensure_memory_context(&inner, &route, session).await;
+                        }
                         let answer = session.tool(&inner.client, settings, &name, &input).await;
                         let _ = reply.send(answer);
                     }
@@ -480,6 +498,43 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
         jobs
     }
+}
+
+/// Give `session` its memory context (spec 3c, ML1): the one stored for it,
+/// or one read from Entorhinal now and stored for good. A session without a
+/// folder has none, and its new memories stay unplaced.
+async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Inner<C>,
+    route: &Route,
+    session: &mut Session,
+) {
+    if session.has_memory_context() {
+        return;
+    }
+    let Some(folder) = route.workdir.as_deref() else {
+        return;
+    };
+    let stored = inner
+        .store
+        .as_ref()
+        .and_then(|store| store.memory_context(&route.session));
+    let context = match stored {
+        Some(context) => context,
+        None => {
+            let read = crate::memory_context::read(
+                &inner.client,
+                &route.session,
+                folder,
+                route.agent_id.as_deref(),
+            )
+            .await;
+            match &inner.store {
+                Some(store) => store.keep_memory_context(&route.session, read),
+                None => read,
+            }
+        }
+    };
+    session.set_memory_context(context);
 }
 
 /// Run the summarizer beside the session's worker, and hand its result back

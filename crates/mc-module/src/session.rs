@@ -136,6 +136,10 @@ pub struct Session {
     /// once, so the answered-images lane can keep the text and mark each
     /// removed image ([`lanes::image_results`]).
     image_outputs: std::collections::BTreeMap<lanes::PartKey, String>,
+    /// The session's memory context, fixed at its first Setup or first
+    /// memory write (spec 3c, ML1), and what its writes record from it.
+    memory_context: Option<crate::memory_profile::MemoryContext>,
+    authority: Option<crate::memory_levels::Authority>,
 }
 
 impl Session {
@@ -182,7 +186,35 @@ impl Session {
             drain: Default::default(),
             reservation: None,
             image_outputs: std::collections::BTreeMap::new(),
+            memory_context: None,
+            authority: None,
         }
+    }
+
+    /// Whether the session's memory context is known yet.
+    pub fn has_memory_context(&self) -> bool {
+        self.memory_context.is_some()
+    }
+
+    /// Take the session's memory context. It never changes afterwards.
+    pub fn set_memory_context(&mut self, context: crate::memory_profile::MemoryContext) {
+        if self.memory_context.is_none() {
+            self.authority = crate::memory_levels::Authority::from_context(&context);
+            self.memory_context = Some(context);
+        }
+    }
+
+    /// Whether the summarizer may read and admit memories: configured, and
+    /// the session's memory profile was not refused. A refused profile keeps
+    /// existing memories in the head (spec 3c, ML1.6).
+    fn memory_admissions(&self, settings: &Settings) -> bool {
+        settings.memory_enabled
+            && !self.memory_context.as_ref().is_some_and(|context| {
+                matches!(
+                    context.profile.state.as_str(),
+                    "unresolved" | "conflict" | "blocked" | "unavailable"
+                )
+            })
     }
 
     /// A session that only calls tools: a runner offers it `ctx_search`,
@@ -457,7 +489,7 @@ impl Session {
         if !self.features.summarizer || self.summarizing {
             return None;
         }
-        let memory_enabled = settings.memory_enabled && self.project.is_some();
+        let memory_enabled = self.memory_admissions(settings) && self.project.is_some();
         let window = self.conditions.context_window;
         let threshold = settings.execute_threshold_percentage;
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
@@ -823,11 +855,15 @@ impl Session {
                 .as_ref()
                 .filter(|_| {
                     !two_pass
-                        && settings.memory_enabled
+                        && self.memory_admissions(settings)
                         && settings.auto_promote
                         && !facts.is_empty()
                 })
-                .map(|project| (project.id.as_str(), facts.as_slice()));
+                .map(|project| crate::context_db::Promotion {
+                    project: project.id.as_str(),
+                    facts: facts.as_slice(),
+                    authority: self.authority.as_ref(),
+                });
             // The plugin stores one primer candidate per run, the first.
             let primer = match (&self.project, validated.primer_candidates.first()) {
                 (Some(project), Some(candidate)) => {
@@ -901,9 +937,10 @@ impl Session {
             project: self.project.as_ref()?.id.clone(),
             project_root: self.workdir.clone(),
             continuation,
-            memory_enabled: settings.memory_enabled,
+            memory_enabled: self.memory_admissions(settings),
             auto_promote: settings.auto_promote,
             embedding: settings.embedding.clone(),
+            authority: self.authority.clone(),
         })
     }
 
@@ -1078,6 +1115,7 @@ impl Session {
                     harness: &self.key.harness,
                     session: &self.key.session,
                     project: &project.id,
+                    authority: self.authority.as_ref(),
                 };
                 db.with_connection(|conn| crate::memory_tool::run(conn, &who, input))
             }

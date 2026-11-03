@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mc/memory-profile@1",
+  "title": "Body of a ck-package/v1 package whose kind is memory-profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "abstract", "extends", "serves", "default_for"],
+  "properties": {
+    "schema": { "const": "mc/memory-profile@1" },
+    "abstract": { "type": "boolean" },
+    "extends": { "anyOf": [{ "$ref": "#/$defs/packageName" }, { "type": "null" }] },
+    "serves": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/packageName" } },
+    "default_for": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/packageName" } },
+    "decay_classes": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/decayClass" } },
+    "categories": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/category" } },
+    "extraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "episode_types": { "$ref": "#/$defs/symbols" },
+        "events": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/eventKind" } },
+        "primer_candidates": { "anyOf": [{ "$ref": "#/$defs/primerCandidates" }, { "type": "null" }] }
+      }
+    },
+    "calibration": { "anyOf": [{ "$ref": "#/$defs/calibration" }, { "type": "null" }] },
+    "tasks": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/task" } },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_ttl_ms": { "$ref": "#/$defs/ttl" },
+        "category_ttl_ms": { "type": "object", "maxProperties": 24, "propertyNames": { "$ref": "#/$defs/qualifiedId" }, "additionalProperties": { "$ref": "#/$defs/ttl" } },
+        "legacy_ttl_ms": { "type": "object", "maxProperties": 32, "propertyNames": { "$ref": "#/$defs/categoryTag" }, "additionalProperties": { "$ref": "#/$defs/ttl" } }
+      }
+    },
+    "category_map": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "anyOf": [{ "$ref": "#/$defs/categoryTag" }, { "$ref": "#/$defs/qualifiedId" }] },
+      "additionalProperties": { "anyOf": [{ "$ref": "#/$defs/qualifiedId" }, { "type": "null" }] }
+    },
+    "render_slots": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/renderSlot" } },
+    "main_agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_examples"],
+      "properties": {
+        "memory_examples": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "content"],
+            "properties": { "category": { "$ref": "#/$defs/qualifiedId" }, "content": { "$ref": "#/$defs/line" } }
+          }
+        }
+      }
+    },
+    "prompts": { "type": "object", "maxProperties": 64, "propertyNames": { "$ref": "#/$defs/documentId" }, "additionalProperties": { "$ref": "#/$defs/document" } },
+    "overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "extraction.episode_types": { "$ref": "#/$defs/symbols" },
+        "extraction.primer_candidates": { "anyOf": [{ "$ref": "#/$defs/primerCandidates" }, { "type": "null" }] },
+        "calibration": { "anyOf": [{ "$ref": "#/$defs/calibration" }, { "type": "null" }] },
+        "retention.default_ttl_ms": { "$ref": "#/$defs/ttl" }
+      }
+    },
+    "extend": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "append"],
+        "properties": {
+          "path": { "type": "string", "maxLength": 160, "pattern": "^(tasks\\.[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)?:[a-z0-9]+(-[a-z0-9]+)*\\.(categories|event_kinds)|render_slots\\.[a-z0-9.:-]+\\.categories)$" },
+          "append": { "type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": { "$ref": "#/$defs/qualifiedId" } }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "extends": { "type": "null" } } },
+      "then": { "required": ["decay_classes", "categories", "extraction", "calibration", "tasks", "retention", "category_map", "render_slots", "main_agent", "prompts"] }
+    },
+    {
+      "if": { "properties": { "abstract": { "const": true } } },
+      "then": { "properties": { "serves": { "maxItems": 0 }, "default_for": { "maxItems": 0 } } },
+      "else": { "properties": { "serves": { "minItems": 1 } } }
+    }
+  ],
+  "$defs": {
+    "packageName": { "type": "string", "maxLength": 105, "pattern": "^@[a-z0-9]+(-[a-z0-9]+)*/[a-z0-9]+(-[a-z0-9]+)*$" },
+    "qualifiedId": { "type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)?:[a-z0-9]+(-[a-z0-9]+)*$" },
+    "vocabularyId": { "type": "string", "maxLength": 128, "pattern": "^([a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)?:)?[a-z][a-z0-9_-]{0,63}$" },
+    "categoryTag": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,31}$" },
+    "eventTag": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$" },
+    "slotTag": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}$" },
+    "symbol": { "type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "symbols": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/symbol" } },
+    "fieldName": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+    "fieldNames": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/fieldName" } },
+    "line": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\r\\n]+$" },
+    "path": { "type": "string", "maxLength": 255, "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", "not": { "pattern": "(^|/)\\.\\.?(/|$)" } },
+    "level": { "enum": ["global", "workspace", "project", "agent"] },
+    "ttl": { "type": ["integer", "null"], "minimum": 86400000, "maximum": 315360000000 },
+    "decayClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "meaning"],
+      "properties": { "id": { "$ref": "#/$defs/vocabularyId" }, "meaning": { "$ref": "#/$defs/line" }, "override": { "const": true } }
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "stream", "description", "test", "definition_file", "default_level", "allowed_levels", "visibility", "decay_class", "sensitive", "render_order", "fact_shape"],
+      "properties": {
+        "id": { "$ref": "#/$defs/qualifiedId" },
+        "tag": { "$ref": "#/$defs/categoryTag" },
+        "stream": { "enum": ["fact", "user-observation"] },
+        "description": { "$ref": "#/$defs/line" },
+        "test": { "$ref": "#/$defs/line" },
+        "definition": { "$ref": "#/$defs/line" },
+        "definition_file": { "$ref": "#/$defs/path" },
+        "routing_question": { "$ref": "#/$defs/line" },
+        "default_level": { "$ref": "#/$defs/level" },
+        "allowed_levels": { "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/level" } },
+        "visibility": { "enum": ["all-profiles", "own-profile"] },
+        "decay_class": { "$ref": "#/$defs/vocabularyId" },
+        "sensitive": { "type": "boolean" },
+        "render_order": { "type": "integer", "minimum": 0, "maximum": 99 },
+        "fact_shape": { "enum": ["assertion", "key-value", "canonical-name"] },
+        "guidance_hint": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\r\\n<>,]+$" },
+        "guidance_hint_light": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\r\\n<>,]+$" },
+        "mural_rgb": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "override": { "const": true }
+      },
+      "if": { "properties": { "stream": { "const": "fact" } } },
+      "then": { "required": ["routing_question", "guidance_hint", "guidance_hint_light"] }
+    },
+    "eventKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "definition_file", "consumer", "anchor", "fields", "enums", "shape_fields"],
+      "properties": {
+        "id": { "$ref": "#/$defs/qualifiedId" },
+        "tag": { "$ref": "#/$defs/eventTag" },
+        "definition_file": { "$ref": "#/$defs/path" },
+        "consumer": { "$ref": "#/$defs/qualifiedId" },
+        "anchor": { "enum": ["message-ids"] },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "optional"],
+          "properties": { "required": { "$ref": "#/$defs/fieldNames" }, "optional": { "$ref": "#/$defs/fieldNames" } }
+        },
+        "enums": { "type": "object", "maxProperties": 8, "propertyNames": { "$ref": "#/$defs/fieldName" }, "additionalProperties": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/fieldName" } } },
+        "shape_fields": { "$ref": "#/$defs/fieldNames" },
+        "override": { "const": true }
+      }
+    },
+    "primerCandidates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consumer", "answered_by", "max_per_chunk"],
+      "properties": {
+        "consumer": { "const": "mc:promote-primers" },
+        "answered_by": { "$ref": "#/$defs/qualifiedId" },
+        "max_per_chunk": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "per_call"],
+      "properties": { "file": { "$ref": "#/$defs/path" }, "per_call": { "type": "integer", "minimum": 1, "maximum": 5 } }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "enabled", "reads", "evidence", "actions", "categories", "prompts"],
+      "properties": {
+        "id": { "$ref": "#/$defs/qualifiedId" },
+        "kind": { "$ref": "#/$defs/symbol" },
+        "enabled": { "type": "boolean" },
+        "replaces_builtin": { "$ref": "#/$defs/symbol" },
+        "reads": { "$ref": "#/$defs/symbols" },
+        "evidence": { "$ref": "#/$defs/symbols" },
+        "actions": { "$ref": "#/$defs/symbols" },
+        "categories": { "type": "array", "maxItems": 24, "uniqueItems": true, "items": { "$ref": "#/$defs/qualifiedId" } },
+        "event_kinds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/qualifiedId" } },
+        "prompts": { "type": "object", "minProperties": 1, "maxProperties": 8, "propertyNames": { "$ref": "#/$defs/fieldName" }, "additionalProperties": { "$ref": "#/$defs/documentId" } },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "map_extensions": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9]{1,10}$" } },
+            "seed_paths_per_memory": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "cue_chars_high": { "type": "integer", "minimum": 1, "maximum": 90 },
+            "cue_chars_low": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "cue_high_from": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "min_proof_count": { "type": "integer", "minimum": 2, "maximum": 20 },
+            "group_events_by": { "$ref": "#/$defs/fieldNames" }
+          }
+        },
+        "override": { "const": true }
+      }
+    },
+    "renderSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "level", "layout", "categories"],
+      "properties": {
+        "id": { "$ref": "#/$defs/vocabularyId" },
+        "tag": { "$ref": "#/$defs/slotTag" },
+        "level": { "$ref": "#/$defs/level" },
+        "layout": { "enum": ["flat-bullets"] },
+        "categories": { "type": "array", "maxItems": 24, "uniqueItems": true, "items": { "$ref": "#/$defs/qualifiedId" } },
+        "override": { "const": true }
+      }
+    },
+    "documentId": { "type": "string", "maxLength": 200, "pattern": "^(historian/system|main-agent/[a-z0-9_.-]+|dreamer/[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)?:[a-z0-9]+(-[a-z0-9]+)*/[a-z0-9_.-]+)$" },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sections"],
+      "properties": {
+        "variants": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/symbol" } },
+        "ext": { "enum": ["md", "json"] },
+        "sections": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/section" } }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "file": { "$ref": "#/$defs/path" },
+        "mc": { "type": "string", "maxLength": 128, "pattern": "^[a-z0-9-]+/[a-z0-9._-]+$" },
+        "requires": { "enum": ["fact_categories", "user_categories", "event_kinds", "primer_candidates"] },
+        "after": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "before": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "override": { "const": true }
+      },
+      "oneOf": [{ "required": ["file"] }, { "required": ["mc"] }]
+    }
+  }
+}

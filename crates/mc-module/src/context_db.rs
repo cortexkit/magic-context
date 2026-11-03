@@ -319,7 +319,7 @@ impl ContextDb {
         harness: &str,
         session: &str,
         compartments: &[ValidatedCompartment],
-        facts: Option<(&str, &[(String, String)])>,
+        facts: Option<Promotion>,
         publication: Option<&turn_one::Publication>,
         recall: &Recall,
         now_ms: i64,
@@ -377,9 +377,26 @@ impl ContextDb {
         )
         .map_err(|error| error.to_string())?;
         let promoted = match facts {
-            Some((project, facts)) => {
-                crate::memory_writes::promote_facts(&transaction, project, session, facts)
-                    .map_err(|error| error.to_string())?
+            Some(promotion) => {
+                // A promoted fact came from the messages these summaries cover.
+                let ordinals: Vec<(u64, u64)> = compartments
+                    .iter()
+                    .map(|compartment| (compartment.start_message, compartment.end_message))
+                    .collect();
+                let placer = crate::memory_levels::Placer {
+                    authority: promotion.authority,
+                    actor: crate::memory_levels::Actor::Historian,
+                    session: Some(session),
+                    ordinals: &ordinals,
+                };
+                crate::memory_writes::promote_facts(
+                    &transaction,
+                    promotion.project,
+                    session,
+                    promotion.facts,
+                    &placer,
+                )
+                .map_err(|error| error.to_string())?
             }
             None => 0,
         };
@@ -774,6 +791,16 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Facts a published summary promotes to project memories, in the same
+/// transaction as the summary.
+pub struct Promotion<'a> {
+    pub project: &'a str,
+    pub facts: &'a [(String, String)],
+    /// The session's writer authority, for each new memory's level record
+    /// (spec 3c, ML2).
+    pub authority: Option<&'a crate::memory_levels::Authority>,
 }
 
 /// What a summary run records for recall besides its summaries, as the

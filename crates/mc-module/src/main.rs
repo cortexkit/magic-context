@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         store,
     );
     module.spawn_upkeep();
+    module.spawn_memory_sync();
     let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest(&module_id),

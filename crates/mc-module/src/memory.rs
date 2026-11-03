@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::context_db::StoredMemory;
 
 /// Render order of the five memory categories.
-const CATEGORY_ORDER: [&str; 5] = [
+pub(crate) const CATEGORY_ORDER: [&str; 5] = [
     "PROJECT_RULES",
     "ARCHITECTURE",
     "CONSTRAINTS",
