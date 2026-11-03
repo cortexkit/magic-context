@@ -6,6 +6,10 @@ publish = false
 default-run = "ck-mc"
 description = "Magic Context as a compaction provider for llm-runners (ck-mc)."
 
+[features]
+# Opt-in measurement for the ignored large-store lock-budget test.
+context-db-timing = ["rusqlite/hooks"]
+
 [dependencies]
 cortexkit-role-compaction = { workspace = true }
 cortexkit-role-llm-runner = { workspace = true }

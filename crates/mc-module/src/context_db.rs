@@ -195,7 +195,13 @@ pub(crate) const CONTEXT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct ContextDb {
     connection: Mutex<Connection>,
+    #[cfg(feature = "context-db-timing")]
+    timing: timing::Timing,
 }
+
+#[cfg(feature = "context-db-timing")]
+#[path = "context_db_timing.rs"]
+pub mod timing;
 
 impl ContextDb {
     /// Open an existing store. Refuses a missing file (standalone plugins
@@ -228,8 +234,12 @@ impl ContextDb {
                 path.display()
             ));
         }
+        #[cfg(feature = "context-db-timing")]
+        let timing = timing::Timing::install(&connection);
         Ok(Self {
             connection: Mutex::new(connection),
+            #[cfg(feature = "context-db-timing")]
+            timing,
         })
     }
 
@@ -427,6 +437,7 @@ impl ContextDb {
 
     /// Run `apply` on the connection, for a caller that manages its own
     /// transaction.
+    #[cfg_attr(feature = "context-db-timing", track_caller)]
     pub fn with_connection<T>(&self, apply: impl FnOnce(&mut Connection) -> T) -> T {
         let mut connection = self.lock();
         apply(&mut connection)
@@ -703,10 +714,28 @@ impl ContextDb {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg(not(feature = "context-db-timing"))]
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.connection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(feature = "context-db-timing")]
+    #[track_caller]
+    fn lock(&self) -> timing::Guard<'_> {
+        self.timing.lock(&self.connection)
+    }
+
+    /// Drain opt-in lock measurements, including direct storage methods.
+    #[cfg(feature = "context-db-timing")]
+    pub fn take_lock_samples(&self) -> Vec<timing::Sample> {
+        self.timing.take()
+    }
+
+    #[cfg(feature = "context-db-timing")]
+    pub fn lock_recorder(&self) -> timing::Recorder {
+        self.timing.recorder()
     }
 }
 
