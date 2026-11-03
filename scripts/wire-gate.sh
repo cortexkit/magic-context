@@ -18,6 +18,9 @@ if [ ! -x "$daemon_root/bin/ck-subc" ]; then
 		subc-core --bin ck-subc --root "$daemon_root"
 fi
 cargo build --locked -p mc-mock-runner --bin ck-mock-runner
+# The rehearsal needs an operator-supplied database copy and staged binaries;
+# the normal gate must remain confined to its throwaway stores.
 MC_TEST_CK_SUBC_BIN="$daemon_root/bin/ck-subc" \
 	MC_TEST_MOCK_RUNNER_BIN="$target_dir/debug/ck-mock-runner" \
-	cargo test --locked -p mc-module --test wire -- --ignored --nocapture
+	cargo test --locked -p mc-module --test wire -- --ignored --nocapture \
+	--skip rehearsal_a_head_on_a_real_store

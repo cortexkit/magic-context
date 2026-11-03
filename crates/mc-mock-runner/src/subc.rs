@@ -573,7 +573,13 @@ impl Handler {
                 if let Some(project) = &request.config.project {
                     provider.scope = Some(scopes.for_project(project).await?);
                 }
-                let mut runner = Runner::start(request.config, provider).await?;
+                let mut runner = if std::env::var_os("MC_MOCK_OBSERVE").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                {
+                    Runner::start_observed(request.config, provider).await?
+                } else {
+                    Runner::start(request.config, provider).await?
+                };
                 hosts
                     .lock()
                     .expect("host map")
@@ -581,6 +587,7 @@ impl Handler {
                 runner.play(&request.steps).await;
                 hosts.lock().expect("host map").remove(&key);
                 let mut report = runner.report.clone();
+                report.observations = runner.host().observations();
                 report.child_runs = runner
                     .host()
                     .child_runs()

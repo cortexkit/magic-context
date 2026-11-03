@@ -35,6 +35,9 @@ const RUNNER: &str = "mock-runner";
 const LAUNCH_NONCE_FD_ENV: &str = "SUBC_LAUNCH_NONCE_FD";
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[path = "support/rehearsal.rs"]
+mod rehearsal;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A process the test started; killed when the test ends.
@@ -80,6 +83,7 @@ fn spawn(
     program: &Path,
     args: &[&std::ffi::OsStr],
     root: &Path,
+    data_home: &Path,
     env: &[(&str, &str)],
     label: &'static str,
 ) -> Process {
@@ -88,12 +92,13 @@ fn spawn(
         .args(args)
         .env("XDG_RUNTIME_DIR", root.join("runtime"))
         .env("XDG_CONFIG_HOME", root.join("config"))
-        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_DATA_HOME", data_home)
         .env("HOME", root.join("config"))
         .env_remove("MAGIC_CONTEXT_DB")
         .env_remove("MAGIC_CONTEXT_MODE3_STORE")
         .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
         .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+        .env_remove("MAGIC_CONTEXT_CONFIG_PATH")
         .env_remove(SUBC_MODULE_ID_ENV)
         .env_remove(SUBC_LAUNCH_NONCE_ENV)
         .env_remove(LAUNCH_NONCE_FD_ENV)
@@ -130,6 +135,15 @@ struct Stack {
 }
 
 fn start_stack() -> Stack {
+    start_stack_with(Path::new(env!("CARGO_BIN_EXE_ck-mc")), None, None, false)
+}
+
+fn start_stack_with(
+    module: &Path,
+    data_home: Option<&Path>,
+    project_root: Option<&Path>,
+    observe: bool,
+) -> Stack {
     let root = std::env::temp_dir().join(format!(
         "mc-wire-{}-{}",
         std::process::id(),
@@ -144,14 +158,21 @@ fn start_stack() -> Stack {
         &root,
         "mock-runner",
     );
-    let module = dev_copy(Path::new(env!("CARGO_BIN_EXE_ck-mc")), &root, "mc");
+    let module = dev_copy(module, &root, "mc");
     let connection_file = root.join("runtime/subc-connection.json");
     // ck-mc's context store, where summaries and memories live. A standalone
     // plugin creates it in production.
-    let context_db = root.join("data/cortexkit/magic-context/context.db");
-    fs::create_dir_all(context_db.parent().unwrap()).unwrap();
-    mc_module::context_db::ContextDb::create_for_tests(&context_db).unwrap();
-    fs::create_dir_all(root.join("project")).unwrap();
+    let private_data = root.join("data");
+    if data_home.is_none() {
+        let context_db = private_data.join("cortexkit/magic-context/context.db");
+        fs::create_dir_all(context_db.parent().unwrap()).unwrap();
+        mc_module::context_db::ContextDb::create_for_tests(&context_db).unwrap();
+    }
+    let private_project = root.join("project");
+    let project_root = project_root.unwrap_or(&private_project);
+    if project_root == private_project {
+        fs::create_dir_all(project_root).unwrap();
+    }
     // The daemon launches both modules itself, as reserved modules. That is
     // what makes it attest each one to the other: a runner's routes reach
     // ck-mc only as an attested module, and ck-mc's reach the runner the
@@ -171,17 +192,36 @@ fn start_stack() -> Stack {
             "version": 1,
             "modules": {
                 PROVIDER: entry(&module, json!({})),
-                RUNNER: entry(&runner, json!({"MOCK_RUNNER_PROVIDER": PROVIDER})),
+                RUNNER: entry(&runner, json!({
+                    "MOCK_RUNNER_PROVIDER": PROVIDER,
+                    "MC_MOCK_OBSERVE": if observe { "1" } else { "0" },
+                })),
             },
         })
         .to_string(),
     )
     .unwrap();
 
+    if data_home.is_some() {
+        // A token threshold lets a short rehearsal exercise the historian even
+        // with a million-token model window. These settings stay in the private
+        // config directory, never in the supplied project or copied data home.
+        fs::write(
+            root.join("config/cortexkit/magic-context.json"),
+            json!({
+                "execute_threshold_tokens": {"default": 5_000},
+                "protected_tokens": 4_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     let processes = vec![spawn(
         &daemon,
         &[],
         &root,
+        data_home.unwrap_or(&private_data),
         &[("SUBC_PORT", "0"), ("SUBC_CGROUP_PLACEMENT", "disabled")],
         "subc",
     )];
@@ -195,7 +235,7 @@ fn start_stack() -> Stack {
     }
     Stack {
         connection_file,
-        project_root: root.join("project"),
+        project_root: project_root.to_path_buf(),
         _processes: processes,
         _root: Root(root),
     }
@@ -464,6 +504,81 @@ async fn a_head_summarizes_in_a_child_under_ck_mc_s_scope_over_the_real_wire() {
         "{:?}",
         report.child_runs
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "writes to an operator-supplied database copy; run scripts/rehearsal-run.sh in an isolated VM"]
+async fn rehearsal_a_head_on_a_real_store() {
+    rehearsal::run().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
+async fn wire_observations_are_opt_in_and_capture_real_calls() {
+    let stack = start_stack();
+    let plain = play(
+        &stack,
+        &PlayRequest {
+            config: config("worker"),
+            steps: vec![answer()],
+        },
+    )
+    .await;
+    assert!(plain.observations.is_none());
+    drop(stack);
+
+    let stack = start_stack_with(Path::new(env!("CARGO_BIN_EXE_ck-mc")), None, None, true);
+    let mut cfg = config("head");
+    cfg.context_window = 100_000;
+    cfg.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-observe".into(),
+        root: stack.project_root.to_string_lossy().into_owned(),
+    });
+    let mut steps = Vec::new();
+    for turn in 0..3 {
+        steps.push(Step::User {
+            text: format!("Inspect file {turn}."),
+        });
+        for _ in 0..2 {
+            steps.push(Step::Model(Turn {
+                tools: vec![ToolCall::ok(
+                    "read",
+                    json!({"path":"a.rs"}),
+                    "x".repeat(48_000),
+                )],
+                ..Turn::default()
+            }));
+        }
+        steps.push(answer());
+    }
+    steps.push(Step::Await {
+        condition: AwaitCondition::ChildRuns { count: 1 },
+        timeout_ms: START_TIMEOUT.as_millis() as u64,
+    });
+    let report = play(&stack, &PlayRequest { config: cfg, steps }).await;
+    let observed = report.observations.unwrap();
+    assert_eq!(
+        observed.setups[0].answer,
+        serde_json::to_value(cortexkit_role_compaction::setup::SetupAnswer::Ready).unwrap()
+    );
+    assert!(observed.setups[0].elapsed_ms > 0.0);
+    assert!(!observed.views.is_empty());
+    assert!(observed.views[0]
+        .inserted_text
+        .join("\n")
+        .contains("<session-history>"));
+    assert!(observed.views[0].adopted_ms.is_some());
+    assert_eq!(observed.tools.len(), 6);
+    assert!(observed
+        .tools
+        .iter()
+        .all(|tool| tool.name == "read" && tool.output.len() == 48_000));
+    assert_eq!(observed.children.len(), report.child_runs.len());
+    assert!(!observed.children.is_empty());
+    assert!(observed
+        .children
+        .iter()
+        .all(|child| child.elapsed_ms >= 0.0 && child.started_ms > 0.0));
 }
 
 /// The hook and reminder paths over the real wire: a person's message after

@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use cortexkit_compaction_view::clean::clean_reply;
 use cortexkit_compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
@@ -177,6 +178,85 @@ pub struct Report {
     /// order.
     #[serde(default)]
     pub delivered_templates: Vec<String>,
+    /// Real wire timings and payload observations, only when explicitly enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observations: Option<Observations>,
+}
+
+/// Wall-clock measurements, independent of the script's simulated clock.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Observations {
+    pub setups: Vec<SetupObservation>,
+    pub views: Vec<ViewObservation>,
+    pub tools: Vec<ToolObservation>,
+    pub children: Vec<ChildObservation>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SetupObservation {
+    pub elapsed_ms: f64,
+    pub answer: Value,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ViewObservation {
+    pub version: u64,
+    /// Milliseconds since Runner started, at accepted publication or ride reply.
+    pub published_ms: f64,
+    pub adopted_ms: Option<f64>,
+    /// Only the first view retains inserted text and image counts, not image
+    /// payloads: large images can otherwise exhaust the report's wire frame budget.
+    pub inserted_text: Vec<String>,
+    pub image_count: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolObservation {
+    pub name: String,
+    pub elapsed_ms: f64,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ChildObservation {
+    pub session: String,
+    pub started_ms: f64,
+    /// Time spent answering session.send, including the mock child responder.
+    pub elapsed_ms: f64,
+}
+
+struct ObservationLog {
+    started: Instant,
+    values: Observations,
+}
+
+impl ObservationLog {
+    fn publish(&mut self, view: &View) {
+        if self
+            .values
+            .views
+            .iter()
+            .any(|seen| seen.version == view.version)
+        {
+            return;
+        }
+        let mut record = ViewObservation {
+            version: view.version,
+            published_ms: self.started.elapsed().as_secs_f64() * 1_000.0,
+            adopted_ms: None,
+            inserted_text: Vec::new(),
+            image_count: 0,
+        };
+        if self.values.views.is_empty() {
+            for edit in &view.edits {
+                if let EditOp::Insert { message, .. } = &edit.op {
+                    record.inserted_text.extend(message.texts.clone());
+                    record.image_count += message.images.len();
+                }
+            }
+        }
+        self.values.views.push(record);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -211,6 +291,7 @@ impl Report {
 }
 
 struct State {
+    observations: Option<ObservationLog>,
     config: SessionConfig,
     transcript: Transcript,
     applied: Option<View>,
@@ -331,6 +412,9 @@ impl Host {
         let mut state = self.lock();
         match state.check(&request.view) {
             Ok(()) => {
+                if let Some(log) = &mut state.observations {
+                    log.publish(&request.view);
+                }
                 state.pending = Some(request.view);
                 ApplyViewAnswer::Accepted
             }
@@ -357,11 +441,19 @@ impl Host {
     pub fn send(&self, bound_session: &str, request: SendRequest) -> Result<SendReply, Refusal> {
         let mut state = self.lock();
         if bound_session != state.config.session.session {
+            let started = Instant::now();
             let responder = state.responder.clone();
             let run_id = state
                 .runs
                 .start(bound_session, request, &responder)
                 .map_err(|error| Refusal::invalid_params("runner_params", error))?;
+            if let Some(log) = &mut state.observations {
+                log.values.children.push(ChildObservation {
+                    session: bound_session.to_owned(),
+                    started_ms: started.duration_since(log.started).as_secs_f64() * 1_000.0,
+                    elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                });
+            }
             let mut reply = SendReply::new(cortexkit_role_llm_runner::run::states::ACTIVE);
             reply.run_id = Some(run_id);
             return Ok(reply);
@@ -407,6 +499,13 @@ impl Host {
     /// Every run started in a child session, for assertions.
     pub fn child_runs(&self) -> Vec<crate::child::ChildRun> {
         self.lock().runs.all().to_vec()
+    }
+
+    pub fn observations(&self) -> Option<Observations> {
+        self.lock()
+            .observations
+            .as_ref()
+            .map(|log| log.values.clone())
     }
 
     /// Answer child runs with `responder` from now on.
@@ -463,6 +562,19 @@ const COLD_RIDE_DEADLINE_MS: u64 = 30_000;
 impl<P: Provider> Runner<P> {
     /// Start a session: Setup, nothing else.
     pub async fn start(config: SessionConfig, provider: P) -> Result<Self, CallError> {
+        Self::start_with_observations(config, provider, false).await
+    }
+
+    /// Enable payload/timing capture without changing the scenario or its clock.
+    pub async fn start_observed(config: SessionConfig, provider: P) -> Result<Self, CallError> {
+        Self::start_with_observations(config, provider, true).await
+    }
+
+    async fn start_with_observations(
+        config: SessionConfig,
+        provider: P,
+        observe: bool,
+    ) -> Result<Self, CallError> {
         let model = MockModel::new(config.kind, config.cache_ttl_ms);
         let mut transcript = Transcript::new(config.tag_checkpoint);
         let mut applied = None;
@@ -473,6 +585,10 @@ impl<P: Provider> Runner<P> {
             applied = Some(moved.view.clone());
         }
         let state = State {
+            observations: observe.then(|| ObservationLog {
+                started: Instant::now(),
+                values: Observations::default(),
+            }),
             transcript,
             now: config.start_ms,
             config,
@@ -542,7 +658,18 @@ impl<P: Provider> Runner<P> {
             request.accepts_images = state.config.accepts_images;
             request
         };
-        self.provider.setup(request).await
+        let started = Instant::now();
+        let answer = self.provider.setup(request).await;
+        if let Some(log) = &mut self.host.lock().observations {
+            log.values.setups.push(SetupObservation {
+                elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                answer: match &answer {
+                    Ok(answer) => serde_json::to_value(answer).expect("Setup answer serializes"),
+                    Err(error) => serde_json::json!({"error": error.message}),
+                },
+            });
+        }
+        answer
     }
 
     /// Play a script. Stops early only when the runner refuses a run or a
@@ -881,6 +1008,7 @@ impl<P: Provider> Runner<P> {
                 .collect()
         };
         for (call, call_id) in calls.iter().zip(call_ids) {
+            let started = Instant::now();
             let (status, output) = if call.name.starts_with("ctx_") {
                 match self.provider.tool(&call.name, &call.input).await {
                     Ok(output) => (ToolStatus::Completed, output),
@@ -890,6 +1018,13 @@ impl<P: Provider> Runner<P> {
                 (call.status.clone(), call.output.clone())
             };
             let mut state = self.host.lock();
+            if let Some(log) = &mut state.observations {
+                log.values.tools.push(ToolObservation {
+                    name: call.name.clone(),
+                    elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                    output: output.clone(),
+                });
+            }
             // A reminder that may ride a tool result is delivered with this
             // one, after its output, in the tool part's delivered list.
             let mut delivered = Vec::new();
@@ -1037,6 +1172,17 @@ impl<P: Provider> Runner<P> {
                         }
                     }
                     state.applied = Some(view.clone());
+                    if let Some(log) = &mut state.observations {
+                        log.publish(&view);
+                        if let Some(record) = log
+                            .values
+                            .views
+                            .iter_mut()
+                            .find(|v| v.version == view.version)
+                        {
+                            record.adopted_ms = Some(log.started.elapsed().as_secs_f64() * 1_000.0);
+                        }
+                    }
                     Ok(())
                 }
                 Err(refusal) => {
