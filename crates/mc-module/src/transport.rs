@@ -748,7 +748,8 @@ impl Handler {
 
     async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Vec<u8>, Refusal> {
         // Every route was checked at bind (`on_bind`): one known role, and a
-        // bound session unless it is a module-level hook route.
+        // bound session unless it is a module-level hook or tool route, which
+        // answers discovery only.
         let bound = self
             .bound
             .lock()
@@ -823,6 +824,15 @@ impl Handler {
         let call = tool_call(body)?;
         if let Some(answer) = self.role_op(route, &call) {
             return answer;
+        }
+        // A tool call acts on the session its route is bound to; a route
+        // bound to no session answers the catalog only.
+        if route.session.harness == MODULE_LEVEL_HARNESS {
+            return Err(Refusal::new(
+                codes::ROUTE_UNBOUND,
+                format!("`{}` needs a route bound to the session", call.name),
+                None,
+            ));
         }
         if !call.name.starts_with("ctx_") {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
@@ -1029,15 +1039,16 @@ impl ModuleHandler for Handler {
                 "open the route for exactly one of compaction-provider/v2, tool-provider/v1 or step-transform-provider/v2",
             );
         };
-        // A hook route may open unbound, for discovery (`role.describe`,
-        // `transform.declare`) only; every other session route concerns the
-        // session it is bound to.
-        if matches!(role, RouteRole::Compaction | RouteRole::Tools)
-            && request.identity.harness == MODULE_LEVEL_HARNESS
+        // Hook and tool routes may open unbound, for discovery only: a hook
+        // route for `role.describe` and `transform.declare`, a tool route for
+        // `role.describe` and `tool.catalog` (core lists a head's tools that
+        // way when the head registered no session). A compaction route always
+        // concerns the session it is bound to.
+        if matches!(role, RouteRole::Compaction) && request.identity.harness == MODULE_LEVEL_HARNESS
         {
             return BindDecision::reject(
                 codes::ROUTE_UNBOUND,
-                "compaction and tool routes must be bound to a session",
+                "compaction routes must be bound to a session",
             );
         }
         let project =
