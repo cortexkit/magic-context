@@ -129,6 +129,23 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
             requires: Vec::new(),
             must_never_reach: Vec::new(),
         }))
+        // The build's commit, from MC_BUILD_SHA at compile time. The daemon
+        // shows it in module status, and placement checks it to prove the
+        // running module is the placed build. A missing or malformed stamp
+        // (a plain `cargo build`) leaves it out rather than stopping the
+        // module.
+        .provenance(
+            match subc_protocol::manifest::build_provenance(option_env!("MC_BUILD_SHA"), None, None)
+            {
+                Ok(provenance) => {
+                    Some(provenance.with_launch_nonce_source(subc_client_rs::launch_nonce_source()))
+                }
+                Err(error) => {
+                    eprintln!("ck-mc: MC_BUILD_SHA rejected, build not declared: {error}");
+                    None
+                }
+            },
+        )
         .build()
 }
 
