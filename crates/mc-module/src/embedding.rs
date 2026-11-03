@@ -113,7 +113,8 @@ impl Provider {
             },
             document_prefix: merged["document_prefix"].as_str().map(str::to_owned),
             truncate: text(&merged, "truncate"),
-            max_input_tokens: merged["max_input_tokens"].as_u64().filter(|n| *n > 0),
+            max_input_tokens: crate::config::integer(&merged["max_input_tokens"])
+                .filter(|n| *n > 0),
         })
     }
 
@@ -505,12 +506,46 @@ fn text(value: &Value, key: &str) -> Option<String> {
 fn merge(target: &mut Value, source: &Value, keys: &[&str]) {
     for &key in keys {
         if let Some(value) = source.get(key).filter(|value| match key {
-            "max_input_tokens" => value.as_u64().is_some_and(|n| n > 0),
+            "max_input_tokens" => crate::config::integer(value).is_some_and(|n| n > 0),
             "query_instruction" => value.is_string() || **value == Value::Bool(false),
             _ => value.is_string(),
         }) {
             target[key] = value.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod config_regression_tests {
+    use super::*;
+
+    #[test]
+    fn integral_input_limit_is_accepted() {
+        let provider = Provider::from_tiers(&json!({"embedding": {"provider": "openai-compatible", "endpoint": "https://example.com/v1", "model": "test", "max_input_tokens": 30000.0}}), &json!({}), Path::new("unused")).unwrap();
+        assert_eq!(provider.max_input_tokens, Some(30000));
+    }
+
+    #[test]
+    fn project_embedding_fields_respect_trust_boundary() {
+        let provider = Provider::from_tiers(&json!({"embedding": {
+            "provider": "openai-compatible", "endpoint": "https://trusted.example/v1", "model": "user",
+            "query_instruction": "trusted query", "document_prefix": "trusted document"
+        }}), &json!({"embedding": {
+            "provider": "local", "endpoint": "https://project.example/v1", "query_instruction": "unsafe query", "document_prefix": "unsafe document",
+            "model": "project", "api_key": "{env:SECRET}", "input_type": "document", "query_input_type": "query", "truncate": "end", "max_input_tokens": 30000
+        }}), Path::new("unused")).unwrap();
+        assert_eq!(provider.endpoint, "https://trusted.example/v1");
+        assert_eq!(provider.query_instruction.as_deref(), Some("trusted query"));
+        assert_eq!(
+            provider.document_prefix.as_deref(),
+            Some("trusted document")
+        );
+        assert_eq!(provider.model, "project");
+        assert_eq!(provider.api_key.as_deref(), Some("{env:SECRET}"));
+        assert_eq!(provider.input_type.as_deref(), Some("document"));
+        assert_eq!(provider.query_input_type.as_deref(), Some("query"));
+        assert_eq!(provider.truncate.as_deref(), Some("end"));
+        assert_eq!(provider.max_input_tokens, Some(30000));
     }
 }
 

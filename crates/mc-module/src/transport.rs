@@ -571,7 +571,11 @@ impl Handler {
                 crate::catalog::role_describe_bytes()
             }
             cortexkit_role_tool_provider::ops::TOOL_CATALOG => {
-                let root = route.project.as_ref().map(|project| project.root.as_str());
+                let root = route
+                    .project
+                    .as_ref()
+                    .map(|project| project.root.as_str())
+                    .or(route.workdir.as_deref());
                 self.module.catalog(root, &call.arguments)
             }
             _ => return None,
@@ -821,5 +825,53 @@ impl ModuleHandler for Handler {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn folder_only_catalog_uses_project_tier() {
+        let root =
+            std::env::temp_dir().join(format!("ck-mc-folder-catalog-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".cortexkit")).unwrap();
+        std::fs::write(root.join("user.jsonc"), "{}").unwrap();
+        std::fs::write(
+            root.join(".cortexkit/magic-context.jsonc"),
+            r#"{"prompt_surface":{"default":"light"}}"#,
+        )
+        .unwrap();
+        let client = SubcRunnerClient::new(
+            root.join("unused-connection"),
+            Arc::new(ChildScopes::new("test-config")),
+        );
+        let handler = Handler::new(Module::new(
+            client,
+            crate::config::Config::Files(crate::config::Loader::with_user_path(
+                root.join("user.jsonc"),
+            )),
+            None,
+            None,
+        ));
+        let route = Route {
+            session: SessionRef::new("runner", "test", "catalog"),
+            project: None,
+            workdir: Some(root.to_string_lossy().into_owned()),
+            agent_id: None,
+        };
+        let arguments = json!({"preset":"worker","composition":{"providers":[{"provider":"magic-context","tools":[{"name":"ctx_reduce"},{"name":"ctx_expand"},{"name":"ctx_search"}]}],"compaction":{"provider":"magic-context"}},"system_text":{"preset":"worker"}});
+        let call = tool_call(
+            &serde_json::to_vec(&json!({"name":"tool.catalog","arguments": arguments})).unwrap(),
+        )
+        .unwrap();
+        let expected = handler
+            .module
+            .catalog(route.workdir.as_deref(), &arguments)
+            .unwrap();
+        assert_ne!(expected, handler.module.catalog(None, &arguments).unwrap());
+        assert_eq!(handler.role_op(&route, &call).unwrap().unwrap(), expected);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
