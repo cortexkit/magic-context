@@ -88,6 +88,10 @@ pub mod workspace;
 /// Magic Context's module id, as runners and core name it.
 pub const MODULE_ID: &str = "magic-context";
 
+pub mod engram_catalog;
+pub mod private_permissions;
+pub mod storage_paths;
+
 /// The version line ck-mc reports: its package version, and the commit it
 /// was built from when the build set `MC_BUILD_SHA`.
 pub fn version_line() -> String {

@@ -4,7 +4,7 @@
  * version-sync.mjs
  *
  * Synchronizes package.json and Cargo.toml versions from a git tag or explicit argument.
- * The plugin packages and all four Rust workspace crates share each release version.
+ * The plugin packages and all Rust workspace members share each release version.
  *
  * Usage:
  *   node scripts/version-sync.mjs 0.1.0           # set version to 0.1.0
@@ -13,6 +13,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,7 +25,8 @@ const PACKAGES = [
     join(repoRoot, "packages", "pi-plugin"),
     join(repoRoot, "packages", "cli"),
 ];
-const CARGO_CRATES = ["mc-core", "mc-store", "mc-module", "mc-tokenizer"];
+const CARGO_MANIFESTS = JSON.parse(execFileSync("python3", [join(__dirname, "workspace_crates.py")], { encoding: "utf-8" }));
+const CARGO_CRATES = Object.values(CARGO_MANIFESTS);
 const CARGO_LOCK_PATH = join(repoRoot, "Cargo.lock");
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/;
@@ -99,11 +101,11 @@ for (const pkgDir of PACKAGES) {
     }
 }
 
-for (const crate of CARGO_CRATES) {
-    const manifestPath = join(repoRoot, "crates", crate, "Cargo.toml");
+for (const manifest of Object.keys(CARGO_MANIFESTS)) {
+    const manifestPath = join(repoRoot, manifest);
     const content = readFileSync(manifestPath, "utf-8");
     const updated = setCargoManifestVersion(content, version, manifestPath);
-    reportChange(`crates/${crate}/Cargo.toml`, content, updated);
+    reportChange(manifest, content, updated);
 }
 
 const cargoLock = readFileSync(CARGO_LOCK_PATH, "utf-8");

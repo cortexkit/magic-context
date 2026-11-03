@@ -466,9 +466,14 @@ echo ""
 # edited in the checkout during the long gate phase into a release commit
 # (v0.42.4); anything else dirty at this point is a foreign change and aborts.
 echo "→ Committing version bump..."
+cargo_manifests_output=$(python3 "$SCRIPT_DIR/workspace_crates.py" --manifests)
+cargo_manifests=()
+while IFS= read -r manifest; do
+  cargo_manifests+=("$manifest")
+done <<< "$cargo_manifests_output"
 if [[ -n "$CI_GATE_SHA" ]]; then
   git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
-    crates/mc-core/Cargo.toml crates/mc-store/Cargo.toml crates/mc-module/Cargo.toml crates/mc-tokenizer/Cargo.toml Cargo.lock \
+    "${cargo_manifests[@]}" Cargo.lock \
     CHANGELOG.md "$NOTES_FILE"
   python3 "$SCRIPT_DIR/check-release-bump.py" "$CI_GATE_SHA" "$VERSION" --staged
   if [[ -n "$(git diff --name-only)" || -n "$(git ls-files --others --exclude-standard)" ]]; then
@@ -477,7 +482,7 @@ if [[ -n "$CI_GATE_SHA" ]]; then
   fi
 else
 git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
-  crates/mc-core/Cargo.toml crates/mc-store/Cargo.toml crates/mc-module/Cargo.toml crates/mc-tokenizer/Cargo.toml Cargo.lock \
+  "${cargo_manifests[@]}" Cargo.lock \
   assets/magic-context.schema.json \
   packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts
 # Cargo.lock is the common dirty file here: Cargo can update the resolved versions

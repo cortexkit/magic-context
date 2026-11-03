@@ -90,6 +90,10 @@ fn spawn(
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("HOME", root.join("config"))
+        .env_remove("MAGIC_CONTEXT_DB")
+        .env_remove("MAGIC_CONTEXT_MODE3_STORE")
+        .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
+        .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
         .env_remove(SUBC_MODULE_ID_ENV)
         .env_remove(SUBC_LAUNCH_NONCE_ENV)
         .env_remove(LAUNCH_NONCE_FD_ENV)
@@ -144,7 +148,8 @@ fn start_stack() -> Stack {
     let connection_file = root.join("runtime/subc-connection.json");
     // ck-mc's context store, where summaries and memories live. A standalone
     // plugin creates it in production.
-    let context_db = root.join("data/context.db");
+    let context_db = root.join("data/cortexkit/magic-context/context.db");
+    fs::create_dir_all(context_db.parent().unwrap()).unwrap();
     mc_module::context_db::ContextDb::create_for_tests(&context_db).unwrap();
     fs::create_dir_all(root.join("project")).unwrap();
     // The daemon launches both modules itself, as reserved modules. That is
@@ -165,7 +170,7 @@ fn start_stack() -> Stack {
         json!({
             "version": 1,
             "modules": {
-                PROVIDER: entry(&module, json!({"MAGIC_CONTEXT_DB": context_db})),
+                PROVIDER: entry(&module, json!({})),
                 RUNNER: entry(&runner, json!({"MOCK_RUNNER_PROVIDER": PROVIDER})),
             },
         })

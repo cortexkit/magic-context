@@ -2,6 +2,7 @@
 """Isolated placement preflight tests; never points at the operator's HOME."""
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ SCRIPT = Path(__file__).with_name("place-ck-mc.sh")
 ROOT = SCRIPT.parent.parent
 NEW = "6d76aeea576fe2a25ac6d5ed0d9c8125a1fff9f2"
 OLD = subprocess.check_output(["git", "rev-parse", NEW + "^"], cwd=ROOT, text=True).strip()
+REAL_GIT = shutil.which("git")
 
 
 def once(directory, body):
@@ -37,19 +39,32 @@ class PlacementTests(unittest.TestCase):
         self.staged = once(root, f'''#!/bin/sh
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({NEW})' ;;
- --print-fences) echo 'context.db=91 store.db=50' ;;
+ --print-fences) echo 'context.db=91 mode3.db=50' ;;
  *) exit 2 ;;
 esac
 ''')
         deployed = once(root, f'''#!/bin/sh
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({OLD})' ;;
+ --print-fences) echo 'context.db=90 store.db=49' ;;
  *) exit 2 ;;
 esac
 ''')
         (self.bin / "ck-mc").write_bytes(deployed.read_bytes())
         (self.bin / "ck-mc").chmod(0o755)
         for name, body in {
+            "stat": '''#!/bin/sh
+python3 -c 'import os,sys; print(os.stat(sys.argv[-1]).st_ino)' "$@"
+''',
+            "git": f'''#!/bin/sh
+if [ "$1" = show ]; then
+  case "$2:${{FAKE_MISSING_EPOCHS:-}}" in
+    {OLD}:crates/mc-module/src/lib.rs:old|{NEW}:crates/mc-module/src/lib.rs:new|*:crates/mc-module/src/lib.rs:both)
+      echo '// No render epochs in this revision.'; exit 0 ;;
+  esac
+fi
+exec {REAL_GIT} -c safe.directory={ROOT} "$@"
+''',
             "codesign": '#!/bin/sh\ncase "$1" in --verify) exit 0;; -dv) if [ "${FAKE_UNHARDENED:-}" = 1 ]; then f="0x2(adhoc)"; else f="0x10002(adhoc,runtime)"; fi; printf "Executable=x\\nIdentifier=ck-mc\\nFormat=Mach-O\\nCodeDirectory v=20500 size=1 flags=$f hashes=1+0 location=embedded\\n" >&2;; esac\n',
             "ck": '''#!/bin/sh
 case "$*" in
@@ -82,7 +97,9 @@ printf '0000000100000000 T _main\\n'
             # Stable content-addressed shim, with a command-name link for PATH lookup.
             (self.shims / name).symlink_to(once(root, body))
         self.versions(90, 49)
-        self.env = dict(os.environ, HOME=str(self.home), MAGIC_CONTEXT_STORAGE_DIR=str(self.store),
+        isolated_env = {key: value for key, value in os.environ.items()
+                        if not key.startswith("MAGIC_CONTEXT_") and not key.startswith("XDG_")}
+        self.env = dict(isolated_env, HOME=str(self.home), MAGIC_CONTEXT_STORAGE_DIR=str(self.store),
                         CK_STAGING=str(self.shared_staging),
                         PATH=str(self.shims) + os.pathsep + os.environ["PATH"],
                         PYTHONPYCACHEPREFIX=str(root / "pycache"), XDG_CACHE_HOME=str(root / "cache"),
@@ -92,7 +109,7 @@ printf '0000000100000000 T _main\\n'
     def versions(self, context, store):
         for name, sql, version in (
             ("context.db", "CREATE TABLE schema_migrations(version INTEGER)", context),
-            ("store.db", "CREATE TABLE cortexkit_schema_version(namespace TEXT, version INTEGER)", store),
+            ("mode3.db", f"PRAGMA user_version = {store}", store),
         ):
             path = self.store / name
             path.unlink(missing_ok=True)
@@ -100,8 +117,7 @@ printf '0000000100000000 T _main\\n'
                 conn.execute(sql)
                 if name == "context.db":
                     conn.execute("INSERT INTO schema_migrations VALUES (?)", (version,))
-                else:
-                    conn.execute("INSERT INTO cortexkit_schema_version VALUES ('mc_cache', ?)", (version,))
+            conn.close()
 
     def seed_shared_declaration(self, path=None):
         self.shared_staging.mkdir(parents=True, exist_ok=True)
@@ -127,14 +143,14 @@ printf '0000000100000000 T _main\\n'
         self.versions(92, 49)
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("context.db live=92 staged=91; store.db live=49 staged=50", run.stdout + run.stderr)
+        self.assertIn("context.db live=92 staged=91; mode3.db live=49 staged=50", run.stdout + run.stderr)
         self.assertIn("rollback refused", run.stderr)
 
     def test_store_fence_refuses(self):
         self.versions(90, 51)
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("context.db live=90 staged=91; store.db live=51 staged=50", run.stdout + run.stderr)
+        self.assertIn("context.db live=90 staged=91; mode3.db live=51 staged=50", run.stdout + run.stderr)
         self.assertIn("rollback refused", run.stderr)
 
     def test_epoch_change_advises_or_refuses(self):
@@ -145,6 +161,43 @@ printf '0000000100000000 T _main\\n'
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("TAGGER_FEATURE_EPOCH: 3 -> 4 CHANGED", refused.stdout)
         self.assertIn("epochs changed", refused.stderr)
+
+    def test_missing_mode3_is_version_zero_and_old_store_is_untouched(self):
+        (self.store / "mode3.db").unlink()
+        old_store = self.store / "store.db"
+        old_store.write_bytes(b"rollback store must not be opened")
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("mode3.db: live=0 staged=50", run.stdout)
+        self.assertIn("old store.db isn't checked", run.stdout)
+        self.assertEqual(old_store.read_bytes(), b"rollback store must not be opened")
+        self.assertFalse((self.store / "mode3.db").exists())
+
+    def test_missing_epochs_skip_and_strict_only_refuses_one_sided_constants(self):
+        for missing, side in (("old", "deployed"), ("new", "staged"), ("both", "both deployed")):
+            with self.subTest(missing=missing):
+                self.env["FAKE_MISSING_EPOCHS"] = missing
+                run = self.run_script()
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertIn("render-epoch check does not apply: " + side, run.stdout)
+                strict = self.run_script("--require-epochs-unchanged")
+                if missing == "both":
+                    self.assertEqual(strict.returncode, 0, strict.stderr)
+                else:
+                    self.assertNotEqual(strict.returncode, 0)
+                    self.assertIn(side + " (", strict.stderr)
+                    self.assertIn("while the other revision has them", strict.stderr)
+
+    def test_xdg_test_root_wins_over_explicit_storage(self):
+        xdg = self.home / "xdg"
+        directory = xdg / "cortexkit/magic-context"
+        directory.mkdir(parents=True)
+        shutil.copyfile(self.store / "context.db", directory / "context.db")
+        self.env.update(XDG_DATA_HOME=str(xdg), MAGIC_CONTEXT_TEST_DATA_DIR=str(self.home / "test"))
+        self.versions(999, 999)
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("context.db: live=90 staged=91; mode3.db: live=0", run.stdout)
 
     def test_placement_verifies_and_preserves_rollback(self):
         run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=self.env,

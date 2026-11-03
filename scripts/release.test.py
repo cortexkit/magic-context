@@ -36,7 +36,7 @@ class ReleaseTests(unittest.TestCase):
         self.git("config", "user.email", "fixture@example.invalid")
         scripts = self.repo / "scripts"
         scripts.mkdir()
-        for name in ("release.sh", "ci-gate.py", "check-release-bump.py", "version-sync.mjs"):
+        for name in ("release.sh", "ci-gate.py", "check-release-bump.py", "version-sync.mjs", "workspace_crates.py"):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         for name in ("run-rust-hermetic-e2e.sh", "release-e2e-docker.sh"):
             path = scripts / name
@@ -46,14 +46,19 @@ class ReleaseTests(unittest.TestCase):
             path = self.repo / "packages" / package
             path.mkdir(parents=True)
             (path / "package.json").write_text(json.dumps({"name": package, "version": "1.0.0"}) + "\n")
-        crates = ("mc-core", "mc-store", "mc-module", "mc-tokenizer")
-        for crate in crates:
-            path = self.repo / "crates" / crate
+        self.crates = json.loads(subprocess.check_output(
+            ["python3", str(SCRIPTS / "workspace_crates.py")], text=True))
+        # A package name need not match its directory, and members can live outside crates/.
+        self.crates["tools/release-fixture/Cargo.toml"] = "fixture-workspace-member"
+        members = [str(Path(manifest).parent) for manifest in self.crates]
+        (self.repo / "Cargo.toml").write_text("[workspace]\nmembers = " + json.dumps(members) + "\n")
+        for manifest, crate in self.crates.items():
+            path = (self.repo / manifest).parent
             path.mkdir(parents=True)
             (path / "Cargo.toml").write_text(
                 f'[package]\nname = "{crate}"\nversion = "1.0.0"\nedition = "2021"\n'
             )
-        lock_packages = [f'[[package]]\nname = "{crate}"\nversion = "1.0.0"\n' for crate in crates]
+        lock_packages = [f'[[package]]\nname = "{crate}"\nversion = "1.0.0"\n' for crate in self.crates.values()]
         (self.repo / "Cargo.lock").write_text(
             'version = 4\n\n[[package]]\nname = "fixture-external"\nversion = "2.3.4"\n\n'
             + "\n".join(lock_packages)
@@ -178,7 +183,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(
             changed,
             {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")}
-            | {f"crates/{crate}/Cargo.toml" for crate in ("mc-core", "mc-store", "mc-module", "mc-tokenizer")}
+            | set(self.crates)
             | {"Cargo.lock"},
         )
         self.assertEqual(self.git("status", "--porcelain"), "")
@@ -256,9 +261,8 @@ class ReleaseTests(unittest.TestCase):
         run = subprocess.run([str(REAL_BUN), "scripts/version-sync.mjs", "9.8.7"],
                              cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        crates = ("mc-core", "mc-store", "mc-module", "mc-tokenizer")
-        for crate in crates:
-            manifest = (self.repo / "crates" / crate / "Cargo.toml").read_text()
+        for path in self.crates:
+            manifest = (self.repo / path).read_text()
             self.assertIn('version = "9.8.7"', manifest)
         lock = (self.repo / "Cargo.lock").read_text()
         versions = {}
@@ -268,8 +272,8 @@ class ReleaseTests(unittest.TestCase):
             if name is not None and package_version is not None:
                 versions[name.group(1)] = package_version.group(1)
         self.assertEqual(
-            {name: versions[name] for name in crates},
-            {name: "9.8.7" for name in crates},
+            {name: versions[name] for name in self.crates.values()},
+            {name: "9.8.7" for name in self.crates.values()},
         )
         self.assertEqual(versions["fixture-external"], "2.3.4")
 

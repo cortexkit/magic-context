@@ -6,12 +6,13 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+from workspace_crates import workspace_crates
 
 PACKAGE_MANIFESTS = {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")}
-CARGO_MANIFESTS = {f"crates/{crate}/Cargo.toml" for crate in ("mc-core", "mc-store", "mc-module", "mc-tokenizer")}
-MANIFESTS = PACKAGE_MANIFESTS | CARGO_MANIFESTS
 CARGO_LOCK = "Cargo.lock"
-CARGO_CRATES = {"mc-core", "mc-store", "mc-module", "mc-tokenizer"}
 
 
 def git(*args):
@@ -34,9 +35,9 @@ def normalize_cargo_manifest(content):
     return content[:body_start] + normalized + content[body_end:]
 
 
-def normalize_cargo_lock(content):
+def normalize_cargo_lock(content, crate_names):
     blocks = re.split(r"(?m)(?=^\[\[package\]\][ \t]*\r?$)", content)
-    found = {name: 0 for name in CARGO_CRATES}
+    found = {name: 0 for name in crate_names}
     normalized = []
     version_line = re.compile(r'(?m)^([ \t]*version[ \t]*=[ \t]*")[^"]+("[^\r\n]*)$')
     for block in blocks:
@@ -69,30 +70,32 @@ def cargo_package_field(content, field):
     return None if match is None else match.group(1)
 
 
-def validate_cargo_lock(content, version):
+def validate_cargo_lock(content, version, crate_names):
     blocks = re.split(r"(?m)(?=^\[\[package\]\][ \t]*\r?$)", content)
     versions = {}
     for block in blocks:
         name = re.search(r'(?m)^name = "([^"]+)"[ \t]*\r?$', block)
         package_version = re.search(r'(?m)^version = "([^"]+)"[ \t]*\r?$', block)
-        if name is not None and name.group(1) in CARGO_CRATES:
+        if name is not None and name.group(1) in crate_names:
             if name.group(1) in versions:
                 raise RuntimeError(f"Cargo.lock contains duplicate workspace package {name.group(1)}")
             versions[name.group(1)] = None if package_version is None else package_version.group(1)
-    if versions != {name: version for name in CARGO_CRATES}:
+    if versions != {name: version for name in crate_names}:
         raise RuntimeError("Cargo.lock workspace package versions do not match the release version")
 
 
 def check_bump(base, version, staged):
+    crates = workspace_crates(Path.cwd(), lambda path: git("show", f"{base}:{path}").decode())
+    manifests = PACKAGE_MANIFESTS | crates.keys()
     target = ":" if staged else "HEAD:"
     notes = {"CHANGELOG.md", f".cortexkit/release-notes/v{version}.md"}
     diff_args = ["--cached"] if staged else []
     targets = [] if staged else ["HEAD"]
     paths = git("diff", *diff_args, "--name-only", "-z", base, *targets, "--").decode().split("\0")
     for path in filter(None, paths):
-        if path not in MANIFESTS | {CARGO_LOCK} | notes:
+        if path not in manifests | {CARGO_LOCK} | notes:
             raise RuntimeError(f"CI reuse refuses non-version/notes change: {path}")
-        if path in MANIFESTS:
+        if path in manifests:
             before_text = git("show", f"{base}:{path}").decode()
             after_text = git("show", f"{target}{path}").decode()
             if path in PACKAGE_MANIFESTS:
@@ -107,7 +110,7 @@ def check_bump(base, version, staged):
             else:
                 if cargo_package_field(after_text, "version") != version:
                     raise RuntimeError(f"Release version mismatch: {path}")
-                expected_name = path.split("/")[1]
+                expected_name = crates[path]
                 if cargo_package_field(after_text, "name") != expected_name:
                     raise RuntimeError(f"Cargo package name mismatch: {path}")
                 if normalize_cargo_manifest(before_text) != normalize_cargo_manifest(after_text):
@@ -115,8 +118,8 @@ def check_bump(base, version, staged):
         elif path == CARGO_LOCK:
             before_text = git("show", f"{base}:{path}").decode()
             after_text = git("show", f"{target}{path}").decode()
-            validate_cargo_lock(after_text, version)
-            if normalize_cargo_lock(before_text) != normalize_cargo_lock(after_text):
+            validate_cargo_lock(after_text, version, crates.values())
+            if normalize_cargo_lock(before_text, crates.values()) != normalize_cargo_lock(after_text, crates.values()):
                 raise RuntimeError("CI reuse refuses non-version Cargo.lock change")
         # Even a version-only edit must not change an executable bit or add a symlink.
         mode = git("ls-files", "--stage", "--", path).decode().split()[0] if staged else git("ls-tree", "HEAD", "--", path).decode().split()[0]

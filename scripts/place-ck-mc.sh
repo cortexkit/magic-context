@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Check the live context.db and store.db versions and source epoch constants before placement.
+# Compare database schema versions before replacement, and render-format epoch
+# constants (versions of cached prompt formats) when both revisions declare them.
 set -euo pipefail
 umask 077
 
@@ -139,10 +140,30 @@ else
     echo "staged build SHA: $staged_sha (compare with the build source; use --source-ref REF to enforce)"
 fi
 fences=$("$staged" --print-fences) || die "staged binary does not report supported fences"
-[[ "$fences" =~ ^context\.db=([0-9]+)[[:space:]]store\.db=([0-9]+)$ ]] || die "invalid --print-fences output: $fences"
+[[ "$fences" =~ ^context\.db=([0-9]+)[[:space:]]mode3\.db=([0-9]+)$ ]] || die "invalid --print-fences output: $fences"
 context_supported=${BASH_REMATCH[1]}
 store_supported=${BASH_REMATCH[2]}
-mc_dir=${MAGIC_CONTEXT_STORAGE_DIR:-$HOME/.local/share/cortexkit/magic-context}
+context_path=$(python3 - <<'PY'
+import os
+from pathlib import Path
+def value(name):
+    return os.environ.get(name, "").strip()
+if os.environ.get("MAGIC_CONTEXT_DB"):
+    path = Path(os.environ["MAGIC_CONTEXT_DB"])
+else:
+    if value("MAGIC_CONTEXT_TEST_DATA_DIR"):
+        directory = Path(value("XDG_DATA_HOME") or value("MAGIC_CONTEXT_TEST_DATA_DIR")) / "cortexkit/magic-context"
+    elif value("MAGIC_CONTEXT_STORAGE_DIR"):
+        directory = Path(value("MAGIC_CONTEXT_STORAGE_DIR"))
+    elif value("XDG_DATA_HOME"):
+        directory = Path(value("XDG_DATA_HOME")) / "cortexkit/magic-context"
+    else:
+        directory = Path.home() / ".local/share/cortexkit/magic-context"
+    path = directory / "context.db"
+print(path)
+PY
+)
+mode3_path=${MAGIC_CONTEXT_MODE3_STORE:-$(dirname "$context_path")/mode3.db}
 read_version() {
     local path=$1 sql=$2 value
     [[ -f "$path" ]] || die "missing live store: $path"
@@ -156,22 +177,34 @@ read_version() {
     [[ "$value" =~ ^[0-9]+$ ]] || die "invalid schema version from $path: $value"
     printf '%s\n' "$value"
 }
-context_live=$(read_version "$mc_dir/context.db" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')
-store_live=$(read_version "$mc_dir/store.db" "SELECT COALESCE(MAX(version), 0) FROM cortexkit_schema_version WHERE namespace = 'mc_cache';")
-echo "context.db: live=$context_live staged=$context_supported; store.db: live=$store_live staged=$store_supported"
-((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; store.db live=$store_live staged=$store_supported"
-((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; store.db live=$store_live staged=$store_supported"
+context_live=$(read_version "$context_path" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')
+store_live=0
+if [[ -e "$mode3_path" ]]; then
+    store_live=$(read_version "$mode3_path" 'PRAGMA user_version;')
+fi
+echo "context.db: live=$context_live staged=$context_supported; mode3.db: live=$store_live staged=$store_supported"
+((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
+((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
 
 bin_dir=$HOME/.local/share/cortexkit/bin
 deployed=$bin_dir/ck-mc
 [[ -f "$deployed" && -x "$deployed" ]] || die "missing deployed ck-mc: $deployed"
 deployed_sha=$(sha_from "$deployed")
+deployed_fences=$("$deployed" --print-fences) || die "deployed binary does not report supported fences"
+if [[ "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]store\.db=[0-9]+$ ]]; then
+    echo "deployed build uses the old store.db; old store.db isn't checked for this placement (left untouched)"
+elif [[ ! "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]mode3\.db=[0-9]+$ ]]; then
+    die "invalid deployed --print-fences output: $deployed_fences"
+fi
 # Require both build revisions locally; guessing an unavailable epoch could hide a change.
 epochs() {
     git show "$1:crates/mc-module/src/lib.rs" | python3 -c '
 import re, sys
 source = sys.stdin.read()
-for name in ("PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC", "TAGGER_FEATURE_EPOCH", "MEMORY_RENDER_FORMAT_EPOCH", "COMPARTMENT_RENDER_FORMAT_EPOCH"):
+names = ("PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC", "TAGGER_FEATURE_EPOCH", "MEMORY_RENDER_FORMAT_EPOCH", "COMPARTMENT_RENDER_FORMAT_EPOCH")
+if any(not re.search(r"pub const " + name + r": u32 = (\d+);", source) for name in names):
+    sys.exit(0)
+for name in names:
     matches = re.findall(r"pub const " + name + r": u32 = (\d+);", source)
     if len(matches) != 1:
         sys.exit("missing or ambiguous epoch: " + name)
@@ -180,6 +213,15 @@ for name in ("PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC", "TAGGER_FEATURE_EPOCH", "MEM
 }
 old_epochs=$(epochs "$deployed_sha") || die "cannot read deployed epochs from git $deployed_sha"
 new_epochs=$(epochs "$staged_sha") || die "cannot read staged epochs from git $staged_sha"
+if [[ -z "$old_epochs" || -z "$new_epochs" ]]; then
+    missing_side="deployed ($deployed_sha)"
+    [[ -n "$new_epochs" ]] || missing_side="staged ($staged_sha)"
+    [[ -n "$old_epochs" || -n "$new_epochs" ]] || missing_side="both deployed ($deployed_sha) and staged ($staged_sha)"
+    echo "render-epoch check does not apply: $missing_side lacks the render-epoch constants; skipping"
+    if ((require_epochs)) && [[ -n "$old_epochs" || -n "$new_epochs" ]]; then
+        die "--require-epochs-unchanged refused: $missing_side lacks the render-epoch constants, while the other revision has them"
+    fi
+else
 echo "epoch diff ($deployed_sha -> $staged_sha):"
 python3 - "$old_epochs" "$new_epochs" <<'PY'
 import sys
@@ -189,6 +231,7 @@ for key in old:
     print(f"  {key}: {old[key]} -> {new[key]}" + (" CHANGED" if old[key] != new[key] else ""))
 PY
 [[ "$old_epochs" == "$new_epochs" || "$require_epochs" -eq 0 ]] || die "epochs changed; pre-announce before placing"
+fi
 rollback=$bin_dir/staging/ck-mc.rollback.$deployed_sha
 printf -v rollback_cmd 'cp %q %q && ck module restart magic-context' "$rollback" "$deployed"
 if ((dry_run)); then
