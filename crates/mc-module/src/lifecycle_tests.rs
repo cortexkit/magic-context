@@ -993,3 +993,18 @@ fn lifecycle_drops_waiting_in_the_tail_free_nothing_in_the_projection() {
     session.queued.insert(("tool".into(), "p".into()));
     assert_eq!(session.usage_after_drops(&settings, 0.9), None);
 }
+
+/// A `ctx_keep` whose view the runner refuses waits again: the model was
+/// told everything else goes, so the next pass must still carry it out.
+#[tokio::test]
+async fn lifecycle_a_refused_keep_view_waits_again() {
+    let (mut session, client, _, _, settings) = fixture();
+    two_old_outputs(&mut session);
+    let kept: BTreeSet<lanes::PartKey> = BTreeSet::new();
+    *client.refuse.lock().unwrap() = true;
+    let (view, _) = session.build(&settings, None, false, Some(&kept));
+    session
+        .publish(&client, view.expect("the keep drops both outputs"))
+        .await;
+    assert_eq!(session.pending_keep, Some(kept));
+}

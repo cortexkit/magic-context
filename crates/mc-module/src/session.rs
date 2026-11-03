@@ -90,6 +90,10 @@ pub struct Session {
     /// After a restart, until the view the runner applies is read back:
     /// ck-mc doesn't know which edits the next view must carry.
     latest_unknown: bool,
+    /// The `ctx_keep` the pass being built carries out. If the runner
+    /// refuses that view or never gets it, the keep waits again: the model
+    /// was told everything else goes.
+    next_keep: Option<BTreeSet<lanes::PartKey>>,
     /// Parts whose edits once made a view fail ck-mc's own checks. Automatic
     /// lanes leave them alone, so the same failing view is not rebuilt on
     /// every pass.
@@ -218,6 +222,8 @@ struct Before {
     reclaim_bookmark: Option<u64>,
     #[serde(default)]
     summary_unshown: bool,
+    #[serde(default)]
+    pending_keep: Option<BTreeSet<lanes::PartKey>>,
 }
 
 /// Admission for a notice, before any lane selects work or publishes a view.
@@ -279,6 +285,7 @@ impl Session {
             next_rearm: false,
             summary_unshown: false,
             latest_unknown: false,
+            next_keep: None,
             failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
@@ -757,7 +764,7 @@ impl Session {
         if !execute {
             self.keep_requested = false;
         }
-        if let Some(kept) = self.pending_keep.take() {
+        if let Some(kept) = self.pending_keep.take_if(|_| !self.latest_unknown) {
             let (view, _) = self.build(settings, None, false, Some(&kept));
             if let Some(view) = view {
                 self.publish(client, view).await;
@@ -1558,7 +1565,7 @@ impl Session {
         if cache_lost || self.head_shape_changed(settings) {
             self.fold_due = true;
         }
-        let kept = self.pending_keep.take();
+        let kept = self.pending_keep.take_if(|_| !self.latest_unknown);
         let view = self
             .build(settings, over_limit, cache_lost, kept.as_ref())
             .0?;
@@ -2563,6 +2570,7 @@ impl Session {
             );
             return (None, 0);
         }
+        self.next_keep = keep.cloned();
         self.app_cause = if over_limit.is_some() {
             "over_limit"
         } else if cache_lost {
@@ -3017,6 +3025,7 @@ impl Session {
             pruned_turns: self.pruned_turns,
             reclaim_bookmark: Some(self.reclaim_bookmark),
             summary_unshown: self.summary_unshown,
+            pending_keep: self.next_keep.take(),
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -3139,6 +3148,9 @@ impl Session {
         self.refused_once = before.refused_once;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;
+        if before.pending_keep.is_some() {
+            self.pending_keep = before.pending_keep;
+        }
         self.baseline = before.baseline;
         self.fold_due = before.fold_due;
         self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
