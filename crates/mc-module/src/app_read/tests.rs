@@ -336,6 +336,28 @@ async fn watch_is_work_driven_replays_bounds_quotas_and_reports_lag() {
 }
 
 #[tokio::test]
+async fn a_watch_follows_sessions_ck_mc_does_not_hold_yet() {
+    let mut replica = replica(None);
+    let unknown = SessionRef::new("opencode", "opencode", "never-moved");
+    let params = json!({"sessions":[key(), {"runner":"opencode","harness":"opencode","session":"never-moved"}]});
+    let mut sub = replica.subscribe("direct".into(), &params).unwrap();
+    let first = sub.recv().await.unwrap().unwrap();
+    assert_eq!(first["kind"], "resync");
+    // The known session still updates.
+    replica.watches.changed(key());
+    assert_eq!(
+        sub.recv().await.unwrap().unwrap()["sessions"],
+        json!([key()])
+    );
+    // The other one is named once ck-mc starts holding it.
+    replica.watches.changed(unknown.clone());
+    assert_eq!(
+        sub.recv().await.unwrap().unwrap()["sessions"],
+        json!([unknown])
+    );
+}
+
+#[tokio::test]
 async fn published_replica_survives_restart_and_does_not_take_the_session_store_lock() {
     let dir = tempfile::tempdir().unwrap();
     let store =

@@ -154,9 +154,13 @@ impl Replica {
             .filter(|v| !v.is_empty() && v.len() <= 32)
             .ok_or_else(|| invalid("sessions"))?;
         let mut sessions = Vec::new();
+        // A named session ck-mc doesn't hold (yet) doesn't refuse the watch:
+        // the watch follows every session it names, so one session that never
+        // moves to mode 3 can't stop the others from updating. Reads of that
+        // session answer its refusal by name, and the watch's notice names it
+        // when its first projection arrives.
         for value in values {
             let key = session(value)?;
-            self.locate(&key)?;
             if sessions.contains(&key) {
                 return Err(invalid("sessions"));
             }
