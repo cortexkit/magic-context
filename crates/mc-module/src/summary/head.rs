@@ -648,10 +648,24 @@ pub fn needs_refold(
 
 /// `m[0]` and `m[1]` as view edits, in that order. `m[0]` carries the mural
 /// image, if any, after its text.
+///
+/// Summaries, memories, the profile and project docs can quote a tag (a
+/// person typing "expand §1234§", a memory about placeholders). An
+/// inserted message may hold no tag notation (compaction contract W6.4,
+/// `tagged_insert`): a quoted number would mislead the model's own count.
+/// So the head shows each quoted tag as its bare number.
 pub fn head_ops(m0: &str, m1: &str, mural: Option<InsertedImage>) -> Vec<EditOp> {
-    let m0 = InsertedMessage::new(M0_ID, Role::User, vec![m0.to_owned()])
-        .with_images(mural.into_iter().collect());
-    let m1 = InsertedMessage::new(M1_ID, Role::User, vec![m1.to_owned()]);
+    let m0 = InsertedMessage::new(
+        M0_ID,
+        Role::User,
+        vec![crate::neutral::without_tag_notation(m0)],
+    )
+    .with_images(mural.into_iter().collect());
+    let m1 = InsertedMessage::new(
+        M1_ID,
+        Role::User,
+        vec![crate::neutral::without_tag_notation(m1)],
+    );
     [m0, m1]
         .into_iter()
         .map(|message| EditOp::Insert {
@@ -669,6 +683,24 @@ pub fn is_head(op: &EditOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_head_shows_quoted_tags_as_bare_numbers() {
+        let text = "read [dropped §7§] and §§12§ but keep §x§, § and §§";
+        assert_eq!(
+            crate::neutral::without_tag_notation(text),
+            "read [dropped 7] and §12 but keep §x§, § and §§"
+        );
+        for op in head_ops(text, text, None) {
+            let EditOp::Insert { message, .. } = op else {
+                panic!("head ops are inserts");
+            };
+            assert!(message
+                .texts
+                .iter()
+                .all(|text| cortexkit_compaction_view::tags::tag_notation_in(text).is_empty()));
+        }
+    }
 
     #[test]
     fn an_overshooting_history_block_is_rendered_again_under_more_pressure() {

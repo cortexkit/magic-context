@@ -226,12 +226,14 @@ pub fn signed_thinking_hold(
 }
 
 /// Where the current turn starts: after the last message a person wrote.
-/// Notices a module or the runner delivered do not end it. `None` when no
+/// Notices a module or the runner delivered do not end it, and neither does
+/// a user-role record that only carries tool results (it has no text or
+/// file part; the plugin's turn boundary skips those too). `None` when no
 /// message a person wrote is held.
 pub fn current_turn_start(entries: &[Entry]) -> Option<usize> {
     entries
         .iter()
-        .rposition(|entry| entry.role == Role::User && entry.notice.is_none())
+        .rposition(lanes::starts_user_turn)
         .map(|user| user + 1)
 }
 

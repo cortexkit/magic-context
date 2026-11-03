@@ -30,3 +30,27 @@ pub fn is_finished(status: &ToolStatus) -> bool {
 pub fn is_known(entry: &Entry, part: &Part) -> bool {
     !matches!(entry.role, Role::Unknown(_)) && !matches!(part.body, PartBody::Unknown { .. })
 }
+
+/// `text` with every tag notation (a section sign, digits, a section sign;
+/// the view library's `tag_notation_in`) replaced by its digits.
+pub fn without_tag_notation(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('§') {
+        let after_open = &rest[start + '§'.len_utf8()..];
+        let digits = after_open.bytes().take_while(u8::is_ascii_digit).count();
+        match after_open[digits..].strip_prefix('§') {
+            Some(after_close) if digits > 0 => {
+                out.push_str(&rest[..start]);
+                out.push_str(&after_open[..digits]);
+                rest = after_close;
+            }
+            _ => {
+                out.push_str(&rest[..start + '§'.len_utf8()]);
+                rest = after_open;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}

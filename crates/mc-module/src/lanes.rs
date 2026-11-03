@@ -488,7 +488,7 @@ pub fn normalize_tool_name(name: &str) -> String {
 
 /// Whether an entry starts a user turn: a message the user wrote, not a
 /// notice a module or the runner delivered.
-fn starts_user_turn(entry: &Entry) -> bool {
+pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
         && entry.parts.iter().any(|part| match &part.body {

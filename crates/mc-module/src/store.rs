@@ -83,6 +83,9 @@ pub struct Durable {
     /// still put it back.
     #[serde(default)]
     pub unconfirmed: Vec<crate::session::Unconfirmed>,
+    /// A summary was published that no view the runner took shows yet.
+    #[serde(default)]
+    pub summary_unshown: bool,
 }
 
 pub struct Store {

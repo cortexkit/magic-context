@@ -84,6 +84,12 @@ pub struct Session {
     /// cut that changes) but selected no emergency batch: once the runner
     /// takes the view, a later batch no longer waits for another rewrite.
     next_rearm: bool,
+    /// A summary was published that no view the runner took shows yet: the
+    /// next view refreshes the head for it even when nothing else changes.
+    summary_unshown: bool,
+    /// After a restart, until the view the runner applies is read back:
+    /// ck-mc doesn't know which edits the next view must carry.
+    latest_unknown: bool,
     /// Parts whose edits once made a view fail ck-mc's own checks. Automatic
     /// lanes leave them alone, so the same failing view is not rebuilt on
     /// every pass.
@@ -210,6 +216,8 @@ struct Before {
     pruned_turns: u64,
     #[serde(default)]
     reclaim_bookmark: Option<u64>,
+    #[serde(default)]
+    summary_unshown: bool,
 }
 
 /// Admission for a notice, before any lane selects work or publishes a view.
@@ -269,6 +277,8 @@ impl Session {
             emergency_latched: false,
             next_latch: false,
             next_rearm: false,
+            summary_unshown: false,
+            latest_unknown: false,
             failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
@@ -424,6 +434,7 @@ impl Session {
             floor_lifted_for: self.floor_lifted_for.clone(),
             floor_pending_for: self.floor_pending_for.clone(),
             unconfirmed: self.unconfirmed.clone(),
+            summary_unshown: self.summary_unshown,
         }
     }
 
@@ -460,9 +471,15 @@ impl Session {
         self.floor_lifted_for = durable.floor_lifted_for;
         self.floor_pending_for = durable.floor_pending_for;
         self.unconfirmed = durable.unconfirmed;
+        self.summary_unshown = durable.summary_unshown;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
         self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
+        // Views are cumulative, and ck-mc doesn't store the confirmed one:
+        // it reads it back from the runner (`session.applied_view`). Until
+        // that read succeeds no view is built, or the next one would carry
+        // none of the earlier edits and every dropped part would come back.
+        self.latest_unknown = self.latest.is_none() && self.version > 0;
         self.distrust_state_ahead_of_summaries();
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
@@ -642,6 +659,7 @@ impl Session {
                     }
                     self.app_projection.revert(*from_ordinal);
                     self.index.truncate(*from_ordinal);
+                    self.clamp_bookmark_to_held();
                     if self.cut.is_some_and(|cut| *from_ordinal <= cut) {
                         // The undo reached the cut message or before it, and
                         // the summaries of what it removed are gone. The next
@@ -693,8 +711,29 @@ impl Session {
             self.app_projection.revert(self.index.base());
         }
         if extended == Extend::Diverged || !self.index_ready {
+            let held_before: Vec<(u64, String)> = self
+                .index
+                .entries()
+                .iter()
+                .map(|entry| (entry.ordinal, entry.mid.clone()))
+                .collect();
             self.index = Index::starting_at(self.cut.unwrap_or(1));
             self.index_ready = self.read_until(client, notice.newest.as_ref(), true).await;
+            if extended == Extend::Diverged {
+                // A change with no event: clamp to what the new transcript
+                // still shares with the old one.
+                let shared = self
+                    .index
+                    .entries()
+                    .iter()
+                    .take_while(|entry| {
+                        held_before
+                            .iter()
+                            .any(|(ordinal, mid)| *ordinal == entry.ordinal && *mid == entry.mid)
+                    })
+                    .count();
+                self.clamp_bookmark_to(shared);
+            }
         } else if extended == Extend::Gap || !self.index.ends_at(notice.newest.as_ref()) {
             self.index_ready = self.sync(client, notice.newest.as_ref()).await;
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
@@ -1314,6 +1353,9 @@ impl Session {
                 stored.created_at = now_ms;
                 stored
             }));
+        if !validated.compartments.is_empty() {
+            self.summary_unshown = true;
+        }
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
         if pass::at_execute(&self.conditions, settings)
@@ -2056,11 +2098,30 @@ impl Session {
                 .map(|last| last.end_message_id.clone())
         };
         let cut = through.and_then(|through| {
-            self.index
-                .entries()
-                .iter()
-                .find(|entry| entry.mid == through)
-                .map(|entry| (entry.ordinal, through))
+            let entries = self.index.entries();
+            let end = entries.iter().position(|entry| entry.mid == through)?;
+            // A tool still running can't be cut (compaction contract W6.5),
+            // yet the summarizer reads past a call left running long ago, as
+            // the plugin does. The cut then stops before it, so views keep
+            // landing; the summary may repeat what those messages still show
+            // until the runner finishes or fails the call.
+            let running = entries[..=end].iter().position(|entry| {
+                entry.parts.iter().any(|part| match &part.body {
+                    PartBody::Tool(tool) => !crate::neutral::is_finished(&tool.status),
+                    _ => false,
+                })
+            });
+            let Some(running) = running else {
+                return Some((entries[end].ordinal, through));
+            };
+            eprintln!(
+                "ck-mc: session {}: the cut stops before message {}, whose tool call is still running",
+                self.key.session, entries[running].ordinal
+            );
+            // With nothing held before the running call, no new cut: the
+            // view carries the cut the runner has now.
+            let before = running.checked_sub(1)?;
+            Some((entries[before].ordinal, entries[before].mid.clone()))
         });
         if let Some((_, through)) = &cut {
             ops.push(EditOp::Cut {
@@ -2308,6 +2369,81 @@ impl Session {
 
     /// The history head as the latest view shows it, after a read the head
     /// needs failed: nothing about it changes on this pass.
+    /// The held entries with the full output of each tool part whose output
+    /// `ops` replace, when ck-mc read it (the answered-images lane does).
+    /// The index holds tool output in compact form, so the view checks could
+    /// otherwise allow only the part's own number in the replacement and
+    /// refuse any other tag its original text quotes (`foreign_tag`), as the
+    /// runner, which checks against the full text, would not. `None` when no
+    /// op replaces such an output.
+    fn with_replaced_outputs(
+        &self,
+        ops: &[EditOp],
+    ) -> Option<Vec<cortexkit_role_compaction::read::Entry>> {
+        let wanted: BTreeSet<lanes::PartKey> = ops
+            .iter()
+            .filter_map(|op| match op {
+                EditOp::Replace {
+                    mid, part, field, ..
+                } if field == "output" => Some((mid.clone(), part.clone())),
+                _ => None,
+            })
+            .filter(|key| self.image_outputs.contains_key(key))
+            .collect();
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut entries = self.index.entries().to_vec();
+        for entry in &mut entries {
+            for part in &mut entry.parts {
+                let key = (entry.mid.clone(), part.id.clone());
+                if let (true, PartBody::Tool(tool)) = (wanted.contains(&key), &mut part.body) {
+                    tool.output = self.image_outputs.get(&key).cloned();
+                }
+            }
+        }
+        Some(entries)
+    }
+
+    /// After an undo, removed numbers go to new parts (compaction contract
+    /// T4), so the age-sweep bookmark can't stay above the highest number
+    /// still held: a new output under it would count as far behind at once.
+    fn clamp_bookmark_to_held(&mut self) {
+        self.clamp_bookmark_to(self.index.entries().len());
+    }
+
+    /// Clamp the bookmark to the highest number among the first `count`
+    /// held entries.
+    fn clamp_bookmark_to(&mut self, count: usize) {
+        let held = self.index.entries()[..count]
+            .iter()
+            .flat_map(|entry| entry.parts.iter())
+            .filter_map(|part| part.tag)
+            .max()
+            .unwrap_or(0);
+        self.reclaim_bookmark = self.reclaim_bookmark.min(held);
+    }
+
+    /// Whether the history head and cut in `history` differ from the latest
+    /// view's only in `m[1]`.
+    fn only_m1_changes(&self, history: &[EditOp]) -> bool {
+        let Some(latest) = &self.latest else {
+            return false;
+        };
+        let shown = |wanted: &EditOp| latest.edits.iter().any(|edit| edit.op == *wanted);
+        let mut m1_changed = false;
+        for op in history {
+            match op {
+                EditOp::Insert { message, .. } if message.id == head::M1_ID => {
+                    m1_changed |= !shown(op);
+                }
+                _ if !shown(op) => return false,
+                _ => {}
+            }
+        }
+        m1_changed
+    }
+
     fn head_as_shown(&mut self, why: &str) -> Vec<EditOp> {
         eprintln!(
             "ck-mc: session {}: history head kept as shown, {why}",
@@ -2418,6 +2554,13 @@ impl Session {
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
         if !self.index_ready {
+            return (None, 0);
+        }
+        if self.latest_unknown {
+            eprintln!(
+                "ck-mc: session {}: no view until the runner's applied view is read back",
+                self.key.session
+            );
             return (None, 0);
         }
         self.app_cause = if over_limit.is_some() {
@@ -2545,9 +2688,12 @@ impl Session {
         }
         // Answered images go once content at least as new has been dropped,
         // by an earlier view or by this pass.
+        // Parts set aside after a view failed ck-mc's own checks stay out of
+        // every automatic lane, so the failure doesn't repeat each pass.
         let image_skip: Vec<lanes::PartKey> = covered
             .iter()
             .chain(keep.into_iter().flatten())
+            .chain(self.failed_parts.iter())
             .cloned()
             .collect();
         let images = lanes::Images {
@@ -2565,6 +2711,7 @@ impl Session {
             .filter(|key| !stripped_only.contains(key))
             .cloned()
             .chain(keep.into_iter().flatten().cloned())
+            .chain(self.failed_parts.iter().cloned())
             .collect();
         ops.extend(image_ops);
         covered.extend(image_parts);
@@ -2606,6 +2753,24 @@ impl Session {
                 .collect();
         let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
+        // A pass whose lanes have no new edit publishes nothing (PD12). A
+        // memory another writer saved changes only `m[1]`: it waits for a
+        // pass that rewrites anyway, as the plugin's history refresh rides a
+        // rewrite and never starts one.
+        let history = if ops.is_empty()
+            && !cache_lost
+            && over_limit.is_none()
+            && keep.is_none()
+            && !self.summary_unshown
+            && !self.head_stale
+            && self.only_m1_changes(&history)
+        {
+            self.head_as_shown(
+                "only memories in m[1] changed; they wait for a pass that rewrites anyway",
+            )
+        } else {
+            history
+        };
         ops.extend(history);
         (self.seal(ops, &covered), freed)
     }
@@ -2615,9 +2780,10 @@ impl Session {
     fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
         let version = self.version + 1;
         let retire = retired_history(self.summaries.is_empty(), &ops);
+        let full = self.with_replaced_outputs(&ops);
         let built = view_builder::next_view(
             self.latest.as_ref(),
-            self.index.entries(),
+            full.as_deref().unwrap_or(self.index.entries()),
             ops,
             &self.conditions.rules,
             version,
@@ -2674,8 +2840,13 @@ impl Session {
         }
         self.next_baseline = None;
         self.next_caveman = None;
+        self.next_latch = false;
+        self.next_rearm = false;
         let covered = std::mem::take(&mut self.next_covered);
         self.forget_queued(&covered);
+        // As after a view that fails ck-mc's own checks: its parts are set
+        // aside, so the same oversized view isn't built again on every pass.
+        self.failed_parts.extend(covered.iter().cloned());
         eprintln!(
             "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
             self.key.session, view.version
@@ -2845,6 +3016,7 @@ impl Session {
             cut: self.cut,
             pruned_turns: self.pruned_turns,
             reclaim_bookmark: Some(self.reclaim_bookmark),
+            summary_unshown: self.summary_unshown,
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -2862,6 +3034,7 @@ impl Session {
             self.head_stale = false;
             self.baseline = Some(next);
             self.fold_due = false;
+            self.summary_unshown = false;
         }
         if let Some(next) = self.next_caveman.take() {
             self.caveman = next;
@@ -2965,6 +3138,7 @@ impl Session {
         self.queued = before.queued;
         self.refused_once = before.refused_once;
         self.emergency_latched = before.emergency_latched;
+        self.summary_unshown |= before.summary_unshown;
         self.baseline = before.baseline;
         self.fold_due = before.fold_due;
         self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
@@ -3011,6 +3185,10 @@ impl Session {
     /// Whether the runner applies a view ck-mc does not expect: neither its
     /// latest nor, while views wait for confirmation, the one before them.
     fn runner_differs(&self, applied: Option<&AppliedView>) -> bool {
+        // After a restart ck-mc must read the view back before building.
+        if self.latest_unknown {
+            return true;
+        }
         let expected = |view: Option<&View>| match (applied, view) {
             (Some(applied), Some(view)) => same(applied, view),
             (None, None) => true,
@@ -3035,6 +3213,7 @@ impl Session {
                     self.apply_cut(view);
                 }
                 self.latest = answer.view;
+                self.latest_unknown = false;
             }
             Err(error) => self.runner_call_failed("session.applied_view", &error),
         }

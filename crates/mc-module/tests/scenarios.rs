@@ -1432,6 +1432,9 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The last request is over the threshold; the step after it is the one
+    // whose request carries the view.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let host = runner.host();
@@ -1475,7 +1478,8 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
             _ => None,
         })
         .unwrap();
-    assert!(first_kept > 0, "nothing was cut");
+    // Ordinals count from 1: a first kept message after 1 means a cut.
+    assert!(first_kept > 1, "nothing was cut");
     assert!(rendered
         .iter()
         .any(|message| message.parts.iter().any(|part| message
