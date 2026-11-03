@@ -520,7 +520,35 @@ impl RunnerClient for SubcRunnerClient {
         if let Some(error) = value.get("error").and_then(Value::as_str) {
             return Err(error.to_owned());
         }
-        Ok(value)
+        engram_result(value)
+    }
+}
+
+/// Engram answers a device-streams call as `{"result": <answer>}`; a
+/// refusal arrives as an error frame instead.
+fn engram_result(mut value: Value) -> Result<Value, String> {
+    match value
+        .as_object_mut()
+        .and_then(|object| object.remove("result"))
+    {
+        Some(result) => Ok(result),
+        None => Err("malformed_reply".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod engram_reply_tests {
+    use super::engram_result;
+    use serde_json::json;
+
+    #[test]
+    fn an_engram_answer_is_read_from_its_result_member() {
+        let heads = json!({"account": "a", "device": "d", "devices": []});
+        assert_eq!(engram_result(json!({"result": heads.clone()})), Ok(heads));
+        assert_eq!(
+            engram_result(json!({"account": "a"})),
+            Err("malformed_reply".to_owned())
+        );
     }
 }
 
