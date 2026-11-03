@@ -289,7 +289,16 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             mid: mid.clone(),
             part: Some(part_id.clone()),
         };
+        // A sealed part (signed or encrypted) can be dropped but never
+        // replaced (compaction contract PR5): it goes whole, or not at all.
+        let sealed = !part.seal.is_none();
         match &part.body {
+            PartBody::Text { .. } if sealed => match (part.tag, shape) {
+                // Stripping an injection keeps the rest of the text, which
+                // only a replacement could do.
+                (Some(_), Shape::StripInjection) | (None, _) => continue,
+                (Some(_), _) => ops.push(drop()),
+            },
             PartBody::Text { text } => match (part.tag, shape) {
                 (Some(tag), Shape::StripInjection) => match injection::strip_part(tag, text) {
                     Some(Stripped::Empty) => ops.push(replace("text", json!(placeholder(tag)))),
@@ -311,11 +320,22 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 };
                 let small_recent = recent.contains(&tag)
                     && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES;
+                let ends = ends_transcript(entry, part, newest_mid);
+                if sealed {
+                    // Its output can't be replaced; removing the call that
+                    // ends the transcript would end the request on it.
+                    if ends {
+                        continue;
+                    }
+                    ops.push(drop());
+                    covered.push(key.clone());
+                    continue;
+                }
                 let keep_call = match shape {
                     Shape::Default | Shape::Requested | Shape::StripInjection => {
-                        ends_transcript(entry, part, newest_mid) || small_recent
+                        ends || small_recent
                     }
-                    Shape::Whole => ends_transcript(entry, part, newest_mid),
+                    Shape::Whole => ends,
                     Shape::EditMarker => true,
                 };
                 if !keep_call {
@@ -335,8 +355,9 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     }
                 }
             }
-            // A file goes only when a lane wants it gone whole (`ctx_keep`).
-            PartBody::File(_) if shape == Shape::Whole => ops.push(drop()),
+            // A file or a known opaque part goes only when a lane wants it
+            // gone whole (`ctx_keep`); an opaque part can only be dropped.
+            PartBody::File(_) | PartBody::Opaque(_) if shape == Shape::Whole => ops.push(drop()),
             // Other files, opaque parts and kinds ck-mc doesn't know: no lane
             // here edits them.
             _ => continue,

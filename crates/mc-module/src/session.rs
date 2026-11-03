@@ -80,6 +80,10 @@ pub struct Session {
     /// Set when the pass being built selected an emergency batch; it latches
     /// only once the runner takes the view.
     next_latch: bool,
+    /// Set when the pass being built rewrites anyway (a lane edit, a head or
+    /// cut that changes) but selected no emergency batch: once the runner
+    /// takes the view, a later batch no longer waits for another rewrite.
+    next_rearm: bool,
     /// Parts whose edits once made a view fail ck-mc's own checks. Automatic
     /// lanes leave them alone, so the same failing view is not rebuilt on
     /// every pass.
@@ -264,6 +268,7 @@ impl Session {
             next_reclaim_bookmark: None,
             emergency_latched: false,
             next_latch: false,
+            next_rearm: false,
             failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
@@ -484,10 +489,13 @@ impl Session {
         let cut_ahead = self
             .cut
             .is_some_and(|cut| covered.is_none_or(|covered| cut > covered));
-        let last_sequence = self.summaries.last().map(|summary| summary.sequence);
-        let head_ahead = self.baseline.as_ref().is_some_and(|baseline| {
-            last_sequence.is_none_or(|last| baseline.through_sequence > last)
-        });
+        // A baseline folded before any summary records -1, the same value
+        // as no summaries in context.db: that pair is consistent, not ahead.
+        let last_sequence = self.summaries.last().map_or(-1, |summary| summary.sequence);
+        let head_ahead = self
+            .baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.through_sequence > last_sequence);
         if !cut_ahead && !head_ahead {
             return;
         }
@@ -2523,6 +2531,18 @@ impl Session {
                 self.next_latch = true;
             }
         }
+        // A rewrite with no batch rearms the emergency lane, so outputs that
+        // become droppable later can still form one (the plugin keeps the
+        // episode armed on such a pass). A lost cache is lost whether or not
+        // a view follows; a lane edit or head change counts once taken.
+        self.next_rearm = false;
+        if priced && !self.next_latch {
+            if cache_lost {
+                self.emergency_latched = false;
+            } else {
+                self.next_rearm = true;
+            }
+        }
         // Answered images go once content at least as new has been dropped,
         // by an earlier view or by this pass.
         let image_skip: Vec<lanes::PartKey> = covered
@@ -2633,6 +2653,7 @@ impl Session {
                 self.forget_queued(covered);
                 self.failed_parts.extend(covered.iter().cloned());
                 self.next_latch = false;
+                self.next_rearm = false;
                 eprintln!(
                     "ck-mc: session {}: no valid view: {refusal:?}",
                     self.key.session
@@ -2834,6 +2855,8 @@ impl Session {
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
             self.emergency_latched = true;
+        } else if std::mem::take(&mut self.next_rearm) {
+            self.emergency_latched = false;
         }
         if let Some(next) = self.next_baseline.take() {
             self.head_stale = false;

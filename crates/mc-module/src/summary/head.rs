@@ -13,7 +13,7 @@
 //! The blocks, wrappers and budgets are the TypeScript plugin's, so a head
 //! reads the same in both.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use cortexkit_role_compaction::read::Role;
 use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedImage, InsertedMessage};
@@ -111,10 +111,17 @@ pub struct Committed {
 pub struct Baseline {
     /// The highest summary sequence in `m[0]`.
     pub through_sequence: i64,
-    /// The highest memory id that existed at the fold. A newer memory is
-    /// one `m[0]` could not show; an older one left out of `m[0]` was left
-    /// out by the memory budget and waits for the next fold.
+    /// The highest memory id that existed at the fold. Only read for a
+    /// baseline without `withheld`.
     pub max_memory_id: i64,
+    /// The memories that could be shown at the fold but that `m[0]` left out
+    /// for the memory budget; they wait for the next fold. Any other memory
+    /// the head does not show, newer or older (restored, newly shared), is
+    /// new to the head and goes to `m[1]`. `None` in a baseline from before
+    /// this was recorded: every memory up to `max_memory_id` counts as
+    /// withheld then.
+    #[serde(default)]
+    pub withheld: Option<BTreeSet<i64>>,
     /// What the head shows of each memory: `m[0]`'s text, then each change
     /// `m[1]` showed since.
     pub shown: BTreeMap<i64, Shown>,
@@ -272,6 +279,14 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
             .map(|memory| memory.id)
             .max()
             .unwrap_or(0),
+        withheld: Some(
+            inputs
+                .memories
+                .iter()
+                .map(|memory| memory.id)
+                .filter(|id| !memories.iter().any(|shown| shown.id == *id))
+                .collect(),
+        ),
         shown: memories
             .iter()
             .map(|memory| {
@@ -391,7 +406,11 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
         }
     }
     for memory in inputs.memories {
-        if memory.id > baseline.max_memory_id && !baseline.shown.contains_key(&memory.id) {
+        let withheld = match &baseline.withheld {
+            Some(withheld) => withheld.contains(&memory.id),
+            None => memory.id <= baseline.max_memory_id,
+        };
+        if !withheld && !baseline.shown.contains_key(&memory.id) {
             out.push(Change {
                 id: memory.id,
                 line: memory::added_line(
