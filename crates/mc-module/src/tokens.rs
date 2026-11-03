@@ -61,8 +61,9 @@ pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
     }
 }
 
-/// A tool part's output alone, without attachments when it is estimated:
-/// what the protected tail weighs, as the plugin does.
+/// A tool part's output alone. When it is estimated, attachments are left
+/// out: the newest tool outputs kept from automatic drops are weighed by
+/// their output text, as the standalone plugin weighs them.
 pub fn tool_output(part: &Part, tool: &ToolPart) -> u64 {
     match part.tokens {
         Some(PartTokens::Tool(counted)) => counted.output,

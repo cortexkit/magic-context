@@ -551,9 +551,10 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
 pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 
 /// How much reasoning one assistant step produced, counting all of its
-/// reasoning: what the signed-thinking hold calls heavy reasoning. It is the
-/// step's own reported count first, since the hold is about how hard the
-/// model just thought, not about what sending the reasoning again costs.
+/// reasoning, with the step's own reported count first. The pass uses it to
+/// hold back a rebuild right after heavy reasoning on models whose signed
+/// thinking a rebuild would invalidate (`pass.rs`), so it measures how hard
+/// the model just thought, not what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
     let reasoning: Vec<&Part> = entry
         .parts
@@ -1510,9 +1511,9 @@ mod tests {
         assert_eq!(cleared, [key("m2", "r2"), key("m3", "r3")]);
     }
 
-    /// The budget weighs reasoning by what sending it again costs, the
-    /// runner's count first; the signed-thinking hold weighs how much the
-    /// step produced, the provider's reported count first.
+    /// The reasoning budget weighs reasoning by what sending it again costs,
+    /// the runner's count first; the heavy-reasoning measure weighs how much
+    /// the step produced, the provider's reported count first.
     #[test]
     fn the_budget_uses_the_replay_count_and_the_hold_the_generated_one() {
         let mut step = entry(1, Role::Assistant, vec![reasoning("r1", 400)]);
