@@ -81,6 +81,12 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         .capabilities(Some(CapabilityDeclarations {
             provides: vec![
                 COMPACTION_PROVIDES.to_owned(),
+                // Core finds tool providers and step-transform providers in
+                // the daemon's module catalog by these claims, before it calls
+                // `role.describe`. Without them core composes Magic Context
+                // into no plan: no tools, no compaction, no `pre_user` hook.
+                cortexkit_role_tool_provider::PROVIDES.to_owned(),
+                step::PROVIDES.to_owned(),
                 subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
                 subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
             ],
@@ -890,5 +896,35 @@ mod agent_surface_tests {
             "ctx_missing".into(),
         ));
         assert_eq!(refusal.code, "unknown_tool");
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    /// Core and runners find ck-mc by these claims in the daemon's module
+    /// catalog. Each one missing makes core leave ck-mc out of every plan's
+    /// matching item, silently.
+    #[test]
+    fn the_manifest_claims_every_role_ck_mc_serves() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let provides: Vec<&str> = manifest["capabilities"]["provides"]
+            .as_array()
+            .expect("capabilities.provides")
+            .iter()
+            .filter_map(|claim| claim.as_str())
+            .collect();
+        for claim in [
+            "compaction-provider/v2",
+            "tool-provider/v1",
+            "step-transform-provider/v2",
+        ] {
+            assert!(provides.contains(&claim), "{claim} missing: {provides:?}");
+        }
+        assert!(
+            !provides
+                .iter()
+                .any(|claim| claim.ends_with("-provider/v1") && *claim != "tool-provider/v1"),
+            "an old contract version is still claimed: {provides:?}"
+        );
     }
 }
