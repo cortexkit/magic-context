@@ -12,6 +12,7 @@ fn transcript() -> Vec<HostMessage> {
         mid: mid.into(),
         entry,
         finished_summary,
+        added: false,
     };
     vec![
         row("u1", Some(1), false),
@@ -241,6 +242,7 @@ fn a_retried_move_does_not_shift_the_numbers_twice() {
             mid: "u0".into(),
             entry: None,
             finished_summary: false,
+            added: false,
         },
     );
     let refused = run(&store, &Numbering::opencode(&other, &newest()).unwrap()).unwrap_err();
@@ -304,11 +306,13 @@ fn a_transcript_without_compactions_changes_no_number() {
             mid: "u1".into(),
             entry: Some(1),
             finished_summary: false,
+            added: false,
         },
         HostMessage {
             mid: "a2".into(),
             entry: Some(2),
             finished_summary: false,
+            added: false,
         },
     ];
     let numbering = Numbering::opencode(&plain, &Cursor::new(2, "a2", "d")).unwrap();
@@ -318,4 +322,71 @@ fn a_transcript_without_compactions_changes_no_number() {
         store.query::<String>("SELECT start_message || '-' || end_message FROM compartments"),
         ["1-2"]
     );
+}
+
+/// The same transcript after its store is converted to OpenCode 2: the
+/// compaction pair is one marker row, a delegated-task prompt and its answer
+/// are gone, user message u6 gets a `synthetic` row with a new id right after
+/// it, and a `system` notice is added at the end. The plugin numbered the
+/// OpenCode 1 rows 1, 2, 3, 4 (opener), 5 (task), 6 (task answer), 7 (u6),
+/// 8 (a7); the runner's entries are 1, 2, 3, -, -, -, 4 (u6), 5 (its added
+/// row), 6 (a7), 7 (the notice).
+fn converted() -> Vec<HostMessage> {
+    let row = |mid: &str, entry: Option<u64>, finished_summary: bool, added: bool| HostMessage {
+        mid: mid.into(),
+        entry,
+        finished_summary,
+        added,
+    };
+    vec![
+        row("u1", Some(1), false, false),
+        row("a2", Some(2), false, false),
+        row("u3", Some(3), false, false),
+        row("opener", None, false, false),
+        row("summary", None, true, false),
+        row("task", None, false, false),
+        row("task-answer", None, false, false),
+        row("u6", Some(4), false, false),
+        row("u6-synthetic", Some(5), false, true),
+        row("a7", Some(6), false, false),
+        row("notice", Some(7), false, true),
+    ]
+}
+
+#[test]
+fn a_store_converted_to_opencode_2_maps_by_id_and_rows_added_after_a_message_count_with_it() {
+    let store = Store::new("converted");
+    store.summary(0, (1, "u1"), (3, "u3"));
+    store.summary(1, (4, "opener"), (7, "u6"));
+    store.summary(2, (8, "a7"), (8, "a7"));
+    let conn = store.conn();
+    conn.execute_batch(&format!(
+        "INSERT INTO notes (type, content, session_id, created_at, updated_at, harness, anchor_ordinal)
+             VALUES ('session', 'after u6', '{SESSION}', 1, 1, '{HARNESS}', 7),
+                    ('session', 'at the task', '{SESSION}', 1, 1, '{HARNESS}', 5);"
+    ))
+    .unwrap();
+    let numbering = Numbering::opencode(&converted(), &Cursor::new(7, "notice", "d")).unwrap();
+    assert!(!numbering.is_identity());
+    run(&store, &numbering).unwrap();
+    // The summary ending at u6 also covers its added synthetic row, so that
+    // text doesn't show raw after the cut; the last one covers the notice.
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_message || '-' || end_message FROM compartments ORDER BY sequence"
+        ),
+        ["1-3", "4-5", "6-7"]
+    );
+    assert_eq!(
+        store.query::<i64>("SELECT anchor_ordinal FROM notes ORDER BY id"),
+        [5, 3]
+    );
+}
+
+#[test]
+fn an_added_row_cannot_be_a_finished_summary() {
+    let mut rows = converted();
+    rows[8].finished_summary = true;
+    let refused = Numbering::opencode(&rows, &Cursor::new(7, "notice", "d")).unwrap_err();
+    assert!(refused.starts_with("invalid_messages:"), "{refused}");
 }

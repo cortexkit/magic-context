@@ -32,6 +32,19 @@
 //! numbering doesn't belong to this transcript, and the move refuses
 //! (`ordinal_mismatch`).
 //!
+//! A session can also move across hosts: its OpenCode 1 store is converted to
+//! OpenCode 2, and the runner numbers the converted rows. The conversion keeps
+//! each message's id and order, drops some rows (a compaction pair becomes one
+//! marker row; an unfinished opener and a delegated-task prompt with its answer
+//! vanish), and adds a few with new ids (a `synthetic` row right after a user
+//! message that also carried system-added text, a trailing `system` notice).
+//! The list then holds the OpenCode 1 rows in their order, each with the entry
+//! of the converted row of the same id (none when it has none), and the added
+//! rows in place, marked `added`. The plugin never numbered an added row, so it
+//! counts as part of the message before it: a range or position that reaches
+//! that message reaches its added rows too, and a summary ending there doesn't
+//! leave the added text raw after the cut.
+//!
 //! The rewrite and a record of it (`mode3_renumber:<harness>:<session>`,
 //! carrying the numbering's checksum) commit in one transaction. A move
 //! retried after a later step failed finds the record and doesn't shift the
@@ -66,13 +79,31 @@ pub struct HostMessage {
     /// plugin, and marking it here would shift every later number.
     #[serde(default)]
     pub finished_summary: bool,
+    /// A row the host added when converting the store, which the standalone
+    /// plugin never saw or numbered (see the module comment). It belongs to
+    /// the message before it.
+    #[serde(default)]
+    pub added: bool,
+}
+
+/// One message the plugin numbered, with the entries it has on the runner.
+#[derive(Debug)]
+struct Numbered {
+    mid: String,
+    /// The entry of the row with this message's id.
+    entry: Option<u64>,
+    /// The first and last entries of the message and the added rows after it.
+    first: Option<u64>,
+    through: Option<u64>,
 }
 
 /// The plugin's numbering of a transcript next to the runner's.
 #[derive(Debug)]
 pub struct Numbering {
-    /// For each plugin number (index + 1): the message and its entry.
-    by_plugin: Vec<(String, Option<u64>)>,
+    /// For each plugin number (index + 1): the message and its entries.
+    by_plugin: Vec<Numbered>,
+    /// Whether any row was added by a store conversion.
+    has_added: bool,
     /// Every message row on the active path: its entry, or none for a marker.
     by_mid: HashMap<String, Option<u64>>,
     checksum: String,
@@ -82,9 +113,10 @@ impl Numbering {
     /// The OpenCode 1 plugin's numbering of `messages`, which must end at the
     /// transcript's newest message `newest`.
     pub fn opencode(messages: &[HostMessage], newest: &Cursor) -> Result<Self, String> {
-        let mut by_plugin = Vec::new();
+        let mut by_plugin: Vec<Numbered> = Vec::new();
         let mut by_mid = HashMap::new();
         let mut last_entry = 0;
+        let mut has_added = false;
         for message in messages {
             if by_mid.insert(message.mid.clone(), message.entry).is_some() {
                 return Err(format!(
@@ -101,8 +133,27 @@ impl Numbering {
                 }
                 last_entry = entry;
             }
-            if !message.finished_summary {
-                by_plugin.push((message.mid.clone(), message.entry));
+            if message.added {
+                if message.finished_summary {
+                    return Err(format!(
+                        "invalid_messages: added row {} can't be a finished summary",
+                        message.mid
+                    ));
+                }
+                has_added = true;
+                // An added row before the first numbered message belongs to
+                // nothing the plugin stored.
+                if let (Some(owner), Some(entry)) = (by_plugin.last_mut(), message.entry) {
+                    owner.first = owner.first.or(Some(entry));
+                    owner.through = Some(entry);
+                }
+            } else if !message.finished_summary {
+                by_plugin.push(Numbered {
+                    mid: message.mid.clone(),
+                    entry: message.entry,
+                    first: message.entry,
+                    through: message.entry,
+                });
             }
         }
         match messages.last() {
@@ -117,13 +168,19 @@ impl Numbering {
         let mut hasher = Sha256::new();
         for message in messages {
             hasher.update(
-                serde_json::to_vec(&(&message.mid, message.entry, message.finished_summary))
-                    .expect("a message row serializes"),
+                serde_json::to_vec(&(
+                    &message.mid,
+                    message.entry,
+                    message.finished_summary,
+                    message.added,
+                ))
+                .expect("a message row serializes"),
             );
             hasher.update(b"\n");
         }
         Ok(Self {
             by_plugin,
+            has_added,
             by_mid,
             checksum: format!("{:x}", hasher.finalize()),
         })
@@ -131,13 +188,15 @@ impl Numbering {
 
     /// Whether every plugin number already is the runner's.
     fn is_identity(&self) -> bool {
-        self.by_plugin
-            .iter()
-            .enumerate()
-            .all(|(index, (_, entry))| *entry == Some(index as u64 + 1))
+        !self.has_added
+            && self
+                .by_plugin
+                .iter()
+                .enumerate()
+                .all(|(index, numbered)| numbered.entry == Some(index as u64 + 1))
     }
 
-    fn at(&self, ordinal: i64) -> Option<&(String, Option<u64>)> {
+    fn at(&self, ordinal: i64) -> Option<&Numbered> {
         usize::try_from(ordinal)
             .ok()
             .and_then(|ordinal| ordinal.checked_sub(1))
@@ -146,20 +205,19 @@ impl Numbering {
 
     /// The message the plugin numbered `ordinal`.
     fn mid(&self, ordinal: i64) -> Option<&str> {
-        self.at(ordinal).map(|(mid, _)| mid.as_str())
+        self.at(ordinal).map(|numbered| numbered.mid.as_str())
     }
 
-    /// The entries of the messages the plugin numbered `start..=end`, first
-    /// to last; none when the range is outside the transcript or covers only
-    /// marker rows.
+    /// The entries of the messages the plugin numbered `start..=end` and of
+    /// the rows added after them, first to last; none when the range is
+    /// outside the transcript or covers no entry.
     fn range(&self, start: i64, end: i64) -> Option<(i64, i64)> {
         if start < 1 || end < start || self.at(end).is_none() {
             return None;
         }
-        let mut covered =
-            (start..=end).filter_map(|ordinal| self.at(ordinal).and_then(|(_, e)| *e));
-        let first = covered.next()?;
-        let last = covered.next_back().unwrap_or(first);
+        let covered: Vec<&Numbered> = (start..=end).filter_map(|o| self.at(o)).collect();
+        let first = covered.iter().find_map(|numbered| numbered.first)?;
+        let last = covered.iter().rev().find_map(|numbered| numbered.through)?;
         Some((first as i64, last as i64))
     }
 
@@ -173,7 +231,7 @@ impl Numbering {
         self.by_plugin[..ordinal.min(self.by_plugin.len())]
             .iter()
             .rev()
-            .find_map(|(_, entry)| *entry)
+            .find_map(|numbered| numbered.through)
             .map_or(0, |entry| entry as i64)
     }
 
@@ -435,14 +493,14 @@ impl Rewrite<'_> {
             params![self.session, self.harness],
         )?;
         for (ordinal, depth) in rows {
-            let Some((_, entry)) = self.numbering.at(ordinal) else {
+            let Some(numbered) = self.numbering.at(ordinal) else {
                 return Err(self.unmapped("a compression depth", ordinal, ordinal));
             };
-            if let Some(entry) = entry {
+            if let Some(entry) = numbered.entry {
                 self.tx.execute(
                     "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![self.session, *entry as i64, depth, self.harness],
+                    params![self.session, entry as i64, depth, self.harness],
                 )?;
             }
         }
