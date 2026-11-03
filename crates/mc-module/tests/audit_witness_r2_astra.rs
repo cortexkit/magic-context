@@ -1,4 +1,5 @@
-//! Regression tests for five defects found before mode 3 went live:
+//! Regression tests for five defects found before ck-mc served runner-hosted
+//! sessions:
 //! - a restart before the first summary treated the head's baseline as ahead
 //!   of context.db and rebuilt `m[0]` below the threshold;
 //! - a requested drop of signed text was built as a replacement, which the
@@ -252,8 +253,8 @@ fn audit_newly_eligible_older_memory_is_added_to_m1() {
     ];
     let (m1, next, _) = head::delta(&baseline, &inputs(&current));
     assert_eq!(next.m0, baseline.m0);
-    // Correct behavior admits the newly eligible row on this authorized soft
-    // refresh without waiting for a hard fold or changing the frozen m[0].
+    // The newly eligible memory appears in m[1] on this refresh, without
+    // waiting for the next m[0] rebuild and without changing m[0].
     assert!(
         m1.contains("Restored constraint"),
         "m[1] silently omitted a newly eligible lower-id memory: {m1}"
