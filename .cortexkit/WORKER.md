@@ -2,6 +2,10 @@
 
 Standing rules for every worker in this repository. A brief can tighten them but never loosens them.
 
+## Read first
+
+Read `ARCHITECTURE.md` and `STRUCTURE.md` at the repository root before changing any code. They describe how a transform pass works, the cache rules every change must keep, and where code belongs. Don't edit either file.
+
 ## Build and test remotely
 
 - Run builds and tests on the build server (`runon: "linux"`, more cores for whole suites). Run on this Mac only what needs macOS, at `nice -n 10`.
@@ -9,7 +13,21 @@ Standing rules for every worker in this repository. A brief can tighten them but
 
 ## Gate before you deliver
 
-Filtered tests alone are never a gate. Run the shared CI gate on Linux (`runon: "linux,8c,net"` for full by default):
+A worker's gate covers what it touched, run on Linux, and takes minutes, not hours:
+
+- `bash scripts/gate.sh preflight`, always. It takes about a minute and catches pin, golden, lockfile and format drift anywhere.
+- The tests for what you changed, by filter: the test modules of the files you touched and the tests that exercise the behaviour you changed (for ck-mc, `cargo test -p mc-module --lib --locked <filter>`; for TypeScript, `bun test <paths>`). Plus clippy with `-D warnings` for ck-mc. Add the shared guards (`cd packages/plugin && bun test src/shared/`) whenever you add a test or a subprocess.
+- A test that fails without your fix, for every bug fix.
+
+Don't run a whole crate's or package's suite, and don't run `bash scripts/gate.sh full`. The ck-mc library suite alone takes about 40 minutes, and a full gate takes hours. The head (the agent that launched you) runs both once, over several merged deliveries, and sends back anything they find. Run them yourself only when your brief explicitly asks.
+
+Keep the edit-test loop short:
+- Run tests in the foreground with `wait: true` when they take under about 10 minutes. Background a job only when you have other work to do meanwhile.
+- Never wait on a job through repeated 30-minute `bash_watch` calls. If a filtered run takes more than about 15 minutes, your filter is too broad: stop it and narrow it.
+- Reuse the checkout's normal `target/` directory. A separate `CARGO_TARGET_DIR` forces a cold build of the whole crate.
+- Read code yourself. A sidekick is for questions about other repositories or large maps, not for files already in your checkout.
+
+The details below describe both gate scripts.
 
 - **Cheap checks:** `bash scripts/gate.sh preflight` runs all pins, goldens, lockfiles, layout and shard contracts, compiled contracts, Rust format, package typechecks and the pinned Biome. It reports every independent failure.
 - **Preflight ordering:** workflow-marked independent layout/format groups overlap dist production. Generated-output readers follow the build, then package typechecks run concurrently after the shared composite declarations are prepared. Package typecheck script payloads remain authoritative.
@@ -25,7 +43,7 @@ Filtered tests alone are never a gate. Run the shared CI gate on Linux (`runon: 
 - **Runtime homes:** each lane gets a fresh home under the job's `tmpdir()`, rejected if its physical path has an ancestor with a `.git` entry. A home inside a checkout would resolve to that project instead of an independent directory in identity tests. Live user stores are never reused.
 - **Independent Smoke:** `bash scripts/gate.sh smoke` runs the same two-hostname HTTP diagnostic as the Smoke workflow. GitHub's artifact transport, cache/status services and scheduled upstream-HEAD drift remain CI-only; local full uses same-checkout producer outputs and the locked daemon revision.
 
-Put each command, elapsed time, pass/fail counts and every failing test name in your report. Gate logs/results are under `target/gate/`; copy evidence cited by a report into `.cortexkit/internal-docs/` before delivery. If a failure isn't yours, show it fails the same way on your base commit.
+Put each command, elapsed time, pass/fail counts and every failing test name in your report. Gate logs/results are under `target/gate/`; copy evidence cited by a report into `.cortexkit/internal-docs/` before delivery. If a failure looks unrelated to your change, run that one test by name on your base commit, never the whole suite again, and report both results.
 
 ## Pre-approved, so don't ask
 
@@ -40,6 +58,7 @@ Put each command, elapsed time, pass/fail counts and every failing test name in 
 - Open, copy or write the live stores under `~/.local/share/cortexkit/`. Work on copies you were given.
 - Commit generated archives, base64 blobs or any file over 1 MB into tracked files.
 - Force-add ignored `.cortexkit/` files.
+- Remove a route, role, op, hook or code path without listing in your report every feature that used it, and where each one lives afterwards. A removal that leaves a feature with nowhere to run is a regression, even when every test passes.
 
 ## Ask when
 
