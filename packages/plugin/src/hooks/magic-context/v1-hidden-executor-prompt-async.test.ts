@@ -18,7 +18,10 @@ import {
 import { recordPromptSessionError } from "../../shared/prompt-async-transport";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
+import {
+    createV1HiddenCompletionExecutor,
+    turnOneOutcomeUnknown,
+} from "./compartment-runner-historian";
 import type { HiddenRunIdentity } from "./compartment-runner-types";
 import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
 import {
@@ -349,6 +352,56 @@ describe("OpenCode 1 historian under a host request timer", () => {
             expect(h.promptAsync).toHaveBeenCalledTimes(1);
         } finally {
             h.stop();
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("OpenCode 1 turn-one outcome", () => {
+    // A turn-one reply the host recorded as a provider error (an exhausted quota
+    // here) is a known failure: nothing was generated, so the send may repeat
+    // and the fallback model may run. Only a reply that may exist unread holds.
+    test("a recorded provider error is a known outcome; a lost reply is not", async () => {
+        const db = freshDb();
+        try {
+            const client = {
+                session: {
+                    create: async () => ({ data: { id: "ses-child" } }),
+                    messages: async () => ({
+                        data: [
+                            {
+                                info: {
+                                    id: "msg_failed",
+                                    role: "assistant",
+                                    time: { created: 2, completed: 3 },
+                                    error: {
+                                        name: "APIError",
+                                        data: {
+                                            message: "no account available; quota resets in 22h",
+                                        },
+                                    },
+                                },
+                                parts: [],
+                            },
+                        ],
+                    }),
+                    delete: async () => ({}),
+                },
+            } as never;
+            const executor = createV1HiddenCompletionExecutor(client, db, "/repo");
+            const recorded = await executor.collect({ id: "ses-child" }, 10).then(
+                () => undefined,
+                (error: unknown) => error,
+            );
+            expect(recorded).toBeInstanceOf(Error);
+            expect(turnOneOutcomeUnknown(recorded, true, false)).toBe(false);
+            expect(turnOneOutcomeUnknown(recorded, true, true)).toBe(false);
+            expect(turnOneOutcomeUnknown(new Error("reading the reply failed"), true, false)).toBe(
+                true,
+            );
+            expect(turnOneOutcomeUnknown(new Error("request timed out"), false, false)).toBe(true);
+            expect(turnOneOutcomeUnknown(new Error("rejected"), false, false)).toBe(false);
+        } finally {
             closeQuietly(db);
         }
     });

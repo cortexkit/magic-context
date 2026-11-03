@@ -303,9 +303,11 @@ export function createV1HiddenCompletionExecutor(
                 const finish = assistantFailure.finish
                     ? ` (finish=${assistantFailure.finish})`
                     : "";
-                const error = new Error(
-                    `Historian host recorded an assistant error${finish}: ${describeAssistantFailure(assistantFailure.error)}`,
-                    hostError === undefined ? undefined : { cause: hostError },
+                const error = markRecordedAssistantFailure(
+                    new Error(
+                        `Historian host recorded an assistant error${finish}: ${describeAssistantFailure(assistantFailure.error)}`,
+                        hostError === undefined ? undefined : { cause: hostError },
+                    ),
                 );
                 annotateSubagentInvocationError(error, {
                     attemptedModel: handle.attemptedModel,
@@ -446,6 +448,40 @@ export function historianReasoningBudgetDiagnostic(
     tokens?: RunTokenLog,
 ): string {
     return `historian ran out of output budget while reasoning (length-capped at ${outputTokens} tokens, no text${tokens ? `; ${formatRunTokenLog(tokens)}` : ""}) — set historian.maxTokens or route historian.model to a low-reasoning lane/variant`;
+}
+
+/** Marks the error collect() throws when the host recorded a provider error as the reply. */
+const RECORDED_ASSISTANT_FAILURE = Symbol("historianRecordedAssistantFailure");
+
+function markRecordedAssistantFailure(error: Error): Error {
+    return Object.assign(error, { [RECORDED_ASSISTANT_FAILURE]: true });
+}
+
+function isRecordedAssistantFailure(error: unknown): boolean {
+    return (
+        error !== null &&
+        typeof error === "object" &&
+        (error as { [RECORDED_ASSISTANT_FAILURE]?: unknown })[RECORDED_ASSISTANT_FAILURE] === true
+    );
+}
+
+/**
+ * Whether a turn-one send that ended in `error` may have produced a reply nobody
+ * read, so the prompt must not be sent again until recovery settles it. A reply
+ * the host recorded as a provider error (a refused account, an exhausted quota)
+ * is a known outcome: the model produced nothing, so the send may be repeated
+ * and the configured fallback model may run. Without this, one such error left
+ * the stage waiting for good and every later run failed without sending.
+ */
+export function turnOneOutcomeUnknown(
+    error: unknown,
+    promptSettled: boolean,
+    recovering: boolean,
+): boolean {
+    if (isRecordedAssistantFailure(error)) return false;
+    return (
+        promptSettled || recovering || /timed?\s*out|outcome.*unknown/i.test(getErrorMessage(error))
+    );
 }
 
 export async function runValidatedHistorianPass(args: {
@@ -1250,9 +1286,7 @@ async function runHistorianPrompt(args: {
             args.turnOneStageKey &&
             handle &&
             !completion &&
-            (promptSettled ||
-                args.recoverTurnOne ||
-                /timed?\s*out|outcome.*unknown/i.test(getErrorMessage(modelError)))
+            turnOneOutcomeUnknown(modelError, promptSettled, args.recoverTurnOne === true)
         ) {
             childRetained = true;
             executor.detach?.(handle);
