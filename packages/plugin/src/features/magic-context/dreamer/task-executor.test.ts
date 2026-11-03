@@ -167,6 +167,7 @@ describe("createDreamTaskExecutor — curate", () => {
             sessionDirectory: project,
             openOpenCodeDb: () => null,
             resolveRetrospectiveUsableInputTokens: () => 2000,
+            memoryInjectionBudgetTokens: 2750,
         });
         const result = await executor(
             { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
@@ -185,6 +186,7 @@ describe("createDreamTaskExecutor — curate", () => {
             }),
         );
         expect(prompts).toHaveLength(3);
+        for (const prompt of prompts) expect(prompt).toContain("the 2750-token injection budget");
         expect(prompts.every((prompt) => (prompt.match(/Content: Rule/g) ?? []).length === 1)).toBe(
             true,
         );

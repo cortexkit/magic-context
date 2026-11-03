@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -115,7 +116,7 @@ for (const arm of [
 				expect(cut!.seq).toBeLessThan(reader.sequenceForId(session.id, raw[base]!.id)!);
 			}
 
-			const mc = new Database(mcPath);
+			const mc = openTestDb(mcPath, undefined, Database);
 			mc.exec("PRAGMA busy_timeout = 5000");
 			const insertCompartment = mc.prepare(
 				"INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'opencode2')",

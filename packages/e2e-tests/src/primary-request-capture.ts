@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -264,7 +264,7 @@ export async function capturePrimaryRequests(
         inventory();
         if (!existsSync(join(runtime, "mc", "context.db")))
             throw new Error("Magic Context context database was not opened");
-        const db = new Database(join(runtime, "mc", "context.db"), { readonly: true });
+        const db = openTestDb(join(runtime, "mc", "context.db"), { readonly: true });
         try {
             if (!db.query("SELECT 1 FROM session_meta WHERE session_id = ?").get(session.id))
                 throw new Error("Magic Context did not process the ordinary primary session");

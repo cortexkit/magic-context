@@ -1,6 +1,6 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { OpenCode } from "@opencode/client";
-import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import {
 	inspectOpenFiles,
@@ -142,7 +142,7 @@ test("OpenCode 2 honors the exact per-model threshold and proactive floor with a
 
 		// Inspect only the throwaway plugin store: the session TTL must be frozen
 		// against the model, rather than a default captured before it was known.
-		const db = new Database(
+		const db = openTestDb(
 			join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 			{ readonly: true },
 		);

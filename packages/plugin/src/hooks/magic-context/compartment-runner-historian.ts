@@ -10,6 +10,13 @@ import {
 } from "../../config/live-child-output-cap";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { externalHistorianFailureReason } from "../../features/magic-context/historian-failure-reason";
+import { hasHistorianToolActivity } from "../../features/magic-context/memory/historian-wire";
+import { lifecycleTextHash } from "../../features/magic-context/memory/lifecycle-text";
+import {
+    HISTORIAN_FORMAT_INSTRUCTION,
+    parseEnabledTurnOne,
+    registerTurnOneChild,
+} from "../../features/magic-context/memory/turn-one-publication";
 import { openDatabase } from "../../features/magic-context/storage";
 import type {
     SubagentInvocationStatus,
@@ -45,8 +52,8 @@ import type { Database } from "../../shared/sqlite";
 import { createChildSessionWithFence } from "./child-session-spawn";
 import {
     buildHistorianEditorPrompt,
-    COMPARTMENT_AGENT_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
+    historianSystemPrompt,
 } from "./compartment-prompt";
 import type {
     HiddenCompletion,
@@ -66,6 +73,7 @@ import {
 } from "./compartment-runner-validation";
 import { resolveHistorianProducerLimits } from "./derive-budgets";
 import { PRODUCER_PROMPT_FIT_FAILURE_PATTERN } from "./historian-prompt-fit";
+import { reportedProfile } from "./historian-turn-two-carrier";
 import {
     historianProducerReserve,
     producerInputTokenLimit,
@@ -478,12 +486,17 @@ export async function runValidatedHistorianPass(args: {
      * historian turn two. Children of replies that fail validation are closed here.
      */
     retainChild?: boolean;
+    turnTwoEnabled?: boolean;
+    turnOneStageKey?: string;
+    recoverTurnOne?: boolean;
 }): Promise<ValidatedHistorianPassResult> {
     const withChild = (
         result: ValidatedHistorianPassResult,
         run: HistorianRunResult,
     ): ValidatedHistorianPassResult =>
-        result.ok ? { ...result, retainedChild: run.retained } : result;
+        result.ok
+            ? { ...result, retainedChild: run.retained, reportedProfile: run.reportedProfile }
+            : result;
     const firstRun = await runHistorianPrompt({
         ...args,
         dumpLabel: `${args.dumpLabelBase}-initial`,
@@ -491,6 +504,25 @@ export async function runValidatedHistorianPass(args: {
         agentId: args.agentId,
     });
     if (!firstRun.ok || !firstRun.result) {
+        if (
+            firstRun.failureReason === "outcome_unknown" ||
+            firstRun.failureReason === "carrier_expired"
+        )
+            return {
+                ok: false,
+                error: firstRun.error ?? "Turn-one outcome unavailable",
+                failureReason: firstRun.failureReason,
+            };
+        if (
+            args.turnTwoEnabled &&
+            (firstRun.failureReason === "parse_failed" || firstRun.failureReason === "empty_output")
+        )
+            return {
+                ok: false,
+                error: firstRun.error ?? "Invalid turn one",
+                failureReason: "parse_failed",
+                reportedProfile: firstRun.reportedProfile,
+            };
         if (firstRun.refusal?.terminal)
             return {
                 ok: false,
@@ -506,18 +538,22 @@ export async function runValidatedHistorianPass(args: {
         });
     }
 
-    const firstValidation = validateHistorianOutput(
-        firstRun.result,
-        args.parentSessionId,
-        args.chunk,
-        args.priorCompartments,
-        args.sequenceOffset,
-    );
+    const firstXml = args.turnTwoEnabled ? parseEnabledTurnOne(firstRun.result) : firstRun.result;
+    const firstValidation =
+        firstXml === null
+            ? { ok: false as const, error: "Invalid turn-one envelope" }
+            : validateHistorianOutput(
+                  firstXml,
+                  args.parentSessionId,
+                  args.chunk,
+                  args.priorCompartments,
+                  args.sequenceOffset,
+              );
     if (firstValidation.ok) {
         const finalResult = args.twoPass
             ? await runEditorPassOrFallback({
                   ...args,
-                  draftXml: firstRun.result,
+                  draftXml: firstXml!,
                   draftValidation: firstValidation,
                   draftDumpPath: firstRun.dumpPath,
                   draftInvocationId: firstRun.invocationId ?? null,
@@ -531,6 +567,14 @@ export async function runValidatedHistorianPass(args: {
         return finalResult;
     }
     await firstRun.retained?.close();
+
+    if (args.turnTwoEnabled)
+        return {
+            ok: false,
+            error: firstValidation.error ?? "Invalid turn one",
+            failureReason: "parse_failed",
+            reportedProfile: firstRun.reportedProfile,
+        };
 
     await args.callbacks?.onRepairRetry?.(firstValidation.error ?? "invalid compartment output");
     const repairPrompt = buildHistorianRepairPrompt(
@@ -644,6 +688,7 @@ async function runEditorPassOrFallback(args: {
      */
     draftRetained?: RetainedHistorianChild;
     retainChild?: boolean;
+    turnTwoEnabled?: boolean;
 }): Promise<ValidatedHistorianPassResult> {
     shared.sessionLog(args.parentSessionId, "historian two-pass: running editor on draft");
     const keepDraft = (): ValidatedHistorianPassResult =>
@@ -652,6 +697,7 @@ async function runEditorPassOrFallback(args: {
                   ...args.draftValidation,
                   invocationId: args.draftInvocationId ?? null,
                   retainedChild: args.draftRetained,
+                  reportedProfile: args.draftRetained?.reportedProfile,
               }
             : args.draftValidation;
     const editorRun = await runHistorianPrompt({
@@ -698,6 +744,10 @@ async function runEditorPassOrFallback(args: {
     }
 
     cleanupHistorianDump(args.parentSessionId, editorRun.dumpPath);
+    if (args.turnTwoEnabled) {
+        await editorRun.retained?.close();
+        return keepDraft();
+    }
     shared.sessionLog(args.parentSessionId, "historian two-pass: editor accepted");
     // The editor's reply is the one published, so its child is the one turn two continues.
     await args.draftRetained?.close();
@@ -735,6 +785,9 @@ async function runHistorianPrompt(args: {
      * turn two can continue the same session. The caller then owns closing it.
      */
     retainChild?: boolean;
+    turnTwoEnabled?: boolean;
+    turnOneStageKey?: string;
+    recoverTurnOne?: boolean;
 }): Promise<HistorianRunResult> {
     const {
         client,
@@ -767,6 +820,8 @@ async function runHistorianPrompt(args: {
     let promptSettled = false;
     let hadUnsettledPrompt = false;
     let childRetained = false;
+    let releaseChild: (() => Promise<void>) | undefined;
+    let answeringModel = modelOverride;
     const startedAt = Date.now();
     let invocationRecorded = false;
 
@@ -817,25 +872,32 @@ async function runHistorianPrompt(args: {
         });
     };
 
-    const system = withContentLanguageDirective(
+    let system = withContentLanguageDirective(
         agentId === HISTORIAN_EDITOR_AGENT
             ? HISTORIAN_EDITOR_SYSTEM_PROMPT
-            : COMPARTMENT_AGENT_SYSTEM_PROMPT,
+            : historianSystemPrompt(args.turnTwoEnabled === true),
         args.language,
     );
+    if (args.turnOneStageKey) {
+        const row = db
+            .prepare("SELECT request_json FROM memory_stage_attempts WHERE stage_key=?")
+            .get(args.turnOneStageKey) as { request_json: string };
+        system = JSON.parse(row.request_json).system;
+    }
     // Admit the prompt before opening a child session. A prompt that cannot fit
     // the selected model would be refused by the transport anyway, and opening
     // first left one more hidden session behind for every refused attempt.
     const overrideModel = parseModelOverride(toModelEntry(modelOverride)?.model ?? "");
-    const preOpenFailure = overrideModel
-        ? historianPromptAdmissionFailure({
-              model: overrideModel,
-              prompt,
-              system,
-              maxOutputTokens: args.maxOutputTokens,
-              parentSessionId,
-          })
-        : null;
+    const preOpenFailure =
+        !args.recoverTurnOne && overrideModel
+            ? historianPromptAdmissionFailure({
+                  model: overrideModel,
+                  prompt,
+                  system,
+                  maxOutputTokens: args.maxOutputTokens,
+                  parentSessionId,
+              })
+            : null;
     if (preOpenFailure) {
         shared.sessionLog(
             parentSessionId,
@@ -853,27 +915,85 @@ async function runHistorianPrompt(args: {
             parentSessionId,
             `historian: creating child session (agent=${toModelEntry(modelOverride)?.model ?? `agent:${agentId}`})`,
         );
-        handle = await executor.open({
-            parentSessionId,
-            parentInvocationId,
-            agent: agentId,
-            kind: agentId === HISTORIAN_EDITOR_AGENT ? "historian-editor" : "historian",
-            system,
-            maxOutputTokens: args.maxOutputTokens,
-            model: modelOverride,
-            configuredModels: [
-                ...(modelOverride ? [modelOverride] : []),
-                ...(fallbackModels ?? []),
-            ],
-            timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-            title: "magic-context-compartment",
-            directory: sessionDirectory,
-            metadata: { dumpLabel, subagentKind },
-        });
+        const recovering =
+            args.recoverTurnOne && args.turnOneStageKey
+                ? (db
+                      .prepare(
+                          "SELECT child_session_id,reply_json FROM memory_stage_attempts WHERE stage_key=? AND state IN ('sending','replied')",
+                      )
+                      .get(args.turnOneStageKey) as {
+                      child_session_id: string;
+                      reply_json: string | null;
+                  } | null)
+                : null;
+        handle = recovering
+            ? { id: recovering.child_session_id, childSessionId: recovering.child_session_id }
+            : await executor.open({
+                  parentSessionId,
+                  parentInvocationId,
+                  agent: agentId,
+                  kind: agentId === HISTORIAN_EDITOR_AGENT ? "historian-editor" : "historian",
+                  system,
+                  maxOutputTokens: args.maxOutputTokens,
+                  model: modelOverride,
+                  configuredModels: [
+                      ...(modelOverride ? [modelOverride] : []),
+                      ...(fallbackModels ?? []),
+                  ],
+                  timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                  title: "magic-context-compartment",
+                  directory: sessionDirectory,
+                  metadata: { dumpLabel, subagentKind },
+              });
         agentSessionId = handle.id || null;
         // The retry transport closes over the opened run; bind it once so the closure
         // sees the resolved handle rather than the nullable slot it was assigned to.
         const opened = handle;
+        if (args.turnOneStageKey)
+            releaseChild = registerTurnOneChild(opened.childSessionId ?? opened.id, () =>
+                executor.close(opened, {
+                    promptSettled,
+                    privacySensitive: false,
+                    context: "historian",
+                    log: (message) => shared.sessionLog(parentSessionId, message),
+                }),
+            );
+        if (args.turnOneStageKey && !recovering)
+            db.prepare(
+                "UPDATE memory_stage_attempts SET state='sending',child_session_id=? WHERE stage_key=? AND state='dispatched'",
+            ).run(opened.childSessionId ?? opened.id, args.turnOneStageKey);
+
+        if (recovering) {
+            const saved = db
+                .prepare("SELECT request_json FROM memory_stage_attempts WHERE stage_key=?")
+                .get(args.turnOneStageKey!) as { request_json: string };
+            answeringModel = JSON.parse(saved.request_json).answerModel ?? modelOverride;
+            if (recovering.reply_json)
+                completion = JSON.parse(recovering.reply_json) as HiddenCompletion;
+            const state = await executor.recoveryState?.(recovering.child_session_id);
+            if (!completion && state === "unavailable") {
+                promptSettled = true;
+                db.prepare(
+                    "UPDATE memory_stage_attempts SET state='expired' WHERE stage_key=? AND state='sending'",
+                ).run(args.turnOneStageKey!);
+                return {
+                    ok: false,
+                    error: "Turn-one child no longer exists",
+                    failureReason: "carrier_expired",
+                };
+            }
+            if (!completion && state !== "active")
+                completion = (await executor.recover?.(recovering.child_session_id)) ?? undefined;
+            if (!completion) {
+                childRetained = true;
+                return {
+                    ok: false,
+                    error: "Turn-one outcome is still unknown",
+                    failureReason: "outcome_unknown",
+                };
+            }
+            promptSettled = true;
+        }
 
         if (!agentSessionId) {
             recordInvocation({
@@ -887,7 +1007,11 @@ async function runHistorianPrompt(args: {
             };
         }
 
-        for (let retryIndex = 0; retryIndex <= MAX_HISTORIAN_RETRIES; retryIndex += 1) {
+        for (
+            let retryIndex = 0;
+            !recovering && retryIndex <= MAX_HISTORIAN_RETRIES;
+            retryIndex += 1
+        ) {
             try {
                 await shared.promptSyncWithModelSuggestionRetry(
                     client,
@@ -924,6 +1048,18 @@ async function runHistorianPrompt(args: {
                                     parentSessionId,
                                 });
                                 if (failure) throw new Error(failure);
+                                if (request.body?.model)
+                                    answeringModel = {
+                                        model: `${request.body.model.providerID}/${request.body.model.modelID}`,
+                                        qualifier: request.body.variant,
+                                    };
+                                if (args.turnOneStageKey)
+                                    db.prepare(
+                                        "UPDATE memory_stage_attempts SET request_json=json_set(request_json,'$.answerModel',json(?)) WHERE stage_key=?",
+                                    ).run(
+                                        JSON.stringify(answeringModel ?? null),
+                                        args.turnOneStageKey,
+                                    );
                                 return executor.attempt(opened, request);
                             },
                             { childSessionId: opened.childSessionId },
@@ -954,7 +1090,9 @@ async function runHistorianPrompt(args: {
                     `historian: prompt attempt ${retryIndex + 1} failed: ${errorMsg}`,
                 );
                 const shouldRetry =
-                    retryIndex < MAX_HISTORIAN_RETRIES && isTransientHistorianPromptError(errorMsg);
+                    !args.turnTwoEnabled &&
+                    retryIndex < MAX_HISTORIAN_RETRIES &&
+                    isTransientHistorianPromptError(errorMsg);
                 if (!shouldRetry) {
                     throw error;
                 }
@@ -968,7 +1106,11 @@ async function runHistorianPrompt(args: {
             }
         }
 
-        completion = await executor.collect(handle, 50);
+        completion ??= await executor.collect(handle, 50);
+        if (args.turnOneStageKey)
+            db.prepare(
+                "UPDATE memory_stage_attempts SET state='replied',reply_json=? WHERE stage_key=? AND state='sending'",
+            ).run(JSON.stringify(completion), args.turnOneStageKey);
         const lengthCapped = completion.lengthCapped;
         const tokens = {
             ...runTokenLog(undefined, args.maxOutputTokens),
@@ -980,6 +1122,29 @@ async function runHistorianPrompt(args: {
             `historian response_chars=${(completion.text ?? completion.reasoning ?? "").length} ${formatRunTokenLog(tokens)}`,
         );
         const textResult = completion.text;
+        const profile = reportedProfile(
+            completion,
+            answeringModel,
+            lifecycleTextHash(system),
+            {
+                harness: executor.capabilities.harness,
+                carrier: args.hiddenCompletionExecutor ? "hidden-completion" : "opencode-session",
+                agent: agentId,
+            },
+            args.turnTwoEnabled ? HISTORIAN_FORMAT_INSTRUCTION : undefined,
+        );
+        if (
+            args.turnTwoEnabled &&
+            (completion.toolActivity ||
+                hasHistorianToolActivity(completion.messages) ||
+                lengthCapped)
+        )
+            return {
+                ok: false,
+                error: "Invalid turn-one transport output",
+                failureReason: "parse_failed",
+                reportedProfile: profile ?? undefined,
+            };
         const reasoningResult = textResult ? null : completion.reasoning;
         const emptyError =
             !textResult && reasoningResult && lengthCapped
@@ -1003,6 +1168,7 @@ async function runHistorianPrompt(args: {
                 error: emptyError,
                 failureReason: "empty_output",
                 invocationId: invocationId ?? undefined,
+                reportedProfile: profile ?? undefined,
             };
         }
 
@@ -1014,6 +1180,7 @@ async function runHistorianPrompt(args: {
                 error: emptyError ?? "Historian returned no assistant output.",
                 failureReason: "empty_output",
                 invocationId: invocationId ?? undefined,
+                reportedProfile: profile ?? undefined,
             };
         }
         const dumpPath = dumpHistorianResponse(
@@ -1035,19 +1202,30 @@ async function runHistorianPrompt(args: {
                 result,
                 dumpPath,
                 invocationId: invocationId ?? undefined,
+                reportedProfile: profile ?? undefined,
                 retained: {
                     executor,
                     handle: retainedHandle,
                     agent: agentId,
                     system,
-                    model: modelOverride,
+                    model: profile
+                        ? {
+                              model: `${profile.provider}/${profile.modelId}`,
+                              qualifier: profile.variant ?? undefined,
+                          }
+                        : modelOverride,
                     directory: sessionDirectory,
                     turnOneText: textResult,
                     providerId: completion.providerId,
                     modelId: completion.modelId,
+                    reportedProfile: profile ?? undefined,
                     close: async () => {
                         if (closed) return;
                         closed = true;
+                        if (releaseChild) {
+                            await releaseChild();
+                            return;
+                        }
                         await executor.close(retainedHandle, {
                             promptSettled: settled,
                             privacySensitive: false,
@@ -1058,8 +1236,36 @@ async function runHistorianPrompt(args: {
                 },
             };
         }
-        return { ok: true, result, dumpPath, invocationId: invocationId ?? undefined };
+        return {
+            ok: true,
+            result,
+            dumpPath,
+            invocationId: invocationId ?? undefined,
+            reportedProfile: profile ?? undefined,
+        };
     } catch (modelError: unknown) {
+        // A failed response read does not make an accepted prompt safe to send again.
+        // Keep its child and key until recovery observes a reply or confirms expiry.
+        if (
+            args.turnOneStageKey &&
+            handle &&
+            !completion &&
+            (promptSettled ||
+                args.recoverTurnOne ||
+                /timed?\s*out|outcome.*unknown/i.test(getErrorMessage(modelError)))
+        ) {
+            childRetained = true;
+            executor.detach?.(handle);
+            return {
+                ok: false,
+                error: "Turn-one outcome is unknown",
+                failureReason: "outcome_unknown",
+            };
+        }
+        if (args.turnOneStageKey)
+            db.prepare(
+                "UPDATE memory_stage_attempts SET state='dispatched' WHERE stage_key=? AND state='sending'",
+            ).run(args.turnOneStageKey);
         const desc = describeError(modelError);
         shared.sessionLog(
             parentSessionId,
@@ -1080,7 +1286,8 @@ async function runHistorianPrompt(args: {
         };
     } finally {
         // A retained child stays open for turn two; its owner closes it.
-        if (!childRetained)
+        if (!childRetained && releaseChild) await releaseChild();
+        else if (!childRetained)
             await executor.close(handle, {
                 promptSettled,
                 privacySensitive: false,
@@ -1130,6 +1337,8 @@ async function runFallbackHistorianPass(args: {
     language?: string;
     dumpPaths: Array<string | undefined>;
     retainChild?: boolean;
+    turnTwoEnabled?: boolean;
+    turnOneStageKey?: string;
 }): Promise<ValidatedHistorianPassResult> {
     // Ordered escalation that matches the intended fallback policy:
     //   configured fallback_models (in order); only an absent primary permits
@@ -1197,21 +1406,49 @@ async function runFallbackHistorianPass(args: {
             modelOverride,
             agentId: args.agentId,
             retainChild: args.retainChild,
+            turnTwoEnabled: args.turnTwoEnabled,
+            turnOneStageKey: args.turnOneStageKey,
             accountingTask: isSessionModelLastResort ? "fallback-session" : "fallback",
         });
         if (!fallbackRun.ok || !fallbackRun.result) {
+            if (
+                fallbackRun.failureReason === "outcome_unknown" ||
+                fallbackRun.failureReason === "carrier_expired"
+            )
+                return {
+                    ok: false,
+                    error: fallbackRun.error ?? "Turn-one outcome unavailable",
+                    failureReason: fallbackRun.failureReason,
+                };
+            if (
+                args.turnTwoEnabled &&
+                (fallbackRun.failureReason === "parse_failed" ||
+                    fallbackRun.failureReason === "empty_output")
+            )
+                return {
+                    ok: false,
+                    error: fallbackRun.error ?? "Invalid turn one",
+                    failureReason: "parse_failed",
+                    reportedProfile: fallbackRun.reportedProfile,
+                };
             lastError = fallbackRun.error ?? lastError;
             lastFailureReason = fallbackRun.failureReason ?? "provider_error";
             continue;
         }
 
-        const fallbackValidation = validateHistorianOutput(
-            fallbackRun.result,
-            args.parentSessionId,
-            args.chunk,
-            args.priorCompartments,
-            args.sequenceOffset,
-        );
+        const fallbackXml = args.turnTwoEnabled
+            ? parseEnabledTurnOne(fallbackRun.result)
+            : fallbackRun.result;
+        const fallbackValidation =
+            fallbackXml === null
+                ? { ok: false as const, error: "Invalid turn-one envelope" }
+                : validateHistorianOutput(
+                      fallbackXml,
+                      args.parentSessionId,
+                      args.chunk,
+                      args.priorCompartments,
+                      args.sequenceOffset,
+                  );
         if (fallbackValidation.ok) {
             // Only cleanup the successful run's dump. Prior failed dumps
             // (args.dumpPaths + earlier chain attempts) are kept for debugging.
@@ -1220,9 +1457,17 @@ async function runFallbackHistorianPass(args: {
                 ...fallbackValidation,
                 invocationId: fallbackRun.invocationId ?? null,
                 retainedChild: fallbackRun.retained,
+                reportedProfile: fallbackRun.reportedProfile,
             };
         }
         await fallbackRun.retained?.close();
+        if (args.turnTwoEnabled)
+            return {
+                ok: false,
+                error: fallbackValidation.error ?? "Invalid turn one",
+                failureReason: "parse_failed",
+                reportedProfile: fallbackRun.reportedProfile,
+            };
         lastError = fallbackValidation.error ?? lastError;
         lastFailureReason = fallbackValidation.error ?? "parse_failed";
         // Keep the dump for debugging; escalate to the next candidate.

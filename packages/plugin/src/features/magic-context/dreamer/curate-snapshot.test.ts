@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { buildCuratePrompt, type CuratePromptMemory, chunkCurateMemories } from "./task-prompts";
+import {
+    buildCuratePrompt,
+    buildDreamTaskPrompt,
+    type CuratePromptMemory,
+    chunkCurateMemories,
+} from "./task-prompts";
 
 const memory = (id: number, content: string): CuratePromptMemory => ({
     id,
@@ -10,6 +15,16 @@ const memory = (id: number, content: string): CuratePromptMemory => ({
     seenCount: 3,
     mappedFiles: ["src/core.ts"],
     hasNoFileSentinel: false,
+});
+
+test("curate states the configured injection budget and pins the 4000 default", () => {
+    const args = { projectPath: "/repo", category: "PROJECT_RULES" as const, memories: [] };
+    const defaultPrompt = buildCuratePrompt(args);
+    expect(defaultPrompt).toContain("the 4000-token injection budget");
+    expect(defaultPrompt).not.toContain("6000-token");
+    expect(buildDreamTaskPrompt("curate", { ...args, memoryInjectionBudgetTokens: 2750 })).toBe(
+        defaultPrompt.replace("4000-token", "2750-token"),
+    );
 });
 
 test("curate snapshot includes decision fields and splits oversized categories with cross-chunk candidates", () => {

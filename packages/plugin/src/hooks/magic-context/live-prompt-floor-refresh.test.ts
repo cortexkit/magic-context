@@ -136,6 +136,7 @@ async function runHistorian(
     try {
         await runCompartmentAgent(
             await prepareProducerFixture({
+                historianTurnTwo: "off",
                 client: historianClient(prompts),
                 db,
                 sessionId,

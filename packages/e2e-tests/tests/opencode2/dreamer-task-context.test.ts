@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -150,7 +151,7 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
             await client.session.prompt({ sessionID: session.id, text: `REAL_USER_${index}: repeated correction about the Fixture project rule.` });
             await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20_000) });
         }
-        db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        db = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
         db.exec("PRAGMA busy_timeout=10000");
         for (let index = 0; index < 10; index++) {
             ids.push(insertMemory(db, { projectPath: project, category: "ARCHITECTURE", content: `Fixture claim ${index} is recorded in fact.txt.` }).id);

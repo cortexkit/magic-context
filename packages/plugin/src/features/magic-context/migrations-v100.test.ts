@@ -29,7 +29,7 @@ describe("migration 100", () => {
         }
     });
 
-    it("steps populated v99 through v100 with nullable TEXT prefix documents and a matching fresh schema", () => {
+    it("steps populated v99 through current migrations with nullable TEXT prefix documents and a matching fresh schema", () => {
         const db = new Database(":memory:");
         const fresh = new Database(":memory:");
         try {
@@ -108,6 +108,7 @@ describe("migration 100", () => {
             initializeDatabase(db);
             runMigrations(db);
             expect(enforceSchemaFence(db, ":previous-binary:", 99)).toBe(false);
+            expect(enforceSchemaFence(db, ":previous-binary:", 100)).toBe(false);
             expect(enforceSchemaFence(db, ":current-binary:", LATEST_SUPPORTED_VERSION)).toBe(true);
         } finally {
             db.close();

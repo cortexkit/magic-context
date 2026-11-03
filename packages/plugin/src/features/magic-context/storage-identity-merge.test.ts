@@ -288,6 +288,45 @@ describe("project identity merge", () => {
         });
     });
 
+    test.each([
+        { targetSafety: 1, sourceSafety: 0, sourceImportance: 12, updatedAt: 1 },
+        { targetSafety: 0, sourceSafety: 1, sourceImportance: 80, updatedAt: 50 },
+    ])("timestamps only a change to the inherited safety assessment: %j", ({
+        targetSafety,
+        sourceSafety,
+        sourceImportance,
+        updatedAt,
+    }) => {
+        const database = makeDb();
+        const sourceId = insertMemory(database, "dir:old", "canonical", "same-hash");
+        const targetId = insertMemory(database, "git:new", "canonical", "same-hash");
+        database
+            .prepare(
+                "UPDATE memories SET safety_critical = ?, importance = ?, classified_at = 20 WHERE id = ?",
+            )
+            .run(sourceSafety, sourceImportance, sourceId);
+        database
+            .prepare(
+                "UPDATE memories SET safety_critical = ?, importance = 80, classified_at = 10 WHERE id = ?",
+            )
+            .run(targetSafety, targetId);
+
+        mergeProjectIdentities(database, "dir:old", "git:new", { now: 50 });
+
+        expect(
+            database
+                .prepare(
+                    "SELECT safety_critical, importance, classified_at, updated_at FROM memories WHERE id = ?",
+                )
+                .get(targetId),
+        ).toEqual({
+            safety_critical: 1,
+            importance: 80,
+            classified_at: 20,
+            updated_at: updatedAt,
+        });
+    });
+
     test("copies a mural cue onto the collision survivor without marking it edited", () => {
         const database = makeDb();
         const sourceId = insertMemory(database, "dir:old", "canonical", "same-hash");

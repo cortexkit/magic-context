@@ -178,6 +178,7 @@ describe("historian child session cleanup", () => {
             expect(acquireCompartmentLease(contextDb!, parentSessionId, holderId)).not.toBeNull();
             try {
                 await runCompartmentAgent({
+                    historianTurnTwo: "off",
                     client,
                     db: contextDb!,
                     sessionId: parentSessionId,

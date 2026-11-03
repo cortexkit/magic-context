@@ -1,5 +1,6 @@
 import type { Database } from "../../shared/sqlite";
 import { nextDueAtMs } from "./dreamer/cron";
+import { inheritMemorySafety } from "./memory/storage-memory";
 
 const IDENTITY_COLUMNS = new Set(["project_path", "project_identity"]);
 const DERIVED_TABLE_SUFFIXES = [
@@ -225,26 +226,34 @@ function mergeMemoryRow(
         const mergedSeen = targetSeen + Number(row.seen_count ?? 1);
         const sourceClassifiedAt = Number(row.classified_at ?? 0);
         const targetClassifiedAt = Number(collision.classified_at ?? 0);
+        const assessment = inheritMemorySafety(
+            [row, collision].map((source) => ({
+                safetyCritical:
+                    typeof source.safety_critical === "number" ? source.safety_critical : null,
+            })),
+            (sourceClassifiedAt > targetClassifiedAt ? row.importance : collision.importance) as
+                | number
+                | null,
+        );
         if (sourceClassifiedAt > targetClassifiedAt) {
             // Importance, scope, and shareable are the memory's scored meaning.
             // Copying a newer classification is an edit of that meaning, so the
             // survivor's updated_at moves. A newer stamp with the same scores is
             // bookkeeping and must not look like the text was edited.
             const meaningChanged =
-                collision.importance !== row.importance ||
+                collision.importance !== assessment.importance ||
+                collision.safety_critical !== assessment.safetyCritical ||
                 collision.scope !== row.scope ||
                 Number(collision.shareable ?? 0) !== Number(row.shareable ?? 0);
             db.prepare(
                 meaningChanged
                     ? `UPDATE memories
-                         SET importance = ?, scope = ?, shareable = ?, classified_at = ?,
-                             updated_at = ?
+                     SET scope = ?, shareable = ?, classified_at = ?, updated_at = ?
                        WHERE id = ?`
                     : `UPDATE memories
-                         SET importance = ?, scope = ?, shareable = ?, classified_at = ?
+                         SET scope = ?, shareable = ?, classified_at = ?
                        WHERE id = ?`,
             ).run(
-                row.importance,
                 row.scope,
                 row.shareable,
                 row.classified_at,
@@ -252,6 +261,11 @@ function mergeMemoryRow(
                 targetId,
             );
         }
+        db.prepare("UPDATE memories SET safety_critical=?,importance=? WHERE id=?").run(
+            assessment.safetyCritical,
+            assessment.importance,
+            targetId,
+        );
         const sourceHasCue = typeof row.mural_cue === "string" && row.mural_cue.length > 0;
         const targetHasCue =
             typeof collision.mural_cue === "string" && collision.mural_cue.length > 0;

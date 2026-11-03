@@ -7,24 +7,14 @@ import {
     type RevisionDecision,
 } from "../../src/features/magic-context/memory/lifecycle-gates";
 import { lifecycleTextHash } from "../../src/features/magic-context/memory/lifecycle-text";
+import { authorizationFixture } from "../../src/features/magic-context/memory/turn-two-test-fixtures.test";
 import { type RecordedCheck, replayRecordedChecks } from "./core";
 import { type ObservedDecision, replayBarFailures } from "./grading";
 import { adaptLegacyDecision, auditRecordedControl, type FrozenCase } from "./recorded";
 
-const profile = {
-    provider: "test",
-    modelId: "recorded-fixture",
-    variant: null,
-    temperature: 0,
-    systemHash: lifecycleTextHash("historian-en"),
-};
-const fixtureProfiles = [
-    profile,
-    ...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-        ...profile,
-        systemHash: lifecycleTextHash(system),
-    })),
-];
+const authorization = authorizationFixture({ lane: "opencode-1", carrier: "hidden-completion", provider: "test", modelId: "recorded-fixture", variant: null, temperature: 0, thinkingLevel: null }, "historian-en");
+const profile = authorization.profile;
+const fixtureProfiles = authorization.rows;
 const decision: RevisionDecision = {
     key: "fixture:decision:1",
     action: "edit",
@@ -87,7 +77,7 @@ function checkRecords(): RecordedCheck[] {
         const request = makeCheckRequest(decision.key, check, profile);
         const reply = {
             usage: null,
-            profile: { ...profile, systemHash: request.systemHash },
+            profile: authorization.checkProfile(request.systemHash),
             verdicts: (check.kind === "compatibility" ? check.pairs : check.operands).map(
                 (operand) => ({
                     id: operand.id,

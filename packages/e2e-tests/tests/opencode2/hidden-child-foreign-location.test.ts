@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
@@ -140,10 +141,10 @@ async function twoDirectoryHost(options: { dreamerDisabledAtBoot?: boolean } = {
 	const memoryIds: number[] = [];
 	/** Adds unmapped memories to A and makes its map-memories task due now. */
 	const seedDueMapping = (count: number) => {
-		const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+		const db = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
 			readwrite: true,
 			fileMustExist: true,
-		});
+		}, Database);
 		try {
 			for (let index = 0; index < count; index++)
 				memoryIds.push(
@@ -165,10 +166,10 @@ async function twoDirectoryHost(options: { dreamerDisabledAtBoot?: boolean } = {
 	};
 	seedDueMapping(3);
 	const mappedCount = () => {
-		const read = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+		const read = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
 			readonly: true,
 			fileMustExist: true,
-		});
+		}, Database);
 		try {
 			return (
 				read

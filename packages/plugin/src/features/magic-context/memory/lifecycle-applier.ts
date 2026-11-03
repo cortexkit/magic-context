@@ -36,6 +36,7 @@ import {
     archiveMemory,
     getMemoryByHash,
     getMemoryById,
+    inheritMemorySafety,
     insertMemory,
     ModuleMemoryAuthorityError,
     mergeMemoryStats,
@@ -442,9 +443,13 @@ export function applyMemoryAdmission(db: Database, request: AdmissionRequest): A
                 ) as { id: number } | null;
             if (!match && cross) return pending("cross_category_match", cross.id);
             if (target && match?.id === target.id) return pending("self_conflict", target.id);
+            const before = match ? memoryHistorySnapshot(db, match.id) : null;
+            const conflictBefore = target ? memoryHistorySnapshot(db, target.id) : null;
             let memory: Memory;
             if (match) {
                 updateMemorySeenCount(db, match.id);
+                if (request.operation !== "agent_save")
+                    db.prepare("UPDATE memories SET revision=revision+1 WHERE id=?").run(match.id);
                 memory = getMemoryById(db, match.id)!;
             } else {
                 memory = insertMemory(db, {
@@ -463,7 +468,11 @@ export function applyMemoryAdmission(db: Database, request: AdmissionRequest): A
                             : resolveExpiresAt(request.input.category),
                 });
             }
-            if (target) linkConflict(db, request.key, memory.id, target.id);
+            if (target) {
+                linkConflict(db, request.key, memory.id, target.id);
+                // The relationship changes both endpoints; keep pre-conflict decisions stale after undo.
+                db.prepare("UPDATE memories SET revision=revision+1 WHERE id=?").run(target.id);
+            }
             // An agent's own save surfaces in its session's m[1] as a fragment, including a
             // save that matched an existing memory this session does not show: the agent
             // asked for it, so it must reach the agent's own session. Historian admissions
@@ -501,13 +510,41 @@ export function applyMemoryAdmission(db: Database, request: AdmissionRequest): A
                     memory.id,
                 );
             }
-            return record({
+            const receipt = record({
                 state: "applied",
                 reason: match ? "live_match" : "inserted",
                 memoryId: memory.id,
                 inserted: !match,
                 adoptionClass: null,
             });
+            if (request.operation !== "agent_save") {
+                // Admission changes no existing text, so its new revisions retain clause evidence.
+                for (const source of [before, conflictBefore])
+                    if (source)
+                        db.prepare(
+                            "INSERT INTO memory_clause_evidence(memory_id,revision,clause_ordinal,text_hash,evidence_json) SELECT memory_id,?,clause_ordinal,text_hash,evidence_json FROM memory_clause_evidence WHERE memory_id=? AND revision=?",
+                        ).run(source.revision + 1, source.id, source.revision);
+                const decision = makeMemoryHistoryDecision({
+                    key: request.key,
+                    projectPath: request.input.projectPath,
+                    writer: "historian",
+                    operation: request.operation,
+                    reason: receipt.reason,
+                    now: Date.now(),
+                    before: [before, ...(conflictBefore ? [conflictBefore] : [])],
+                    after: [
+                        memoryHistorySnapshot(db, memory.id)!,
+                        ...(target ? [memoryHistorySnapshot(db, target.id)!] : []),
+                    ],
+                    sourceIds: [...(match ? [match.id] : []), ...(target ? [target.id] : [])],
+                    survivorId: memory.id,
+                });
+                recordMemoryHistoryDecision(db, decision);
+                db.prepare(
+                    "UPDATE memory_journal SET before_json=?,after_json=? WHERE decision_key=?",
+                ).run(memoryHistoryJson(decision), memoryHistoryJson(decision), request.key);
+            }
+            return receipt;
         })
         .immediate();
 }
@@ -849,6 +886,12 @@ function applyMemoryMutation(
                         sourceType: automated ? "dreamer" : "agent",
                     });
                 if (!duplicate) before.push(null);
+                const assessment = inheritMemorySafety(sources, canonical.importance);
+                db.prepare("UPDATE memories SET safety_critical=?,importance=? WHERE id=?").run(
+                    assessment.safetyCritical,
+                    assessment.importance,
+                    canonical.id,
+                );
                 const changed = canonical.content !== content || canonical.normalizedHash !== hash;
                 if (changed) {
                     updateMemoryContent(db, canonical.id, content!, hash!);
@@ -1137,6 +1180,10 @@ function commitMemoryRevision(
 ): ApplierReceipt {
     const before = context.sources.map((source) => memoryHistorySnapshot(db, source.id));
     const survivor = getMemoryById(db, decision.survivorId)!;
+    const assessment = inheritMemorySafety(
+        context.sources.map((source) => getMemoryById(db, source.id)!),
+        decision.action === "replaces" ? 50 : survivor.importance,
+    );
     let survivorId = survivor.id;
     if (decision.action === "replaces")
         survivorId = insertMemory(db, {
@@ -1193,6 +1240,11 @@ function commitMemoryRevision(
                 "INSERT INTO memory_clause_evidence(memory_id,revision,clause_ordinal,text_hash,evidence_json) VALUES(?,?,?,?,?)",
             ).run(survivorId, survivorRevision, clause.ordinal, hash, JSON.stringify(evidence));
     }
+    db.prepare("UPDATE memories SET safety_critical=?,importance=? WHERE id=?").run(
+        assessment.safetyCritical,
+        assessment.importance,
+        survivorId,
+    );
     const after = context.sources.map((source) => memoryHistorySnapshot(db, source.id)!);
     if (!context.sources.some((source) => source.id === survivorId)) {
         before.push(null);

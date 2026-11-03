@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -93,7 +94,7 @@ for (const { kind, reopen } of [
 			const legacyBefore = legacyStoreSnapshot(fixture.openCodeDbPath, kind);
 			if (!host.env.XDG_DATA_HOME)
 				throw new Error("isolated data root is missing");
-			const db = new Database(
+			const db = openTestDb(
 				join(
 					host.env.XDG_DATA_HOME,
 					"cortexkit",
@@ -104,7 +105,7 @@ for (const { kind, reopen } of [
 					readonly: true,
 					fileMustExist: true,
 				},
-			);
+			 Database);
 			try {
 				const row = db
 					.prepare(

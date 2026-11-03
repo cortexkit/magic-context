@@ -33,7 +33,7 @@ function successfulClassifyClient(onPrompt?: () => void, onSystem?: (system: str
                 const prompt = args.body?.parts?.[0]?.text ?? "";
                 onSystem?.(args.body?.system ?? "");
                 const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) => Number(match[1]));
-                manifest = `<classify>${ids.map((id) => `<memory id="${id}" importance="80" scope="project" shareable="true"/>`).join("")}</classify>`;
+                manifest = `<classify>${ids.map((id) => `<memory id="${id}" importance="80" scope="project" shareable="true" safety_critical="false"/>`).join("")}</classify>`;
                 onPrompt?.();
                 return {};
             },
@@ -229,7 +229,7 @@ describe("runClassify disposition", () => {
         }
     });
 
-    test("skips rows with an open historian classification item and never re-scores a historian score", async () => {
+    test("assesses safety for open historian items without replacing their importance", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:classify-historian-items";
@@ -281,9 +281,9 @@ describe("runClassify disposition", () => {
 
             const result = await runClassify(args);
 
-            expect(result.classified).toBe(8);
-            expect(prompted).not.toContain(pending.id);
-            expect(prompted).not.toContain(scored.id);
+            expect(result.classified).toBe(10);
+            expect(prompted).toContain(pending.id);
+            expect(prompted).toContain(scored.id);
             expect(getMemoryById(db, pending.id)?.importance).toBe(50);
             expect(getMemoryById(db, scored.id)?.importance).toBe(30);
         } finally {

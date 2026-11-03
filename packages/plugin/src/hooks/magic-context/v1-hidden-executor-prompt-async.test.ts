@@ -21,6 +21,10 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
 import type { HiddenRunIdentity } from "./compartment-runner-types";
 import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
+import {
+    createOpenCodeTurnTwoCarrier,
+    createOpenCodeTurnTwoRecovery,
+} from "./historian-turn-two-carrier";
 import { createOpenCodeRescoreCarrier, driveRescore } from "./rescore-driver";
 
 function freshDb(): Database {
@@ -34,13 +38,17 @@ function freshDb(): Database {
 function host() {
     const messages: unknown[] = [];
     const promptAsync = mock(async () => {
+        const sequence = messages.length;
         messages.push(
-            { info: { id: "msg_user", role: "user", time: { created: 1 } }, parts: [] },
+            {
+                info: { id: `msg_user_${sequence}`, role: "user", time: { created: sequence + 1 } },
+                parts: [],
+            },
             {
                 info: {
-                    id: "msg_final",
+                    id: `msg_final_${sequence}`,
                     role: "assistant",
-                    time: { created: 2, completed: 3 },
+                    time: { created: sequence + 2, completed: sequence + 3 },
                     finish: "stop",
                 },
                 parts: [{ type: "text", text: "<classify/>" }],
@@ -83,6 +91,94 @@ const request = {
 };
 
 describe("OpenCode 1 hidden executor transport", () => {
+    test("OpenCode 1 serialized historian sends stay best-effort across continuation and reattach", async () => {
+        const db = freshDb();
+        try {
+            const h = host();
+            const executor = createV1HiddenCompletionExecutor(h.client, db, "/repo");
+            const identity = { ...run("historian"), agent: "historian", model: "anthropic/model" };
+            const handle = await executor.open(identity);
+            await executor.attempt(handle, {
+                ...request,
+                body: {
+                    agent: "historian",
+                    model: { providerID: "anthropic", modelID: "model" },
+                    parts: [{ type: "text", text: "turn one" }],
+                },
+            });
+            const child = {
+                executor,
+                handle,
+                agent: "historian",
+                system: identity.system,
+                model: "anthropic/model",
+                directory: "/repo",
+                turnOneText: "turn one reply",
+                close: async () => {},
+            };
+            const carrier = createOpenCodeTurnTwoCarrier({
+                child,
+                parentSessionId: "parent",
+                harness: "opencode",
+                carrier: "opencode-session",
+                turnOneText: child.turnOneText,
+                timeoutMs: 5000,
+            });
+            await carrier.send("turn two", "stage");
+            const requests = (h.promptAsync.mock.calls as unknown as unknown[][]).map((args) => {
+                const shaped = structuredClone(args[0]) as PromptArgs;
+                shapeV1HiddenMessage(shaped.path.id, shaped.body);
+                return JSON.stringify(shaped);
+            });
+            expect(requests).toHaveLength(2);
+            for (const bytes of requests)
+                for (const key of [
+                    "response_schema",
+                    "responseSchema",
+                    "response_format",
+                    "tool_choice",
+                    "toolChoice",
+                    "StructuredOutput",
+                    "capture",
+                ])
+                    expect(bytes).not.toContain(key);
+            expect(
+                requests.map((bytes) => JSON.stringify(JSON.parse(bytes).body.tools ?? null)),
+            ).toEqual(["null", "null"]);
+            const recovered = createOpenCodeTurnTwoRecovery({
+                executor,
+                carrier: "opencode-session",
+                harness: "opencode",
+                directory: "/repo",
+                timeoutMs: 1000,
+                now: () => 10_000,
+            })({
+                stageKey: "stage",
+                projectPath: "/repo",
+                publicationId: "pub",
+                runAttempt: 1,
+                sessionId: "parent",
+                harness: "opencode",
+                carrier: "opencode-session",
+                childSessionId: handle.id,
+                startedAt: 0,
+                baseline: "turn-one-hash",
+                historianSystemHash: "system-hash",
+                variant: null,
+            });
+            if (!recovered || recovered === "busy") throw new Error("expected recovery");
+            expect((await recovered.reattach()).kind).toBe("reply");
+            expect(h.promptAsync).toHaveBeenCalledTimes(2);
+            await executor.close(handle, {
+                promptSettled: true,
+                privacySensitive: false,
+                context: "test",
+                log() {},
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
     test("a dreamer task child sends with prompt_async instead of a held request", async () => {
         const db = freshDb();
         try {

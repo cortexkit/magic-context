@@ -84,6 +84,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `historian.pi.fallback_models`
 - `historian.pi.model`
 - `historian.pi.thinking_level`
+- `historian.turn_two`
 - `historian.two_pass`
 - `historian_timeout_ms`
 - `memory.auto_promote`

@@ -661,6 +661,12 @@ export interface TransformDeps {
     /** When true, run a second editor pass after historian to clean U: lines.
      *  Enables the historian-editor agent. Controlled by `historian.two_pass` config. */
     historianTwoPass?: boolean;
+    /** `historian.turn_two`, the memory-lifecycle off switch. Absent means
+     *  "on", the value the schema gives a configured historian block. */
+    historianTurnTwo?: "on" | "off";
+    /** Reads the switch again from current config; the runner asks after each
+     *  provider reply, so turning turn two off mid-flight revokes it. */
+    historianTurnTwoIsEnabled?: () => boolean;
     historianExpandTools?: Record<string, string | false>;
     liveModelBySession?: LiveModelBySession;
     agentBySession?: Map<string, string>;
@@ -2164,6 +2170,8 @@ export function createTransform(deps: TransformDeps) {
                         historianRun?.userObservationsRequested ?? deps.userObservationsRequested,
                     experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                     historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
+                    historianTurnTwo: deps.historianTurnTwo,
+                    historianTurnTwoIsEnabled: deps.historianTurnTwoIsEnabled,
                     historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
                     // Issue #44: gate historian-driven memory promotion so users
                     // who disable the feature actually see no memories created.
@@ -2915,6 +2923,8 @@ export function createTransform(deps: TransformDeps) {
                 historianRun?.userObservationsRequested ?? deps.userObservationsRequested,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
+            historianTurnTwo: deps.historianTurnTwo,
+            historianTurnTwoIsEnabled: deps.historianTurnTwoIsEnabled,
             historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and

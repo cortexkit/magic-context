@@ -1,14 +1,14 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
-import { Database } from "bun:sqlite";
 import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 const todos = [{ content: "Finish the fixture", status: "in_progress", priority: "high" }];
 
 function todoState(path: string, sessionID: string): string {
-    const db = new Database(path, { readonly: true });
+    const db = openTestDb(path, { readonly: true });
     try {
         return (db.prepare("SELECT last_todo_state AS state FROM session_meta WHERE session_id = ?")
             .get(sessionID) as { state: string } | undefined)?.state ?? "";
@@ -88,7 +88,7 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         let callID = "";
         await until(() => {
-            const pricedDb = new Database(contextPath, { readonly: true });
+            const pricedDb = openTestDb(contextPath, { readonly: true });
             try {
                 callID = (pricedDb.prepare("SELECT todo_synthetic_call_id AS callId FROM session_meta WHERE session_id = ?")
                     .get(session.id) as { callId: string } | undefined)?.callId ?? "";

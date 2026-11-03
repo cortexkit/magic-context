@@ -99,6 +99,7 @@ export function buildCuratePrompt(args: {
     category: CurateMemoryCategory;
     memories: CuratePromptMemory[];
     crossChunkCandidates?: string[];
+    injectionBudgetTokens?: number;
 }): string {
     // adapted from validated shadow-trial prompt; further tuning happens in the harness
     return `## Task: Curate Project Memory Pool (hygiene)
@@ -107,7 +108,7 @@ export function buildCuratePrompt(args: {
 
 This run covers the whole of the \`${args.category}\` category (the other categories run in later windows).
 
-The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the ~6000-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).
+The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the ${args.injectionBudgetTokens ?? 4000}-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).
 
 Work ALL THREE phases below in order (A → B → C) over this category. Do NOT stop after consolidating — a run that only merges and never improves or archives is incomplete.
 
@@ -288,6 +289,7 @@ export function buildDreamTaskPrompt(
         docsBudget?: number;
         docsCurrentTokens?: number;
         docsContents?: { architecture: string; structure: string };
+        memoryInjectionBudgetTokens?: number;
         curate?: {
             category: CurateMemoryCategory;
             memories: CuratePromptMemory[];
@@ -302,6 +304,7 @@ export function buildDreamTaskPrompt(
                 category: args.curate?.category ?? "PROJECT_RULES",
                 memories: args.curate?.memories ?? [],
                 crossChunkCandidates: args.curate?.crossChunkCandidates,
+                injectionBudgetTokens: args.memoryInjectionBudgetTokens,
             });
         case "maintain-docs":
             return buildMaintainDocsPrompt(

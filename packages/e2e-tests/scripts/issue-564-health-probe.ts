@@ -1,8 +1,8 @@
+import { openTestDb } from "../src/test-db";
 // Probe OpenCode HTTP latency while a synthetic history backlog is embedded.
 // The e2e harness starts a local mock LLM, isolated host roots and a local
 // embeddings endpoint; the lsof check refuses any live-store file descriptor.
 import { execFileSync } from "node:child_process";
-import { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +45,7 @@ try {
     }
     console.log(`lsof verified pid=${pid} forbidden=0 root=${h.dataDir}`);
     const sessionId = await h.createSession();
-    const db = new Database(h.contextDbPath());
+    const db = openTestDb(h.contextDbPath());
     // Use the same synthetic source and FTS mapping that the session drain reads.
     recordSessionProjectIdentity(db, sessionId, resolveProjectIdentity(h.workdir));
     const insert = db.prepare(`INSERT INTO compartments (session_id,sequence,start_message,end_message,title,content,p1,created_at)
@@ -86,7 +86,7 @@ try {
         const drainStart = performance.now();
         while (performance.now() - drainStart < 90_000) {
             await Bun.sleep(1_000);
-            const probe = new Database(h.contextDbPath(), { readonly: true });
+            const probe = openTestDb(h.contextDbPath(), { readonly: true });
             const row = probe.prepare("SELECT COUNT(DISTINCT compartment_id) AS n FROM compartment_chunk_embeddings WHERE session_id = ?").get(sessionId) as { n: number };
             probe.close();
             if (row.n >= 1500) break;
@@ -96,7 +96,7 @@ try {
         stop = true;
         await poll;
     }
-    const inspection = new Database(h.contextDbPath(), { readonly: true });
+    const inspection = openTestDb(h.contextDbPath(), { readonly: true });
     const mapping = inspection.prepare("SELECT session_id, project_path FROM session_projects WHERE session_id = ?").all(sessionId);
     const counts = inspection.prepare("SELECT (SELECT COUNT(*) FROM compartments WHERE session_id = ?) AS compartments, (SELECT COUNT(*) FROM compartment_chunk_embeddings WHERE session_id = ?) AS vectors").get(sessionId, sessionId);
     inspection.close();

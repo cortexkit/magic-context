@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "description": "Input-to-output contract fixtures for activation identity. These synthetic byte fixtures pin hashing and canonicalization, not production prompt contents or validated profiles. null expectedLane means no lane, not a nullable allowlist lane.",
+  "runtimeReports": [
+    { "name": "OpenCode 1 hidden executor", "report": { "harness": "opencode", "carrier": "hidden-completion" }, "expectedLane": "opencode-1" },
+    { "name": "OpenCode 1 session executor", "report": { "harness": "opencode", "carrier": "opencode-session" }, "expectedLane": "opencode-1" },
+    { "name": "OpenCode 2 hidden executor", "report": { "harness": "opencode2", "carrier": "hidden-completion" }, "expectedLane": "opencode-2" },
+    { "name": "Pi RPC is not OMP", "report": { "harness": "pi", "carrier": "pi-historian-rpc" }, "expectedLane": "pi" },
+    { "name": "OMP RPC is not Pi", "report": { "harness": "omp", "carrier": "pi-historian-rpc" }, "expectedLane": "omp" },
+    { "name": "ck-mc harness runner bound to OpenCode 1", "report": { "harness": "opencode", "bindingHarness": "opencode", "carrier": "session-runner:thalamus-harness" }, "expectedLane": null },
+    { "name": "ck-mc harness runner bound to OpenCode 2", "report": { "harness": "opencode2", "bindingHarness": "opencode2", "carrier": "session-runner:thalamus-harness" }, "expectedLane": null },
+    { "name": "ck-mc harness runner bound to Pi", "report": { "harness": "pi", "bindingHarness": "pi", "carrier": "session-runner:thalamus-harness" }, "expectedLane": null },
+    { "name": "ck-mc harness runner bound to OMP", "report": { "harness": "omp", "bindingHarness": "omp", "carrier": "session-runner:thalamus-harness" }, "expectedLane": null },
+    { "name": "ck-mc Broca runner cannot inherit OpenCode 1", "report": { "harness": "opencode", "carrier": "session-runner:broca" }, "expectedLane": null },
+    { "name": "ck-mc Broca runner cannot inherit OpenCode 2", "report": { "harness": "opencode2", "carrier": "session-runner:broca" }, "expectedLane": null },
+    { "name": "ck-mc Broca runner cannot inherit Pi", "report": { "harness": "pi", "carrier": "session-runner:broca" }, "expectedLane": null },
+    { "name": "ck-mc Broca runner cannot inherit OMP", "report": { "harness": "omp", "carrier": "session-runner:broca" }, "expectedLane": null },
+    { "name": "ck-mc Thalamus runner cannot inherit OpenCode 1", "report": { "harness": "opencode", "carrier": "session-runner:thalamus" }, "expectedLane": null },
+    { "name": "ck-mc Thalamus runner cannot inherit OpenCode 2", "report": { "harness": "opencode2", "carrier": "session-runner:thalamus" }, "expectedLane": null },
+    { "name": "ck-mc Thalamus runner cannot inherit Pi", "report": { "harness": "pi", "carrier": "session-runner:thalamus" }, "expectedLane": null },
+    { "name": "ck-mc Thalamus runner cannot inherit OMP", "report": { "harness": "omp", "carrier": "session-runner:thalamus" }, "expectedLane": null },
+    { "name": "ck-mc configured Broca cannot inherit OpenCode 1", "report": { "harness": "opencode", "carrier": "broca" }, "expectedLane": null },
+    { "name": "ck-mc configured Broca cannot inherit OpenCode 2", "report": { "harness": "opencode2", "carrier": "broca" }, "expectedLane": null },
+    { "name": "ck-mc configured Broca cannot inherit Pi", "report": { "harness": "pi", "carrier": "broca" }, "expectedLane": null },
+    { "name": "ck-mc configured Broca cannot inherit OMP", "report": { "harness": "omp", "carrier": "broca" }, "expectedLane": null },
+    { "name": "ck-mc host queue cannot inherit OpenCode 1", "report": { "harness": "opencode", "carrier": "host-queue", "storedCarrier": "rust_host" }, "expectedLane": null },
+    { "name": "ck-mc host queue cannot inherit OpenCode 2", "report": { "harness": "opencode2", "carrier": "host-queue", "storedCarrier": "rust_host" }, "expectedLane": null },
+    { "name": "ck-mc host queue cannot inherit Pi", "report": { "harness": "pi", "carrier": "host-queue", "storedCarrier": "rust_host" }, "expectedLane": null },
+    { "name": "ck-mc host queue cannot inherit OMP", "report": { "harness": "omp", "carrier": "host-queue", "storedCarrier": "rust_host" }, "expectedLane": null },
+    { "name": "Legacy stored host-queue literal", "report": { "harness": "opencode", "carrier": "rust_host" }, "expectedLane": null },
+    { "name": "Claude Code on Thalamus", "report": { "harness": "claude-code", "carrier": "session-runner:thalamus" }, "expectedLane": null },
+    { "name": "Unknown harness on a host carrier", "report": { "harness": "unknown-harness", "carrier": "hidden-completion" }, "expectedLane": null },
+    { "name": "Absent harness", "report": { "carrier": "hidden-completion" }, "expectedLane": null }
+  ],
+  "hashContract": {
+    "algorithm": "sha256",
+    "encoding": "UTF-8",
+    "digest": "lowercase hexadecimal",
+    "inputUtf8": "The decoded JSON string is the entire hash input. Escaped newlines are actual LF bytes; do not hash the surrounding JSON quotes or append a newline.",
+    "toolSurface": "Recursively sort object keys lexicographically, preserve array order, serialize without insignificant whitespace and without Unicode normalization. The canonical string must equal inputUtf8 before hashing. An empty tool surface is []."
+  },
+  "textHashes": [
+    {
+      "name": "combined system with language directive and non-ASCII bytes",
+      "field": "historianSystemHash",
+      "inputUtf8": "Historian combined system.\nLanguage: Türkçe 🧠\n",
+      "byteLength": 51,
+      "sha256": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490"
+    },
+    {
+      "name": "persisted combined format instructions",
+      "field": "combinedSchemaHash",
+      "inputUtf8": "Return exactly one JSON object: {\"result\":{\"step\":\"turn_one\",\"xml\":\"...\"}} or {\"result\":{\"step\":\"turn_two\",\"decisions\":[],\"scores\":[]}}.\n",
+      "byteLength": 137,
+      "sha256": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924"
+    },
+    {
+      "name": "disproof check system",
+      "field": "checkSystemHashes.disproof",
+      "inputUtf8": "Answer whether the evidence disproves the old clause.\n",
+      "byteLength": 54,
+      "sha256": "2cb8eb986b398b3256dd8ba318e0d290c921857d81336dc03a4f9158fe5dc45b"
+    },
+    {
+      "name": "support check system",
+      "field": "checkSystemHashes.support",
+      "inputUtf8": "Answer whether the evidence supports the proposed clause.\n",
+      "byteLength": 58,
+      "sha256": "19172be0efc42582de1fc6ceb3fced7781355a370f546b0d44fb33a1b86952c2"
+    },
+    {
+      "name": "kept-clause check system",
+      "field": "checkSystemHashes.kept-clause",
+      "inputUtf8": "Answer whether the proposed text preserves the kept clause.\n",
+      "byteLength": 60,
+      "sha256": "e5c238ce52facbfb0281ccfa460b2b1c15bf85dde879019314396710cc0838ee"
+    },
+    {
+      "name": "compatibility check system",
+      "field": "checkSystemHashes.compatibility",
+      "inputUtf8": "Answer whether both clauses can hold together.\n",
+      "byteLength": 47,
+      "sha256": "f24d5052f06c5b6819e4e46468cccb3d00c6cfb8f2b4c715ad77d57d1013241a"
+    },
+    {
+      "name": "persisted check contract",
+      "field": "checkSchemaHash",
+      "inputUtf8": "Return only JSON: {\"verdicts\":[{\"id\":\"operand-id\",\"verdict\":\"yes|no\"}]}.\n",
+      "byteLength": 73,
+      "sha256": "ebecba6f3df8489c7913290d47f3ae001e4973033565998aa2a96bc2ae2ded03"
+    }
+  ],
+  "toolHashes": [
+    {
+      "name": "OpenCode 2 context-hook draft tool list",
+      "field": "historianToolHash",
+      "lane": "opencode-2",
+      "carriers": ["hidden-completion"],
+      "toolSurface": ["read"],
+      "inputUtf8": "[\"read\"]",
+      "byteLength": 8,
+      "sha256": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927"
+    },
+    {
+      "name": "OpenCode 1 registered allowed tools and permissions",
+      "field": "historianToolHash",
+      "lane": "opencode-1",
+      "carriers": ["hidden-completion", "opencode-session"],
+      "toolSurface": { "permissions": { "read": "allow", "*": "deny" }, "allowedTools": ["read"] },
+      "inputUtf8": "{\"allowedTools\":[\"read\"],\"permissions\":{\"*\":\"deny\",\"read\":\"allow\"}}",
+      "byteLength": 67,
+      "sha256": "b4b9510b7867fc6c6fe6305f57e3680029c4b952971db7776f647e6dace470a3"
+    },
+    {
+      "name": "Pi and OMP tool set fixed at RPC child spawn",
+      "field": "historianToolHash",
+      "lanes": ["pi", "omp"],
+      "carriers": ["pi-historian-rpc"],
+      "toolSurface": [],
+      "inputUtf8": "[]",
+      "byteLength": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "OpenCode 2 check child with a host-required blocked read",
+      "field": "checkToolHash",
+      "checkKinds": ["disproof", "support", "kept-clause", "compatibility"],
+      "lane": "opencode-2",
+      "carriers": ["hidden-completion"],
+      "toolSurface": ["read"],
+      "inputUtf8": "[\"read\"]",
+      "byteLength": 8,
+      "sha256": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927"
+    },
+    {
+      "name": "OpenCode 1 check child with registered blocked read",
+      "field": "checkToolHash",
+      "checkKinds": ["disproof", "support", "kept-clause", "compatibility"],
+      "lane": "opencode-1",
+      "carriers": ["hidden-completion", "opencode-session"],
+      "toolSurface": { "permissions": { "read": "allow", "*": "deny" }, "allowedTools": ["read"] },
+      "inputUtf8": "{\"allowedTools\":[\"read\"],\"permissions\":{\"*\":\"deny\",\"read\":\"allow\"}}",
+      "byteLength": 67,
+      "sha256": "b4b9510b7867fc6c6fe6305f57e3680029c4b952971db7776f647e6dace470a3"
+    },
+    {
+      "name": "Pi and OMP tool-free check child",
+      "field": "checkToolHash",
+      "checkKinds": ["disproof", "support", "kept-clause", "compatibility"],
+      "lanes": ["pi", "omp"],
+      "carriers": ["pi-historian-rpc"],
+      "toolSurface": [],
+      "inputUtf8": "[]",
+      "byteLength": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "canonical JSON sorts nested object keys but preserves tool array order",
+      "fields": ["historianToolHash", "checkToolHash"],
+      "toolSurface": { "permissions": { "write": "deny", "read": "allow", "*": "deny" }, "allowedTools": ["write", "read"] },
+      "inputUtf8": "{\"allowedTools\":[\"write\",\"read\"],\"permissions\":{\"*\":\"deny\",\"read\":\"allow\",\"write\":\"deny\"}}",
+      "byteLength": 90,
+      "sha256": "2e520782cabe5d74ee7113ace98d603addb7ad5d27fec029bcee3b27e7db7e46"
+    },
+    {
+      "name": "any tool-free historian or check child",
+      "fields": ["historianToolHash", "checkToolHash"],
+      "toolSurface": [],
+      "inputUtf8": "[]",
+      "byteLength": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    }
+  ]
+}

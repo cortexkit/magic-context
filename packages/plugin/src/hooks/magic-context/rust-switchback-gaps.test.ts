@@ -252,6 +252,7 @@ function fixture() {
         try {
             await runCompartmentAgent(
                 await prepareProducerFixture({
+                    historianTurnTwo: "off",
                     client,
                     db,
                     sessionId,

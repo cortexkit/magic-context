@@ -62,6 +62,7 @@ import { log } from "@magic-context/core/shared/logger";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import { loadPiConfig } from "./config";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
+import { OMP_RETAINED_NO_TOOLS_ENV } from "./omp-retained-rpc";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { registerMagicContextTools } from "./tools";
 
@@ -82,18 +83,29 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	const budgetGuardFile = process.env.MAGIC_CONTEXT_SUBAGENT_BUDGET_GUARD_FILE;
-	if (budgetGuardFile) {
+	const toolFreeRetainedOmp = process.env[OMP_RETAINED_NO_TOOLS_ENV] === "1";
+	if (budgetGuardFile || toolFreeRetainedOmp) {
 		pi.on("tool_call", () => {
 			try {
-				if (readFileSync(budgetGuardFile, "utf8") === "finalize") {
-					return { block: true, reason: TOKEN_BUDGET_TOOL_REFUSAL };
+				if (budgetGuardFile) {
+					if (readFileSync(budgetGuardFile, "utf8") === "finalize") {
+						return { block: true, reason: TOKEN_BUDGET_TOOL_REFUSAL };
+					}
 				}
 			} catch {
 				return { block: true, reason: TOKEN_BUDGET_TOOL_REFUSAL };
 			}
+			if (toolFreeRetainedOmp)
+				return {
+					block: true,
+					reason: "Retained historian RPC children have no tools",
+				};
 			return undefined;
 		});
 	}
+	// Registration itself is forbidden, not merely execution after the budget ends.
+	// Ordinary OMP print children and plain Pi keep their existing registration policy.
+	if (toolFreeRetainedOmp) return;
 
 	pi.on("session_start", async () => {
 		try {

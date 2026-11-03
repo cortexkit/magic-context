@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -31,7 +32,7 @@ interface V1Client {
 }
 
 function contextRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
-    const db = new Database(path, { readonly: true, fileMustExist: true });
+    const db = openTestDb(path, { readonly: true, fileMustExist: true }, Database);
     try {
         return db.prepare(sql).all(...params) as T[];
     } finally {

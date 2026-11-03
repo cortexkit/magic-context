@@ -138,8 +138,23 @@ describe("production turn one", () => {
     test("only reply-local printed ranges or explicit unknown anchors pass", () => {
         expect(
             turnOneAnchorFailures(
+                reply("[at_compartment=1 messages=10]"),
+                "[10] user: one\n[11] assistant: two",
+            ),
+        ).toEqual([]);
+        expect(
+            turnOneAnchorFailures(
                 reply("[at_compartment=1 messages=10-11]"),
                 "[10] user: one\n[11] assistant: two",
+            ),
+        ).toEqual(["fact_1: anchor_not_reply_local_printed_range"]);
+        expect(
+            turnOneAnchorFailures(
+                reply(
+                    "[at_compartment=1 messages=10-11]",
+                    "<unprocessed_from>12</unprocessed_from>",
+                ),
+                "[10] user: one\n[11] assistant: two\n[12] user: lookahead",
             ),
         ).toEqual([]);
         expect(turnOneAnchorFailures(reply("[at_compartment=unknown]"), "[10] user: one")).toEqual(
@@ -162,6 +177,33 @@ describe("production turn one", () => {
                 "[10] user: one",
             ).length,
         ).toBeGreaterThan(0);
+    });
+    test("multi-range and folded-line anchors retain every printed-boundary and containment check", () => {
+        const localReply = (anchor: string) => reply(anchor).replace('end="11"', 'end="13"');
+        const printed =
+            "[10] user: one\n[11] assistant: two\n[12] user: three\n[13] assistant: four\n[14] user: lookahead";
+        expect(
+            turnOneAnchorFailures(localReply("[at_compartment=1 messages=10,12]"), printed),
+        ).toEqual([]);
+        expect(
+            turnOneAnchorFailures(localReply("[at_compartment=1 messages=10,14]"), printed),
+        ).toEqual(["fact_1: anchor_not_reply_local_printed_range"]);
+        expect(
+            turnOneAnchorFailures(localReply("[at_compartment=1 messages=10,12,13,14]"), printed),
+        ).toEqual(["fact_1: anchor_not_reply_local_printed_range"]);
+        const folded = "[10-11] user: one\n[12] assistant: two\n[13] user: three";
+        expect(
+            turnOneAnchorFailures(localReply("[at_compartment=1 messages=10-11]"), folded),
+        ).toEqual([]);
+        expect(turnOneAnchorFailures(localReply("[at_compartment=1 messages=10]"), folded)).toEqual(
+            ["fact_1: anchor_not_reply_local_printed_range"],
+        );
+        expect(
+            turnOneAnchorFailures(
+                localReply("[at_compartment=1 messages=10,12]"),
+                "[10] user: one\n[11] assistant: two\n[13] user: three",
+            ),
+        ).toEqual(["fact_1: anchor_not_reply_local_printed_range"]);
     });
 });
 

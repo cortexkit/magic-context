@@ -1,6 +1,6 @@
+import { openTestDb } from "../src/test-db";
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -72,7 +72,7 @@ const enabled = /\/magic-context\/issue-574(?:\/|$)/.test(resolve(tmpdir()));
 					resolve(line.slice(1)).startsWith(realpathSync(tmpdir()) + "/"),
 				),
 			).toBe(true);
-			const db = new Database(join(storage, "context.db"));
+			const db = openTestDb(join(storage, "context.db"));
 			const content =
 				"UNBORN_PROJECT_EXISTING_MEMORY: always preserve the directory's established conventions";
 			const now = Date.now();

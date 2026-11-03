@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,10 +51,10 @@ function contextDbPath(env: NodeJS.ProcessEnv): string {
 }
 
 function readContextDb<T>(env: NodeJS.ProcessEnv, read: (db: Database) => T): T {
-	const db = new Database(contextDbPath(env), {
+	const db = openTestDb(contextDbPath(env), {
 		readonly: true,
 		fileMustExist: true,
-	});
+	}, Database);
 	try {
 		return read(db);
 	} finally {
@@ -62,10 +63,10 @@ function readContextDb<T>(env: NodeJS.ProcessEnv, read: (db: Database) => T): T 
 }
 
 function writeContextDb(env: NodeJS.ProcessEnv, write: (db: Database) => void): void {
-	const db = new Database(contextDbPath(env), {
+	const db = openTestDb(contextDbPath(env), {
 		readwrite: true,
 		fileMustExist: true,
-	});
+	}, Database);
 	try {
 		write(db);
 	} finally {

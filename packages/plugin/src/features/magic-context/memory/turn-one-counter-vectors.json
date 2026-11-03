@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "description": "Enabled turn-one parse-failure counter fixtures. Each sequence starts with an empty memory_stage_attempts table. request_json is shown decoded; persist it as JSON text. event, appendedMessageIds and expectedCount are fixture metadata, not database columns. expectedMemoryPublications lists only publications with the sequence's t1fail: id, not ordinary publications from a successful wrapper.",
+  "contract": {
+    "keyFields": ["parentSessionId", "firstMessageId", "profileHash", "renderingHash", "schemaHash", "toolHash"],
+    "keyBytes": "Canonical JSON of exactly the six key fields: recursively sort object keys lexicographically, preserve array order, omit insignificant whitespace and encode as UTF-8 without a trailing newline.",
+    "publicationId": "t1fail: followed by the lowercase SHA-256 hex digest of keyBytes.",
+    "profileHash": "Lowercase SHA-256 hex over canonical UTF-8 JSON of the requested lane, carrier, provider, modelId, variant, configured temperature and configured thinkingLevel, using the same canonicalization rules as keyBytes. All seven fields are present, including explicit null. This counter key records requested values; it does not authorize actual values.",
+    "renderingHash": "Hash of the persisted combined historian system rendering plus any language directive, not the dormant XML or editor rendering.",
+    "schemaHash": "Hash of the persisted combined format-instruction bytes.",
+    "toolHash": "Hash of the canonical JSON historian tool surface handed to this carrier.",
+    "append": "The first unpublished message id remains unchanged while the publication floor is unmoved. Appended messages, child ids and a process or host restart do not change the counter key.",
+    "row": "Every row under a t1fail: id has stage turn_one, run_attempt equal to 1 plus the maximum prior run_attempt for that publication_id, stage_key <publication_id>:<run_attempt>, session_id equal to parentSessionId, and the send's harness and carrier.",
+    "count": "Count parse_failed rows with run_attempt greater than the newest counter_reset row's run_attempt, or greater than zero if there is no reset. Do not reset run_attempt itself.",
+    "reset": "When the count is nonzero, a successfully publishing wrapper or dormant fallback appends a counter_reset row under the same publication_id. A successful wrapper at count zero writes no reset row.",
+    "effects": "A parse failure writes no compartments or candidates, promotes nothing, leaves the publication floor unmoved, sends no repair turn, and releases the child once. No t1fail: id has a memory_publications row.",
+    "retry": "Record the prior outcome before starting a new child. After three failures, the next ordinary firing runs dormant turn one; a validation gate run ends instead of falling back. An unknown outcome does not append a parse_failed row or start a new send."
+  },
+  "requestedProfile": { "lane": "opencode-2", "carrier": "hidden-completion", "provider": "fixture-provider", "modelId": "fixture/model", "variant": null, "temperature": 0.1, "thinkingLevel": null },
+  "profileHashVector": {
+    "inputUtf8": "{\"carrier\":\"hidden-completion\",\"lane\":\"opencode-2\",\"modelId\":\"fixture/model\",\"provider\":\"fixture-provider\",\"temperature\":0.1,\"thinkingLevel\":null,\"variant\":null}",
+    "sha256": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae"
+  },
+  "key": {
+    "parentSessionId": "session-s1",
+    "firstMessageId": "message-001",
+    "profileHash": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae",
+    "renderingHash": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490",
+    "schemaHash": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924",
+    "toolHash": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927"
+  },
+  "keyHashVector": {
+    "inputUtf8": "{\"firstMessageId\":\"message-001\",\"parentSessionId\":\"session-s1\",\"profileHash\":\"d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae\",\"renderingHash\":\"749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490\",\"schemaHash\":\"d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924\",\"toolHash\":\"8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927\"}",
+    "sha256": "cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1",
+    "publication_id": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1"
+  },
+  "sequences": [
+    {
+      "name": "failure, failure, publishing reset, failure",
+      "expectedCounts": [1, 2, 0, 1],
+      "expectedMemoryPublications": [],
+      "rows": [
+        {
+          "event": "parse failure",
+          "row": {
+            "stage_key": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1:1",
+            "project_path": "/fixture-project",
+            "publication_id": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1",
+            "run_attempt": 1,
+            "stage": "turn_one",
+            "session_id": "session-s1",
+            "harness": "opencode2",
+            "carrier": "hidden-completion",
+            "state": "parse_failed",
+            "request_json": { "parentSessionId": "session-s1", "firstMessageId": "message-001", "profileHash": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae", "renderingHash": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490", "schemaHash": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924", "toolHash": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927" },
+            "started_at": 1
+          },
+          "expectedCount": 1
+        },
+        {
+          "event": "parse failure after a process restart and an appended message",
+          "appendedMessageIds": ["message-002"],
+          "row": {
+            "stage_key": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1:2",
+            "project_path": "/fixture-project",
+            "publication_id": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1",
+            "run_attempt": 2,
+            "stage": "turn_one",
+            "session_id": "session-s1",
+            "harness": "opencode2",
+            "carrier": "hidden-completion",
+            "state": "parse_failed",
+            "request_json": { "parentSessionId": "session-s1", "firstMessageId": "message-001", "profileHash": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae", "renderingHash": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490", "schemaHash": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924", "toolHash": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927" },
+            "started_at": 2
+          },
+          "expectedCount": 2
+        },
+        {
+          "event": "successfully publishing wrapper resets a nonzero count",
+          "row": {
+            "stage_key": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1:3",
+            "project_path": "/fixture-project",
+            "publication_id": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1",
+            "run_attempt": 3,
+            "stage": "turn_one",
+            "session_id": "session-s1",
+            "harness": "opencode2",
+            "carrier": "hidden-completion",
+            "state": "counter_reset",
+            "request_json": { "parentSessionId": "session-s1", "firstMessageId": "message-001", "profileHash": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae", "renderingHash": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490", "schemaHash": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924", "toolHash": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927" },
+            "started_at": 3
+          },
+          "expectedCount": 0
+        },
+        {
+          "event": "parse failure after reset keeps increasing run_attempt",
+          "row": {
+            "stage_key": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1:4",
+            "project_path": "/fixture-project",
+            "publication_id": "t1fail:cbe1df3cf86ba05456272b197f7ed81cde538f4ec69164071cfb3fb4ab5374f1",
+            "run_attempt": 4,
+            "stage": "turn_one",
+            "session_id": "session-s1",
+            "harness": "opencode2",
+            "carrier": "hidden-completion",
+            "state": "parse_failed",
+            "request_json": { "parentSessionId": "session-s1", "firstMessageId": "message-001", "profileHash": "d7e8b8bc33e5bf1770097843700fd06d64a350115d2cbd6808187c378add44ae", "renderingHash": "749b8137c2958ff36de81c480af695b60be9fba4e680544d36a736635f8a4490", "schemaHash": "d58f303daa62bec3698ce7f0dc9b59637565369484462b4dafaffcd2d7db8924", "toolHash": "8a2d0b87e8c712cc8e06c5c3f8de5e7f9dc8edcca03079a7aec0cb6436294927" },
+            "started_at": 4
+          },
+          "expectedCount": 1
+        }
+      ]
+    }
+  ]
+}

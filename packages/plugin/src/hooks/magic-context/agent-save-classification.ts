@@ -3,9 +3,9 @@
  * (an agent-memory classification item, see memory/turn-two-scoring.ts).
  *
  * Only an enabled lane, whose historian runs turn two, scores agent saves. A lane is
- * dormant (`resolveTurnOneLane`) until its transport makes the provider enforce the
- * turn-two response schema, and every production lane is dormant today: there no
- * item is enqueued and dreamer classify scores the row as before.
+ * dormant (`resolveTurnOneLane`) until its profile is authorized, and every
+ * production lane is dormant today. In that case no classification item is
+ * enqueued; the background dreamer classifier scores the saved memory instead.
  */
 import {
     resolveTurnOneLane,

@@ -49,14 +49,15 @@ import {
  *
  * 3-stage anchoring (hardcoded 10/100 thresholds):
  *  - Stage 1 (< 10 memories): skip — too small a pool to score meaningfully.
- *  - Stage 2 (<= 100): classify the WHOLE pool every run (the model sees the full
- *    distribution, so it can discriminate). No anchors.
- *  - Stage 3 (> 100): classify only the NEW/CHANGED memories (classified_at NULL),
+ *  - Stage 2 (<= 100): classify new/changed rows and assess unknown safety flags.
+ *    No anchors.
+ *  - Stage 3 (> 100): classify new/changed rows and assess unknown safety flags,
  *    plus a stratified sample of already-classified memories as scoring ANCHORS
  *    (calibration, not re-scored).
  *
  * The classified_at marker (stamped by setMemoryClassification, cleared on content
- * change) is the per-memory run-gate: a classified memory is not re-scored.
+ * change) prevents re-scoring. A NULL safety flag still needs an assessment, but
+ * that assessment preserves an existing score except to enforce the safety floor.
  */
 
 const MIN_POOL_TO_CLASSIFY = 10; // Stage 1 floor
@@ -102,6 +103,8 @@ interface ClassifyCandidate {
     /** The shared row id and content hash used by either writer. */
     id: number;
     normalizedHash: string;
+    /** Already scored, or reserved for historian scoring; assess safety only. */
+    safetyOnly?: boolean;
 }
 
 function getClassifyCandidates(args: ClassifyArgs): ClassifyCandidate[] {
@@ -177,21 +180,24 @@ export async function runClassify(args: ClassifyArgs): Promise<ClassifyResult> {
         ),
     );
     const historianScored = memoriesWithOpenClassificationItems(args.db);
-    toClassify = active.filter(
-        (candidate) =>
+    toClassify = active.flatMap((candidate) => {
+        const needsClassification =
             unclassifiedIds.has(candidate.contextMemory.id) &&
-            // A row whose classification item is still open is the historian's to
-            // score. A scored row was stamped classified when its score was recorded,
-            // so it is not re-scored here either.
-            !historianScored.has(candidate.contextMemory.id),
-    );
+            !historianScored.has(candidate.contextMemory.id);
+        if (needsClassification) return [candidate];
+        return candidate.contextMemory.safetyCritical === null
+            ? [{ ...candidate, safetyOnly: true }]
+            : [];
+    });
     if (active.length <= FULL_POOL_CEILING) {
-        // An unchanged classification is already durable; only new or changed rows need a prompt.
+        // Memories whose content has not changed and whose safety is assessed need no prompt.
         stage = 2;
     } else {
         stage = 3;
         const classified = active.filter(
-            (candidate) => !unclassifiedIds.has(candidate.contextMemory.id),
+            (candidate) =>
+                !unclassifiedIds.has(candidate.contextMemory.id) &&
+                candidate.contextMemory.safetyCritical !== null,
         );
         anchors = stratifiedAnchors(classified, STAGE3_ANCHOR_COUNT);
     }
@@ -377,6 +383,9 @@ async function classifyOneChunk(
             args,
             chunk.map((candidate) => candidate.contextMemory),
             run.validated,
+            new Set(
+                chunk.filter((candidate) => candidate.safetyOnly).map((candidate) => candidate.id),
+            ),
         );
     } catch (error) {
         const failure = error;
@@ -417,6 +426,7 @@ export function applyClassifications(
     args: ClassifyArgs,
     chunk: Memory[],
     manifestText: string,
+    safetyOnlyIds: ReadonlySet<number> = new Set(),
 ): { classified: number; changed: number } {
     const byId = new Map(chunk.map((m) => [m.id, m]));
     const parsed = parseClassifyManifest(manifestText);
@@ -439,12 +449,21 @@ export function applyClassifications(
                 p.shareable === true && hasShareabilitySensitiveText(memory.content)
                     ? false
                     : p.shareable;
-            const didChange = setMemoryClassification(args.db, p.id, {
-                importance: p.importance,
-                scope: p.scope,
-                shareable,
-            });
-            classified += 1; // stamped classified_at (run-gate satisfied)
+            const classification = safetyOnlyIds.has(p.id)
+                ? {}
+                : {
+                      importance: p.importance,
+                      scope: p.scope,
+                      shareable,
+                  };
+            const didChange =
+                safetyOnlyIds.has(p.id) && p.safety_critical === undefined
+                    ? false
+                    : setMemoryClassification(args.db, p.id, {
+                          ...classification,
+                          safetyCritical: p.safety_critical,
+                      });
+            classified += 1; // the row's reply was processed, including flag-only assessments
             if (didChange) changed += 1; // an actual column value moved
         }
     });

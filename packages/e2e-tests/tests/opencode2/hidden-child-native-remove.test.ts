@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import {
     existsSync,
@@ -53,10 +54,10 @@ async function eventually<T>(
 }
 
 function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writable = false): T {
-    const db = new Database(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+    const db = openTestDb(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
         ...(writable ? { readwrite: true } : { readonly: true }),
         fileMustExist: true,
-    });
+    }, Database);
     try {
         return use(db);
     } finally {

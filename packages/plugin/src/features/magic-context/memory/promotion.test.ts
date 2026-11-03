@@ -69,6 +69,8 @@ function makeMemoryDatabase(): Database {
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       normalized_hash TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'project',
+      shareable INTEGER NOT NULL DEFAULT 0,
       source_session_id TEXT,
       source_type TEXT DEFAULT 'historian',
       seen_count INTEGER DEFAULT 1,
@@ -85,6 +87,7 @@ function makeMemoryDatabase(): Database {
       superseded_by_memory_id INTEGER,
       merged_from TEXT,
       metadata_json TEXT,
+      safety_critical INTEGER,
       UNIQUE(project_path, category, normalized_hash)
     );
 

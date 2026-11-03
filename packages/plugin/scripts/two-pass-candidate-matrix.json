@@ -1,0 +1,411 @@
+{
+    "version": 1,
+    "mode": "best_effort",
+    "carrierPolicy": "OpenCode 1 lists both possible literals; V4 real-host preflight must pin exactly one. This matrix authorizes no profile.",
+    "evidenceNotes": [
+        "V4 denotes the real-host profile preflight before a validation run. In retained evidence quotations, MC means Magic Context, OC2 means OpenCode 2, and compartments are persisted summaries of conversation ranges. ck-mc names the Rust Magic Context module carrier. Quotations retain the original wording and source-scope qualifications; they are historical evidence, not fresh runtime attestations.",
+        "The owner hydrated opencode-zen-free-historian-evidence.json because opencode-zen-historian-tools-evidence.json was not retained. Its recorded requests pin the three Zen ids; they are not inferred from display names.",
+        "Null settings, variants and tariffs with source unknown are unresolved, not effective null reports or claims of zero cost. V4 preflight must pin them or drop the row before a validation run.",
+        "The OMP cline-pass catalog is unavailable after revocation of the Cline grant. No OpenRouter or Zen Muse id is substituted.",
+        "Plain pi has no evidence-backed candidate; no ck-mc carrier is an activation target. Dropped rows remain in the inventory but must not be sent."
+    ],
+    "rows": [
+        {
+            "candidate": "DeepSeek V4.1 Flash",
+            "lane": "opencode-1",
+            "carriers": ["hidden-completion", "opencode-session"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "deepseek-v4.1-flash-free",
+            "modelRoute": "opencode/deepseek-v4.1-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 89,
+                "quote": "          \"model\": \"deepseek-v4.1-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "GLM-5.3-Flash",
+            "lane": "opencode-1",
+            "carriers": ["hidden-completion", "opencode-session"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "glm-5.3-flash-free",
+            "modelRoute": "opencode/glm-5.3-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 302,
+                "quote": "          \"model\": \"glm-5.3-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "MiMo-V2.6-Flash",
+            "lane": "opencode-1",
+            "carriers": ["hidden-completion", "opencode-session"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "mimo-v2.6-flash-free",
+            "modelRoute": "opencode/mimo-v2.6-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 562,
+                "quote": "          \"model\": \"mimo-v2.6-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "Gemini 3.8 Flash",
+            "lane": "opencode-1",
+            "carriers": ["hidden-completion", "opencode-session"],
+            "provider": "google",
+            "providerSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 70,
+                "quote": "| OpenCode primary `google/antigravity-gemini-3.8-flash` | The **native Gemini API** supports schema-constrained output; this name instead identifies an Antigravity route under the `google` host provider. Native Gemini support does **not** prove the OAuth/auth-plugin proxy retains `responseSchema` or its equivalent. The exact installed auth-plugin/version and wire behavior were not available under the allowed source scope. Treat current enforcement as **unvalidated**, not “Gemini cannot do JSON.” |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            },
+            "status": "candidate",
+            "modelId": "antigravity-gemini-3.8-flash",
+            "modelRoute": "google/antigravity-gemini-3.8-flash",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": null,
+            "tariffSource": "unknown",
+            "tariffUnresolvedReason": "No per-request tariff for this exact Antigravity route was supplied. https://antigravity.google/docs/models.md documents model availability, not this OpenCode route's billing. Native Gemini API prices are not a substitute; price class and both USD rates remain unresolved pending an authorized route-specific billing/catalog capture.",
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "configured-route",
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 70,
+                "quote": "| OpenCode primary `google/antigravity-gemini-3.8-flash` | The **native Gemini API** supports schema-constrained output; this name instead identifies an Antigravity route under the `google` host provider. Native Gemini support does **not** prove the OAuth/auth-plugin proxy retains `responseSchema` or its equivalent. The exact installed auth-plugin/version and wire behavior were not available under the allowed source scope. Treat current enforcement as **unvalidated**, not “Gemini cannot do JSON.” |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            }
+        },
+        {
+            "candidate": "Claude Sonnet 5.5",
+            "lane": "opencode-1",
+            "carriers": ["hidden-completion", "opencode-session"],
+            "provider": null,
+            "providerSource": "unknown",
+            "status": "dropped",
+            "modelId": null,
+            "modelRoute": null,
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": null,
+            "tariffSource": "unknown",
+            "tariffUnresolvedReason": "The provider and exact model route are missing for this display name. A first-party Anthropic or Broca model ID and tariff cannot price an OpenCode fallback. Keep this row dropped until its own provider catalog pins both identity and USD rates.",
+            "pin_at": "V4 preflight",
+            "dropReason": "Only a display name is available for the OpenCode fallback; no exact route is pinned. The separate Broca cache-measurement id is not an OpenCode candidate route.",
+            "dropReasonSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 71,
+                "quote": "| Antigravity Claude Sonnet 5.5 fallback | The brief supplies a display name, not its exact full routing ID. Do not invent one. Anthropic API capability does not certify a Claude-through-Antigravity route. Forced-tool compatibility and native-output field passthrough both need proof for that route. |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            }
+        },
+        {
+            "candidate": "DeepSeek V4.1 Flash",
+            "lane": "opencode-2",
+            "carriers": ["hidden-completion"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "deepseek-v4.1-flash-free",
+            "modelRoute": "opencode/deepseek-v4.1-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 89,
+                "quote": "          \"model\": \"deepseek-v4.1-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "GLM-5.3-Flash",
+            "lane": "opencode-2",
+            "carriers": ["hidden-completion"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "glm-5.3-flash-free",
+            "modelRoute": "opencode/glm-5.3-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 302,
+                "quote": "          \"model\": \"glm-5.3-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "MiMo-V2.6-Flash",
+            "lane": "opencode-2",
+            "carriers": ["hidden-completion"],
+            "provider": "opencode",
+            "providerSource": {
+                "path": ".cortexkit/scripts/zen-free-historian-probe.ts",
+                "line": 64,
+                "quote": "const model = `opencode/${selectedModel}`;",
+                "sha256": "95978e3b8f64c380f889f9c4641ad94e28225b13f1c1d24e991dc6819aa17b55"
+            },
+            "status": "candidate",
+            "modelId": "mimo-v2.6-flash-free",
+            "modelRoute": "opencode/mimo-v2.6-flash-free",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": "free",
+            "tariff": {
+                "inputUSDPerMillion": 0,
+                "outputUSDPerMillion": 0,
+                "source": "Historical free-tier catalog evidence quoted in tariffSource (line 255, sha256 ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c); not current account billing or grader pricing. Re-attest catalog before an authorized run."
+            },
+            "tariffSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/opencode-zen-historian-tools.md",
+                "line": 255,
+                "quote": "The two grid lanes use separate host roots; live provider requests are native and direct to `https://opencode.ai/inference/openai/v1/chat/completions` for DeepSeek/GLM/MiMo and to the native `https://opencode.ai/inference/openai/v1/responses` endpoint for Muse (158 and 34 observed requests respectively). Successful response bodies and compartment contents are not exported. Usage is exported both from MC accounting and from per-assistant-step host counters; tools and step counts come from host stores without arguments. The host sums, not MC's potentially last-step-only OC2 historian collection, are used for the cost tables. Timeout rows show only known partial usage. Context/output caps apply per request, not to cumulative input across tool loops, repairs or fallback passes. HTTP errors are verbatim. Free-tier catalog prices are zero; reported token counts measure work, not paid account charges or a trustworthy estimate of latency.",
+                "sha256": "ff713263447061d709a7f0adebc62c81977ee2b16d0682f80b2bb95dbffa1e3c"
+            },
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "recorded-request",
+                "path": ".cortexkit/internal-docs/investigations/opencode-zen-free-historian-evidence.json",
+                "line": 562,
+                "quote": "          \"model\": \"mimo-v2.6-flash-free\",",
+                "sha256": "4b39c36e55dc131daf561c7755499eefa2679684a7d1d3b937d4620624ad15e8"
+            }
+        },
+        {
+            "candidate": "Gemini 3.8 Flash",
+            "lane": "opencode-2",
+            "carriers": ["hidden-completion"],
+            "provider": "google",
+            "providerSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 70,
+                "quote": "| OpenCode primary `google/antigravity-gemini-3.8-flash` | The **native Gemini API** supports schema-constrained output; this name instead identifies an Antigravity route under the `google` host provider. Native Gemini support does **not** prove the OAuth/auth-plugin proxy retains `responseSchema` or its equivalent. The exact installed auth-plugin/version and wire behavior were not available under the allowed source scope. Treat current enforcement as **unvalidated**, not “Gemini cannot do JSON.” |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            },
+            "status": "candidate",
+            "modelId": "antigravity-gemini-3.8-flash",
+            "modelRoute": "google/antigravity-gemini-3.8-flash",
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": null,
+            "tariffSource": "unknown",
+            "tariffUnresolvedReason": "No per-request tariff for this exact Antigravity route was supplied. https://antigravity.google/docs/models.md documents model availability, not this OpenCode route's billing. Native Gemini API prices are not a substitute; price class and both USD rates remain unresolved pending an authorized route-specific billing/catalog capture.",
+            "pin_at": "V4 preflight",
+            "modelEvidence": {
+                "kind": "configured-route",
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 70,
+                "quote": "| OpenCode primary `google/antigravity-gemini-3.8-flash` | The **native Gemini API** supports schema-constrained output; this name instead identifies an Antigravity route under the `google` host provider. Native Gemini support does **not** prove the OAuth/auth-plugin proxy retains `responseSchema` or its equivalent. The exact installed auth-plugin/version and wire behavior were not available under the allowed source scope. Treat current enforcement as **unvalidated**, not “Gemini cannot do JSON.” |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            }
+        },
+        {
+            "candidate": "Claude Sonnet 5.5",
+            "lane": "opencode-2",
+            "carriers": ["hidden-completion"],
+            "provider": null,
+            "providerSource": "unknown",
+            "status": "dropped",
+            "modelId": null,
+            "modelRoute": null,
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": null,
+            "tariffSource": "unknown",
+            "tariffUnresolvedReason": "The provider and exact model route are missing for this display name. A first-party Anthropic or Broca model ID and tariff cannot price an OpenCode fallback. Keep this row dropped until its own provider catalog pins both identity and USD rates.",
+            "pin_at": "V4 preflight",
+            "dropReason": "Only a display name is available for the OpenCode fallback; no exact route is pinned. The separate Broca cache-measurement id is not an OpenCode candidate route.",
+            "dropReasonSource": {
+                "path": ".cortexkit/prefrontal/evidence/slice/.cortexkit/internal-docs/investigations/two-pass-historian-activation.md",
+                "line": 71,
+                "quote": "| Antigravity Claude Sonnet 5.5 fallback | The brief supplies a display name, not its exact full routing ID. Do not invent one. Anthropic API capability does not certify a Claude-through-Antigravity route. Forced-tool compatibility and native-output field passthrough both need proof for that route. |",
+                "sha256": "5dfe60b3fca53e673e6d4a4da386ec7e20cc729859ec3b60bf831b744f2e1e33"
+            }
+        },
+        {
+            "candidate": "Muse Spark 1.3",
+            "lane": "omp",
+            "carriers": ["pi-historian-rpc"],
+            "provider": "cline-pass",
+            "providerSource": "unknown",
+            "status": "dropped",
+            "modelId": null,
+            "modelRoute": null,
+            "variant": null,
+            "variantSource": "unknown",
+            "variantUnresolvedReason": "No sanitized effective historian/host configuration was supplied. Variant is resolved from trusted configuration, not a model display name (packages/plugin/src/shared/model-resolution.ts:43-61,92-127). Null does not attest an unset qualifier.",
+            "configuredTemperature": null,
+            "configuredThinkingLevel": null,
+            "configurationSource": "unknown",
+            "configurationUnresolvedReason": "No sanitized runtime settings capture was supplied. Temperature is optional (packages/plugin/src/config/schema/agent-overrides.ts:17-20); OpenCode variant and Pi/OMP thinking_level are distinct (packages/plugin/src/config/schema/magic-context.ts:175-203). Configured nulls must not be substituted for reported nulls.",
+            "priceClass": null,
+            "tariffSource": "unknown",
+            "tariffUnresolvedReason": "The exact cline-pass catalog ID, route, and tariff are unavailable. The historical Cline grant was revoked; a fresh authorized apikey:cline-pass catalog capture is required. Keep this row dropped rather than substituting a Zen or OpenRouter Muse identity or price.",
+            "pin_at": "V4 preflight",
+            "dropReason": "The OMP cline-pass model catalog is unavailable and its key grant was revoked. Pin the exact catalog id at V4 preflight or leave this row dropped; another provider's Muse route is not evidence for cline-pass.",
+            "dropReasonSource": "unknown"
+        }
+    ]
+}

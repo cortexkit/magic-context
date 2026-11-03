@@ -469,6 +469,10 @@ export async function runPiWrapup(
 					const runHistorian = deps.runPiHistorianForWrapup ?? runPiHistorian;
 					await runHistorian({
 						db: deps.db,
+						// RPC can expose UI methods without a persistent interactive host.
+						// A detached second turn would outlive the wrapup command's caller.
+						hasUI:
+							ctx.hasUI === true && (ctx as { mode?: string }).mode !== "rpc",
 						sessionId,
 						directory: ctx.cwd,
 						provider,

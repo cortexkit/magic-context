@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -46,8 +47,8 @@ async function eventually<T>(
 
 function withDb<T>(path: string, read: (db: Database) => T, readwrite = false): T {
 	const db = readwrite
-		? new Database(path)
-		: new Database(path, { readonly: true });
+		? openTestDb(path, undefined, Database)
+		: openTestDb(path, { readonly: true }, Database);
 	try {
 		return read(db);
 	} finally {

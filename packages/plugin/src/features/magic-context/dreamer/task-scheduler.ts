@@ -7,6 +7,7 @@ import type { ModelInput } from "../../../shared/model-resolution";
 import type { Database } from "../../../shared/sqlite";
 import { isUsableProjectIdentity } from "../memory/project-identity";
 import { nextDueAtMs } from "./cron";
+import { getExpiredActiveMemoryIds } from "./expire-memories";
 import { pruneIdleScheduleIdentities } from "./idle-schedule-prune";
 import {
     acquireLeaseWithAcquisition,
@@ -94,10 +95,13 @@ export interface TaskExecutorContext {
     leaseAcquisition?: LeaseAcquisition;
 }
 
-export type TaskExecutor = (
+export type TaskExecutor = ((
     task: DreamTaskRuntimeConfig,
     ctx: TaskExecutorContext,
-) => Promise<TaskExecOutcome>;
+) => Promise<TaskExecOutcome>) & {
+    /** TTL maintenance runs independently of model-task schedules and gates. */
+    expireMemories?: (ctx: TaskExecutorContext) => Promise<number>;
+};
 
 export interface RunDueTasksDeps {
     db: Database;
@@ -738,6 +742,30 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
     // rows to the daily idle prune instead.
     const allowedTasks = tasksAllowedBySettings(deps);
     if (allowedTasks.length === 0) return 0;
+    // Idle expiry ticks must not take a write lease. The executor rechecks the
+    // expired rows under the lease before archiving them.
+    if (
+        deps.projectMemoryEnabled !== false &&
+        deps.executor.expireMemories &&
+        getExpiredActiveMemoryIds(deps.db, deps.projectIdentity).length > 0
+    ) {
+        const holderId = crypto.randomUUID();
+        const leaseKey = leaseKeyFor("curate", deps.projectIdentity);
+        const leaseAcquisition = acquireLeaseWithAcquisition(deps.db, holderId, leaseKey);
+        if (leaseAcquisition) {
+            try {
+                await deps.executor.expireMemories({
+                    db: deps.db,
+                    projectIdentity: deps.projectIdentity,
+                    holderId,
+                    leaseKey,
+                    leaseAcquisition,
+                });
+            } finally {
+                releaseLease(deps.db, holderId, leaseKey);
+            }
+        }
+    }
     const now = deps.now ?? Date.now();
     const due = planDueTasks(deps.db, deps.projectIdentity, allowedTasks, now);
     if (due.length === 0) return 0;

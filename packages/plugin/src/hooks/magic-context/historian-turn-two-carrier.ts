@@ -4,13 +4,18 @@
  * turn-one child with a second prompt on the same session id, and sends each narrow
  * check as a fresh single-turn child of its own.
  *
- * No production lane is enabled yet (see `resolveTurnOneLane`): the OpenCode prompt
- * body has no response-schema field the provider honours, so this carrier is only
- * reached on a lane a test enables. Before a lane is enabled, a recorded replay must
+ * No production lane is enabled yet (see `resolveTurnOneLane`). Before a lane is enabled, a recorded replay must
  * also show that a check request reaches the provider with only its own fixed system
  * prompt (the OpenCode agent registration can add its own).
  */
 
+import {
+    buildHiddenAgentConfig,
+    buildHiddenAgentRegistrations,
+    buildZenReadAgentRegistrations,
+} from "../../agents/hidden-agent-registrations";
+import { CHECK_SCHEMA_CONTRACT } from "../../features/magic-context/memory/historian-schema";
+import { hasHistorianToolActivity } from "../../features/magic-context/memory/historian-wire";
 import type {
     CheckReply,
     CheckRequest,
@@ -29,6 +34,11 @@ import {
     closeTurnTwoChild,
     retainedTurnTwoChild,
 } from "../../features/magic-context/memory/turn-two-children";
+import {
+    lifecycleToolHash,
+    turnTwoLaneForReport,
+} from "../../features/magic-context/memory/turn-two-profile";
+import { needsBlockedRead, ZEN_READ_AGENT_SUFFIX } from "../../shared/hidden-zen-read";
 import { modelBodyField, toModelEntry } from "../../shared/resolve-fallbacks";
 import type {
     HiddenCompletion,
@@ -72,20 +82,78 @@ function answeredBy(completion: HiddenCompletion): { provider: string; modelId: 
     return null;
 }
 
-function reportedProfile(
+/** Hash only the surface authored here, never the host's tool-definition text. */
+export function openCodeTurnTwoToolHash(args: {
+    harness: string;
+    carrier: string;
+    agent: string;
+    provider?: string;
+    observedToolSurface?: readonly string[];
+}): string | null {
+    const surface = openCodeTurnTwoToolSurface(args);
+    return surface === undefined ? null : lifecycleToolHash(surface);
+}
+
+/** The exact Magic Context tool bytes used for both request persistence and carrier reports. */
+export function openCodeTurnTwoToolSurface(
+    args: Parameters<typeof openCodeTurnTwoToolHash>[0],
+): unknown {
+    const lane = turnTwoLaneForReport(args);
+    if (lane === "opencode-2") return args.observedToolSurface;
+    if (lane !== "opencode-1") return undefined;
+    const registrations = buildHiddenAgentRegistrations({
+        dreamerPrompt: undefined,
+        historianPrompt: undefined,
+        historianEditorPrompt: undefined,
+        historianDisallowed: [],
+    });
+    const agent = needsBlockedRead(args.agent, args.provider)
+        ? `${args.agent}${ZEN_READ_AGENT_SUFFIX}`
+        : args.agent;
+    const registration = [...registrations, ...buildZenReadAgentRegistrations(registrations)].find(
+        (entry) => entry.id === agent,
+    );
+    if (!registration) return undefined;
+    if (registration.allowedTools.length === 0) return [];
+    const config = buildHiddenAgentConfig(
+        "",
+        registration.allowedTools,
+        registration.maxSteps,
+        registration.overrides,
+        registration.id,
+        registration.lockPermissions,
+    );
+    return {
+        allowedTools: registration.allowedTools,
+        permissions: config.permission,
+    };
+}
+
+export function reportedProfile(
     completion: HiddenCompletion,
     model: RetainedHistorianChild["model"],
     systemHash: string,
+    identity: { harness: string; carrier: string; agent: string },
+    formatInstructions?: string,
 ): ReportedProfile | null {
     const answered = answeredBy(completion);
     if (!answered) return null;
     return {
+        lane: turnTwoLaneForReport(identity),
+        carrier: identity.carrier,
         provider: answered.provider,
         modelId: answered.modelId,
         variant: toModelEntry(model)?.qualifier ?? null,
         // No OpenCode carrier reports the sampling temperature.
         temperature: null,
+        thinkingLevel: null,
         systemHash,
+        schemaHash: formatInstructions === undefined ? null : lifecycleTextHash(formatInstructions),
+        toolHash: openCodeTurnTwoToolHash({
+            ...identity,
+            provider: answered.provider,
+            observedToolSurface: completion.observedToolSurface,
+        }),
     };
 }
 
@@ -114,10 +182,12 @@ export function createOpenCodeTurnTwoCarrier(args: {
     parentSessionId: string;
     harness: string;
     carrier: string;
-    enforcedJson: boolean;
+    enforcedJson?: boolean;
     /** Turn one's reply; a later reply that differs from it is turn two's. */
     turnOneText: string;
     timeoutMs: number;
+    /** The persisted format-instruction bytes used on both historian turns. */
+    formatInstructions?: string;
 }): TurnTwoCarrier {
     const { child } = args;
     const historianSystemHash = lifecycleTextHash(child.system);
@@ -137,7 +207,6 @@ export function createOpenCodeTurnTwoCarrier(args: {
     return {
         carrier: args.carrier,
         harness: args.harness,
-        enforcedJson: args.enforcedJson,
         childSessionId: child.handle.childSessionId ?? child.handle.id,
         baseline: lifecycleTextHash(args.turnOneText),
         historianSystemHash,
@@ -148,17 +217,24 @@ export function createOpenCodeTurnTwoCarrier(args: {
                 args.timeoutMs,
             );
             const completion = await child.executor.collect(child.handle, 50);
-            if (!completion.text || completion.text === args.turnOneText)
+            const toolActivity = hasHistorianToolActivity(completion);
+            if (!toolActivity && (!completion.text || completion.text === args.turnOneText))
                 throw new TurnTwoOutcomeUnknownError("turn two reply not yet available");
             return {
-                text: completion.text,
+                text: completion.text ?? "",
                 lengthCapped: completion.lengthCapped,
-                profile: reportedProfile(completion, child.model, historianSystemHash),
+                toolActivity,
+                profile: reportedProfile(
+                    completion,
+                    child.model,
+                    historianSystemHash,
+                    { ...args, agent: child.agent },
+                    args.formatInstructions,
+                ),
                 usage: completion.usage,
             };
         },
-        check: (request) =>
-            sendCheck(child.executor, child, args.parentSessionId, request, args.timeoutMs),
+        check: (request) => sendCheck(child.executor, child, args, request),
     };
 }
 
@@ -169,10 +245,10 @@ export function createOpenCodeTurnTwoCarrier(args: {
 async function sendCheck(
     executor: HiddenCompletionExecutor,
     child: RetainedHistorianChild,
-    parentSessionId: string,
+    identity: { parentSessionId: string; harness: string; carrier: string; timeoutMs: number },
     request: CheckRequest,
-    timeoutMs: number,
 ): Promise<CheckReply> {
+    const { parentSessionId, timeoutMs } = identity;
     const handle = await executor.open({
         parentSessionId,
         agent: child.agent,
@@ -211,7 +287,13 @@ async function sendCheck(
         });
         const completion = await executor.collect(handle, 10);
         settled = true;
-        const profile = reportedProfile(completion, child.model, request.systemHash);
+        const profile = reportedProfile(
+            completion,
+            child.model,
+            lifecycleTextHash(request.system),
+            { ...identity, agent: child.agent },
+            CHECK_SCHEMA_CONTRACT,
+        );
         if (!profile) throw new Error("check carrier reported no model");
         let verdicts: CheckReply["verdicts"];
         try {
@@ -222,7 +304,12 @@ async function sendCheck(
             // failure (which would retry it).
             verdicts = [];
         }
-        return { verdicts, profile, usage: completion.usage };
+        return {
+            verdicts: completion.lengthCapped ? [] : verdicts,
+            profile,
+            usage: completion.usage,
+            toolActivity: hasHistorianToolActivity(completion),
+        };
     } finally {
         await executor.close(handle, {
             promptSettled: settled,
@@ -276,13 +363,18 @@ export function createOpenCodeTurnTwoRecovery(args: {
                     // only by session id that cannot be read no longer exists.
                     return retained ? { kind: "unknown" } : { kind: "gone" };
                 }
-                if (!completion.text || lifecycleTextHash(completion.text) === record.baseline)
+                const toolActivity = hasHistorianToolActivity(completion);
+                if (
+                    !toolActivity &&
+                    (!completion.text || lifecycleTextHash(completion.text) === record.baseline)
+                )
                     return { kind: "unknown" };
                 return {
                     kind: "reply",
                     reply: {
-                        text: completion.text,
+                        text: completion.text ?? "",
                         lengthCapped: completion.lengthCapped,
+                        toolActivity: hasHistorianToolActivity(completion),
                         profile: recoveredProfile(completion, record),
                         usage: completion.usage,
                     },
@@ -316,10 +408,19 @@ function recoveredProfile(
     const answered = answeredBy(completion);
     if (!answered || !record.historianSystemHash) return null;
     return {
+        lane: turnTwoLaneForReport(record),
+        carrier: record.carrier,
         provider: answered.provider,
         modelId: answered.modelId,
         variant: record.variant,
         temperature: null,
+        thinkingLevel: null,
         systemHash: record.historianSystemHash,
+        // Old stage records do not retain the format bytes or the registered agent.
+        schemaHash: null,
+        toolHash:
+            record.harness === "opencode2" && completion.observedToolSurface !== undefined
+                ? lifecycleToolHash(completion.observedToolSurface)
+                : null,
     };
 }

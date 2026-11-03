@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
@@ -67,7 +68,7 @@ test("OpenCode 1 live cache_ttl edits affect the next idle check without changin
         await completedPrompt("Seed a cached conversation.");
         await completedPrompt("Keep the original prefix.");
         const prior = h.requests().filter(r => !bytes(r.body.system).includes("title generator")).at(-1)!;
-        writer = new Database(h.contextDbPath());
+        writer = openTestDb(h.contextDbPath());
         // A busy timeout handles SQLite lock contention, not event ordering; the
         // completedPrompt fence above handles the host's late response-clock write.
         writer.exec("PRAGMA busy_timeout = 5000");

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
@@ -45,7 +45,7 @@ async function checkStorageBoot(blocked: boolean) {
 	const dbPath = join(storage, "context.db");
 	if (!openDatabase(dbPath)) throw new Error("could not seed isolated storage");
 	closeDatabase();
-	const db = new Database(dbPath);
+	const db = openTestDb(dbPath);
 	db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(
 		LATEST_SUPPORTED_VERSION,
 	);
@@ -261,7 +261,7 @@ export default { id: "opencode-magic-context", async setup(context) { mark("setu
 			expect(second.setupPending).toBe(true);
 		}
 		expect(Math.max(...latencies)).toBeLessThan(2000);
-		const checked = new Database(dbPath, { readonly: true });
+		const checked = openTestDb(dbPath, { readonly: true });
 		expect(
 			checked
 				.query("SELECT MAX(version) AS version FROM schema_migrations")
@@ -371,7 +371,7 @@ test.each([
 		if (!openDatabase(dbPath))
 			throw new Error("could not seed isolated storage");
 		closeDatabase();
-		const seed = new Database(dbPath);
+		const seed = openTestDb(dbPath);
 		try {
 			seed
 				.prepare("DELETE FROM schema_migrations WHERE version >= ?")
@@ -421,7 +421,7 @@ test.each([
 			expect(log).not.toContain("storage fatal:");
 			expect(log).toContain("async open main-thread migration-body count: 0");
 			expect(log).not.toContain("migration worker could not start");
-			const checked = new Database(dbPath, { readonly: true });
+			const checked = openTestDb(dbPath, { readonly: true });
 			try {
 				expect(
 					checked

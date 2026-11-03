@@ -280,6 +280,11 @@ export function turnOneAnchorFailures(reply: string, newMessages: string): strin
         (compartment) =>
             parsed.unprocessedFrom === null || compartment.endMessage < parsed.unprocessedFrom,
     );
+    // A partial reply does not shrink the input covered by the whole-chunk refusal.
+    const chunk = {
+        startOrdinal: blocks[0]?.startOrdinal,
+        endOrdinal: blocks.at(-1)?.endOrdinal,
+    };
     bullets.forEach((bullet, index) => {
         if (
             /^[[(]\s*(?:at_compartment|origin_compartment)\s*=\s*"?unknown"?\s*[\])]\s*\S/.test(
@@ -288,7 +293,7 @@ export function turnOneAnchorFailures(reply: string, newMessages: string): strin
         )
             return;
         const fact = parsed.facts[index];
-        if (!fact?.anchor || !resolveTurnOneFactAnchor(fact.anchor, compartments, blocks)) {
+        if (!fact?.anchor || !resolveTurnOneFactAnchor(fact.anchor, compartments, blocks, chunk)) {
             failures.push(`fact_${index + 1}: anchor_not_reply_local_printed_range`);
         }
     });

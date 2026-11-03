@@ -35,6 +35,77 @@ async function inThrowawayRoot(run: (root: string) => Promise<void>): Promise<vo
 }
 
 forEachHost(import.meta.url, "historian extension runtime", (host) => {
+    if (host === "omp") it("OMP RPC completes legacy turn one and publishes without a detached turn two", () => inThrowawayRoot(async (root) => {
+        const previousPackage = process.env.MC_E2E_OMP_PACKAGE_JSON;
+        delete process.env.MC_E2E_OMP_PACKAGE_JSON;
+        const legacyInvocation = resolvePiHostInvocation("omp");
+        // Exercise both sides of the capability boundary: v2 framing alone is
+        // not prompt completion, and an RPC UI adapter is not a persistent TUI.
+        expect(JSON.parse(readFileSync(legacyInvocation.packageJson, "utf8")).version).toBe("18.2.6");
+        process.env.MC_E2E_OMP_PACKAGE_JSON = join(import.meta.dir, "../../pi-plugin/node_modules/omp-coding-agent-18126/package.json");
+        let h: PiTestHarness | undefined;
+        try {
+            const fixture = createE2ETempDir("rpc-historian-");
+            const contextPath = join(fixture, "context.json");
+            const extension = join(fixture, "context.mjs");
+            writeFileSync(extension, `import { writeFileSync } from "node:fs";
+export default function(pi) { pi.on("session_start", (_event, ctx) => writeFileSync(${JSON.stringify(contextPath)}, JSON.stringify({ mode: ctx.mode, hasUI: ctx.hasUI }))); }`);
+            h = await PiTestHarness.create({ host: "omp", extensionsBeforeMagicContext: [extension], magicContextConfig: { execute_threshold_percentage: 40, dreamer: { disable: true }, compressor: { enabled: false } } });
+            await h.getState();
+            expect(JSON.parse(readFileSync(contextPath, "utf8"))).toEqual({ mode: "rpc", hasUI: true });
+            const harness = h;
+            const env = childEnv(h.env);
+            const keys = ["HOME", "CFFIXED_USER_HOME", "TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "MAGIC_CONTEXT_STORAGE_DIR", "PI_CODING_AGENT_DIR", "ANTHROPIC_API_KEY", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK"];
+            const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+            for (const key of keys) process.env[key] = env[key];
+            let opened;
+            try {
+                const runner = new PiSubagentRunner({ invocation: legacyInvocation, subagentExtensions: [join(PI_PLUGIN_ROOT, "dist/subagent-entry.js")] });
+                opened = await runner.runRetainedHistorian({
+                    agent: "historian", model: "mock/mock-model", tokenBudget: 100000,
+                    systemPrompt: "Reply once, then stop.", userMessage: "LEGACY_HISTORIAN_FIRST_REPLY",
+                    cwd: h.workdir, timeoutMs: 15000,
+                    onProgress: (event) => { if (event.type === "spawned" && event.pid) assertIsolated(event.pid, root, false); },
+                }, "legacy-turn-one");
+                expect(opened.result).toMatchObject({ ok: true });
+                expect(opened.child).toBeNull();
+                expect(runner.canRetainHistorian).toBe(false);
+            } finally {
+                await opened?.child?.close();
+                for (const key of keys) {
+                    if (saved[key] === undefined) delete process.env[key];
+                    else process.env[key] = saved[key];
+                }
+            }
+            assertIsolated(h.hostPid!, root);
+            h.mock.addMatcher((body) => {
+                if (!JSON.stringify(body.system).includes("the hippocampus of a long-running coding agent")) return null;
+                const range = findHistorianOrdinalRange(body);
+                if (!range) throw new Error("Historian request has no source ordinals");
+                return { text: buildMockHistorianPayload({ start: range.start, end: range.end, title: "RPC complete history", body: "History is complete before the RPC client disconnects." }), usage: { input_tokens: 500, output_tokens: 200 } };
+            });
+            const session = await h.createSession();
+            for (let i = 0; i < 10; i++) await h.sendPrompt(session, `Durable RPC turn ${i}. ${h.ballast(3000)}`);
+            h.mock.setDefault({ text: "pressure", usage: { input_tokens: 90000, output_tokens: 20, cache_creation_input_tokens: 90000, cache_read_input_tokens: 0 } });
+            await h.sendPrompt(session, "Trigger RPC history compression.");
+            h.mock.setDefault({ text: "after", usage: { input_tokens: 500, output_tokens: 10 } });
+            await h.sendPrompt(session, "Run RPC historian.");
+            await h.waitFor(() => harness.countCompartments(session) > 0 && (harness.contextDb().prepare("SELECT compartment_in_progress FROM session_meta WHERE session_id = ?").get(session) as { compartment_in_progress: number })?.compartment_in_progress === 0, { timeoutMs: 30000, label: "complete RPC publication" });
+            const stages = h.contextDb().prepare("SELECT stage, carrier, state FROM memory_stage_attempts WHERE session_id = ?").all(session);
+            expect(stages.length).toBeGreaterThan(0);
+            for (const stage of stages) expect(stage).toEqual({ stage: "turn_one", carrier: "pi-subagent", state: "published" });
+            const requests = h.mock.requests().filter((r) => JSON.stringify(r.body.system).includes("the hippocampus of a long-running coding agent"));
+            expect(requests.length).toBeGreaterThan(0);
+            for (const request of requests) {
+                expect(JSON.stringify(request.body.system)).not.toContain("Reply with exactly one JSON object under a `result` wrapper.");
+                expect(request.body.tools ?? []).toEqual([]);
+            }
+        } finally {
+            await h?.dispose();
+            if (previousPackage === undefined) delete process.env.MC_E2E_OMP_PACKAGE_JSON;
+            else process.env.MC_E2E_OMP_PACKAGE_JSON = previousPackage;
+        }
+    }), 120000);
     it(host === "pi" ? "publishes history after a loader-only extension evaluation without binding that runtime" : "initialized OMP filters disabled built-ins and publishes history", () => inThrowawayRoot(async (root) => {
         if (host !== "pi" && host !== "omp") throw new Error(`Unsupported host ${host}`);
         // All host state, including the native extraction cache, belongs to this task's throwaway root.

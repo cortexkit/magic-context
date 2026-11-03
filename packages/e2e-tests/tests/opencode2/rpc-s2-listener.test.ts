@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -56,7 +56,7 @@ test("v2_rpc_listener_publishes_nonzero_sidebar_snapshot_after_prompt", async ()
 		const sessionMeta = await eventually(() => {
 			const databasePath = join(storageDir, "context.db");
 			if (!existsSync(databasePath)) return undefined;
-			const db = new Database(databasePath, { readonly: true });
+			const db = openTestDb(databasePath, { readonly: true });
 			try {
 				const row = db
 					.prepare<

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { openTestDb } from "../src/test-db";
 /**
  * Switch-off differential: with `rust_background_enabled` off, a host must serve
  * byte-identical provider requests, and leave identical dreamer schedule rows,
@@ -144,8 +145,7 @@ function lastRequestWith(requests: Array<{ body: Record<string, unknown> }>, mar
 /** task_schedule_state with timestamps reduced to null / present. */
 async function scheduleRows(contextDb: string, normalize: (t: string) => string): Promise<string[]> {
 	if (!existsSync(contextDb)) return ["<no context.db>"];
-	const { Database } = await import("bun:sqlite");
-	const db = new Database(contextDb, { readonly: true });
+	const db = openTestDb(contextDb, { readonly: true });
 	try {
 		const rows = db
 			.prepare("SELECT * FROM task_schedule_state ORDER BY project_path, task")
@@ -235,12 +235,11 @@ const transformedCount = (turns: Turn[]) =>
  * rows. Uses the extracted tree's own storage code and project identity.
  */
 async function seedMemory(contextDb: string, directory: string): Promise<void> {
-	const { Database } = await import("bun:sqlite");
 	const { resolveProjectIdentity } = await import(
 		"../../plugin/src/features/magic-context/memory/project-identity"
 	);
 	const { insertMemory } = await import("../../plugin/src/features/magic-context/memory/storage-memory");
-	const db = new Database(contextDb);
+	const db = openTestDb(contextDb);
 	try {
 		db.exec("PRAGMA busy_timeout = 10000");
 		insertMemory(db as never, {

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -161,7 +161,7 @@ try {
 		)
 	)
 		throw new Error("real OpenCode 2 emergency loses answered question");
-	const db = new Database(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+	const db = openTestDb(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
 		readonly: true,
 	});
 	try {

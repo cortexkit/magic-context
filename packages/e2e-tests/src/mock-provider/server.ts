@@ -14,6 +14,7 @@
  */
 import { LatestTurnThinkingValidator } from "./latest-turn-thinking";
 import { PrefixBindingValidator } from "./prefix-binding";
+import { emptyTurnTwoResponse, historianProtocolResponse, historianTurnInRequest, isTurnTwoResponse } from "./historian-protocol";
 
 const STREAM_PING_INTERVAL_MS = 5_000;
 
@@ -316,7 +317,12 @@ export class MockProvider {
                     break;
                 }
             }
-            const scripted = matcherResponse ?? this.responses.shift() ?? this.defaultResponse;
+            const historianTurn = historianTurnInRequest(body);
+            // An unscripted turn-two request must not consume the next queued response.
+            const selected = matcherResponse ?? (historianTurn === "turn_two" && !isTurnTwoResponse(this.responses[0])
+                ? (isTurnTwoResponse(this.defaultResponse) ? this.defaultResponse : emptyTurnTwoResponse())
+                : this.responses.shift() ?? this.defaultResponse);
+            const scripted = selected ? historianProtocolResponse(historianTurn, selected) : null;
             if (!scripted) {
                 return new Response(
                     JSON.stringify({

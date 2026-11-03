@@ -1,7 +1,7 @@
+import { openTestDb } from "../test-db";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { Database } from "bun:sqlite";
 
 const columns = [
     ["session", "directory"],
@@ -28,7 +28,7 @@ export function isolateStoreDirectories(root: string, openCodeDb: string, contex
     for (const [path, fields] of [[openCodeDb, columns.slice(0, 3)], [contextDb, columns.slice(3)]] as const) {
         if (!existsSync(path)) continue;
         if (!inside(path, base)) throw new Error(`E2E_STORE_OUTSIDE_ROOT: ${path}`);
-        const db = new Database(path);
+        const db = openTestDb(path);
         try {
             const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name));
             const rewrite = db.transaction(() => {

@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 // TMPDIR and MC_PREFIX_PROBE_ROOT must name the same throwaway directory: the harness
 // allocates every host store below it, and this probe checks open files against it.
 import { execFileSync } from "node:child_process";
@@ -166,7 +167,7 @@ try {
             check(await prepareCompactionMarkerCandidates(session), "Marker candidate preparation failed");
             const marker = injectCompactionMarker({ sessionId: session, endOrdinal: 1, endMessageId: boundary, summaryText: MARKER_SUMMARY_TEXT, directory: h.workdir });
             check(marker, "Real marker injection failed");
-            const writer = new Database(h.contextDbPath());
+            const writer = openTestDb(h.contextDbPath());
             try { setPersistedCompactionMarkerState(writer, session, { ...marker!, boundaryOrdinal: 1, targetEndMessageId: boundary }); }
             finally { writer.close(); }
         } finally {
@@ -202,7 +203,7 @@ try {
         const turn = h.sendPrompt(session, "PREFIX-RECORD compaction-off loop", { timeoutMs: 90_000 });
         void turn.catch(() => {});
         await h.waitFor(() => step >= 2, { timeoutMs: 20_000, label: "signed off-mode loop" });
-        const writer = new Database(h.contextDbPath());
+        const writer = openTestDb(h.contextDbPath());
         try {
             writer.prepare("UPDATE session_meta SET served_prefix = 'invalid' WHERE session_id = ?").run(session);
             writer.exec("CREATE TRIGGER fail_served_prefix BEFORE UPDATE OF served_prefix ON session_meta BEGIN SELECT RAISE(ABORT, 'record unavailable'); END");
@@ -252,7 +253,7 @@ try {
             check(text, "Loop did not write its served prefix record");
             report.servedPrefixBefore = JSON.parse(String(text));
         }
-        const writer = new Database(h.contextDbPath());
+        const writer = openTestDb(h.contextDbPath());
         try {
             writer.prepare("INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, ?)")
                 .run(session, tag!.tag_number as number, Date.now(), h.harnessId);

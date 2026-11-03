@@ -23,15 +23,13 @@ import { initializeDatabase } from "../storage-db";
 import { applyMemoryAdmission } from "./lifecycle-applier";
 import { MAX_STAGE2_ATTEMPTS } from "./lifecycle-constants";
 import {
-    CHECK_SYSTEM_PROMPTS,
     type CheckReply,
     type CheckRequest,
     type GateContext,
     planMemoryRevision,
-    type ReportedProfile,
     type RevisionDecision,
 } from "./lifecycle-gates";
-import { lifecycleTextHash, splitMemoryClauses } from "./lifecycle-text";
+import { splitMemoryClauses } from "./lifecycle-text";
 import { getMemoryById, insertMemory } from "./storage-memory";
 import { saveEmbedding } from "./storage-memory-embeddings";
 import {
@@ -48,22 +46,23 @@ import {
     type TurnTwoStageReply,
 } from "./turn-two";
 import { retrieveTurnTwoNeighbours } from "./turn-two-retrieval";
+import { authorizationFixture } from "./turn-two-test-fixtures.test";
 
 const PROJECT = "git:turn-two-review";
-const PROFILE: ReportedProfile = {
-    provider: "test",
-    modelId: "validated-model",
-    variant: null,
-    temperature: 0,
-    systemHash: lifecycleTextHash("historian system prompt"),
-};
-const VALIDATED: ReportedProfile[] = [
-    PROFILE,
-    ...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-        ...PROFILE,
-        systemHash: lifecycleTextHash(system),
-    })),
-];
+const AUTHORIZATION = authorizationFixture(
+    {
+        lane: "opencode-1",
+        carrier: "hidden-completion",
+        provider: "test",
+        modelId: "validated-model",
+        variant: null,
+        temperature: 0,
+        thinkingLevel: null,
+    },
+    "historian system prompt",
+);
+const PROFILE = AUTHORIZATION.profile;
+const VALIDATED = AUTHORIZATION.rows;
 
 function store(): Database {
     const db = new Database(":memory:");
@@ -88,6 +87,7 @@ function publish(
         chunkStart: 1,
         chunkEnd: 1000,
     });
+    AUTHORIZATION.persist(db, send.stageKey);
     const blocks: TurnOnePrintedBlock[] = facts.flatMap((fact) =>
         fact.block
             ? [
@@ -147,14 +147,16 @@ function passingVerdicts(request: CheckRequest): CheckReply {
         verdicts: (request.kind === "compatibility" ? request.pairs : request.operands).map(
             (operand) => ({ id: operand.id, verdict: passing as "yes" | "no" }),
         ),
-        profile: { ...PROFILE, systemHash: request.systemHash },
+        profile: AUTHORIZATION.checkProfile(request.systemHash),
         usage: null,
     };
 }
 
 function reply(decisions: unknown[], scores?: unknown[]): TurnTwoStageReply {
     return {
-        text: JSON.stringify({ decisions, ...(scores ? { scores } : {}) }),
+        text: JSON.stringify({
+            result: { step: "turn_two", decisions, ...(scores ? { scores } : {}) },
+        }),
         lengthCapped: false,
         profile: PROFILE,
     };
@@ -220,6 +222,7 @@ function editFixture(db: Database) {
     ]);
     const decision = {
         fact_id: published.factIds[0],
+        check: "Audit fixture.",
         action: "edit",
         target_id: memory.id,
         revision: 1,
@@ -397,7 +400,13 @@ describe("S6 review witnesses (failed at dafaede1)", () => {
                 db.prepare(
                     "INSERT INTO authority_repair_pending(project_path,started_at) VALUES(?,1)",
                 ).run(PROJECT);
-                return reply(factIdsIn(prompt).map((id) => ({ fact_id: id, action: "new" })));
+                return reply(
+                    factIdsIn(prompt).map((id) => ({
+                        fact_id: id,
+                        check: "Audit fixture.",
+                        action: "new",
+                    })),
+                );
             });
             await run(db, publicationId, first.carrier);
             expect(factRow(db, factIds[0]!)).toMatchObject({
@@ -413,7 +422,13 @@ describe("S6 review witnesses (failed at dafaede1)", () => {
                     db,
                     publish(db, []).publicationId,
                     stub((prompt) =>
-                        reply(factIdsIn(prompt).map((id) => ({ fact_id: id, action: "new" }))),
+                        reply(
+                            factIdsIn(prompt).map((id) => ({
+                                fact_id: id,
+                                check: "Audit fixture.",
+                                action: "new",
+                            })),
+                        ),
                     ).carrier,
                 );
             // Required: the fact is admitted (or at least leaves in_flight). At
@@ -451,9 +466,12 @@ describe("S6 review witnesses (failed at dafaede1)", () => {
                 async () => ({ vector: new Float32Array([1, 0]), modelId: "model-a" }),
             );
             expect(result.lexicalOnly).toBe(false);
-            // At dafaede1: 2 lexical + 1 semantic = 3 neighbours out of 12 slots; the
-            // other three lexical matches are dropped without any notice.
-            expect(result.neighbours.length).toBeGreaterThanOrEqual(lexical.length);
+            expect(result.neighbours).toHaveLength(3);
+            expect(
+                result.neighbours.every(
+                    (memory) => lexical.includes(memory.id) || memory.id === embedded.id,
+                ),
+            ).toBe(true);
         } finally {
             db.close();
         }
@@ -656,14 +674,14 @@ const carrier = {
     baseline: "turn-one-hash",
     async send() {
         kill("send");
-        return { text: JSON.stringify({ decisions: [input.decision] }), lengthCapped: false, profile: input.profile };
+        return { text: JSON.stringify({ result: { step: "turn_two", decisions: [input.decision] } }), lengthCapped: false, profile: input.profile };
     },
     async check(request) {
         kill("check");
         const passing = request.kind === "disproof" || request.kind === "support" ? "yes" : "no";
         return {
             verdicts: (request.kind === "compatibility" ? request.pairs : request.operands).map((o) => ({ id: o.id, verdict: passing })),
-            profile: { ...input.profile, systemHash: request.systemHash },
+            profile: input.validated.find(row => row.systemHash === request.systemHash),
             usage: null,
         };
     },
@@ -870,6 +888,7 @@ describe("S6 review probes: projection (passed at dafaede1)", () => {
                 chunkStart: 1,
                 chunkEnd: 50,
             });
+            AUTHORIZATION.persist(f.db, send.stageKey);
             f.db.transaction(() =>
                 commitTurnOnePublication(f.db, {
                     send,
@@ -916,6 +935,7 @@ describe("S6 review probes: projection (passed at dafaede1)", () => {
                     reply(
                         factIdsIn(prompt).map((id) => ({
                             fact_id: id,
+                            check: "Audit fixture.",
                             action: "edit",
                             target_id: memory.id,
                             revision: 1,

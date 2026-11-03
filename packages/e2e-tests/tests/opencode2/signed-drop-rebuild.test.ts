@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -54,7 +54,7 @@ async function runSignedReclaimScenario(held: boolean) {
 		baseUrl: host.url,
 		headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
 	});
-	const db = new Database(
+	const db = openTestDb(
 		join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 	);
 	db.exec("PRAGMA busy_timeout = 10000");

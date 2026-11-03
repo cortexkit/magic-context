@@ -7,6 +7,7 @@
  * .cortexkit/internal-docs/investigations/reports/memory-s8-review-r2.md records the accepted takeover cost and rulings.
  * The long-send and starvation cases use real timers and take about 130 seconds.
  */
+
 import { describe, expect, it, spyOn } from "bun:test";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -17,9 +18,7 @@ import {
 	CHECK_SYSTEM_PROMPTS,
 	type CheckReply,
 	type CheckRequest,
-	type ReportedProfile,
 } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
-import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	allocateTurnOneSend,
@@ -30,6 +29,7 @@ import {
 	runTurnTwo,
 	type TurnTwoCarrier,
 } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -47,20 +47,21 @@ import { createTestDb } from "./test-utils.test";
 
 const enabled = process.env.MC_S8_REVIEW === "1";
 const projectPath = "dir:/s8-review-r2";
-const profile: ReportedProfile = {
-	provider: "test",
-	modelId: "model",
-	variant: null,
-	temperature: 0,
-	systemHash: lifecycleTextHash("historian system"),
-};
-const validatedProfiles = [
-	profile,
-	...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-		...profile,
-		systemHash: lifecycleTextHash(system),
-	})),
-];
+const authorization = authorizationFixture(
+	{
+		lane: "pi",
+		carrier: "pi-historian-rpc",
+		provider: "test",
+		modelId: "model",
+		variant: null,
+		temperature: null,
+		thinkingLevel: null,
+	},
+	"historian system",
+	[],
+);
+const profile = authorization.profile;
+const validatedProfiles = authorization.rows;
 type Db = ReturnType<typeof createTestDb>;
 const delay = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -81,6 +82,7 @@ function publication(db: Db, count: number) {
 		chunkStart: 1,
 		chunkEnd: 2,
 	});
+	authorization.persist(db, send.stageKey);
 	db.transaction(() =>
 		commitTurnOnePublication(db, {
 			send,
@@ -124,6 +126,7 @@ function fixture(db: Db, count = 1) {
 		const rule = `New rule ${i + 1}.`;
 		return {
 			fact_id: i + 1,
+			check: "Audit fixture.",
 			action: "edit",
 			target_id: memory.id,
 			revision: 1,
@@ -148,7 +151,7 @@ function accepted(request: CheckRequest): CheckReply {
 					? "yes"
 					: "no",
 		})),
-		profile: { ...profile, systemHash: request.systemHash },
+		profile: authorization.checkProfile(request.systemHash),
 		usage: null,
 	};
 }
@@ -172,7 +175,9 @@ function carrier(f: ReturnType<typeof fixture>): TurnTwoCarrier {
 		childSessionId: `review-r2-${randomUUID()}`,
 		historianSystemHash: profile.systemHash,
 		send: async () => ({
-			text: JSON.stringify({ decisions: f.decisions }),
+			text: JSON.stringify({
+				result: { step: "turn_two", decisions: f.decisions },
+			}),
 			lengthCapped: false,
 			profile,
 		}),
@@ -232,7 +237,7 @@ const child = {
   const row = db.prepare("SELECT stage_key,request_json FROM memory_stage_attempts WHERE state='sending'").get();
   out({ event: "ready", pid: process.pid, sends, ...row });
   await pending;
-  return { ok: true, durationMs: 1, assistantText: JSON.stringify({ decisions: cfg.decisions }), meta: { reportedProvider: "test", reportedModel: "model" } };
+  return { ok: true, durationMs: 1, assistantText: JSON.stringify({ result: { step: "turn_two", decisions: cfg.decisions } }), meta: { reportedProvider: "test", reportedModel: "model" } };
  }
 };
 const runner = {
@@ -243,7 +248,7 @@ const runner = {
   return { child: null, result: { ok: true, durationMs: 1, assistantText: JSON.stringify({ verdicts: ids.map(id => ({ id, verdict: options.systemPrompt === cfg.systems.disproof || options.systemPrompt === cfg.systems.support ? "yes" : "no" })) }), meta: { reportedProvider: "test", reportedModel: "model" } } };
  }
 };
-schedulePiHistorianTurnTwo({ db, projectPath: cfg.projectPath, publicationId: cfg.publicationId, sessionId: "ses-review-r2", child, runner, options: { agent: "historian", systemPrompt: "historian system", userMessage: "first", temperature: 0 }, turnOneText: "first", memoryEnabled: true, autoPromote: true, validatedProfiles: cfg.profiles, log: line => out({ event: "log", line }) });
+schedulePiHistorianTurnTwo({ formatInstructions: cfg.formatInstructions, db, projectPath: cfg.projectPath, publicationId: cfg.publicationId, sessionId: "ses-review-r2", child, runner, options: { agent: "historian", systemPrompt: "historian system", userMessage: "first", temperature: 0 }, turnOneText: "first", memoryEnabled: true, autoPromote: true, validatedProfiles: cfg.profiles, log: line => out({ event: "log", line }) });
 createInterface({ input: process.stdin }).on("line", async command => {
  if (command === "starve") {
   const start = performance.now();
@@ -289,6 +294,7 @@ function startOwner(path: string, f: ReturnType<typeof fixture>, skew = 0) {
 				uuid: randomUUID(),
 				projectPath,
 				profiles: validatedProfiles,
+				formatInstructions: authorization.request.formatInstruction,
 				systems: CHECK_SYSTEM_PROMPTS,
 			}),
 		},
@@ -371,11 +377,18 @@ async function visitPi(db: Db, publicationId = publication(db, 0)) {
 			ok: true as const,
 			durationMs: 1,
 			assistantText: JSON.stringify({
-				decisions: [{ fact_id: 1, action: "abstain" }],
+				result: {
+					step: "turn_two",
+					decisions: [
+						{ fact_id: 1, check: "Audit fixture.", action: "abstain" },
+					],
+				},
 			}),
+			meta: { reportedProvider: "test", reportedModel: "model" },
 		}),
 	};
 	schedulePiHistorianTurnTwo({
+		formatInstructions: authorization.request.formatInstruction,
 		db,
 		projectPath,
 		publicationId,

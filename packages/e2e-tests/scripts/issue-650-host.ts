@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,9 +44,9 @@ writeFileSync(
 	}),
 );
 setHarness("pi");
-const db = new Database(
+const db = openTestDb(
 	join(process.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
-);
+ undefined, Database);
 initializeDatabase(db);
 runMigrations(db);
 let perturb = false;
