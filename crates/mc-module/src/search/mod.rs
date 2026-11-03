@@ -46,6 +46,9 @@ pub struct Scope<'a> {
     /// Messages after this number are in the model's view already and are
     /// not returned.
     pub cutoff: i64,
+    /// Without summaries, visibility follows the applied part edits rather
+    /// than a single history boundary.
+    pub visible_messages: Option<BTreeSet<i64>>,
     /// The memory text the model's view shows in full, by memory id. A
     /// memory whose current text it shows is left out of the results.
     pub seen: &'a BTreeMap<i64, String>,
@@ -124,6 +127,7 @@ fn compare(left: &Hit, right: &Hit) -> std::cmp::Ordering {
 struct Diagnostics {
     suppressed_visible: Vec<i64>,
     live_message_matches: u64,
+    visibility_from_view: bool,
     no_git_repository: bool,
 }
 
@@ -369,8 +373,17 @@ fn diagnostic_lines(hits: &[Hit], diagnostics: &Diagnostics) -> Vec<String> {
     if diagnostics.live_message_matches > 0 {
         let count = diagnostics.live_message_matches;
         lines.push(format!(
-            "Message history: {count} raw-message {} newer than the last compartment boundary (already in your context).",
-            if count == 1 { "match is" } else { "matches are" }
+            "Message history: {count} raw-message {} {} (already in your context).",
+            if count == 1 {
+                "match is"
+            } else {
+                "matches are"
+            },
+            if diagnostics.visibility_from_view {
+                "visible in the applied view"
+            } else {
+                "newer than the last compartment boundary"
+            }
         ));
     }
     if diagnostics.no_git_repository {
@@ -404,7 +417,7 @@ fn format_results(query: &str, hits: &[Hit], session: &str, diagnostics: &Diagno
         parts.push(lines.join("\n"));
     }
     if hits.iter().any(|hit| matches!(hit, Hit::Message(_))) {
-        parts.push("Use ctx_expand(start, end) with the range from any message result above to read the conversation context. If the host no longer holds those messages, ctx_expand returns indexed text from the search archive only, with no surrounding messages or tool output.".into());
+        parts.push("Use ctx_expand(start, end) with the range from any message result above to read the conversation context.".into());
     }
     if hits.iter().any(|hit| {
         matches!(hit, Hit::Note(note) if note.anchor_ordinal.is_some() && note.session_id.as_deref() == Some(session))
@@ -514,12 +527,6 @@ fn parse(input: &Value) -> Result<Request<'_>, String> {
     })
 }
 
-fn project_of<'a>(scope: &Scope<'a>) -> Result<&'a str, String> {
-    scope.project.ok_or_else(|| {
-        "Error: Could not resolve project identity for search: the session has no project.".into()
-    })
-}
-
 /// The memories whose current text the head shows.
 fn visible_memories(conn: &Connection, project: &str, scope: &Scope) -> BTreeSet<i64> {
     sources::workspace_memories(conn, project)
@@ -545,10 +552,7 @@ pub fn by_ids(
         return None;
     }
     let ids = id_query(request.query)?;
-    let project = match project_of(scope) {
-        Ok(project) => project,
-        Err(error) => return Some(Err(error)),
-    };
+    let project = scope.project?;
     let visible = visible_memories(conn, project, scope);
     let mut diagnostics = Diagnostics::default();
     let limit = request.tool_limit.max(ids.len());
@@ -676,8 +680,10 @@ fn collect(
 ) -> Result<Vec<Hit>, String> {
     let (query, dates) = (request.query, request.dates);
     let active = |source: &str| request.active(source);
-    let project = project_of(scope)?;
-    let visible = visible_memories(conn, project, scope);
+    let project = scope.project;
+    let visible = project
+        .map(|project| visible_memories(conn, project, scope))
+        .unwrap_or_default();
     let limit = request.tool_limit.clamp(1, MAX_LIMIT);
     let tier = (limit * 3).max(DEFAULT_LIMIT);
     let probes = if explicit {
@@ -690,6 +696,7 @@ fn collect(
         limit: tier,
         probes: &probes,
         dates,
+        visible: scope.visible_messages.as_ref(),
     };
     if active("git_commit") && scope.git_repository == Some(false) {
         diagnostics.no_git_repository = true;
@@ -701,7 +708,7 @@ fn collect(
         tier
     };
     let mut hits: Vec<Hit> = Vec::new();
-    if active("memory") && scope.memory_enabled {
+    if let Some(project) = project.filter(|_| active("memory") && scope.memory_enabled) {
         let mut halves = lanes.is_some().then(sources::Halves::default);
         let (found, suppressed) = sources::search_memories(
             conn,
@@ -720,7 +727,7 @@ fn collect(
             lanes.memory_vector = halves.meaning.into_iter().map(Hit::Memory).collect();
         }
     }
-    if active("primer") && scope.memory_enabled {
+    if let Some(project) = project.filter(|_| active("primer") && scope.memory_enabled) {
         let mut halves = lanes.is_some().then(sources::Halves::default);
         hits.extend(
             sources::search_primers(
@@ -742,12 +749,19 @@ fn collect(
     }
     if active("message") {
         if explicit {
-            diagnostics.live_message_matches =
-                messages::count_live_matches(conn, scope.session, query, scope.cutoff, dates);
+            diagnostics.live_message_matches = messages::count_live_matches(
+                conn,
+                scope.session,
+                query,
+                scope.cutoff,
+                dates,
+                scope.visible_messages.as_ref(),
+            );
+            diagnostics.visibility_from_view = scope.visible_messages.is_some();
         }
         let found = messages::search(conn, scope.session, &wanted, scope.cutoff, explicit);
-        let chunks = match scope.semantic {
-            Some(semantic) => sources::search_chunks(
+        let chunks = match (scope.semantic, project) {
+            (Some(semantic), Some(project)) => sources::search_chunks(
                 conn,
                 scope.session,
                 project,
@@ -756,7 +770,7 @@ fn collect(
                 dates,
                 semantic,
             ),
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         if let Some(lanes) = lanes.as_deref_mut() {
             // The message lane is read deeper on its own, as the plugin's
@@ -780,7 +794,7 @@ fn collect(
         }
         hits.extend(fuse_history(found, chunks, tier));
     }
-    if active("git_commit") && scope.git_commits_enabled {
+    if let Some(project) = project.filter(|_| active("git_commit") && scope.git_commits_enabled) {
         let mut halves = lanes.is_some().then(sources::Halves::default);
         hits.extend(
             sources::search_commits(

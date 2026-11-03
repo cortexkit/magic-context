@@ -51,6 +51,8 @@ pub enum ModuleError {
     UnknownPreset(String),
     /// A call for a session that never had a Setup.
     UnknownSession,
+    /// The session's catalog does not serve this tool.
+    UnknownTool(String),
     /// The session's worker stopped.
     Stopped,
     /// A tool call failed; the text is for the model.
@@ -98,7 +100,7 @@ enum Job {
         route: Route,
         name: String,
         input: Value,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<String, ModuleError>>,
     },
     PreUser {
         text: String,
@@ -232,10 +234,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 reply,
             })
             .map_err(|_| ModuleError::Stopped)?;
-        answer
-            .await
-            .map_err(|_| ModuleError::Stopped)?
-            .map_err(ModuleError::Tool)
+        answer.await.map_err(|_| ModuleError::Stopped)?
     }
 
     /// The `pre_user` hook: what to add to a person's message, within
@@ -480,10 +479,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     } => {
                         let session = session
                             .get_or_insert_with(|| Session::tools_only(&route, inner.db.clone()));
-                        if name == "ctx_memory" {
-                            ensure_memory_context(&inner, &route, session).await;
-                        }
-                        let answer = session.tool(&inner.client, settings, &name, &input).await;
+                        let config = inner.config.catalog_config(session.config_inputs().0);
+                        let answer = if !session.serves_tool(&name, &config) {
+                            Err(ModuleError::UnknownTool(name.clone()))
+                        } else if name == "ctx_memory" && !settings.memory_enabled {
+                            Err(ModuleError::Tool(
+                                "Cross-session memory is disabled for this project.".into(),
+                            ))
+                        } else {
+                            if name == "ctx_memory" {
+                                ensure_memory_context(&inner, &route, session).await;
+                            }
+                            session
+                                .tool(&inner.client, settings, &name, &input)
+                                .await
+                                .map_err(ModuleError::Tool)
+                        };
                         let _ = reply.send(answer);
                     }
                     Job::PreUser { text, now, reply } => {

@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use step::answer::{HookAnswer, Operation};
-use step::hook::{HookCall, Subject};
+use step::hook::HookCall;
 use step::subscription::{
     Declaration, DeclareRequest, DeclaredSubscription, Hook, OnUnavailable, Op,
 };
@@ -646,8 +646,8 @@ impl Handler {
                     ));
                 }
                 let session = route.session.clone();
-                let answer = match &call.subject {
-                    Subject::PreUser { blocks, .. } if !blocks.is_empty() => {
+                let answer = match crate::pre_user::person_blocks(&call.subject) {
+                    Some(blocks) => {
                         let addition = self
                             .module
                             .pre_user(&session, &blocks.join("\n"), now_ms())
@@ -741,6 +741,10 @@ fn refusal(error: ModuleError) -> Refusal {
     match error {
         ModuleError::UnknownSession => Refusal::unknown_session(),
         ModuleError::UnknownPreset(preset) => Refusal::unknown_preset(&preset),
+        ModuleError::UnknownTool(name) => {
+            let error = cortexkit_role_tool_provider::errors::unknown_tool(&name);
+            Refusal::new(&error.code, error.message, None)
+        }
         other => Refusal::new("internal", format!("{other:?}"), None),
     }
 }
@@ -861,7 +865,7 @@ mod config_tests {
             workdir: Some(root.to_string_lossy().into_owned()),
             agent_id: None,
         };
-        let arguments = json!({"preset":"worker","composition":{"providers":[{"provider":"magic-context","tools":[{"name":"ctx_reduce"},{"name":"ctx_expand"},{"name":"ctx_search"}]}],"compaction":{"provider":"magic-context"}},"system_text":{"preset":"worker"}});
+        let arguments = json!({"preset":"worker","composition":{"providers":[{"provider":"magic-context","tools":[{"name":"ctx_reduce"},{"name":"ctx_expand"},{"name":"ctx_search"},{"name":"ctx_keep"}]}],"compaction":{"provider":"magic-context"}},"system_text":{"preset":"worker"}});
         let call = tool_call(
             &serde_json::to_vec(&json!({"name":"tool.catalog","arguments": arguments})).unwrap(),
         )
@@ -873,5 +877,16 @@ mod config_tests {
         assert_ne!(expected, handler.module.catalog(None, &arguments).unwrap());
         assert_eq!(handler.role_op(&route, &call).unwrap().unwrap(), expected);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_surface_tests {
+    #[test]
+    fn unknown_tool_is_a_protocol_refusal() {
+        let refusal = super::refusal(crate::module::ModuleError::UnknownTool(
+            "ctx_missing".into(),
+        ));
+        assert_eq!(refusal.code, "unknown_tool");
     }
 }

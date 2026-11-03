@@ -4,8 +4,8 @@
   "preset_tools": {
     "compacting": {
       "head": ["ctx_reduce", "ctx_expand", "ctx_note", "ctx_memory", "ctx_search"],
-      "worker": ["ctx_reduce", "ctx_expand", "ctx_search"],
-      "reader": ["ctx_reduce", "ctx_expand", "ctx_search"]
+      "worker": ["ctx_reduce", "ctx_expand", "ctx_search", "ctx_keep"],
+      "reader": ["ctx_reduce", "ctx_expand", "ctx_search", "ctx_keep"]
     },
     "not_compacting": {
       "head": ["ctx_search", "ctx_memory", "ctx_note"],
@@ -239,6 +239,22 @@
         },
         "additionalProperties": false
       }
+    },
+    {
+      "name": "ctx_keep",
+      "capabilities": ["magic-context:context.keep/v1"],
+      "result_ops": ["prepend", "append"],
+      "semantics": 1,
+      "read_scope": true,
+      "structure": {
+        "type": "object",
+        "properties": {
+          "tags": {"type": "string"},
+          "note": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "required": ["tags", "note"]
+      }
     }
   ],
   "descriptions": {
@@ -251,6 +267,7 @@
       }
     },
     "full": {
+      "ctx_keep": "Keep the context you still need before continuing. List tag numbers and ranges in tags, most important first, and write a non-empty note on where you are and what comes next. Tags are kept in order within the context budget. Messages from the person, the protected tail and this call with its note also stay; everything else before this call is removed on the next view.",
       "ctx_reduce": "Stamp an item on your desk as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest tags are protected so stamping recent output is harmless. A cleared item goes to the archive — a recent one leaves a `[dropped §N§]` placeholder, an older one leaves nothing — and `ctx_expand(tag=N)` is the way back. So the question before stamping is not \"have I finished reading this?\" but \"does this need to stay on my desk for what comes next?\" — a file you read and will keep editing stays; the grep that found it goes.\n\nStamp: file reads, search results and tool outputs the work ahead no longer needs; build/test output after you acted on it; repeated or redundant dumps; data written to disk; status/log output that only confirmed what you expected; a large block pasted inside a user message once you have used it.\nKeep: user messages (never stamp one for its directive), your own conversation text, unresolved errors, raw evidence you haven't extracted yet, and outputs whose exact wording may still matter.\n\nLook at each tag before stamping it; never blanket-stamp a range like \"1-50\". Many small targeted stamps beat one sweep. `drop` accepts \"3-5\", \"1,2,9\", \"1-5,8,12-15\".",
       "ctx_expand": "Recover original content that is no longer on your desk. It takes two kinds of number, and they are never interchangeable:\n- `tag=N`: the number from a §N§ tag or a `[dropped §N§]` placeholder. Returns that one item whole: a text, or a tool call with its full input and output.\n- `message=N`, `start`/`end`: message ordinals, the positions shown in `<session-history>` headings (`## start-end`) and in `ctx_search` hits. An ordinal counts whole messages; a tag counts each text and tool result separately, so the same number points at different things.\n\nEarlier turns are summarized in <session-history> under `## start-end · date · title` headings; each heading stands for the raw messages in that ordinal range. When the summary isn't enough — exact wording, a value, an error message, the reasoning behind a decision — expand the range: ctx_expand(start=120, end=245). Also works around a ctx_search message hit: start=N-10, end=N+5. Ranges after the last compartment are your live tail — already visible, not expandable.\n\nReturns the raw transcript as [N] U:/A: lines, capped at ~15K tokens; an oversized range returns the head and says where to continue.\n\nFiner recovery:\n- verbose=true lists each message separately with its ordinal and a per-part preview (tool calls with output sizes) so you can pick one.\n- message=N returns that one message in full — every text part and every tool call's complete input and output — from stored history. This is the way back to a tool output you released with ctx_reduce; if the message was deleted from history it says so.",
       "ctx_note": "Session notes are pending intentions: work you intend to return to, with its findings attached.\n\nUse notes for:\n- A finding to revisit when you return to the intended work\n- A decision with its reasoning, when follow-up work remains\n- A backlog item with evidence already found\n- Something the user explicitly asks you to note\n\nDon't use notes for: the next few steps; a plan you are actively executing; restart/fold insurance; or a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. Use todos for active work. If the detail already lives in a file, record the path and what to inspect — don't copy the file into a note. Durable project facts belong in ctx_memory, not notes.\n\nFirst line is the title (under 80 chars), followed by detail. Operations:\n- write: save a new note (content required)\n- read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other statuses.\n- update: change one note (note_ids=[N])\n- dismiss: retire 1–50 notes (note_ids). Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.\n- surface_condition: make it a smart note — an outside checker periodically tests the condition using only externally verifiable signals (GitHub state, files, git, releases, web), never this conversation or future actions; the note is parked until the condition holds.",
@@ -258,6 +275,7 @@
       "ctx_search": "Search the archive — everything that ever happened in this project, not just what is on your desk.\n\nRetrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.\n- \"where is the opencode source code path?\"  (a location you once knew)\n- \"why did we choose SQLite over postgres?\"  (a decision and its reasons)\n- \"how does the dreamer lease work?\"  (a mechanism discussed or implemented earlier)\n- Not: \"upload client retry backoff config\"\n\nResults only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.\n\nSources (omit for all):\n- memory — rules, constraints, conventions; \"what's our convention for X\"\n- message — the raw conversation behind compacted history; \"did we discuss this\"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)\n- git_commit — commit history; \"when did this change\" (pair with message for regression hunts)\n- primer — reusable project Q&A the dreamer distils from recurring questions; \"have we answered this before\"\n- note — parked follow-ups with their recorded text; \"did we leave a follow-up\"\nUse from/to to restrict every source to an inclusive UTC date range."
     },
     "light": {
+      "ctx_keep": "Keep needed tags, most important first, within the context budget. Include a non-empty progress and next-steps note. Messages from the person, the protected tail and this call stay; other earlier context is removed on the next view.",
       "ctx_reduce": "Stamp an item as no longer needed for the work ahead. Not a delete: stamping QUEUES it, the item stays readable until Magic Context clears stamped items in one sweep, newest tags are protected, and a cleared item goes to the archive (recent: a [dropped §N§] placeholder; older: removed) recoverable via ctx_expand(tag=N). The question is \"does this need to stay on my desk for what comes next?\" — a file you keep editing stays, the grep that found it goes. Stamp used reads/searches/outputs, acted-on build/test output, redundant dumps, extracted pasted payloads; keep user messages, your own text, unresolved errors, raw evidence, exact wording that may matter. Look at each tag; never blanket-stamp \"1-50\". Grammar: \"3-5\", \"1,2,9\", \"1-5,8,12-15\".",
       "ctx_expand": "Recover one item with tag=N (a §N§ or dropped placeholder number), not a message ordinal; text or one tool call with full input/output. message=N and start/end are whole-message ordinals from history/search, never tag numbers. Recover raw conversation behind a <session-history> heading or around a ctx_search hit: ctx_expand(start, end) returns [N] U:/A: lines (~15K-token cap; oversized ranges return the head and where to continue). verbose=true lists messages with per-part previews to pick one; message=N returns that message in full, including a tool output released with ctx_reduce. Ranges after the last compartment are your live tail, not expandable.",
       "ctx_note": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
@@ -267,6 +285,10 @@
   },
   "parameter_descriptions": {
     "full": {
+      "ctx_keep": {
+        "tags": "Tag IDs to keep, most important first: \"12,3-5\".",
+        "note": "A few lines on where you are and what comes next."
+      },
       "ctx_reduce": {
         "drop": "Tag IDs to drop: \"3-5\", \"1,2,9\", \"1-5,8,12-15\"."
       },
@@ -302,6 +324,10 @@
       }
     },
     "light": {
+      "ctx_keep": {
+        "tags": "Tag IDs to keep, most important first: \"12,3-5\".",
+        "note": "Progress and next steps; must not be empty."
+      },
       "ctx_reduce": {
         "drop": "Tag IDs: \"3-5\", \"1,2,9\", \"1-5,8,12-15\"."
       },

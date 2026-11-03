@@ -149,10 +149,10 @@ pub fn templates() -> Vec<Template> {
     }
     templates.push(Template::new(
         KEEP_TEMPLATE,
-        "Your context is {usage}% full, and dropping old tool output freed only {freed} tokens. \
+        "<system-reminder>\nYour context is {usage}% full, and dropping old tool output freed only {freed} tokens. \
          Call ctx_keep now. In `tags`, list the tags you still need, most important first. \
          In `note`, write a few lines on where you are and what comes next. \
-         Everything else before that call, except your task, is then removed.",
+         Everything else before that call, except messages from the person, is then removed.\n</system-reminder>",
         BTreeMap::from([
             ("usage".to_owned(), Slot::Percentage),
             ("freed".to_owned(), integer(0)),
@@ -275,8 +275,8 @@ pub fn measure(
             };
             measurement.t += weight;
             let key = (entry.mid.clone(), part.id.clone());
-            let protected = match (tool, part.tag, protected_from) {
-                (Some(_), Some(tag), Some(from)) => tag >= from,
+            let protected = match (part.tag, protected_from) {
+                (Some(tag), Some(from)) => tag >= from,
                 _ => false,
             } || protected_tools.contains(&key);
             let Some(tag) = part.tag else {
@@ -517,7 +517,7 @@ mod tests {
             |_| None,
         )
         .unwrap();
-        assert!(keep.starts_with("Your context is 81% full, and dropping old tool output freed only 1200 tokens. Call ctx_keep now."), "{keep}");
+        assert!(keep.starts_with("<system-reminder>\nYour context is 81% full, and dropping old tool output freed only 1200 tokens. Call ctx_keep now."), "{keep}");
     }
 
     #[test]

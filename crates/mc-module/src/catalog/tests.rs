@@ -18,6 +18,26 @@ use serde_json::{json, Value};
 
 use super::{self as tool_catalog, CatalogConfig, CatalogError, Surface, TextFlags};
 
+#[test]
+fn surface_workers_and_readers_offer_keep_with_string_tags_and_note() {
+    for preset in ["worker", "reader"] {
+        let answer = tool_catalog::catalog_answer(
+            &json!({"preset": preset, "params": {"compacting": true}}),
+            &example_catalog_config(),
+        )
+        .unwrap();
+        let keep = answer["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "ctx_keep")
+            .expect("ctx_keep must be offered");
+        assert_eq!(keep["input_schema"]["properties"]["tags"]["type"], "string");
+        assert_eq!(keep["input_schema"]["properties"]["note"]["type"], "string");
+        assert_eq!(keep["input_schema"]["required"], json!(["tags", "note"]));
+    }
+}
+
 /// The reply-language directive the generator's matrix was rendered with:
 /// the language's name from the plugin's own table, as the plugin words it.
 fn language_directive(language: &str) -> Option<String> {
@@ -203,7 +223,7 @@ fn role_request(preset: &str, compacting: bool, surface: &str) -> Value {
             "ctx_search",
         ],
         ("head", false) => vec!["ctx_note", "ctx_memory", "ctx_search"],
-        (_, true) => vec!["ctx_reduce", "ctx_expand", "ctx_search"],
+        (_, true) => vec!["ctx_reduce", "ctx_expand", "ctx_search", "ctx_keep"],
         (_, false) => vec![],
     };
     let mut composition = json!({"providers": [{"provider": "magic-context", "tools": names.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()}]});
@@ -231,7 +251,7 @@ fn every_role_and_compaction_cell_serves_its_exact_tools_and_text() {
                         "ctx_search",
                     ],
                     ("head", false) => vec!["ctx_note", "ctx_memory", "ctx_search"],
-                    (_, true) => vec!["ctx_reduce", "ctx_expand", "ctx_search"],
+                    (_, true) => vec!["ctx_reduce", "ctx_expand", "ctx_search", "ctx_keep"],
                     (_, false) => vec![],
                 };
                 let names: Vec<&str> = answer["tools"]
@@ -605,7 +625,10 @@ fn every_capability_tag_passes_the_roles_check() {
     }
     tags.sort();
     tags.dedup();
-    assert_eq!(tags.len(), 14, "{tags:?}");
+    assert_eq!(tags.len(), 15, "{tags:?}");
+    assert!(tags
+        .iter()
+        .any(|tag| tag == "magic-context:context.keep/v1"));
     for tag in &tags {
         assert_eq!(check_capability_tag(tag), Ok(()), "{tag}");
     }
@@ -744,7 +767,7 @@ fn a_user_override_replaces_head_text_with_or_without_compaction() {
                     "ctx_search",
                 ]
             } else {
-                vec!["ctx_reduce", "ctx_expand", "ctx_search"]
+                vec!["ctx_reduce", "ctx_expand", "ctx_search", "ctx_keep"]
             };
             request["composition"] = json!({"compaction": {"provider": "magic-context"}, "providers": [{"provider": "magic-context", "tools": names.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()}]});
         }
