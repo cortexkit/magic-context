@@ -445,6 +445,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         model_latency_ms: 0,
         // The plan admits ck-mc's reminder templates, as core composes it.
         templates: mc_module::nudges::templates(),
+        accepts_images: None,
     }
 }
 
@@ -2299,6 +2300,113 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
             rusqlite::params![id, content, format!("hash-{id}")],
         )
         .unwrap();
+}
+
+/// Twenty project memories with current mural cues, and a memory budget
+/// that shows only a few of them: the rest are what a mural draws.
+fn mural_project(name: &str) -> std::path::PathBuf {
+    use sha2::Digest as _;
+    let dir = scratch(name);
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    let connection = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    for id in 1..=20 {
+        let content =
+            format!("Rule {id}: always run the parser checks before merging change {id}.");
+        let hash = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+        connection
+            .execute(
+                "INSERT INTO memories (id, project_path, category, content, normalized_hash, importance,
+                                       first_seen_at, created_at, updated_at, last_seen_at,
+                                       mural_cue, mural_cue_hash)
+                 VALUES (?1, 'pj-test', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1, ?4, ?5)",
+                rusqlite::params![id, content, format!("hash-{id}"), format!("parser checks→merge {id}"), hash],
+            )
+            .unwrap();
+    }
+    dir
+}
+
+fn mural_config(dir: &std::path::Path, accepts_images: Option<bool>) -> SessionConfig {
+    let mut config = config("head", Kind::Anthropic, free());
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    config.accepts_images = accepts_images;
+    config
+}
+
+fn mural_settings() -> Settings {
+    Settings {
+        mural_enabled: true,
+        memory_budget_tokens: 120,
+        ..Settings::default()
+    }
+}
+
+fn head_images(host: &Host) -> Vec<Vec<u8>> {
+    host.rendered()[0]
+        .parts
+        .iter()
+        .filter_map(|part| match &part.body {
+            PartBody::File(file) => Some(serde_json::to_vec(file).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// With the mural on and a model that reads images, `m[0]` carries one
+/// image of the memories its budget left out, after the block that
+/// introduces it, and keeps the same bytes until the next fold.
+#[tokio::test]
+async fn m0_carries_the_memory_mural_on_a_model_that_reads_images() {
+    let dir = mural_project("mural-on");
+    let mut runner = start_full(
+        mural_config(&dir, Some(true)),
+        mural_settings(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner.play(&[user("Hello."), answer()]).await;
+    let (m0, _) = head_texts(runner.host());
+    assert!(m0.ends_with("</memory-mural>"), "{m0}");
+    let first = head_images(runner.host());
+    assert_eq!(first.len(), 1, "m[0] carries one mural image");
+    runner.play(&[user("Go on."), answer()]).await;
+    assert_clean(&runner);
+    assert_eq!(
+        head_images(runner.host()),
+        first,
+        "the mural changed without a fold"
+    );
+    let stored: i64 = rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM mural_manifest WHERE project_path = 'pj-test'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A model not known to read images gets neither the image nor its block.
+#[tokio::test]
+async fn m0_has_no_mural_when_the_model_may_not_read_images() {
+    let dir = mural_project("mural-no-images");
+    let mut runner = start_full(
+        mural_config(&dir, None),
+        mural_settings(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner.play(&[user("Hello."), answer()]).await;
+    assert_clean(&runner);
+    let (m0, _) = head_texts(runner.host());
+    assert!(!m0.contains("<memory-mural>"), "{m0}");
+    assert!(head_images(runner.host()).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

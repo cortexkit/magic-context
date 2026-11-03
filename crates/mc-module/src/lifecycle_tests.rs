@@ -673,3 +673,27 @@ async fn a_time_marker_counts_from_when_the_previous_message_finished() {
     // Without a finish stamp the gap runs from when it was written.
     assert_eq!(marker(None).await.as_deref(), Some("<!-- +12m -->\n"));
 }
+
+#[test]
+fn a_restarted_session_serves_the_same_mural_image_from_the_store() {
+    let dir = scratch("mural-restart");
+    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let (mut session, _, _, _, _) = fixture();
+    session.set_store(Some(store.clone()));
+    session.keep_mural(crate::mural::Mural {
+        png: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+        content_hash: "layout-1".into(),
+        width: 1,
+        height: 1,
+        memory_ids: vec![1],
+    });
+    let before = session.mural_png("layout-1").expect("kept in memory");
+    // A restarted process has nothing in memory: m[0] must still carry the
+    // same bytes, from the store.
+    let (mut restarted, _, _, _, _) = fixture();
+    restarted.set_store(Some(store));
+    assert_eq!(restarted.mural_png("layout-1"), Some(before));
+    // A mural the store doesn't hold is left out, not invented.
+    assert_eq!(restarted.mural_png("layout-2"), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}

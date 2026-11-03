@@ -20,6 +20,7 @@ mc-tokenizer = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 md5 = "0.7"
+base64 = "0.22"
 # The memory mural's PNG encoding (zlib), pure Rust.
 miniz_oxide = "0.8"
 # tool.catalog answers are RFC 8785 canonical JSON, byte for byte.

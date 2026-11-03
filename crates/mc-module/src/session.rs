@@ -11,7 +11,8 @@ use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, Sessi
 use cortexkit_role_compaction::ride::{RideCause, RideRequest};
 use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
-    AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, View, ViewRefusal, MAX_VIEW_BYTES,
+    AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
+    MAX_VIEW_BYTES,
 };
 use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
@@ -150,6 +151,10 @@ pub struct Session {
     /// Where the session's state is saved before a view leaves ck-mc, so a
     /// crash never leaves the runner holding a view ck-mc has forgotten.
     store: Option<Arc<crate::store::Store>>,
+    /// The mural image `m[0]` last carried: its checksum and the PNG in
+    /// base64, as the view sends it. Every view repeats `m[0]` byte for byte
+    /// until the next fold, so the image is kept, not drawn again.
+    mural_image: Option<(String, String)>,
 }
 
 /// A view the runner took (an `apply_view` it accepted, or a ride's answer)
@@ -238,6 +243,7 @@ impl Session {
             authority: None,
             unconfirmed: Vec::new(),
             store: None,
+            mural_image: None,
         }
     }
 
@@ -1952,8 +1958,16 @@ impl Session {
                 None => Ok(Vec::new()),
             }
         };
-        let folded = |inputs: &head::Inputs| {
-            let mut base = head::fold(inputs);
+        // A fold draws the mural afresh; between folds `m[0]` keeps the one
+        // it was folded with, as in the plugin.
+        let mut drawn: Option<Option<crate::mural::Mural>> = None;
+        let mut folded = |inputs: &head::Inputs| {
+            let mural =
+                drawn.get_or_insert_with(|| self.draw_mural(settings, shape.memory_enabled, now));
+            let mut base = head::fold(
+                inputs,
+                mural.as_ref().map(|mural| mural.content_hash.as_str()),
+            );
             base.shape = Some(shape.clone());
             base
         };
@@ -1980,9 +1994,95 @@ impl Session {
             // A fresh fold shows every current memory, so none is gone.
             (m1, next, _) = head::delta(&base, &fold_inputs);
         }
-        let ops = head::head_ops(&next.m0, &m1);
+        if let Some(Some(mural)) = drawn {
+            self.keep_mural(mural);
+        }
+        let image = next.mural.as_deref().and_then(|hash| self.mural_png(hash));
+        let ops = head::head_ops(&next.m0, &m1, image);
         self.next_baseline = Some(next);
         ops
+    }
+
+    /// The memory mural for a fold, or `None` when it is off, the model
+    /// doesn't read images, or there is nothing worth drawing. It shows the
+    /// project's own memories that the head's memory budget leaves out, as
+    /// the plugin's `resolveMuralForM0` does. A failure to draw is logged and
+    /// leaves the mural out of this fold.
+    fn draw_mural(
+        &self,
+        settings: &Settings,
+        memory_enabled: bool,
+        now: i64,
+    ) -> Option<crate::mural::Mural> {
+        if !settings.mural_enabled
+            || !memory_enabled
+            || self.conditions.accepts_images != Some(true)
+        {
+            return None;
+        }
+        let (db, project) = (self.db.as_ref()?, self.project.as_ref()?);
+        let drawn = db
+            .project_memories(&project.id, now)
+            .map_err(|error| error.to_string())
+            .and_then(|memories| {
+                db.with_connection(|conn| {
+                    crate::mural::ensure(
+                        conn,
+                        &project.id,
+                        &memories,
+                        settings.memory_budget_tokens,
+                        now,
+                    )
+                })
+                .map_err(|error| error.to_string())
+            });
+        drawn.unwrap_or_else(|error| {
+            eprintln!(
+                "ck-mc: session {}: the memory mural was left out of this fold: {error}",
+                self.key.session
+            );
+            None
+        })
+    }
+
+    /// Keep a newly drawn mural: in memory for the views that repeat `m[0]`,
+    /// and in the store for after a restart.
+    fn keep_mural(&mut self, mural: crate::mural::Mural) {
+        use base64::Engine as _;
+        if let Some(store) = &self.store {
+            if let Err(error) = store.save_head_mural(&self.key, &mural.content_hash, &mural.png) {
+                eprintln!("ck-mc: {error}");
+            }
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(&mural.png);
+        self.mural_image = Some((mural.content_hash, data));
+    }
+
+    /// The image for the mural with checksum `hash`, as a view carries it.
+    /// After a restart it comes from the store, so `m[0]` keeps its bytes.
+    fn mural_png(&mut self, hash: &str) -> Option<InsertedImage> {
+        use base64::Engine as _;
+        if self
+            .mural_image
+            .as_ref()
+            .is_none_or(|(kept, _)| kept != hash)
+        {
+            let png = self
+                .store
+                .as_ref()
+                .and_then(|store| store.head_mural(&self.key, hash));
+            let Some(png) = png else {
+                eprintln!(
+                    "ck-mc: session {}: the mural image m[0] shows is gone; m[0] goes without it",
+                    self.key.session
+                );
+                return None;
+            };
+            let data = base64::engine::general_purpose::STANDARD.encode(&png);
+            self.mural_image = Some((hash.to_owned(), data));
+        }
+        let (_, data) = self.mural_image.as_ref()?;
+        Some(InsertedImage::new("image/png", data.clone()))
     }
 
     /// The history head as the latest view shows it, after a read the head
@@ -2811,12 +2911,14 @@ fn folder_of(route: &Route) -> Option<String> {
 }
 
 fn conditions_of(request: &SetupRequest) -> Conditions {
-    Conditions::new(
+    let mut conditions = Conditions::new(
         request.model.clone(),
         request.context_window,
         request.output_reserve,
         request.rules.clone(),
-    )
+    );
+    conditions.accepts_images = request.accepts_images;
+    conditions
 }
 
 fn list(tags: &[u64]) -> String {

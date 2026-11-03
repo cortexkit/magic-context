@@ -256,6 +256,7 @@ fn config(preset: &str) -> SessionConfig {
         project: None,
         model_latency_ms: 200,
         templates: mc_module::nudges::templates(),
+        accepts_images: None,
     }
 }
 

@@ -307,6 +307,11 @@ fn resolve_tiers(
         if let Some(enabled) = tier.get("temporal_awareness").and_then(Value::as_bool) {
             settings.temporal_awareness = enabled;
         }
+        // A project may turn the mural on or off, as in the plugin: it only
+        // changes how the project's own memories are shown.
+        if let Some(enabled) = tier.pointer("/mural/enabled").and_then(Value::as_bool) {
+            settings.mural_enabled = enabled;
+        }
         let auto = &mut settings.auto_search;
         if let Some(enabled) = tier
             .pointer("/memory/auto_search/enabled")

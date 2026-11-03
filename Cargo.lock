@@ -786,6 +786,7 @@ dependencies = [
 name = "mc-module"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cortexkit-agent-identity",
  "cortexkit-compaction-view",
  "cortexkit-project-identity",

@@ -74,6 +74,10 @@ pub struct SessionConfig {
     /// (its `senders` entry). A reminder send names one of them.
     #[serde(default)]
     pub templates: Vec<Template>,
+    /// Whether the session's model reads images, as Setup and notices report
+    /// it; `None` when the runner doesn't know.
+    #[serde(default)]
+    pub accepts_images: Option<bool>,
 }
 
 /// What a move from a standalone host leaves in the runner: the old
@@ -252,6 +256,7 @@ impl State {
             self.config.rules.clone(),
         );
         conditions.last_prompt_tokens = self.last_prompt_tokens;
+        conditions.accepts_images = self.config.accepts_images;
         conditions
     }
 
@@ -534,6 +539,7 @@ impl<P: Provider> Runner<P> {
             );
             request.applied_view = state.applied.as_ref().map(View::applied);
             request.newest = state.transcript.cursor();
+            request.accepts_images = state.config.accepts_images;
             request
         };
         self.provider.setup(request).await

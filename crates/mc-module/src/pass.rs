@@ -65,6 +65,9 @@ pub struct Settings {
     /// `temporal_awareness`: a person's message after a gap of five minutes
     /// or more starts with a marker saying how long it was.
     pub temporal_awareness: bool,
+    /// `mural.enabled`: the history head carries an image of the project
+    /// memories its memory budget left out, on models that read images.
+    pub mural_enabled: bool,
     /// `memory.auto_search`: memory hints on a person's message.
     pub auto_search: AutoSearch,
     /// `caveman_text_compression`: older long text compressed by age, for
@@ -136,6 +139,7 @@ impl Default for Settings {
             embedding: None,
             rerank: crate::search::rerank::Reranker::Synapse,
             temporal_awareness: true,
+            mural_enabled: false,
             auto_search: AutoSearch::default(),
             caveman: None,
             language: None,

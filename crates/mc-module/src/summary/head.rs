@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use cortexkit_role_compaction::read::Role;
-use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedMessage};
+use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedImage, InsertedMessage};
 use serde::{Deserialize, Serialize};
 
 use super::render::{
@@ -136,6 +136,11 @@ pub struct Baseline {
     /// rendered again at once ([`Shape`]).
     #[serde(default)]
     pub shape: Option<Shape>,
+    /// The checksum of the memory mural `m[0]` carries as an image, if any.
+    /// It changes only when `m[0]` is rendered again; the image itself is
+    /// kept apart from this record, which is saved often.
+    #[serde(default)]
+    pub mural: Option<String>,
 }
 
 /// The settings that decide what `m[0]` may hold. The plugin folds `m[0]` on
@@ -185,8 +190,10 @@ fn fit_history(
     block
 }
 
-/// Render a new baseline from everything current: a fold.
-pub fn fold(inputs: &Inputs) -> Baseline {
+/// Render a new baseline from everything current: a fold. `mural` is the
+/// checksum of the mural image `m[0]` will carry, if any: the text then ends
+/// with the block that introduces it, as the plugin's `renderM0` does.
+pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
         |budget| {
@@ -216,6 +223,9 @@ pub fn fold(inputs: &Inputs) -> Baseline {
         memory::render_workspace_block(&memories, "project-memory", inputs.workspace);
     if !memory_block.is_empty() {
         sections.push(memory_block);
+    }
+    if mural.is_some() {
+        sections.push(crate::mural::BLOCK.to_owned());
     }
     Baseline {
         through_sequence: inputs
@@ -248,6 +258,7 @@ pub fn fold(inputs: &Inputs) -> Baseline {
             .map(|memory| (memory.id, memory.content.clone()))
             .collect(),
         shape: None,
+        mural: mural.map(str::to_owned),
     }
 }
 
@@ -575,13 +586,17 @@ pub fn needs_refold(baseline: &Baseline, pressure_tokens: u64, history_budget_to
             && m1_tokens > m0_tokens as f64 * M1_DRIFT_RATIO)
 }
 
-/// `m[0]` and `m[1]` as view edits, in that order.
-pub fn head_ops(m0: &str, m1: &str) -> Vec<EditOp> {
-    [(M0_ID, m0), (M1_ID, m1)]
+/// `m[0]` and `m[1]` as view edits, in that order. `m[0]` carries the mural
+/// image, if any, after its text.
+pub fn head_ops(m0: &str, m1: &str, mural: Option<InsertedImage>) -> Vec<EditOp> {
+    let m0 = InsertedMessage::new(M0_ID, Role::User, vec![m0.to_owned()])
+        .with_images(mural.into_iter().collect());
+    let m1 = InsertedMessage::new(M1_ID, Role::User, vec![m1.to_owned()]);
+    [m0, m1]
         .into_iter()
-        .map(|(id, text)| EditOp::Insert {
+        .map(|message| EditOp::Insert {
             at: InsertAt::Start,
-            message: InsertedMessage::new(id, Role::User, vec![text.to_owned()]),
+            message,
         })
         .collect()
 }
@@ -675,7 +690,7 @@ mod tests {
     fn m1_shows_every_change_since_the_fold_and_a_fold_takes_them_in() {
         let summaries = vec![summary(0, 1, 4), summary(1, 5, 9)];
         let at_fold = vec![memory(1, "ask first"), memory(2, "old naming rule")];
-        let baseline = fold(&inputs(&summaries[..1], &at_fold));
+        let baseline = fold(&inputs(&summaries[..1], &at_fold), None);
         assert!(baseline.m0.contains("Part 0") && baseline.m0.contains("#1: ask first"));
         assert_eq!(
             delta(&baseline, &inputs(&summaries[..1], &at_fold)).0,
@@ -710,7 +725,7 @@ mod tests {
         // Nothing new: the same m[1], byte for byte.
         assert_eq!(delta(&next, &current).0, m1);
 
-        let refolded = fold(&inputs(&summaries, &now));
+        let refolded = fold(&inputs(&summaries, &now), None);
         assert!(
             refolded.m0.contains("#1: ask before every push")
                 && refolded.m0.contains("#3: new naming rule")
@@ -720,7 +735,7 @@ mod tests {
 
     #[test]
     fn changes_show_in_full_then_as_markers_then_in_one_line_and_never_move() {
-        let baseline = fold(&inputs(&[], &[]));
+        let baseline = fold(&inputs(&[], &[]), None);
         // Varied words, so a line costs real tokens: one fits the full budget, two do not.
         let text = |id: i64| {
             (0..15)
@@ -780,7 +795,7 @@ mod tests {
         let before = ["prefers tea".to_owned(), "works late".to_owned()];
         at_fold.profile = &before;
         at_fold.profile_max_id = 2;
-        let baseline = fold(&at_fold);
+        let baseline = fold(&at_fold, None);
         assert_eq!(delta(&baseline, &at_fold).0, M1_EMPTY);
         let after = ["prefers coffee".to_owned(), "works late".to_owned()];
         let mut now = at_fold;
@@ -794,7 +809,7 @@ mod tests {
     /// returns.
     #[test]
     fn memory_changes_alone_never_fold() {
-        let baseline = fold(&inputs(&[], &[]));
+        let baseline = fold(&inputs(&[], &[]), None);
         let edits: Vec<StoredMemory> = (1..=60)
             .map(|id| memory(id, &format!("fact number {id} with some detail")))
             .collect();

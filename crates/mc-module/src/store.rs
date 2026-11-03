@@ -102,6 +102,14 @@ impl Store {
                      state TEXT NOT NULL,
                      PRIMARY KEY (runner, harness, session)
                  );
+                 CREATE TABLE IF NOT EXISTS head_murals (
+                     runner TEXT NOT NULL,
+                     harness TEXT NOT NULL,
+                     session TEXT NOT NULL,
+                     content_hash TEXT NOT NULL,
+                     png BLOB NOT NULL,
+                     PRIMARY KEY (runner, harness, session)
+                 );
                  CREATE TABLE IF NOT EXISTS memory_contexts (
                      runner TEXT NOT NULL,
                      harness TEXT NOT NULL,
@@ -145,6 +153,37 @@ impl Store {
         result
             .map(|_| ())
             .map_err(|error| format!("session {}: saving its state failed: {error}", key.session))
+    }
+
+    /// Keep the mural image the session's history head was last folded
+    /// with, so the same bytes can be served again after a restart. One row
+    /// per session: a later fold's mural replaces it.
+    pub fn save_head_mural(
+        &self,
+        key: &SessionRef,
+        content_hash: &str,
+        png: &[u8],
+    ) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT INTO head_murals (runner, harness, session, content_hash, png) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (runner, harness, session) DO UPDATE SET content_hash = excluded.content_hash, png = excluded.png",
+                params![key.runner, key.harness, key.session, content_hash, png],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("session {}: saving its mural failed: {error}", key.session))
+    }
+
+    /// The session's stored mural image, if it is the one with `content_hash`.
+    pub fn head_mural(&self, key: &SessionRef, content_hash: &str) -> Option<Vec<u8>> {
+        self.lock()
+            .query_row(
+                "SELECT png FROM head_murals WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND content_hash = ?4",
+                params![key.runner, key.harness, key.session, content_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None)
     }
 
     /// The memory context stored for the session (spec 3c, ML1), if any.

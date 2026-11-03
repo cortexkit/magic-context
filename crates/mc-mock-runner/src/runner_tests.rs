@@ -147,6 +147,7 @@ fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
         project: None,
         model_latency_ms: 0,
         templates: Vec::new(),
+        accepts_images: None,
     }
 }
 
