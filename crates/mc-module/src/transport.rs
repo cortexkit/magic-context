@@ -823,3 +823,7 @@ impl ModuleHandler for Handler {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "transport_lifecycle_tests.rs"]
+mod lifecycle_tests;

@@ -1,0 +1,418 @@
+use super::*;
+
+fn saved(dir: &std::path::Path) -> Value {
+    let text: String = rusqlite::Connection::open(dir.join("mode3.db"))
+        .unwrap()
+        .query_row(
+            "SELECT state FROM sessions WHERE session = 's1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+#[tokio::test]
+async fn lifecycle_a_tool_before_setup_restores_compaction_but_not_notice_readiness() {
+    let dir = scratch("tool-before-setup");
+    let mut runner = start_full(
+        config("worker", Kind::OpenAi, free()),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner
+        .play(&[
+            user("Review the module."),
+            read_file(50),
+            read_file(50),
+            reduce("3"),
+        ])
+        .await;
+    runner.provider().restart();
+    let route = &runner.provider().route;
+    runner
+        .provider()
+        .module()
+        .tool(route, "ctx_reduce", json!({"drop":"5"}))
+        .await
+        .expect("the restored session still compacts");
+    runner
+        .provider()
+        .module()
+        .idle(&route.session)
+        .await
+        .unwrap();
+    let state = saved(&dir);
+    assert_eq!(state["queued"].as_array().unwrap().len(), 2);
+    let conditions = cortexkit_role_compaction::notice::Conditions::new(
+        ModelRef::new("test", "test-model"),
+        40_000,
+        1000,
+        free(),
+    );
+    assert_eq!(
+        runner
+            .provider()
+            .module()
+            .notice(&route.session, NoticeRequest::new(1, conditions)),
+        Ok(NoticeAnswer::SetupRequired)
+    );
+    runner
+        .play(&[read_file(50), read_file(50), answer(), answer()])
+        .await;
+    assert_clean(&runner);
+    assert_eq!(
+        seen(runner.host(), 3).as_deref(),
+        Some(placeholder(3).as_str())
+    );
+    assert_eq!(
+        seen(runner.host(), 5).as_deref(),
+        Some(placeholder(5).as_str())
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_a_tools_only_worker_still_requires_setup_for_notices() {
+    let module = Module::new(HostClient::default(), Settings::default(), None, None);
+    let route = Route {
+        session: SessionRef::new("mock-runner", "mock", "tools"),
+        project: None,
+        workdir: None,
+        agent_id: None,
+    };
+    assert!(module
+        .tool(&route, "ctx_reduce", json!({"drop":"1"}))
+        .await
+        .is_err());
+    let conditions = cortexkit_role_compaction::notice::Conditions::new(
+        ModelRef::new("test", "test-model"),
+        40_000,
+        1000,
+        free(),
+    );
+    assert_eq!(
+        module.notice(&route.session, NoticeRequest::new(1, conditions)),
+        Ok(NoticeAnswer::SetupRequired)
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_a_keep_called_before_restart_lands_on_the_next_notice() {
+    let dir = scratch("pending-keep");
+    let settings = Settings {
+        protected_tokens: Some(0),
+        ..Settings::default()
+    };
+    let mut runner = start_full(
+        config("worker", Kind::OpenAi, free()),
+        settings,
+        Some(dir.clone()),
+    )
+    .await;
+    runner
+        .play(&[
+            user("Review the module."),
+            long_reply(1000),
+            long_reply(1000),
+            long_reply(1000),
+        ])
+        .await;
+    *runner.provider().restart_after_keep.lock().unwrap() = true;
+    runner
+        .play(&[
+            step(
+                "Keeping the useful reply.",
+                vec![ToolCall::ok(
+                    "ctx_keep",
+                    json!({"tags":"3", "note":"Keep the task and useful reply."}),
+                    "",
+                )],
+            ),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    assert_eq!(
+        seen(runner.host(), 2).as_deref(),
+        Some(placeholder(2).as_str())
+    );
+    assert_ne!(
+        seen(runner.host(), 3).as_deref(),
+        Some(placeholder(3).as_str())
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
+    let dir = scratch("retry-save");
+    let mut runner = start_full(
+        config("worker", Kind::OpenAi, free()),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner
+        .play(&[user("Review the module."), read_file(50), read_file(50)])
+        .await;
+    let conn = rusqlite::Connection::open(dir.join("mode3.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'save unavailable'); END;").unwrap();
+    runner
+        .provider()
+        .module()
+        .tool(&runner.provider().route, "ctx_reduce", json!({"drop":"3"}))
+        .await
+        .unwrap();
+    runner
+        .provider()
+        .module()
+        .idle(&runner.provider().route.session)
+        .await
+        .unwrap();
+    assert!(saved(&dir)["queued"].as_array().unwrap().is_empty());
+    conn.execute_batch("DROP TRIGGER fail_save").unwrap();
+    // No compaction decision changes: even an idle job must retry the write.
+    runner
+        .provider()
+        .module()
+        .idle(&runner.provider().route.session)
+        .await
+        .unwrap();
+    assert_eq!(saved(&dir)["queued"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
+    mc_module::move_in::MoveRequest {
+        session: SessionRef::new("mock-runner", "mock", "s1"),
+        preset: "head".into(),
+        project: Some(RouteProject {
+            id: "pj-test".into(),
+            root: dir.to_string_lossy().into_owned(),
+        }),
+        model: ModelRef::new("test", "model"),
+        context_window: 100_000,
+        output_reserve: 1000,
+        rules: free(),
+        newest: cortexkit_role_compaction::read::Cursor::new(2, "m2", "d"),
+        now: 1,
+    }
+}
+
+fn fenced(dir: &std::path::Path) -> u64 {
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations_meta WHERE key = 'mode3_move:mock:s1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn lifecycle_move_never_fences_a_failed_state_save() {
+    let dir = scratch("move-save-failed");
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
+    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    rusqlite::Connection::open(dir.join("mode3.db"))
+        .unwrap()
+        .execute("DROP TABLE sessions", [])
+        .unwrap();
+    let result =
+        mc_module::move_in::move_in(db, &store, &Settings::default().into(), &move_request(&dir));
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.starts_with("state_save_failed:")),
+        "{result:?}"
+    );
+    assert_eq!(fenced(&dir), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lifecycle_move_refuses_unrenderable_memories_and_profile_without_writes() {
+    for table in ["memories", "user_memories"] {
+        let dir = scratch(&format!("move-head-{table}"));
+        let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+        insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
+        db.with_connection(|conn| {
+            conn.execute_batch(&format!("ALTER TABLE {table} RENAME TO unavailable"))
+        })
+        .unwrap();
+        let store = Store::open(&dir.join("mode3.db")).unwrap();
+        let result = mc_module::move_in::move_in(
+            db,
+            &store,
+            &Settings::default().into(),
+            &move_request(&dir),
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("history_head_unavailable:")),
+            "{table}: {result:?}"
+        );
+        assert!(store.load(&move_request(&dir).session).is_none());
+        assert_eq!(fenced(&dir), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn lifecycle_move_refuses_incompatible_message_ordinals() {
+    let dir = scratch("move-ordinals");
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
+    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    let mut request = move_request(&dir);
+    request.newest.ordinal = 4;
+    let result = mc_module::move_in::move_in(db, &store, &Settings::default().into(), &request);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.starts_with("session_not_summarized:")),
+        "{result:?}"
+    );
+    assert_eq!(fenced(&dir), 0);
+    assert!(store.load(&request.session).is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_one_worker_handles_setup_notice_and_tool_in_order() {
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    runner.play(&[user("Review."), read_file(50)]).await;
+    let client = runner.provider().client.clone();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *client.pause_reads.lock().unwrap() = Some(pause.clone());
+    let module = Module::new(client.clone(), Settings::default(), None, None);
+    let route = runner.provider().route.clone();
+    let last = runner.host().entries().last().cloned().unwrap();
+    let newest = cortexkit_role_compaction::read::Cursor::new(last.ordinal, last.mid, last.digest);
+    let request = SetupRequest::new(
+        "worker",
+        ModelRef::new("test", "test-model"),
+        40_000,
+        1000,
+        free(),
+        Vec::new(),
+        1,
+    )
+    .with_newest(newest.clone());
+    module.setup(route.clone(), request).unwrap();
+    client.read_started.notified().await;
+    let conditions = cortexkit_role_compaction::notice::Conditions::new(
+        ModelRef::new("test", "test-model"),
+        40_000,
+        1000,
+        free(),
+    );
+    assert_eq!(
+        module.notice(
+            &route.session,
+            NoticeRequest::new(1, conditions).with_newest(newest)
+        ),
+        Ok(NoticeAnswer::Received)
+    );
+    let tool_module = module.clone();
+    let tool = tokio::spawn(async move {
+        tool_module
+            .tool(&route, "ctx_reduce", json!({"drop":"3"}))
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !tool.is_finished(),
+        "a tool overtook Setup's transcript read"
+    );
+    *client.pause_reads.lock().unwrap() = None;
+    pause.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), tool)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_pre_user_honors_its_budget_behind_a_stuck_job() {
+    let module = Module::new(StuckClient, Settings::default(), None, None);
+    let route = Route {
+        session: SessionRef::new("mock-runner", "mock", "stuck"),
+        project: None,
+        workdir: None,
+        agent_id: None,
+    };
+    let request = SetupRequest::new(
+        "worker",
+        ModelRef::new("test", "model"),
+        40_000,
+        1000,
+        free(),
+        Vec::new(),
+        1,
+    )
+    .with_newest(cortexkit_role_compaction::read::Cursor::new(1, "m1", "d"));
+    module.setup(route.clone(), request).unwrap();
+    let start = std::time::Instant::now();
+    let answer = tokio::time::timeout(
+        mc_module::module::PRE_USER_BUDGET + std::time::Duration::from_millis(500),
+        module.pre_user(&route.session, "hello", 1),
+    )
+    .await
+    .expect("pre_user missed its budget");
+    assert!(answer.prepend.is_none() && answer.append.is_none());
+    assert!(start.elapsed() >= mc_module::module::PRE_USER_BUDGET);
+}
+
+#[tokio::test]
+async fn lifecycle_tools_answer_while_the_historian_is_still_writing() {
+    let client = HostClient::default();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *client.pause_children.lock().unwrap() = Some(pause.clone());
+    let mut runner = start_with_client(
+        client.clone(),
+        config("head", Kind::OpenAi, free()),
+        Settings::default(),
+        None,
+        false,
+        |_| {},
+    )
+    .await;
+    let module = runner.provider().module();
+    let route = runner.provider().route.clone();
+    let play = tokio::spawn(async move {
+        let mut steps = turn("Look at a.rs.");
+        steps.extend(turn("And b.rs."));
+        steps.extend(turn("Then c.rs."));
+        steps.push(answer());
+        runner.play(&steps).await;
+        runner
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.child_started.notified(),
+    )
+    .await
+    .expect("the historian did not start");
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        module.tool(&route, "ctx_reduce", json!({"drop":"3"})),
+    )
+    .await
+    .expect("a historian run blocked the worker");
+    assert!(answer.is_ok(), "{answer:?}");
+    *client.pause_children.lock().unwrap() = None;
+    pause.add_permits(1);
+    let runner = tokio::time::timeout(std::time::Duration::from_secs(5), play)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_clean(&runner);
+}

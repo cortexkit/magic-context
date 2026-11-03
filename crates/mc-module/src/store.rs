@@ -21,6 +21,17 @@ use crate::summary::head::Baseline;
 /// What a session keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Durable {
+    /// Compaction features and conditions, for a tool arriving before Setup
+    /// after a restart. Older rows recover these at their next Setup.
+    #[serde(default)]
+    pub compaction: Option<(
+        crate::preset::Features,
+        cortexkit_role_compaction::notice::Conditions,
+    )>,
+    #[serde(default)]
+    pub pending_keep: Option<BTreeSet<(String, String)>>,
+    #[serde(default)]
+    pub head_stale: bool,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
     /// Parts the model asked to drop that no view carries yet.
@@ -70,8 +81,10 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection =
             Connection::open(path).map_err(|error| format!("store {}: {error}", path.display()))?;
+        // Let the next job retry a busy write instead of blocking an executor
+        // thread shared by other sessions.
         connection
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(Duration::ZERO)
             .map_err(|error| error.to_string())?;
         connection
             .execute_batch(
@@ -116,19 +129,16 @@ impl Store {
         text.and_then(|text| serde_json::from_str(&text).ok())
     }
 
-    pub fn save(&self, key: &SessionRef, state: &Durable) {
+    pub fn save(&self, key: &SessionRef, state: &Durable) -> Result<(), String> {
         let text = serde_json::to_string(state).expect("state serializes");
         let result = self.lock().execute(
             "INSERT INTO sessions (runner, harness, session, state) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (runner, harness, session) DO UPDATE SET state = excluded.state",
             params![key.runner, key.harness, key.session, text],
         );
-        if let Err(error) = result {
-            eprintln!(
-                "ck-mc: session {}: saving its state failed: {error}",
-                key.session
-            );
-        }
+        result
+            .map(|_| ())
+            .map_err(|error| format!("session {}: saving its state failed: {error}", key.session))
     }
 
     /// The memory context stored for the session (spec 3c, ML1), if any.

@@ -15,7 +15,7 @@
 //! [`crate::upkeep`]) runs on a timer of its own, for every project a
 //! session used in the last hour, one project at a time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -81,6 +81,7 @@ struct Inner<C> {
     /// Where each session's own decisions survive a restart.
     store: Option<Arc<Store>>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
+    set_up: Mutex<HashSet<SessionRef>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
     /// Each session's project, from its Setup route's scope.
@@ -124,6 +125,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 db: db.map(Arc::new),
                 store: store.map(Arc::new),
                 workers: Mutex::new(HashMap::new()),
+                set_up: Mutex::new(HashSet::new()),
                 summaries_running: Mutex::new(0),
                 session_projects: Mutex::new(HashMap::new()),
                 active_projects: Mutex::new(HashMap::new()),
@@ -151,9 +153,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .or_insert_with(|| self.spawn_worker())
                 .clone()
         };
+        let key = route.session.clone();
         worker
             .send(Job::Setup(route, request, features))
             .map_err(|_| ModuleError::Stopped)?;
+        self.inner
+            .set_up
+            .lock()
+            .expect("setup sessions")
+            .insert(key);
         Ok(SetupAnswer::Ready)
     }
 
@@ -165,6 +173,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         session: &SessionRef,
         request: NoticeRequest,
     ) -> Result<NoticeAnswer, ModuleError> {
+        if !self
+            .inner
+            .set_up
+            .lock()
+            .expect("setup sessions")
+            .contains(session)
+        {
+            return Ok(NoticeAnswer::SetupRequired);
+        }
         match self.send(session, Job::Notice(request)) {
             Ok(()) => {
                 self.touch(session);
@@ -454,20 +471,32 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::Ride(ride, reply) => {
                         // Past its deadline the runner already sends without
                         // a view: build none.
-                        if reply.is_closed() {
-                            continue;
-                        }
-                        let view = session
-                            .as_mut()
-                            .and_then(|session| session.ride(settings, &ride));
+                        let mut view = if reply.is_closed() {
+                            None
+                        } else {
+                            session
+                                .as_mut()
+                                .and_then(|session| session.ride(settings, &ride))
+                        };
                         // Saved before the answer leaves, as for a pushed
                         // view: the runner may hold it from here on.
+                        let mut save_failed = false;
                         if let (Some(store), Some(session), Some(_)) =
                             (&inner.store, session.as_ref(), view.as_ref())
                         {
                             let durable = session.durable();
-                            store.save(session.key(), &durable);
-                            saved = Some(durable);
+                            match store.save(session.key(), &durable) {
+                                Ok(()) => saved = Some(durable),
+                                Err(error) => {
+                                    eprintln!("ck-mc: {error}");
+                                    save_failed = true;
+                                }
+                            }
+                        }
+                        if save_failed {
+                            if let (Some(session), Some(view)) = (session.as_mut(), view.take()) {
+                                session.ride_undelivered(view.version);
+                            }
                         }
                         if let Err(Some(view)) = reply.send(view) {
                             if let Some(session) = session.as_mut() {
@@ -481,12 +510,27 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         input,
                         reply,
                     } => {
-                        let session = session
-                            .get_or_insert_with(|| Session::tools_only(&route, inner.db.clone()));
+                        if session.is_none() {
+                            let mut fresh = Session::tools_only(&route, inner.db.clone());
+                            fresh.set_store(inner.store.clone());
+                            if let Some(durable) = inner
+                                .store
+                                .as_ref()
+                                .and_then(|store| store.load(&route.session))
+                            {
+                                fresh.restore(durable);
+                                fresh.load_summaries();
+                                fresh.restore_for_tools(&inner.client).await;
+                            }
+                            session = Some(fresh);
+                        }
+                        let session = session.as_mut().expect("tool session");
                         if name == "ctx_memory" {
                             ensure_memory_context(&inner, &route, session).await;
                         }
-                        let answer = session.tool(&inner.client, settings, &name, &input).await;
+                        let (root, model, usable) = session.config_inputs();
+                        let settings = inner.config.resolve(root, &model, usable);
+                        let answer = session.tool(&inner.client, &settings, &name, &input).await;
                         let _ = reply.send(answer);
                     }
                     Job::PreUser { text, now, reply } => {
@@ -495,11 +539,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             None => Addition::default(),
                         };
                         let _ = reply.send(answer);
-                        continue;
                     }
                     Job::Idle(reply) => {
                         let _ = reply.send(());
-                        continue;
                     }
                 }
                 // A tools-only session has nothing to keep across a restart.
@@ -509,8 +551,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 ) {
                     let durable = session.durable();
                     if saved.as_ref() != Some(&durable) {
-                        store.save(session.key(), &durable);
-                        saved = Some(durable);
+                        match store.save(session.key(), &durable) {
+                            Ok(()) => saved = Some(durable),
+                            Err(error) => eprintln!("ck-mc: {error}"),
+                        }
                     }
                 }
             }

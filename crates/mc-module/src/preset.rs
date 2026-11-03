@@ -3,7 +3,7 @@
 //! change here and nowhere else.
 
 /// The features a session has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Features {
     /// Summaries of older history, rendered as messages at the start of the
     /// request in place of the messages they cover. A session with a summarizer rebuilds when a summary lands or

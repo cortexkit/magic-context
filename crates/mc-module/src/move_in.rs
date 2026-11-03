@@ -119,7 +119,9 @@ pub fn move_in(
     let mut session = Session::new(&route, &setup, features, Some(Arc::clone(&db)));
     session.load_summaries();
     let reaches = session.last_summary_end();
-    if reaches.as_deref() != Some(request.newest.mid.as_str()) {
+    if reaches.as_deref() != Some(request.newest.mid.as_str())
+        || session.last_summary_ordinal() != Some(request.newest.ordinal)
+    {
         return Err(format!(
             "session_not_summarized: the summaries of {} end at {}, not at its newest message {}; run /ctx-wrapup 0 first",
             key.session,
@@ -137,7 +139,7 @@ pub fn move_in(
             .context_window
             .saturating_sub(request.output_reserve),
     );
-    let view = session.first_view_after_move(&settings, &request.newest);
+    let view = session.first_view_after_move(&settings, &request.newest)?;
     let tag_checkpoint: u64 = db.with_connection(|conn| {
         conn.query_row(
             "SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1 AND harness = ?2",
@@ -147,7 +149,9 @@ pub fn move_in(
         .map(|max| max.max(0) as u64)
         .map_err(|error| error.to_string())
     })?;
-    store.save(key, &session.durable());
+    store
+        .save(key, &session.durable())
+        .map_err(|error| format!("state_save_failed: {error}"))?;
     let record = serde_json::json!({
         "version": 3,
         "session": key.session,

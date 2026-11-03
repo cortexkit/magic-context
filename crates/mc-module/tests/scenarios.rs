@@ -31,6 +31,9 @@ use mc_module::routing::{RouteError, Router};
 use mc_module::store::Store;
 use serde_json::{json, Value};
 
+#[path = "support/lifecycle_scenarios.rs"]
+mod lifecycle_scenarios;
+
 /// ck-mc's calls back into the mock runner. The runner exists only after its
 /// Setup call, so the host is attached right after it starts.
 /// A catch-up read: the ordinal it read after, and how many entries it got.
@@ -62,6 +65,10 @@ struct HostClient {
     /// folder to `store-at-<version>.db` there: the store as a crash right
     /// after the hand-over would leave it.
     snapshot_store: Arc<Mutex<Option<std::path::PathBuf>>>,
+    pause_reads: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    read_started: Arc<tokio::sync::Notify>,
+    pause_children: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    child_started: Arc<tokio::sync::Notify>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -153,6 +160,11 @@ fn read_wrapped<T: serde::Serialize, A: serde::de::DeserializeOwned>(
 
 impl RunnerClient for HostClient {
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
+        let pause = self.pause_reads.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            self.read_started.notify_one();
+            pause.acquire().await.unwrap().forget();
+        }
         let page = self
             .host()?
             .read(&request)
@@ -240,6 +252,11 @@ impl RunnerClient for HostClient {
         _: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
+        let pause = self.pause_children.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            self.child_started.notify_one();
+            pause.acquire().await.unwrap().forget();
+        }
         let request: RunResultRequest = through_wire(&request);
         let result = self
             .host()?
@@ -282,6 +299,8 @@ struct InProcess {
     /// Whether a person's messages go through ck-mc's `pre_user`. Off for
     /// scenarios about other things, whose transcripts it would change.
     pre_user: bool,
+    /// Crash after a keep call is saved but before its next notice.
+    restart_after_keep: Mutex<bool>,
 }
 
 impl InProcess {
@@ -364,10 +383,21 @@ impl Provider for InProcess {
     }
 
     async fn tool(&self, name: &str, input: &Value) -> Result<String, CallError> {
-        self.module()
+        let answer = self
+            .module()
             .tool(&self.route, name, input.clone())
             .await
-            .map_err(call_error)
+            .map_err(call_error);
+        let restart =
+            name == "ctx_keep" && std::mem::take(&mut *self.restart_after_keep.lock().unwrap());
+        if restart {
+            self.module()
+                .idle(&self.route.session)
+                .await
+                .map_err(call_error)?;
+            self.restart();
+        }
+        answer
     }
 
     async fn pre_user(&self, text: &str, now: u64) -> Result<UserEdit, CallError> {
@@ -493,6 +523,7 @@ async fn start_with_client(
         settings,
         stores,
         pre_user,
+        restart_after_keep: Mutex::new(false),
     };
     let runner = Runner::start(config, provider).await.unwrap();
     *runner.provider().client.host.lock().unwrap() = Some(runner.host().clone());

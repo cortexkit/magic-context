@@ -203,8 +203,10 @@ impl ContextDb {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|error| format!("context.db {}: {error}", path.display()))?;
+        // A busy database is reported to the caller, not waited on while an
+        // executor thread shared by other sessions is blocked.
         connection
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(Duration::ZERO)
             .map_err(|error| error.to_string())?;
         let found: i64 = connection
             .query_row(

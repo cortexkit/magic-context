@@ -40,6 +40,8 @@ pub struct Session {
     features: Features,
     conditions: Conditions,
     index: Index,
+    /// No view may use an index left partial by an unsuccessful catch-up.
+    index_ready: bool,
     /// The newest view the runner accepted (or took with a ride answer). The
     /// next view carries its edits forward.
     latest: Option<View>,
@@ -164,6 +166,8 @@ pub struct Unconfirmed {
 /// The state a view's acceptance replaced.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Before {
+    #[serde(default)]
+    head_stale: bool,
     latest: Option<View>,
     queued: BTreeSet<lanes::PartKey>,
     refused_once: BTreeSet<lanes::PartKey>,
@@ -195,6 +199,7 @@ impl Session {
             features,
             conditions: conditions_of(request),
             index: Index::default(),
+            index_ready: true,
             latest: None,
             version: 0,
             queued: BTreeSet::new(),
@@ -284,8 +289,8 @@ impl Session {
         session
     }
 
-    /// Whether Magic Context compacts this session (it had a Setup), rather
-    /// than only serving its tools.
+    /// Whether Magic Context compacts this session, including state restored
+    /// before this process receives Setup, rather than only serving its tools.
     pub fn compacting(&self) -> bool {
         !self.tools_only
     }
@@ -308,6 +313,9 @@ impl Session {
     /// What must survive a restart.
     pub fn durable(&self) -> crate::store::Durable {
         crate::store::Durable {
+            compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
+            pending_keep: self.pending_keep.clone(),
+            head_stale: self.head_stale,
             version: self.version,
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
@@ -327,6 +335,13 @@ impl Session {
 
     /// Take back what a previous ck-mc process saved for the session.
     pub fn restore(&mut self, durable: crate::store::Durable) {
+        self.tools_only = false;
+        if let Some((features, conditions)) = durable.compaction {
+            self.features = features;
+            self.conditions = conditions;
+        }
+        self.pending_keep = durable.pending_keep;
+        self.head_stale = durable.head_stale;
         self.version = durable.version;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
@@ -347,6 +362,13 @@ impl Session {
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(durable.cut.unwrap_or(1));
+        self.index_ready = false;
+    }
+
+    /// Restore the transcript for a tool that arrived before the runner's
+    /// first notice. This does not count as Setup in the current process.
+    pub async fn restore_for_tools<C: RunnerClient>(&mut self, client: &C) {
+        self.index_ready = self.read_until(client, None, true).await;
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -386,7 +408,14 @@ impl Session {
         self.seq = 0;
         self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
         self.offer_unconfirmed_again(client).await;
-        self.sync(client, request.newest.as_ref()).await;
+        if !self.reconcile_summaries(client, 1, false).await {
+            self.index_ready = false;
+            return;
+        }
+        self.index_ready = self.sync(client, request.newest.as_ref()).await;
+        if !self.index_ready {
+            return;
+        }
         // After the read, so the cut message of the view the runner applies
         // is in the index (spec 4, ST2).
         if self.runner_differs(request.applied_view.as_ref()) {
@@ -418,6 +447,9 @@ impl Session {
         let version = self.latest.as_ref().map(|view| view.version);
         let cut = self.cut_ordinal();
         let summary = self.handle_notice(client, settings, notice).await;
+        if !self.index_ready {
+            return summary;
+        }
         let rebuilt = self.latest.as_ref().map(|view| view.version) != version;
         let cut_moved = self.cut_ordinal() > cut;
         self.remind(client, settings, rebuilt, cut_moved).await;
@@ -446,8 +478,21 @@ impl Session {
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
+                    if !self.reconcile_summaries(client, *from_ordinal, true).await {
+                        self.index_ready = false;
+                        return None;
+                    }
+                    if self
+                        .summaries
+                        .last()
+                        .is_some_and(|summary| summary.end_message as u64 >= *from_ordinal)
+                    {
+                        // A summary on the replacement branch already covers
+                        // the change; the delayed event must not erase it or
+                        // its search rows.
+                        continue;
+                    }
                     self.index.truncate(*from_ordinal);
-                    self.forget_summaries_from(*from_ordinal);
                     if self.cut.is_some_and(|cut| *from_ordinal <= cut) {
                         // The undo reached the cut message or before it, and
                         // the summaries of what it removed are gone. The next
@@ -492,12 +537,17 @@ impl Session {
         let omitted = notice.entries.is_empty();
         // No newest entry: the transcript is empty, and the read empties the
         // index.
-        if self.index.extend(notice.entries) != Extend::Continued
-            || !self.index.ends_at(notice.newest.as_ref())
-        {
-            self.sync(client, notice.newest.as_ref()).await;
+        let extended = self.index.extend(notice.entries);
+        if extended == Extend::Diverged || !self.index_ready {
+            self.index = Index::starting_at(self.cut.unwrap_or(1));
+            self.index_ready = self.read_until(client, notice.newest.as_ref(), true).await;
+        } else if extended == Extend::Gap || !self.index.ends_at(notice.newest.as_ref()) {
+            self.index_ready = self.sync(client, notice.newest.as_ref()).await;
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
-            self.sync_from_changeable(client, newest).await;
+            self.index_ready = self.sync_from_changeable(client, newest).await;
+        }
+        if !self.index_ready {
+            return None;
         }
         // A view the runner applies that ck-mc does not expect (it lost one,
         // or restored an older one) is taken as ck-mc's own. After the read,
@@ -528,7 +578,7 @@ impl Session {
             self.fold_due = true;
             self.head_stale = true;
         }
-        if std::mem::take(&mut self.head_stale) {
+        if self.head_stale {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
@@ -805,6 +855,11 @@ impl Session {
             return;
         };
         let sequence = self.summaries[first].sequence;
+        let shown = self.baseline.is_some()
+            || self
+                .latest
+                .as_ref()
+                .is_some_and(|view| view.edits.iter().any(|edit| head::is_head(&edit.op)));
         if let Some(db) = &self.db {
             if let Err(error) =
                 db.delete_compartments_from(&self.key.harness, &self.key.session, sequence)
@@ -826,10 +881,85 @@ impl Session {
         {
             self.baseline = None;
         }
-        self.head_stale = self
-            .latest
-            .as_ref()
-            .is_some_and(|view| view.edits.iter().any(|edit| head::is_head(&edit.op)));
+        self.head_stale |= shown;
+    }
+
+    /// A notice may be acknowledged before its revert runs, or arrive after
+    /// a read already saw the replacement branch. Validate summary endpoints
+    /// against the current transcript rather than deleting by a stale event.
+    async fn reconcile_summaries<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        from: u64,
+        explicit_revert: bool,
+    ) -> bool {
+        let mut invalid_from = None;
+        for summary in self
+            .summaries
+            .iter()
+            .rev()
+            .filter(|summary| summary.end_message as u64 >= from)
+        {
+            if summary.end_message_id.is_empty() {
+                // Older rows may lack endpoint metadata. Only an explicit
+                // revert, not that missing metadata alone, invalidates them.
+                if !explicit_revert {
+                    break;
+                }
+                invalid_from = Some(summary.start_message as u64);
+                continue;
+            }
+            let request = ReadRequest::new(
+                Select::Mids {
+                    mids: vec![summary.end_message_id.clone()],
+                },
+                Detail::Compact,
+            );
+            let page = match client.read(&self.key, request).await {
+                Ok(page) => page,
+                Err(error) => {
+                    eprintln!(
+                        "ck-mc: session {}: reconciling summaries failed: {error:?}",
+                        self.key.session
+                    );
+                    return false;
+                }
+            };
+            if page.entries.iter().any(|entry| {
+                entry.mid == summary.end_message_id && entry.ordinal == summary.end_message as u64
+            }) {
+                break;
+            }
+            invalid_from = Some(summary.start_message as u64);
+        }
+        if let Some(ordinal) = invalid_from {
+            self.invalidate_transcript_from(ordinal);
+        }
+        true
+    }
+
+    fn invalidate_transcript_from(&mut self, ordinal: u64) {
+        self.forget_summaries_from(ordinal);
+        self.index.truncate(ordinal);
+        if self.cut.is_some_and(|cut| ordinal <= cut) {
+            self.cut = self.summarized_through();
+            self.index = Index::starting_at(self.cut.unwrap_or(1));
+        }
+        if let Some(db) = &self.db {
+            if let Err(error) = db.with_connection(|conn| {
+                crate::search::messages::forget_from(
+                    conn,
+                    &self.key.harness,
+                    &self.key.session,
+                    ordinal,
+                )
+            }) {
+                eprintln!(
+                    "ck-mc: session {}: search index revert failed: {error}",
+                    self.key.session
+                );
+            }
+        }
     }
 
     /// The id of the last message a summary covers.
@@ -837,6 +967,10 @@ impl Session {
         self.summaries
             .last()
             .map(|summary| summary.end_message_id.clone())
+    }
+
+    pub fn last_summary_ordinal(&self) -> Option<u64> {
+        self.summarized_through()
     }
 
     /// The last ordinal a summary covers. Summaries name messages by
@@ -1128,6 +1262,9 @@ impl Session {
     /// A ride: the runner is about to send a request that rewrites the cache
     /// anyway, or would not fit. Everything held lands now.
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
+        if !self.index_ready {
+            return None;
+        }
         self.conditions = ride.conditions.clone();
         self.settle_unconfirmed(ride.applied_view.as_ref(), &[]);
         let over_limit = ride
@@ -1161,6 +1298,9 @@ impl Session {
         name: &str,
         input: &Value,
     ) -> Result<String, String> {
+        if !self.tools_only && !self.index_ready && matches!(name, "ctx_reduce" | "ctx_keep") {
+            return Err("transcript catch-up is incomplete; retry after the next notice".into());
+        }
         match name {
             // The tools that act on the transcript need a session Magic Context
             // compacts; the catalog never offers them to any other.
@@ -1706,9 +1846,18 @@ impl Session {
     /// summaries cover its whole transcript: the history head, and a cut
     /// through `newest`, the transcript's last message. The session then
     /// holds it as accepted, ready to be saved.
-    pub fn first_view_after_move(&mut self, settings: &Settings, newest: &Cursor) -> View {
+    pub fn first_view_after_move(
+        &mut self,
+        settings: &Settings,
+        newest: &Cursor,
+    ) -> Result<View, String> {
         self.fold_due = true;
         let mut ops = self.render_head(settings);
+        if self.next_baseline.is_none() || !ops.iter().any(head::is_head) {
+            return Err(
+                "history_head_unavailable: cannot render the moved session's history head".into(),
+            );
+        }
         ops.push(EditOp::Cut {
             through: newest.mid.clone(),
         });
@@ -1727,7 +1876,7 @@ impl Session {
         self.cut = Some(newest.ordinal);
         self.index = Index::starting_at(newest.ordinal);
         self.latest = Some(view.clone());
-        view
+        Ok(view)
     }
 
     /// A pass with permission to rebuild: every lane adds the parts it wants
@@ -1751,6 +1900,9 @@ impl Session {
         cache_lost: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
+        if !self.index_ready {
+            return (None, 0);
+        }
         let (history, cut) = self.history_ops(settings);
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
@@ -1981,7 +2133,11 @@ impl Session {
             return;
         }
         self.accept(view.clone());
-        self.save();
+        if let Err(error) = self.save() {
+            eprintln!("ck-mc: {error}");
+            self.roll_back(view.version, false);
+            return;
+        }
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {}
@@ -2065,10 +2221,11 @@ impl Session {
     }
 
     /// Save the session's state now, where a store is set.
-    fn save(&self) {
+    fn save(&self) -> Result<(), String> {
         if let Some(store) = &self.store {
-            store.save(&self.key, &self.durable());
+            store.save(&self.key, &self.durable())?;
         }
+        Ok(())
     }
 
     /// Forget queued drops that landed or can never land.
@@ -2103,6 +2260,7 @@ impl Session {
     fn accept(&mut self, view: View) {
         let covered = std::mem::take(&mut self.next_covered);
         let before = Before {
+            head_stale: self.head_stale,
             latest: self.latest.clone(),
             queued: self.queued.clone(),
             refused_once: self.refused_once.clone(),
@@ -2123,6 +2281,7 @@ impl Session {
             self.emergency_latched = true;
         }
         if let Some(next) = self.next_baseline.take() {
+            self.head_stale = false;
             self.baseline = Some(next);
             self.fold_due = false;
         }
@@ -2188,6 +2347,7 @@ impl Session {
         self.emergency_latched = before.emergency_latched;
         self.baseline = before.baseline;
         self.fold_due = before.fold_due;
+        self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
         self.caveman = before.caveman;
         self.cut = before.cut;
         self.pruned_turns = before.pruned_turns;
@@ -2195,8 +2355,15 @@ impl Session {
             // The index already forgot what the cut removed; read it again
             // from the cut the runner still shows.
             self.index = Index::starting_at(self.cut.unwrap_or(1));
+            self.index_ready = false;
         }
         if refused {
+            self.failed_parts.extend(
+                covered
+                    .iter()
+                    .filter(|part| !self.queued.contains(*part))
+                    .cloned(),
+            );
             self.next_covered = covered;
             self.keep_refused_drops();
         }
@@ -2248,14 +2415,19 @@ impl Session {
     /// from the index, read it all again.
     /// Read from the oldest held entry that may still change, even though
     /// the index already ends where the runner's transcript does.
-    async fn sync_from_changeable<C: RunnerClient>(&mut self, client: &C, newest: &Cursor) {
+    async fn sync_from_changeable<C: RunnerClient>(&mut self, client: &C, newest: &Cursor) -> bool {
         if self.index.changeable_from().is_some() {
-            self.read_until(client, Some(newest), true).await;
+            return self.read_until(client, Some(newest), true).await;
         }
+        true
     }
 
-    async fn sync<C: RunnerClient>(&mut self, client: &C, newest: Option<&Cursor>) {
-        self.read_until(client, newest, false).await;
+    async fn sync<C: RunnerClient>(&mut self, client: &C, newest: Option<&Cursor>) -> bool {
+        let force = !self.index_ready
+            || self
+                .cut
+                .is_some_and(|cut| newest.map_or(0, |cursor| cursor.ordinal) < cut);
+        self.read_until(client, newest, force).await
     }
 
     /// Read until the index ends at `newest`; with `force`, read at least
@@ -2265,12 +2437,12 @@ impl Session {
         client: &C,
         newest: Option<&Cursor>,
         mut force: bool,
-    ) {
+    ) -> bool {
         let mut rebuilt = false;
         let mut after = self.index.read_after();
         loop {
             if !std::mem::take(&mut force) && self.index.ends_at(newest) {
-                return;
+                return true;
             }
             let request = ReadRequest::new(
                 Select::After {
@@ -2287,18 +2459,44 @@ impl Session {
                         "ck-mc: session {}: session.read failed: {error:?}",
                         self.key.session
                     );
-                    return;
+                    return false;
                 }
             };
+            if self.cut.is_some_and(|cut| {
+                page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal) < cut
+            }) {
+                if rebuilt {
+                    eprintln!(
+                        "ck-mc: session {}: transcript keeps changing under a read",
+                        self.key.session
+                    );
+                    return false;
+                }
+                self.invalidate_transcript_from(
+                    page.head
+                        .newest
+                        .as_ref()
+                        .map_or(1, |cursor| cursor.ordinal + 1),
+                );
+                self.restart_index(&mut rebuilt, &mut after);
+                continue;
+            }
             match self.index.extend(page.entries) {
                 Extend::Continued => match page.next_after {
                     Some(next) => after = Some(next),
                     None => {
-                        if !self.index.ends_at(page.head.newest.as_ref()) && !rebuilt {
-                            self.restart_index(&mut rebuilt, &mut after);
-                            continue;
+                        if !self.index.ends_at(page.head.newest.as_ref()) {
+                            if !rebuilt {
+                                self.restart_index(&mut rebuilt, &mut after);
+                                continue;
+                            }
+                            eprintln!(
+                                "ck-mc: session {}: transcript keeps changing under a read",
+                                self.key.session
+                            );
+                            return false;
                         }
-                        return;
+                        return true;
                     }
                 },
                 Extend::Gap | Extend::Diverged if !rebuilt => {
@@ -2309,7 +2507,7 @@ impl Session {
                         "ck-mc: session {}: transcript keeps changing under a read",
                         self.key.session
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -2345,6 +2543,12 @@ impl Session {
         self.image_outputs
             .retain(|(mid, part), _| index.find(mid, part).is_some());
         self.caveman.retain_present(index);
+        if let Some(kept) = &mut self.pending_keep {
+            kept.retain(|(mid, part)| index.find(mid, part).is_some());
+            if kept.is_empty() {
+                self.pending_keep = None;
+            }
+        }
     }
 
     /// Read in full the tool results with images whose output the
@@ -2467,3 +2671,7 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
