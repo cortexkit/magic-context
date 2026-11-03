@@ -28,10 +28,16 @@ pub struct Durable {
         crate::preset::Features,
         cortexkit_role_compaction::notice::Conditions,
     )>,
+    /// The preset used to select tools for a compacting session restored before Setup.
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(default)]
     pub pending_keep: Option<BTreeSet<(String, String)>>,
     #[serde(default)]
     pub head_stale: bool,
+    /// Reserved reminder ids, independent of the runner's notice numbering.
+    #[serde(default)]
+    pub reminder_counter: u64,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
     /// Parts the model asked to drop that no view carries yet.

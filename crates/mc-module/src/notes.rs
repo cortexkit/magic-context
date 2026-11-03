@@ -235,7 +235,8 @@ pub fn run(
     let empty = Map::new();
     let args = input.as_object().unwrap_or(&empty);
     let action = match args.get("action").and_then(Value::as_str) {
-        Some(action) => action.to_owned(),
+        Some(action @ ("write" | "read" | "update" | "dismiss")) => action.to_owned(),
+        Some(_) => "read".into(),
         // Models that fill every field send an empty content on a read.
         None if text(args, "content").is_some() => "write".into(),
         None => "read".into(),
@@ -262,10 +263,7 @@ pub fn run(
         }
         "dismiss" => {
             let ids = targeted.expect("checked");
-            let outcomes: Vec<(i64, bool)> = ids
-                .iter()
-                .map(|id| db.dismiss_note(*id, scope, now_ms).map(|done| (*id, done)))
-                .collect::<Result<_, _>>()?;
+            let outcomes = db.dismiss_notes(&ids, scope, now_ms)?;
             if let [(id, done)] = outcomes[..] {
                 return Ok(if done {
                     format!("Note #{id} dismissed.")
@@ -293,6 +291,13 @@ pub fn run(
         }
         "update" => {
             let id = targeted.expect("checked")[0];
+            if text(args, "surface_condition").is_some()
+                && db
+                    .note_in_scope(id, scope)?
+                    .is_some_and(|note| note.kind == "session")
+            {
+                return Ok("Error: Only a note created with a condition can have one. Write a new note with surface_condition, and dismiss this one.".into());
+            }
             let Some(content) = text(args, "content") else {
                 return Err(
                     "Error: Provide 'content' and/or 'surface_condition' to update.".into(),
@@ -322,7 +327,7 @@ pub fn run(
                 }
                 None => {
                     let notes = match args.get("filter").and_then(Value::as_str) {
-                        None => {
+                        None | Some("") => {
                             let mut notes = db.session_notes(scope, &["active"])?;
                             notes.extend(db.project_smart_notes(scope, &["ready", "pending"])?);
                             notes
@@ -334,7 +339,7 @@ pub fn run(
                                 "pending" => &["pending"],
                                 "ready" => &["ready"],
                                 "dismissed" => &["dismissed"],
-                                other => return Err(format!("Error: unknown filter '{other}'.")),
+                                _ => &["active", "ready", "pending"],
                             };
                             let mut notes = db.session_notes(scope, statuses)?;
                             notes.extend(db.project_smart_notes(scope, statuses)?);

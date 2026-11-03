@@ -779,6 +779,9 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .index
         .entries()
         .iter()
+        // A notice is already a distinct instruction from the runner, not
+        // injected framing inside a person's prompt. Keep it actionable.
+        .filter(|entry| entry.notice.is_none())
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
@@ -1292,8 +1295,8 @@ pub fn emergency_drop(
 }
 
 /// The parts a `ctx_keep` view drops: everything before the message holding
-/// the `ctx_keep` call, except the session's first message when it keeps it,
-/// the parts the model asked to keep, and the protected tail. The call's
+/// the `ctx_keep` call, except messages from the person, the session's first
+/// message when it keeps it, the selected parts, and the protected tail. The call's
 /// message and everything after it stay, so the model sees its own note.
 pub fn keep_drops(
     context: &Context,
@@ -1311,7 +1314,9 @@ pub fn keep_drops(
     };
     let mut drops = Vec::new();
     for (position, entry) in entries[..call_at].iter().enumerate() {
-        if position == 0 && context.keep_first_message {
+        if (position == 0 && context.keep_first_message)
+            || (entry.role == Role::User && entry.notice.is_none())
+        {
             continue;
         }
         for part in &entry.parts {

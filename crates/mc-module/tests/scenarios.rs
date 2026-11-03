@@ -31,6 +31,8 @@ use mc_module::routing::{RouteError, Router};
 use mc_module::store::Store;
 use serde_json::{json, Value};
 
+#[path = "scenarios/agent_surface.rs"]
+mod agent_surface;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
 
@@ -3292,7 +3294,10 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     )
     .await
     .expect("the free session answered its tool call");
-    assert!(reply.is_err(), "{reply:?}");
+    assert_eq!(
+        reply,
+        Ok("Error: Unknown tag(s) §1§. Check available tags in conversation.".into())
+    );
 }
 
 #[tokio::test]
@@ -3863,5 +3868,99 @@ async fn a_prose_search_answers_in_the_rerankers_order() {
         .await
         .unwrap();
     assert!(client.calls.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn workspace_shared_memories_have_sources_in_the_head_deltas_and_search() {
+    let dir = scratch("workspace-shares");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Own project rule.");
+    insert_memory(&dir, 2, "Foreign shared constraint.");
+    insert_memory(&dir, 3, "Foreign private naming convention.");
+    insert_memory(&dir, 4, "Workspace placement remains searchable.");
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    db.execute_batch("INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(1,'Example',0,0);
+        INSERT INTO workspace_members VALUES(1,'pj-test','Current','/current',0),(1,'pj-other','Other Project','/other',0);
+        UPDATE memories SET project_path='pj-other',category='CONSTRAINTS',shareable=1 WHERE id IN (2,4);
+        UPDATE memories SET project_path='pj-other',category='NAMING',shareable=1 WHERE id=3;
+        INSERT INTO memory_placement(memory_id,level,owner_kind,owner_id,written_at)
+            VALUES(4,'workspace','workspace','1',0);").unwrap();
+    let project = mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    };
+    let mut head_config = config("head", Kind::OpenAi, free());
+    head_config.project = Some(project.clone());
+    let mut runner = start_full(head_config, Settings::default(), Some(dir.clone())).await;
+    runner.play(&[user("Hello."), answer()]).await;
+    assert_clean(&runner);
+    let (m0, _) = head_texts(runner.host());
+    assert!(m0.contains("#1: Own project rule."), "{m0}");
+    assert!(
+        m0.contains("#2 [Other Project]: Foreign shared constraint."),
+        "{m0}"
+    );
+    assert!(!m0.contains("Foreign private naming"), "{m0}");
+    assert!(!m0.contains("Workspace placement"), "{m0}");
+
+    db.execute_batch("UPDATE memories SET content='Foreign revised constraint.' WHERE id=2;")
+        .unwrap();
+    insert_memory(&dir, 5, "Foreign new constraint.");
+    db.execute_batch("UPDATE memories SET project_path='pj-other',category='CONSTRAINTS',shareable=1 WHERE id=5;").unwrap();
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (later_m0, m1) = head_texts(runner.host());
+    assert_eq!(later_m0, m0);
+    assert!(m1.contains("<updated id=\"2\" category=\"CONSTRAINTS\" project=\"Other Project\">Foreign revised constraint.</updated>"), "{m1}");
+    assert!(m1.contains("<added id=\"5\" category=\"CONSTRAINTS\" project=\"Other Project\">Foreign new constraint.</added>"), "{m1}");
+
+    // A worker has no history head, so the shared result is not suppressed as visible.
+    let mut worker_config = config("worker", Kind::OpenAi, free());
+    worker_config.session = SessionRef::new("mock-runner", "mock", "workspace-worker");
+    worker_config.project = Some(project);
+    let mut worker = start_full(worker_config, Settings::default(), Some(dir.clone())).await;
+    let search = |query: &str| {
+        Step::Model(Turn {
+            tools: vec![ToolCall::ok(
+                "ctx_search",
+                json!({"query":query,"sources":["memory"]}),
+                "",
+            )],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    worker
+        .play(&[
+            user("Find the rules."),
+            search("revised constraint"),
+            search("#2"),
+            search("private naming"),
+            search("placement searchable"),
+            answer(),
+        ])
+        .await;
+    assert_clean(&worker);
+    let outputs = tool_outputs(worker.host(), "ctx_search");
+    assert_eq!(outputs.len(), 4, "{outputs:?}");
+    for output in &outputs[..2] {
+        assert!(
+            output.contains("id=2 category=CONSTRAINTS source=Other Project match=fts"),
+            "{output}"
+        );
+        assert!(output.contains("Foreign revised constraint."), "{output}");
+    }
+    assert!(outputs[2].starts_with("No results found"), "{}", outputs[2]);
+    assert!(
+        outputs[3].contains("id=4 category=CONSTRAINTS source=Other Project match=fts"),
+        "{}",
+        outputs[3]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

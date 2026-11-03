@@ -51,6 +51,8 @@ pub enum ModuleError {
     UnknownPreset(String),
     /// A call for a session that never had a Setup.
     UnknownSession,
+    /// The session's catalog does not serve this tool.
+    UnknownTool(String),
     /// The session's worker stopped.
     Stopped,
     /// A tool call failed; the text is for the model.
@@ -99,7 +101,7 @@ enum Job {
         route: Route,
         name: String,
         input: Value,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<String, ModuleError>>,
     },
     PreUser {
         text: String,
@@ -249,10 +251,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 reply,
             })
             .map_err(|_| ModuleError::Stopped)?;
-        answer
-            .await
-            .map_err(|_| ModuleError::Stopped)?
-            .map_err(ModuleError::Tool)
+        answer.await.map_err(|_| ModuleError::Stopped)?
     }
 
     /// The `pre_user` hook: what to add to a person's message, within
@@ -397,8 +396,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             while let Some(job) = receiver.recv().await {
                 let settings: Settings = match (&job, &session) {
                     (Job::Idle(_), _) => Settings::default(),
-                    (Job::Setup(route, request, _), _) => inner.config.resolve(
-                        route.project.as_ref().map(|project| project.root.as_str()),
+                    (Job::Setup(route, request, _), _) => route_settings(
+                        &inner.config,
+                        route,
                         &format!("{}/{}", request.model.provider, request.model.model),
                         request
                             .context_window
@@ -410,11 +410,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                     // The first tool call of a session that has no Setup: only
                     // the project's settings matter to its tools.
-                    (Job::Tool { route, .. }, None) => inner.config.resolve(
-                        route.project.as_ref().map(|project| project.root.as_str()),
-                        "",
-                        0,
-                    ),
+                    (Job::Tool { route, .. }, None) => route_settings(&inner.config, route, "", 0),
                     (_, None) => Settings::default(),
                 };
                 let settings = &settings;
@@ -525,12 +521,24 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             session = Some(fresh);
                         }
                         let session = session.as_mut().expect("tool session");
-                        if name == "ctx_memory" {
-                            ensure_memory_context(&inner, &route, session).await;
-                        }
                         let (root, model, usable) = session.config_inputs();
                         let settings = inner.config.resolve(root, &model, usable);
-                        let answer = session.tool(&inner.client, &settings, &name, &input).await;
+                        let config = inner.config.catalog_config(session.config_inputs().0);
+                        let answer = if !session.serves_tool(&name, &config) {
+                            Err(ModuleError::UnknownTool(name.clone()))
+                        } else if name == "ctx_memory" && !settings.memory_enabled {
+                            Err(ModuleError::Tool(
+                                "Cross-session memory is disabled for this project.".into(),
+                            ))
+                        } else {
+                            if name == "ctx_memory" {
+                                ensure_memory_context(&inner, &route, session).await;
+                            }
+                            session
+                                .tool(&inner.client, &settings, &name, &input)
+                                .await
+                                .map_err(ModuleError::Tool)
+                        };
                         let _ = reply.send(answer);
                     }
                     Job::PreUser { text, now, reply } => {
@@ -641,8 +649,69 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     });
 }
 
+fn route_settings(config: &Config, route: &Route, model_key: &str, usable: u64) -> Settings {
+    config.resolve(
+        route
+            .project
+            .as_ref()
+            .map(|project| project.root.as_str())
+            .or(route.workdir.as_deref()),
+        model_key,
+        usable,
+    )
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::ModelRef;
+
+    #[test]
+    fn folder_only_setup_and_first_tool_match_later_passes() {
+        let root = std::env::temp_dir().join(format!("ck-mc-folder-config-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".cortexkit")).unwrap();
+        std::fs::write(root.join("user.jsonc"), "{}").unwrap();
+        std::fs::write(root.join(".cortexkit/magic-context.jsonc"), r#"{"execute_threshold_percentage":85,"history_budget_percentage":0.2,"memory":{"injection_budget_tokens":5000}}"#).unwrap();
+        let config = Config::Files(crate::config::Loader::with_user_path(
+            root.join("user.jsonc"),
+        ));
+        let route = Route {
+            session: SessionRef::new("runner", "test", "folder-config"),
+            project: None,
+            workdir: Some(root.to_string_lossy().into_owned()),
+            agent_id: None,
+        };
+        let request = SetupRequest::new(
+            "config-test",
+            ModelRef::new("test", "model"),
+            200_000,
+            32_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            0,
+        );
+        let session = Session::new(&route, &request, preset::Features::NONE, None);
+        let (folder, model, usable) = session.config_inputs();
+        let later = config.resolve(folder, &model, usable);
+        let setup = route_settings(&config, &route, &model, usable);
+        let first_tool = route_settings(&config, &route, "", 0);
+        assert_eq!(later.execute_threshold_percentage, 85.0);
+        assert_eq!(
+            setup.execute_threshold_percentage,
+            later.execute_threshold_percentage
+        );
+        assert_eq!(
+            setup.history_budget_percentage,
+            later.history_budget_percentage
+        );
+        assert_eq!(first_tool.memory_budget_tokens, later.memory_budget_tokens);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

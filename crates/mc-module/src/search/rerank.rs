@@ -88,10 +88,10 @@ impl Reranker {
                     .filter(|key| !key.is_empty())
                     .map(str::to_owned),
                 timeout_ms: rerank["timeout_ms"]
-                    .as_u64()
-                    .map_or(1500, |ms| ms.clamp(50, 15_000)),
-                top_n: rerank["top_n"]
-                    .as_u64()
+                    .as_f64()
+                    .filter(|ms| ms.is_finite() && ms.fract() == 0.0)
+                    .map_or(1500, |ms| ms.clamp(50.0, 15_000.0) as u64),
+                top_n: crate::config::integer(&rerank["top_n"])
                     .filter(|n| (1..=20).contains(n))
                     .map_or(POOL, |n| n as usize),
             }),
@@ -679,6 +679,7 @@ mod tests {
     fn memory(id: i64) -> Hit {
         Hit::Memory(MemoryHit {
             id,
+            source_name: None,
             category: "ARCHITECTURE".into(),
             content: format!("memory {id}"),
             score: 0.5,
@@ -831,5 +832,29 @@ mod tests {
             skipped_line("secret detail"),
             "Reranking skipped: remote_error"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_regression_tests {
+    use super::*;
+
+    #[test]
+    fn integral_timeout_is_clamped() {
+        for (timeout, expected) in [
+            (json!(-5), 50),
+            (json!(75.0), 75),
+            (json!(20000.0), 15000),
+            (json!(75.5), 1500),
+        ] {
+            let Reranker::Remote(remote) = Reranker::from_tiers(
+                &json!({"rerank": {"provider": "remote", "timeout_ms": timeout, "top_n": 3.0}}),
+                &json!({}),
+            ) else {
+                panic!("not remote")
+            };
+            assert_eq!(remote.timeout_ms, expected);
+            assert_eq!(remote.top_n, 3);
+        }
     }
 }

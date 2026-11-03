@@ -38,6 +38,8 @@ const READ_PAGE_BYTES: u64 = 1 << 20;
 pub struct Session {
     key: SessionRef,
     features: Features,
+    preset: crate::catalog::Preset,
+    reminder_counter: u64,
     conditions: Conditions,
     index: Index,
     /// No view may use an index left partial by an unsuccessful catch-up.
@@ -197,6 +199,9 @@ impl Session {
             workdir: folder_of(route),
             key: route.session.clone(),
             features,
+            preset: crate::catalog::Preset::parse(&request.preset)
+                .unwrap_or(crate::catalog::Preset::Head),
+            reminder_counter: 0,
             conditions: conditions_of(request),
             index: Index::default(),
             index_ready: true,
@@ -299,6 +304,27 @@ impl Session {
         &self.key
     }
 
+    /// Use the same preset and configuration policy as the runner's catalog.
+    pub(crate) fn serves_tool(&self, name: &str, config: &crate::catalog::CatalogConfig) -> bool {
+        if self.tools_only && matches!(name, "ctx_reduce" | "ctx_expand" | "ctx_keep") {
+            return true; // These calls retain their explanatory tools-only refusal.
+        }
+        let mut config = config.clone();
+        // A disabled memory tool has its own explanatory refusal. Preset
+        // membership is still checked before that refusal is returned.
+        if name == "ctx_memory" {
+            config.memory_enabled = true;
+        }
+        crate::catalog::served_tools(
+            self.preset,
+            !self.tools_only,
+            &serde_json::Map::new(),
+            &config,
+        )
+        .iter()
+        .any(|tool| tool.name == name)
+    }
+
     /// What the session's settings depend on: its project folder, its model
     /// as `provider/model`, and its usable window.
     pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
@@ -314,8 +340,10 @@ impl Session {
     pub fn durable(&self) -> crate::store::Durable {
         crate::store::Durable {
             compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
+            preset: (!self.tools_only).then(|| self.preset.as_str().to_owned()),
             pending_keep: self.pending_keep.clone(),
             head_stale: self.head_stale,
+            reminder_counter: self.reminder_counter,
             version: self.version,
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
@@ -336,12 +364,20 @@ impl Session {
     /// Take back what a previous ck-mc process saved for the session.
     pub fn restore(&mut self, durable: crate::store::Durable) {
         self.tools_only = false;
+        if let Some(preset) = durable
+            .preset
+            .as_deref()
+            .and_then(crate::catalog::Preset::parse)
+        {
+            self.preset = preset;
+        }
         if let Some((features, conditions)) = durable.compaction {
             self.features = features;
             self.conditions = conditions;
         }
         self.pending_keep = durable.pending_keep;
         self.head_stale = durable.head_stale;
+        self.reminder_counter = durable.reminder_counter;
         self.version = durable.version;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
@@ -401,6 +437,7 @@ impl Session {
         features: Features,
     ) {
         self.features = features;
+        self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");
         self.tools_only = false;
         self.conditions = conditions_of(request);
         self.project = route.project.clone();
@@ -1210,14 +1247,37 @@ impl Session {
             let Some(template) = template else {
                 continue;
             };
-            let request = reminder(format!("{kind}:{}", self.seq), template, kind, mode);
+            if kind == crate::nudges::CEILING_KIND {
+                self.nudges.ceiling_sent = false;
+            }
+            let Some(send_id) = self.next_reminder_id(kind) else {
+                continue;
+            };
+            let request = reminder(send_id, template, kind, mode);
             if let Err(error) = client.send(&self.key, request).await {
                 eprintln!(
                     "ck-mc: session {}: session.send failed: {error:?}",
                     self.key.session
                 );
+            } else if kind == crate::nudges::CEILING_KIND {
+                self.nudges.ceiling_sent = true;
             }
         }
+    }
+
+    /// Reserve the id before delivery: a crash after sending must not let a
+    /// restarted process reuse an id the runner already accepted.
+    /// The namespace keeps new ids distinct from persisted runner keys that
+    /// used notice numbers or view versions instead of a counter.
+    fn next_reminder_id(&mut self, kind: &str) -> Option<String> {
+        self.reminder_counter = self.reminder_counter.checked_add(1)?;
+        if let Some(store) = &self.store {
+            if let Err(error) = store.save(&self.key, &self.durable()) {
+                eprintln!("ck-mc: {error}");
+                return None;
+            }
+        }
+        Some(format!("{kind}:counter:{}", self.reminder_counter))
     }
 
     /// After a pass at the execute threshold, a session with `ctx_keep` whose
@@ -1242,10 +1302,13 @@ impl Session {
             return;
         }
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
-        // One request per stay over the threshold, so the view version that
-        // crossed it names it.
+        // One request per stay over the threshold, with a durable send id
+        // independent of the view version that crossed it.
+        let Some(send_id) = self.next_reminder_id(KEEP_KIND) else {
+            return;
+        };
         let request = reminder(
-            format!("{KEEP_KIND}:{}", self.version),
+            send_id,
             crate::nudges::keep_request(usage, freed),
             KEEP_KIND,
             Mode::Steer,
@@ -1307,7 +1370,7 @@ impl Session {
             "ctx_reduce" | "ctx_expand" | "ctx_keep" if self.tools_only => Err(format!(
                 "{name} works only in a session Magic Context compacts."
             )),
-            "ctx_reduce" => self.ctx_reduce(input),
+            "ctx_reduce" => self.ctx_reduce(client, input).await,
             "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
             "ctx_memory" => {
                 let db = self
@@ -1489,7 +1552,21 @@ impl Session {
             cutoff: self
                 .summaries
                 .last()
-                .map_or(0, |summary| summary.end_message),
+                .map_or(i64::MAX, |summary| summary.end_message),
+            visible_messages: (self.summaries.is_empty() && !self.tools_only).then(|| {
+                let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+                self.index
+                    .entries()
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .parts
+                            .iter()
+                            .any(|part| !edited.covers(&entry.mid, &part.id))
+                    })
+                    .map(|entry| entry.ordinal as i64)
+                    .collect()
+            }),
             seen: self
                 .baseline
                 .as_ref()
@@ -1534,26 +1611,59 @@ impl Session {
         let Some(db) = &self.db else {
             return answer;
         };
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_millis(crate::pre_user::AUTO_SEARCH_TIMEOUT_MS);
         let search = async {
             let embedded = match &settings.embedding {
-                Some(provider) => provider
-                    .embed_query(&prompt)
-                    .await
-                    .map(|vector| (vector, provider.model_id(), provider.chunk_model_id())),
+                Some(provider) => tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    provider.embed_query(&prompt),
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|vector| (vector, provider.model_id(), provider.chunk_model_id())),
                 None => None,
             };
             let empty = std::collections::BTreeMap::new();
-            let mut scope = self.search_scope(settings, &empty);
-            scope.semantic = embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
-                crate::search::sources::Semantic {
-                    vector,
-                    model_id,
-                    chunk_model_id,
-                }
-            });
-            db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
+            let scope = self.search_scope(settings, &empty);
+            let cutoff = scope.cutoff;
+            let visible_messages = scope.visible_messages;
+            let seen = scope.seen.clone();
+            let key = self.key.clone();
+            let project = self.project.clone();
+            let (memory_enabled, git_commits_enabled, git_repository) = (
+                scope.memory_enabled,
+                scope.git_commits_enabled,
+                scope.git_repository,
+            );
+            let (db, prompt) = (db.clone(), prompt.clone());
+            // SQLite and its connection mutex are synchronous. Keep both off
+            // the session worker so the deadline can expire during the read.
+            tokio::task::spawn_blocking(move || {
+                let scope = crate::search::Scope {
+                    harness: &key.harness,
+                    session: &key.session,
+                    project: project.as_ref().map(|project| project.id.as_str()),
+                    cutoff,
+                    visible_messages,
+                    seen: &seen,
+                    memory_enabled,
+                    git_commits_enabled,
+                    git_repository,
+                    semantic: embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
+                        crate::search::sources::Semantic {
+                            vector,
+                            model_id,
+                            chunk_model_id,
+                        }
+                    }),
+                };
+                db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
+            })
+            .await
+            .unwrap_or_default()
         };
-        let deadline = std::time::Duration::from_millis(crate::pre_user::AUTO_SEARCH_TIMEOUT_MS);
         let Ok(hits) = tokio::time::timeout(deadline, search).await else {
             eprintln!(
                 "ck-mc: session {}: memory search took too long; the message has no hint",
@@ -1561,6 +1671,9 @@ impl Session {
             );
             return answer;
         };
+        if started.elapsed() >= deadline {
+            return answer;
+        }
         answer.append =
             crate::search::build_hint(hits, auto.score_threshold, &prompt, now_ms as i64)
                 .map(|hint| format!("\n\n{hint}"));
@@ -1612,7 +1725,7 @@ impl Session {
                 list(&kept_tags)
             )
         };
-        answer.push_str(" Everything else before this call is removed before your next step.");
+        answer.push_str(" Messages from the person also stay. Everything else before this call is removed before your next step.");
         if !over.is_empty() {
             answer.push_str(&format!(
                 " Not kept, over the limit of {cap} tokens: {}.",
@@ -1626,45 +1739,107 @@ impl Session {
         Ok(answer)
     }
 
-    fn ctx_reduce(&mut self, input: &Value) -> Result<String, String> {
-        let spec = input
+    async fn ctx_reduce<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        input: &Value,
+    ) -> Result<String, String> {
+        let Some(spec) = input
             .get("drop")
             .and_then(Value::as_str)
-            .ok_or("ctx_reduce needs `drop`, a list of tag numbers such as \"3-5,8\"")?;
-        let tags = reduce::parse_tags(spec)?;
-        let first_mid = self.index.entries().first().map(|entry| entry.mid.clone());
-        let mut queued = Vec::new();
-        let mut missing = Vec::new();
-        for tag in tags {
-            match self.index.find_tag(tag) {
-                // The first message of a session that keeps it is its task.
-                // It is answered like any other tag and never dropped:
-                // refusing would only cost the model another turn.
-                Some((entry, _))
-                    if self.features.keep_first_message
-                        && Some(&entry.mid) == first_mid.as_ref() =>
-                {
-                    queued.push(tag);
-                }
-                Some((entry, part)) => {
-                    self.queued.insert((entry.mid.clone(), part.id.clone()));
-                    queued.push(tag);
-                }
-                None => missing.push(tag),
-            }
-        }
-        if !queued.is_empty() {
-            self.nudges.reduced();
-        }
-        if queued.is_empty() && !missing.is_empty() {
-            return Err(format!(
-                "no valid tags to queue: {} not found",
-                list(&missing)
+            .filter(|spec| !spec.is_empty())
+        else {
+            return Ok("Error: 'drop' must be provided as a string of tag numbers, for example {\"drop\": \"3-5,8\"}.".into());
+        };
+        let tags = match reduce::parse_tags(spec) {
+            Ok(tags) => tags,
+            Err(error) => return Ok(format!("Error: Invalid range syntax. {error}")),
+        };
+        // The bounded live index no longer holds compacted tags. Ask the raw
+        // transcript for missing handles before classifying them as unknown.
+        let missing: Vec<_> = tags
+            .iter()
+            .copied()
+            .filter(|tag| self.index.find_tag(*tag).is_none())
+            .collect();
+        let archived = if missing.is_empty() {
+            Vec::new()
+        } else {
+            crate::reads::by_tags(client, &self.key, missing).await?
+        };
+        let find = |tag: u64| {
+            self.index.find_tag(tag).or_else(|| {
+                archived.iter().find_map(|entry| {
+                    entry
+                        .parts
+                        .iter()
+                        .find(|part| part.tag == Some(tag))
+                        .map(|part| (entry, part))
+                })
+            })
+        };
+        let unknown: Vec<_> = tags
+            .iter()
+            .copied()
+            .filter(|tag| find(*tag).is_none())
+            .collect();
+        if !unknown.is_empty() {
+            return Ok(format!(
+                "Error: Unknown tag(s) {}. Check available tags in conversation.",
+                list(&unknown)
             ));
         }
-        let mut answer = format!("Queued {} for removal.", list(&queued));
-        if !missing.is_empty() {
-            answer.push_str(&format!(" Not found: {}.", list(&missing)));
+        let mut self_stamps = 0;
+        let mut skipped = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut selected = Vec::new();
+        for tag in tags {
+            let (entry, part) = find(tag).expect("all tags resolved");
+            if matches!(&part.body, PartBody::Tool(tool) if tool.name.eq_ignore_ascii_case("ctx_reduce"))
+            {
+                self_stamps += 1;
+            } else if entry.role == cortexkit_role_compaction::read::Role::Assistant
+                && matches!(&part.body, PartBody::Text { text } if text.trim().is_empty())
+            {
+                skipped.push(format!("§{tag}§ is provider framing, nothing to reclaim"));
+            } else if self.cut.is_some_and(|cut| entry.ordinal <= cut) {
+                conflicts.push(format!("§{tag}§ is from before compaction"));
+            } else {
+                selected.push((entry.mid.clone(), part.id.clone()));
+            }
+        }
+        if !conflicts.is_empty() {
+            return Ok(format!(
+                "Error: Conflicting operations — {}.",
+                conflicts.join("; ")
+            ));
+        }
+        let first_mid = self.index.entries().first().map(|entry| entry.mid.clone());
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let stamped = selected.len();
+        let mut added = false;
+        for (mid, part) in selected {
+            if (self.features.keep_first_message && Some(&mid) == first_mid.as_ref())
+                || edited.covers(&mid, &part)
+            {
+                continue;
+            }
+            added |= self.queued.insert((mid, part));
+        }
+        if added {
+            self.nudges.reduced();
+        }
+        let mut answer = reduce::reply(stamped, self_stamps);
+        if !skipped.is_empty() {
+            if !answer.is_empty() {
+                answer.push(' ');
+            }
+            answer.push_str(&format!("Skipped: {}.", skipped.join("; ")));
+        }
+        if answer.is_empty() {
+            answer =
+                "All requested tags were already queued or processed. No new action is needed."
+                    .into();
         }
         Ok(answer)
     }
@@ -1719,11 +1894,19 @@ impl Session {
         // profile, as the standalone plugin's does. The user profile is the
         // person's, read whatever the session's project.
         let mut memories = Vec::new();
+        let mut workspace = None;
         let (mut profile, mut profile_max_id) = (Vec::new(), 0);
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
             if let Some(project) = &self.project {
-                match db.project_memories(&project.id, now) {
-                    Ok(read) => memories = read,
+                match db.with_connection(|conn| {
+                    let resolved = crate::workspace::Workspace::resolve(conn, &project.id)?;
+                    let read = resolved.memories(conn, now, true)?;
+                    Ok::<_, rusqlite::Error>((resolved, read))
+                }) {
+                    Ok((resolved, read)) => {
+                        workspace = Some(resolved);
+                        memories = read;
+                    }
                     Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
                 }
             }
@@ -1743,6 +1926,7 @@ impl Session {
             profile: &profile,
             profile_max_id,
             memories: &memories,
+            workspace: workspace.as_ref(),
             gone: &[],
             history_budget_tokens,
             history_local_budget_tokens: crate::summary::render::history_local_budget(
@@ -1826,7 +2010,7 @@ impl Session {
         head::Shape {
             memory_enabled: settings.memory_enabled,
             memory_budget_tokens: settings.memory_budget_tokens,
-            history_budget_tokens: (self.conditions.context_window as f64
+            history_budget_tokens: (crate::pass::usable_window(&self.conditions) as f64
                 * settings.execute_threshold_percentage
                 / 100.0
                 * settings.history_budget_percentage) as u64,
@@ -2675,3 +2859,47 @@ fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn history_budget_uses_output_reserved_window() {
+        use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+        use cortexkit_role_compaction::setup::ModelRef;
+        let route = Route {
+            session: SessionRef::new("runner", "test", "budget"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let request = SetupRequest::new(
+            "config-test",
+            ModelRef::new("test", "model"),
+            200_000,
+            32_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            0,
+        );
+        let session = Session::new(&route, &request, crate::preset::Features::NONE, None);
+        assert_eq!(
+            session
+                .head_shape(&Settings::default())
+                .history_budget_tokens,
+            16_380
+        );
+        let settings = crate::config::resolve_for_test(
+            serde_json::json!({"execute_threshold_tokens": {"default": 84000}}),
+            serde_json::json!({}),
+            "test/model",
+            168_000,
+        );
+        assert_eq!(session.head_shape(&settings).history_budget_tokens, 12_600);
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/agent_surface.rs"]
+mod agent_surface_tests;

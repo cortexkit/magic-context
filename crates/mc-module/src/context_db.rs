@@ -514,19 +514,35 @@ impl ContextDb {
     /// Dismiss a note the scope may change. False when it is not there or
     /// already dismissed.
     pub fn dismiss_note(&self, id: i64, scope: &NoteScope, now_ms: i64) -> Result<bool, String> {
-        if self
-            .note_in_scope(id, scope)?
-            .is_none_or(|note| note.status == "dismissed")
-        {
-            return Ok(false);
-        }
-        self.lock()
-            .execute(
-                "UPDATE notes SET status = 'dismissed', updated_at = ?2 WHERE id = ?1",
-                params![id, now_ms],
-            )
-            .map(|changed| changed == 1)
-            .map_err(|error| error.to_string())
+        self.dismiss_notes(&[id], scope, now_ms)
+            .map(|outcomes| outcomes[0].1)
+    }
+
+    /// Dismiss the batch in one transaction, so a failed write leaves no
+    /// earlier note dismissed. Each update enforces the caller's scope.
+    pub fn dismiss_notes(
+        &self,
+        ids: &[i64],
+        scope: &NoteScope,
+        now_ms: i64,
+    ) -> Result<Vec<(i64, bool)>, String> {
+        self.with_connection(|conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut outcomes = Vec::new();
+            for id in ids {
+                let changed = tx.execute(
+                    "UPDATE notes SET status = 'dismissed', updated_at = ?2
+                     WHERE id = ?1 AND status != 'dismissed'
+                       AND ((type = 'session' AND session_id = ?3 AND harness = ?4)
+                         OR (type = 'smart' AND project_path = ?5))",
+                    params![id, now_ms, scope.session, scope.harness, scope.project],
+                )?;
+                outcomes.push((*id, changed == 1));
+            }
+            tx.commit()?;
+            Ok::<_, rusqlite::Error>(outcomes)
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// Replace a note's text. False when the scope may not change it.

@@ -103,7 +103,7 @@ fn fixture() -> (Session, Client, Route, SetupRequest, Settings) {
         agent_id: None,
     };
     let request = SetupRequest::new(
-        "test",
+        crate::catalog::Preset::Worker.as_str(),
         ModelRef::new("test", "model"),
         100_000,
         1000,
@@ -235,6 +235,20 @@ fn lifecycle_pending_keep_survives_serialization() {
 }
 
 #[test]
+fn lifecycle_restored_worker_keeps_its_catalog_tool_policy() {
+    let (mut session, _, _, _, _) = fixture();
+    session.preset = crate::catalog::Preset::Worker;
+    let (mut restored, _, _, _, _) = fixture();
+    restored.preset = crate::catalog::Preset::Head;
+    restored.restore(session.durable());
+    let config = crate::config::Config::from(Settings::default()).catalog_config(None);
+    assert!(
+        restored.serves_tool("ctx_keep", &config),
+        "restoring a worker changed its catalog policy"
+    );
+}
+
+#[test]
 fn lifecycle_head_retry_survives_serialization() {
     let (mut session, _, _, _, _) = fixture();
     session.head_stale = true;
@@ -269,7 +283,14 @@ async fn lifecycle_a_transcript_shorter_than_the_saved_cut_can_grow_again() {
     let mut request = notice(&session, 1, Some(cursor(&text(7, "m7"))));
     request.entries = vec![text(6, "m6"), text(7, "m7")];
     session.notice(&client, &settings, request).await;
-    assert!(session.ctx_reduce(&serde_json::json!({"drop":"6"})).is_ok());
+    let answer = session
+        .ctx_reduce(&client, &serde_json::json!({"drop":"6"}))
+        .await
+        .unwrap();
+    assert!(
+        session.queued.contains(&("m6".into(), "p".into())),
+        "{answer}"
+    );
     assert_eq!(session.cut, None);
 }
 
@@ -302,10 +323,14 @@ async fn lifecycle_a_second_shrink_below_the_cut_stops_catchup() {
 
 fn scratch(label: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/scratch")
         .join(format!(
-            "lifecycle-{label}-{}-{}",
+            "lifecycle-{label}-{}-{now}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));

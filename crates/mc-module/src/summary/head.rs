@@ -44,6 +44,7 @@ pub struct Inputs<'a> {
     pub profile_max_id: i64,
     /// Every project memory that may be shown.
     pub memories: &'a [StoredMemory],
+    pub workspace: Option<&'a crate::workspace::Workspace>,
     /// The current rows of memories the head shows that are no longer in
     /// `memories` (archived, merged away or expired).
     pub gone: &'a [StoredMemory],
@@ -193,7 +194,14 @@ pub fn fold(inputs: &Inputs) -> Baseline {
         },
         mc_tokenizer::estimate_tokens,
     );
-    let memories = memory::trim_to_budget(inputs.memories.to_vec(), inputs.memory_budget_tokens);
+    let memories = match inputs.workspace {
+        Some(workspace) => memory::trim_workspace_to_budget(
+            inputs.memories.to_vec(),
+            inputs.memory_budget_tokens,
+            workspace,
+        ),
+        None => memory::trim_to_budget(inputs.memories.to_vec(), inputs.memory_budget_tokens),
+    };
     let profile = memory::trim_profile(inputs.profile.to_vec(), inputs.profile_budget_tokens);
     let mut sections = Vec::new();
     if !inputs.docs.is_empty() {
@@ -204,7 +212,8 @@ pub fn fold(inputs: &Inputs) -> Baseline {
         sections.push(profile_block);
     }
     sections.push(history);
-    let memory_block = memory::render_block(&memories, "project-memory");
+    let memory_block =
+        memory::render_workspace_block(&memories, "project-memory", inputs.workspace);
     if !memory_block.is_empty() {
         sections.push(memory_block);
     }
@@ -307,7 +316,14 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
             (Some(memory), Shown::Text { text }) if memory.content == *text => {}
             (Some(memory), _) => out.push(Change {
                 id: *id,
-                line: memory::updated_line(*id, Some(&memory.category), &memory.content),
+                line: memory::updated_line(
+                    *id,
+                    Some(&memory.category),
+                    &memory.content,
+                    inputs
+                        .workspace
+                        .and_then(|workspace| workspace.source_name(&memory.project_path)),
+                ),
                 after: Shown::Text {
                     text: memory.content.clone(),
                 },
@@ -334,7 +350,14 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
         if memory.id > baseline.max_memory_id && !baseline.shown.contains_key(&memory.id) {
             out.push(Change {
                 id: memory.id,
-                line: memory::added_line(memory.id, Some(&memory.category), &memory.content),
+                line: memory::added_line(
+                    memory.id,
+                    Some(&memory.category),
+                    &memory.content,
+                    inputs
+                        .workspace
+                        .and_then(|workspace| workspace.source_name(&memory.project_path)),
+                ),
                 after: Shown::Text {
                     text: memory.content.clone(),
                 },
@@ -634,6 +657,7 @@ mod tests {
 
     fn inputs<'a>(summaries: &'a [StoredCompartment], memories: &'a [StoredMemory]) -> Inputs<'a> {
         Inputs {
+            workspace: None,
             summaries,
             docs: "",
             profile: &[],

@@ -595,7 +595,7 @@ fn one_of(value: &Value, allowed: &[&str]) -> bool {
     value.as_str().is_some_and(|value| allowed.contains(&value))
 }
 
-fn served_tools(
+pub(crate) fn served_tools(
     preset: Preset,
     compacting: bool,
     params: &Map<String, Value>,

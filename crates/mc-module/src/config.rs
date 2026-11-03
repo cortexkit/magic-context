@@ -1,12 +1,13 @@
 //! Magic Context's configuration, read the way the plugin reads it.
 //!
-//! Two files: the user's (`magic-context.jsonc` in `$XDG_CONFIG_HOME/cortexkit`,
+//! Two files: the user's (`MAGIC_CONTEXT_CONFIG_PATH`, else `magic-context.jsonc` in `$XDG_CONFIG_HOME/cortexkit`,
 //! else `~/.config/cortexkit`) and the project's (`.cortexkit/magic-context.jsonc`
 //! in the project folder). Both may be JSON with comments.
 //!
 //! A project file comes with a cloned repository, so it may not make a session
 //! spend more or send private text somewhere else. The plugin's trust rules
-//! (`config/project-security.ts`) apply here unchanged:
+//! (`config/project-security.ts`) apply here, with a stricter resolved-value
+//! floor so more-specific project keys cannot lower a user's threshold:
 //! - a project may raise the execute threshold and `protected_tokens`, never
 //!   lower them, and may only raise a token threshold the user already set;
 //! - `{env:…}` and `{file:…}` are expanded in the user file only;
@@ -16,13 +17,16 @@
 //! Each file is re-read when its modification time changes, so an edit
 //! applies from the session's next pass without a restart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+mod jsonc;
 
 use crate::embedding;
 use crate::pass::Settings;
@@ -74,8 +78,10 @@ impl Config {
 
 #[derive(Default)]
 struct Cached {
+    initialized: bool,
     modified: Option<SystemTime>,
     value: Option<Value>,
+    warned: HashSet<String>,
 }
 
 /// Reads the two files, keeping each parsed copy until the file changes.
@@ -87,10 +93,37 @@ pub struct Loader {
 impl Loader {
     /// The user file chosen the way the plugin chooses it.
     pub fn from_environment() -> Self {
-        Self::with_user_path(user_config_path(
+        Self::from_paths(
+            std::env::var_os("MAGIC_CONTEXT_CONFIG_PATH"),
             std::env::var_os("XDG_CONFIG_HOME"),
             home_dir(),
-        ))
+        )
+        .expect("invalid Magic Context user config path")
+    }
+
+    fn from_paths(
+        explicit: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+        home: Option<PathBuf>,
+    ) -> Result<Self, &'static str> {
+        let path = match explicit {
+            Some(path) => {
+                let path = PathBuf::from(
+                    path.to_str()
+                        .ok_or("MAGIC_CONTEXT_CONFIG_PATH must be UTF-8")?
+                        .trim(),
+                );
+                if !path.is_absolute() {
+                    return Err("MAGIC_CONTEXT_CONFIG_PATH must be an absolute path to a user config file (not blank)");
+                }
+                if !path.exists() {
+                    eprintln!("ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found: {}; continuing without user config (no XDG or legacy fallback)", path.display());
+                }
+                path
+            }
+            None => user_config_path(xdg, home),
+        };
+        Ok(Self::with_user_path(path))
     }
 
     pub fn with_user_path(user_path: PathBuf) -> Self {
@@ -129,24 +162,52 @@ impl Loader {
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
+        self.read_with_warning(path, &mut |warning| eprintln!("ck-mc: {warning}"))
+    }
+
+    fn read_with_warning(&self, path: &Path, warn: &mut dyn FnMut(String)) -> Option<Value> {
         let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok();
         let mut cache = self.cache.lock().expect("config cache");
         let entry = cache.entry(path.to_path_buf()).or_default();
-        if entry.modified != modified || (modified.is_some() && entry.value.is_none()) {
+        if !entry.initialized || entry.modified != modified {
+            let initial = !entry.initialized;
+            entry.initialized = true;
             entry.modified = modified;
-            entry.value =
-                fs::read_to_string(path)
-                    .ok()
-                    .and_then(|raw| match parse_config_text(&raw) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            eprintln!(
-                                "ck-mc: {}: {error}; using defaults for this file",
-                                path.display()
-                            );
-                            None
+            match fs::read_to_string(path) {
+                Ok(raw) => {
+                    let mut parsed = jsonc::parse(&raw);
+                    if !parsed.value.is_object() {
+                        if !initial && parsed.issue.is_none() {
+                            parsed.issue = Some("1:1: expected an object".to_owned());
                         }
-                    });
+                        parsed.value = Value::Object(serde_json::Map::new());
+                    }
+                    if let Some(issue) = parsed.issue {
+                        let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+                        if entry.warned.insert(digest) {
+                            let recovery = if !initial {
+                                "keeping the previous configuration for this file."
+                            } else if parsed.value.as_object().is_some_and(|map| !map.is_empty()) {
+                                "recovered values were applied, but the file must be fixed."
+                            } else {
+                                "using defaults for this file."
+                            };
+                            warn(format!("{}:{issue}; {recovery}", path.display()));
+                        }
+                        if initial {
+                            entry.value = Some(parsed.value);
+                        }
+                    } else {
+                        entry.value = Some(parsed.value);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => entry.value = None,
+                Err(error) => {
+                    if entry.warned.insert(error.to_string()) {
+                        warn(format!("{}: failed to read config: {error}; keeping the previous configuration for this file.", path.display()));
+                    }
+                }
+            }
         }
         entry.value.clone()
     }
@@ -171,45 +232,60 @@ fn resolve_tiers(
     let mut reasoning: Option<Value> = None;
     for tier in [user, project] {
         if let Some(value) = tier.get("keep_reasoning_tokens") {
-            let valid = |value: &Value| value.as_u64().is_some_and(|n| n <= 1_000_000);
-            let is_valid =
-                valid(value) || value.as_object().is_some_and(|map| map.values().all(valid));
-            if !is_valid {
-                continue;
-            }
-            match (&mut reasoning, value) {
+            let valid = |value: &Value| integer(value).is_some_and(|n| n <= 1_000_000);
+            let value = match value {
+                Value::Object(map) => Value::Object(
+                    map.iter()
+                        .filter(|(_, value)| valid(value))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+                value if valid(value) => value.clone(),
+                _ => continue,
+            };
+            match (&mut reasoning, &value) {
                 (Some(Value::Object(existing)), Value::Object(overrides)) => {
                     existing.extend(overrides.clone());
                 }
-                _ => reasoning = Some(value.clone()),
+                _ => reasoning = Some(value),
             }
         }
     }
     settings.keep_reasoning_tokens = match reasoning {
-        Some(Value::Object(map)) => model_value(&map, model_key)
-            .and_then(Value::as_u64)
+        Some(Value::Object(map)) => reasoning_value(&map, model_key)
+            .and_then(integer)
             .unwrap_or(DEFAULT_KEEP_REASONING_TOKENS),
-        Some(value) => value.as_u64().unwrap_or(DEFAULT_KEEP_REASONING_TOKENS),
+        Some(value) => integer(&value).unwrap_or(DEFAULT_KEEP_REASONING_TOKENS),
         None => DEFAULT_KEEP_REASONING_TOKENS,
     };
 
     let protected_tokens = |tier: &Value| {
         tier.get("protected_tokens")
-            .and_then(Value::as_u64)
+            .and_then(integer)
             .filter(|tokens| (4_000..=1_000_000).contains(tokens))
     };
-    settings.protected_tokens = match (protected_tokens(user), protected_tokens(project)) {
-        (user, Some(project)) if user.is_none_or(|user| project >= user) => Some(project),
-        (user, _) => user,
+    let user_protected = protected_tokens(user);
+    let project_protected = protected_tokens(project);
+    // The derived floor depends on the runner's usable window, not the file.
+    // Keep the tiers separate until that geometry is available here.
+    settings.protected_tokens = match project_protected {
+        Some(project)
+            if project
+                >= user_protected
+                    .unwrap_or_else(|| crate::lanes::default_protected_tokens(usable)) =>
+        {
+            Some(project)
+        }
+        _ => user_protected,
     };
 
     for tier in [user, project] {
         if let Some(map) = tier.get("protected_tools").and_then(Value::as_object) {
             for (name, count) in map {
-                if let Some(count) = count.as_u64() {
+                if let Some(count) = integer(count) {
                     settings
                         .protected_tools
-                        .insert(name.trim().to_lowercase(), count);
+                        .insert(crate::lanes::normalize_tool_name(name), count);
                 }
             }
         }
@@ -306,7 +382,7 @@ fn commit_clusters(user: &Value, project: &Value) -> Option<u64> {
         }
         if let Some(clusters) = tier
             .pointer("/commit_cluster_trigger/min_clusters")
-            .and_then(Value::as_u64)
+            .and_then(integer)
             .filter(|clusters| *clusters >= 1)
         {
             min = clusters;
@@ -333,7 +409,7 @@ fn caveman(user: &Value, project: &Value) -> Option<crate::pass::Caveman> {
         }
         if let Some(chars) = tier
             .pointer("/caveman_text_compression/min_chars")
-            .and_then(Value::as_u64)
+            .and_then(integer)
             .filter(|chars| (100..=10_000).contains(chars))
         {
             min_chars = chars;
@@ -525,40 +601,95 @@ fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64
                 .contains(percentage)
         })
     };
-    let lookup = |map: &serde_json::Map<String, Value>, valid: &dyn Fn(&Value) -> Option<f64>| {
-        let kept: serde_json::Map<String, Value> = map
-            .iter()
+    let valid_map = |value: Option<&Value>,
+                     valid: &dyn Fn(&Value) -> Option<f64>|
+     -> serde_json::Map<String, Value> {
+        value
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
             .filter(|(_, value)| valid(value).is_some())
             .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        model_value(&kept, model_key).and_then(valid)
+            .collect()
     };
-    let tokens = |tier: &Value| -> Option<f64> {
-        let map = tier.get("execute_threshold_tokens")?.as_object()?;
-        lookup(map, &valid_tokens)
-    };
+    let user_tokens = valid_map(user.get("execute_threshold_tokens"), &valid_tokens);
     if usable > 0 {
-        if let Some(user_tokens) = tokens(user) {
-            let chosen = tokens(project).map_or(user_tokens, |project| project.max(user_tokens));
+        if let Some(user_value) = model_value(&user_tokens, model_key).and_then(valid_tokens) {
+            let project_tokens = valid_map(project.get("execute_threshold_tokens"), &valid_tokens);
+            let merged = raised_threshold_map(&user_tokens, &project_tokens);
+            let chosen = model_value(&merged, model_key)
+                .and_then(valid_tokens)
+                .unwrap_or(user_value)
+                .max(user_value);
             let cap = usable as f64 * MAX_EXECUTE_THRESHOLD_PERCENTAGE / 100.0;
             return (chosen.min(cap) / usable as f64 * 100.0).min(MAX_EXECUTE_THRESHOLD_PERCENTAGE);
         }
     }
-    let percentage = |tier: &Value, fallback: f64| -> Option<f64> {
-        let value = tier.get("execute_threshold_percentage")?;
-        Some(
-            match value {
-                Value::Object(map) => lookup(map, &valid_percentage),
-                other => valid_percentage(other),
-            }
-            .unwrap_or(fallback),
-        )
-    };
-    let user_value = percentage(user, DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
+    let mut user_percentages =
+        valid_map(user.get("execute_threshold_percentage"), &valid_percentage);
+    let default = user
+        .get("execute_threshold_percentage")
+        .and_then(valid_percentage)
         .unwrap_or(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE);
-    let chosen =
-        percentage(project, user_value).map_or(user_value, |project| project.max(user_value));
+    user_percentages
+        .entry("default")
+        .or_insert_with(|| Value::from(default));
+    let user_value = model_value(&user_percentages, model_key)
+        .and_then(valid_percentage)
+        .unwrap_or(default);
+    let chosen = if let Some(scalar) = project
+        .get("execute_threshold_percentage")
+        .and_then(valid_percentage)
+    {
+        user_value.max(scalar)
+    } else {
+        let project_percentages = valid_map(
+            project.get("execute_threshold_percentage"),
+            &valid_percentage,
+        );
+        let merged = raised_threshold_map(&user_percentages, &project_percentages);
+        // A new, more-specific project key must not bypass the user's resolved
+        // floor, even if it passed the literal-key comparison above.
+        model_value(&merged, model_key)
+            .and_then(valid_percentage)
+            .unwrap_or(user_value)
+            .max(user_value)
+    };
     chosen.min(MAX_EXECUTE_THRESHOLD_PERCENTAGE)
+}
+
+/// Merge already-validated threshold maps. A project default only replaces
+/// the user default; model overrides retain their own baselines.
+fn raised_threshold_map(
+    user: &serde_json::Map<String, Value>,
+    project: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut merged = user.clone();
+    if let (Some(base), Some(value)) = (
+        user.get("default").and_then(Value::as_f64),
+        project.get("default").and_then(Value::as_f64),
+    ) {
+        if value > base {
+            merged.insert("default".into(), Value::from(value));
+        }
+    }
+    for (key, value) in project {
+        if key == "default" {
+            continue;
+        }
+        let base = user
+            .get(key)
+            .or_else(|| user.get("default"))
+            .and_then(Value::as_f64);
+        if base.is_some_and(|base| value.as_f64().is_some_and(|value| value > base)) {
+            if value.as_f64() == merged.get("default").and_then(Value::as_f64) {
+                merged.remove(key);
+            } else {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    merged
 }
 
 /// A per-model setting's value for `model_key`, falling back to `default`.
@@ -567,6 +698,45 @@ fn model_value<'a>(map: &'a serde_json::Map<String, Value>, model_key: &str) -> 
         .iter()
         .find_map(|key| map.get(key))
         .or_else(|| map.get("default"))
+}
+
+fn reasoning_value<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    model_key: &str,
+) -> Option<&'a Value> {
+    let keys = model_key_lookup_order(model_key);
+    keys.iter()
+        .find_map(|key| map.get(key))
+        .or_else(|| {
+            let mut providers = Vec::new();
+            for key in &keys {
+                if let Some((provider, _)) = key.split_once('/') {
+                    if !providers.contains(&provider) {
+                        providers.push(provider);
+                    }
+                }
+            }
+            providers
+                .into_iter()
+                .find_map(|provider| map.get(&format!("{provider}/*")))
+        })
+        .or_else(|| map.get("default"))
+}
+
+/// JSON has one number type: an integral floating-point spelling is still
+/// an integer, while fractional and negative values are not token counts.
+pub(crate) fn integer(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|number| {
+                number.is_finite()
+                    && *number >= 0.0
+                    && number.fract() == 0.0
+                    && *number < u64::MAX as f64
+            })
+            .map(|number| number as u64)
+    })
 }
 
 /// The keys a per-model setting is looked up under, most specific first: the
@@ -623,18 +793,29 @@ fn in_range(value: &Value, pointer: &str, min: f64, max: f64) -> Option<f64> {
 /// `{env:NAME}` and `{file:path}` in every string of the user file. A relative
 /// file path is read from the user file's folder, `~/` from the home folder;
 /// a missing variable or file becomes empty text, as in the plugin.
-fn expand_user(mut value: Value, user_path: &Path) -> Value {
+fn expand_user(value: Value, user_path: &Path) -> Value {
+    expand_user_with(value, user_path, home_dir().as_deref(), &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn expand_user_with(
+    mut value: Value,
+    user_path: &Path,
+    home: Option<&Path>,
+    env_value: &dyn Fn(&str) -> Option<String>,
+) -> Value {
     match &mut value {
         Value::String(text) if text.contains('{') => {
             let env = regex::Regex::new(r"\{env:([^}]*)\}").expect("env pattern");
             let file = regex::Regex::new(r"\{file:([^}]*)\}").expect("file pattern");
             let expanded = env.replace_all(text, |caps: &regex::Captures<'_>| {
-                std::env::var(caps[1].trim()).unwrap_or_default()
+                env_value(caps[1].trim()).unwrap_or_default()
             });
             let expanded = file.replace_all(&expanded, |caps: &regex::Captures<'_>| {
                 let name = caps[1].trim();
                 let path = match name.strip_prefix("~/") {
-                    Some(rest) => home_dir().unwrap_or_default().join(rest),
+                    Some(rest) => home.unwrap_or(Path::new("")).join(rest),
                     None => user_path.parent().unwrap_or(Path::new(".")).join(name),
                 };
                 fs::read_to_string(path)
@@ -645,12 +826,12 @@ fn expand_user(mut value: Value, user_path: &Path) -> Value {
         }
         Value::Object(map) => {
             for entry in map.values_mut() {
-                *entry = expand_user(entry.take(), user_path);
+                *entry = expand_user_with(entry.take(), user_path, home, env_value);
             }
         }
         Value::Array(list) => {
             for entry in list {
-                *entry = expand_user(entry.take(), user_path);
+                *entry = expand_user_with(entry.take(), user_path, home, env_value);
             }
         }
         _ => {}
@@ -696,85 +877,6 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     non_empty("HOME").or_else(|| std::env::home_dir().filter(|home| !home.as_os_str().is_empty()))
 }
 
-/// One file's text as JSON: a leading byte-order mark, comments and trailing
-/// commas are allowed.
-fn parse_config_text(raw: &str) -> Result<Value, serde_json::Error> {
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    serde_json::from_str(&strip_jsonc(raw))
-}
-
-/// Remove `//` and `/* */` comments and trailing commas, leaving string
-/// literals untouched.
-fn strip_jsonc(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    let skip_comment = |chars: &[char], mut k: usize| -> Option<usize> {
-        match (chars.get(k), chars.get(k + 1)) {
-            (Some('/'), Some('/')) => {
-                while k < chars.len() && chars[k] != '\n' {
-                    k += 1;
-                }
-                Some(k)
-            }
-            (Some('/'), Some('*')) => {
-                k += 2;
-                while k + 1 < chars.len() && !(chars[k] == '*' && chars[k + 1] == '/') {
-                    k += 1;
-                }
-                Some((k + 2).min(chars.len()))
-            }
-            _ => None,
-        }
-    };
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if let Some(next) = skip_comment(&chars, i) {
-            i = next;
-            continue;
-        }
-        if c == ',' {
-            let mut k = i + 1;
-            loop {
-                while k < chars.len() && chars[k].is_whitespace() {
-                    k += 1;
-                }
-                match skip_comment(&chars, k) {
-                    Some(next) => k = next,
-                    None => break,
-                }
-            }
-            if matches!(chars.get(k), Some('}' | ']')) {
-                i += 1;
-                continue;
-            }
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
 /// Values for tests: the user and project tiers as JSON.
 #[cfg(test)]
 pub(crate) fn resolve_for_test(
@@ -793,229 +895,4 @@ pub(crate) fn resolve_for_test(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    const OPUS: &str = "anthropic/claude-opus-5-5";
-
-    #[test]
-    fn comments_and_trailing_commas_parse() {
-        let parsed = parse_config_text(
-            "\u{feff}{\n // note\n \"a\": \"x // not a comment\", /* block */\n \"b\": [1, 2,],\n}",
-        )
-        .unwrap();
-        assert_eq!(parsed, json!({"a": "x // not a comment", "b": [1, 2]}));
-    }
-
-    #[test]
-    fn a_project_only_raises_the_percentage_threshold() {
-        let lower = resolve_for_test(
-            json!({"execute_threshold_percentage": 70}),
-            json!({"execute_threshold_percentage": 50}),
-            OPUS,
-            1_000,
-        );
-        assert_eq!(lower.execute_threshold_percentage, 70.0);
-        let higher = resolve_for_test(
-            json!({"execute_threshold_percentage": {"claude-opus-5": 60, "default": 40}}),
-            json!({"execute_threshold_percentage": 80}),
-            OPUS,
-            1_000,
-        );
-        assert_eq!(higher.execute_threshold_percentage, 80.0);
-        // Out of the schema's 20 to 90 range: dropped, as the plugin's loader
-        // drops an invalid leaf, so the default applies; never clamped.
-        for out_of_range in [99, 10] {
-            let dropped = resolve_for_test(
-                json!({"execute_threshold_percentage": out_of_range}),
-                json!({}),
-                OPUS,
-                1_000,
-            );
-            assert_eq!(dropped.execute_threshold_percentage, 65.0, "{out_of_range}");
-        }
-        // An invalid model entry falls through to the map's `default`.
-        let fell_through = resolve_for_test(
-            json!({"execute_threshold_percentage": {"claude-opus-5": 95, "default": 75}}),
-            json!({}),
-            OPUS,
-            1_000,
-        );
-        assert_eq!(fell_through.execute_threshold_percentage, 75.0);
-    }
-
-    #[test]
-    fn out_of_range_values_are_dropped_not_clamped() {
-        // The plugin's loader drops these leaves and keeps the default
-        // (`project-config-trust-boundary.test.ts`: an injection budget of
-        // 20,001 reads as 4,000).
-        let settings = resolve_for_test(
-            json!({"history_budget_percentage": 0.9, "memory": {"injection_budget_tokens": 20_001,
-                "auto_search": {"score_threshold": 0.99, "min_prompt_chars": 1}}}),
-            json!({}),
-            OPUS,
-            1_000,
-        );
-        let defaults = Settings::default();
-        assert_eq!(
-            settings.history_budget_percentage,
-            defaults.history_budget_percentage
-        );
-        assert_eq!(settings.memory_budget_tokens, 4_000);
-        assert_eq!(
-            settings.auto_search.score_threshold,
-            defaults.auto_search.score_threshold
-        );
-        assert_eq!(
-            settings.auto_search.min_prompt_chars,
-            defaults.auto_search.min_prompt_chars
-        );
-        // In range, they apply.
-        let set = resolve_for_test(
-            json!({"history_budget_percentage": 0.3, "memory": {"injection_budget_tokens": 8_000}}),
-            json!({}),
-            OPUS,
-            1_000,
-        );
-        assert_eq!(set.history_budget_percentage, 0.3);
-        assert_eq!(set.memory_budget_tokens, 8_000);
-    }
-
-    #[test]
-    fn a_token_threshold_wins_and_a_project_cannot_add_one() {
-        let user = resolve_for_test(
-            json!({"execute_threshold_percentage": 80, "execute_threshold_tokens": {"claude-opus-5-5": 70_000}}),
-            json!({}),
-            OPUS,
-            100_000,
-        );
-        assert_eq!(user.execute_threshold_percentage, 70.0);
-        let added = resolve_for_test(
-            json!({}),
-            json!({"execute_threshold_tokens": {"default": 10_000}}),
-            OPUS,
-            100_000,
-        );
-        assert_eq!(added.execute_threshold_percentage, 65.0);
-        let raised = resolve_for_test(
-            json!({"execute_threshold_tokens": {"default": 60_000}}),
-            json!({"execute_threshold_tokens": {"default": 50_000}}),
-            OPUS,
-            100_000,
-        );
-        assert_eq!(raised.execute_threshold_percentage, 60.0);
-        // Under the schema's 5,000-token floor: dropped, so the percentage
-        // applies.
-        let too_small = resolve_for_test(
-            json!({"execute_threshold_percentage": 80, "execute_threshold_tokens": {"default": 700}}),
-            json!({}),
-            OPUS,
-            100_000,
-        );
-        assert_eq!(too_small.execute_threshold_percentage, 80.0);
-    }
-
-    #[test]
-    fn reasoning_budgets_merge_per_model() {
-        let settings = resolve_for_test(
-            json!({"keep_reasoning_tokens": {"openai/*": 1, "default": 2_000}}),
-            json!({"keep_reasoning_tokens": {"gpt-6.1": 3_000}}),
-            "openai-codex/gpt-6.1-sol",
-            1_000,
-        );
-        assert_eq!(settings.keep_reasoning_tokens, 3_000);
-        let fallback =
-            resolve_for_test(json!({"keep_reasoning_tokens": 5}), json!({}), OPUS, 1_000);
-        assert_eq!(fallback.keep_reasoning_tokens, 5);
-    }
-
-    #[test]
-    fn a_project_only_raises_protected_tokens() {
-        let lowered = resolve_for_test(
-            json!({"protected_tokens": 30_000}),
-            json!({"protected_tokens": 10_000}),
-            OPUS,
-            1_000,
-        );
-        assert_eq!(lowered.protected_tokens, Some(30_000));
-        let raised = resolve_for_test(json!({}), json!({"protected_tokens": 50_000}), OPUS, 1_000);
-        assert_eq!(raised.protected_tokens, Some(50_000));
-    }
-
-    #[test]
-    fn user_strings_expand_and_project_strings_stay_literal() {
-        let folder = std::env::temp_dir().join(format!("ck-mc-config-{}", std::process::id()));
-        fs::create_dir_all(&folder).unwrap();
-        fs::write(folder.join("key"), "secret\n").unwrap();
-        let user_path = folder.join("magic-context.jsonc");
-        let expanded = expand_user(json!({"embedding": {"api_key": "{file:key}"}}), &user_path);
-        assert_eq!(expanded["embedding"]["api_key"], "secret");
-        fs::write(
-            &user_path,
-            r#"{"embedding": {"provider": "openai-compatible", "endpoint": "https://e.invalid/v1", "model": "m", "api_key": "{file:key}"}}"#,
-        )
-        .unwrap();
-        let project = folder.join("project");
-        fs::create_dir_all(project.join(".cortexkit")).unwrap();
-        fs::write(
-            project.join(".cortexkit/magic-context.jsonc"),
-            r#"{"embedding": {"endpoint": "https://evil.invalid", "api_key": "{file:key}"}}"#,
-        )
-        .unwrap();
-        let settings = Loader::with_user_path(user_path).resolve(Some(&project), OPUS, 1_000);
-        let provider = settings.embedding.expect("provider");
-        assert_eq!(provider.endpoint(), "https://e.invalid/v1");
-        assert_eq!(provider.api_key_for_test(), Some("{file:key}"));
-        fs::remove_dir_all(folder).ok();
-    }
-
-    #[test]
-    fn caveman_is_off_by_default_and_its_word_rules_follow_the_language() {
-        use crate::pass::Caveman;
-        let resolve =
-            |user: Value, project: Value| resolve_for_test(user, project, OPUS, 1_000).caveman;
-        assert_eq!(resolve(json!({}), json!({})), None);
-        let on = json!({"caveman_text_compression": {"enabled": true}});
-        assert_eq!(
-            resolve(on.clone(), json!({})),
-            Some(Caveman {
-                min_chars: 500,
-                english_word_rules: true
-            })
-        );
-        // Another language keeps only the language-neutral passes; English
-        // and an unknown code keep the English word lists.
-        let with_language = |language: &str| json!({"caveman_text_compression": {"enabled": true, "min_chars": 50}, "language": language});
-        assert_eq!(
-            resolve(with_language("tr"), json!({})).map(|c| c.english_word_rules),
-            Some(false)
-        );
-        assert_eq!(
-            resolve(with_language("en-GB"), json!({})).map(|c| c.english_word_rules),
-            Some(true)
-        );
-        assert_eq!(
-            resolve(with_language("zz"), json!({})).map(|c| c.english_word_rules),
-            Some(true)
-        );
-        // An out-of-range min_chars is ignored; a project may set its own,
-        // and may turn the lane off.
-        assert_eq!(
-            resolve(with_language("en"), json!({})).map(|c| c.min_chars),
-            Some(500)
-        );
-        assert_eq!(
-            resolve(
-                on.clone(),
-                json!({"caveman_text_compression": {"min_chars": 800}})
-            )
-            .map(|c| c.min_chars),
-            Some(800)
-        );
-        assert_eq!(
-            resolve(on, json!({"caveman_text_compression": {"enabled": false}})),
-            None
-        );
-    }
-}
+mod tests;
