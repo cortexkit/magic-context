@@ -23,6 +23,11 @@ pub enum Step {
     Model(Turn),
     /// Time passes with nothing sent, in milliseconds.
     Wait { ms: u64 },
+    /// Wait on real provider work without advancing the scenario's clock.
+    Await {
+        condition: AwaitCondition,
+        timeout_ms: u64,
+    },
     /// The session switches model, window or provider rules.
     ChangeModel {
         model: ModelRef,
@@ -35,6 +40,15 @@ pub enum Step {
     /// The runner restarts: it keeps its stored transcript and view, forgets
     /// when it last sent, and calls Setup again.
     RestartRunner,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "condition", rename_all = "snake_case")]
+pub enum AwaitCondition {
+    /// A session-bound tool reply fences all previously acknowledged notices.
+    NoticesProcessed,
+    /// The runner has received at least this many child-session sends.
+    ChildRuns { count: usize },
 }
 
 /// The model's reply to one request.

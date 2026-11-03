@@ -22,7 +22,7 @@ use cortexkit_role_compaction::setup::ModelRef;
 use cortexkit_role_compaction::wire;
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{Report, SessionConfig};
-use mc_mock_runner::script::{Step, ToolCall, Turn};
+use mc_mock_runner::script::{AwaitCondition, Step, ToolCall, Turn};
 use mc_mock_runner::subc::{FetchAnswer, FetchRequest, PlayRequest, MOCK_FETCH, MOCK_PLAY};
 use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
@@ -202,8 +202,24 @@ fn start_stack() -> Stack {
 }
 
 /// Ask the mock runner to play a scenario, waiting for both modules to
-/// register first.
+/// register first and for each step's notices to be processed before the next.
 async fn play(stack: &Stack, request: &PlayRequest) -> Report {
+    let request = PlayRequest {
+        config: request.config.clone(),
+        steps: request
+            .steps
+            .iter()
+            .flat_map(|step| {
+                [
+                    step.clone(),
+                    Step::Await {
+                        condition: AwaitCondition::NoticesProcessed,
+                        timeout_ms: START_TIMEOUT.as_millis() as u64,
+                    },
+                ]
+            })
+            .collect(),
+    };
     let consumer = SubcConsumer::connect(&stack.connection_file, ConsumerOptions::default())
         .await
         .unwrap();
@@ -219,7 +235,7 @@ async fn play(stack: &Stack, request: &PlayRequest) -> Report {
                     module_id: RUNNER.into(),
                 },
                 BindIdentity::new("mock", "wire-test"),
-                wire::encode(MOCK_PLAY, request),
+                wire::encode(MOCK_PLAY, &request),
                 options.clone(),
             )
             .await;
@@ -259,7 +275,7 @@ fn config(preset: &str) -> SessionConfig {
         moved_in: None,
         start_ms: 1_000_000,
         project: None,
-        model_latency_ms: 200,
+        model_latency_ms: 0,
         templates: mc_module::nudges::templates(),
         accepts_images: None,
     }
@@ -425,7 +441,12 @@ async fn a_head_summarizes_in_a_child_under_ck_mc_s_scope_over_the_real_wire() {
             answer(),
         ]);
     }
-    steps.extend([answer(), answer()]);
+    // A notice can start a summarizer beside the worker; draining notices alone
+    // does not mean its session.send has reached the runner yet.
+    steps.push(Step::Await {
+        condition: AwaitCondition::ChildRuns { count: 1 },
+        timeout_ms: START_TIMEOUT.as_millis() as u64,
+    });
     let report = play(&stack, &PlayRequest { config, steps }).await;
     assert!(report.model_errors.is_empty(), "{:?}", report.model_errors);
     assert!(report.refusals.is_empty(), "{:?}", report.refusals);
@@ -476,10 +497,8 @@ async fn a_time_marker_and_a_reduce_reminder_reach_the_runner_over_the_real_wire
     assert!(report.call_errors.is_empty(), "{:?}", report.call_errors);
     assert_eq!(report.user_texts.len(), 2, "{:?}", report.user_texts);
     assert_eq!(report.user_texts[0], "Survey the repository.");
-    // The published hook carries no time, so ck-mc measures the gap on its
-    // own clock, while the mock's clock is simulated: the marker's size is
-    // not checked here (the in-process scenarios check it), only that it
-    // arrived through the hook route.
+    // The hook carries the mock's simulated time. Notice fences keep its
+    // session worker caught up before the hook's best-effort reply budget starts.
     assert!(
         report.user_texts[1].starts_with("<!-- +")
             && report.user_texts[1].ends_with("-->\nKeep going."),

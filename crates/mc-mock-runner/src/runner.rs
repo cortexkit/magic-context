@@ -563,6 +563,10 @@ impl<P: Provider> Runner<P> {
                     self.host.lock().now += ms;
                     true
                 }
+                Step::Await {
+                    condition,
+                    timeout_ms,
+                } => self.await_condition(condition, *timeout_ms).await,
                 Step::ChangeModel {
                     model,
                     context_window,
@@ -612,6 +616,45 @@ impl<P: Provider> Runner<P> {
                 return;
             }
         }
+    }
+
+    async fn await_condition(
+        &mut self,
+        condition: &crate::script::AwaitCondition,
+        timeout_ms: u64,
+    ) -> bool {
+        use crate::script::AwaitCondition;
+        use std::time::Duration;
+
+        let wait = async {
+            match condition {
+                AwaitCondition::NoticesProcessed => {
+                    // Unlike a notice acknowledgement, a tool reply comes from
+                    // the session worker after earlier notices have been handled.
+                    // Expanding raw history is read-only and does not add a turn.
+                    self.provider
+                        .tool("ctx_expand", &serde_json::json!({"start": 1, "end": 1}))
+                        .await?;
+                }
+                AwaitCondition::ChildRuns { count } => {
+                    while self.host.child_runs().len() < *count {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }
+            }
+            Ok::<_, CallError>(())
+        };
+        let result = tokio::time::timeout(Duration::from_millis(timeout_ms), wait).await;
+        let error = match result {
+            Ok(Ok(())) => return true,
+            Ok(Err(error)) => CallError::new(format!("await {condition:?} failed: {error:?}")),
+            Err(_) => CallError::new(format!(
+                "await {condition:?} timed out after {timeout_ms} ms (observed {} child runs)",
+                self.host.child_runs().len()
+            )),
+        };
+        self.report.call_errors.push(error);
+        false
     }
 
     async fn user(&mut self, text: &str, images: u64) {

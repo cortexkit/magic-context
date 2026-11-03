@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::model::{Kind, ModelError};
 use crate::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
-use crate::script::{SelfTag, Step, ToolCall, Turn};
+use crate::script::{AwaitCondition, SelfTag, Step, ToolCall, Turn};
 
 type Decide = Box<dyn FnMut(&Host) -> Option<Vec<Edit>> + Send>;
 
@@ -44,6 +44,7 @@ struct TestProvider {
     version: Mutex<u64>,
     published: Mutex<Vec<ApplyViewAnswer>>,
     notices: Mutex<Vec<NoticeRequest>>,
+    tool_reply: Mutex<Option<tokio::sync::oneshot::Receiver<Result<String, CallError>>>>,
 }
 
 impl TestProvider {
@@ -55,6 +56,7 @@ impl TestProvider {
             version: Mutex::new(0),
             published: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
+            tool_reply: Mutex::new(None),
         }
     }
 
@@ -114,6 +116,11 @@ impl Provider for TestProvider {
     }
 
     async fn tool(&self, name: &str, _: &Value) -> Result<String, CallError> {
+        let reply = self.tool_reply.lock().unwrap().take();
+        if let Some(reply) = reply {
+            assert_eq!(name, "ctx_expand");
+            return reply.await.map_err(|_| CallError::new("tool stopped"))?;
+        }
         Ok(format!("{name} done"))
     }
 
@@ -155,6 +162,124 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
     let runner = Runner::start(config, TestProvider::new()).await.unwrap();
     runner.provider().attach(runner.host().clone());
     runner
+}
+
+#[tokio::test]
+async fn await_notices_waits_for_the_session_tool_reply_without_advancing_time() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let config = config(Kind::OpenAi, free(), 40_000);
+    let before = config.start_ms;
+    let mut runner = start(config).await;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    *runner.provider().tool_reply.lock().unwrap() = Some(answer);
+    let steps = [Step::Await {
+        condition: AwaitCondition::NoticesProcessed,
+        timeout_ms: 1_000,
+    }];
+    let mut play = Box::pin(runner.play(&steps));
+    std::future::poll_fn(|cx| {
+        assert!(play.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    reply.send(Ok("message 1".into())).unwrap();
+    play.await;
+    assert!(runner.report.call_errors.is_empty());
+    assert!(runner.host().entries().is_empty());
+    assert!(runner.report.requests.is_empty());
+    runner.play(&[user("after the fence")]).await;
+    assert_eq!(runner.host().entries()[0].written_at, before);
+}
+
+#[tokio::test]
+async fn await_notices_reports_a_failed_fence_and_stops_the_script() {
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    *runner.provider().tool_reply.lock().unwrap() = Some(answer);
+    reply.send(Err(CallError::new("worker stopped"))).unwrap();
+    runner
+        .play(&[
+            Step::Await {
+                condition: AwaitCondition::NoticesProcessed,
+                timeout_ms: 1_000,
+            },
+            user("must not run"),
+        ])
+        .await;
+    assert_eq!(runner.report.call_errors.len(), 1);
+    assert!(runner.report.call_errors[0]
+        .message
+        .contains("worker stopped"));
+    assert!(runner.host().entries().is_empty());
+}
+
+#[tokio::test]
+async fn await_child_runs_keeps_play_pending_until_a_child_arrives() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    let host = runner.host().clone();
+    let steps = [Step::Await {
+        condition: AwaitCondition::ChildRuns { count: 1 },
+        timeout_ms: 1_000,
+    }];
+    let mut play = Box::pin(runner.play(&steps));
+    std::future::poll_fn(|cx| {
+        assert!(play.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let mut request = cortexkit_role_llm_runner::send::SendRequest::new("chunk", "send-1");
+    request.runner_params = json!({
+        "model": {"provider": "test", "model": "summarizer"},
+        "system": "Summarize the chunk.",
+        "generation": {"max_output_tokens": 100},
+        "stop_when": {"max_steps": 1}
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    host.send("s1:mc-summary:1", request).unwrap();
+    play.await;
+    assert!(runner.report.call_errors.is_empty());
+    assert_eq!(host.child_runs().len(), 1);
+}
+
+#[tokio::test]
+async fn await_child_runs_times_out_with_the_condition_and_observation() {
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    runner
+        .play(&[
+            Step::Await {
+                condition: AwaitCondition::ChildRuns { count: 1 },
+                timeout_ms: 1,
+            },
+            user("must not run"),
+        ])
+        .await;
+    assert_eq!(runner.report.call_errors.len(), 1);
+    let message = &runner.report.call_errors[0].message;
+    assert!(message.contains("ChildRuns { count: 1 }"), "{message}");
+    assert!(message.contains("timed out"), "{message}");
+    assert!(message.contains("observed 0 child runs"), "{message}");
+    assert!(runner.host().entries().is_empty());
+}
+
+#[tokio::test]
+async fn await_an_already_satisfied_condition_does_not_add_a_turn() {
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    runner
+        .play(&[Step::Await {
+            condition: AwaitCondition::ChildRuns { count: 0 },
+            timeout_ms: 1_000,
+        }])
+        .await;
+    assert!(runner.report.call_errors.is_empty());
+    assert!(runner.host().entries().is_empty());
+    assert!(runner.report.requests.is_empty());
 }
 
 fn user(text: &str) -> Step {
