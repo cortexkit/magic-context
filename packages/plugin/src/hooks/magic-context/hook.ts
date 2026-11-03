@@ -974,6 +974,18 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         pauseEmbedDrain,
         getEmbedStatusText,
         sendNotification: sendCommandNotification,
+        sendStatus: async (sessionId, text, params) => {
+            await sendStatusNotification(deps.client, sessionId, text, {
+                ...getLiveNotificationParams(
+                    sessionId,
+                    liveModelBySession,
+                    variantBySession,
+                    agentBySession,
+                    (deps.sampleDreamConfig?.() ?? deps.config).toast_duration_ms,
+                ),
+                ...params,
+            });
+        },
         dreamer: dreamerConfig
             ? {
                   config: dreamerConfig,

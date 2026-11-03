@@ -441,6 +441,13 @@ export function createMagicContextCommandHandler(deps: {
         text: string,
         params: NotificationParams,
     ) => Promise<void>;
+    /**
+     * Shows a result without writing anything into the session: a toast in a
+     * connected TUI, otherwise nothing. Used for `/ctx-wrapup 0`, whose summaries
+     * must reach the session's newest message (moving the session to a runner
+     * requires it), so its own result must not become a newer, unsummarized row.
+     */
+    sendStatus?: (sessionId: string, text: string, params: NotificationParams) => Promise<void>;
     /** Configured toast lifetime (ms) forwarded into diagnostics logs. */
     toastDurationMs?: number;
     sampleToastDurationMs?: () => number | undefined;
@@ -472,6 +479,19 @@ export function createMagicContextCommandHandler(deps: {
             );
         }
     };
+    const rawSendStatus = deps.sendStatus;
+    if (rawSendStatus) {
+        deps.sendStatus = async (sessionId, text, params) => {
+            try {
+                await rawSendStatus(sessionId, text, params);
+            } catch (err) {
+                sessionLog(
+                    sessionId,
+                    `command notification delivery failed (status toast; continuing to sentinel): ${err instanceof Error ? err.message : String(err)}`,
+                );
+            }
+        };
+    }
 
     const isStatusCommand = (command: string): boolean => command === "ctx-status";
     const isFlushCommand = (command: string): boolean => command === "ctx-flush";
@@ -508,6 +528,8 @@ export function createMagicContextCommandHandler(deps: {
 
             const sessionId = input.sessionID;
             let result = "";
+            // `/ctx-wrapup 0` reports without adding a row; see `sendStatus`.
+            let resultInTranscript = true;
 
             if (isRescore) {
                 try {
@@ -706,6 +728,7 @@ export function createMagicContextCommandHandler(deps: {
                     result =
                         "## Magic Wrapup\n\n/ctx-wrapup is unavailable because the historian handler is not configured.";
                 } else {
+                    resultInTranscript = parsed.messagesToKeep > 0;
                     result = await deps.executeWrapup(sessionId, {
                         messagesToKeep: parsed.messagesToKeep,
                     });
@@ -822,7 +845,12 @@ export function createMagicContextCommandHandler(deps: {
                 }
             }
 
-            await deps.sendNotification(sessionId, result, {});
+            if (resultInTranscript) {
+                await deps.sendNotification(sessionId, result, {});
+            } else {
+                sessionLog(sessionId, `command ${input.command} result: ${result}`);
+                await deps.sendStatus?.(sessionId, result, {});
+            }
             sessionLog(sessionId, `command ${input.command} handled via command.execute.before`);
 
             throwSentinel(input.command);

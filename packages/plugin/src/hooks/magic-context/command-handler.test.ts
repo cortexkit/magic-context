@@ -317,6 +317,67 @@ describe("createMagicContextCommandHandler", () => {
         );
     });
 
+    // Moving a session to a runner needs its summaries to reach the newest
+    // message, so `/ctx-wrapup 0` must not add its own result as a newer row.
+    it("ctx-wrapup 0 reports without writing into the session; a kept tail still does", async () => {
+        insertSessionMeta(db, "ses-wrap");
+        const sendNotification = mock(async () => {});
+        const sendStatus = mock(async () => {});
+        const executeWrapup = mock(async () => "## Magic Wrapup\n\nWrapped up 40 messages.");
+        const handler = createMagicContextCommandHandler({
+            db,
+            sendNotification,
+            sendStatus,
+            executeWrapup,
+        });
+
+        await expectSentinel(
+            handler["command.execute.before"](
+                { command: "ctx-wrapup", sessionID: "ses-wrap", arguments: "0" },
+                makeOutput(""),
+                {},
+            ),
+            "CTX-WRAPUP",
+        );
+        expect(executeWrapup).toHaveBeenCalledWith("ses-wrap", { messagesToKeep: 0 });
+        expect(sendNotification).not.toHaveBeenCalled();
+        expect(sendStatus).toHaveBeenCalledWith(
+            "ses-wrap",
+            expect.stringContaining("Wrapped up 40 messages"),
+            {},
+        );
+
+        await expectSentinel(
+            handler["command.execute.before"](
+                { command: "ctx-wrapup", sessionID: "ses-wrap", arguments: "5" },
+                makeOutput(""),
+                {},
+            ),
+            "CTX-WRAPUP",
+        );
+        expect(sendNotification).toHaveBeenCalledTimes(1);
+        expect(sendStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it("a failing ctx-wrapup 0 status delivery still ends in the sentinel", async () => {
+        insertSessionMeta(db, "ses-wrap-fail");
+        const handler = createMagicContextCommandHandler({
+            db,
+            sendNotification: mock(async () => {}),
+            sendStatus: mock(async () => {
+                throw new Error("rpc down");
+            }),
+            executeWrapup: mock(async () => "done"),
+        });
+        await expectSentinel(
+            handler["command.execute.before"](
+                { command: "ctx-wrapup", sessionID: "ses-wrap-fail", arguments: "0" },
+                makeOutput(""),
+                {},
+            ),
+            "CTX-WRAPUP",
+        );
+    });
     for (const command of ["ctx-wrapup", "ctx-recomp", "ctx-flush"] as const) {
         it(`refuses /${command} without side effects when compaction is off`, async () => {
             insertTag(db, "ses-compaction-off", 1, 500);
