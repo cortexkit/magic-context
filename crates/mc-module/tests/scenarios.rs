@@ -3793,7 +3793,8 @@ fn a_session_that_changes_harness_moves_every_row_to_the_runners_harness() {
         .unwrap()
     };
     assert_eq!((rows("opencode", "s1"), rows("opencode2", "s1")), (0, 2));
-    // Fenced under both harnesses, so neither plugin takes the session up.
+    // The move is recorded under both harnesses, so the standalone plugin on
+    // either one sees the session was moved and leaves it alone.
     for fence in ["mode3_move:opencode:s1", "mode3_move:opencode2:s1"] {
         let found: i64 = db
             .query_row(
