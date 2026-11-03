@@ -7,6 +7,13 @@ StreamData, are inside `{"result": ...}`. Refusals remain protocol errors.
 The role declaration may be omitted on this exact target; any declared role
 must be `mc-app-read:v1`.
 
+The phone reaches ck-mc through Callosum, which relays only management
+operations, so four of the reads are also declared as `query` operations on
+ck-mc's unscoped `ManagementSurface` target `{module_id: "magic-context"}`:
+`session_data.read`, `context.cache_why`, `context.search` and
+`context.watch`. They take the same requests and answer in the same shapes as
+here. Other methods on that target are refused `unknown_method`.
+
 This set replaces `crates_old/mc-module/testdata/app-read-samples/`
 (`mc-app-read-samples-v3`) for these six methods only; the role version and
 field spellings are unchanged.

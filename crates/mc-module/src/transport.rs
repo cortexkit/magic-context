@@ -92,6 +92,23 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 .map(str::to_owned)
                 .collect(),
             },
+            // The phone reaches ck-mc through Callosum, which relays only
+            // management-surface operations, so the reads it uses are also
+            // declared there, as queries.
+            ProviderRole::ManagementSurface {
+                operations: MANAGEMENT_APP_METHODS
+                    .iter()
+                    .map(|method| subc_protocol::manifest::ManagementOperation {
+                        name: (*method).into(),
+                        kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                        description: None,
+                    })
+                    .collect(),
+                config_schema: json!({ "type": "object" }),
+                observability: Vec::new(),
+                identity_scope: Vec::new(),
+                concurrency: Concurrency::ModuleManaged,
+            },
         ])
         // The daemon puts a scope's folder and project on a route's stamp
         // only for a provider that asks; they are where a session's project
@@ -502,6 +519,9 @@ pub struct Handler {
 struct AppCaller {
     principal: Principal,
     harness: String,
+    /// Whether the route is ck-mc's management surface, which serves only
+    /// [`MANAGEMENT_APP_METHODS`].
+    management: bool,
 }
 
 impl AppCaller {
@@ -523,6 +543,16 @@ impl AppCaller {
     }
 }
 
+/// The app reads ck-mc's management surface serves: the ones the phone uses,
+/// as Callosum relays only management operations. The desktop reaches every
+/// read on the internal app-read service.
+const MANAGEMENT_APP_METHODS: &[&str] = &[
+    "session_data.read",
+    "context.cache_why",
+    "context.search",
+    "context.watch",
+];
+
 fn app_admission(request: &RouteBindRequest) -> Result<AppCaller, Refusal> {
     let refused = || {
         Refusal::new(
@@ -531,8 +561,15 @@ fn app_admission(request: &RouteBindRequest) -> Result<AppCaller, Refusal> {
             None,
         )
     };
-    if !matches!(&request.target, RouteTarget::InternalService { module_id, service_id } if module_id == crate::MODULE_ID && service_id == crate::app_read::ROLE.0)
-        || request.scope.is_some()
+    let management = match &request.target {
+        RouteTarget::InternalService {
+            module_id,
+            service_id,
+        } if module_id == crate::MODULE_ID && service_id == crate::app_read::ROLE.0 => false,
+        RouteTarget::ManagementSurface { module_id } if module_id == crate::MODULE_ID => true,
+        _ => return Err(refused()),
+    };
+    if request.scope.is_some()
         || request.role_versions.as_ref().is_some_and(|roles| {
             roles.iter().any(|(name, version)| {
                 name != crate::app_read::ROLE.0 || version != crate::app_read::ROLE.1
@@ -544,6 +581,7 @@ fn app_admission(request: &RouteBindRequest) -> Result<AppCaller, Refusal> {
     let caller = AppCaller {
         principal: request.principal.clone().ok_or_else(refused)?,
         harness: request.identity.harness.clone(),
+        management,
     };
     if !caller.allowed() {
         return Err(refused());
@@ -629,6 +667,13 @@ impl Handler {
             serde_json::from_slice(body).map_err(|_| crate::app_read::invalid("request"))?;
         let envelope = crate::app_read::object(&value, &["method", "params"])?;
         let method = crate::app_read::string(envelope, "method")?;
+        if caller.management && !MANAGEMENT_APP_METHODS.contains(&method) {
+            return Err(Refusal::new(
+                "unknown_method",
+                format!("{method} isn't served on ck-mc's management surface."),
+                None,
+            ));
+        }
         let params = envelope.get("params").cloned().unwrap_or(Value::Null);
         if method == "context.watch" {
             let mut subscription = self.module.app_read().watch(caller.quota(), params).await?;
@@ -1126,12 +1171,68 @@ mod app_read_tests {
         }
     }
 
+    /// The phone's reads come through Callosum, which relays only management
+    /// operations: ck-mc's own management surface admits the same callers as
+    /// the app-read service, and a management route is marked so it serves
+    /// only the phone's methods.
     #[test]
-    fn app_read_refuses_management_wrong_target_roles_and_all_scopes_including_flows() {
+    fn app_read_admits_ck_mcs_own_management_surface_for_the_phone() {
+        let mut request = request();
+        request.target = RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
+        request.role_versions = None;
+        request.principal = Some(Principal::Reserved {
+            module_id: "callosum".into(),
+        });
+        request.identity.harness = "fed-phone:device-1".into();
+        assert!(app_admission(&request).unwrap().management);
+        request.target = RouteTarget::ManagementSurface {
+            module_id: "other".into(),
+        };
+        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+        request.target = RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
+        request.identity.harness = "opencode".into();
+        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+    }
+
+    #[test]
+    fn the_manifest_declares_the_phones_reads_as_management_queries() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let surface = manifest["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .expect("a management surface");
+        let mut operations: Vec<(String, String)> = surface["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| {
+                (
+                    op["name"].as_str().unwrap().to_owned(),
+                    op["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        operations.sort();
+        assert_eq!(
+            operations,
+            [
+                ("context.cache_why".into(), "query".into()),
+                ("context.search".into(), "query".into()),
+                ("context.watch".into(), "query".into()),
+                ("session_data.read".into(), "query".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_read_refuses_wrong_targets_and_all_scopes_including_flows() {
         for target in [
-            RouteTarget::ManagementSurface {
-                module_id: crate::MODULE_ID.into(),
-            },
             RouteTarget::InternalService {
                 module_id: "other".into(),
                 service_id: "mc-app-read".into(),
