@@ -1,7 +1,14 @@
-//! Report-only audit witnesses: these assert the required behavior and are
-//! intentionally red until the corresponding production defects are fixed.
-//! The runner adapter follows contract_audit.rs; transcript numbering and
-//! paged reads reuse the same mock Transcript as the scenario harness.
+//! Regression tests for four defects found before mode 3 went live:
+//! - the age sweep dropped outputs in the protected tail;
+//! - on a `ctx_keep` pass, other lanes dropped parts the model chose to keep;
+//! - a history head kept as shown, after a read it needs failed, still
+//!   moved the cut, hiding messages without their summary;
+//! - after adopting a newer view from the runner, the next pass re-rendered
+//!   `m[0]` from ck-mc's older baseline.
+//!
+//! Each test failed before its fix. The runner adapter follows
+//! `contract_audit.rs`; transcript numbering and paged reads reuse the same
+//! mock `Transcript` as the scenario harness.
 
 use std::sync::{Arc, Mutex};
 

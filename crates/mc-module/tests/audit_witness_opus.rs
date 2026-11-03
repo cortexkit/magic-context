@@ -1,7 +1,12 @@
-//! Witness tests from an audit of ck-mc before go-live. Each test FAILS on
-//! the code it was written against and says, in its comments, what correct
-//! behaviour would make it pass. They drive ck-mc in process against the mock
-//! runner (`mc-mock-runner`), with a trimmed copy of the harness in
+//! Regression tests for two defects found before mode 3 went live:
+//! - a head re-rendered `m[0]` whenever the context window the runner
+//!   reports changed, even when it grew, and that rebuild landed drops below
+//!   the execute threshold;
+//! - a `ctx_keep` that named no keepable tag was forgotten before its view
+//!   was built, after the model was told everything else goes.
+//!
+//! Each test failed before its fix. They drive ck-mc in process against the
+//! mock runner (`mc-mock-runner`), with a trimmed copy of the harness in
 //! `tests/scenarios.rs`: that harness's helpers are private to its own test
 //! crate, so they cannot be imported from here.
 
