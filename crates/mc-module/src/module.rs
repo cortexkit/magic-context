@@ -337,8 +337,28 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             // Upkeep reads no per-model setting, so no model is named.
             let settings = self.inner.config.resolve(Some(&root), "", 0);
             let plan = crate::upkeep::Plan::from_settings(&settings);
-            let report =
-                crate::upkeep::run_project(&db, &id, Path::new(&root), &plan, &now_ms).await;
+            // Only sessions registered in this process belong to this upkeep
+            // scope. After a restart their persisted summaries wait until the
+            // session registers again; a harness name alone never proves ownership.
+            let owned = || {
+                self.inner
+                    .session_projects
+                    .lock()
+                    .expect("session projects")
+                    .iter()
+                    .filter(|(_, project)| project.id == id)
+                    .map(|(key, _)| (key.harness.clone(), key.session.clone()))
+                    .collect()
+            };
+            let report = crate::upkeep::run_project_scoped(
+                &db,
+                &id,
+                Path::new(&root),
+                &plan,
+                &now_ms,
+                &owned,
+            )
+            .await;
             if report != crate::upkeep::Report::default() {
                 eprintln!("ck-mc: upkeep for {id}: {report:?}");
             }
