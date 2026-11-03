@@ -134,7 +134,7 @@ async fn a_notice_numbered_zero_after_setup_is_ignored() {
         .notice(
             &fixed,
             &settings,
-            NoticeRequest::new(0, cursor(&fixed.entries[0]), changed),
+            NoticeRequest::new(0, changed).with_newest(cursor(&fixed.entries[0])),
         )
         .await;
     assert_eq!(session.config_inputs().1, "test/initial");

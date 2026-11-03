@@ -13,8 +13,8 @@ use cortexkit_role_compaction::read::Entry;
 use cortexkit_role_compaction::rules::ProviderRules;
 use std::collections::HashSet;
 
-use compaction_view::render::{self as view, edits_for_transcript};
-use compaction_view::rules;
+use cortexkit_compaction_view::render::{self as view, edits_for_transcript};
+use cortexkit_compaction_view::rules;
 use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 
 /// The next view, or `None` when it would change nothing: no new edit, and

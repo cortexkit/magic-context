@@ -3,7 +3,7 @@
 //! provider has its own estimator and calibrates it against the prompt sizes
 //! the providers report, which is what these counts become.
 
-use compaction_view::render::RenderedMessage;
+use cortexkit_compaction_view::render::RenderedMessage;
 use cortexkit_role_compaction::part::{AttachmentItem, Part, PartBody};
 
 /// Tokens for an image, whatever its size.

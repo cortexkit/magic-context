@@ -1282,7 +1282,7 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     let first_kept = rendered
         .iter()
         .find_map(|message| match &message.source {
-            compaction_view::render::Source::Entry { ordinal, .. } => Some(*ordinal),
+            cortexkit_compaction_view::render::Source::Entry { ordinal, .. } => Some(*ordinal),
             _ => None,
         })
         .unwrap();
@@ -2928,7 +2928,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     let conditions =
         cortexkit_role_compaction::notice::Conditions::new(model.clone(), 40_000, 4_000, free())
             .with_last_prompt_tokens(1_000);
-    let notice = || NoticeRequest::new(1, cursor.clone(), conditions.clone());
+    let notice = || NoticeRequest::new(1, conditions.clone()).with_newest(cursor.clone());
     // A notice is acknowledged at once even for the stuck session; its
     // work waits behind the read.
     assert_eq!(

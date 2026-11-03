@@ -398,12 +398,14 @@ impl Session {
         // then a change to an older message is not in it either: read from
         // the oldest entry that may have changed.
         let omitted = notice.entries.is_empty();
+        // No newest entry: the transcript is empty, and the read empties the
+        // index.
         if self.index.extend(notice.entries) != Extend::Continued
-            || !self.index.ends_at(Some(&notice.newest))
+            || !self.index.ends_at(notice.newest.as_ref())
         {
-            self.sync(client, Some(&notice.newest)).await;
-        } else if omitted {
-            self.sync_from_changeable(client, &notice.newest).await;
+            self.sync(client, notice.newest.as_ref()).await;
+        } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
+            self.sync_from_changeable(client, newest).await;
         }
         self.forget_missing();
         self.update_search_index();

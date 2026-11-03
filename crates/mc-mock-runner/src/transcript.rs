@@ -8,7 +8,7 @@
 //! pattern-match into a jump. Only the runner counts; it hands each part's
 //! number to the compaction provider in reads and notices.
 
-use compaction_view::tags::is_numbered;
+use cortexkit_compaction_view::tags::is_numbered;
 use cortexkit_role_compaction::part::{Attachment, Delivered, Part, PartBody, Seal, ToolStatus};
 use cortexkit_role_compaction::read::{
     entry_digest, Cursor, Detail, Entry, NoticeOrigin, Role, Select, StepUsage,

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use compaction_view::render::RenderedMessage;
+use cortexkit_compaction_view::render::RenderedMessage;
 use cortexkit_role_compaction::part::{PartBody, Seal};
 use cortexkit_role_compaction::read::{Role, StepUsage};
 use sha2::{Digest, Sha256};

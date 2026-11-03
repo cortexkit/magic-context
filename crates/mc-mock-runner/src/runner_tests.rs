@@ -3,7 +3,7 @@
 
 use std::sync::Mutex;
 
-use compaction_view::rules::invalid_signed_parts;
+use cortexkit_compaction_view::rules::invalid_signed_parts;
 use cortexkit_role_compaction::notice::{Event, NoticeAnswer, NoticeRequest};
 use cortexkit_role_compaction::part::{PartBody, ToolStatus};
 use cortexkit_role_compaction::read::SessionRef;

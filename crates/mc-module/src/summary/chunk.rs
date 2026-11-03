@@ -401,8 +401,9 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Strip injected regions (reminder blocks, directives, oh-my-opencode's
-/// initiator marker) from a user's text. A message the user sent while the
+/// Strip injected regions (reminder blocks, directives, and the
+/// `<!-- OMO_INTERNAL_INITIATOR -->` comment oh-my-opencode adds to prompts
+/// it sends itself) from a user's text. A message the user sent while the
 /// agent ran, which older OpenCode wrapped in a reminder, is the user's own
 /// words and stays ([`crate::injection::strip`]).
 fn clean_user_text(text: &str) -> String {

@@ -563,18 +563,17 @@ impl Handler {
             }
             step::ops::TRANSFORM_HOOK => {
                 let call: HookCall = wire::params(params)?;
-                let bound_to_session = route.session.harness != MODULE_LEVEL_HARNESS;
-                if bound_to_session
-                    && (call.harness != route.session.harness
-                        || call.session != route.session.session)
-                {
-                    return Err(Refusal::session_mismatch(&call.session));
+                // step-transform-provider/v2: a hook concerns the session its
+                // route is bound to, whatever the body names; an unbound route
+                // answers discovery only.
+                if route.session.harness == MODULE_LEVEL_HARNESS {
+                    return Err(Refusal::new(
+                        codes::ROUTE_UNBOUND,
+                        "transform.hook needs a route bound to the session",
+                        None,
+                    ));
                 }
-                let session = SessionRef::new(
-                    route.session.runner.clone(),
-                    call.harness.clone(),
-                    call.session.clone(),
-                );
+                let session = route.session.clone();
                 let answer = match &call.subject {
                     Subject::PreUser { blocks, .. } if !blocks.is_empty() => {
                         let addition = self
@@ -592,8 +591,8 @@ impl Handler {
     }
 }
 
-/// The bind harness a runner declares on a route that serves all of its
-/// sessions, as the step-transform contract allows.
+/// The bind harness a runner declares on a route bound to no session: a
+/// hook route opened for discovery.
 const MODULE_LEVEL_HARNESS: &str = "runner";
 
 /// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
@@ -694,9 +693,9 @@ impl ModuleHandler for Handler {
                 "open the route for exactly one of compaction-provider/v2, tool-provider/v1 or step-transform-provider/v1",
             );
         };
-        // Only the transitional hook routes may serve all of a runner's
-        // sessions; every other session route concerns the session it is
-        // bound to. Discovery concerns no session.
+        // A hook route may open unbound, for discovery (`role.describe`,
+        // `transform.declare`) only; every other session route concerns the
+        // session it is bound to.
         if matches!(role, RouteRole::Compaction | RouteRole::Tools)
             && request.identity.harness == MODULE_LEVEL_HARNESS
         {

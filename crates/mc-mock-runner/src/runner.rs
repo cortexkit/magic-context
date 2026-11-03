@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use compaction_view::clean::clean_reply;
-use compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
-use compaction_view::rules;
-use compaction_view::tags::tag_prefix;
+use cortexkit_compaction_view::clean::clean_reply;
+use cortexkit_compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
+use cortexkit_compaction_view::rules;
+use cortexkit_compaction_view::tags::tag_prefix;
 use cortexkit_role_compaction::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
 };
@@ -1030,9 +1030,9 @@ impl<P: Provider> Runner<P> {
         }
         let request = {
             let mut state = self.host.lock();
-            let Some(newest) = state.transcript.cursor() else {
-                return;
-            };
+            // An empty transcript, after a revert of every message, still
+            // gets a notice, with no newest entry (compaction contract W4.1).
+            let newest = state.transcript.cursor();
             let entries: Vec<Entry> = state
                 .transcript
                 .entries()
@@ -1054,8 +1054,13 @@ impl<P: Provider> Runner<P> {
                 .expect("entries serialize")
                 .len();
             state.seq += 1;
-            state.notified = Some((newest.ordinal, newest.digest.clone()));
-            let mut request = NoticeRequest::new(state.seq, newest, state.conditions());
+            state.notified = newest
+                .as_ref()
+                .map(|newest| (newest.ordinal, newest.digest.clone()));
+            let mut request = NoticeRequest::new(state.seq, state.conditions());
+            if let Some(newest) = newest {
+                request = request.with_newest(newest);
+            }
             request.applied_view = state.applied.as_ref().map(View::applied);
             request.events = std::mem::take(&mut state.events);
             if size <= ENTRIES_BUDGET_BYTES {
