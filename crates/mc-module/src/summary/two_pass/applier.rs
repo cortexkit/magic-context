@@ -7,7 +7,8 @@
 //!
 //! These are automated writes: they change memories and their undo history
 //! but write no `memory_mutation_log` row, so a session's history head shows
-//! them only after its next fold rebuilds `m[0]`. A changed memory's
+//! them only after its next fold rebuilds the head's frozen baseline message
+//! (`m[0]`), never in the changes message after it. A changed memory's
 //! embedding is deleted, and the embedding upkeep computes the new one.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};

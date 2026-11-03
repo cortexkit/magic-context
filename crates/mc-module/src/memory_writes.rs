@@ -928,7 +928,9 @@ pub fn mutate(
 pub(crate) struct History<'a> {
     pub key: &'a str,
     pub project: &'a str,
-    /// Who decided: `ctx_memory`, `historian`, ...
+    /// Who decided, as the dashboard's undo history shows it: `ctx_memory`
+    /// for the agent's memory tool, `historian` for the summarizer's second
+    /// turn.
     pub writer: &'a str,
     pub operation: &'a str,
     pub reason: &'a str,
