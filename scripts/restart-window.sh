@@ -133,8 +133,8 @@ fi
 [ -n "$(context_version)" ] || { echo "cannot read the context.db schema version" >&2; exit 2; }
 say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, mode3.db $(mode3_version) -> $STORE_FENCE, store.db $(store_versions)(kept), ck-mc $SHA, ${#FIRST[@]} step(s) first, ${#THEN[@]} after placement"
 if [ "$DRY_RUN" -eq 1 ]; then
-    for step in "${FIRST[@]}"; do say "would first run: $step"; done
-    for step in "${THEN[@]}"; do say "would then run: $step"; done
+    for step in ${FIRST[@]+"${FIRST[@]}"}; do say "would first run: $step"; done
+    for step in ${THEN[@]+"${THEN[@]}"}; do say "would then run: $step"; done
     notify "Dry run: preflight passed. Nothing changed."
     exit 0
 fi
@@ -144,7 +144,7 @@ exec > >(tee -a "$BK/window.log") 2>&1
 status RUNNING
 say "OpenCode and Pi are closed. Keep them closed until this finishes."
 
-for step in "${FIRST[@]}"; do
+for step in ${FIRST[@]+"${FIRST[@]}"}; do
     say "running first: $step"
     bash -c "$step" || { status FAILED; notify "FAILED before any change: $step. Nothing here changed."; exit 1; }
 done
@@ -208,7 +208,7 @@ got=$(mode3_version)
 [ "$got" = "$STORE_FENCE" ] || post_fail "mode3.db is at $got after placement, expected $STORE_FENCE"
 say "schema after: context=$(context_version) mode3=$got store=$(store_versions)"
 
-for step in "${THEN[@]}"; do
+for step in ${THEN[@]+"${THEN[@]}"}; do
     say "running: $step"
     bash -c "$step" || post_fail "step failed: $step"
 done
