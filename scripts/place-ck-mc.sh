@@ -184,6 +184,10 @@ if [[ -e "$mode3_path" ]]; then
 fi
 echo "context.db: live=$context_live staged=$context_supported; mode3.db: live=$store_live staged=$store_supported"
 ((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
+# ck-mc opens context.db only at exactly the version it was built for; the
+# standalone plugin migrates it. Placing it over an older database would leave
+# it refusing to start.
+((10#$context_live == 10#$context_supported)) || die "context.db is at $context_live but this ck-mc opens only $context_supported: start a host with the matching plugin release to migrate it first"
 ((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
 
 bin_dir=$HOME/.local/share/cortexkit/bin

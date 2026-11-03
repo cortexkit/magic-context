@@ -96,7 +96,7 @@ printf '0000000100000000 T _main\\n'
         }.items():
             # Stable content-addressed shim, with a command-name link for PATH lookup.
             (self.shims / name).symlink_to(once(root, body))
-        self.versions(90, 49)
+        self.versions(91, 49)
         isolated_env = {key: value for key, value in os.environ.items()
                         if not key.startswith("MAGIC_CONTEXT_") and not key.startswith("XDG_")}
         self.env = dict(isolated_env, HOME=str(self.home), MAGIC_CONTEXT_STORAGE_DIR=str(self.store),
@@ -147,11 +147,19 @@ printf '0000000100000000 T _main\\n'
         self.assertIn("rollback refused", run.stderr)
 
     def test_store_fence_refuses(self):
-        self.versions(90, 51)
+        self.versions(91, 51)
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("context.db live=90 staged=91; mode3.db live=51 staged=50", run.stdout + run.stderr)
+        self.assertIn("context.db live=91 staged=91; mode3.db live=51 staged=50", run.stdout + run.stderr)
         self.assertIn("rollback refused", run.stderr)
+
+    def test_an_unmigrated_context_db_refuses(self):
+        # ck-mc opens context.db only at exactly its own version, so placing it
+        # before a host migrated the database would leave it refusing to start.
+        self.versions(90, 49)
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("context.db is at 90 but this ck-mc opens only 91", run.stderr)
 
     def test_epoch_change_advises_or_refuses(self):
         allowed = self.run_script()
@@ -197,7 +205,7 @@ printf '0000000100000000 T _main\\n'
         self.versions(999, 999)
         run = self.run_script()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("context.db: live=90 staged=91; mode3.db: live=0", run.stdout)
+        self.assertIn("context.db: live=91 staged=91; mode3.db: live=0", run.stdout)
 
     def test_placement_verifies_and_preserves_rollback(self):
         run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=self.env,
