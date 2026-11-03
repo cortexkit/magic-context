@@ -1686,7 +1686,7 @@ impl Session {
         head::Shape {
             memory_enabled: settings.memory_enabled,
             memory_budget_tokens: settings.memory_budget_tokens,
-            history_budget_tokens: (self.conditions.context_window as f64
+            history_budget_tokens: (crate::pass::usable_window(&self.conditions) as f64
                 * settings.execute_threshold_percentage
                 / 100.0
                 * settings.history_budget_percentage) as u64,
@@ -2466,4 +2466,44 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn history_budget_uses_output_reserved_window() {
+        use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+        use cortexkit_role_compaction::setup::ModelRef;
+        let route = Route {
+            session: SessionRef::new("runner", "test", "budget"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let request = SetupRequest::new(
+            "config-test",
+            ModelRef::new("test", "model"),
+            200_000,
+            32_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            0,
+        );
+        let session = Session::new(&route, &request, crate::preset::Features::NONE, None);
+        assert_eq!(
+            session
+                .head_shape(&Settings::default())
+                .history_budget_tokens,
+            16_380
+        );
+        let settings = crate::config::resolve_for_test(
+            serde_json::json!({"execute_threshold_tokens": {"default": 84000}}),
+            serde_json::json!({}),
+            "test/model",
+            168_000,
+        );
+        assert_eq!(session.head_shape(&settings).history_budget_tokens, 12_600);
+    }
 }
