@@ -82,6 +82,7 @@ pub mod tokens;
 pub mod transport;
 pub mod upkeep;
 pub mod view_builder;
+pub mod workspace;
 
 /// Magic Context's module id, as runners and core name it.
 pub const MODULE_ID: &str = "magic-context";

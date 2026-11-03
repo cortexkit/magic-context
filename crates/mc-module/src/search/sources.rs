@@ -123,6 +123,7 @@ fn linear_decay(rank: usize, total: usize) -> f64 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryHit {
     pub id: i64,
+    pub source_name: Option<String>,
     pub category: String,
     pub content: String,
     pub score: f64,
@@ -132,21 +133,29 @@ pub struct MemoryHit {
 #[derive(Clone, Debug)]
 pub struct SearchMemory {
     pub id: i64,
+    pub source_name: Option<String>,
     pub category: String,
     pub content: String,
     pub created_at: i64,
 }
 
-/// The project's current memories: active or permanent, not expired.
-pub fn project_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<SearchMemory>> {
-    let mut statement = conn.prepare_cached(
-        "SELECT id, category, content, created_at FROM memories
-          WHERE project_path = ?1 AND status IN ('active', 'permanent')
-            AND (expires_at IS NULL OR expires_at > ?2)",
-    )?;
-    let rows = statement.query_map(params![project, now_ms()], |row| {
+/// The workspace pool, with no placement exclusion: active/permanent, not expired.
+pub fn workspace_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<SearchMemory>> {
+    let workspace = crate::workspace::Workspace::resolve(conn, project)?;
+    let sql = format!(
+        "SELECT id, category, content, created_at, project_path FROM memories m
+          WHERE {} AND status IN ('active', 'permanent')
+            AND (expires_at IS NULL OR expires_at > ?4)",
+        workspace.predicate(conn, "m")?
+    );
+    let mut statement = conn.prepare_cached(&sql)?;
+    let [all, own, categories] = workspace.bindings();
+    let rows = statement.query_map(params![all, own, categories, now_ms()], |row| {
         Ok(SearchMemory {
             id: row.get(0)?,
+            source_name: workspace
+                .source_name(&row.get::<_, String>(4)?)
+                .map(str::to_owned),
             category: row.get(1)?,
             content: row.get(2)?,
             created_at: row.get(3)?,
@@ -197,7 +206,40 @@ fn memory_fts_ids(
     fts: &str,
     dates: Option<DateRange>,
 ) -> Vec<i64> {
-    memory_fts_ids_limited(conn, project, fts, dates, MEMORY_FTS_CANDIDATES)
+    let read = || -> rusqlite::Result<Vec<i64>> {
+        let workspace = crate::workspace::Workspace::resolve(conn, project)?;
+        let sql = format!(
+            "SELECT memories.id FROM memories_fts
+            JOIN memories ON memories.id = memories_fts.rowid WHERE {}
+            AND memories.status IN ('active','permanent')
+            AND (memories.expires_at IS NULL OR memories.expires_at > ?4)
+            AND memories.created_at BETWEEN ?5 AND ?6 AND memories_fts MATCH ?7
+            ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?8",
+            workspace.predicate(conn, "memories")?
+        );
+        let mut statement = conn.prepare_cached(&sql)?;
+        let [all, own, categories] = workspace.bindings();
+        let (from, to) = dates.map_or((i64::MIN, i64::MAX), |dates| (dates.from, dates.to));
+        let rows = statement.query_map(
+            params![
+                all,
+                own,
+                categories,
+                now_ms(),
+                from,
+                to,
+                fts,
+                MEMORY_FTS_CANDIDATES as i64
+            ],
+            |row| row.get(0),
+        )?;
+        rows.collect()
+    };
+    if fts.is_empty() {
+        Vec::new()
+    } else {
+        read().unwrap_or_default()
+    }
 }
 
 fn memory_fts_ids_limited(
@@ -245,7 +287,7 @@ pub fn search_memories(
     semantic: Option<Semantic<'_>>,
     halves: Option<&mut Halves<MemoryHit>>,
 ) -> (Vec<MemoryHit>, Vec<i64>) {
-    let memories: Vec<SearchMemory> = project_memories(conn, project)
+    let memories: Vec<SearchMemory> = workspace_memories(conn, project)
         .unwrap_or_default()
         .into_iter()
         .filter(|memory| dates.is_none_or(|dates| dates.contains(memory.created_at)))
@@ -269,8 +311,9 @@ pub fn search_memories(
             conn,
             "SELECT e.memory_id, e.embedding FROM memory_embeddings e
                JOIN memories m ON m.id = e.memory_id
-              WHERE m.project_path = ?1 AND e.model_id = ?2",
-            project,
+              WHERE m.id IN (SELECT value FROM json_each(?1)) AND e.model_id = ?2",
+            &serde_json::to_string(&memories.iter().map(|memory| memory.id).collect::<Vec<_>>())
+                .unwrap(),
             semantic.model_id,
         );
         for memory in &memories {
@@ -288,6 +331,7 @@ pub fn search_memories(
                     let score = scores.get(&memory.id)? * factor;
                     (score > 0.0).then(|| MemoryHit {
                         id: memory.id,
+                        source_name: memory.source_name.clone(),
                         category: memory.category.clone(),
                         content: preview(&memory.content),
                         score,
@@ -317,6 +361,7 @@ pub fn search_memories(
         }
         hits.push(MemoryHit {
             id: memory.id,
+            source_name: memory.source_name.clone(),
             category: memory.category.clone(),
             content: preview(&memory.content),
             score,

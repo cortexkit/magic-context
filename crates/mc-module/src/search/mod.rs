@@ -1,5 +1,5 @@
 //! `ctx_search`: one query over the session's earlier messages, the
-//! project's memories, git commits and primers, and the session's notes.
+//! project's and workspace-shared memories, git commits and primers, and the session's notes.
 //! Argument rules, scoring, ordering and the reply follow the TypeScript
 //! tool (`tools/ctx-search` and `features/magic-context/search.ts`), so an
 //! agent reads the same in both.
@@ -10,8 +10,6 @@
 //! rerank, also keeps the candidates [`rerank`] scores, and [`finish`]
 //! writes the reply. The caller makes the reranker's call between
 //! [`prepare`] and [`finish`], without holding the store.
-//!
-//! Not here yet: memories a workspace shares from other projects.
 
 pub mod messages;
 pub mod rerank;
@@ -284,8 +282,16 @@ fn age(at: i64, now: i64) -> String {
 fn format_hit(hit: &Hit, index: usize, session: &str, now: i64) -> String {
     match hit {
         Hit::Memory(hit) => format!(
-            "[{index}] [memory] score={:.2} id={} category={} match={}\n{}",
-            hit.score, hit.id, hit.category, hit.match_type, hit.content
+            "[{index}] [memory] score={:.2} id={} category={}{} match={}\n{}",
+            hit.score,
+            hit.id,
+            hit.category,
+            hit.source_name
+                .as_ref()
+                .map(|name| format!(" source={name}"))
+                .unwrap_or_default(),
+            hit.match_type,
+            hit.content
         ),
         Hit::Commit(hit) => format!(
             "[{index}] [git_commit] score={:.2} sha={} {} match={}\n{}",
@@ -414,7 +420,7 @@ fn format_results(query: &str, hits: &[Hit], session: &str, diagnostics: &Diagno
 }
 
 /// Memories by id, in the order asked, leaving out ones the model sees.
-/// `None` when no id names a current memory of the project.
+/// `None` when no id names a current memory in the workspace pool.
 fn memories_by_id(
     conn: &Connection,
     project: &str,
@@ -424,7 +430,7 @@ fn memories_by_id(
     dates: Option<DateRange>,
     diagnostics: &mut Diagnostics,
 ) -> Option<Vec<Hit>> {
-    let memories = sources::project_memories(conn, project).unwrap_or_default();
+    let memories = sources::workspace_memories(conn, project).unwrap_or_default();
     let mut hits = Vec::new();
     let mut suppressed = BTreeSet::new();
     for id in ids {
@@ -440,6 +446,7 @@ fn memories_by_id(
         let rank = hits.len();
         hits.push(Hit::Memory(MemoryHit {
             id: memory.id,
+            source_name: memory.source_name.clone(),
             category: memory.category.clone(),
             content: text::preview(&memory.content),
             score: 1.0 - rank as f64 * 0.01,
@@ -515,7 +522,7 @@ fn project_of<'a>(scope: &Scope<'a>) -> Result<&'a str, String> {
 
 /// The memories whose current text the head shows.
 fn visible_memories(conn: &Connection, project: &str, scope: &Scope) -> BTreeSet<i64> {
-    sources::project_memories(conn, project)
+    sources::workspace_memories(conn, project)
         .unwrap_or_default()
         .iter()
         .filter(|memory| scope.seen.get(&memory.id) == Some(&memory.content))

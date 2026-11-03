@@ -1579,11 +1579,19 @@ impl Session {
         // profile, as the standalone plugin's does. The user profile is the
         // person's, read whatever the session's project.
         let mut memories = Vec::new();
+        let mut workspace = None;
         let (mut profile, mut profile_max_id) = (Vec::new(), 0);
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
             if let Some(project) = &self.project {
-                match db.project_memories(&project.id, now) {
-                    Ok(read) => memories = read,
+                match db.with_connection(|conn| {
+                    let resolved = crate::workspace::Workspace::resolve(conn, &project.id)?;
+                    let read = resolved.memories(conn, now, true)?;
+                    Ok::<_, rusqlite::Error>((resolved, read))
+                }) {
+                    Ok((resolved, read)) => {
+                        workspace = Some(resolved);
+                        memories = read;
+                    }
                     Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
                 }
             }
@@ -1603,6 +1611,7 @@ impl Session {
             profile: &profile,
             profile_max_id,
             memories: &memories,
+            workspace: workspace.as_ref(),
             gone: &[],
             history_budget_tokens,
             history_local_budget_tokens: crate::summary::render::history_local_budget(

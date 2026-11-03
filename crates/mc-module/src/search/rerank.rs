@@ -679,6 +679,7 @@ mod tests {
     fn memory(id: i64) -> Hit {
         Hit::Memory(MemoryHit {
             id,
+            source_name: None,
             category: "ARCHITECTURE".into(),
             content: format!("memory {id}"),
             score: 0.5,

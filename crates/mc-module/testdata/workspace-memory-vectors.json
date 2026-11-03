@@ -1,0 +1,138 @@
+{
+  "inputs": [
+    [
+      1,
+      "pj-a",
+      "PROJECT_RULES",
+      "Keep permanent rules.",
+      1,
+      "permanent"
+    ],
+    [
+      2,
+      "pj-b",
+      "CONSTRAINTS",
+      "Permanent foreign constraint.",
+      2,
+      "permanent"
+    ],
+    [
+      3,
+      "pj-a",
+      "CONSTRAINTS",
+      "Alpha's high priority constraint.",
+      100,
+      "active"
+    ],
+    [
+      4,
+      "pj-a",
+      "CONSTRAINTS",
+      "Alpha's second high priority constraint.",
+      99,
+      "active"
+    ],
+    [
+      5,
+      "pj-a",
+      "CONSTRAINTS",
+      "Alpha exceeds its member floor with another constraint.",
+      98,
+      "active"
+    ],
+    [
+      6,
+      "pj-b",
+      "CONSTRAINTS",
+      "Beta requires <review> & approval.\nNo exceptions.",
+      20,
+      "active"
+    ],
+    [
+      7,
+      "pj-c",
+      "CONSTRAINTS",
+      "Gamma's low priority constraint.",
+      10,
+      "active"
+    ],
+    [
+      8,
+      "pj-c",
+      "NAMING",
+      "Category miss must never render.",
+      100,
+      "permanent"
+    ]
+  ],
+  "pool": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    1
+  ],
+  "vectors": [
+    {
+      "budget": 60,
+      "selected": [
+        2,
+        1
+      ],
+      "rendered": "<project-memory>\n<PROJECT_RULES>\n#1: Keep permanent rules.\n</PROJECT_RULES>\n<CONSTRAINTS>\n#2 [Beta &amp; Co]: Permanent foreign constraint.\n</CONSTRAINTS>\n</project-memory>"
+    },
+    {
+      "budget": 110,
+      "selected": [
+        2,
+        1,
+        3,
+        7,
+        4,
+        5
+      ],
+      "rendered": "<project-memory>\n<PROJECT_RULES>\n#1: Keep permanent rules.\n</PROJECT_RULES>\n<CONSTRAINTS>\n#2 [Beta &amp; Co]: Permanent foreign constraint.\n#3: Alpha's high priority constraint.\n#4: Alpha's second high priority constraint.\n#5: Alpha exceeds its member floor with another constraint.\n#7 [Gamma]: Gamma's low priority constraint.\n</CONSTRAINTS>\n</project-memory>"
+    },
+    {
+      "budget": 150,
+      "selected": [
+        2,
+        1,
+        3,
+        4,
+        6,
+        7,
+        5
+      ],
+      "rendered": "<project-memory>\n<PROJECT_RULES>\n#1: Keep permanent rules.\n</PROJECT_RULES>\n<CONSTRAINTS>\n#2 [Beta &amp; Co]: Permanent foreign constraint.\n#3: Alpha's high priority constraint.\n#4: Alpha's second high priority constraint.\n#5: Alpha exceeds its member floor with another constraint.\n#6 [Beta &amp; Co]: Beta requires &lt;review&gt; &amp; approval.\nNo exceptions.\n#7 [Gamma]: Gamma's low priority constraint.\n</CONSTRAINTS>\n</project-memory>"
+    },
+    {
+      "budget": 220,
+      "selected": [
+        2,
+        1,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "rendered": "<project-memory>\n<PROJECT_RULES>\n#1: Keep permanent rules.\n</PROJECT_RULES>\n<CONSTRAINTS>\n#2 [Beta &amp; Co]: Permanent foreign constraint.\n#3: Alpha's high priority constraint.\n#4: Alpha's second high priority constraint.\n#5: Alpha exceeds its member floor with another constraint.\n#6 [Beta &amp; Co]: Beta requires &lt;review&gt; &amp; approval.\nNo exceptions.\n#7 [Gamma]: Gamma's low priority constraint.\n</CONSTRAINTS>\n</project-memory>"
+    },
+    {
+      "budget": 1000,
+      "selected": [
+        2,
+        1,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "rendered": "<project-memory>\n<PROJECT_RULES>\n#1: Keep permanent rules.\n</PROJECT_RULES>\n<CONSTRAINTS>\n#2 [Beta &amp; Co]: Permanent foreign constraint.\n#3: Alpha's high priority constraint.\n#4: Alpha's second high priority constraint.\n#5: Alpha exceeds its member floor with another constraint.\n#6 [Beta &amp; Co]: Beta requires &lt;review&gt; &amp; approval.\nNo exceptions.\n#7 [Gamma]: Gamma's low priority constraint.\n</CONSTRAINTS>\n</project-memory>"
+    }
+  ]
+}

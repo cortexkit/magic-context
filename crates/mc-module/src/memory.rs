@@ -58,6 +58,14 @@ pub fn render_line(memory: &StoredMemory) -> String {
 
 /// The memories grouped by category inside `<wrapper>`, or nothing.
 pub fn render_block(memories: &[StoredMemory], wrapper: &str) -> String {
+    render_workspace_block(memories, wrapper, None)
+}
+
+pub fn render_workspace_block(
+    memories: &[StoredMemory],
+    wrapper: &str,
+    workspace: Option<&crate::workspace::Workspace>,
+) -> String {
     if memories.is_empty() {
         return String::new();
     }
@@ -73,7 +81,7 @@ pub fn render_block(memories: &[StoredMemory], wrapper: &str) -> String {
             open = Some(&memory.category);
             lines.push(format!("<{}>", escape_attr(&memory.category)));
         }
-        lines.push(render_line(memory));
+        lines.push(render_workspace_line(memory, workspace));
     }
     if let Some(category) = open {
         lines.push(format!("</{}>", escape_attr(category)));
@@ -182,19 +190,21 @@ fn category_attribute(category: Option<&str>) -> String {
 }
 
 /// The `m[1]` line for a memory whose text was replaced.
-pub fn updated_line(id: i64, category: Option<&str>, text: &str) -> String {
+pub fn updated_line(id: i64, category: Option<&str>, text: &str, source: Option<&str>) -> String {
     format!(
-        "  <updated id=\"{id}\"{}>{}</updated>",
+        "  <updated id=\"{id}\"{}{}>{}</updated>",
         category_attribute(category),
+        project_attribute(source),
         escape_content(text)
     )
 }
 
 /// The `m[1]` line for a new memory, saved or produced by a merge.
-pub fn added_line(id: i64, category: Option<&str>, text: &str) -> String {
+pub fn added_line(id: i64, category: Option<&str>, text: &str, source: Option<&str>) -> String {
     format!(
-        "  <added id=\"{id}\"{}>{}</added>",
+        "  <added id=\"{id}\"{}{}>{}</added>",
         category_attribute(category),
+        project_attribute(source),
         escape_content(text)
     )
 }
@@ -205,6 +215,95 @@ pub fn removed_line(id: i64) -> String {
 
 pub fn superseded_line(id: i64, by: i64) -> String {
     format!("  <superseded id=\"{id}\" by=\"{by}\"/>")
+}
+
+fn project_attribute(source: Option<&str>) -> String {
+    source
+        .map(|name| format!(" project=\"{}\"", escape_attr(name)))
+        .unwrap_or_default()
+}
+
+fn render_workspace_line(
+    memory: &StoredMemory,
+    workspace: Option<&crate::workspace::Workspace>,
+) -> String {
+    match workspace.and_then(|workspace| workspace.source_name(&memory.project_path)) {
+        Some(name) => format!(
+            "#{} [{}]: {}",
+            memory.id,
+            escape_content(name),
+            escape_content(&memory.content)
+        ),
+        None => render_line(memory),
+    }
+}
+
+/// Permanent rows precede equal per-member floors; the remainder fills by priority.
+/// Candidate costs include source labels and category tags before admission.
+pub fn trim_workspace_to_budget(
+    mut memories: Vec<StoredMemory>,
+    budget: u64,
+    workspace: &crate::workspace::Workspace,
+) -> Vec<StoredMemory> {
+    if !workspace.is_workspaced() {
+        return trim_to_budget(memories, budget);
+    }
+    let estimate = |text: &str| mc_tokenizer::estimate_tokens(text) as u64;
+    let mut used = estimate("<project-memory>\n</project-memory>");
+    let mut categories = HashSet::new();
+    let cost = |memory: &StoredMemory, categories: &HashSet<String>| {
+        let mut cost = estimate(&(render_workspace_line(memory, Some(workspace)) + "\n"));
+        if !categories.contains(&memory.category) {
+            let category = escape_attr(&memory.category);
+            cost += estimate(&format!("<{category}>\n</{category}>\n"));
+        }
+        cost
+    };
+    memories.sort_by(selection_order);
+    let mut selected = Vec::new();
+    let mut ids = HashSet::new();
+    for memory in memories
+        .iter()
+        .filter(|memory| memory.status == "permanent")
+    {
+        let tokens = cost(memory, &categories);
+        if used + tokens <= budget {
+            used += tokens;
+            categories.insert(memory.category.clone());
+            ids.insert(memory.id);
+            selected.push(memory.clone());
+        }
+    }
+    let floor = budget.saturating_sub(used) as f64 / workspace.members.len() as f64;
+    for member in &workspace.members {
+        let mut member_tokens = 0;
+        for memory in memories.iter().filter(|memory| {
+            memory.status != "permanent"
+                && workspace.member(&memory.project_path) == Some(member.as_str())
+        }) {
+            let tokens = cost(memory, &categories);
+            if (member_tokens + tokens) as f64 > floor || used + tokens > budget {
+                continue;
+            }
+            used += tokens;
+            member_tokens += tokens;
+            categories.insert(memory.category.clone());
+            ids.insert(memory.id);
+            selected.push(memory.clone());
+        }
+    }
+    for memory in memories {
+        if ids.contains(&memory.id) {
+            continue;
+        }
+        let tokens = cost(&memory, &categories);
+        if used + tokens <= budget {
+            used += tokens;
+            categories.insert(memory.category.clone());
+            selected.push(memory);
+        }
+    }
+    selected
 }
 
 #[cfg(test)]
