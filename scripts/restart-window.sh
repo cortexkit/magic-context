@@ -5,12 +5,14 @@
 #
 #   bash scripts/restart-window.sh --sha <ck-mc source sha> --staged <staged ck-mc> \
 #       --dists <prebuilt checkout> --context-fence <N> --store-fence <M> \
-#       [--then '<command>' ...] [--dry-run]
+#       [--first '<command>' ...] [--then '<command>' ...] [--dry-run]
 #
 # --store-fence is the version of mode3.db, the store the mode-3 ck-mc keeps;
 # the old module's store.db is cloned for a rollback and otherwise left alone.
-# Each --then command runs after ck-mc is placed, in order, while the hosts are
-# still closed: steps of other modules that must land before any host starts.
+# Each --first command runs before anything is touched; a failure stops the
+# script with nothing changed. Each --then command runs after ck-mc is placed.
+# Both run in the order given, while the hosts are still closed: steps of
+# other modules that must land before any host starts.
 # A dry run checks everything and can run with the hosts up.
 #
 # --dists names a checkout whose packages/plugin/dist and packages/pi-plugin/dist
@@ -33,8 +35,10 @@ umask 077
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${MAGIC_CONTEXT_STORAGE_DIR:-$HOME/.local/share/cortexkit/magic-context}"
 SHA="" STAGED="" DISTS="" CONTEXT_FENCE="" STORE_FENCE="" DRY_RUN=0
-# Other modules' steps that must run while the hosts are still closed (core's
-# prompt activation, a runner's update), in the order given, after ck-mc is placed.
+# Other modules' steps that must run while the hosts are still closed. FIRST
+# steps run before anything here is touched (a launch hold), THEN steps after
+# ck-mc is placed (a runner's update, core's prompt activation), in order.
+FIRST=()
 THEN=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,6 +47,7 @@ while [ $# -gt 0 ]; do
         --dists) DISTS="$2"; shift 2 ;;
         --context-fence) CONTEXT_FENCE="$2"; shift 2 ;;
         --store-fence) STORE_FENCE="$2"; shift 2 ;;
+        --first) FIRST+=("$2"); shift 2 ;;
         --then) THEN+=("$2"); shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -126,8 +131,9 @@ if [ -n "$others" ]; then
     [ "$DRY_RUN" -eq 1 ] || exit 2
 fi
 [ -n "$(context_version)" ] || { echo "cannot read the context.db schema version" >&2; exit 2; }
-say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, mode3.db $(mode3_version) -> $STORE_FENCE, store.db $(store_versions)(kept), ck-mc $SHA, ${#THEN[@]} step(s) after placement"
+say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, mode3.db $(mode3_version) -> $STORE_FENCE, store.db $(store_versions)(kept), ck-mc $SHA, ${#FIRST[@]} step(s) first, ${#THEN[@]} after placement"
 if [ "$DRY_RUN" -eq 1 ]; then
+    for step in "${FIRST[@]}"; do say "would first run: $step"; done
     for step in "${THEN[@]}"; do say "would then run: $step"; done
     notify "Dry run: preflight passed. Nothing changed."
     exit 0
@@ -137,6 +143,11 @@ mkdir -p "$BK"
 exec > >(tee -a "$BK/window.log") 2>&1
 status RUNNING
 say "OpenCode and Pi are closed. Keep them closed until this finishes."
+
+for step in "${FIRST[@]}"; do
+    say "running first: $step"
+    bash -c "$step" || { status FAILED; notify "FAILED before any change: $step. Nothing here changed."; exit 1; }
+done
 
 for s in "${SENTINELS[@]}"; do launchctl bootout "gui/$(id -u)/$s" 2>/dev/null || true; done
 say "stopping ck-mc"
