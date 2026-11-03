@@ -9,6 +9,9 @@ use cortexkit_role_llm_runner::send::SendReply;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+#[path = "pass_decision_tests.rs"]
+mod pass_decision_tests;
+
 #[derive(Default)]
 struct Client {
     entries: Mutex<Vec<Entry>>,

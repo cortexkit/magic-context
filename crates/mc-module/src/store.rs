@@ -72,6 +72,10 @@ pub struct Durable {
     /// it twice.
     #[serde(default)]
     pub floor_lifted_for: Option<String>,
+    /// A live-prompt floor marked for the next pass, including its transcript
+    /// ordinal so a replaced prompt cannot spend an earlier mark.
+    #[serde(default)]
+    pub floor_pending_for: Option<(u64, String)>,
     /// Views handed to the runner that it has not yet confirmed applying,
     /// with the state each replaced, so a refusal after a restart can
     /// still put it back.

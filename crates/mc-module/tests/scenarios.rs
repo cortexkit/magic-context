@@ -45,6 +45,12 @@ mod write_lock_budget;
 /// A catch-up read: the ordinal it read after, and how many entries it got.
 type ReadLog = Arc<Mutex<Vec<(Option<u64>, usize)>>>;
 
+struct NoticeTrace {
+    seq: u64,
+    percentage: f64,
+    child_runs: usize,
+}
+
 #[derive(Clone, Default)]
 struct HostClient {
     host: Arc<Mutex<Option<Host>>>,
@@ -75,6 +81,8 @@ struct HostClient {
     read_started: Arc<tokio::sync::Notify>,
     pause_children: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
     child_started: Arc<tokio::sync::Notify>,
+    /// Optional per-notice observations; a tool step delivers more than one notice.
+    notice_log: Arc<Mutex<Option<Vec<NoticeTrace>>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -372,11 +380,34 @@ impl Provider for InProcess {
     }
 
     async fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, CallError> {
+        let observation = if self.client.notice_log.lock().unwrap().is_some() {
+            let usable = request.conditions.context_window - request.conditions.output_reserve;
+            Some((
+                request.seq,
+                request.conditions.last_prompt_tokens.unwrap_or(0) as f64 / usable as f64 * 100.0,
+            ))
+        } else {
+            None
+        };
         let session = &self.route.session;
         let module = self.module();
         let answer = module.notice(session, request).map_err(call_error)?;
         if answer == NoticeAnswer::Received {
             module.idle(session).await.map_err(call_error)?;
+        }
+        if let Some((seq, percentage)) = observation {
+            let child_runs = self.client.host().unwrap().child_runs().len();
+            self.client
+                .notice_log
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .push(NoticeTrace {
+                    seq,
+                    percentage,
+                    child_runs,
+                });
         }
         Ok(answer)
     }
@@ -1599,23 +1630,50 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
 
 #[tokio::test]
 async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
-    let mut runner = start(config("head", Kind::OpenAi, free())).await;
+    let client = HostClient::default();
+    *client.notice_log.lock().unwrap() = Some(Vec::new());
+    let mut runner = start_with_client(
+        client.clone(),
+        config("head", Kind::OpenAi, free()),
+        Settings::default(),
+        None,
+        false,
+        |_| {},
+    )
+    .await;
     // One prompt, then a long run of tool steps: everything after the prompt
     // is the current turn, which the summarizer may not read below the force
-    // band, except for one run past the prompt at the execute threshold.
+    // band. The first execute marks the prompt; the next pass may summarize
+    // past it once, before the force band.
     runner.play(&[user("Refactor the whole crate.")]).await;
     let usable = 99_000.0;
     let mut usage_at_first_run = None;
     for _ in 0..24 {
         runner.play(&[read_file(50)]).await;
+        let last = runner.report.requests.last().unwrap();
+        let percentage = last.usage.prompt_tokens.unwrap_or(0) as f64 / usable * 100.0;
         if usage_at_first_run.is_none() && !runner.host().child_runs().is_empty() {
-            let last = runner.report.requests.last().unwrap();
-            usage_at_first_run =
-                Some(last.usage.prompt_tokens.unwrap_or(0) as f64 / usable * 100.0);
+            usage_at_first_run = Some(percentage);
         }
     }
     assert_clean(&runner);
     let usage = usage_at_first_run.expect("no summarizer run");
+    let log = client.notice_log.lock().unwrap();
+    let notices = log.as_ref().unwrap();
+    let first_execute = notices
+        .iter()
+        .find(|notice| notice.percentage >= 65.0)
+        .unwrap();
+    assert_eq!(
+        first_execute.child_runs, 0,
+        "first execute must only mark the floor"
+    );
+    let first_run = notices.iter().find(|notice| notice.child_runs > 0).unwrap();
+    assert_eq!(
+        first_run.seq,
+        first_execute.seq + 1,
+        "the following notice must consume the floor mark"
+    );
     // It ran at the threshold, not only once the force band let it past the
     // prompt.
     assert!((65.0..85.0).contains(&usage), "first run at {usage:.1}%");

@@ -138,6 +138,8 @@ pub struct Session {
     /// The newest prompt a run has already summarized past once at the
     /// execute threshold ([`Session::summary_due`]).
     floor_lifted_for: Option<String>,
+    /// A meaningful prompt whose floor may be lifted on the next notice only.
+    floor_pending_for: Option<(u64, String)>,
     /// How much history the summarizer may still read in the drain quota's
     /// current ten-minute window.
     drain: crate::summary::drain::Drain,
@@ -193,6 +195,13 @@ struct Before {
     pruned_turns: u64,
 }
 
+/// Admission for a notice, before any lane selects work or publishes a view.
+struct NoticePass {
+    summary: Option<run::Request>,
+    rebuild: bool,
+    head_stale: bool,
+}
+
 /// Whether the runner reports applying `view`.
 fn same(applied: &AppliedView, view: &View) -> bool {
     applied.version == view.version && applied.checksum == view.checksum
@@ -244,6 +253,7 @@ impl Session {
             tools_only: false,
             no_progress: None,
             floor_lifted_for: None,
+            floor_pending_for: None,
             drain: Default::default(),
             reservation: None,
             image_outputs: std::collections::BTreeMap::new(),
@@ -371,6 +381,7 @@ impl Session {
             drain: self.drain.clone(),
             no_progress: self.no_progress.clone(),
             floor_lifted_for: self.floor_lifted_for.clone(),
+            floor_pending_for: self.floor_pending_for.clone(),
             unconfirmed: self.unconfirmed.clone(),
         }
     }
@@ -405,6 +416,7 @@ impl Session {
         self.drain = durable.drain;
         self.no_progress = durable.no_progress;
         self.floor_lifted_for = durable.floor_lifted_for;
+        self.floor_pending_for = durable.floor_pending_for;
         self.unconfirmed = durable.unconfirmed;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
@@ -660,43 +672,68 @@ impl Session {
             self.keep_requested = false;
             return None;
         }
-        let summary = self.summary_due(settings);
-        let force = pass::in_force_band(&self.conditions, settings);
-        if self.head_shape_changed(settings) {
-            self.fold_due = true;
-            self.head_stale = true;
-        }
-        if self.head_stale {
-            let (view, _) = self.build_now(client, settings).await;
-            if let Some(view) = view {
-                self.publish(client, view).await;
-            }
-            return summary;
-        }
-        if execute
-            && (force || !self.summary_on_its_way())
-            && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
-        {
+        let decision = self.decide_notice(settings);
+        if decision.rebuild {
             let (view, freed) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
-            self.ask_for_keep_if_short(client, settings, freed).await;
+            if !decision.head_stale {
+                self.ask_for_keep_if_short(client, settings, freed).await;
+            }
         }
-        summary
+        decision.summary
+    }
+
+    /// One permission for the history refresh and every mutation lane. Summary
+    /// admission runs first, so a run started here also holds the queued work.
+    fn decide_notice(&mut self, settings: &Settings) -> NoticePass {
+        let summary = self.summary_due(settings);
+        if self.head_shape_changed(settings) {
+            self.fold_due = true;
+            self.head_stale = true;
+        }
+        NoticePass {
+            summary,
+            rebuild: self.head_stale
+                || (pass::at_execute(&self.conditions, settings)
+                    && (pass::in_force_band(&self.conditions, settings)
+                        || !self.summary_on_its_way())
+                    && !pass::signed_thinking_hold(
+                        self.index.entries(),
+                        &self.conditions,
+                        settings,
+                    )),
+            head_stale: self.head_stale,
+        }
     }
 
     /// A summarizer run to start now, if one is due: the session has a
     /// summarizer, none is running, and the history it may read is worth a
     /// run at this usage.
     fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
+        let threshold = settings.execute_threshold_percentage;
+        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let prompt = self
+            .index
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| trigger::is_meaningful_user(entry))
+            .map(|entry| (entry.ordinal, entry.mid.clone()));
+        if usage < threshold
+            || self
+                .floor_pending_for
+                .as_ref()
+                .is_some_and(|mark| Some(mark) != prompt.as_ref())
+        {
+            self.floor_pending_for = None;
+        }
         if !self.features.summarizer || self.summarizing {
             return None;
         }
         let memory_enabled = self.memory_admissions(settings) && self.project.is_some();
-        let window = self.conditions.context_window;
-        let threshold = settings.execute_threshold_percentage;
-        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let window = pass::usable_window(&self.conditions);
         let force = pass::in_force_band(&self.conditions, settings);
         let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
         let tail = trigger::protected_tail_tokens(window, threshold, usage);
@@ -762,10 +799,11 @@ impl Session {
                 settings.commit_clusters,
             )
         };
-        let mut until = bounded(tail, force);
+        // Consume the mark before inspecting the lifted head. A head that has
+        // shrunk cannot re-arm the same mark on this evaluation.
+        let lift_floor = self.floor_pending_for.take().is_some();
+        let mut until = bounded(tail, force || lift_floor);
         let mut decision = decide(until);
-        // The prompt this run summarizes past, once it is admitted.
-        let mut lifting = None;
         if decision.is_none() && force {
             // Nothing to read in the force band: the protected tail shrinks
             // to a half, or a quarter from 95% (the plugin's emergency tail
@@ -777,21 +815,20 @@ impl Session {
         if decision.is_none() {
             // At the threshold, a long turn's history after the person's
             // newest prompt cannot be summarized while that prompt stays raw.
-            // The plugin lets one run summarize past it, once per prompt
-            // (`compartment-trigger.ts`, the live-prompt floor lift).
-            let prompt = entries
-                .iter()
-                .rev()
-                .find(|entry| trigger::is_meaningful_user(entry))
-                .map(|entry| entry.mid.clone());
-            let lifted = bounded(tail, true);
-            if usage < threshold || prompt.is_none() || prompt == self.floor_lifted_for {
-                return None;
+            // Mark only when lifting that floor exposes a meaningful head;
+            // the next notice may lift it once, while queued work waits for it.
+            if !force
+                && !lift_floor
+                && usage >= threshold
+                && prompt.is_some()
+                && prompt.as_ref().map(|(_, mid)| mid) != self.floor_lifted_for.as_ref()
+            {
+                let lifted = bounded(tail, true);
+                if lifted > until && decide(lifted).is_some() {
+                    self.floor_pending_for = prompt;
+                }
             }
-            decision = decide(lifted);
-            decision?;
-            until = lifted;
-            lifting = prompt;
+            return None;
         }
         if self.waits_for_new_history(force) {
             return None;
@@ -813,8 +850,8 @@ impl Session {
         self.reservation = Some(reservation);
         self.summarizing = true;
         // The lift is spent only by a run that actually starts.
-        if lifting.is_some() {
-            self.floor_lifted_for = lifting;
+        if lift_floor {
+            self.floor_lifted_for = prompt.map(|(_, mid)| mid);
         }
         Some(run::Request {
             session: self.key.clone(),
@@ -1908,7 +1945,7 @@ impl Session {
     }
 
     fn summary_on_its_way(&self) -> bool {
-        self.summarizing
+        self.features.summarizer && (self.summarizing || self.floor_pending_for.is_some())
     }
 
     /// The history head, and the cut when the newest summary's last message
@@ -2220,6 +2257,14 @@ impl Session {
         Ok(view)
     }
 
+    /// A spent emergency batch waits for another rewrite, but an over-limit
+    /// request must reclaim even when the pressure episode is already spent.
+    fn emergency_drop_allowed(&self, settings: &Settings, over_limit: bool, priced: bool) -> bool {
+        over_limit
+            || (pass::in_force_band(&self.conditions, settings)
+                && (priced || !self.emergency_latched))
+    }
+
     /// A pass with permission to rebuild: every lane adds the parts it wants
     /// gone, and one view carries them. `None` when no lane has work.
     ///
@@ -2297,7 +2342,6 @@ impl Session {
         ));
         wanted.retain(|(key, _)| !self.failed_parts.contains(key));
         let (mut ops, mut covered) = lanes::drop_ops(&context, &wanted);
-        let force = pass::in_force_band(&self.conditions, settings);
         // Another rewrite on this pass: a lane edit, a history head or cut
         // that changes, or a ride whose cache is lost anyway.
         let head_changes = history.iter().any(|op| {
@@ -2308,7 +2352,7 @@ impl Session {
         });
         let priced = !ops.is_empty() || head_changes || cache_lost;
         self.next_latch = false;
-        if over_limit.is_some() || (force && (priced || !self.emergency_latched)) {
+        if self.emergency_drop_allowed(settings, over_limit.is_some(), priced) {
             let emergency = lanes::Emergency {
                 prompt_tokens: over_limit
                     .unwrap_or(0)
