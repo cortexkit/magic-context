@@ -308,6 +308,7 @@ fn lifecycle_move_converts_the_plugins_numbers_across_a_compaction() {
         entry,
         finished_summary,
         added: false,
+        pi: None,
     };
     let messages = vec![
         row("m1", Some(1), false),

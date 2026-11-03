@@ -13,6 +13,7 @@ fn transcript() -> Vec<HostMessage> {
         entry,
         finished_summary,
         added: false,
+        pi: None,
     };
     vec![
         row("u1", Some(1), false),
@@ -243,6 +244,7 @@ fn a_retried_move_does_not_shift_the_numbers_twice() {
             entry: None,
             finished_summary: false,
             added: false,
+            pi: None,
         },
     );
     let refused = run(&store, &Numbering::opencode(&other, &newest()).unwrap()).unwrap_err();
@@ -307,12 +309,14 @@ fn a_transcript_without_compactions_changes_no_number() {
             entry: Some(1),
             finished_summary: false,
             added: false,
+            pi: None,
         },
         HostMessage {
             mid: "a2".into(),
             entry: Some(2),
             finished_summary: false,
             added: false,
+            pi: None,
         },
     ];
     let numbering = Numbering::opencode(&plain, &Cursor::new(2, "a2", "d")).unwrap();
@@ -337,6 +341,7 @@ fn converted() -> Vec<HostMessage> {
         entry,
         finished_summary,
         added,
+        pi: None,
     };
     vec![
         row("u1", Some(1), false, false),
@@ -389,4 +394,160 @@ fn an_added_row_cannot_be_a_finished_summary() {
     rows[8].finished_summary = true;
     let refused = Numbering::opencode(&rows, &Cursor::new(7, "notice", "d")).unwrap_err();
     assert!(refused.starts_with("invalid_messages:"), "{refused}");
+}
+
+/// A Pi branch, root to leaf, with the runner's entries. The plugin numbers
+/// it 1 u1, 2 a2, 3 b5 (a bashExecution message takes a number while the
+/// results before it wait), 4 u6 (with t3 and t4 folded in, and the custom
+/// message after it), 5 a8, 6 synth-user-t9 (a result run with no user
+/// message after it), 7 a10 (with the result without a call id after it),
+/// 8 u13, 9 a14. The runner counts every message entry and the custom
+/// message, and neither the model change nor the compaction.
+fn pi_branch() -> Vec<HostMessage> {
+    let row =
+        |mid: &str, entry: Option<u64>, kind: &str, role: Option<&str>, call: bool| HostMessage {
+            mid: mid.into(),
+            entry,
+            finished_summary: false,
+            added: false,
+            pi: Some(PiRow {
+                kind: kind.into(),
+                role: role.map(Into::into),
+                has_tool_call_id: call,
+            }),
+        };
+    let message =
+        |mid: &str, entry: u64, role: &str| row(mid, Some(entry), "message", Some(role), false);
+    vec![
+        row("mc", None, "model_change", None, false),
+        message("u1", 1, "user"),
+        message("a2", 2, "assistant"),
+        row("t3", Some(3), "message", Some("toolResult"), true),
+        row("t4", Some(4), "message", Some("toolResult"), true),
+        message("b5", 5, "bashExecution"),
+        message("u6", 6, "user"),
+        row("cm7", Some(7), "custom_message", None, false),
+        message("a8", 8, "assistant"),
+        row("t9", Some(9), "message", Some("toolResult"), true),
+        message("a10", 10, "assistant"),
+        row("t11", Some(11), "message", Some("toolResult"), false),
+        row("c12", None, "compaction", None, false),
+        message("u13", 12, "user"),
+        message("a14", 13, "assistant"),
+        row("label", None, "label", None, false),
+    ]
+}
+
+fn pi_newest() -> Cursor {
+    Cursor::new(13, "a14", "d")
+}
+
+fn pi_summary(
+    store: &Store,
+    sequence: i64,
+    (start, start_id): (i64, &str),
+    (end, end_id): (i64, &str),
+) {
+    store
+        .conn()
+        .execute(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message,
+                 start_message_id, end_message_id, title, content, p1, created_at, harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 't', 'c', 'c', 1, 'pi')",
+            params![SESSION, sequence, start, end, start_id, end_id],
+        )
+        .unwrap();
+}
+
+fn pi_run(store: &Store) -> Result<(), String> {
+    let mut conn = store.conn();
+    let numbering = Numbering::pi(&pi_branch(), &pi_newest())?.align_pi(&conn, "pi", SESSION)?;
+    renumber(&mut conn, "pi", SESSION, &numbering)
+}
+
+#[test]
+fn a_pi_branch_maps_folded_results_and_skipped_entries_to_the_message_they_belong_to() {
+    let store = Store::new("pi");
+    pi_summary(&store, 0, (1, "u1"), (4, "u6"));
+    pi_summary(&store, 1, (5, "a8"), (6, "synth-user-t9"));
+    pi_summary(&store, 2, (7, "a10"), (9, "a14"));
+    store
+        .conn()
+        .execute_batch(&format!(
+            "INSERT INTO message_history_source (session_id, message_id, message_ordinal, source_version, normalized_content_hash, role, harness, updated_at)
+                 VALUES ('{SESSION}', 'u6', 4, 'v', 'h', 'user', 'pi', 1),
+                        ('{SESSION}', 'synth-user-t9', 6, 'v', 'h', 'user', 'pi', 1),
+                        ('{SESSION}', 'a14', 9, 'v', 'h', 'assistant', 'pi', 1);
+             INSERT INTO notes (type, content, session_id, created_at, updated_at, harness, anchor_ordinal)
+                 VALUES ('session', 'n', '{SESSION}', 1, 1, 'pi', 7);"
+        ))
+        .unwrap();
+    pi_run(&store).unwrap();
+
+    // u6's summary also covers the results folded into it (3, 4) and the
+    // custom message after it (7); a10's covers the result without a call id.
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_message || '-' || end_message FROM compartments ORDER BY sequence"
+        ),
+        ["1-7", "8-9", "10-13"]
+    );
+    assert_eq!(
+        store.query::<String>(
+            "SELECT message_id || ':' || message_ordinal FROM message_history_source ORDER BY message_ordinal"
+        ),
+        ["u6:6", "synth-user-t9:9", "a14:13"]
+    );
+    assert_eq!(store.query::<i64>("SELECT anchor_ordinal FROM notes"), [11]);
+}
+
+#[test]
+fn pi_numbers_stored_ahead_of_a_branch_that_lost_entries_are_lined_up_first() {
+    let store = Store::new("pi-offset");
+    // One message before u1 is gone from the file, so the plugin numbered
+    // the branch from 2, behind a number for the lost message.
+    pi_summary(&store, 0, (1, "lost"), (5, "u6"));
+    pi_summary(&store, 1, (6, "a8"), (7, "synth-user-t9"));
+    pi_summary(&store, 2, (8, "a10"), (10, "a14"));
+    pi_run(&store).unwrap();
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_message || '-' || end_message FROM compartments ORDER BY sequence"
+        ),
+        ["1-7", "8-9", "10-13"]
+    );
+}
+
+#[test]
+fn a_pi_summary_the_branch_cannot_place_refuses_and_changes_nothing() {
+    let store = Store::new("pi-unanchored");
+    pi_summary(&store, 0, (1, "u1"), (4, "elsewhere"));
+    let error = pi_run(&store).unwrap_err();
+    assert!(error.starts_with("ordinal_unanchored:"), "{error}");
+    let store = Store::new("pi-disagree");
+    pi_summary(&store, 0, (1, "u1"), (4, "u6"));
+    // Its end says offset 0, its start says 1.
+    pi_summary(&store, 1, (6, "a8"), (6, "synth-user-t9"));
+    let error = pi_run(&store).unwrap_err();
+    assert!(error.starts_with("ordinal_unanchored:"), "{error}");
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_message || '-' || end_message FROM compartments ORDER BY sequence"
+        ),
+        ["1-4", "6-6"]
+    );
+}
+
+#[test]
+fn a_pi_list_must_say_what_each_entry_is_and_end_at_the_newest_message() {
+    let mut rows = pi_branch();
+    rows[1].pi = None;
+    assert!(Numbering::pi(&rows, &pi_newest())
+        .unwrap_err()
+        .starts_with("invalid_messages:"));
+    let mut rows = pi_branch();
+    rows.truncate(rows.len() - 3);
+    assert!(Numbering::pi(&rows, &pi_newest())
+        .unwrap_err()
+        .starts_with("invalid_messages:"));
 }

@@ -45,6 +45,13 @@
 //! that message reaches its added rows too, and a summary ending there doesn't
 //! leave the added text raw after the cut.
 //!
+//! On Pi the plugin numbers the journal entries of the session's active
+//! branch by its own rule (see [`Numbering::pi`]): it folds tool results into
+//! the user message after them and skips the entries the runner adds to its
+//! count (custom messages, branch summaries, tool results without a call id).
+//! The list then holds every journal entry of the branch with its kind, and
+//! each skipped or folded entry belongs to the message the plugin put it in.
+//!
 //! The rewrite and a record of it (`mode3_renumber:<harness>:<session>`,
 //! carrying the numbering's checksum) commit in one transaction. A move
 //! retried after a later step failed finds the record and doesn't shift the
@@ -84,17 +91,65 @@ pub struct HostMessage {
     /// the message before it.
     #[serde(default)]
     pub added: bool,
+    /// On Pi, what the journal entry is. The Pi plugin's numbering depends on
+    /// it (see [`Numbering::pi`]); OpenCode rows leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi: Option<PiRow>,
 }
+
+/// A Pi journal entry's kind, as the runner's move tool reads it from the
+/// session file.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PiRow {
+    /// The entry's `type`: `message`, `custom_message`, `branch_summary`,
+    /// `compaction`, `model_change` and so on.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// A `message` entry's `message.role`: `user`, `assistant`, `toolResult`,
+    /// or another role such as `bashExecution`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether a `toolResult` carries a non-empty `toolCallId`.
+    #[serde(default)]
+    pub has_tool_call_id: bool,
+}
+
+/// The id the Pi plugin gives the user message it makes up for a run of tool
+/// results with no user message after them: this prefix and the first
+/// result's entry id (`SYNTH_USER_ID_PREFIX` in the Pi plugin).
+const PI_SYNTHETIC_USER_PREFIX: &str = "synth-user-";
 
 /// One message the plugin numbered, with the entries it has on the runner.
 #[derive(Debug)]
 struct Numbered {
+    /// Empty for a number the plugin kept for a message its branch walk no
+    /// longer reached (a Pi session whose file lost entries before
+    /// everything stored; see [`Numbering::align_pi`]).
     mid: String,
     /// The entry of the row with this message's id.
     entry: Option<u64>,
-    /// The first and last entries of the message and the added rows after it.
+    /// The first and last entries of the rows that make up this message: its
+    /// own row, the rows added after it, and on Pi the tool results folded
+    /// into it.
     first: Option<u64>,
     through: Option<u64>,
+}
+
+impl Numbered {
+    fn new(mid: impl Into<String>, entry: Option<u64>) -> Self {
+        Self {
+            mid: mid.into(),
+            entry,
+            first: entry,
+            through: entry,
+        }
+    }
+
+    fn covers(&mut self, entry: Option<u64>) {
+        let Some(entry) = entry else { return };
+        self.first = Some(self.first.map_or(entry, |first| first.min(entry)));
+        self.through = Some(self.through.map_or(entry, |through| through.max(entry)));
+    }
 }
 
 /// The plugin's numbering of a transcript next to the runner's.
@@ -118,21 +173,7 @@ impl Numbering {
         let mut last_entry = 0;
         let mut has_added = false;
         for message in messages {
-            if by_mid.insert(message.mid.clone(), message.entry).is_some() {
-                return Err(format!(
-                    "invalid_messages: message {} is listed twice",
-                    message.mid
-                ));
-            }
-            if let Some(entry) = message.entry {
-                if entry <= last_entry {
-                    return Err(format!(
-                        "invalid_messages: entry numbers must rise in host order; {} has {entry} after {last_entry}",
-                        message.mid
-                    ));
-                }
-                last_entry = entry;
-            }
+            check_row(&mut by_mid, &mut last_entry, message)?;
             if message.added {
                 if message.finished_summary {
                     return Err(format!(
@@ -143,57 +184,211 @@ impl Numbering {
                 has_added = true;
                 // An added row before the first numbered message belongs to
                 // nothing the plugin stored.
-                if let (Some(owner), Some(entry)) = (by_plugin.last_mut(), message.entry) {
-                    owner.first = owner.first.or(Some(entry));
-                    owner.through = Some(entry);
+                if let Some(owner) = by_plugin.last_mut() {
+                    owner.covers(message.entry);
                 }
             } else if !message.finished_summary {
-                by_plugin.push(Numbered {
-                    mid: message.mid.clone(),
-                    entry: message.entry,
-                    first: message.entry,
-                    through: message.entry,
-                });
+                by_plugin.push(Numbered::new(&message.mid, message.entry));
             }
         }
         match messages.last() {
             Some(last) if last.mid == newest.mid && last.entry == Some(newest.ordinal) => {}
-            _ => {
-                return Err(format!(
-                    "invalid_messages: the list must end at the newest message {} (entry {})",
-                    newest.mid, newest.ordinal
-                ))
-            }
-        }
-        let mut hasher = Sha256::new();
-        for message in messages {
-            hasher.update(
-                serde_json::to_vec(&(
-                    &message.mid,
-                    message.entry,
-                    message.finished_summary,
-                    message.added,
-                ))
-                .expect("a message row serializes"),
-            );
-            hasher.update(b"\n");
+            _ => return Err(not_at_newest(newest)),
         }
         Ok(Self {
             by_plugin,
             has_added,
             by_mid,
-            checksum: format!("{:x}", hasher.finalize()),
+            checksum: checksum(messages),
         })
+    }
+
+    /// The Pi plugin's numbering of `messages`: every journal entry on the
+    /// session's active branch, root to leaf. The plugin numbers only
+    /// `message` entries, from 1, as it walks the branch (`read-session-pi.ts`):
+    /// - a `user` or `assistant` message takes the next number, and so does a
+    ///   message of any other role (such as `bashExecution`);
+    /// - a `toolResult` with a call id takes none of its own: it folds into the
+    ///   next `user` message, or, when an `assistant` message or the branch's
+    ///   end comes first, into a user message the plugin makes up for the run
+    ///   (`synth-user-` and the run's first result id), numbered just before
+    ///   that assistant;
+    /// - a `toolResult` without a call id is skipped.
+    ///
+    /// The runner also counts `custom_message` and `branch_summary` entries
+    /// and each tool result on its own. A row the plugin skipped belongs to
+    /// the message before it, as an added row does on OpenCode, and a folded
+    /// result belongs to the message it folds into, so a stored range still
+    /// covers exactly what the plugin summarized.
+    ///
+    /// The list must end, ignoring rows without an entry, at the transcript's
+    /// newest message `newest`.
+    pub fn pi(messages: &[HostMessage], newest: &Cursor) -> Result<Self, String> {
+        let mut by_plugin: Vec<Numbered> = Vec::new();
+        let mut by_mid = HashMap::new();
+        let mut last_entry = 0;
+        // A run of tool results waiting for the message it folds into.
+        let mut results: Option<Numbered> = None;
+        for message in messages {
+            check_row(&mut by_mid, &mut last_entry, message)?;
+            let Some(row) = &message.pi else {
+                return Err(format!(
+                    "invalid_messages: Pi row {} doesn't say what journal entry it is",
+                    message.mid
+                ));
+            };
+            if message.added || message.finished_summary {
+                return Err(format!(
+                    "invalid_messages: Pi row {} can't be an added row or a finished summary",
+                    message.mid
+                ));
+            }
+            let skipped = |by_plugin: &mut Vec<Numbered>| {
+                if let Some(owner) = by_plugin.last_mut() {
+                    owner.covers(message.entry);
+                }
+            };
+            if row.kind != "message" {
+                skipped(&mut by_plugin);
+                continue;
+            }
+            match row.role.as_deref() {
+                Some("toolResult") if row.has_tool_call_id => results
+                    .get_or_insert_with(|| {
+                        Numbered::new(
+                            format!("{PI_SYNTHETIC_USER_PREFIX}{}", message.mid),
+                            message.entry,
+                        )
+                    })
+                    .covers(message.entry),
+                Some("toolResult") => skipped(&mut by_plugin),
+                Some("user") => {
+                    let mut user = Numbered::new(&message.mid, message.entry);
+                    if let Some(run) = results.take() {
+                        user.covers(run.first);
+                        user.covers(run.through);
+                    }
+                    by_plugin.push(user);
+                }
+                Some("assistant") => {
+                    by_plugin.extend(results.take());
+                    by_plugin.push(Numbered::new(&message.mid, message.entry));
+                }
+                // Any other role keeps its number; a pending run of results
+                // still folds into the next user or assistant turn.
+                _ => by_plugin.push(Numbered::new(&message.mid, message.entry)),
+            }
+        }
+        by_plugin.extend(results.take());
+        for numbered in &by_plugin {
+            if numbered.mid.starts_with(PI_SYNTHETIC_USER_PREFIX) {
+                by_mid.insert(numbered.mid.clone(), numbered.entry);
+            }
+        }
+        match messages
+            .iter()
+            .rev()
+            .find(|message| message.entry.is_some())
+        {
+            Some(last) if last.mid == newest.mid && last.entry == Some(newest.ordinal) => {}
+            _ => return Err(not_at_newest(newest)),
+        }
+        Ok(Self {
+            by_plugin,
+            has_added: false,
+            by_mid,
+            checksum: checksum(messages),
+        })
+    }
+
+    /// Line the Pi numbering up with the numbers stored for `session`. A Pi
+    /// session file can lose entries in front of everything stored (a
+    /// malformed line ends the parent chain the branch walk follows), and the
+    /// plugin then numbers the branch it still reaches from an offset, behind
+    /// numbers for the messages it no longer reaches (`pi-ordinal-alignment.ts`).
+    /// The offset is measured as the plugin measures it: the newest summary's
+    /// stored end number minus its end message's place on the branch, checked
+    /// against that summary's start and the previous summary's end. A
+    /// summary that can't be placed refuses (`ordinal_unanchored`), changing
+    /// nothing.
+    pub fn align_pi(
+        mut self,
+        conn: &Connection,
+        harness: &str,
+        session: &str,
+    ) -> Result<Self, String> {
+        let rows: Vec<(i64, i64, i64, String, String)> = conn
+            .prepare(
+                "SELECT sequence, start_message, end_message, start_message_id, end_message_id
+                 FROM compartments WHERE session_id = ?1 AND harness = ?2
+                 ORDER BY sequence DESC LIMIT 2",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![session, harness], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                            row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        ))
+                    })?
+                    .collect()
+            })
+            .map_err(|error| error.to_string())?;
+        let Some((sequence, start, end, start_id, end_id)) = rows.first() else {
+            return Ok(self);
+        };
+        let place = |mid: &str| {
+            self.by_plugin
+                .iter()
+                .position(|numbered| numbered.mid == mid)
+                .map(|index| index as i64 + 1)
+        };
+        let Some(branch) = place(end_id) else {
+            return Err(format!(
+                "ordinal_unanchored: summary {sequence} of {session} ends at message {end_id}, which the branch doesn't contain"
+            ));
+        };
+        let offset = end - branch;
+        let mut checks = vec![(*start, start_id.as_str())];
+        if let Some((_, _, previous_end, _, previous_end_id)) = rows.get(1) {
+            checks.push((*previous_end, previous_end_id.as_str()));
+        }
+        for (stored, mid) in checks {
+            if let Some(found) = place(mid).filter(|_| !mid.is_empty()) {
+                if stored - found != offset {
+                    return Err(format!(
+                        "ordinal_unanchored: summary {sequence} of {session} puts message {end_id} {offset} after its branch place, but message {mid} {} after",
+                        stored - found
+                    ));
+                }
+            }
+        }
+        if offset < 0 {
+            return Err(format!(
+                "ordinal_unanchored: the numbers stored for {session} are behind its branch by {}",
+                -offset
+            ));
+        }
+        let unreachable = (0..offset).map(|_| Numbered {
+            mid: String::new(),
+            entry: None,
+            first: None,
+            through: None,
+        });
+        self.by_plugin.splice(0..0, unreachable);
+        Ok(self)
     }
 
     /// Whether every plugin number already is the runner's.
     fn is_identity(&self) -> bool {
         !self.has_added
-            && self
-                .by_plugin
-                .iter()
-                .enumerate()
-                .all(|(index, numbered)| numbered.entry == Some(index as u64 + 1))
+            && self.by_plugin.iter().enumerate().all(|(index, numbered)| {
+                let own = Some(index as u64 + 1);
+                numbered.entry == own && numbered.first == own && numbered.through == own
+            })
     }
 
     fn at(&self, ordinal: i64) -> Option<&Numbered> {
@@ -203,21 +398,34 @@ impl Numbering {
             .and_then(|index| self.by_plugin.get(index))
     }
 
-    /// The message the plugin numbered `ordinal`.
+    /// The message the plugin numbered `ordinal`; none past the transcript or
+    /// for a number whose message the branch no longer reaches.
     fn mid(&self, ordinal: i64) -> Option<&str> {
-        self.at(ordinal).map(|numbered| numbered.mid.as_str())
+        self.at(ordinal)
+            .map(|numbered| numbered.mid.as_str())
+            .filter(|mid| !mid.is_empty())
+    }
+
+    /// Whether the plugin kept `ordinal` for a message its branch walk no
+    /// longer reaches.
+    fn unreachable(&self, ordinal: i64) -> bool {
+        self.at(ordinal)
+            .is_some_and(|numbered| numbered.mid.is_empty())
     }
 
     /// The entries of the messages the plugin numbered `start..=end` and of
-    /// the rows added after them, first to last; none when the range is
-    /// outside the transcript or covers no entry.
+    /// the rows that belong to them, lowest to highest; none when the range
+    /// is outside the transcript or covers no entry.
     fn range(&self, start: i64, end: i64) -> Option<(i64, i64)> {
         if start < 1 || end < start || self.at(end).is_none() {
             return None;
         }
         let covered: Vec<&Numbered> = (start..=end).filter_map(|o| self.at(o)).collect();
-        let first = covered.iter().find_map(|numbered| numbered.first)?;
-        let last = covered.iter().rev().find_map(|numbered| numbered.through)?;
+        let first = covered.iter().filter_map(|numbered| numbered.first).min()?;
+        let last = covered
+            .iter()
+            .filter_map(|numbered| numbered.through)
+            .max()?;
         Some((first as i64, last as i64))
     }
 
@@ -230,8 +438,8 @@ impl Numbering {
         };
         self.by_plugin[..ordinal.min(self.by_plugin.len())]
             .iter()
-            .rev()
-            .find_map(|numbered| numbered.through)
+            .filter_map(|numbered| numbered.through)
+            .max()
             .map_or(0, |entry| entry as i64)
     }
 
@@ -240,6 +448,60 @@ impl Numbering {
     fn entry_of(&self, mid: &str) -> Option<Option<u64>> {
         self.by_mid.get(mid).copied()
     }
+}
+
+/// Record `message` and check it is listed once, with an entry above every
+/// entry before it.
+fn check_row(
+    by_mid: &mut HashMap<String, Option<u64>>,
+    last_entry: &mut u64,
+    message: &HostMessage,
+) -> Result<(), String> {
+    if by_mid.insert(message.mid.clone(), message.entry).is_some() {
+        return Err(format!(
+            "invalid_messages: message {} is listed twice",
+            message.mid
+        ));
+    }
+    if let Some(entry) = message.entry {
+        if entry <= *last_entry {
+            return Err(format!(
+                "invalid_messages: entry numbers must rise in host order; {} has {entry} after {last_entry}",
+                message.mid
+            ));
+        }
+        *last_entry = entry;
+    }
+    Ok(())
+}
+
+fn not_at_newest(newest: &Cursor) -> String {
+    format!(
+        "invalid_messages: the list must end at the newest message {} (entry {})",
+        newest.mid, newest.ordinal
+    )
+}
+
+/// The list's checksum, kept in the rewrite's record so a retried move can
+/// tell the same transcript from a different one. A Pi row adds its kind; an
+/// OpenCode row hashes as it always has.
+fn checksum(messages: &[HostMessage]) -> String {
+    let mut hasher = Sha256::new();
+    for message in messages {
+        let row = (
+            &message.mid,
+            message.entry,
+            message.finished_summary,
+            message.added,
+        );
+        let bytes = match &message.pi {
+            None => serde_json::to_vec(&row),
+            Some(pi) => serde_json::to_vec(&(row, pi)),
+        };
+        hasher.update(bytes.expect("a message row serializes"));
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// The key of the record a finished rewrite leaves.
@@ -383,6 +645,11 @@ impl Rewrite<'_> {
         for (id, sequence, start, end, start_id, end_id) in rows {
             for (ordinal, stored) in [(start, &start_id), (end, &end_id)] {
                 let actual = self.numbering.mid(ordinal);
+                // A number kept for a message the Pi branch no longer reaches
+                // has nothing to compare; its message is gone from the file.
+                if self.numbering.unreachable(ordinal) {
+                    continue;
+                }
                 if !stored.is_empty() && actual != Some(stored.as_str()) {
                     return Err(Failure(format!(
                         "ordinal_mismatch: summary {sequence} of {} stores message {stored} at {ordinal}, but the transcript has {} there",

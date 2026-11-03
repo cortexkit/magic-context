@@ -60,9 +60,11 @@ pub struct MoveRequest {
     /// Milliseconds since the Unix epoch, for the fence record.
     pub now: u64,
     /// Every message row of the session's active path, in host order, with
-    /// the runner's entry number for each. Needed when the transcript holds a
-    /// compaction, where the standalone plugin's numbering differs from the
-    /// runner's; without it the stored numbers must already be the runner's.
+    /// the runner's entry number for each; on Pi, every journal entry of the
+    /// active branch, root to leaf, with its kind. Needed when the standalone
+    /// plugin's numbering differs from the runner's (an OpenCode compaction,
+    /// any Pi tool result); without it the stored numbers must already be the
+    /// runner's.
     #[serde(default)]
     pub messages: Option<Vec<crate::move_renumber::HostMessage>>,
 }
@@ -107,16 +109,19 @@ pub fn move_in(
         ));
     }
     if let Some(messages) = &request.messages {
-        // Only the OpenCode 1 plugin's numbering is rebuilt here; another
+        // The OpenCode 1 and Pi plugins' numberings are rebuilt here; another
         // host's standalone numbering has its own rules.
-        if key.harness != "opencode" {
-            return Err(format!(
-                "renumbering_unsupported: converting message numbers is built for OpenCode 1 sessions, not {}",
-                key.harness
-            ));
-        }
-        let numbering = crate::move_renumber::Numbering::opencode(messages, &request.newest)?;
         db.with_connection(|conn| {
+            let numbering = match key.harness.as_str() {
+                "opencode" => crate::move_renumber::Numbering::opencode(messages, &request.newest)?,
+                "pi" => crate::move_renumber::Numbering::pi(messages, &request.newest)?
+                    .align_pi(conn, &key.harness, &key.session)?,
+                other => {
+                    return Err(format!(
+                        "renumbering_unsupported: converting message numbers is built for OpenCode 1 and Pi sessions, not {other}"
+                    ))
+                }
+            };
             crate::move_renumber::renumber(conn, &key.harness, &key.session, &numbering)
         })?;
     }
