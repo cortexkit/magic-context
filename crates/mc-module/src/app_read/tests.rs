@@ -31,6 +31,7 @@ fn fixture() -> Snapshot {
 fn replica(context: Option<Connection>) -> Replica {
     let s = fixture();
     Replica {
+        boundaries: HashMap::new(),
         known: HashSet::new(),
         load_failed: false,
         snapshots: HashMap::from([(s.key.clone(), s)]),
@@ -43,6 +44,22 @@ fn request(extra: Value) -> Value {
     let mut p = extra;
     p["session"] = json!(key());
     p
+}
+
+fn save_fixture(store: &crate::store::Store, snapshot: &Snapshot, reverted: Option<u64>) {
+    let rows: Vec<_> = snapshot
+        .messages
+        .iter()
+        .map(|(mid, m)| IndexRow {
+            mid: mid.clone(),
+            ordinal: m.ordinal,
+            at_ms: m.at_ms,
+        })
+        .collect();
+    store
+        .save_app_index(&snapshot.key, &rows, reverted)
+        .unwrap();
+    store.save_app_snapshot(snapshot).unwrap();
 }
 
 #[test]
@@ -324,7 +341,7 @@ async fn published_replica_survives_restart_and_does_not_take_the_session_store_
     let store =
         std::sync::Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
     let reader = AppRead::new(Some(store.path.clone()), None);
-    store.save_app_snapshot(&fixture()).unwrap();
+    save_fixture(&store, &fixture(), None);
     reader.publish(fixture());
     assert_eq!(
         reader
@@ -573,7 +590,7 @@ async fn app_optional_nulls_match_omitted_fields_and_search_refuses_identity_ali
 async fn archive_message_identity_survives_cut_restart_and_revert() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
-    store.save_app_snapshot(&fixture()).unwrap();
+    save_fixture(&store, &fixture(), None);
     let mut cut = fixture();
     cut.base = 4;
     cut.messages.clear();
@@ -600,7 +617,7 @@ async fn archive_message_identity_survives_cut_restart_and_revert() {
     reverted.newest = 1;
     reverted.messages.retain(|_, message| message.ordinal == 1);
     reverted.compartments.clear();
-    store.save_app_snapshot(&reverted).unwrap();
+    save_fixture(&store, &reverted, Some(2));
     app.publish(reverted);
     let states = app
         .read("context.states", request(json!({"message_ids":["m2"]})))
@@ -663,4 +680,40 @@ async fn cold_session_records_preserve_runner_identity_and_unready_reads_are_tra
             .unwrap()["state"],
         "ready"
     );
+}
+
+#[test]
+fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
+    let mut replica = replica(None);
+    replica.snapshots.clear();
+    let mut first = fixture();
+    let boundary = first.messages.remove("m1").unwrap();
+    first.compartments[0]["first_at_ms"] = Value::Null;
+    first.compartments[0]["last_at_ms"] = Value::Null;
+    let header = Arc::new(Header {
+        base: first.base,
+        newest: first.newest,
+        ready: first.ready,
+        meta: first.meta.clone(),
+        breakdown: first.breakdown.clone(),
+    });
+    replica.publish(first);
+    replica.update(Update {
+        key: key(),
+        header,
+        rows: vec![("m1".into(), Arc::new(boundary))],
+        reset_from: None,
+        prune_before: None,
+        compartments: None,
+        decisions: None,
+        reverted: false,
+    });
+    let compartment = replica
+        .read(
+            "context.compartment",
+            &request(json!({"compartment_id":"1"})),
+        )
+        .unwrap();
+    assert_eq!(compartment["compartment"]["first_at_ms"], 10);
+    assert_eq!(compartment["compartment"]["last_at_ms"], 10);
 }

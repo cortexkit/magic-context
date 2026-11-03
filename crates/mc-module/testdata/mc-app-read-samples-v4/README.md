@@ -60,12 +60,17 @@ its first 50 hits and a real continuation cursor. Regenerate deliberately:
 MC_REGENERATE_APP_READ_SAMPLES=1 cargo test -p mc-module --lib app_read::tests::samples_v4 -- --exact
 ```
 
-Mode-3 schema version 2 adds `app_read_snapshots` (one live projection per
-session) and `app_read_message_index` (runner-qualified message ordinals and
-timestamps, retained after a cut and removed on revert). Session work writes
-both; the app replica uses independent read-only connections. Accepted-view
-decisions are also kept in the session's durable `app.decisions`, bounded at
-256 records, with offered/accepted/applied/refused status kept distinct.
+The ck-mc compaction store (`mode3.db`, separate from the shared `context.db`)
+uses schema version 3 and keeps `app_read_snapshots` as Setup/cut/revert
+checkpoints, not a per-step cache. `app_read_message_index` receives only new
+runner-qualified message ordinals and timestamps; cut history remains intact
+and only reverted suffixes are deleted. The app replica receives shared
+incremental pieces and uses independent read-only connections. Accepted-view
+decisions live in their own `app_read_decisions` row, written only when a
+decision or its status changes, and never in the per-job durable session
+payload. They remain bounded at 256 records, with offered/accepted/applied/
+refused status kept distinct. Token totals and queued counts are maintained
+incrementally; unchanged summary tiers and head text are not re-serialized.
 
 Other app methods refuse `app_op_unavailable`; this collection does not
 promise compatibility for methods the Alfonso iOS and desktop apps do not call.

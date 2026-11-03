@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cortexkit_role_compaction::{read::SessionRef, wire::Refusal};
@@ -35,9 +36,52 @@ pub struct SessionState {
     pub last_model: Option<String>,
     pub failures: u64,
     pub last_error: Option<String>,
-    pub stamps: Vec<((String, String), u64)>,
-    /// Accepted view decisions, newest last, bounded independently of history.
-    pub decisions: Vec<Value>,
+    #[serde(with = "stamp_map")]
+    pub stamps: BTreeMap<(String, String), u64>,
+}
+
+mod stamp_map {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        map: &BTreeMap<(String, String), u64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<(String, String), u64>, D::Error> {
+        Ok(Vec::<((String, String), u64)>::deserialize(deserializer)?
+            .into_iter()
+            .collect())
+    }
+}
+
+#[derive(PartialEq)]
+pub(crate) struct Header {
+    pub base: u64,
+    pub newest: u64,
+    pub ready: bool,
+    pub meta: Value,
+    pub breakdown: Value,
+}
+
+pub(crate) struct Update {
+    pub key: SessionRef,
+    pub header: Arc<Header>,
+    pub rows: Vec<(String, Arc<Message>)>,
+    pub reset_from: Option<u64>,
+    pub prune_before: Option<u64>,
+    pub compartments: Option<Arc<Vec<Value>>>,
+    pub decisions: Option<Arc<Vec<Value>>>,
+    pub reverted: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct IndexRow {
+    pub mid: String,
+    pub ordinal: u64,
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,7 +110,9 @@ pub struct AppRead {
 }
 
 enum Command {
+    #[cfg(test)]
     Publish(Box<Snapshot>),
+    Update(Update),
     Read(String, Value, oneshot::Sender<Result<Value, Refusal>>),
     Watch(
         String,
@@ -75,8 +121,11 @@ enum Command {
     ),
 }
 
+type BoundaryIndex = HashMap<String, Vec<(usize, &'static str)>>;
+
 struct Replica {
     snapshots: HashMap<SessionRef, Snapshot>,
+    boundaries: HashMap<SessionRef, BoundaryIndex>,
     known: HashSet<SessionRef>,
     load_failed: bool,
     store: Option<Connection>,
@@ -105,6 +154,7 @@ impl AppRead {
                 }
                 let mut replica = Replica {
                     snapshots: HashMap::new(),
+                    boundaries: HashMap::new(),
                     known: HashSet::new(),
                     load_failed: store_expected && store.is_none(),
                     store,
@@ -114,7 +164,9 @@ impl AppRead {
                 replica.load();
                 while let Ok(command) = rx.recv() {
                     match command {
+                        #[cfg(test)]
                         Command::Publish(snapshot) => replica.publish(*snapshot),
+                        Command::Update(update) => replica.update(update),
                         Command::Read(method, params, reply) => {
                             let _ = reply.send(replica.read(&method, &params));
                         }
@@ -129,8 +181,13 @@ impl AppRead {
         Self { tx }
     }
 
+    #[cfg(test)]
     pub(crate) fn publish(&self, snapshot: Snapshot) {
         let _ = self.tx.send(Command::Publish(Box::new(snapshot)));
+    }
+
+    pub(crate) fn update(&self, update: Update) {
+        let _ = self.tx.send(Command::Update(update));
     }
 
     pub async fn read(&self, method: &str, params: Value) -> Result<Value, Refusal> {
@@ -191,6 +248,32 @@ impl Replica {
                 eprintln!("ck-mc: app replica load: {error}");
             }
         }
+        let decisions = (|| -> rusqlite::Result<Vec<(SessionRef, String)>> {
+            let Some(conn) = &self.store else {
+                return Ok(Vec::new());
+            };
+            conn.prepare("SELECT runner,harness,session,decisions FROM app_read_decisions")?
+                .query_map([], |row| {
+                    Ok((
+                        SessionRef::new(
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ),
+                        row.get(3)?,
+                    ))
+                })?
+                .collect()
+        })();
+        if let Ok(decisions) = decisions {
+            for (key, text) in decisions {
+                if let Some(snapshot) = self.snapshots.get_mut(&key) {
+                    if let Ok(rows) = serde_json::from_str(&text) {
+                        snapshot.decisions = rows;
+                    }
+                }
+            }
+        }
     }
 
     fn publish(&mut self, mut snapshot: Snapshot) {
@@ -211,6 +294,18 @@ impl Replica {
                 }
             }
         }
+        self.enrich(&mut snapshot);
+        if self.snapshots.get(&snapshot.key) == Some(&snapshot) {
+            return;
+        }
+        let key = snapshot.key.clone();
+        self.boundaries
+            .insert(key.clone(), boundary_index(&snapshot));
+        self.snapshots.insert(key.clone(), snapshot);
+        self.watches.changed(key);
+    }
+
+    fn enrich(&self, snapshot: &mut Snapshot) {
         for compartment in &mut snapshot.compartments {
             for (id, time) in [
                 ("first_message_id", "first_at_ms"),
@@ -225,12 +320,76 @@ impl Replica {
                 compartment[time] = json!(at_ms);
             }
         }
-        if self.snapshots.get(&snapshot.key) == Some(&snapshot) {
-            return;
+    }
+
+    fn update(&mut self, update: Update) {
+        let key = update.key;
+        let h = update.header;
+        let mut snapshot = self.snapshots.remove(&key).unwrap_or_else(|| Snapshot {
+            key: key.clone(),
+            base: 0,
+            newest: 0,
+            ready: false,
+            meta: Value::Null,
+            breakdown: Value::Null,
+            compartments: Vec::new(),
+            messages: BTreeMap::new(),
+            decisions: Vec::new(),
+        });
+        let mut changed = snapshot.base != h.base
+            || snapshot.newest != h.newest
+            || snapshot.ready != h.ready
+            || snapshot.meta != h.meta
+            || snapshot.breakdown != h.breakdown;
+        snapshot.base = h.base;
+        snapshot.newest = h.newest;
+        snapshot.ready = h.ready;
+        snapshot.meta = h.meta.clone();
+        snapshot.breakdown = h.breakdown.clone();
+        if let Some(from) = update.reset_from {
+            let before = snapshot.messages.len();
+            snapshot
+                .messages
+                .retain(|_, message| message.ordinal < from && message.ordinal <= h.newest);
+            changed |= before != snapshot.messages.len();
         }
-        let key = snapshot.key.clone();
+        if self.store.is_some() {
+            if let Some(base) = update.prune_before {
+                snapshot
+                    .messages
+                    .retain(|_, message| message.ordinal >= base);
+            }
+        }
+        for (mid, row) in update.rows {
+            if let Some(boundaries) = self.boundaries.get(&key).and_then(|index| index.get(&mid)) {
+                for (index, field) in boundaries {
+                    if let Some(compartment) = snapshot.compartments.get_mut(*index) {
+                        let at = json!(row.at_ms);
+                        changed |= compartment[*field] != at;
+                        compartment[*field] = at;
+                    }
+                }
+            }
+            if snapshot.messages.get(&mid) != Some(row.as_ref()) {
+                snapshot.messages.insert(mid, (*row).clone());
+                changed = true;
+            }
+        }
+        if let Some(compartments) = update.compartments {
+            snapshot.compartments = (*compartments).clone();
+            self.enrich(&mut snapshot);
+            self.boundaries
+                .insert(key.clone(), boundary_index(&snapshot));
+            changed = true;
+        }
+        if let Some(decisions) = update.decisions {
+            snapshot.decisions = (*decisions).clone();
+            changed = true;
+        }
         self.snapshots.insert(key.clone(), snapshot);
-        self.watches.changed(key);
+        if changed {
+            self.watches.changed(key);
+        }
     }
 
     fn locate(&self, key: &SessionRef) -> Result<&Snapshot, Refusal> {
@@ -379,6 +538,26 @@ impl Replica {
         envelope(method, &mut fields);
         Ok(fields)
     }
+}
+
+fn boundary_index(snapshot: &Snapshot) -> BoundaryIndex {
+    // Late transcript entries can fill summary boundary dates. Index those
+    // references once instead of rescanning every summary on each append.
+    let mut index = BoundaryIndex::new();
+    for (ordinal, compartment) in snapshot.compartments.iter().enumerate() {
+        for (id, time) in [
+            ("first_message_id", "first_at_ms"),
+            ("last_message_id", "last_at_ms"),
+        ] {
+            if let Some(mid) = compartment[id].as_str().filter(|mid| !mid.is_empty()) {
+                index
+                    .entry(mid.to_owned())
+                    .or_default()
+                    .push((ordinal, time));
+            }
+        }
+    }
+    index
 }
 
 fn conditional(p: &Map<String, Value>, row: &Value) -> Result<Value, Refusal> {

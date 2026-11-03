@@ -436,6 +436,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 };
                 let settings = &settings;
                 let publish_app = !matches!(&job, Job::Idle(_) | Job::PreUser { .. });
+                let app_checkpoint = matches!(&job, Job::Setup(..))
+                    || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
                     Job::Setup(route, request, features) => match &mut session {
                         // A session that so far only called tools starts
@@ -582,13 +584,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                 }
                 if let Some(session) = session.as_mut().filter(|_| publish_app) {
-                    let snapshot = session.app_snapshot();
-                    if let Some(store) = &inner.store {
-                        if let Err(error) = store.save_app_snapshot(&snapshot) {
-                            eprintln!("ck-mc: {error}");
-                        }
-                    }
-                    inner.app_read.publish(snapshot);
+                    session.publish_app(&inner.app_read, app_checkpoint);
                 }
                 // A tools-only session has nothing to keep across a restart.
                 if let (Some(store), Some(session)) = (

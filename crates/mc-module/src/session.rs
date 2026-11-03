@@ -38,6 +38,10 @@ const READ_PAGE_BYTES: u64 = 1 << 20;
 
 pub struct Session {
     app: crate::app_read::SessionState,
+    app_projection: app_projection::Projection,
+    app_decisions: Vec<Value>,
+    app_decisions_revision: u64,
+    app_decisions_dirty: bool,
     app_cause: String,
     key: SessionRef,
     features: Features,
@@ -210,6 +214,9 @@ fn same(applied: &AppliedView, view: &View) -> bool {
 }
 
 impl Session {
+    pub(crate) fn publish_app(&mut self, app: &crate::app_read::AppRead, checkpoint: bool) {
+        self.app_publish_update(app, checkpoint);
+    }
     pub fn new(
         route: &Route,
         request: &SetupRequest,
@@ -218,6 +225,10 @@ impl Session {
     ) -> Self {
         Self {
             app: Default::default(),
+            app_projection: Default::default(),
+            app_decisions: Vec::new(),
+            app_decisions_revision: 0,
+            app_decisions_dirty: false,
             app_cause: "publication".into(),
             db,
             project: route.project.clone(),
@@ -271,6 +282,10 @@ impl Session {
 
     /// Save the session's state here before each view it hands over.
     pub fn set_store(&mut self, store: Option<Arc<crate::store::Store>>) {
+        if let Some(store) = &store {
+            self.app_decisions = store.app_decisions(&self.key);
+            self.app_decisions_revision += 1;
+        }
         self.store = store;
     }
 
@@ -482,7 +497,10 @@ impl Session {
             return;
         };
         match db.compartments(&self.key.harness, &self.key.session) {
-            Ok(summaries) => self.summaries = summaries,
+            Ok(summaries) => {
+                self.summaries = summaries;
+                self.app_projection.summaries_dirty = true;
+            }
             Err(error) => eprintln!(
                 "ck-mc: session {}: loading summaries failed: {error}",
                 self.key.session
@@ -598,6 +616,7 @@ impl Session {
                         // its search rows.
                         continue;
                     }
+                    self.app_projection.revert(*from_ordinal);
                     self.index.truncate(*from_ordinal);
                     if self.cut.is_some_and(|cut| *from_ordinal <= cut) {
                         // The undo reached the cut message or before it, and
@@ -644,6 +663,9 @@ impl Session {
         // No newest entry: the transcript is empty, and the read empties the
         // index.
         let extended = self.index.extend(notice.entries);
+        if extended == Extend::Diverged {
+            self.app_projection.revert(self.index.base());
+        }
         if extended == Extend::Diverged || !self.index_ready {
             self.index = Index::starting_at(self.cut.unwrap_or(1));
             self.index_ready = self.read_until(client, notice.newest.as_ref(), true).await;
@@ -1002,6 +1024,7 @@ impl Session {
             }
         }
         self.summaries.truncate(first);
+        self.app_projection.summaries_dirty = true;
         // `m[0]` is rendered again only when it shows a forgotten summary;
         // one shown only in `m[1]` leaves with an `m[1]` refresh, and `m[0]`
         // stays cached.
@@ -1072,6 +1095,7 @@ impl Session {
     fn invalidate_transcript_from(&mut self, ordinal: u64) {
         self.forget_summaries_from(ordinal);
         self.index.truncate(ordinal);
+        self.app_projection.revert(ordinal);
         if self.cut.is_some_and(|cut| ordinal <= cut) {
             self.cut = self.summarized_through();
             self.index = Index::starting_at(self.cut.unwrap_or(1));
@@ -1246,6 +1270,7 @@ impl Session {
             }
         }
         self.no_progress = None;
+        self.app_projection.summaries_dirty = true;
         self.summaries
             .extend(validated.compartments.iter().map(|compartment| {
                 let mut stored = StoredCompartment::from(compartment);
@@ -1319,6 +1344,7 @@ impl Session {
         }
         self.cut = Some(ordinal);
         let gone = self.index.prune_before(ordinal);
+        self.app_persist_cut(&gone);
         self.pruned_turns += crate::nudges::person_turns(&gone);
     }
 
@@ -1940,7 +1966,8 @@ impl Session {
             }
             let key = (mid, part);
             if self.queued.insert(key.clone()) {
-                self.app.stamps.push((key, crate::app_read::now_ms()));
+                self.app_projection.dirty.insert(key.0.clone());
+                self.app.stamps.insert(key, crate::app_read::now_ms());
                 added = true;
             }
         }
@@ -2643,6 +2670,11 @@ impl Session {
     fn save(&self) -> Result<(), String> {
         if let Some(store) = &self.store {
             store.save(&self.key, &self.durable())?;
+            if self.app_decisions_dirty {
+                if let Err(error) = store.save_app_decisions(&self.key, &self.app_decisions) {
+                    eprintln!("ck-mc: {error}");
+                }
+            }
         }
         Ok(())
     }
@@ -2650,8 +2682,10 @@ impl Session {
     /// Forget queued drops that landed or can never land.
     fn forget_queued(&mut self, parts: &[lanes::PartKey]) {
         for part in parts {
+            self.app_projection.dirty.insert(part.0.clone());
             self.queued.remove(part);
             self.refused_once.remove(part);
+            self.app_prune_stamps([part.clone()]);
         }
     }
 
@@ -2670,6 +2704,8 @@ impl Session {
                 self.key.session, part.0, part.1
             );
             self.queued.remove(&part);
+            self.app_projection.dirty.insert(part.0.clone());
+            self.app_prune_stamps([part.clone()]);
             self.refused_once.remove(&part);
         }
     }
@@ -2725,6 +2761,17 @@ impl Session {
                 .iter()
                 .position(|pending| same(applied, &pending.view))
             {
+                let stamp_keys: Vec<_> = self
+                    .unconfirmed
+                    .first()
+                    .into_iter()
+                    .flat_map(|first| first.before.queued.iter().cloned())
+                    .collect();
+                if let Some(first) = self.unconfirmed.first() {
+                    self.app_projection
+                        .dirty
+                        .extend(first.before.queued.iter().map(|key| key.0.clone()));
+                }
                 let versions: Vec<_> = self.unconfirmed[..=at]
                     .iter()
                     .map(|pending| pending.view.version)
@@ -2733,6 +2780,12 @@ impl Session {
                     self.app_view_status(version, "applied");
                 }
                 self.unconfirmed.drain(..=at);
+                self.app_prune_stamps(stamp_keys);
+                if let Some(first) = self.unconfirmed.first() {
+                    self.app_projection
+                        .dirty
+                        .extend(first.before.queued.iter().map(|key| key.0.clone()));
+                }
             }
         }
         if let Some(version) = refused
@@ -2754,12 +2807,16 @@ impl Session {
     /// must not make every later pass build a view it refuses.
     fn roll_back(&mut self, version: u64, refused: bool) {
         if let Some(record) = self
-            .app
-            .decisions
+            .app_decisions
             .iter_mut()
             .find(|r| r["view_version"] == version)
         {
-            record["status"] = serde_json::json!(if refused { "refused" } else { "undelivered" });
+            let status = if refused { "refused" } else { "undelivered" };
+            if record["status"] != status {
+                record["status"] = serde_json::json!(status);
+                self.app_decisions_revision += 1;
+                self.app_decisions_dirty = true;
+            }
         }
         let Some(at) = self
             .unconfirmed
@@ -2771,6 +2828,12 @@ impl Session {
         let undone = self.unconfirmed.split_off(at);
         let first = &undone[0];
         let before = first.before.clone();
+        self.app_projection.dirty.extend(
+            self.queued
+                .iter()
+                .chain(&before.queued)
+                .map(|key| key.0.clone()),
+        );
         let covered: Vec<lanes::PartKey> = undone
             .iter()
             .flat_map(|pending| pending.covered.iter().cloned())
@@ -2985,8 +3048,14 @@ impl Session {
 
     fn forget_missing(&mut self) {
         let index = &self.index;
-        self.queued
-            .retain(|(mid, part)| index.find(mid, part).is_some());
+        let mut removed = Vec::new();
+        self.queued.retain(|key| {
+            let keep = index.find(&key.0, &key.1).is_some();
+            if !keep {
+                removed.push(key.clone());
+            }
+            keep
+        });
         self.image_outputs
             .retain(|(mid, part), _| index.find(mid, part).is_some());
         self.caveman.retain_present(index);
@@ -2996,6 +3065,7 @@ impl Session {
                 self.pending_keep = None;
             }
         }
+        self.app_prune_stamps(removed);
     }
 
     /// Read in full the tool results with images whose output the

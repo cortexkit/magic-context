@@ -2,155 +2,15 @@
 use super::*;
 use crate::app_read::{Message, Snapshot};
 use serde_json::json;
+#[path = "incremental.rs"]
+mod incremental;
+pub(super) use incremental::Projection;
 
 impl Session {
+    #[cfg(test)]
     pub(crate) fn app_snapshot(&mut self) -> Snapshot {
-        let mut queued = self.queued.clone();
-        let (view, cut) = if let Some(pending) = self.unconfirmed.first() {
-            queued.extend(pending.before.queued.iter().cloned());
-            (pending.before.latest.as_ref(), pending.before.cut)
-        } else {
-            (self.latest.as_ref(), self.cut)
-        };
-        self.app.stamps.retain(|(key, _)| queued.contains(key));
-        let edited = lanes::Edited::of(view, &self.index, cut);
-        let mut messages = std::collections::BTreeMap::new();
-        let mut raw_tokens = 0;
-        let mut tool_tokens = 0;
-        for entry in self.index.entries() {
-            let mut stamped = Vec::new();
-            let mut dropped = Vec::new();
-            let mut tagged = 0;
-            for part in &entry.parts {
-                tagged += usize::from(part.tag.is_some());
-                let key = (entry.mid.clone(), part.id.clone());
-                let tokens = crate::tokens::part(part);
-                let body = serde_json::to_value(part).expect("part JSON");
-                let kind = body["kind"].as_str().unwrap_or("opaque");
-                let bytes = match &part.body {
-                    PartBody::Text { text } => Some(text.len() as u64),
-                    PartBody::Reasoning { text_bytes, .. } => *text_bytes,
-                    PartBody::Tool(tool) => tool.output_bytes,
-                    _ => None,
-                };
-                let size = json!({"bytes":bytes, "tokens":tokens, "input_bytes":null, "input_tokens":null});
-                if queued.contains(&key) && !edited.covers(&entry.mid, &part.id) {
-                    stamped.push(json!({"kind":kind, "part_ref":{"part_key":part.id}, "size":size, "stage":"queued", "stamped_at_ms":self.app.stamps.iter().find(|(k,_)| k==&key).map(|(_,at)| at), "stamped_at_source":"recorded"}));
-                }
-                if edited.covers(&entry.mid, &part.id)
-                    && !cut.is_some_and(|cut| entry.ordinal <= cut)
-                {
-                    dropped.push(json!({"kind":kind, "part_ref":{"part_key":part.id}, "size":size, "dropped_at_ms":null, "dropped_at_source":"not_recorded", "drop_mode":null}));
-                } else if !cut.is_some_and(|cut| entry.ordinal <= cut) {
-                    if matches!(part.body, PartBody::Tool(_)) {
-                        tool_tokens += tokens;
-                    } else {
-                        raw_tokens += tokens;
-                    }
-                }
-            }
-            let state = if !entry.parts.is_empty() && dropped.len() == entry.parts.len() {
-                "dropped"
-            } else {
-                "raw"
-            };
-            let row = json!({"message_id":entry.mid, "state":state, "compartment_id":null, "outside_reason":null, "split":null, "parts":{"tagged":tagged, "stamped":stamped.len(), "dropped":dropped.len()}, "stamped_parts":stamped, "dropped_parts":dropped});
-            messages.insert(
-                entry.mid.clone(),
-                Message {
-                    ordinal: entry.ordinal,
-                    at_ms: entry.written_at,
-                    row,
-                },
-            );
-        }
-        let compartments: Vec<Value> = self.summaries.iter().map(|c| {
-            json!({"compartment_id":c.sequence.to_string(), "ordinal":c.sequence, "title":c.title, "first_message_id":c.start_message_id, "last_message_id":c.end_message_id, "first_message_ordinal":c.start_message, "last_message_ordinal":c.end_message, "first_at_ms":null, "last_at_ms":null, "message_count":(c.end_message-c.start_message+1).max(0), "importance":c.importance, "summary_markdown":c.content, "summary_markdown_bytes":c.content.len(), "summary_markdown_truncated":false, "tiers":{"p1":c.p1, "p2":c.p2, "p3":c.p3, "p4":c.p4}, "tiers_bytes":{"p1":c.p1.as_ref().map(String::len), "p2":c.p2.as_ref().map(String::len), "p3":c.p3.as_ref().map(String::len), "p4":c.p4.as_ref().map(String::len)}, "tiers_truncated":{"p1":false,"p2":false,"p3":false,"p4":false}, "created_at_ms":c.created_at, "legacy":c.legacy!=0, "episode_type":c.episode_type, "facts":{"attribution":"historian_run", "by_category":{}, "session_facts_cursor":null}})
-        }).collect();
-        let usage = self
-            .index
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.usage.is_some());
-        let at = usage.map(|entry| entry.completed_at.unwrap_or(entry.written_at));
-        let provider_total = self
-            .conditions
-            .last_prompt_tokens
-            .or_else(|| usage.and_then(|e| e.usage.and_then(|u| u.prompt_tokens)));
-        let head_text = view
-            .map(|view| {
-                view.edits
-                    .iter()
-                    .filter_map(|edit| match &edit.op {
-                        EditOp::Insert { message, .. } => Some(message.texts.join("\n")),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        let docs = block_tokens(&head_text, "project-docs");
-        let profile = block_tokens(&head_text, "user-profile");
-        let memory =
-            block_tokens(&head_text, "project-memory") + block_tokens(&head_text, "memory-updates");
-        let head_tokens =
-            crate::tokens::bytes(head_text.len() as u64).saturating_sub(docs + profile + memory);
-        let baseline = self
-            .unconfirmed
-            .first()
-            .map_or(self.baseline.as_ref(), |pending| {
-                pending.before.baseline.as_ref()
-            });
-        let memory_count = baseline.map_or(0, |b| b.seen.len());
-        let parts = [
-            PartTokens::unknown("system_prompt"),
-            PartTokens::unknown("tool_definitions"),
-            PartTokens::estimate("memory", memory),
-            PartTokens::estimate("project_docs", docs),
-            PartTokens::estimate("user_profile", profile),
-            PartTokens::estimate("history_summaries", head_tokens),
-            PartTokens::estimate("history_raw", raw_tokens),
-            PartTokens::estimate("tool_calls_results", tool_tokens),
-            PartTokens::estimate("last_user_message", 0),
-        ];
-        let mut breakdown = breakdown(&parts, provider_total, self.conditions.context_window);
-        breakdown["managed"] = json!({"value":!self.tools_only && !self.suspended});
-        breakdown["as_of"] = json!({"step_ref":usage.map(|entry| &entry.mid), "at_ms":at});
-        breakdown["parts"][2]["count"] = json!(memory_count);
-        if self.tools_only || self.suspended {
-            breakdown["total"] = Value::Null;
-            breakdown["context_window"] = Value::Null;
-            breakdown["parts"] = json!([]);
-            breakdown["unattributed"] = Value::Null;
-            breakdown["estimation_source"] = Value::Null;
-        }
-        let queued_stamp_count: usize = messages
-            .values()
-            .filter(|message| {
-                !self.summaries.iter().any(|c| {
-                    c.start_message as u64 <= message.ordinal
-                        && c.end_message as u64 >= message.ordinal
-                })
-            })
-            .map(|message| message.row["stamped_parts"].as_array().map_or(0, Vec::len))
-            .sum();
-        let meta = json!({"session_id":self.key.session, "compartment_count":self.summaries.len(), "newest_compartment_at_ms":self.summaries.last().map(|c| c.created_at), "queued_stamp_count":queued_stamp_count, "compartment_in_progress":self.summarizing, "historian_failure_count":self.app.failures, "historian_last_error":self.app.last_error, "memory_block_count":memory_count, "cache_ttl":null, "last_response_time_ms":at, "is_subagent":!self.features.summarizer, "last_input_tokens":provider_total});
-        Snapshot {
-            key: self.key.clone(),
-            base: self.index.base(),
-            newest: self
-                .index
-                .entries()
-                .last()
-                .map_or(self.cut.unwrap_or(0), |e| e.ordinal),
-            ready: self.index_ready,
-            meta,
-            breakdown,
-            compartments,
-            messages,
-            decisions: self.app.decisions.clone(),
-        }
+        let _ = self.app_update();
+        self.app_materialize()
     }
 
     pub(super) fn app_record_view(&mut self, view: &View) {
@@ -176,21 +36,26 @@ impl Session {
             .filter_map(|(mid, part)| self.index.find(mid, part))
             .map(|(_, part)| crate::tokens::part(part))
             .sum();
-        self.app.decisions.push(json!({"view_version":view.version, "view_checksum":view.checksum, "status":"offered", "producer_ref":null, "at_ms":crate::app_read::now_ms(), "decision":"publish", "cause":self.app_cause, "changes":{"model":changes, "system_prompt":null, "tool_set":null}, "dropped_count":self.next_covered.len(), "dropped_tokens":freed, "emergency":self.next_latch, "identity_delta":identity_delta, "input_tokens":self.conditions.last_prompt_tokens, "materialized":materialized}));
-        if self.app.decisions.len() > 256 {
-            self.app.decisions.remove(0);
+        self.app_decisions.push(json!({"view_version":view.version, "view_checksum":view.checksum, "status":"offered", "producer_ref":null, "at_ms":crate::app_read::now_ms(), "decision":"publish", "cause":self.app_cause, "changes":{"model":changes, "system_prompt":null, "tool_set":null}, "dropped_count":self.next_covered.len(), "dropped_tokens":freed, "emergency":self.next_latch, "identity_delta":identity_delta, "input_tokens":self.conditions.last_prompt_tokens, "materialized":materialized}));
+        if self.app_decisions.len() > 256 {
+            self.app_decisions.remove(0);
         }
+        self.app_decisions_revision += 1;
+        self.app_decisions_dirty = true;
         self.app.last_model = Some(model);
     }
 
     pub(crate) fn app_view_status(&mut self, version: u64, status: &str) {
         if let Some(record) = self
-            .app
-            .decisions
+            .app_decisions
             .iter_mut()
             .find(|r| r["view_version"] == version)
         {
-            record["status"] = json!(status);
+            if record["status"] != status {
+                record["status"] = json!(status);
+                self.app_decisions_revision += 1;
+                self.app_decisions_dirty = true;
+            }
         }
     }
 }
@@ -307,7 +172,7 @@ mod tests {
         ]);
         let key = ("m2".into(), "p".into());
         session.queued.insert(key.clone());
-        session.app.stamps.push((key.clone(), 123));
+        session.app.stamps.insert(key.clone(), 123);
         assert_eq!(
             session.app_snapshot().messages["m2"].row["stamped_parts"][0]["stamped_at_ms"],
             123
@@ -341,12 +206,14 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
-        assert_eq!(session.app.decisions[0]["status"], "applied");
+        assert_eq!(session.app_decisions[0]["status"], "applied");
         for _ in 0..300 {
             session.app_record_view(&view);
         }
-        assert_eq!(session.app.decisions.len(), 256);
-        assert_eq!(session.durable().app.decisions.len(), 256);
+        assert_eq!(session.app_decisions.len(), 256);
+        assert!(serde_json::to_value(session.durable()).unwrap()["app"]
+            .get("decisions")
+            .is_none());
     }
 
     impl Session {
@@ -402,7 +269,7 @@ mod tests {
             }
             session.index.extend(entries);
             session.queued.insert(("m2".into(), "p".into()));
-            session.app.stamps.push((("m2".into(), "p".into()), 123));
+            session.app.stamps.insert(("m2".into(), "p".into()), 123);
             session.conditions.last_prompt_tokens = Some(80);
             let view = session
                 .seal(
@@ -415,7 +282,7 @@ mod tests {
                 .unwrap();
             session.accept(view.clone());
             session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
-            session.app.decisions[0]["at_ms"] = json!(40);
+            session.app_decisions[0]["at_ms"] = json!(40);
             session.summaries.push(StoredCompartment {
                 sequence: 1,
                 start_message: 1,
@@ -434,5 +301,143 @@ mod tests {
             });
             session.app_snapshot()
         }
+    }
+
+    fn session() -> Session {
+        let route = Route {
+            session: SessionRef::new("runner", "test", "incremental"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let setup = SetupRequest::new(
+            "head",
+            ModelRef::new("provider", "model"),
+            100000,
+            1000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            vec![],
+            1,
+        );
+        let mut session = Session::new(
+            &route,
+            &setup,
+            crate::preset::features("head").unwrap(),
+            None,
+        );
+        session.index.extend((1..=200).map(|ordinal| {
+            Entry::new(
+                ordinal,
+                format!("m{ordinal}"),
+                Role::Assistant,
+                ordinal,
+                vec![Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "small text".into(),
+                    },
+                )],
+            )
+        }));
+        session
+    }
+
+    #[test]
+    fn app_read_updates_only_changed_rows_and_reuses_summary_and_decision_arcs() {
+        let mut session = session();
+        let first = session.app_update();
+        assert_eq!(first.rows.len(), 200);
+        let summaries = first.compartments.unwrap();
+        let unchanged = session.app_update();
+        assert!(unchanged.rows.is_empty());
+        assert!(unchanged.compartments.is_none());
+        assert!(unchanged.decisions.is_none());
+        assert!(Arc::ptr_eq(&first.header, &unchanged.header));
+        let mut completed = session.index.at(200).unwrap().clone();
+        completed.completed_at = Some(123);
+        session.index.extend([completed]);
+        assert!(session.app_update().rows.is_empty());
+        session.index.extend([Entry::new(
+            201,
+            "m201",
+            Role::Assistant,
+            201,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "new text".into(),
+                },
+            )],
+        )]);
+        let appended = session.app_update();
+        assert_eq!(appended.rows.len(), 1);
+        assert_eq!(appended.rows[0].0, "m201");
+        assert!(appended.compartments.is_none());
+        assert!(appended.decisions.is_none());
+        session.queued.insert(("m2".into(), "p".into()));
+        session.app.stamps.insert(("m2".into(), "p".into()), 42);
+        session.app_projection.dirty.insert("m2".into());
+        let stamp = session.app_update();
+        assert_eq!(stamp.rows.len(), 1);
+        assert_eq!(stamp.rows[0].1.row["stamped_parts"][0]["stamped_at_ms"], 42);
+        assert_eq!(stamp.header.meta["queued_stamp_count"], 1);
+        assert!(stamp.compartments.is_none());
+        assert!(Arc::ptr_eq(
+            &summaries,
+            &session.app_projection.summary_arc()
+        ));
+        session.summaries.push(StoredCompartment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 3,
+            ..Default::default()
+        });
+        session.app_projection.summaries_dirty = true;
+        let summary = session.app_update();
+        assert!(summary.rows.is_empty());
+        assert_eq!(summary.compartments.unwrap().len(), 1);
+        assert_eq!(summary.header.meta["queued_stamp_count"], 0);
+    }
+
+    #[test]
+    fn app_read_reuses_an_unchanged_head_when_a_drop_view_is_applied() {
+        use cortexkit_role_compaction::view::{InsertAt, InsertedMessage};
+        let mut session = session();
+        let head = EditOp::Insert {
+            at: InsertAt::Start,
+            message: InsertedMessage::new(
+                "cached-head",
+                Role::User,
+                vec![format!(
+                    "<project-docs>{}</project-docs>",
+                    "stable docs ".repeat(10000)
+                )],
+            ),
+        };
+        let view = session.seal(vec![head], &[]).unwrap();
+        session.accept(view.clone());
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        session.app_update();
+        assert_eq!(session.app_projection.head_rebuilds, 1);
+        let view = session
+            .seal(
+                vec![EditOp::Drop {
+                    mid: "m2".into(),
+                    part: Some("p".into()),
+                }],
+                &[("m2".into(), "p".into())],
+            )
+            .unwrap();
+        session.accept(view.clone());
+        session.app_update();
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        let applied = session.app_update();
+        assert_eq!(applied.rows.len(), 1);
+        assert_eq!(applied.rows[0].1.row["state"], "dropped");
+        assert_eq!(session.app_projection.head_rebuilds, 0);
+    }
+
+    mod perf_tests {
+        include!("perf_tests.rs");
     }
 }
