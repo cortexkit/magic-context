@@ -114,6 +114,16 @@ enum Job {
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
+    /// Drain opt-in context.db lock measurements for a scenario.
+    #[cfg(feature = "context-db-timing")]
+    pub fn take_context_lock_samples(&self) -> Vec<crate::context_db::timing::Sample> {
+        self.inner
+            .db
+            .as_ref()
+            .map(|db| db.take_lock_samples())
+            .unwrap_or_default()
+    }
+
     pub fn new(
         client: C,
         config: impl Into<Config>,

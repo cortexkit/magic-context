@@ -36,6 +36,10 @@ mod agent_surface;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
 
+#[cfg(feature = "context-db-timing")]
+#[path = "scenarios/write_lock_budget.rs"]
+mod write_lock_budget;
+
 /// ck-mc's calls back into the mock runner. The runner exists only after its
 /// Setup call, so the host is attached right after it starts.
 /// A catch-up read: the ordinal it read after, and how many entries it got.
