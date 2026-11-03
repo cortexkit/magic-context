@@ -551,3 +551,78 @@ fn a_pi_list_must_say_what_each_entry_is_and_end_at_the_newest_message() {
         .unwrap_err()
         .starts_with("invalid_messages:"));
 }
+
+fn oc1(mid: &str, finished_summary: bool) -> OpenCode1Row {
+    OpenCode1Row {
+        mid: mid.into(),
+        finished_summary,
+    }
+}
+
+fn oc2(id: &str, number: Option<u64>, compaction: bool) -> OpenCode2Row {
+    OpenCode2Row {
+        id: id.into(),
+        number,
+        compaction,
+    }
+}
+
+fn shape(messages: &[HostMessage]) -> Vec<(String, Option<u64>, bool, bool)> {
+    messages
+        .iter()
+        .map(|m| (m.mid.clone(), m.entry, m.finished_summary, m.added))
+        .collect()
+}
+
+/// A compaction pair becomes one marker row under the opener's id, the
+/// summary row vanishes, and an added row (new id) follows the row before it.
+#[test]
+fn an_opencode1_session_converted_to_opencode2_lines_up_by_id() {
+    let rows = [
+        oc1("u1", false),
+        oc1("a1", false),
+        oc1("open", false),
+        oc1("sum", true),
+        oc1("u2", false),
+        oc1("a2", false),
+    ];
+    let converted = [
+        oc2("u1", Some(1), false),
+        oc2("a1", Some(2), false),
+        oc2("open", None, true),
+        oc2("u2", Some(3), false),
+        oc2("note", Some(4), false),
+        oc2("a2", Some(5), false),
+    ];
+    let messages = opencode1_to_2(&rows, &converted).unwrap();
+    let row = |mid: &str, entry: Option<u64>, summary: bool, added: bool| {
+        (mid.to_owned(), entry, summary, added)
+    };
+    assert_eq!(
+        shape(&messages),
+        vec![
+            row("u1", Some(1), false, false),
+            row("a1", Some(2), false, false),
+            row("open", None, false, false),
+            row("sum", None, true, false),
+            row("u2", Some(3), false, false),
+            row("note", Some(4), false, true),
+            row("a2", Some(5), false, false),
+        ]
+    );
+    // The list feeds the OpenCode numbering as any other.
+    Numbering::opencode(&messages, &Cursor::new(5, "a2", "")).unwrap();
+}
+
+#[test]
+fn opencode_lists_that_disagree_on_order_or_start_with_an_added_row_refuse() {
+    let rows = [oc1("u1", false), oc1("a1", false)];
+    let swapped = [oc2("a1", Some(1), false), oc2("u1", Some(2), false)];
+    assert!(opencode1_to_2(&rows, &swapped)
+        .unwrap_err()
+        .starts_with("order_differs"));
+    let added_first = [oc2("new", Some(1), false), oc2("u1", Some(2), false)];
+    assert!(opencode1_to_2(&rows, &added_first)
+        .unwrap_err()
+        .starts_with("added_row_first"));
+}

@@ -97,6 +97,96 @@ pub struct HostMessage {
     pub pi: Option<PiRow>,
 }
 
+/// One message row of an OpenCode 1 session in the standalone plugin's
+/// order (`time_created`, then id), read from a copy of the OpenCode 1 store
+/// when the session moves to OpenCode 2.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenCode1Row {
+    pub mid: String,
+    /// `summary: true` with `finish: "stop"`: see
+    /// [`HostMessage::finished_summary`].
+    pub finished_summary: bool,
+}
+
+/// One row of the same session after OpenCode 2 converted the store, in
+/// OpenCode 2's order, as the runner lists it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct OpenCode2Row {
+    pub id: String,
+    /// The runner's entry number; absent for a row that isn't an entry.
+    #[serde(default)]
+    pub number: Option<u64>,
+    /// A compaction marker row (a converted compaction pair).
+    #[serde(default)]
+    pub compaction: bool,
+}
+
+/// The message list for a session moved from OpenCode 1 to OpenCode 2: the
+/// OpenCode 1 rows in their order, each with the entry of the converted row
+/// of the same id (none when it has none or became a marker row), and every
+/// row the conversion added (an id OpenCode 1 doesn't have) right after the
+/// row it follows in OpenCode 2, marked `added`.
+///
+/// Refuses when the two orders disagree on the rows they share, or when the
+/// first converted row is an added one (it would belong to no message).
+pub fn opencode1_to_2(
+    rows: &[OpenCode1Row],
+    converted: &[OpenCode2Row],
+) -> Result<Vec<HostMessage>, String> {
+    let position: HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.mid.as_str(), at))
+        .collect();
+    let entry_of = |row: &OpenCode2Row| row.number.filter(|_| !row.compaction);
+    let mut entries: HashMap<&str, Option<u64>> = HashMap::new();
+    let mut added: Vec<Vec<HostMessage>> = vec![Vec::new(); rows.len()];
+    let mut last: Option<usize> = None;
+    for row in converted {
+        match position.get(row.id.as_str()) {
+            Some(&at) => {
+                if last.is_some_and(|last| at <= last) {
+                    return Err(format!(
+                        "order_differs: OpenCode 2 has {} after a row OpenCode 1 has after it",
+                        row.id
+                    ));
+                }
+                last = Some(at);
+                entries.insert(row.id.as_str(), entry_of(row));
+            }
+            None => {
+                let Some(at) = last else {
+                    return Err(format!(
+                        "added_row_first: {} has no OpenCode 1 message before it",
+                        row.id
+                    ));
+                };
+                added[at].push(HostMessage {
+                    mid: row.id.clone(),
+                    entry: entry_of(row),
+                    finished_summary: false,
+                    added: true,
+                    pi: None,
+                });
+            }
+        }
+    }
+    Ok(rows
+        .iter()
+        .zip(added)
+        .flat_map(|(row, extra)| {
+            std::iter::once(HostMessage {
+                mid: row.mid.clone(),
+                entry: entries.get(row.mid.as_str()).copied().flatten(),
+                finished_summary: row.finished_summary,
+                added: false,
+                pi: None,
+            })
+            .chain(extra)
+        })
+        .collect())
+}
+
 /// A Pi journal entry's kind, as the runner's move tool reads it from the
 /// session file.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
