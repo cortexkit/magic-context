@@ -7,7 +7,7 @@
 //! rollback to one of them finds its own file untouched.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ use crate::summary::head::Baseline;
 /// What a session keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Durable {
+    #[serde(default)]
+    pub app: crate::app_read::SessionState,
     /// Compaction features and conditions, for a tool arriving before Setup
     /// after a restart. Older rows recover these at their next Setup.
     #[serde(default)]
@@ -85,10 +87,11 @@ pub struct Durable {
 
 pub struct Store {
     connection: Mutex<Connection>,
+    pub(crate) path: PathBuf,
 }
 
 /// The newest mode3.db schema this build can read and write.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -127,7 +130,24 @@ impl Store {
                      png BLOB NOT NULL,
                      PRIMARY KEY (runner, harness, session)
                  );
-                 CREATE TABLE IF NOT EXISTS memory_contexts (
+                  CREATE TABLE IF NOT EXISTS app_read_snapshots (
+                      runner TEXT NOT NULL,
+                      harness TEXT NOT NULL,
+                      session TEXT NOT NULL,
+                      snapshot TEXT NOT NULL,
+                      PRIMARY KEY (runner, harness, session)
+                  );
+                  CREATE TABLE IF NOT EXISTS app_read_message_index (
+                      runner TEXT NOT NULL,
+                      harness TEXT NOT NULL,
+                      session TEXT NOT NULL,
+                      message_id TEXT NOT NULL,
+                      ordinal INTEGER NOT NULL,
+                      at_ms INTEGER NOT NULL,
+                      PRIMARY KEY (runner, harness, session, message_id)
+                  );
+                  CREATE INDEX IF NOT EXISTS app_read_message_ordinals ON app_read_message_index(runner, harness, session, ordinal);
+                  CREATE TABLE IF NOT EXISTS memory_contexts (
                      runner TEXT NOT NULL,
                      harness TEXT NOT NULL,
                      session TEXT NOT NULL,
@@ -142,6 +162,7 @@ impl Store {
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         Ok(Self {
             connection: Mutex::new(connection),
+            path: path.to_owned(),
         })
     }
 
@@ -174,6 +195,27 @@ impl Store {
         result
             .map(|_| ())
             .map_err(|error| format!("session {}: saving its state failed: {error}", key.session))
+    }
+
+    /// Persist a read projection as part of session work. The app replica has
+    /// read-only connections and does not compete with session work for a write lock.
+    pub(crate) fn save_app_snapshot(
+        &self,
+        snapshot: &crate::app_read::Snapshot,
+    ) -> Result<(), String> {
+        let key = &snapshot.key;
+        let text = serde_json::to_string(snapshot).expect("snapshot JSON");
+        let write = || -> rusqlite::Result<()> {
+            let mut connection = self.lock();
+            let transaction = connection.transaction()?;
+            transaction.execute("INSERT INTO app_read_snapshots VALUES (?1, ?2, ?3, ?4) ON CONFLICT (runner, harness, session) DO UPDATE SET snapshot=excluded.snapshot", params![key.runner, key.harness, key.session, text])?;
+            // Keep the identity of cut history without retaining its parts in
+            // RAM. Replacing the live suffix also removes ids lost to a revert.
+            transaction.execute("DELETE FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 AND (ordinal>=?4 OR ordinal>?5)",params![key.runner,key.harness,key.session,snapshot.base,snapshot.newest])?;
+            transaction.execute("INSERT OR REPLACE INTO app_read_message_index SELECT ?1,?2,?3,key,json_extract(value,'$.ordinal'),json_extract(value,'$.at_ms') FROM json_each(?4,'$.messages')", params![key.runner,key.harness,key.session,text])?;
+            transaction.commit()
+        };
+        write().map_err(|error| format!("app snapshot: {error}"))
     }
 
     /// Keep the mural image the session's history head was last folded
@@ -253,6 +295,12 @@ impl Store {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_connection_held(&self, f: impl FnOnce()) {
+        let _connection = self.lock();
+        f();
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +316,9 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_snapshots','app_read_message_index')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 2);
     }
 
     #[test]
@@ -306,6 +356,6 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 }

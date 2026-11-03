@@ -72,6 +72,7 @@ impl<C> Clone for Module<C> {
 }
 
 struct Inner<C> {
+    app_read: crate::app_read::AppRead,
     client: C,
     /// Where each session's settings come from. They are resolved again for
     /// every job, so a configuration edit applies from the session's next
@@ -130,8 +131,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         db: Option<ContextDb>,
         store: Option<Store>,
     ) -> Self {
+        let app_read = crate::app_read::AppRead::new(
+            store.as_ref().map(|s| s.path.clone()),
+            db.as_ref().map(|d| d.path.clone()),
+        );
         Self {
             inner: Arc::new(Inner {
+                app_read,
                 client,
                 config: config.into(),
                 db: db.map(Arc::new),
@@ -143,6 +149,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 active_projects: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// App requests read an independent projection, never a session job.
+    pub fn app_read(&self) -> &crate::app_read::AppRead {
+        &self.inner.app_read
     }
 
     /// `compaction.setup` for the session `route` is bound to. Answers at
@@ -424,6 +435,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     (_, None) => Settings::default(),
                 };
                 let settings = &settings;
+                let publish_app = !matches!(&job, Job::Idle(_) | Job::PreUser { .. });
                 match job {
                     Job::Setup(route, request, features) => match &mut session {
                         // A session that so far only called tools starts
@@ -504,10 +516,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 session.ride_undelivered(view.version);
                             }
                         }
+                        let delivered_version = view.as_ref().map(|v| v.version);
                         if let Err(Some(view)) = reply.send(view) {
                             if let Some(session) = session.as_mut() {
                                 session.ride_undelivered(view.version);
                             }
+                        } else if let (Some(session), Some(version)) =
+                            (session.as_mut(), delivered_version)
+                        {
+                            session.app_view_status(version, "accepted");
                         }
                     }
                     Job::Tool {
@@ -563,6 +580,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::Idle(reply) => {
                         let _ = reply.send(());
                     }
+                }
+                if let Some(session) = session.as_mut().filter(|_| publish_app) {
+                    let snapshot = session.app_snapshot();
+                    if let Some(store) = &inner.store {
+                        if let Err(error) = store.save_app_snapshot(&snapshot) {
+                            eprintln!("ck-mc: {error}");
+                        }
+                    }
+                    inner.app_read.publish(snapshot);
                 }
                 // A tools-only session has nothing to keep across a restart.
                 if let (Some(store), Some(session)) = (

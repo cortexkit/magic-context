@@ -1,0 +1,92 @@
+{
+  "name": "token-breakdown",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "session_data.read",
+      "row": {
+        "as_of": {
+          "at_ms": 30,
+          "step_ref": "m3"
+        },
+        "context_window": {
+          "source": "usage",
+          "tokens": 100000
+        },
+        "estimation_source": "legacy_estimate",
+        "last_user_message_in_history_raw": true,
+        "managed": {
+          "value": true
+        },
+        "parts": [
+          {
+            "estimate": true,
+            "part": "system_prompt",
+            "tokens": null
+          },
+          {
+            "estimate": true,
+            "part": "tool_definitions",
+            "tokens": null
+          },
+          {
+            "count": 0,
+            "estimate": true,
+            "part": "memory",
+            "tokens": 0
+          },
+          {
+            "estimate": true,
+            "part": "project_docs",
+            "tokens": 0
+          },
+          {
+            "estimate": true,
+            "part": "user_profile",
+            "tokens": 0
+          },
+          {
+            "estimate": true,
+            "part": "history_summaries",
+            "tokens": 0
+          },
+          {
+            "estimate": true,
+            "part": "history_raw",
+            "tokens": 6
+          },
+          {
+            "estimate": true,
+            "part": "tool_calls_results",
+            "tokens": 0
+          },
+          {
+            "estimate": true,
+            "part": "last_user_message",
+            "tokens": 0
+          }
+        ],
+        "total": {
+          "source": "provider",
+          "tokens": 80
+        },
+        "unattributed": 74
+      },
+      "schema": 1,
+      "section": "token_breakdown",
+      "state": "ready",
+      "version": "mca1:b42b313a601fd10643f67219e87836e0bfcc43cffb69f385f4275cb0835cde06"
+    }
+  }
+}

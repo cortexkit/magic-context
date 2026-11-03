@@ -38,6 +38,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod app_read;
 pub mod calibration;
 pub mod catalog;
 pub mod caveman;

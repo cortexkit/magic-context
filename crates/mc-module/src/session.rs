@@ -37,6 +37,8 @@ use crate::view_builder;
 const READ_PAGE_BYTES: u64 = 1 << 20;
 
 pub struct Session {
+    app: crate::app_read::SessionState,
+    app_cause: String,
     key: SessionRef,
     features: Features,
     preset: crate::catalog::Preset,
@@ -215,6 +217,8 @@ impl Session {
         db: Option<Arc<ContextDb>>,
     ) -> Self {
         Self {
+            app: Default::default(),
+            app_cause: "publication".into(),
             db,
             project: route.project.clone(),
             workdir: folder_of(route),
@@ -363,6 +367,7 @@ impl Session {
     /// What must survive a restart.
     pub fn durable(&self) -> crate::store::Durable {
         crate::store::Durable {
+            app: self.app.clone(),
             compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
             preset: (!self.tools_only).then(|| self.preset.as_str().to_owned()),
             pending_keep: self.pending_keep.clone(),
@@ -388,6 +393,7 @@ impl Session {
 
     /// Take back what a previous ck-mc process saved for the session.
     pub fn restore(&mut self, durable: crate::store::Durable) {
+        self.app = durable.app.clone();
         self.tools_only = false;
         if let Some(preset) = durable
             .preset
@@ -1140,6 +1146,8 @@ impl Session {
             // `historian-history-wait.ts`): a provider that recovers may run
             // again on the same history while the quota lasts.
             Err(error) => {
+                self.app.failures += 1;
+                self.app.last_error = Some(error.clone());
                 eprintln!(
                     "ck-mc: session {}: summary failed: {error}",
                     self.key.session
@@ -1227,6 +1235,8 @@ impl Session {
                 &recall,
                 now_ms,
             ) {
+                self.app.failures += 1;
+                self.app.last_error = Some(error.clone());
                 eprintln!(
                     "ck-mc: session {}: storing summaries failed: {error}",
                     self.key.session
@@ -1237,7 +1247,11 @@ impl Session {
         }
         self.no_progress = None;
         self.summaries
-            .extend(validated.compartments.iter().map(StoredCompartment::from));
+            .extend(validated.compartments.iter().map(|compartment| {
+                let mut stored = StoredCompartment::from(compartment);
+                stored.created_at = now_ms;
+                stored
+            }));
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
         if pass::at_execute(&self.conditions, settings)
@@ -1924,7 +1938,11 @@ impl Session {
             {
                 continue;
             }
-            added |= self.queued.insert((mid, part));
+            let key = (mid, part);
+            if self.queued.insert(key.clone()) {
+                self.app.stamps.push((key, crate::app_read::now_ms()));
+                added = true;
+            }
         }
         if added {
             self.nudges.reduced();
@@ -2289,6 +2307,24 @@ impl Session {
         if !self.index_ready {
             return (None, 0);
         }
+        self.app_cause = if over_limit.is_some() {
+            "over_limit"
+        } else if cache_lost {
+            "cache_lost"
+        } else if self.head_stale {
+            "history_changed"
+        } else if self.summary_on_its_way()
+            || self.summaries.last().is_some_and(|s| {
+                self.baseline
+                    .as_ref()
+                    .is_none_or(|b| s.sequence > b.through_sequence)
+            })
+        {
+            "history_refresh"
+        } else {
+            "execute"
+        }
+        .into();
         let (history, cut) = self.history_ops(settings);
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
@@ -2525,7 +2561,9 @@ impl Session {
         }
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
-            Ok(ApplyViewAnswer::Accepted) => {}
+            Ok(ApplyViewAnswer::Accepted) => {
+                self.app_view_status(view.version, "accepted");
+            }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
@@ -2574,7 +2612,9 @@ impl Session {
             .apply_view(&self.key, ApplyViewRequest::new(view.clone()))
             .await
         {
-            Ok(ApplyViewAnswer::Accepted) => {}
+            Ok(ApplyViewAnswer::Accepted) => {
+                self.app_view_status(view.version, "accepted");
+            }
             Ok(ApplyViewAnswer::Refused {
                 refusal: ViewRefusal::StaleVersion { latest, .. },
             }) if latest == view.version => {}
@@ -2637,6 +2677,7 @@ impl Session {
     /// Take `view` as the one the runner shows, unconfirmed until a notice
     /// reports it applied (see [`Unconfirmed`]).
     fn accept(&mut self, view: View) {
+        self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
         let before = Before {
             head_stale: self.head_stale,
@@ -2684,6 +2725,13 @@ impl Session {
                 .iter()
                 .position(|pending| same(applied, &pending.view))
             {
+                let versions: Vec<_> = self.unconfirmed[..=at]
+                    .iter()
+                    .map(|pending| pending.view.version)
+                    .collect();
+                for version in versions {
+                    self.app_view_status(version, "applied");
+                }
                 self.unconfirmed.drain(..=at);
             }
         }
@@ -2705,6 +2753,14 @@ impl Session {
     /// refused view already carried once: a drop the runner keeps refusing
     /// must not make every later pass build a view it refuses.
     fn roll_back(&mut self, version: u64, refused: bool) {
+        if let Some(record) = self
+            .app
+            .decisions
+            .iter_mut()
+            .find(|r| r["view_version"] == version)
+        {
+            record["status"] = serde_json::json!(if refused { "refused" } else { "undelivered" });
+        }
         let Some(at) = self
             .unconfirmed
             .iter()
@@ -3068,6 +3124,9 @@ fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[path = "app_read/projection.rs"]
+mod app_projection;
 
 #[cfg(test)]
 mod config_tests {
