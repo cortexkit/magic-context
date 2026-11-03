@@ -190,6 +190,9 @@ fn placeholders(count: usize) -> String {
     vec!["?"; count].join(", ")
 }
 
+/// How long a context.db statement waits for another process's write lock.
+pub(crate) const CONTEXT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+
 pub struct ContextDb {
     connection: Mutex<Connection>,
 }
@@ -203,10 +206,14 @@ impl ContextDb {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|error| format!("context.db {}: {error}", path.display()))?;
-        // A busy database is reported to the caller, not waited on while an
-        // executor thread shared by other sessions is blocked.
+        // context.db is shared with every host running the plugin, which
+        // takes short write locks on most passes. Wait briefly for one, as
+        // the plugin's own transform writes do, so an ordinary collision
+        // doesn't fail a summary or a memory save. The bound keeps a stuck
+        // writer from holding this executor thread, which other sessions
+        // share, for longer than that.
         connection
-            .busy_timeout(Duration::ZERO)
+            .busy_timeout(CONTEXT_BUSY_TIMEOUT)
             .map_err(|error| error.to_string())?;
         let found: i64 = connection
             .query_row(

@@ -508,19 +508,35 @@ fn lifecycle_store_save_reports_failure_and_never_waits_on_a_writer() {
 }
 
 #[test]
-fn lifecycle_context_writes_never_wait_on_an_external_writer() {
+fn lifecycle_context_writes_wait_briefly_for_an_external_writer() {
     let dir = scratch("context-locks");
-    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
-    let timeout = db
-        .with_connection(|conn| {
-            conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))
-                .map_err(|e| e.to_string())
-        })
-        .unwrap();
-    assert_eq!(
-        timeout, 0,
-        "shared context writes may not stall another session"
+    let path = dir.join("context.db");
+    let db = ContextDb::create_for_tests(&path).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let start = std::time::Instant::now();
+    let held = db.with_connection(|conn| {
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+            .map_err(|error| error.to_string())
+    });
+    let waited = start.elapsed();
+    assert!(held.is_err(), "a held write lock was not reported");
+    // A collision waits a little, as the plugin's own writes do, instead
+    // of failing at once; a stuck writer stalls the thread only that long.
+    assert!(
+        waited >= std::time::Duration::from_millis(200),
+        "gave up after {waited:?}"
     );
+    assert!(
+        waited < std::time::Duration::from_secs(2),
+        "a held lock stalled the worker for {waited:?}"
+    );
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(db
+        .with_connection(|conn| conn
+            .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+            .map_err(|error| error.to_string()))
+        .is_ok());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
