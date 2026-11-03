@@ -5,7 +5,7 @@ use super::{bundled, list, text, Profile};
 use crate::memory_context::{ContextAnswer, ProjectContext, SessionContext};
 
 /// Profiles change no prompt text yet: the historian and dreamer prompts stay
-/// the plugin's (spec 3c, "Not in scope").
+/// the OpenCode plugin's.
 pub(crate) fn parity_mode() -> bool {
     true
 }

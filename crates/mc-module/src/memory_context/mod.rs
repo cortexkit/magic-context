@@ -1,6 +1,7 @@
-//! A session's memory context (spec 3c, ML1): its project, workspace and
+//! A session's memory context: its project, workspace and
 //! domain from Entorhinal, and the memory profile its agent pins. ck-mc reads
-//! it once, at the session's first Setup, and keeps it with the session.
+//! it once, at the session's first Setup (or first `ctx_memory` call, for a
+//! session that only calls tools), and keeps it with the session.
 //! Ported from the memory-levels card (`crates/mc-module/src/memory_context/`
 //! at `75adf757`).
 

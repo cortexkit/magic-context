@@ -1,5 +1,5 @@
 //! The device-local sync tables: the ops ck-mc wrote, the queue of ops still
-//! to append, and the per-device allocator (spec 3c, ML3.1). Every write
+//! to append, and the per-device allocator. Every write
 //! borrows the caller's transaction. Ported from the memory-levels card
 //! (`crates/mc-store/src/memory_levels/ledger.rs` at `75adf757`).
 

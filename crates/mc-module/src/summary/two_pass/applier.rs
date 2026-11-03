@@ -300,8 +300,8 @@ pub struct Admission<'a> {
     pub conflict_target: Option<i64>,
     pub fact_id: i64,
     pub reservation: Option<&'a Reservation>,
-    /// The session's writer authority, for a new memory's level record
-    /// (spec 3c, ML2).
+    /// The session's writer authority, for a new memory's project-level
+    /// placement record, written in the same transaction as the memory.
     pub authority: Option<&'a crate::memory_levels::Authority>,
 }
 
@@ -443,7 +443,7 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                     )?;
                 }
                 // Turn two's `new` is the two-pass form of fact promotion, so
-                // it is placed the same way (spec 3c, ML2.1).
+                // it is placed the same way, with the historian as its actor.
                 let ordinals = fact_ordinals(&tx, admission.fact_id)?;
                 crate::memory_levels::created(
                     &tx,
@@ -655,8 +655,7 @@ pub fn commit_revision(
         tx.commit()?;
         return Ok(receipt);
     }
-    // A replacement's sources must share one owner, which the new row takes
-    // (spec 3c, ML2.3).
+    // A replacement's sources must share one owner, which the new row takes.
     let owner = if decision.action == "replaces" {
         let ids: Vec<i64> = current.iter().map(|source| source.id).collect();
         match crate::memory_levels::merge_owner(&tx, &ids, &decision.project, authority) {

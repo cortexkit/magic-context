@@ -186,7 +186,7 @@ impl Store {
             .unwrap_or(None)
     }
 
-    /// The memory context stored for the session (spec 3c, ML1), if any.
+    /// The memory context fixed once and stored for the session, if any.
     /// It is kept apart from [`Durable`] because a session that only calls
     /// tools has one too.
     pub fn memory_context(&self, key: &SessionRef) -> Option<MemoryContext> {

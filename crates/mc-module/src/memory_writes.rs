@@ -529,7 +529,7 @@ pub struct Writer<'a> {
     pub session: &'a str,
     pub project: &'a str,
     /// What the session's memory context says about the writer, for the
-    /// level record of each new memory (spec 3c, ML2). `None` leaves new
+    /// level record of each new memory. `None` leaves new
     /// memories unplaced.
     pub authority: Option<&'a crate::memory_levels::Authority>,
 }
@@ -770,7 +770,7 @@ pub fn mutate(
         }
     }
     // A merge's sources must share one owner, settled before any of them
-    // changes; its survivor takes that owner (spec 3c, ML2.3).
+    // changes; its survivor takes that owner.
     let merge_owner = if operation == Operation::Merge {
         let ids: Vec<i64> = sources.iter().map(|source| source.id).collect();
         match crate::memory_levels::merge_owner(&tx, &ids, who.project, who.authority) {

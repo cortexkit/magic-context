@@ -1,4 +1,4 @@
-//! Sync of new memories to Engram (spec 3c, ML3). A memory's create is queued
+//! Sync of new memories to Engram. A memory's create is queued
 //! in the transaction that wrote it; a background task appends queued ops to
 //! the device's stream later. Appending changes only the sync tables, never a
 //! view, `m[0]`, `m[1]` or a fold. Updates, archives and merges are not
@@ -35,7 +35,7 @@ fn work() -> &'static Notify {
     WORK.get_or_init(Notify::new)
 }
 
-/// Queue a new memory's op, in the caller's transaction (ML3.1). A create
+/// Queue a new memory's op, in the caller's transaction. A create
 /// that cannot be synced is logged with its reason and changes nothing; a
 /// failure to write the sync rows fails the caller's whole write.
 pub(crate) fn queue(conn: &Connection, event: &CreateEvent, now: i64) -> rusqlite::Result<()> {
@@ -127,7 +127,7 @@ fn transaction(
 }
 
 /// The background task: append queued ops until none is left, then wait for
-/// a new create or the idle refresh (ML3.3). Never returns.
+/// a new create or the idle refresh. Never returns.
 pub(crate) async fn run<C: RunnerClient>(client: &C, db: &ContextDb) {
     let holder = format!("{}-{}", std::process::id(), crate::memory_writes::now_ms());
     let mut retry = INITIAL_RETRY;

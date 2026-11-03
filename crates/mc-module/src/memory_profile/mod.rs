@@ -1,8 +1,9 @@
 //! Memory profiles: the bundled profile packages, and the choice of one
-//! profile for a session (spec 3c, ML1). A profile names the memory
+//! profile for a session. A profile names the memory
 //! categories, with an id for each, that a session's new memories are
-//! recorded under (ML2), and says which categories another profile's session
-//! may see (ML4). Ported from the memory-levels card
+//! recorded under. It also says which of its categories a session under
+//! another profile may see, which matters only to memories placed at
+//! workspace level: the history head doesn't show those yet. Ported from the memory-levels card
 //! (`crates/mc-module/src/memory_profile/` at `75adf757`).
 
 mod bundled;
@@ -19,7 +20,7 @@ pub(crate) use resolve::resolve;
 pub use resolve::{MemoryContext, ProfilePin};
 
 /// The bundled software profile: the only one ck-mc installs.
-#[allow(dead_code)] // The workspace lane of the history head reads it (ML4).
+#[allow(dead_code)] // For the history head's workspace-level memories, not built yet.
 pub(crate) fn bundled_swe() -> Result<Profile> {
     bundled::swe()
 }

@@ -30,7 +30,7 @@ pub struct Route {
     /// both are stamped.
     pub workdir: Option<String>,
     /// The agent the scope works for, when it names one. It picks the
-    /// memory profile the agent pins (spec 3c, ML1); attribution only, never
+    /// memory profile the agent pins; attribution only, never
     /// authority.
     pub agent_id: Option<String>,
 }

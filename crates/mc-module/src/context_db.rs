@@ -823,8 +823,8 @@ mod tests {
 pub struct Promotion<'a> {
     pub project: &'a str,
     pub facts: &'a [(String, String)],
-    /// The session's writer authority, for each new memory's level record
-    /// (spec 3c, ML2).
+    /// The session's writer authority, for each new memory's project-level
+    /// placement record, written in the same transaction as the memory.
     pub authority: Option<&'a crate::memory_levels::Authority>,
 }
 

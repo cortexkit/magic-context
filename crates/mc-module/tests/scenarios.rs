@@ -669,11 +669,11 @@ async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_n
 }
 
 /// A view the runner takes and then refuses at its step boundary is undone
-/// in ck-mc too (spec 4, WK3 and NT3). Here the runner refuses every view
+/// in ck-mc too. Here the runner refuses every view
 /// that drops tag 2. Kept as applied, the refused view's drop would be
 /// carried into every later view and refused with it, so no view would ever
 /// land again. Undone, its drops are queued again, forgotten after a second
-/// refusal (spec 2, QD7), and a later drop lands.
+/// refusal, and a later drop lands.
 #[tokio::test]
 async fn a_view_refused_at_the_step_boundary_is_undone_so_later_views_land() {
     let mut runner = start(config("worker", Kind::OpenAi, free())).await;
@@ -2114,7 +2114,7 @@ async fn a_restarted_ck_mc_keeps_queued_drops_and_the_view_the_runner_applies() 
 /// ck-mc crashes right after handing over the view that cuts summarized
 /// history, before the end of the job saves its state. The state saved before
 /// the hand-over names that view, so after the restart ck-mc keeps the same
-/// `m[0]` and reads only from the cut (spec 4, DS2 and ST2).
+/// history baseline (`m[0]`) and reads only from the cut.
 #[tokio::test]
 async fn a_crash_right_after_handing_over_a_view_keeps_its_cut_and_baseline() {
     let dir = scratch("crash-after-view");
@@ -2754,7 +2754,7 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
 /// A session's memory context is read from Entorhinal once, at its first
 /// Setup, and kept across a ck-mc restart; every memory the session saves is
 /// recorded at its project's level with the profile and category id it was
-/// written under (spec 3c, ML1 and ML2).
+/// written under.
 #[tokio::test]
 async fn saved_memories_record_their_project_level_from_a_context_read_once() {
     let dir = scratch("memory-levels");
