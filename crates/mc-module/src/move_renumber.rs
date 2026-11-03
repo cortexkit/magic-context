@@ -59,8 +59,11 @@ pub struct HostMessage {
     pub mid: String,
     /// The runner's entry number for the row, or none for a marker row.
     pub entry: Option<u64>,
-    /// Whether the row is a finished compaction summary, which the standalone
-    /// plugin leaves out of its numbering.
+    /// Whether the standalone plugin leaves the row out of its numbering:
+    /// exactly `summary: true` with `finish: "stop"`, error or not. This is
+    /// the plugin's rule, not the runner's marker rule (that one is `entry`
+    /// being none): a summary that stopped for another reason counts for the
+    /// plugin, and marking it here would shift every later number.
     #[serde(default)]
     pub finished_summary: bool,
 }
