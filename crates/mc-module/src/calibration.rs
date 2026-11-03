@@ -38,6 +38,17 @@ pub struct LocalMass {
 }
 
 impl DecisionCalibration {
+    /// Exact vocabulary counts are already provider tokens, including for prompt fit.
+    pub fn exact() -> Self {
+        Self {
+            system_ratio: 1.0,
+            tools_ratio: 1.0,
+            prose_ratio: 1.0,
+            seeded: true,
+            unknown_fit_ratio: 1.0,
+        }
+    }
+
     pub fn neutral() -> Self {
         Self {
             system_ratio: 1.0,

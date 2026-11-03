@@ -18,7 +18,7 @@ use super::prompt::{
     render_seed_examples_block, render_session_references_block_window, select_seeds,
     select_session_references, CompartmentPromptInputs, ReferenceCompartment, SEED_FLOOR,
 };
-use crate::calibration::{DecisionCalibration, LocalMass};
+use crate::calibration::LocalMass;
 use crate::context_db::{StoredCompartment, StoredMemory};
 
 /// Smallest chunk worth a run: below it the fixed parts take the whole window
@@ -37,7 +37,7 @@ const OUTPUT_SHARE_CAP: f64 = 0.25;
 /// A model a run may be sent to.
 #[derive(Clone, Copy, Debug)]
 pub struct Window {
-    pub calibration: DecisionCalibration,
+    pub counter: crate::count::Counter,
     /// Its context window in tokens.
     pub context_window: u64,
 }
@@ -56,10 +56,10 @@ impl Window {
         let Some(limit) = self.input_limit(output) else {
             return true;
         };
-        let tokens = self.calibration.provider_mass(
+        let tokens = self.counter.calibration().provider_mass(
             LocalMass {
-                system: mc_tokenizer::estimate_tokens(system) as f64,
-                prose: mc_tokenizer::estimate_tokens(prompt) as f64,
+                system: self.counter.count(system) as f64,
+                prose: self.counter.count(prompt) as f64,
                 tools: 0.0,
             },
             true,
@@ -158,11 +158,10 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
         }
     };
     let header = format!("Messages {}-{}:\n\n", input.chunk_start, input.last_ordinal);
-    let system_tokens = mc_tokenizer::estimate_tokens(input.system_prompt) as f64;
-    let fixed_tokens = |refs: usize, memory_count: usize, seed_count: usize| -> u64 {
+    let fixed_prompt = |refs: usize, memory_count: usize, seed_count: usize| -> String {
         let (seed_examples, session_references, project_memory) =
             render(refs, memory_count, seed_count);
-        let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+        build_compartment_agent_prompt(&CompartmentPromptInputs {
             seed_examples: &seed_examples,
             session_references: &session_references,
             project_memory: &project_memory,
@@ -171,16 +170,21 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
             user_observations_requested: false,
             extraction_free: false,
             anchored_facts: input.anchored_facts,
-        });
-        mc_tokenizer::estimate_tokens(&prompt) as u64
+        })
     };
-    let limits: Vec<(DecisionCalibration, u64)> = input
+    let limits: Vec<(crate::count::Counter, u64, f64)> = input
         .windows
         .iter()
         .filter_map(|window| {
             window
                 .input_limit(window.output_tokens(input.output_cap))
-                .map(|limit| (window.calibration, limit))
+                .map(|limit| {
+                    (
+                        window.counter,
+                        limit,
+                        window.counter.count(input.system_prompt) as f64,
+                    )
+                })
         })
         .collect();
     if limits.is_empty() {
@@ -195,13 +199,15 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
     // The largest chunk that keeps the prompt within every model's limit, or
     // `None` when the fixed parts alone do not fit one of them.
     let room = |refs: usize, memory_count: usize, seed_count: usize| -> Option<u64> {
-        let fixed = fixed_tokens(refs, memory_count, seed_count);
+        let prompt = fixed_prompt(refs, memory_count, seed_count);
         let mut room = u64::MAX;
-        for (calibration, limit) in &limits {
+        for (counter, limit, system_tokens) in &limits {
+            let fixed = counter.count(&prompt);
+            let calibration = counter.calibration();
             let fits = |prose: u64| {
                 let tokens = calibration.provider_mass(
                     LocalMass {
-                        system: system_tokens,
+                        system: *system_tokens,
                         prose: prose as f64,
                         tools: 0.0,
                     },
@@ -321,7 +327,7 @@ mod tests {
 
     fn window(context_window: u64) -> Window {
         Window {
-            calibration: DecisionCalibration::for_model(Some("anthropic/claude-sonnet-5-5")),
+            counter: crate::count::Counter::for_model(Some("anthropic/claude-sonnet-5-5")),
             context_window,
         }
     }
@@ -366,5 +372,41 @@ mod tests {
         let fit = fit(&input(&[], &memories, &[])).unwrap();
         assert!(!fit.trimmed);
         assert_eq!(fit.chunk_tokens, 20_000);
+    }
+    #[test]
+    fn exact_opus_prompt_fit_never_uses_the_unknown_ratio() {
+        let counter = crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5"));
+        let calibration = counter.calibration();
+        assert!(calibration.seeded);
+        assert_eq!(
+            (
+                calibration.system_ratio,
+                calibration.tools_ratio,
+                calibration.prose_ratio
+            ),
+            (1.0, 1.0, 1.0)
+        );
+        let system = "You are a careful coding assistant.";
+        let prompt =
+            "Inspect src/session.rs and keep the cached prefix byte-identical. ".repeat(200);
+        let count = cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, system).unwrap()
+            + cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, &prompt).unwrap();
+        let window = Window {
+            counter,
+            context_window: count + count / 4,
+        };
+        assert!(window.admits(0, system, &prompt));
+        assert!(!Window {
+            context_window: count,
+            ..window
+        }
+        .admits(0, system, &prompt));
+        let windows = [Window {
+            counter,
+            context_window: 80_000,
+        }];
+        let fitted = fit(&input(&[], &[], &windows)).unwrap();
+        assert_eq!(fitted.chunk_tokens, 20_000);
+        assert!(!fitted.trimmed);
     }
 }

@@ -80,7 +80,7 @@ struct Block {
 }
 
 impl Block {
-    fn format(&self) -> String {
+    fn header(&self) -> String {
         let range = if self.start == self.end {
             format!("[{}]", self.start)
         } else {
@@ -91,7 +91,11 @@ impl Block {
         } else {
             format!(" commits: {}", self.commit_hashes.join(", "))
         };
-        format!("{range} {}:{commits} {}", self.role, self.parts.join(" / "))
+        format!("{range} {}:{commits} ", self.role)
+    }
+
+    fn format(&self) -> String {
+        format!("{}{}", self.header(), self.parts.join(" / "))
     }
 }
 
@@ -99,12 +103,128 @@ impl Block {
 /// before a line would take the text past `token_budget` tokens. The first
 /// line is always taken, so a chunk is never empty while messages remain.
 /// Returns `None` when the entries hold nothing to summarize.
-pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
-    build_with(entries, token_budget, Lines::Merged)
+pub fn build(
+    entries: &[Entry],
+    token_budget: u64,
+    counter: crate::count::Counter,
+) -> Option<Chunk> {
+    build_with(entries, token_budget, Lines::Merged, counter)
 }
 
 /// [`build`], with lines formed as `mode` says.
-pub fn build_with(entries: &[Entry], token_budget: u64, mode: Lines) -> Option<Chunk> {
+pub fn build_with(
+    entries: &[Entry],
+    token_budget: u64,
+    mode: Lines,
+    counter: crate::count::Counter,
+) -> Option<Chunk> {
+    build_counted(entries, token_budget, mode, |_, text| counter.count(text))
+}
+
+/// The trigger revisits held history on notices. Exact vocabularies cache each
+/// message by digest and family, so a growing assistant turn never re-tokenizes
+/// its old text. Headers and separators are added separately: token merges at
+/// message joins may differ slightly, which is sufficient for a trigger decision.
+/// Estimated models retain their merged-line counts for compatibility.
+#[derive(Default, Debug)]
+pub struct CountCache {
+    family: Option<Option<cortexkit_tokens::Family>>,
+    counts: std::collections::HashMap<(u64, u64, Vec<String>), u64>,
+    entry_counts: std::collections::HashMap<(u64, String), Option<u64>>,
+    headers: std::collections::HashMap<String, u64>,
+    separator: Option<u64>,
+    #[cfg(test)]
+    pub misses: usize,
+    #[cfg(test)]
+    pub header_misses: usize,
+}
+
+impl CountCache {
+    pub fn build(
+        &mut self,
+        entries: &[Entry],
+        budget: u64,
+        counter: crate::count::Counter,
+    ) -> Option<Chunk> {
+        if self.family != Some(counter.family()) {
+            self.counts.clear();
+            self.entry_counts.clear();
+            self.headers.clear();
+            self.separator = None;
+            self.family = Some(counter.family());
+        }
+        // Retain only the current scan's lines, so cuts and changing entries
+        // cannot leave an ever-growing cache behind in a long session.
+        let mut retained = std::collections::HashMap::new();
+        let mut retained_entries = std::collections::HashMap::new();
+        let mut retained_headers = std::collections::HashMap::new();
+        let separator = counter
+            .family()
+            .map(|_| *self.separator.get_or_insert_with(|| counter.count(" / ")));
+        let chunk = build_counted(entries, budget, Lines::Merged, |block, text| {
+            let low = entries.partition_point(|entry| entry.ordinal < block.start);
+            let high = entries.partition_point(|entry| entry.ordinal <= block.end);
+            if let Some(separator) = separator {
+                let mut members = 0u64;
+                let header = block.header();
+                let mut tokens = self.headers.remove(&header).unwrap_or_else(|| {
+                    #[cfg(test)]
+                    {
+                        self.header_misses += 1;
+                    }
+                    counter.count(&header)
+                });
+                retained_headers.insert(header, tokens);
+                for entry in &entries[low..high] {
+                    let key = (entry.ordinal, entry.digest.clone());
+                    let count = self.entry_counts.remove(&key).unwrap_or_else(|| {
+                        render_entry(entry, false).map(|(_, parts, _, _)| {
+                            #[cfg(test)]
+                            {
+                                self.misses += 1;
+                            }
+                            counter.count(&parts.join(" / "))
+                        })
+                    });
+                    if let Some(count) = count {
+                        tokens += count;
+                        members += 1;
+                    }
+                    retained_entries.insert(key, count);
+                }
+                return tokens + members.saturating_sub(1) * separator;
+            }
+            let key = (
+                block.start,
+                block.end,
+                entries[low..high]
+                    .iter()
+                    .map(|entry| entry.digest.clone())
+                    .collect(),
+            );
+            let count = self.counts.remove(&key).unwrap_or_else(|| {
+                #[cfg(test)]
+                {
+                    self.misses += 1;
+                }
+                counter.count(text)
+            });
+            retained.insert(key, count);
+            count
+        });
+        self.counts = retained;
+        self.entry_counts = retained_entries;
+        self.headers = retained_headers;
+        chunk
+    }
+}
+
+fn build_counted(
+    entries: &[Entry],
+    token_budget: u64,
+    mode: Lines,
+    mut count: impl FnMut(&Block, &str) -> u64,
+) -> Option<Chunk> {
     let per_message = mode == Lines::PerMessage;
     let mut lines: Vec<String> = Vec::new();
     let mut printed: Vec<(char, u64, u64, Vec<String>)> = Vec::new();
@@ -119,17 +239,17 @@ pub fn build_with(entries: &[Entry], token_budget: u64, mode: Lines) -> Option<C
     let mut last_role: Option<char> = None;
 
     // Appends the current block to the chunk; false when it does not fit.
-    let flush = |block: Block,
-                 lines: &mut Vec<String>,
-                 printed: &mut Vec<(char, u64, u64, Vec<String>)>,
-                 covered: &mut Vec<ChunkLine>,
-                 tool_only: &mut Vec<MessageRange>,
-                 total: &mut u64,
-                 clusters: &mut u64,
-                 last_role: &mut Option<char>|
+    let mut flush = |block: Block,
+                     lines: &mut Vec<String>,
+                     printed: &mut Vec<(char, u64, u64, Vec<String>)>,
+                     covered: &mut Vec<ChunkLine>,
+                     tool_only: &mut Vec<MessageRange>,
+                     total: &mut u64,
+                     clusters: &mut u64,
+                     last_role: &mut Option<char>|
      -> bool {
         let text = block.format();
-        let tokens = mc_tokenizer::estimate_tokens(&text) as u64;
+        let tokens = count(&block, &text);
         if *total + tokens > token_budget && *total > 0 {
             return false;
         }
@@ -573,7 +693,8 @@ mod tests {
                 )],
             ),
         ];
-        let chunk = build(&entries, 10_000).expect("a chunk");
+        let chunk =
+            build(&entries, 10_000, crate::count::Counter::for_model(None)).expect("a chunk");
         assert!(
             chunk.input.contains("Do not deploy to production."),
             "{}",
@@ -607,7 +728,13 @@ mod tests {
                 vec![text("Committed abc1234def as the fix.")],
             ),
         ];
-        let chunk = build_with(&entries, 10_000, Lines::PerMessage).expect("a chunk");
+        let chunk = build_with(
+            &entries,
+            10_000,
+            Lines::PerMessage,
+            crate::count::Counter::for_model(None),
+        )
+        .expect("a chunk");
         let lines: Vec<&str> = chunk.input.lines().skip(2).collect();
         assert_eq!(
             lines,
@@ -636,7 +763,8 @@ mod tests {
         assert_eq!(sent, [1, 2]);
         // Merged lines are unchanged: a hidden message opens the next line,
         // and assistant text loses its hash.
-        let merged = build(&entries, 10_000).expect("a chunk");
+        let merged =
+            build(&entries, 10_000, crate::count::Counter::for_model(None)).expect("a chunk");
         assert!(
             merged.input.ends_with(
                 "[1-2] U: Ship it. / Today. / And tag it.\n[3-4] A: commits: abc1234def Committed as the fix."
@@ -682,7 +810,7 @@ mod tests {
             ),
             entry(6, Role::User, true, vec![text(answer)]),
         ];
-        let chunk = build(&entries, 10_000).unwrap();
+        let chunk = build(&entries, 10_000, crate::count::Counter::for_model(None)).unwrap();
         assert_eq!(
             chunk.input,
             "Messages 1-6:\n\n[1] U: Fix the bug.\n[2-5] A: commits: abc1234 TC: read(src/a.rs) / TC: Build it / Committed with the fix.\n[6] U: U (answered \"Ship it?\"): Yes"
@@ -743,7 +871,7 @@ mod tests {
                 vec![text("Committed 9fedcba with the tests.")],
             ),
         ];
-        let chunk = build(&entries, 10_000).unwrap();
+        let chunk = build(&entries, 10_000, crate::count::Counter::for_model(None)).unwrap();
         assert_eq!(chunk.commit_clusters, 3, "{}", chunk.input);
         assert_eq!(chunk.messages, 9);
     }
@@ -754,7 +882,7 @@ mod tests {
             entry(1, Role::User, false, vec![text("First.")]),
             entry(2, Role::Assistant, false, vec![text(&"word ".repeat(400))]),
         ];
-        let chunk = build(&entries, 50).unwrap();
+        let chunk = build(&entries, 50, crate::count::Counter::for_model(None)).unwrap();
         assert_eq!(chunk.validation.end_index, 1);
         assert!(chunk.has_more);
         assert_eq!(chunk.validation.present_ordinals, vec![1]);
@@ -768,6 +896,87 @@ mod tests {
             true,
             vec![text("<system-reminder>x</system-reminder>")],
         )];
-        assert_eq!(build(&entries, 1_000), None);
+        assert_eq!(
+            build(&entries, 1_000, crate::count::Counter::for_model(None)),
+            None
+        );
+    }
+    #[test]
+    fn scan_counts_follow_entry_digests_and_counter_families() {
+        let exact = crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5"));
+        let old = crate::count::Counter::for_model(Some("test/model"));
+        let mut cache = CountCache::default();
+        let mut entries = vec![
+            entry(1, Role::User, false, vec![text("Inspect src/session.rs")]),
+            entry(
+                2,
+                Role::Assistant,
+                false,
+                vec![text("Read the notice handler.")],
+            ),
+        ];
+        for counter in [exact, old] {
+            let expected = cache.build(&entries, 10_000, counter);
+            let sent = build(&entries, 10_000, counter);
+            assert_eq!(
+                expected.as_ref().unwrap().input,
+                sent.as_ref().unwrap().input
+            );
+            if counter.family().is_none() {
+                assert_eq!(expected, sent, "estimated scans keep their merged counts");
+            } else {
+                assert_eq!(
+                    expected.as_ref().unwrap().token_estimate,
+                    exact.count("[1] U: ")
+                        + exact.count("Inspect src/session.rs")
+                        + exact.count("[2] A: ")
+                        + exact.count("Read the notice handler.")
+                );
+            }
+            let misses = cache.misses;
+            assert_eq!(cache.build(&entries, 10_000, counter), expected);
+            assert_eq!(cache.misses, misses);
+        }
+        let before = cache.misses;
+        cache.build(&entries, 10_000, exact);
+        assert_eq!(
+            cache.misses,
+            before + 2,
+            "a different vocabulary invalidates both entry counts"
+        );
+        entries[1] = entry(
+            2,
+            Role::Assistant,
+            false,
+            vec![text("Changed exact-family content.")],
+        );
+        let before = cache.misses;
+        cache.build(&entries, 10_000, exact);
+        assert_eq!(
+            cache.misses,
+            before + 1,
+            "a changed digest invalidates only its entry"
+        );
+        cache.build(&entries[1..], 10_000, exact);
+        assert_eq!(cache.entry_counts.len(), 1);
+        cache.build(&entries, 10_000, old);
+        entries[1] = entry(
+            2,
+            Role::Assistant,
+            false,
+            vec![text("The tool result changed; recheck the boundary.")],
+        );
+        let misses = cache.misses;
+        assert_eq!(
+            cache.build(&entries, 10_000, old),
+            build(&entries, 10_000, old)
+        );
+        assert_eq!(cache.misses, misses + 1);
+        cache.build(&entries[1..], 10_000, old);
+        assert_eq!(
+            cache.counts.len(),
+            1,
+            "pruned entries leave no cached counts"
+        );
     }
 }

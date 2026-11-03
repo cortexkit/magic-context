@@ -901,7 +901,9 @@ mod tests {
 /// Convert the real history allowance only at a materialization edge. Both the
 /// curve pressure and exact demotion loop consume the resulting local allowance.
 pub fn history_local_budget(provider_tokens: f64, model_key: Option<&str>) -> f64 {
-    let ratio = crate::calibration::DecisionCalibration::for_model(model_key).prose_ratio;
+    let ratio = crate::count::Counter::for_model(model_key)
+        .calibration()
+        .prose_ratio;
     if ratio == 1.0 {
         provider_tokens
     } else {
@@ -915,11 +917,11 @@ mod calibration_tests {
     fn fable_history_budget_is_provider_tokens() {
         assert_eq!(
             super::history_local_budget(60_000.0, Some("anthropic/claude-fable-5-1")),
-            38173.0
+            60000.0
         );
         assert_eq!(
             super::history_local_budget(60_000.0, Some("anthropic/claude-fable-5-2")),
-            38173.0
+            60000.0
         );
         assert_eq!(
             super::history_local_budget(60_000.0, Some("unknown/model")),

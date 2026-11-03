@@ -110,11 +110,13 @@ pub fn entries(
     memories: &[StoredMemory],
     cues: &HashMap<i64, Cue>,
     budget_tokens: u64,
+    counter: crate::count::Counter,
 ) -> Vec<Entry> {
-    let shown: HashSet<i64> = crate::memory::trim_to_budget(memories.to_vec(), budget_tokens)
-        .iter()
-        .map(|memory| memory.id)
-        .collect();
+    let shown: HashSet<i64> =
+        crate::memory::trim_to_budget(memories.to_vec(), budget_tokens, counter)
+            .iter()
+            .map(|memory| memory.id)
+            .collect();
     let mut entries: Vec<Entry> = memories
         .iter()
         .filter(|memory| !shown.contains(&memory.id))
@@ -177,13 +179,14 @@ pub fn ensure(
     memories: &[StoredMemory],
     budget_tokens: u64,
     now_ms: i64,
+    counter: crate::count::Counter,
 ) -> rusqlite::Result<Option<Mural>> {
     let ids: Vec<i64> = memories.iter().map(|memory| memory.id).collect();
     let cues = read_cues(conn, &ids)?;
     if !coverage_ok(memories, &cues) {
         return Ok(None);
     }
-    let entries = entries(memories, &cues, budget_tokens);
+    let entries = entries(memories, &cues, budget_tokens, counter);
     if entries.is_empty() {
         return Ok(None);
     }
@@ -293,7 +296,7 @@ mod tests {
             },
         );
         // A budget that fits only the first memory's line.
-        let entries = entries(&memories, &cues, 60);
+        let entries = entries(&memories, &cues, 60, crate::count::Counter::for_model(None));
         let shown: Vec<(i64, &str)> = entries
             .iter()
             .map(|entry| (entry.id, entry.cue.as_str()))
@@ -343,7 +346,16 @@ mod tests {
             memories.push(memory(id, "NAMING", 50, &content));
         }
         let first = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, 200, 1))
+            .with_connection(|conn| {
+                ensure(
+                    conn,
+                    "pj-mural",
+                    &memories,
+                    200,
+                    1,
+                    crate::count::Counter::for_model(None),
+                )
+            })
             .unwrap()
             .expect("a mural");
         // The plugin's stored image for the same layout is served as it is.
@@ -353,7 +365,16 @@ mod tests {
                 .unwrap()
         });
         let again = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, 200, 2))
+            .with_connection(|conn| {
+                ensure(
+                    conn,
+                    "pj-mural",
+                    &memories,
+                    200,
+                    2,
+                    crate::count::Counter::for_model(None),
+                )
+            })
             .unwrap()
             .unwrap();
         assert_eq!(again.png, marker);
@@ -367,7 +388,16 @@ mod tests {
             .unwrap()
         });
         let redrawn = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, 200, 3))
+            .with_connection(|conn| {
+                ensure(
+                    conn,
+                    "pj-mural",
+                    &memories,
+                    200,
+                    3,
+                    crate::count::Counter::for_model(None),
+                )
+            })
             .unwrap()
             .unwrap();
         assert_ne!(redrawn.content_hash, first.content_hash);

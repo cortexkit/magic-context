@@ -17,7 +17,6 @@ use serde_json::{json, Map, Value};
 
 use super::two_pass::turn_one::{self, Lane};
 use super::{chunk, fit};
-use crate::calibration::DecisionCalibration;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -202,7 +201,7 @@ pub async fn run<C: RunnerClient + Router>(
         };
         tried.push(answer.route.route_key());
         let window = fit::Window {
-            calibration: DecisionCalibration::for_model(Some(&answer.route.route_key())),
+            counter: crate::count::Counter::for_model(Some(&answer.route.route_key())),
             context_window: answer.context_window,
         };
         let target = Target {
@@ -319,8 +318,8 @@ const TRUNCATION_MARKER: &str =
 /// `text` cut to fit `budget` tokens with [`TRUNCATION_MARKER`] after it, as
 /// the plugin's `truncateHistorianInputIfNeeded`: a single message larger
 /// than the whole budget is summarized from its start.
-fn truncate_to(text: &str, budget: u64) -> String {
-    let tokens = |text: &str| mc_tokenizer::estimate_tokens(text) as u64;
+fn truncate_to(text: &str, budget: u64, counter: crate::count::Counter) -> String {
+    let tokens = |text: &str| counter.count(text);
     if tokens(text) <= budget {
         return text.to_owned();
     }
@@ -362,20 +361,11 @@ async fn summarize_on<C: RunnerClient>(
     // Facts carry anchors only when memory is on: with memory off the
     // prompt asks for none.
     let anchored = enabled && job.memory_enabled;
-    // A quarter of the model's window, in the model's tokens, converted to
-    // the local estimator's with the larger of its prose and tool ratios
-    // (the plugin's `producerSourceLocalBudget`).
+    // A quarter of the routed model's window. Exact vocabularies use that
+    // budget directly; estimates convert it with the prose/tool calibration.
     let requested = ((window.context_window as f64 * CHUNK_SHARE).round() as u64)
         .clamp(CHUNK_MIN_TOKENS, CHUNK_MAX_TOKENS);
-    let ratio = window
-        .calibration
-        .prose_ratio
-        .max(window.calibration.tools_ratio);
-    let requested = if ratio == 1.0 {
-        requested
-    } else {
-        crate::calibration::local_budget(requested as f64, ratio) as u64
-    };
+    let requested = window.counter.local_budget(requested as f64) as u64;
     let fitted = fit::fit(&fit::Input {
         session_id: &job.session.session,
         chunk_start: job.from,
@@ -397,11 +387,11 @@ async fn summarize_on<C: RunnerClient>(
     } else {
         chunk::Lines::Merged
     };
-    let Some(chunk) = chunk::build_with(entries, fitted.chunk_tokens, lines) else {
+    let Some(chunk) = chunk::build_with(entries, fitted.chunk_tokens, lines, window.counter) else {
         return Ok(None);
     };
     // The first message is always taken, even past the budget.
-    let input = truncate_to(&chunk.input, fitted.chunk_tokens);
+    let input = truncate_to(&chunk.input, fitted.chunk_tokens, window.counter);
     let mut prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &fitted.seed_examples,
         session_references: &fitted.session_references,
@@ -878,11 +868,12 @@ mod tests {
     #[test]
     fn an_oversized_chunk_is_cut_to_its_budget() {
         let text = "word ".repeat(10_000);
-        let cut = truncate_to(&text, 500);
+        let counter = crate::count::Counter::for_model(None);
+        let cut = truncate_to(&text, 500, counter);
         assert!(cut.ends_with(TRUNCATION_MARKER));
         assert!(mc_tokenizer::estimate_tokens(&cut) as u64 <= 500);
         assert!(cut.len() > 1_000, "cut far too short: {}", cut.len());
-        assert_eq!(truncate_to("short", 500), "short");
+        assert_eq!(truncate_to("short", 500, counter), "short");
     }
 
     // The cases the plugin's classifier is written for.

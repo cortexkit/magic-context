@@ -118,8 +118,12 @@ fn selection_order(left: &StoredMemory, right: &StoredMemory) -> Ordering {
 
 /// The memories that fit `budget_tokens` once rendered, counting each
 /// category's tags once.
-pub fn trim_to_budget(mut memories: Vec<StoredMemory>, budget_tokens: u64) -> Vec<StoredMemory> {
-    let estimate = |text: &str| mc_tokenizer::estimate_tokens(text) as u64;
+pub fn trim_to_budget(
+    mut memories: Vec<StoredMemory>,
+    budget_tokens: u64,
+    counter: crate::count::Counter,
+) -> Vec<StoredMemory> {
+    let estimate = |text: &str| counter.count(text);
     let budget = budget_tokens.max(1);
     let mut used = estimate("<project-memory>\n</project-memory>");
     let mut categories = HashSet::new();
@@ -156,12 +160,16 @@ fn profile_line(content: &str) -> String {
 }
 
 /// The user profile lines that fit `budget_tokens`, oldest first.
-pub fn trim_profile(profile: Vec<String>, budget_tokens: u64) -> Vec<String> {
+pub fn trim_profile(
+    profile: Vec<String>,
+    budget_tokens: u64,
+    counter: crate::count::Counter,
+) -> Vec<String> {
     let mut used = 0;
     profile
         .into_iter()
         .filter(|content| {
-            let cost = mc_tokenizer::estimate_tokens(&format!("- {content}")) as u64 + 4;
+            let cost = counter.count(&format!("- {content}")) + 4;
             if used + cost > budget_tokens.max(1) {
                 return false;
             }
@@ -244,11 +252,12 @@ pub fn trim_workspace_to_budget(
     mut memories: Vec<StoredMemory>,
     budget: u64,
     workspace: &crate::workspace::Workspace,
+    counter: crate::count::Counter,
 ) -> Vec<StoredMemory> {
     if !workspace.is_workspaced() {
-        return trim_to_budget(memories, budget);
+        return trim_to_budget(memories, budget, counter);
     }
-    let estimate = |text: &str| mc_tokenizer::estimate_tokens(text) as u64;
+    let estimate = |text: &str| counter.count(text);
     let mut used = estimate("<project-memory>\n</project-memory>");
     let mut categories = HashSet::new();
     let cost = |memory: &StoredMemory, categories: &HashSet<String>| {
@@ -347,7 +356,7 @@ mod tests {
             memory(2, "NAMING", "small", 80),
             permanent,
         ];
-        let kept: Vec<i64> = trim_to_budget(memories, 40)
+        let kept: Vec<i64> = trim_to_budget(memories, 40, crate::count::Counter::for_model(None))
             .iter()
             .map(|memory| memory.id)
             .collect();

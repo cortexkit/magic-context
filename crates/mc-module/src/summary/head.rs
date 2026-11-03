@@ -36,6 +36,7 @@ const DELTA_SHARE: f64 = 0.25;
 
 /// What the head shows, read fresh for each pass that builds a view.
 pub struct Inputs<'a> {
+    pub counter: crate::count::Counter,
     pub summaries: &'a [StoredCompartment],
     /// The rendered `<project-docs>` block, or empty.
     pub docs: &'a str,
@@ -51,9 +52,7 @@ pub struct Inputs<'a> {
     /// The history budget in the model provider's tokens, which `m[1]`'s
     /// size limits are measured against.
     pub history_budget_tokens: u64,
-    /// The same budget in the local estimator's tokens, which the summaries
-    /// in `m[0]` are rendered against (`history_local_budget`): the plugin
-    /// converts it, so a model whose tokens are larger gets less detail.
+    /// The same budget in the counter's units; exact vocabularies need no conversion.
     pub history_local_budget_tokens: u64,
     pub memory_budget_tokens: u64,
     pub profile_budget_tokens: u64,
@@ -194,22 +193,30 @@ fn fit_history(
 /// checksum of the mural image `m[0]` will carry, if any: the text then ends
 /// with the block that introduces it, as the plugin's `renderM0` does.
 pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
+    let estimate = |text: &str| inputs.counter.count(text) as usize;
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
-        |budget| {
-            render_stored_compartments(inputs.summaries, budget, mc_tokenizer::estimate_tokens)
-        },
-        mc_tokenizer::estimate_tokens,
+        |budget| render_stored_compartments(inputs.summaries, budget, estimate),
+        estimate,
     );
     let memories = match inputs.workspace {
         Some(workspace) => memory::trim_workspace_to_budget(
             inputs.memories.to_vec(),
             inputs.memory_budget_tokens,
             workspace,
+            inputs.counter,
         ),
-        None => memory::trim_to_budget(inputs.memories.to_vec(), inputs.memory_budget_tokens),
+        None => memory::trim_to_budget(
+            inputs.memories.to_vec(),
+            inputs.memory_budget_tokens,
+            inputs.counter,
+        ),
     };
-    let profile = memory::trim_profile(inputs.profile.to_vec(), inputs.profile_budget_tokens);
+    let profile = memory::trim_profile(
+        inputs.profile.to_vec(),
+        inputs.profile_budget_tokens,
+        inputs.counter,
+    );
     let mut sections = Vec::new();
     if !inputs.docs.is_empty() {
         sections.push(inputs.docs.to_owned());
@@ -277,12 +284,11 @@ const M1_ABSOLUTE_CAP_RATIO: f64 = 0.2;
 const MARKER_RESERVE_TOKENS: u64 = 200;
 const OVERFLOW_ID_LIST_CHARS: usize = 120;
 
-fn tokens(text: &str) -> u64 {
-    mc_tokenizer::estimate_tokens(text) as u64
-}
-
-fn line_tokens(lines: &[String]) -> u64 {
-    lines.iter().map(|line| tokens(&format!("{line}\n"))).sum()
+fn line_tokens(lines: &[String], counter: crate::count::Counter) -> u64 {
+    lines
+        .iter()
+        .map(|line| counter.count(&format!("{line}\n")))
+        .sum()
 }
 
 fn updates_block(lines: &[String]) -> String {
@@ -428,6 +434,8 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
 /// Also returns `m[1]`'s size without its memory changes, which is what the
 /// refold backstop measures ([`needs_refold`]).
 pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
+    let tokens = |text: &str| inputs.counter.count(text);
+    let line_tokens = |lines: &[String]| line_tokens(lines, inputs.counter);
     let mut next = baseline.clone();
     let mut blocks = Vec::new();
     let newer_summaries: Vec<String> = inputs
@@ -452,6 +460,7 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
         let profile = memory::trim_profile(
             inputs.profile.to_vec(),
             ((inputs.profile_budget_tokens as f64 * DELTA_SHARE) as u64).max(1),
+            inputs.counter,
         );
         let block = memory::render_profile(&profile, "new-user-profile");
         if !block.is_empty() {
@@ -575,12 +584,17 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
 /// `pressure_tokens` is `m[1]`'s size without its memory changes, as
 /// [`delta`] returns it. Memory changes have their own allowance and are
 /// never a reason to fold, as in the plugin.
-pub fn needs_refold(baseline: &Baseline, pressure_tokens: u64, history_budget_tokens: u64) -> bool {
+pub fn needs_refold(
+    baseline: &Baseline,
+    pressure_tokens: u64,
+    history_budget_tokens: u64,
+    counter: crate::count::Counter,
+) -> bool {
     if pressure_tokens == 0 {
         return false;
     }
     let m1_tokens = pressure_tokens as f64;
-    let m0_tokens = tokens(&baseline.m0);
+    let m0_tokens = counter.count(&baseline.m0);
     m1_tokens > history_budget_tokens as f64 * M1_ABSOLUTE_CAP_RATIO
         || (m0_tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS
             && m1_tokens > m0_tokens as f64 * M1_DRIFT_RATIO)
@@ -672,6 +686,7 @@ mod tests {
 
     fn inputs<'a>(summaries: &'a [StoredCompartment], memories: &'a [StoredMemory]) -> Inputs<'a> {
         Inputs {
+            counter: crate::count::Counter::for_model(None),
             workspace: None,
             summaries,
             docs: "",
@@ -777,14 +792,34 @@ mod tests {
             ..Baseline::default()
         };
         // Nothing new: never.
-        assert!(!needs_refold(&big_m0, 0, 10_000));
+        assert!(!needs_refold(
+            &big_m0,
+            0,
+            10_000,
+            crate::count::Counter::for_model(None)
+        ));
         // Over 15% of a large m[0].
-        let big_m0_tokens = tokens(&big_m0.m0);
-        assert!(needs_refold(&big_m0, big_m0_tokens / 5, 1_000_000));
+        let big_m0_tokens = crate::count::Counter::for_model(None).count(&big_m0.m0);
+        assert!(needs_refold(
+            &big_m0,
+            big_m0_tokens / 5,
+            1_000_000,
+            crate::count::Counter::for_model(None)
+        ));
         // A small m[0] does not count the share; a fifth of the history
         // budget does.
-        assert!(!needs_refold(&small_m0, 300, 10_000));
-        assert!(needs_refold(&small_m0, 3_000, 10_000));
+        assert!(!needs_refold(
+            &small_m0,
+            300,
+            10_000,
+            crate::count::Counter::for_model(None)
+        ));
+        assert!(needs_refold(
+            &small_m0,
+            3_000,
+            10_000,
+            crate::count::Counter::for_model(None)
+        ));
     }
 
     /// Editing a profile line in place, with no new row, still shows the
@@ -816,6 +851,61 @@ mod tests {
         let (m1, _, pressure) = delta(&baseline, &inputs(&[], &edits));
         assert!(m1.contains("<memory-updates>"));
         assert_eq!(pressure, 0);
-        assert!(!needs_refold(&baseline, pressure, 1_000));
+        assert!(!needs_refold(
+            &baseline,
+            pressure,
+            1_000,
+            crate::count::Counter::for_model(None)
+        ));
+    }
+    #[test]
+    fn exact_opus_head_fits_memories_in_real_tokens() {
+        let model = "anthropic/claude-opus-5-5";
+        let detail = "Read crates/mc-module/src/session.rs and traced the notice through summary_due. The cached prefix must replay byte-identically; pending reductions ride the next authorized rebuild. Added a regression test around the tool result and ran cargo test --locked. ";
+        let summaries: Vec<_> = (0..12)
+            .map(|sequence| {
+                let mut row = summary(sequence, sequence * 20 + 1, sequence * 20 + 20);
+                row.content = detail.repeat(8);
+                row.p1 = Some(detail.repeat(8));
+                row.p2 = Some(detail.repeat(4));
+                row.p3 = Some(detail.repeat(2));
+                row.p4 = Some(detail.to_owned());
+                row
+            })
+            .collect();
+        let memories: Vec<_> = (1..=30).map(|id| memory(id, "Keep session-history stable on deferred notices. Run filtered Rust tests on Linux and never rewrite a signed thinking prefix.")).collect();
+        let mut exact_inputs = inputs(&summaries, &memories);
+        exact_inputs.counter = crate::count::Counter::for_model(Some(model));
+        exact_inputs.history_budget_tokens = 2000;
+        exact_inputs.history_local_budget_tokens =
+            crate::summary::render::history_local_budget(2000.0, Some(model)) as u64;
+        exact_inputs.memory_budget_tokens = 500;
+        let mut old_inputs = Inputs {
+            counter: crate::count::Counter::estimated_for_model(Some(model)),
+            ..exact_inputs
+        };
+        old_inputs.history_local_budget_tokens = crate::calibration::local_budget(
+            2000.0,
+            crate::calibration::DecisionCalibration::for_model(Some(model)).prose_ratio,
+        ) as u64;
+        let exact = fold(&exact_inputs, None);
+        let old = fold(&old_inputs, None);
+        let block = |text: &str, name: &str| {
+            let start = text.find(&format!("<{name}>")).unwrap();
+            let end = text.find(&format!("</{name}>")).unwrap() + name.len() + 3;
+            text[start..end].to_owned()
+        };
+        let exact_memory = block(&exact.m0, "project-memory");
+        let old_memory = block(&old.m0, "project-memory");
+        let exact_history = block(&exact.m0, "session-history");
+        let old_history = block(&old.m0, "session-history");
+        println!("OPUS_HEAD old_memories={} exact_memories={} old_memory_bytes={} exact_memory_bytes={} old_history_bytes={} exact_history_bytes={}", old.shown.len(), exact.shown.len(), old_memory.len(), exact_memory.len(), old_history.len(), exact_history.len());
+        assert_eq!(
+            (old.shown.len(), exact.shown.len()),
+            (16, 9),
+            "the old estimator admits seven memories that do not fit in real tokens"
+        );
+        assert_eq!(exact_history.len(), 5243);
+        assert_eq!(exact_inputs.history_local_budget_tokens, 2000);
     }
 }

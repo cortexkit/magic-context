@@ -27,6 +27,7 @@ cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.2"
 cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
+cortexkit-tokens = "0.1"
 
 # Published subc wire/SDK crates use crates.io. subc-core is unpublished; this
 # revision matches daemon 0.39.0. Historian, classifier and dream sessions receive

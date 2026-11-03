@@ -49,6 +49,7 @@ pub struct Session {
     reminder_counter: u64,
     conditions: Conditions,
     index: Index,
+    scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
     /// The runner refused ck-mc as this session's compaction provider
@@ -214,6 +215,13 @@ fn same(applied: &AppliedView, view: &View) -> bool {
 }
 
 impl Session {
+    fn counter(&self) -> crate::count::Counter {
+        crate::count::Counter::for_model(Some(&format!(
+            "{}/{}",
+            self.conditions.model.provider, self.conditions.model.model
+        )))
+    }
+
     pub(crate) fn publish_app(&mut self, app: &crate::app_read::AppRead, checkpoint: bool) {
         self.app_publish_update(app, checkpoint);
     }
@@ -240,6 +248,7 @@ impl Session {
             reminder_counter: 0,
             conditions: conditions_of(request),
             index: Index::default(),
+            scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
             suspended: false,
             latest: None,
@@ -781,13 +790,12 @@ impl Session {
         if self.drain.exhausted(&quota) {
             return None;
         }
-        // The scan measures the lines in the summarizer's own tokens, scaled
-        // to the model's by the larger of its prose and tool ratios.
+        // The trigger uses the session model; a routed summarizer gets its own
+        // counter when the run starts. Only estimated counts need scaling.
         let model = &self.conditions.model;
-        let calibration = crate::calibration::DecisionCalibration::for_model(Some(&format!(
-            "{}/{}",
-            model.provider, model.model
-        )));
+        let counter =
+            crate::count::Counter::for_model(Some(&format!("{}/{}", model.provider, model.model)));
+        let calibration = counter.calibration();
         let ratio = calibration
             .prose_ratio
             .max(calibration.tools_ratio)
@@ -797,11 +805,14 @@ impl Session {
             let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
             trigger::cap_run(entries, entry_tokens, from, until, cap)
         };
-        let scan_at = |until: u64| -> Option<trigger::Scan> {
+        let after_drops = force
+            .then(|| self.usage_after_drops(settings, usage))
+            .flatten();
+        let mut scan_at = |until: u64| -> Option<trigger::Scan> {
             let low = entries.partition_point(|entry| entry.ordinal < from);
             let high = entries.partition_point(|entry| entry.ordinal < until);
             let readable = &entries[low..high.max(low)];
-            let chunk = crate::summary::chunk::build(readable, scan_lines)?;
+            let chunk = self.scan_counts.build(readable, scan_lines, counter)?;
             Some(trigger::Scan {
                 tokens: (chunk.token_estimate as f64 * ratio).ceil() as u64,
                 has_more: chunk.has_more,
@@ -817,11 +828,9 @@ impl Session {
             // Drops land only on a pass allowed to rebuild. A head whose
             // summary is still to come is allowed one in the force band, so
             // the usage after its drops counts there.
-            after_drops: force
-                .then(|| self.usage_after_drops(settings, usage))
-                .flatten(),
+            after_drops,
         };
-        let decide = |until: u64| {
+        let mut decide = |until: u64| {
             trigger::decide(
                 &pressure,
                 scan_at(until).as_ref(),
@@ -1588,7 +1597,7 @@ impl Session {
                     .summaries
                     .last()
                     .and_then(|summary| u64::try_from(summary.end_message).ok());
-                crate::expand::run(client, &self.key, input, last_summarized).await
+                crate::expand::run(client, &self.key, input, last_summarized, self.counter()).await
             }
             other => Err(format!("unknown tool {other}")),
         }
@@ -2068,6 +2077,7 @@ impl Session {
         );
         let history_budget_tokens = shape.history_budget_tokens;
         let fold_inputs = head::Inputs {
+            counter: crate::count::Counter::for_model(Some(&model_key)),
             summaries: &self.summaries,
             docs: &docs,
             profile: &profile,
@@ -2128,7 +2138,7 @@ impl Session {
         );
         if self.baseline.is_some()
             && !self.fold_due
-            && head::needs_refold(&base, pressure, history_budget_tokens)
+            && head::needs_refold(&base, pressure, history_budget_tokens, fold_inputs.counter)
         {
             base = folded(&fold_inputs);
             // A fresh fold shows every current memory, so none is gone.
@@ -2172,6 +2182,7 @@ impl Session {
                         &memories,
                         settings.memory_budget_tokens,
                         now,
+                        self.counter(),
                     )
                 })
                 .map_err(|error| error.to_string())

@@ -12,6 +12,9 @@ use std::sync::Mutex;
 #[path = "pass_decision_tests.rs"]
 mod pass_decision_tests;
 
+#[path = "session_count_tests.rs"]
+mod count_tests;
+
 #[derive(Default)]
 struct Client {
     entries: Mutex<Vec<Entry>>,

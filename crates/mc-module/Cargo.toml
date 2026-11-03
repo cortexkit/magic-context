@@ -23,6 +23,7 @@ subc-client-rs = { workspace = true }
 subc-protocol = { workspace = true }
 regex = "1"
 mc-tokenizer = { workspace = true }
+cortexkit-tokens = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 md5 = "0.7"

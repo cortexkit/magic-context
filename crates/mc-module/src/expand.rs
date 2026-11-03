@@ -208,7 +208,7 @@ fn render_part_full(body: &PartBody) -> Option<String> {
 }
 
 /// One preview line per part, for the verbose range form.
-fn render_part_preview(body: &PartBody) -> Option<String> {
+fn render_part_preview(body: &PartBody, counter: crate::count::Counter) -> Option<String> {
     match body {
         PartBody::Text { text } => {
             let text = truncate(text, 200);
@@ -222,10 +222,9 @@ fn render_part_preview(body: &PartBody) -> Option<String> {
                 format!("{}({arg})", tool.name)
             };
             Some(match &tool.output {
-                Some(output) => format!(
-                    "    • tool {head} → output ~{} tok",
-                    mc_tokenizer::estimate_tokens(output)
-                ),
+                Some(output) => {
+                    format!("    • tool {head} → output ~{} tok", counter.count(output))
+                }
                 None => format!("    • tool {head}"),
             })
         }
@@ -260,6 +259,7 @@ pub async fn run<C: RunnerClient>(
     session: &SessionRef,
     input: &Value,
     last_summarized: Option<u64>,
+    counter: crate::count::Counter,
 ) -> Result<String, String> {
     match mode(input)? {
         Mode::Tag(tag) => by_tag(client, session, tag).await,
@@ -278,9 +278,9 @@ pub async fn run<C: RunnerClient>(
             }
             let end_clamped = last_summarized.map_or(end, |last| end.min(last));
             if verbose {
-                verbose_range(client, session, start, end_clamped).await
+                verbose_range(client, session, start, end_clamped, counter).await
             } else {
-                range(client, session, start, end, end_clamped).await
+                range(client, session, start, end, end_clamped, counter).await
             }
         }
     }
@@ -341,6 +341,7 @@ async fn range<C: RunnerClient>(
     start: u64,
     asked_end: u64,
     end: u64,
+    counter: crate::count::Counter,
 ) -> Result<String, String> {
     // The chunk stops at the budget; the read stops once it has read more
     // text than the budget could show.
@@ -349,7 +350,7 @@ async fn range<C: RunnerClient>(
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
-    let Some(chunk) = chunk::build(&entries, TOKEN_BUDGET) else {
+    let Some(chunk) = chunk::build(&entries, TOKEN_BUDGET, counter) else {
         return Ok(format!(
             "No messages found in range {start}-{asked_end}. The range may be outside this session's history."
         ));
@@ -381,6 +382,7 @@ async fn verbose_range<C: RunnerClient>(
     session: &SessionRef,
     start: u64,
     end: u64,
+    counter: crate::count::Counter,
 ) -> Result<String, String> {
     let byte_cap = TOKEN_BUDGET * 8;
     let entries = reads::full_range(client, session, start, end + 1, |read| {
@@ -397,14 +399,14 @@ async fn verbose_range<C: RunnerClient>(
         let parts: Vec<String> = entry
             .parts
             .iter()
-            .filter_map(|part| render_part_preview(&part.body))
+            .filter_map(|part| render_part_preview(&part.body, counter))
             .collect();
         let block = if parts.is_empty() {
             header
         } else {
             format!("{header}\n{}", parts.join("\n"))
         };
-        let cost = mc_tokenizer::estimate_tokens(&block) as u64;
+        let cost = counter.count(&block);
         if used + cost > TOKEN_BUDGET && !blocks.is_empty() {
             truncated = true;
             break;

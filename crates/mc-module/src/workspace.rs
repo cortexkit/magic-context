@@ -290,8 +290,13 @@ mod tests {
             [1, 2]
         );
         assert_eq!(
-            crate::memory::trim_workspace_to_budget(memories.clone(), 30, &workspace),
-            crate::memory::trim_to_budget(memories, 30)
+            crate::memory::trim_workspace_to_budget(
+                memories.clone(),
+                30,
+                &workspace,
+                crate::count::Counter::for_model(None)
+            ),
+            crate::memory::trim_to_budget(memories, 30, crate::count::Counter::for_model(None))
         );
     }
 
@@ -443,6 +448,7 @@ mod tests {
                 memories.clone(),
                 vector["budget"].as_u64().unwrap(),
                 &workspace,
+                crate::count::Counter::for_model(None),
             );
             assert_eq!(
                 serde_json::json!(selected.iter().map(|memory| memory.id).collect::<Vec<_>>()),
