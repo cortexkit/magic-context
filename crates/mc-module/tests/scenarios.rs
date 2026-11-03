@@ -3668,6 +3668,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         newest: cortexkit_role_compaction::read::Cursor::new(6, "msg00006", "d"),
         now: 1,
         messages: None,
+        source_harness: None,
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {
@@ -3735,6 +3736,80 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         requests[1].usage.cache_read_tokens,
         requests[0].usage.prompt_tokens
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_session_that_changes_harness_moves_every_row_to_the_runners_harness() {
+    use mc_module::move_in::{move_in, MoveRequest};
+    // An OpenCode 1 session converted to OpenCode 2: the standalone plugin
+    // kept its rows under `opencode`, and the runner runs it as `opencode2`.
+    let dir = scratch("move-in-harness");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_summary(&dir, "s1", 0, (1, "msg00001"), (2, "msg00002"), "Set up");
+    insert_summary(&dir, "s2", 0, (1, "msg00001"), (2, "msg00002"), "Set up");
+    {
+        let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+        db.execute_batch(
+            "UPDATE compartments SET harness = 'opencode';
+             INSERT INTO tags (session_id, message_id, type, tag_number, harness)
+             VALUES ('s1', 'msg00002', 'message', 9, 'opencode'),
+                    ('s2', 'msg00002', 'message', 9, 'opencode'),
+                    ('s2', 'msg00002', 'message', 10, 'opencode2');",
+        )
+        .unwrap();
+    }
+    let request = |session: &str| MoveRequest {
+        session: SessionRef::new("thalamus-harness", "opencode2", session),
+        preset: "head".into(),
+        project: None,
+        model: cortexkit_role_compaction::setup::ModelRef::new("test", "model"),
+        context_window: 100_000,
+        output_reserve: 1000,
+        rules: free(),
+        newest: cortexkit_role_compaction::read::Cursor::new(2, "msg00002", "d"),
+        now: 1,
+        messages: None,
+        source_harness: Some("opencode".into()),
+    };
+    let config_source = mc_module::config::Config::from(Settings::default());
+    let open = || {
+        (
+            ContextDb::open(&dir.join("context.db")).unwrap(),
+            Store::open(&dir.join("mode3.db")).unwrap(),
+        )
+    };
+    let (db, store) = open();
+    let moved = move_in(db, &store, &config_source, &request("s1")).unwrap();
+    assert_eq!(moved.tag_checkpoint, 9);
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let rows = |harness: &str, session: &str| -> i64 {
+        db.query_row(
+            "SELECT (SELECT count(*) FROM compartments WHERE session_id = ?1 AND harness = ?2)
+                  + (SELECT count(*) FROM tags WHERE session_id = ?1 AND harness = ?2)",
+            rusqlite::params![session, harness],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!((rows("opencode", "s1"), rows("opencode2", "s1")), (0, 2));
+    // Fenced under both harnesses, so neither plugin takes the session up.
+    for fence in ["mode3_move:opencode:s1", "mode3_move:opencode2:s1"] {
+        let found: i64 = db
+            .query_row(
+                "SELECT count(*) FROM schema_migrations_meta WHERE key = ?1",
+                [fence],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "{fence}");
+    }
+    // Rows under both harnesses: refused, nothing moved.
+    drop(store);
+    let (context, store) = open();
+    let refused = move_in(context, &store, &config_source, &request("s2")).unwrap_err();
+    assert!(refused.starts_with("harness_conflict:"), "{refused}");
+    assert_eq!((rows("opencode", "s2"), rows("opencode2", "s2")), (2, 1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -34,7 +34,7 @@ use cortexkit_role_compaction::read::{Cursor, SessionRef};
 use cortexkit_role_compaction::rules::ProviderRules;
 use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
 use cortexkit_role_compaction::view::View;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -67,6 +67,13 @@ pub struct MoveRequest {
     /// runner's.
     #[serde(default)]
     pub messages: Option<Vec<crate::move_renumber::HostMessage>>,
+    /// The harness the standalone plugin kept the session under, when it
+    /// differs from the runner's: a session moved from OpenCode 1 to a runner
+    /// on OpenCode 2 was kept under `opencode` and runs as `opencode2`. The
+    /// stored numbers follow that harness's numbering, and every row moves
+    /// to the runner's harness (see [`rekey`]). Absent: the same harness.
+    #[serde(default)]
+    pub source_harness: Option<String>,
 }
 
 /// What the runner's move tool installs. `ck-mc move-in` prints it as JSON.
@@ -92,15 +99,33 @@ pub fn move_in(
     let key = &request.session;
     let features = preset::features(&request.preset)
         .ok_or_else(|| format!("unknown preset `{}`", request.preset))?;
-    let fence = fence_key(&key.harness, &key.session);
+    let source = request.source_harness.as_deref().unwrap_or(&key.harness);
+    // The standalone plugin checks the fence under its own harness, so a
+    // session that changes harness is fenced under both.
+    let fences: Vec<String> = if source == key.harness {
+        vec![fence_key(&key.harness, &key.session)]
+    } else {
+        vec![
+            fence_key(source, &key.session),
+            fence_key(&key.harness, &key.session),
+        ]
+    };
     let already: Option<String> = db.with_connection(|conn| {
-        conn.query_row(
-            "SELECT value FROM schema_migrations_meta WHERE key = ?1",
-            params![fence],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())
+        let mut found = None;
+        for fence in &fences {
+            found = conn
+                .query_row(
+                    "SELECT value FROM schema_migrations_meta WHERE key = ?1",
+                    params![fence],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if found.is_some() {
+                break;
+            }
+        }
+        Ok::<_, String>(found)
     })?;
     if already.is_some() {
         return Err(format!(
@@ -112,18 +137,21 @@ pub fn move_in(
         // The OpenCode 1 and Pi plugins' numberings are rebuilt here; another
         // host's standalone numbering has its own rules.
         db.with_connection(|conn| {
-            let numbering = match key.harness.as_str() {
+            let numbering = match source {
                 "opencode" => crate::move_renumber::Numbering::opencode(messages, &request.newest)?,
                 "pi" => crate::move_renumber::Numbering::pi(messages, &request.newest)?
-                    .align_pi(conn, &key.harness, &key.session)?,
+                    .align_pi(conn, source, &key.session)?,
                 other => {
                     return Err(format!(
                         "renumbering_unsupported: converting message numbers is built for OpenCode 1 and Pi sessions, not {other}"
                     ))
                 }
             };
-            crate::move_renumber::renumber(conn, &key.harness, &key.session, &numbering)
+            crate::move_renumber::renumber(conn, source, &key.session, &numbering)
         })?;
+    }
+    if source != key.harness {
+        db.with_connection(|conn| rekey(conn, &key.session, source, &key.harness))?;
     }
     // Offline, nothing rides; the runner declares what it detects at its own
     // Setup.
@@ -195,14 +223,77 @@ pub fn move_in(
         "moved_at": request.now,
     });
     db.with_connection(|conn| {
-        conn.execute(
-            "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
-            params![fence, record.to_string()],
-        )
-        .map_err(|error| error.to_string())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        for fence in &fences {
+            tx.execute(
+                "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
+                params![fence, record.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
     })?;
     Ok(Moved {
         view,
         tag_checkpoint,
     })
+}
+
+/// Move every row `context.db` holds for `session` under harness `from` to
+/// harness `to`, in one transaction: every table with both a `session_id`
+/// and a `harness` column, found from the schema, so a table added later is
+/// covered too. Refuses (`harness_conflict`), changing nothing, when a table
+/// already holds rows for the session under both harnesses. A retry after
+/// the rows moved finds none under `from` and changes nothing.
+fn rekey(conn: &mut Connection, session: &str, from: &str, to: &str) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let tables: Vec<String> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT m.name FROM sqlite_master m
+                  WHERE m.type = 'table'
+                    AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'session_id')
+                    AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'harness')
+                  ORDER BY m.name",
+            )
+            .map_err(|error| error.to_string())?;
+        let names = statement
+            .query_map([], |row| row.get(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?;
+        names
+    };
+    let count = |table: &str, harness: &str| -> Result<i64, String> {
+        tx.query_row(
+            &format!("SELECT count(*) FROM \"{table}\" WHERE session_id = ?1 AND harness = ?2"),
+            params![session, harness],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+    };
+    let mut moving = Vec::new();
+    for table in &tables {
+        let (old, new) = (count(table, from)?, count(table, to)?);
+        if old > 0 && new > 0 {
+            return Err(format!(
+                "harness_conflict: {table} holds rows for {session} under both {from} and {to}"
+            ));
+        }
+        if old > 0 {
+            moving.push(table);
+        }
+    }
+    for table in moving {
+        tx.execute(
+            &format!("UPDATE \"{table}\" SET harness = ?3 WHERE session_id = ?1 AND harness = ?2"),
+            params![session, from, to],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())
 }

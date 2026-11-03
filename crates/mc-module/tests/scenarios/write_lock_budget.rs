@@ -305,6 +305,8 @@ async fn werni_sized_writes_stay_within_budget() {
             rules: free(),
             newest: Cursor::new(MESSAGES as u64, "msg09000", "seed"),
             now: 1_000_000,
+            messages: None,
+            source_harness: None,
         },
     )
     .unwrap();

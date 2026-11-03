@@ -200,6 +200,7 @@ fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
         newest: cortexkit_role_compaction::read::Cursor::new(2, "m2", "d"),
         now: 1,
         messages: None,
+        source_harness: None,
     }
 }
 
