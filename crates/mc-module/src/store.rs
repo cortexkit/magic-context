@@ -83,10 +83,22 @@ pub struct Store {
     connection: Mutex<Connection>,
 }
 
+/// The newest mode3.db schema this build can read and write.
+pub const SCHEMA_VERSION: u32 = 1;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection =
             Connection::open(path).map_err(|error| format!("store {}: {error}", path.display()))?;
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|error| format!("store {}: {error}", path.display()))?;
+        if version > SCHEMA_VERSION {
+            return Err(format!(
+                "store_too_new: {} has schema version {version}; this ck-mc supports {SCHEMA_VERSION}",
+                path.display()
+            ));
+        }
         // Let the next job retry a busy write instead of blocking an executor
         // thread shared by other sessions.
         connection
@@ -95,6 +107,7 @@ impl Store {
         connection
             .execute_batch(
                 "PRAGMA journal_mode = WAL;
+                 BEGIN IMMEDIATE;
                  CREATE TABLE IF NOT EXISTS sessions (
                      runner TEXT NOT NULL,
                      harness TEXT NOT NULL,
@@ -118,6 +131,10 @@ impl Store {
                      PRIMARY KEY (runner, harness, session)
                  );",
             )
+            .map_err(|error| format!("store {}: {error}", path.display()))?;
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .and_then(|()| connection.execute_batch("COMMIT;"))
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -231,5 +248,60 @@ impl Store {
         self.connection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_store_records_the_supported_schema_version() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mode3.db");
+        drop(Store::open(&path).unwrap());
+        let connection = Connection::open(path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn a_newer_store_is_refused_without_changing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mode3.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let error = Store::open(&path)
+            .err()
+            .expect("newer stores must be refused");
+        assert!(error.contains("store_too_new"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!path.with_file_name("mode3.db-wal").exists());
+    }
+
+    #[test]
+    fn an_unversioned_mode3_store_is_adopted_without_losing_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mode3.db");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE sessions (runner TEXT, harness TEXT, session TEXT, state TEXT, PRIMARY KEY(runner, harness, session)); INSERT INTO sessions VALUES ('r', 'h', 's', '{}');").unwrap();
+        drop(connection);
+        drop(Store::open(&path).unwrap());
+        let connection = Connection::open(path).unwrap();
+        let count: u32 = connection
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
     }
 }

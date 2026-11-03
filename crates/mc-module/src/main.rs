@@ -17,38 +17,73 @@ use mc_module::child_scopes::ChildScopes;
 use mc_module::config::{Config, Loader};
 use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
+use mc_module::storage_paths::{context_db_path, store_path};
 use mc_module::store::Store;
 use mc_module::transport::{manifest, Handler, SubcRunnerClient};
 
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    if std::env::args().skip(1).any(|arg| arg == "--version") {
+        println!("{}", mc_module::version_line());
+        return Ok(());
+    }
+    if std::env::args().skip(1).any(|arg| arg == "--print-fences") {
+        println!(
+            "context.db={} mode3.db={}",
+            mc_module::context_db::SCHEMA_VERSION,
+            mc_module::store::SCHEMA_VERSION
+        );
+        return Ok(());
+    }
+    #[cfg(unix)]
+    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+    // Read and close the inherited pipe carrying the daemon's launch nonce before
+    // initialization can spawn helpers that would inherit the pipe too.
+    let _ = subc_client_rs::launch_nonce();
+    let logger = match cortexkit_log::init_from_env() {
+        Ok(logger) => logger,
+        Err(cortexkit_log::InitError::ModuleIdNotInEnvironment) => {
+            let logger = cortexkit_log::init(cortexkit_log::Config::for_module(DEFAULT_MODULE_ID))?;
+            tracing::info!("SUBC_MODULE_ID absent; using magic-context for local module logging");
+            logger
+        }
+        Err(error) => return Err(error.into()),
+    };
+    tracing::info!("mc-module: logger initialized");
+    let log_permissions = mc_module::private_permissions::tighten_tree(logger.logs_dir());
+    tracing::info!(
+        tightened = log_permissions.tightened,
+        failures = log_permissions.failures,
+        "mc-module: log permission tightening"
+    );
     if std::env::args().nth(1).as_deref() == Some("move-in") {
         return move_in();
     }
-    // Before anything could start a child that would inherit the launch
-    // nonce's descriptor.
-    let _ = subc_client_rs::launch_nonce();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection_file = subc_arg().ok_or("missing --subc <connection-file>")?;
     let module_id = std::env::var(subc_protocol::SUBC_MODULE_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
-    let db = match context_db_path() {
-        Some(path) => Some(ContextDb::open(&path)?),
-        None => None,
-    };
-    let store = match store_path() {
-        Some(path) => Some(Store::open(&path)?),
-        None => None,
-    };
+    let context_path = context_db_path();
+    let db = open_context_db(&context_path)?;
+    let store = Store::open(&store_path(&context_path))?;
+    if let Some(data_dir) = context_path.parent() {
+        let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
+    }
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
     let module = Module::new(
         SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes)),
         Config::Files(Loader::from_environment()),
-        db,
-        store,
+        Some(db),
+        Some(store),
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
@@ -65,9 +100,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let context_path = context_db_path();
+    let db = open_context_db(&context_path)?;
+    let store = Store::open(&store_path(&context_path))?;
     let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
-    let db = ContextDb::open(&context_db_path().ok_or("move-in needs MAGIC_CONTEXT_DB")?)?;
-    let store = Store::open(&store_path().ok_or("move-in needs MAGIC_CONTEXT_MODE3_STORE")?)?;
     let moved = mc_module::move_in::move_in(
         db,
         &store,
@@ -78,20 +114,11 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-/// `context.db`, named by `MAGIC_CONTEXT_DB`. Without it summaries are kept in
-/// memory only, which only throwaway test runs want.
-fn context_db_path() -> Option<PathBuf> {
-    std::env::var_os("MAGIC_CONTEXT_DB")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// ck-mc's own store, named by `MAGIC_CONTEXT_MODE3_STORE`. Without it a
-/// restart forgets queued drops and re-renders history heads.
-fn store_path() -> Option<PathBuf> {
-    std::env::var_os("MAGIC_CONTEXT_MODE3_STORE")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+fn open_context_db(path: &std::path::Path) -> Result<ContextDb, Box<dyn Error + Send + Sync>> {
+    if !path.exists() {
+        return Err("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.".into());
+    }
+    Ok(ContextDb::open(path)?)
 }
 
 fn subc_arg() -> Option<PathBuf> {

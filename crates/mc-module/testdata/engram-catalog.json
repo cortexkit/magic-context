@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "module_id": "magic-context",
+  "entries": [
+    {
+      "entry_id": "magic-context/context-db",
+      "class": "portable",
+      "mechanism": "page-db",
+      "path": "context.db",
+      "writer_interaction": "read-transaction-live",
+      "exclude_tables": [
+        "lkg_slots",
+        "lkg_slot_chunks"
+      ]
+    },
+    {
+      "entry_id": "magic-context/module-store",
+      "class": "portable",
+      "mechanism": "whole-db",
+      "path": "store.db",
+      "writer_interaction": "backup-api-live"
+    },
+    {
+      "entry_id": "magic-context/mode3-store",
+      "class": "portable",
+      "mechanism": "whole-db",
+      "path": "mode3.db",
+      "writer_interaction": "backup-api-live"
+    },
+    {
+      "entry_id": "magic-context/project-identities",
+      "class": "portable",
+      "mechanism": "filetree",
+      "path": "project-identities"
+    },
+    {
+      "entry_id": "magic-context/rpc",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "rpc"
+    },
+    {
+      "entry_id": "magic-context/lkg-recovery-fences",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "lkg-recovery-fences"
+    },
+    {
+      "entry_id": "magic-context/pi-served-array-digests",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "pi-served-array-digests"
+    },
+    {
+      "entry_id": "magic-context/pi-served-tag-numbers",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "pi-served-tag-numbers"
+    },
+    {
+      "entry_id": "magic-context/last-update-check",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "last-update-check.json"
+    },
+    {
+      "entry_id": "magic-context/last-announced-version",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "last_announced_version"
+    },
+    {
+      "entry_id": "magic-context/agent-data",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "agent-data"
+    },
+    {
+      "entry_id": "magic-context/embedding-models",
+      "class": "rebuild",
+      "mechanism": "filetree",
+      "path": "models"
+    },
+    {
+      "entry_id": "magic-context/model-context-limits-opencode",
+      "class": "rebuild",
+      "mechanism": "filetree",
+      "path": "model-context-limits-opencode.json"
+    },
+    {
+      "entry_id": "magic-context/model-context-limits-opencode2",
+      "class": "rebuild",
+      "mechanism": "filetree",
+      "path": "model-context-limits-opencode2.json"
+    },
+    {
+      "entry_id": "magic-context/model-context-limits-pi",
+      "class": "rebuild",
+      "mechanism": "filetree",
+      "path": "model-context-limits-pi.json"
+    },
+    {
+      "entry_id": "magic-context/model-context-limits-omp",
+      "class": "rebuild",
+      "mechanism": "filetree",
+      "path": "model-context-limits-omp.json"
+    },
+    {
+      "entry_id": "magic-context/github-token",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "github-token",
+      "reason": "secret: a user-placed GitHub token; place it again on the new machine"
+    },
+    {
+      "entry_id": "magic-context/logs",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "logs",
+      "reason": "diagnostic logs for this machine; may quote prompt and tool text"
+    },
+    {
+      "entry_id": "magic-context/window-reports",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "window-reports.jsonl",
+      "reason": "diagnostic context-window overflow ledger for this machine"
+    },
+    {
+      "entry_id": "magic-context/window-reports-rotated",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "window-reports.jsonl.1",
+      "reason": "rotated diagnostic context-window overflow ledger for this machine"
+    },
+    {
+      "entry_id": "magic-context/heap-snapshots",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "heap-snapshots",
+      "reason": "bulky on-demand heap dumps; may hold prompt text in memory"
+    },
+    {
+      "entry_id": "magic-context/host-profiler",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "host-profiler",
+      "reason": "opt-in stall profiles for this machine's host process"
+    },
+    {
+      "entry_id": "magic-context/pi-served-array-bodies",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "pi-served-array-bodies",
+      "reason": "opt-in debug capture of full served request bodies; bulky and holds prompt text"
+    },
+    {
+      "entry_id": "magic-context/backups",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "backups",
+      "reason": "bulky doctor repair backups of databases that are captured on their own"
+    },
+    {
+      "entry_id": "magic-context/archive",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "archive",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/ci-sentinel",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "ci-sentinel",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/ci-sentinel-bin",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "ci-sentinel-bin",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/drafts",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "drafts",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/reviews",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "reviews",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/sentinel",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "sentinel",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/specimens",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "specimens",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/staging",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "staging",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/cache-bust-sentinel-state",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "cache-bust-sentinel-state.json",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/subagent-failure-sentinel-state",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "subagent-failure-sentinel-state.json",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/transform-latency-sentinel-state",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "transform-latency-sentinel-state.json",
+      "reason": "maintainer-only, not written by released code"
+    },
+    {
+      "entry_id": "magic-context/migration-complete",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "migration_complete.txt",
+      "reason": "maintainer-only, not written by released code"
+    }
+  ]
+}
