@@ -201,7 +201,10 @@ say "placing ck-mc $SHA (its first open creates or migrates mode3.db to $STORE_F
 # The old ck-mc refuses the migrated context.db and may not start; placement
 # replaces it regardless. Give placement's version and health waits headroom.
 ck module start magic-context || true
-PLACE_CK_MC_POLL_SECONDS=5 bash "$REPO/scripts/place-ck-mc.sh" --source-ref "$SHA" "$STAGED"
+# Placement runs the target commit's own script: it is the one that knows how
+# the staged build reports its store versions (the mode-3 build reports
+# mode3.db where older builds reported store.db).
+(cd "$DISTS" && PLACE_CK_MC_POLL_SECONDS=5 bash scripts/place-ck-mc.sh --source-ref "$SHA" "$STAGED")
 rc=$?
 [ "$rc" -eq 0 ] || post_fail "ck-mc placement exited $rc"
 got=$(mode3_version)
