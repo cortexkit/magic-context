@@ -1,4 +1,4 @@
-# mc-app-read-samples-v4
+# mc-app-read-samples-v5
 
 The six mode-3 app reads served by rebuilt ck-mc, role `mc-app-read/v1`.
 Requests use the unscoped `InternalService` target `{module_id:
@@ -14,6 +14,14 @@ ck-mc's unscoped `ManagementSurface` target `{module_id: "magic-context"}`:
 `context.watch`. They take the same requests and answer in the same shapes as
 here. Other methods on that target are refused `unknown_method`.
 
+Changes from `mc-app-read-samples-v4`: `token_breakdown.context_window` is
+the usable window, not the whole window; the system-prompt and
+tool-definition parts carry the runner's counts when it sends them; and
+`meta` carries `execute_threshold: {percentage, tokens, source}` again, where
+`tokens` is the threshold on the usable window and `source` names the deciding
+setting (`model_tokens`, `model_percentage`, `user_percentage`,
+`project_percentage` or `default`). No other field changed.
+
 This set replaces `crates_old/mc-module/testdata/app-read-samples/`
 (`mc-app-read-samples-v3`) for these six methods only; the role version and
 field spellings are unchanged.
@@ -26,8 +34,11 @@ Changes from that collection:
 - Token parts keep `part`, `tokens`, `estimate`, and memory `count`. Every
   local count is estimated; missing system/tool-definition counts are null.
   The runner's reported prompt total is marked `source: "provider"`.
-  The window is the runner-declared context window. No model/tool/system
-  identity is invented. `last_user_message_in_history_raw` means `history_raw`
+  The window is the usable window: the runner-declared context window less
+  its output reserve, as the standalone plugin reports it. The system-prompt
+  and tool-definition parts carry the runner's own counts when its notices
+  send them (`estimate` true when the runner marks them inexact), else null.
+  No model/tool/system identity is invented. `last_user_message_in_history_raw` means `history_raw`
   already counts the last user message, so the separate `last_user_message`
   bucket is zero.
 - States retain mode-3 `part_ref.part_key`, nullable drop timestamps, and

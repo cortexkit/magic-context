@@ -413,7 +413,7 @@ async fn published_replica_survives_restart_and_does_not_take_the_session_store_
 }
 
 #[tokio::test]
-async fn samples_v4() {
+async fn samples_v5() {
     let (_dir, conn) = search_db();
     let mut replica = replica(Some(conn));
     replica.snapshots.clear();
@@ -451,7 +451,7 @@ async fn samples_v4() {
         ),
     ];
     let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v4");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v5");
     let regenerate = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES").is_some();
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {
