@@ -176,7 +176,7 @@ export function registerIssue424Tests(
         });
 
         test("300 parallel batches with steering inside batches already progress below force pressure", () => {
-            const raw = convert(issue424Fixture());
+            const raw = convert(issue424Fixture(300, 1, 1, "inputs"));
             const boundary = resolve(raw, "ordinary");
             expect(boundary.protectedTailStart).toBeGreaterThan(400);
             expect(boundary.eligibleEndOrdinal).toBeGreaterThan(boundary.offset);
@@ -194,7 +194,7 @@ export function registerIssue424Tests(
             }
         });
         test("oversized first batch reports cap retraction and whole-component admission separately", () => {
-            const boundary = resolve(convert(issue424Fixture(300, 30)), "large");
+            const boundary = resolve(convert(issue424Fixture(300, 30, 1, "inputs")), "large");
             expect(boundary.protectedTailStart).toBeGreaterThan(400);
             expect(boundary.eligibleEndOrdinal).toBe(harness === "pi" ? 4 : 5);
             const diagnostics = boundary.diagnostics!;
@@ -220,7 +220,7 @@ export function registerIssue424Tests(
             );
         });
         test("wrapup explains its tiny first chunk before an oversized batch", () => {
-            const source = convert(issue424Fixture(300, 30));
+            const source = convert(issue424Fixture(300, 1, 1, "inputs"));
             const raw = [
                 source[0]!,
                 {
@@ -229,7 +229,16 @@ export function registerIssue424Tests(
                     role: "assistant",
                     parts: [{ type: "text", text: "Starting now." }],
                 },
-                ...source.slice(1),
+                source[1]!,
+                // Steering inside the first component makes the cap land after
+                // its invocation, so the boundary must retreat to keep the arc whole.
+                {
+                    ordinal: 0,
+                    id: "oversize-steering",
+                    role: "user",
+                    parts: [{ type: "text", text: "steering value\n".repeat(60000) }],
+                },
+                ...source.slice(2),
             ].map((m, i) => ({ ...m, ordinal: i + 1 }));
             const sessionId = `issue424-wrapup-${harness}`;
             const dispose = setRawMessageProvider(sessionId, { readMessages: () => raw });
@@ -304,7 +313,7 @@ export function registerIssue424Tests(
             }
         });
         test("an oversized first batch advances below force pressure without admitting the next batch", () => {
-            const raw = convert(issue424Fixture(300, 30));
+            const raw = convert(issue424Fixture(300, 30, 1, "inputs"));
             const boundary = resolve(raw, "candidate");
             expect(boundary.eligibleEndOrdinal).toBe(harness === "pi" ? 4 : 5);
             expect(boundary.oversizeAtomicUnit).toBe(true);
@@ -318,13 +327,27 @@ export function registerIssue424Tests(
                 ).toBe(false);
             }
         });
+        test("large tool outputs do not make a completed batch oversized for the run cap", () => {
+            // Results leave the prompt through their own removal lane. The cap
+            // counts text and calls, so growing only outputs cannot shorten the head.
+            const ordinary = resolve(convert(issue424Fixture()), "ordinary-outputs");
+            const large = resolve(convert(issue424Fixture(300, 30)), "large-outputs");
+            expect(large.protectedTailStart).toBe(ordinary.protectedTailStart);
+            expect(large.eligibleEndOrdinal).toBe(ordinary.eligibleEndOrdinal);
+            expect(large.eligibleEndOrdinal).toBe(large.protectedTailStart);
+            expect(large.oversizeAtomicUnit).toBe(false);
+            expect(large.diagnostics!.head.capEnd).toBe(large.protectedTailStart);
+            expect(large.summaryRemovedEligibleTokens).toBeLessThan(large.diagnostics!.capTokens);
+            expect(large.trueRawEligibleTokens).toBeGreaterThan(6 * large.diagnostics!.capTokens);
+        });
         test("random sequential batches preserve every whole arc and historian range validation", () => {
             for (let seed = 1; seed <= 20; seed++) {
-                const raw = convert(issue424Fixture(30, 1, seed));
+                const raw = convert(issue424Fixture(30, 1, seed, "inputs"));
                 const arcs = buildToolArcs(raw);
                 const index = buildTrueRawTokenIndex(`issue424-property-${harness}-${seed}`, raw, {
                     providerShapeVersion: harness === "pi" ? "pi-folded-v1" : "opencode-v1",
                     cacheNamespace: `issue424-property-${harness}-${seed}`,
+                    measure: "summary-removed",
                 });
                 let offset = 2;
                 while (offset < raw.length + 1) {

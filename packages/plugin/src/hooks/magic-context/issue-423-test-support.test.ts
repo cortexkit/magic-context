@@ -204,7 +204,9 @@ export function registerIssue423Tests(
             ).toBe(false);
         });
         test("oversized first completed arc cannot collapse the force-band head to offset", () => {
-            const raw = adapter.raw(issue423Fixture(120, 30));
+            // Only text and tool inputs count toward the cap; a large write
+            // keeps this an oversized arc even though its result is ordinary.
+            const raw = adapter.raw(issue423Fixture(120, 1, 30));
             const boundary = issue423Boundary(`issue423-atomic-${harness}`, raw, harness);
             expect(boundary.protectedTailStart).toBeGreaterThan(3);
             expect(boundary.eligibleEndOrdinal).toBe(4);
@@ -240,7 +242,7 @@ export function registerIssue423HistorianTest(
         const db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = `issue423-publish-${harness}`;
-        const raw = rawForFixture(issue423Fixture(120, 30));
+        const raw = rawForFixture(issue423Fixture(120, 1, 30));
         appendCompartments(db, sessionId, [
             {
                 sequence: 0,
