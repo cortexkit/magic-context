@@ -3,12 +3,12 @@
 //! are not kept here: after a restart ck-mc takes the runner's current view
 //! with `session.applied_view`, so this store is small and close to a cache.
 //!
-//! It is a new file, separate from the store earlier ck-mc builds used, so a
-//! rollback to one of them finds its own file untouched.
+//! Version 4 keeps large immutable history text apart from the mutable state
+//! rows. Rolling back to a version-3 build requires restoring its store backup.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cortexkit_role_compaction::read::SessionRef;
@@ -48,7 +48,7 @@ pub struct Durable {
     pub emergency_latched: bool,
     pub keep_requested: bool,
     /// What the head's `m[0]` holds, so a restart does not re-render it.
-    pub baseline: Option<Baseline>,
+    pub baseline: Option<Arc<Baseline>>,
     /// The `ctx_reduce` reminders' cadence, so a restart neither repeats a
     /// reminder nor forgets a grace.
     #[serde(default)]
@@ -89,6 +89,13 @@ pub struct Durable {
 }
 
 pub struct Store {
+    /// Saving before a view is handed to the runner and after the notice job
+    /// often writes identical state. Keep one successful value, not an unbounded
+    /// per-session cache, so the second call need not encode or write it again.
+    last_saved: Mutex<Option<(SessionRef, Durable)>>,
+    text_cache: Mutex<crate::store_text::Cache>,
+    #[cfg(test)]
+    legacy_v3: bool,
     #[cfg(test)]
     write_max_ns: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -102,7 +109,7 @@ pub struct Store {
 }
 
 /// The newest mode3.db schema this build can read and write.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -175,10 +182,24 @@ impl Store {
             )
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS state_texts (id TEXT PRIMARY KEY, text TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS state_text_refs (runner TEXT,harness TEXT,session TEXT,id TEXT,PRIMARY KEY(runner,harness,session,id));
+                 CREATE INDEX IF NOT EXISTS state_text_refs_id ON state_text_refs(id);",
+            )
+            .map_err(|error| error.to_string())?;
+        if version < 4 {
+            crate::store_text::migrate(&connection)?;
+        }
+        connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .and_then(|()| connection.execute_batch("COMMIT;"))
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         Ok(Self {
+            last_saved: Mutex::new(None),
+            text_cache: Mutex::new(Default::default()),
+            #[cfg(test)]
+            legacy_v3: false,
             #[cfg(test)]
             write_max_ns: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -208,24 +229,131 @@ impl Store {
                 );
                 None
             });
-        text.and_then(|text| serde_json::from_str(&text).ok())
+        text.and_then(|text| {
+            let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            if let Err(error) = crate::store_text::transform(&mut value, &connection, false) {
+                tracing::warn!(
+                    "ck-mc: session {}: loading state failed: {error}",
+                    key.session
+                );
+                return None;
+            }
+            serde_json::from_value(value).ok()
+        })
     }
 
     pub fn save(&self, key: &SessionRef, state: &Durable) -> Result<(), String> {
-        let text = serde_json::to_string(state).expect("state serializes");
-        let connection = self.lock();
+        let _timing = crate::notice_cost_timing::span("store.save");
+        let mut saved = self.last_saved.lock().expect("last saved session state");
+        if saved
+            .as_ref()
+            .is_some_and(|(old_key, old)| old_key == key && old == state)
+        {
+            return Ok(());
+        }
+        let mut cached = self.text_cache.lock().expect("store text cache");
+        let mut next_cache = cached.clone();
+        #[cfg(test)]
+        let legacy = self.legacy_v3;
+        #[cfg(not(test))]
+        let legacy = false;
+        let (text, texts, used) = if legacy {
+            (
+                serde_json::to_string(state).expect("legacy state serializes"),
+                vec![],
+                BTreeSet::new(),
+            )
+        } else {
+            crate::store_text::encode(state, &mut next_cache)
+        };
+        let mut connection = self.lock();
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for (id, text) in texts {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO state_texts (id,text) VALUES (?1,?2)",
+                    params![id, text],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        let retired = {
+            let mut stmt = transaction
+                .prepare(
+                    "SELECT id FROM state_text_refs WHERE runner=?1 AND harness=?2 AND session=?3",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![key.runner, key.harness, key.session], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            rows
+        };
+        transaction
+            .execute(
+                "DELETE FROM state_text_refs WHERE runner=?1 AND harness=?2 AND session=?3",
+                params![key.runner, key.harness, key.session],
+            )
+            .map_err(|e| e.to_string())?;
+        for id in &used {
+            transaction
+                .execute(
+                    "INSERT INTO state_text_refs VALUES (?1,?2,?3,?4)",
+                    params![key.runner, key.harness, key.session, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        // Only the retiring session's old references need checking. An index
+        // on id finds strings still referenced by another session or by the
+        // saved state needed if the runner refuses an unconfirmed view.
+        for id in retired.iter().filter(|id| !used.contains(*id)) {
+            transaction.execute("DELETE FROM state_texts WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM state_text_refs WHERE id=?1)",[id]).map_err(|e|e.to_string())?;
+        }
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let result = connection.execute(
+        let result = transaction.execute(
             "INSERT INTO sessions (runner, harness, session, state) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (runner, harness, session) DO UPDATE SET state = excluded.state",
             params![key.runner, key.harness, key.session, text],
         );
         #[cfg(test)]
         self.record_write(started);
+        let result = result
+            .and_then(|_| transaction.commit())
+            .map_err(|error| format!("session {}: saving its state failed: {error}", key.session));
+        if result.is_ok() {
+            *saved = Some((key.clone(), state.clone()));
+            *cached = next_cache;
+        }
         result
-            .map(|_| ())
-            .map_err(|error| format!("session {}: saving its state failed: {error}", key.session))
+    }
+
+    /// A version-three writer for the migration's step-through fixture. State
+    /// is populated through save/load, using the old inline JSON representation.
+    #[cfg(test)]
+    pub fn create_version_three_for_tests(path: &Path) -> Result<Self, String> {
+        if path.exists() {
+            let conn = Connection::open(path).map_err(|e| e.to_string())?;
+            let version: u32 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            if version > 3 {
+                return Err(format!(
+                    "store_too_new: schema version {version}; version-three writer supports 3"
+                ));
+            }
+        }
+        let mut store = Self::open(path)?;
+        store
+            .lock()
+            .pragma_update(None, "user_version", 3)
+            .map_err(|e| e.to_string())?;
+        store.legacy_v3 = true;
+        Ok(store)
     }
 
     /// Checkpoint a projection only on Setup, a cut, or a transcript replacement.
@@ -441,6 +569,62 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "explicit offline backup only; never opens a live store"]
+    fn offline_copy_version_three_migration_preserves_every_session() {
+        use sha2::{Digest, Sha256};
+        let path = PathBuf::from(
+            std::env::var_os("NOTICE_COST_MIGRATION_COPY").expect("supply an offline backup copy"),
+        );
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            3
+        );
+        let rows = {
+            let mut stmt = conn.prepare("SELECT runner,harness,session,state FROM sessions ORDER BY runner,harness,session").unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        SessionRef::new(
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ),
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let before: Vec<(SessionRef, Durable)> = rows
+            .into_iter()
+            .map(|(key, text)| {
+                (
+                    key,
+                    serde_json::from_str(&text).expect("version-three Durable"),
+                )
+            })
+            .collect();
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+        for (index, (key, expected)) in before.iter().enumerate() {
+            assert!(
+                store.load(key).as_ref() == Some(expected),
+                "decoded state differs for offline-copy row {index}"
+            );
+            println!("offline-copy row {index}: harness={} session_sha256={:x} decoded equality PASS baseline={} pending_views={}",key.harness,Sha256::digest(key.session.as_bytes()),expected.baseline.is_some(),expected.unconfirmed.len());
+        }
+        println!(
+            "Offline copy migrated 3 -> 4: {}/{} sessions decoded identically",
+            before.len(),
+            before.len()
+        );
+    }
+
+    #[test]
     fn a_new_store_records_the_supported_schema_version() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("mode3.db");
@@ -449,7 +633,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_snapshots','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 3);
     }
@@ -489,6 +673,158 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+    #[test]
+    fn repeated_successful_save_does_not_write_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let store = Store::open(&path).unwrap();
+        let key = SessionRef::new("runner", "pi", "session");
+        let state = Durable::default();
+        store.save(&key, &state).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER forbid_redundant_state_write BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT, 'redundant state write'); END;").unwrap();
+        store.save(&key, &state).unwrap();
+        assert_eq!(store.load(&key), Some(state));
+    }
+    #[test]
+    fn version_three_migration_preserves_baselines_pending_views_and_rollback_state() {
+        use cortexkit_role_compaction::read::Role;
+        use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt, InsertedMessage, View};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let legacy = Store::create_version_three_for_tests(&path).unwrap();
+        let old = Baseline {
+            m0: "old immutable history ".repeat(1_000),
+            ..Baseline::default()
+        };
+        let base = Baseline {
+            m0: "current immutable history ".repeat(1_000),
+            ..Baseline::default()
+        };
+        let view = |version, text: &str| {
+            View::seal(
+                version,
+                vec![Edit::new(
+                    version,
+                    EditOp::Insert {
+                        at: InsertAt::Start,
+                        message: InsertedMessage::new("history", Role::User, vec![text.to_owned()]),
+                    },
+                )],
+            )
+        };
+        let pending = serde_json::from_value(serde_json::json!({
+            "view":view(2,&base.m0),"covered":[],"before":{
+                "latest":view(1,&old.m0),"queued":[],"refused_once":[],"emergency_latched":false,
+                "baseline":old,"fold_due":false,"caveman":{"depths":[],"english_word_rules":null},"cut":19,"pruned_turns":3
+            }
+        })).unwrap();
+        let state = Durable {
+            version: 2,
+            baseline: Some(Arc::new(base)),
+            unconfirmed: vec![pending],
+            ..Durable::default()
+        };
+        let keys = [
+            SessionRef::new("runner", "pi", "one"),
+            SessionRef::new("runner", "opencode2", "two"),
+        ];
+        for key in &keys {
+            legacy.save(key, &state).unwrap();
+            assert_eq!(legacy.load(key), Some(state.clone()));
+        }
+        drop(legacy);
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated
+                .lock()
+                .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
+        for key in &keys {
+            assert_eq!(migrated.load(key), Some(state.clone()));
+        }
+        let blobs: usize = migrated
+            .lock()
+            .query_row("SELECT COUNT(*) FROM state_texts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            blobs, 2,
+            "current and rollback history each stored once across sessions"
+        );
+        assert!(Store::create_version_three_for_tests(&path)
+            .err()
+            .unwrap()
+            .starts_with("store_too_new:"));
+    }
+
+    #[test]
+    fn failed_normalized_save_does_not_cache_uncommitted_text_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let store = Store::open(&path).unwrap();
+        let key = SessionRef::new("runner", "pi", "retry");
+        let state = Durable {
+            baseline: Some(Arc::new(Baseline {
+                m0: "immutable history ".repeat(1_000),
+                ..Baseline::default()
+            })),
+            ..Durable::default()
+        };
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_state_insert BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        assert!(store.save(&key, &state).is_err());
+        conn.execute_batch("DROP TRIGGER fail_state_insert;")
+            .unwrap();
+        store.save(&key, &state).unwrap();
+        assert_eq!(store.load(&key), Some(state));
+    }
+
+    #[test]
+    fn retired_history_text_is_collected_only_after_its_last_session_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let one = SessionRef::new("runner", "pi", "one");
+        let two = SessionRef::new("runner", "pi", "two");
+        let original = Durable {
+            baseline: Some(Arc::new(Baseline {
+                m0: "old history ".repeat(1_000),
+                ..Baseline::default()
+            })),
+            ..Durable::default()
+        };
+        let newer = Durable {
+            baseline: Some(Arc::new(Baseline {
+                m0: "new history ".repeat(1_000),
+                ..Baseline::default()
+            })),
+            ..Durable::default()
+        };
+        store.save(&one, &original).unwrap();
+        store.save(&two, &original).unwrap();
+        store.save(&one, &newer).unwrap();
+        assert_eq!(store.load(&two), Some(original));
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM state_texts", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            2
+        );
+        store.save(&two, &newer).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM state_texts", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.load(&one), Some(newer.clone()));
+        assert_eq!(store.load(&two), Some(newer));
     }
 }

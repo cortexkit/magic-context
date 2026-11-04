@@ -2274,7 +2274,14 @@ async fn a_crash_right_after_handing_over_a_view_keeps_its_cut_and_baseline() {
         crashed.join("mode3.db"),
     )
     .unwrap();
-    std::fs::copy(dir.join("context.db"), crashed.join("context.db")).unwrap();
+    // A crash keeps the write-ahead log; a main-file copy would lose committed summaries.
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .execute(
+            "VACUUM INTO ?1",
+            [crashed.join("context.db").to_string_lossy()],
+        )
+        .unwrap();
     runner.provider().client.reads.lock().unwrap().clear();
     runner.provider().client.offered.lock().unwrap().clear();
     runner.provider().restart_from(&crashed);

@@ -84,6 +84,8 @@ mod tests {
     /// that map a name to its settings may spell one: this one, the tool
     /// catalog and its tests (which tools a preset gets) and the transport (the default
     /// preset of a tools-only route).
+    /// Test-only modules ending in `_tests.rs` may also name presets in the
+    /// Setup requests they construct; they do not define production gates.
     #[test]
     fn no_gate_outside_the_preset_tables_names_a_preset() {
         const ALLOWED: &[&str] = &["preset.rs", "catalog.rs", "transport.rs"];
@@ -105,7 +107,7 @@ mod tests {
                 let allowed = ALLOWED
                     .iter()
                     .any(|file| relative == *file || relative.starts_with("catalog/"));
-                if !relative.ends_with(".rs") || allowed {
+                if !relative.ends_with(".rs") || relative.ends_with("_tests.rs") || allowed {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();

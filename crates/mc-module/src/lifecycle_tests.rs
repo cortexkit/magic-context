@@ -613,18 +613,49 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
     let dir = scratch("search-revert");
     with_summary(&mut session, &dir, "removed");
     session.index.extend(vec![text(1, "a"), text(2, "removed")]);
-    session.update_search_index();
+    session.db.as_ref().unwrap().with_connection(|conn| {
+        crate::search::messages::index(conn, "mock", "s1", session.index.entries()).unwrap()
+    });
     *client.entries.lock().unwrap() = vec![text(1, "a")];
     let mut request = notice(&session, 1, Some(cursor(&text(1, "a"))));
     request
         .events
         .push(Event::TranscriptChanged { from_ordinal: 2 });
     session.notice(&client, &settings, request).await;
+    // Notice invalidates summary state immediately; raw search cleanup now
+    // runs on the independent indexer and is fenced only for this assertion.
+    let search =
+        crate::search::background::Background::new(Arc::new(client), dir.join("context.db"));
+    let key = session.key().clone();
+    search.mark(&key, session.search_mark());
+    search.idle(&key).await.unwrap();
     let db = session.db.as_ref().unwrap();
     assert!(db.compartments("mock", "s1").unwrap().is_empty());
     let removed: u64 = db.with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM message_history_source WHERE session_id = 's1' AND message_id = 'removed'", [], |row| row.get(0))).unwrap();
     assert_eq!(removed, 0);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn quiet_durable_snapshots_share_the_unchanged_history_baseline() {
+    let (mut session, _, _, _, _) = fixture();
+    session.baseline = Some(Arc::new(Baseline {
+        m0: "unchanged history ".repeat(12_000),
+        ..Baseline::default()
+    }));
+    let first = session.durable();
+    let second = session.durable();
+    assert!(Arc::ptr_eq(
+        first.baseline.as_ref().unwrap(),
+        second.baseline.as_ref().unwrap()
+    ));
+    let bytes = serde_json::to_vec(&first).unwrap();
+    let decoded: crate::store::Durable = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(first, decoded);
+    assert_eq!(
+        serde_json::to_value(first).unwrap()["baseline"]["m0"],
+        session.baseline.as_ref().unwrap().m0
+    );
 }
 
 #[test]
@@ -972,10 +1003,10 @@ fn lifecycle_a_shape_fold_waits_out_a_heavy_thinking_turn() {
     session.index.extend(vec![text(1, "task"), thinking]);
     let mut shape = session.head_shape(&settings);
     shape.memory_enabled = !shape.memory_enabled;
-    session.baseline = Some(Baseline {
+    session.baseline = Some(Arc::new(Baseline {
         shape: Some(shape),
         ..Baseline::default()
-    });
+    }));
     let pass = session.decide_notice(&settings);
     assert!(!pass.rebuild, "the shape fold rebuilt during the hold");
     assert!(!session.fold_due);

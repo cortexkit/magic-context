@@ -105,6 +105,70 @@ fn set_watermark(
     Ok(())
 }
 
+/// A partially backfilled map cannot reach every legacy FTS row. Match the
+/// plugin's rowid-watermark sweep as well as deleting the mapped rows.
+pub(super) fn delete_fts_range(
+    conn: &Connection,
+    session: &str,
+    from: i64,
+    through: i64,
+    limit: i64,
+) -> rusqlite::Result<bool> {
+    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3)",params![session,from,through])?;
+    let (watermark, completed): (i64, bool) = conn
+        .query_row(
+            "SELECT watermark_rowid,completed FROM message_fts_rowid_map_backfill_state WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, false));
+    if completed {
+        return Ok(false);
+    }
+    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT rowid FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4 LIMIT ?5)",params![watermark,session,from,through,limit])?;
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4)",params![watermark,session,from,through],|r|r.get(0))
+}
+
+/// Setup checks the supplied entries after a restart without rebuilding unchanged
+/// rows. Changes to an older tool's result still refresh its source digest.
+pub(super) fn reconcile(
+    conn: &mut Connection,
+    harness: &str,
+    session: &str,
+    entries: &[Entry],
+) -> rusqlite::Result<()> {
+    let mark = watermark(conn, session)?.max(0) as u64;
+    let mut changed = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.ordinal <= mark) {
+        let stored:Option<(String,String)>=conn.query_row("SELECT message_id,source_version FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",params![session,entry.ordinal as i64],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if stored
+            .as_ref()
+            .is_none_or(|(mid, digest)| mid != &entry.mid || digest != &entry.digest)
+        {
+            changed.push(entry);
+        }
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for entry in changed {
+        let number = entry.ordinal as i64;
+        delete_fts_range(&tx, session, number, number, -1)?;
+        tx.execute(
+            "DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2",
+            params![session, number],
+        )?;
+        tx.execute(
+            "DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",
+            params![session, number],
+        )?;
+        insert(&tx, harness, session, entry, &content_of(entry))?;
+    }
+    tx.commit()
+}
+
 fn insert(
     conn: &Connection,
     harness: &str,
@@ -114,6 +178,7 @@ fn insert(
 ) -> rusqlite::Result<()> {
     let number = entry.ordinal as i64;
     let role = role_name(&entry.role);
+    let source_timing = crate::notice_cost_timing::span("search.source_insert");
     conn.execute(
         "INSERT INTO message_history_source
             (session_id, message_id, message_ordinal, source_version, normalized_content_hash, role, harness, updated_at)
@@ -124,14 +189,18 @@ fn insert(
             updated_at = excluded.updated_at",
         params![session, entry.mid, number, entry.digest, content_hash(content), role, harness, now_ms()],
     )?;
+    drop(source_timing);
     if content.is_empty() {
         return Ok(());
     }
+    let fts_timing = crate::notice_cost_timing::span("search.fts_insert");
     conn.execute(
         "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![session, number, entry.mid, role, content],
     )?;
+    drop(fts_timing);
+    let _timing = crate::notice_cost_timing::span("search.rowid_insert");
     conn.execute(
         "INSERT OR REPLACE INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
          VALUES (?1, ?2, ?3, ?4)",
@@ -150,6 +219,7 @@ pub fn index(
     session: &str,
     entries: &[Entry],
 ) -> rusqlite::Result<()> {
+    let _timing = crate::notice_cost_timing::span("search.index");
     let mark = watermark(conn, session)?;
     let start = entries.partition_point(|entry| (entry.ordinal as i64) < mark);
     let pending = &entries[start..];
@@ -171,6 +241,7 @@ pub fn index(
             }
             let content = content_of(entry);
             if number == mark {
+                let lookup_timing = crate::notice_cost_timing::span("search.boundary_lookup");
                 let stored: Option<(String, String)> = tx
                     .query_row(
                         "SELECT message_id, normalized_content_hash FROM message_history_source
@@ -179,6 +250,7 @@ pub fn index(
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
+                drop(lookup_timing);
                 if stored == Some((entry.mid.clone(), content_hash(&content))) {
                     continue;
                 }
@@ -188,6 +260,7 @@ pub fn index(
             mark = number;
         }
         set_watermark(&tx, harness, session, mark)?;
+        let _timing = crate::notice_cost_timing::span("search.commit");
         tx.commit()?;
         if stopped {
             break;

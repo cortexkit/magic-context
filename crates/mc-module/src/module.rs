@@ -73,7 +73,8 @@ impl<C> Clone for Module<C> {
 
 struct Inner<C> {
     app_read: crate::app_read::AppRead,
-    client: C,
+    client: Arc<C>,
+    search: Option<crate::search::background::Background>,
     /// Where each session's settings come from. They are resolved again for
     /// every job, so a configuration edit applies from the session's next
     /// pass.
@@ -135,10 +136,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
         );
+        let client = Arc::new(client);
+        let search = db
+            .as_ref()
+            .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
         Self {
             inner: Arc::new(Inner {
                 app_read,
                 client,
+                search,
                 config: config.into(),
                 db: db.map(Arc::new),
                 store: store.map(Arc::new),
@@ -154,6 +160,21 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// App requests read an independent projection, never a session job.
     pub fn app_read(&self) -> &crate::app_read::AppRead {
         &self.inner.app_read
+    }
+
+    /// Wait for eventual message search indexing, outside the session worker.
+    pub async fn search_idle(&self, session: &SessionRef) -> Result<(), String> {
+        match &self.inner.search {
+            Some(search) => search.idle(session).await,
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(feature = "notice-cost-timing")]
+    pub fn pause_search_measurement(&self, paused: bool) {
+        if let Some(search) = &self.inner.search {
+            search.pause(paused);
+        }
     }
 
     /// `compaction.setup` for the session `route` is bound to. Answers at
@@ -173,7 +194,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
                 .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker())
+                .or_insert_with(|| self.spawn_worker(route.session.clone()))
                 .clone()
         };
         let key = route.session.clone();
@@ -261,7 +282,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
                 .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker())
+                .or_insert_with(|| self.spawn_worker(route.session.clone()))
                 .clone()
         };
         worker
@@ -300,6 +321,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// make a run deterministic, the way a real runner's model time gives
     /// ck-mc time to finish.
     pub async fn idle(&self, session: &SessionRef) -> Result<(), ModuleError> {
+        self.idle_foreground(session).await?;
+        self.search_idle(session).await.map_err(ModuleError::Tool)
+    }
+
+    /// Drain foreground work only. Background indexing is fenced separately
+    /// when a test needs search results rather than an applied compaction view.
+    pub async fn idle_foreground(&self, session: &SessionRef) -> Result<(), ModuleError> {
         loop {
             let (reply, answer) = oneshot::channel();
             self.send(session, Job::Idle(reply))?;
@@ -392,7 +420,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let module = self.clone();
         tokio::spawn(async move {
             let db = module.inner.db.as_ref().expect("checked above");
-            crate::memory_sync::run(&module.inner.client, db).await;
+            crate::memory_sync::run(module.inner.client.as_ref(), db).await;
         });
     }
 
@@ -426,14 +454,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         worker.send(job).map_err(|_| ModuleError::Stopped)
     }
 
-    fn spawn_worker(&self) -> mpsc::UnboundedSender<Job> {
+    fn spawn_worker(&self, key: SessionRef) -> mpsc::UnboundedSender<Job> {
         let (jobs, mut receiver) = mpsc::unbounded_channel::<Job>();
         let inner = Arc::clone(&self.inner);
         // Weak, so the worker's own handle never keeps it alive.
         let own = jobs.downgrade();
         tokio::spawn(async move {
+            let _search_guard = inner
+                .search
+                .as_ref()
+                .map(|search| search.session_guard(key));
             let mut session: Option<Session> = None;
             let mut saved: Option<crate::store::Durable> = None;
+            let mut retry_save = false;
             while let Some(job) = receiver.recv().await {
                 let settings: Settings = match (&job, &session) {
                     (Job::Idle(_), _) => Settings::default(),
@@ -456,6 +489,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 };
                 let settings = &settings;
                 let publish_app = !matches!(&job, Job::Idle(_) | Job::PreUser { .. });
+                let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
@@ -465,7 +499,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         Some(existing) if existing.compacting() => {
                             ensure_memory_context(&inner, &route, existing).await;
                             existing
-                                .setup(&inner.client, settings, &route, &request, features)
+                                .setup(inner.client.as_ref(), settings, &route, &request, features)
                                 .await
                         }
                         _ => {
@@ -482,15 +516,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             }
                             ensure_memory_context(&inner, &route, &mut fresh).await;
                             fresh
-                                .setup(&inner.client, settings, &route, &request, features)
+                                .setup(inner.client.as_ref(), settings, &route, &request, features)
                                 .await;
                             session = Some(fresh);
                         }
                     },
                     Job::Notice(notice) => {
                         if let Some(session) = &mut session {
-                            if let Some(request) =
-                                session.notice(&inner.client, settings, notice).await
+                            if let Some(request) = session
+                                .notice(inner.client.as_ref(), settings, notice)
+                                .await
                             {
                                 start_summary(&inner, own.clone(), request);
                             }
@@ -499,7 +534,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::SummaryFinished(result) => {
                         if let Some(session) = &mut session {
                             let continuation = session
-                                .summary_finished(&inner.client, settings, *result, now_ms())
+                                .summary_finished(
+                                    inner.client.as_ref(),
+                                    settings,
+                                    *result,
+                                    now_ms(),
+                                )
                                 .await;
                             if let Some(job) = continuation.and_then(|continuation| {
                                 session.turn_two_job(settings, continuation)
@@ -567,7 +607,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 // state against them.
                                 fresh.load_summaries();
                                 fresh.restore(durable);
-                                fresh.restore_for_tools(&inner.client).await;
+                                fresh.restore_for_tools(inner.client.as_ref()).await;
                             }
                             session = Some(fresh);
                         }
@@ -586,7 +626,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 ensure_memory_context(&inner, &route, session).await;
                             }
                             session
-                                .tool(&inner.client, &settings, &name, &input)
+                                .tool(inner.client.as_ref(), &settings, &name, &input)
                                 .await
                                 .map_err(ModuleError::Tool)
                         };
@@ -600,11 +640,36 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let _ = reply.send(answer);
                     }
                     Job::Idle(reply) => {
+                        if retry_save {
+                            if let (Some(store), Some(session)) =
+                                (&inner.store, session.as_ref().filter(|s| s.compacting()))
+                            {
+                                let durable = session.durable();
+                                match store.save(session.key(), &durable) {
+                                    Ok(()) => {
+                                        saved = Some(durable);
+                                        retry_save = false;
+                                    }
+                                    Err(error) => tracing::warn!("ck-mc: {error}"),
+                                }
+                            }
+                        }
                         let _ = reply.send(());
+                        // A barrier changes no session state. The preceding
+                        // job already persisted its changes unless a failed
+                        // write above needs retrying. Successful barriers need
+                        // no extra snapshot or save.
+                        continue;
                     }
                 }
                 if let Some(session) = session.as_mut().filter(|_| publish_app) {
                     session.publish_app(&inner.app_read, app_checkpoint);
+                    if refresh_search && session.search_enabled() {
+                        if let Some(search) = &inner.search {
+                            let key = session.key().clone();
+                            search.mark(&key, session.search_mark());
+                        }
+                    }
                 }
                 // A tools-only session has nothing to keep across a restart.
                 if let (Some(store), Some(session)) = (
@@ -614,8 +679,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     let durable = session.durable();
                     if saved.as_ref() != Some(&durable) {
                         match store.save(session.key(), &durable) {
-                            Ok(()) => saved = Some(durable),
-                            Err(error) => tracing::warn!("ck-mc: {error}"),
+                            Ok(()) => {
+                                saved = Some(durable);
+                                retry_save = false;
+                            }
+                            Err(error) => {
+                                retry_save = true;
+                                tracing::warn!("ck-mc: {error}");
+                            }
                         }
                     }
                 }
@@ -647,7 +718,7 @@ async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>
         Some(context) => context,
         None => {
             let read = crate::memory_context::read(
-                &inner.client,
+                inner.client.as_ref(),
                 &route.session,
                 folder,
                 route.agent_id.as_deref(),
@@ -672,7 +743,7 @@ fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
     *inner.summaries_running.lock().expect("summary count") += 1;
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
-        let result = run::run(&inner.client, inner.db.as_deref(), &request).await;
+        let result = run::run(inner.client.as_ref(), inner.db.as_deref(), &request).await;
         if let Some(worker) = worker.upgrade() {
             let _ = worker.send(Job::SummaryFinished(Box::new(result)));
         }
@@ -694,7 +765,8 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     *inner.summaries_running.lock().expect("summary count") += 1;
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
-        let outcome = crate::summary::two_pass::turn_two::run(&inner.client, &db, &job).await;
+        let outcome =
+            crate::summary::two_pass::turn_two::run(inner.client.as_ref(), &db, &job).await;
         tracing::info!(
             "ck-mc: session {}: turn two: {outcome:?}",
             job.owner.session

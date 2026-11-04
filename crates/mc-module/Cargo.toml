@@ -9,6 +9,8 @@ description = "Magic Context as a compaction provider for llm-runners (ck-mc)."
 [features]
 # Opt-in measurement for the ignored large-store lock-budget test.
 context-db-timing = ["rusqlite/hooks"]
+# Opt-in CPU attribution; ordinary builds compile the spans away.
+notice-cost-timing = ["nix/resource", "nix/time"]
 
 [dependencies]
 cortexkit-log = { workspace = true }

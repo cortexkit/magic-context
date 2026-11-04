@@ -11,6 +11,7 @@
 //! writes the reply. The caller makes the reranker's call between
 //! [`prepare`] and [`finish`], without holding the store.
 
+pub(crate) mod background;
 pub mod messages;
 pub mod rerank;
 pub mod sources;

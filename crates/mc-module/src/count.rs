@@ -24,6 +24,7 @@ impl Counter {
     }
 
     pub fn count(self, text: &str) -> u64 {
+        let _timing = crate::notice_cost_timing::span("counter.count");
         match self.family {
             Some(family) => cortexkit_tokens::count(family, text)
                 .expect("the counter only selects built vocabularies"),
