@@ -889,7 +889,22 @@ impl Session {
             usable: ((window as f64 * threshold / 100.0).round() as u64).max(1),
             per_run_cap: cap,
         };
+        // At or over the threshold, a pass that starts no summary says why,
+        // so a head that only ever sheds drops can be explained from the log.
+        let at_threshold = usage >= threshold;
+        let session = self.key.session.clone();
+        let held = |why: std::fmt::Arguments<'_>| {
+            if at_threshold {
+                tracing::info!(
+                    "ck-mc: session {session}: no summary at {usage:.0}% (threshold {threshold:.0}%): {why}"
+                );
+            }
+        };
         if self.drain.exhausted(&quota) {
+            held(format_args!(
+                "the drain quota is spent ({} tokens this window)",
+                self.drain.spent
+            ));
             return None;
         }
         // The trigger uses the session model; a routed summarizer gets its own
@@ -969,9 +984,16 @@ impl Session {
                     self.floor_pending_for = prompt;
                 }
             }
+            held(format_args!(
+                "nothing to summarize: messages {from}..{until}, protected tail {tail} tokens, trigger budget {budget}, after drops {after_drops:?}, floor mark {}",
+                self.floor_pending_for.is_some()
+            ));
             return None;
         }
         if self.waits_for_new_history(force) {
+            held(format_args!(
+                "the last run made no progress; waiting for new history"
+            ));
             return None;
         }
         let requested: u64 = self
