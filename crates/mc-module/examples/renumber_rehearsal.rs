@@ -30,13 +30,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find_map(|message| message.entry.map(|entry| (message.mid.clone(), entry)))
         .ok_or("no message has an entry")?;
     let newest = Cursor::new(newest.1, &newest.0, "");
+    let mut conn = rusqlite::Connection::open(db)?;
+    // Pi numbering is lined up with the stored summaries first, as move-in
+    // does, so messages the session file lost become unreachable slots.
     let numbering = if messages.iter().any(|message| message.pi.is_some()) {
-        Numbering::pi(&messages, &newest)?
+        Numbering::pi(&messages, &newest)?.align_pi(&conn, harness, session)?
     } else {
         Numbering::opencode(&messages, &newest)?
     };
-    let mut conn = rusqlite::Connection::open(db)?;
     renumber(&mut conn, harness, session, &numbering)?;
     println!("renumbered {session}: newest entry {}", newest.ordinal);
+    for warning in numbering.alignment_warnings() {
+        println!("{warning}");
+    }
     Ok(())
 }

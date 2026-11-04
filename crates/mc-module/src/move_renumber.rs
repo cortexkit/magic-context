@@ -534,8 +534,12 @@ impl Numbering {
                                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                             })?
                             .filter_map(|row| match row {
+                                // A row with no message id (the plugin writes
+                                // one for a system part) names no message, so
+                                // it can't be the one the branch lost.
                                 Ok((ordinal, mid))
-                                    if !self.by_mid.contains_key(&mid)
+                                    if !mid.is_empty()
+                                        && !self.by_mid.contains_key(&mid)
                                         && rows.iter().any(|(_, start, end, _, _)| {
                                             *start <= ordinal && ordinal <= *end
                                         }) =>

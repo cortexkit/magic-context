@@ -94,7 +94,10 @@ impl Fixture {
             conn.execute_batch(
                 "INSERT INTO message_history_source (session_id, message_id, message_ordinal, source_version,
                     normalized_content_hash, role, harness, updated_at)
-                 VALUES ('s1', 'vanished-assistant', 4, 'v', 'h', 'assistant', 'pi', 1);"
+                 VALUES ('s1', 'vanished-assistant', 4, 'v', 'h', 'assistant', 'pi', 1),
+                        -- ANTAUTH's store holds an id-less system row at the
+                        -- vanished message's number; it must not count.
+                        ('s1', '', 4, 'v', 'h', 'system', 'pi', 1);"
             ).unwrap();
         }
         let request = MoveRequest {
