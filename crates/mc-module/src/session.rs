@@ -892,8 +892,9 @@ impl Session {
             usable: ((window as f64 * threshold / 100.0).round() as u64).max(1),
             per_run_cap: cap,
         };
-        // At or over the threshold, a pass that starts no summary says why,
-        // so a head that only ever sheds drops can be explained from the log.
+        // At or over the threshold, a pass that starts no summary logs why, so
+        // a session that stays over the threshold without summarizing can be
+        // explained from the log.
         let at_threshold = usage >= threshold;
         let session = self.key.session.clone();
         let held = |why: std::fmt::Arguments<'_>| {
@@ -3491,9 +3492,9 @@ impl Session {
     /// oldest message ck-mc holds, read from the runner. The index only
     /// grows over contiguous messages, so without this a gap below the held
     /// window would leave every later message unsearchable too. A gap
-    /// appears after a move-in, when the standalone plugin's index stopped
-    /// short of the cut, or when ck-mc first starts on a session after its
-    /// cut. Reads at most a few pages per pass; the next pass goes on.
+    /// appears when a session moves in from the standalone plugin (`ck-mc
+    /// move-in`) and the plugin's index stopped short of the cut, or when
+    /// ck-mc first starts on a session after its cut. Reads at most a few pages per pass; the next pass goes on.
     async fn fill_search_gap<C: RunnerClient>(&self, client: &C) {
         let Some(db) = &self.db else {
             return;
