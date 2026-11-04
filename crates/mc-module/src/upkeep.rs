@@ -191,7 +191,7 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
         Ok(rows) if !rows.is_empty() => rows,
         Ok(_) => return 0,
         Err(error) => {
-            eprintln!("ck-mc: upkeep could not read memories for {project}: {error}");
+            tracing::warn!("ck-mc: upkeep could not read memories for {project}: {error}");
             return 0;
         }
     };
@@ -220,7 +220,7 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
         Ok(saved)
     });
     saved.unwrap_or_else(|error| {
-        eprintln!("ck-mc: upkeep could not save memory vectors for {project}: {error}");
+        tracing::warn!("ck-mc: upkeep could not save memory vectors for {project}: {error}");
         0
     })
 }
@@ -313,7 +313,7 @@ fn park(db: &ContextDb, project: &str, holder: &str, clock: &(impl Fn() -> i64 +
 
 fn fail(db: &ContextDb, project: &str, holder: &str, message: String) -> Sweep {
     let _ = db.with_connection(|conn| release_lease(conn, project, holder));
-    eprintln!("ck-mc: commit sweep failed for {project}: {message}");
+    tracing::warn!("ck-mc: commit sweep failed for {project}: {message}");
     Sweep::Failed(message)
 }
 

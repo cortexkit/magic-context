@@ -923,7 +923,7 @@ pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> Strin
         })
         .collect();
     if let Err(error) = sources::count_retrievals(conn, &returned) {
-        eprintln!(
+        tracing::warn!(
             "ck-mc: session {}: counting memory retrievals failed: {error}",
             scope.session
         );

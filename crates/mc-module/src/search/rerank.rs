@@ -666,7 +666,9 @@ pub fn log_fallback(reason: &str) {
     static LOGGED: Mutex<BTreeMap<String, ()>> = Mutex::new(BTreeMap::new());
     let mut logged = LOGGED.lock().expect("rerank log");
     if logged.insert(reason.to_owned(), ()).is_none() {
-        eprintln!("ck-mc: ctx_search rerank fallback ({reason}); keeping the original ranking");
+        tracing::info!(
+            "ck-mc: ctx_search rerank fallback ({reason}); keeping the original ranking"
+        );
     }
 }
 

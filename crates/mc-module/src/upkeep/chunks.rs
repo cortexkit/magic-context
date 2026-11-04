@@ -207,7 +207,7 @@ pub(super) async fn embed(
             ) {
                 Ok(count) => saved += count,
                 Err(error) => {
-                    eprintln!(
+                    tracing::warn!(
                         "ck-mc: upkeep could not save history vectors for {project}: {error}"
                     );
                     break;

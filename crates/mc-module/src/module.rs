@@ -360,7 +360,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             )
             .await;
             if report != crate::upkeep::Report::default() {
-                eprintln!("ck-mc: upkeep for {id}: {report:?}");
+                tracing::info!("ck-mc: upkeep for {id}: {report:?}");
             }
             reports.push((id, report));
         }
@@ -528,7 +528,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             match store.save(session.key(), &durable) {
                                 Ok(()) => saved = Some(durable),
                                 Err(error) => {
-                                    eprintln!("ck-mc: {error}");
+                                    tracing::warn!("ck-mc: {error}");
                                     save_failed = true;
                                 }
                             }
@@ -615,7 +615,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     if saved.as_ref() != Some(&durable) {
                         match store.save(session.key(), &durable) {
                             Ok(()) => saved = Some(durable),
-                            Err(error) => eprintln!("ck-mc: {error}"),
+                            Err(error) => tracing::warn!("ck-mc: {error}"),
                         }
                     }
                 }
@@ -695,7 +695,7 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
         let outcome = crate::summary::two_pass::turn_two::run(&inner.client, &db, &job).await;
-        eprintln!(
+        tracing::info!(
             "ck-mc: session {}: turn two: {outcome:?}",
             job.owner.session
         );

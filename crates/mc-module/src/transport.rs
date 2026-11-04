@@ -141,7 +141,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                     Some(provenance.with_launch_nonce_source(subc_client_rs::launch_nonce_source()))
                 }
                 Err(error) => {
-                    eprintln!("ck-mc: MC_BUILD_SHA rejected, build not declared: {error}");
+                    tracing::warn!("ck-mc: MC_BUILD_SHA rejected, build not declared: {error}");
                     None
                 }
             },
@@ -352,7 +352,7 @@ impl crate::routing::Router for SubcRunnerClient {
 
     async fn report(&self, request: ReportRequest) {
         if let Err(error) = self.route_call("route.report", &request).await {
-            eprintln!("ck-mc: route.report failed: {error}");
+            tracing::warn!("ck-mc: route.report failed: {error}");
         }
     }
 }

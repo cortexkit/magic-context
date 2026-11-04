@@ -523,7 +523,7 @@ impl Session {
         if !cut_ahead && !head_ahead {
             return;
         }
-        eprintln!(
+        tracing::info!(
             "ck-mc: session {}: saved state is ahead of context.db's summaries (cut {:?}, summaries through {covered:?}); rebuilding from context.db",
             self.key.session, self.cut
         );
@@ -549,7 +549,7 @@ impl Session {
                 self.summaries = summaries;
                 self.app_projection.summaries_dirty = true;
             }
-            Err(error) => eprintln!(
+            Err(error) => tracing::warn!(
                 "ck-mc: session {}: loading summaries failed: {error}",
                 self.key.session
             ),
@@ -570,6 +570,17 @@ impl Session {
         request: &SetupRequest,
         features: Features,
     ) {
+        tracing::info!(
+            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, window {}, reserve {}, applied view {:?})",
+            self.key.session,
+            self.key.harness,
+            request.preset,
+            request.model.provider,
+            request.model.model,
+            request.context_window,
+            request.output_reserve,
+            request.applied_view.as_ref().map(|view| view.version)
+        );
         self.features = features;
         self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");
         self.tools_only = false;
@@ -685,7 +696,7 @@ impl Session {
                                 *from_ordinal,
                             )
                         }) {
-                            eprintln!(
+                            tracing::warn!(
                                 "ck-mc: session {session}: search index revert failed: {error}"
                             );
                         }
@@ -697,7 +708,7 @@ impl Session {
                 // so the index is read again from the cut, the oldest message
                 // the model still sees (compaction contract W1.5).
                 other => {
-                    eprintln!(
+                    tracing::info!(
                         "ck-mc: session {}: unknown notice event {other:?}; reading the transcript again",
                         self.key.session
                     );
@@ -943,9 +954,10 @@ impl Session {
             .map(entry_tokens)
             .sum();
         let Some(reservation) = self.drain.reserve(&quota, requested) else {
-            eprintln!(
+            tracing::info!(
                 "ck-mc: session {}: summary skipped: drain budget spent ({} tokens this window)",
-                self.key.session, self.drain.spent
+                self.key.session,
+                self.drain.spent
             );
             return None;
         };
@@ -1100,7 +1112,7 @@ impl Session {
             if let Err(error) =
                 db.delete_compartments_from(&self.key.harness, &self.key.session, sequence)
             {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: deleting reverted summaries failed: {error}",
                     self.key.session
                 );
@@ -1155,7 +1167,7 @@ impl Session {
             let page = match client.read(&self.key, request).await {
                 Ok(page) => page,
                 Err(error) => {
-                    eprintln!(
+                    tracing::warn!(
                         "ck-mc: session {}: reconciling summaries failed: {error:?}",
                         self.key.session
                     );
@@ -1192,7 +1204,7 @@ impl Session {
                     ordinal,
                 )
             }) {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: search index revert failed: {error}",
                     self.key.session
                 );
@@ -1255,7 +1267,7 @@ impl Session {
             Err(error) => {
                 self.app.failures += 1;
                 self.app.last_error = Some(error.clone());
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: summary failed: {error}",
                     self.key.session
                 );
@@ -1344,7 +1356,7 @@ impl Session {
             ) {
                 self.app.failures += 1;
                 self.app.last_error = Some(error.clone());
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: storing summaries failed: {error}",
                     self.key.session
                 );
@@ -1362,6 +1374,15 @@ impl Session {
             }));
         if !validated.compartments.is_empty() {
             self.summary_unshown = true;
+            tracing::info!(
+                "ck-mc: session {}: {} summaries published, through message {}",
+                self.key.session,
+                validated.compartments.len(),
+                validated
+                    .compartments
+                    .last()
+                    .map_or(0, |compartment| compartment.end_message)
+            );
         }
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
@@ -1480,7 +1501,7 @@ impl Session {
             };
             let request = reminder(send_id, template, kind, mode);
             if let Err(error) = client.send(&self.key, request).await {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: session.send failed: {error:?}",
                     self.key.session
                 );
@@ -1498,7 +1519,7 @@ impl Session {
         self.reminder_counter = self.reminder_counter.checked_add(1)?;
         if let Some(store) = &self.store {
             if let Err(error) = store.save(&self.key, &self.durable()) {
-                eprintln!("ck-mc: {error}");
+                tracing::warn!("ck-mc: {error}");
                 return None;
             }
         }
@@ -1540,7 +1561,7 @@ impl Session {
         );
         match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
-            Err(error) => eprintln!(
+            Err(error) => tracing::warn!(
                 "ck-mc: session {}: session.send failed: {error:?}",
                 self.key.session
             ),
@@ -1891,7 +1912,7 @@ impl Session {
             .unwrap_or_default()
         };
         let Ok(hits) = tokio::time::timeout(deadline, search).await else {
-            eprintln!(
+            tracing::info!(
                 "ck-mc: session {}: memory search took too long; the message has no hint",
                 self.key.session
             );
@@ -2121,7 +2142,7 @@ impl Session {
             let Some(running) = running else {
                 return Some((entries[end].ordinal, through));
             };
-            eprintln!(
+            tracing::info!(
                 "ck-mc: session {}: the cut stops before message {}, whose tool call is still running",
                 self.key.session, entries[running].ordinal
             );
@@ -2326,7 +2347,7 @@ impl Session {
                 .map_err(|error| error.to_string())
             });
         drawn.unwrap_or_else(|error| {
-            eprintln!(
+            tracing::warn!(
                 "ck-mc: session {}: the memory mural was left out of this fold: {error}",
                 self.key.session
             );
@@ -2340,7 +2361,7 @@ impl Session {
         use base64::Engine as _;
         if let Some(store) = &self.store {
             if let Err(error) = store.save_head_mural(&self.key, &mural.content_hash, &mural.png) {
-                eprintln!("ck-mc: {error}");
+                tracing::warn!("ck-mc: {error}");
             }
         }
         let data = base64::engine::general_purpose::STANDARD.encode(&mural.png);
@@ -2361,7 +2382,7 @@ impl Session {
                 .as_ref()
                 .and_then(|store| store.head_mural(&self.key, hash));
             let Some(png) = png else {
-                eprintln!(
+                tracing::info!(
                     "ck-mc: session {}: the mural image m[0] shows is gone; m[0] goes without it",
                     self.key.session
                 );
@@ -2452,7 +2473,7 @@ impl Session {
     }
 
     fn head_as_shown(&mut self, why: &str) -> Vec<EditOp> {
-        eprintln!(
+        tracing::info!(
             "ck-mc: session {}: history head kept as shown, {why}",
             self.key.session
         );
@@ -2564,7 +2585,7 @@ impl Session {
             return (None, 0);
         }
         if self.latest_unknown {
-            eprintln!(
+            tracing::info!(
                 "ck-mc: session {}: no view until the runner's applied view is read back",
                 self.key.session
             );
@@ -2828,7 +2849,7 @@ impl Session {
                 self.failed_parts.extend(covered.iter().cloned());
                 self.next_latch = false;
                 self.next_rearm = false;
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: no valid view: {refusal:?}",
                     self.key.session
                 );
@@ -2855,7 +2876,7 @@ impl Session {
         // As after a view that fails ck-mc's own checks: its parts are set
         // aside, so the same oversized view isn't built again on every pass.
         self.failed_parts.extend(covered.iter().cloned());
-        eprintln!(
+        tracing::info!(
             "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
             self.key.session, view.version
         );
@@ -2872,19 +2893,26 @@ impl Session {
         }
         self.accept(view.clone());
         if let Err(error) = self.save() {
-            eprintln!("ck-mc: {error}");
+            tracing::warn!("ck-mc: {error}");
             self.roll_back(view.version, false, None);
             return;
         }
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {
+                tracing::info!(
+                    "ck-mc: session {}: view {} accepted ({} edits)",
+                    self.key.session,
+                    view.version,
+                    view.edits.len()
+                );
                 self.app_view_status(view.version, "accepted");
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
-                    self.key.session, view.version
+                    self.key.session,
+                    view.version
                 );
                 // The runner holds a newer view than ck-mc knows (one handed
                 // over before a crash): the next view must be newer still,
@@ -2902,9 +2930,10 @@ impl Session {
             // unknown (compaction contract W1.5): the view is not sent again,
             // and ck-mc takes whatever view the runner applies.
             Ok(other) => {
-                eprintln!(
+                tracing::info!(
                     "ck-mc: session {}: unknown answer to view {}: {other:?}",
-                    self.key.session, view.version
+                    self.key.session,
+                    view.version
                 );
                 self.roll_back(view.version, false, None);
                 self.adopt_runner_view(client).await;
@@ -2936,16 +2965,18 @@ impl Session {
                 refusal: ViewRefusal::StaleVersion { latest, .. },
             }) if latest == view.version => {}
             Ok(ApplyViewAnswer::Refused { refusal }) => {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: runner refused view {} offered again: {refusal:?}",
-                    self.key.session, view.version
+                    self.key.session,
+                    view.version
                 );
                 self.roll_back(oldest, true, None);
             }
             Ok(other) => {
-                eprintln!(
+                tracing::info!(
                     "ck-mc: session {}: unknown answer to view {} offered again: {other:?}",
-                    self.key.session, view.version
+                    self.key.session,
+                    view.version
                 );
                 self.roll_back(oldest, false, None);
             }
@@ -2962,7 +2993,7 @@ impl Session {
             store.save(&self.key, &self.durable())?;
             if self.app_decisions_dirty {
                 if let Err(error) = store.save_app_decisions(&self.key, &self.app_decisions) {
-                    eprintln!("ck-mc: {error}");
+                    tracing::warn!("ck-mc: {error}");
                 }
             }
         }
@@ -2989,9 +3020,11 @@ impl Session {
             if self.refused_once.insert(part.clone()) {
                 continue;
             }
-            eprintln!(
+            tracing::warn!(
                 "ck-mc: session {}: queued drop of {}/{} forgotten after a second refused view",
-                self.key.session, part.0, part.1
+                self.key.session,
+                part.0,
+                part.1
             );
             self.queued.remove(&part);
             self.app_projection.dirty.insert(part.0.clone());
@@ -3235,12 +3268,12 @@ impl Session {
     /// `compaction_not_permitted` refusal suspends the session (see
     /// `suspended`); any other failure leaves it to the next notice.
     fn runner_call_failed(&mut self, what: &str, error: &crate::client::ClientError) {
-        eprintln!(
+        tracing::warn!(
             "ck-mc: session {}: {what} failed: {error}",
             self.key.session
         );
         if error.not_permitted() && !self.suspended {
-            eprintln!(
+            tracing::warn!(
                 "ck-mc: session {}: the runner refused ck-mc as its compaction provider; suspended until its next Setup",
                 self.key.session
             );
@@ -3302,7 +3335,7 @@ impl Session {
                 page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal) < cut
             }) {
                 if rebuilt {
-                    eprintln!(
+                    tracing::info!(
                         "ck-mc: session {}: transcript keeps changing under a read",
                         self.key.session
                     );
@@ -3329,7 +3362,7 @@ impl Session {
                                 self.restart_index(&mut rebuilt, &mut after);
                                 continue;
                             }
-                            eprintln!(
+                            tracing::info!(
                                 "ck-mc: session {}: transcript keeps changing under a read",
                                 self.key.session
                             );
@@ -3342,7 +3375,7 @@ impl Session {
                     self.restart_index(&mut rebuilt, &mut after)
                 }
                 Extend::Gap | Extend::Diverged => {
-                    eprintln!(
+                    tracing::info!(
                         "ck-mc: session {}: transcript keeps changing under a read",
                         self.key.session
                     );
@@ -3371,7 +3404,7 @@ impl Session {
         if let Err(error) = db
             .with_connection(|conn| crate::search::messages::index(conn, harness, session, entries))
         {
-            eprintln!("ck-mc: session {session}: search indexing failed: {error}");
+            tracing::warn!("ck-mc: session {session}: search indexing failed: {error}");
         }
     }
 
@@ -3444,7 +3477,7 @@ impl Session {
                         }
                     }
                 }
-                Err(error) => eprintln!(
+                Err(error) => tracing::warn!(
                     "ck-mc: session {}: reading tool results with images failed: {error:?}",
                     self.key.session
                 ),
@@ -3461,7 +3494,7 @@ impl Session {
 fn folder_of(route: &Route) -> Option<String> {
     if route.project.is_none() {
         if let Some(folder) = &route.workdir {
-            eprintln!(
+            tracing::info!(
                 "ck-mc: session {} has a folder but no project id ({folder}); \
                  project memories and upkeep are off for it",
                 route.session.session

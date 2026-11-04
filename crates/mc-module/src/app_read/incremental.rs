@@ -478,14 +478,14 @@ impl Session {
             if self.app_decisions_dirty {
                 match store.save_app_decisions(&self.key, &self.app_decisions) {
                     Ok(()) => self.app_decisions_dirty = false,
-                    Err(error) => eprintln!("ck-mc: {error}"),
+                    Err(error) => tracing::warn!("ck-mc: {error}"),
                 }
             }
         }
         if checkpoint {
             if let Some(store) = &self.store {
                 if let Err(error) = store.save_app_snapshot(&self.app_materialize()) {
-                    eprintln!("ck-mc: {error}");
+                    tracing::warn!("ck-mc: {error}");
                 }
             }
         }
@@ -500,7 +500,7 @@ impl Session {
         let rows: Vec<_> = p.pending_rows.values().cloned().collect();
         if let Some(store) = &self.store {
             if let Err(error) = store.save_app_index(&self.key, &rows, p.revert_from) {
-                eprintln!("ck-mc: {error}");
+                tracing::warn!("ck-mc: {error}");
                 return;
             }
             p.persisted = Some(

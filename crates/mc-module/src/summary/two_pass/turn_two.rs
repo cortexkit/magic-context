@@ -815,7 +815,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
             .copied()
             .collect();
         if !extra.is_empty() {
-            eprintln!("ck-mc: turn two: ignored extra fact ids: {extra:?}");
+            tracing::info!("ck-mc: turn two: ignored extra fact ids: {extra:?}");
         }
         let facts: Vec<FactRow> = self
             .db
@@ -905,9 +905,10 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 .pending(fact, reservation, &key, "abstain", None, None)
                 .map(Ok),
             "retire" | "promote_rule" => {
-                eprintln!(
+                tracing::info!(
                     "ck-mc: turn two dropped {} for fact {}",
-                    decision.action, fact.id
+                    decision.action,
+                    fact.id
                 );
                 let reason = format!("{}_dropped", decision.action);
                 self.pending(fact, reservation, &key, &reason, None, None)
@@ -1336,7 +1337,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     }
                     Err(error) if error == TIMED_OUT => return Ok(Err(Unknown)),
                     Err(error) => {
-                        eprintln!("ck-mc: turn two: check failed to send: {error}");
+                        tracing::warn!("ck-mc: turn two: check failed to send: {error}");
                         self.db
                             .with_connection(|conn| {
                                 conn.execute(
@@ -1471,7 +1472,7 @@ fn reserve(
         return Ok(None);
     }
     if fitted.deferred != (0, 0) {
-        eprintln!(
+        tracing::info!(
             "ck-mc: turn two: the prompt size bound left out {} fact(s) and {} item(s); they wait for a later run",
             fitted.deferred.0, fitted.deferred.1
         );
@@ -1556,7 +1557,7 @@ async fn recover<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Resu
             continue;
         };
         if let Err(error) = recover_one(client, db, job, &stage).await {
-            eprintln!("ck-mc: turn two: recovering {stage} failed: {error}");
+            tracing::warn!("ck-mc: turn two: recovering {stage} failed: {error}");
             let given_up = db
                 .with_connection(|conn| -> rusqlite::Result<bool> {
                     if count_visit(conn, &stage)? >= UNKNOWN_MAX_VISITS {
@@ -1566,7 +1567,7 @@ async fn recover<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Resu
                 })
                 .unwrap_or(false);
             if given_up {
-                eprintln!("ck-mc: turn two: gave up {stage} (recovery_error)");
+                tracing::warn!("ck-mc: turn two: gave up {stage} (recovery_error)");
             }
         }
     }
@@ -1587,7 +1588,7 @@ async fn recover_one<C: RunnerClient>(
         db.with_connection(|conn| charge_stage(conn, stage, reason, state))
             .map(|given_up| {
                 if given_up {
-                    eprintln!("ck-mc: turn two: gave up {stage} ({reason})");
+                    tracing::warn!("ck-mc: turn two: gave up {stage} ({reason})");
                 }
             })
             .map_err(|error| error.to_string())
@@ -1609,7 +1610,7 @@ async fn recover_one<C: RunnerClient>(
                 .with_connection(|conn| record_reply(conn, stage, &carrier, &reply))
                 .map_err(|error| error.to_string())?,
             Err(error) => {
-                eprintln!("ck-mc: turn two: reattaching {stage}: {error}");
+                tracing::warn!("ck-mc: turn two: reattaching {stage}: {error}");
                 let visits = db
                     .with_connection(|conn| count_visit(conn, stage))
                     .map_err(|error| error.to_string())?;
@@ -1648,7 +1649,7 @@ pub async fn run<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Outc
         return Outcome::Skipped("memory_disabled");
     }
     if let Err(error) = recover(client, db, job).await {
-        eprintln!("ck-mc: turn two: recovery failed: {error}");
+        tracing::warn!("ck-mc: turn two: recovery failed: {error}");
     }
     match send(client, db, job).await {
         Ok(outcome) => outcome,

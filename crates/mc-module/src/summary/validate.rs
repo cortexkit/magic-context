@@ -502,7 +502,7 @@ pub fn parse_compartment_output(
             }
             dropped_fact_blocks += 1;
             dropped_facts += count;
-            eprintln!("ck-mc: {}", format_dropped_fact_category(category, count));
+            tracing::info!("ck-mc: {}", format_dropped_fact_category(category, count));
             continue;
         }
         for item in fact_items(block) {

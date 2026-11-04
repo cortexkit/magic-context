@@ -227,7 +227,7 @@ impl Replica {
             Ok(keys) => self.known.extend(keys),
             Err(error) => {
                 self.load_failed = true;
-                eprintln!("ck-mc: app session lookup: {error}");
+                tracing::warn!("ck-mc: app session lookup: {error}");
             }
         }
         let rows = (|| -> rusqlite::Result<Vec<String>> {
@@ -245,7 +245,7 @@ impl Replica {
             }
             Err(error) => {
                 self.load_failed = true;
-                eprintln!("ck-mc: app replica load: {error}");
+                tracing::warn!("ck-mc: app replica load: {error}");
             }
         }
         let decisions = (|| -> rusqlite::Result<Vec<(SessionRef, String)>> {

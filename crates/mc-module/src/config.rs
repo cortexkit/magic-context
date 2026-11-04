@@ -117,7 +117,7 @@ impl Loader {
                     return Err("MAGIC_CONTEXT_CONFIG_PATH must be an absolute path to a user config file (not blank)");
                 }
                 if !path.exists() {
-                    eprintln!("ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found: {}; continuing without user config (no XDG or legacy fallback)", path.display());
+                    tracing::info!("ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found: {}; continuing without user config (no XDG or legacy fallback)", path.display());
                 }
                 path
             }
@@ -162,7 +162,7 @@ impl Loader {
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
-        self.read_with_warning(path, &mut |warning| eprintln!("ck-mc: {warning}"))
+        self.read_with_warning(path, &mut |warning| tracing::info!("ck-mc: {warning}"))
     }
 
     fn read_with_warning(&self, path: &Path, warn: &mut dyn FnMut(String)) -> Option<Value> {
@@ -548,7 +548,7 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
             .join(path)
     };
     let warn = |why: &str| {
-        eprintln!(
+        tracing::info!(
             "ck-mc: prompt_surface.guidance_override_path ({}) {why}; using built-in guidance",
             path.display()
         );

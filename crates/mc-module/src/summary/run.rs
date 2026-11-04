@@ -531,7 +531,7 @@ async fn summarize_on<C: RunnerClient>(
                         )
                     });
                     if let Err(failure) = counted {
-                        eprintln!("ck-mc: recording a turn-one failure failed: {failure}");
+                        tracing::warn!("ck-mc: recording a turn-one failure failed: {failure}");
                     }
                 }
                 Err(Failure::Final(format!("invalid turn-one reply: {error}")))

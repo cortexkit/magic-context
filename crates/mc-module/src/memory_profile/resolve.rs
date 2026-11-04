@@ -110,7 +110,7 @@ pub(crate) fn resolve(
     if let Some(pin) = pins.first() {
         context.profile.pin = Some(pin.clone());
         if pin["status"].is_null() {
-            eprintln!(
+            tracing::info!(
                 "ck-mc: memory-profile pin {} has no registry status record",
                 text(pin, "name")
             );

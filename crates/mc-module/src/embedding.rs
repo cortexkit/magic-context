@@ -97,7 +97,7 @@ impl Provider {
         let endpoint = text(&merged, "endpoint")?.trim_end_matches('/').to_owned();
         let model = text(&merged, "model")?;
         if validate_endpoint(&endpoint).is_err() {
-            eprintln!("ck-mc: the embedding endpoint is not allowed; search uses words only");
+            tracing::info!("ck-mc: the embedding endpoint is not allowed; search uses words only");
             return None;
         }
         Some(Self {
@@ -293,14 +293,14 @@ impl Provider {
         let response = match request.body(body.to_string()).send().await {
             Ok(response) => response,
             Err(_) => {
-                eprintln!("ck-mc: {what} embedding failed: the endpoint did not answer");
+                tracing::warn!("ck-mc: {what} embedding failed: the endpoint did not answer");
                 return None;
             }
         };
         let status = response.status().as_u16();
         let raw = response.bytes().await.ok()?;
         if status != 200 {
-            eprintln!("ck-mc: {what} embedding failed: HTTP {status}");
+            tracing::warn!("ck-mc: {what} embedding failed: HTTP {status}");
             return None;
         }
         parse_response(&raw, &self.model, count)
@@ -327,7 +327,9 @@ fn parse_response(raw: &[u8], requested: &str, count: usize) -> Option<Vec<Optio
     let body: Value = serde_json::from_slice(raw).ok()?;
     if let Some(served) = body["model"].as_str().filter(|served| !served.is_empty()) {
         if !models_match(served, requested) {
-            eprintln!("ck-mc: the embedding endpoint answered for another model; result refused");
+            tracing::warn!(
+                "ck-mc: the embedding endpoint answered for another model; result refused"
+            );
             return None;
         }
     }

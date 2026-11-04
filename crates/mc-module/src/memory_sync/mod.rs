@@ -43,7 +43,7 @@ pub(crate) fn queue(conn: &Connection, event: &CreateEvent, now: i64) -> rusqlit
         None => work().notify_one(),
         // A survivor is never synced; that is not worth a log line.
         Some(_) if event.kind == CreateKind::MergeSurvivor => {}
-        Some(reason) => eprintln!("ck-mc: memory {} is not synced: {reason}", event.memory_id),
+        Some(reason) => tracing::info!("ck-mc: memory {} is not synced: {reason}", event.memory_id),
     }
     Ok(())
 }
@@ -136,12 +136,12 @@ pub(crate) async fn run<C: RunnerClient>(client: &C, db: &ContextDb) {
         let (inactive, pending) = match scheduling_state(db) {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("ck-mc: memory sync: {error}");
+                tracing::warn!("ck-mc: memory sync: {error}");
                 (false, true)
             }
         };
         if let Err(error) = &result {
-            eprintln!("ck-mc: memory sync: {error}");
+            tracing::warn!("ck-mc: memory sync: {error}");
         }
         let delay = if inactive {
             retry = MAX_RETRY;

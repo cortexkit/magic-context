@@ -165,7 +165,7 @@ pub fn index(
             if number > mark + 1 {
                 // The watermark only moves over contiguous messages; ck-mc's
                 // view does not hold the missing ones, so stop here.
-                eprintln!("ck-mc: session {session}: search index stops at message {mark}; message {number} follows a gap");
+                tracing::info!("ck-mc: session {session}: search index stops at message {mark}; message {number} follows a gap");
                 stopped = true;
                 break;
             }

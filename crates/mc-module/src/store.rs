@@ -202,7 +202,7 @@ impl Store {
             )
             .optional()
             .unwrap_or_else(|error| {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: loading its state failed: {error}",
                     key.session
                 );
@@ -371,7 +371,7 @@ impl Store {
             )
             .optional()
             .unwrap_or_else(|error| {
-                eprintln!(
+                tracing::warn!(
                     "ck-mc: session {}: loading its memory context failed: {error}",
                     key.session
                 );
@@ -390,7 +390,7 @@ impl Store {
             params![key.runner, key.harness, key.session, text],
         );
         if let Err(error) = result {
-            eprintln!(
+            tracing::warn!(
                 "ck-mc: session {}: saving its memory context failed: {error}",
                 key.session
             );
