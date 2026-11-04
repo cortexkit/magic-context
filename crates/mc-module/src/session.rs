@@ -922,9 +922,15 @@ impl Session {
             .max(calibration.tools_ratio)
             .max(1.0);
         let scan_lines = (trigger::scan_budget(budget) as f64 / ratio).floor() as u64;
+        let cap_weight: fn(&cortexkit_role_compaction::read::Entry) -> u64 =
+            if trial_removed_measure(&self.key.session) {
+                entry_removed_tokens
+            } else {
+                entry_tokens
+            };
         let bounded = |tail_tokens: u64, lift: bool| {
             let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
-            trigger::cap_run(entries, entry_tokens, from, until, cap)
+            trigger::cap_run(entries, cap_weight, from, until, cap)
         };
         let after_drops = force
             .then(|| self.usage_after_drops(settings, usage))
@@ -1014,7 +1020,7 @@ impl Session {
             .entries()
             .iter()
             .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
-            .map(entry_tokens)
+            .map(cap_weight)
             .sum();
         let Some(reservation) = self.drain.reserve(&quota, requested) else {
             tracing::info!(
@@ -3725,6 +3731,37 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
+}
+
+/// What summarizing a message removes from the model's view: its text and
+/// tool calls (see [`tokens::removed_by_summary`]).
+fn entry_removed_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
+    entry.parts.iter().map(tokens::removed_by_summary).sum()
+}
+
+/// Sessions whose summary run cap and drain budget count only what a summary
+/// removes ([`entry_removed_tokens`]) instead of each message's full size.
+/// A temporary trial switch: a file named `dev-run-limit-text-inputs` next to
+/// context.db lists one session id per line. It is read once, at the first
+/// summary decision, and has no other effect. Remove it with the trial.
+fn trial_removed_measure(session: &str) -> bool {
+    static SESSIONS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    SESSIONS
+        .get_or_init(|| {
+            let path =
+                crate::storage_paths::context_db_path().with_file_name("dev-run-limit-text-inputs");
+            std::fs::read_to_string(path)
+                .map(|text| {
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .contains(session)
 }
 
 /// The part a runner's view refusal names as at fault, if it names one.

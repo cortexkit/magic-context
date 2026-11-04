@@ -52,6 +52,18 @@ fn estimate(part: &Part) -> u64 {
     }
 }
 
+/// What a summary removes from the model's view of a part: text and tool
+/// calls. Tool results, reasoning and media leave the prompt through their
+/// own lanes (age sweep, reasoning budget, answered images), so a summary
+/// does not remove them.
+pub fn removed_by_summary(part: &Part) -> u64 {
+    match &part.body {
+        PartBody::Text { .. } => self::part(part),
+        PartBody::Tool(tool) => self::part(part).saturating_sub(tool_result(part, tool)),
+        _ => 0,
+    }
+}
+
 /// What a tool part's result costs: its output and attachments, without the
 /// call. `part` is the tool part holding `tool`.
 pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
@@ -127,5 +139,20 @@ mod tests {
         // A count of the wrong shape for the part is not used.
         let part = tool(Some(PartTokens::count(5)));
         assert_eq!(super::part(&part), estimate(&part));
+    }
+
+    #[test]
+    fn a_summary_removes_a_tool_call_but_not_its_result() {
+        assert_eq!(
+            removed_by_summary(&tool(Some(PartTokens::tool(12, 700)))),
+            12
+        );
+        let part = tool(None);
+        assert_eq!(removed_by_summary(&part), super::part(&part) - 1000);
+        let text: Part = serde_json::from_value(serde_json::json!({
+            "id": "p1", "kind": "text", "text": "twelve bytes", "digest": "d",
+        }))
+        .unwrap();
+        assert_eq!(removed_by_summary(&text), 3);
     }
 }
