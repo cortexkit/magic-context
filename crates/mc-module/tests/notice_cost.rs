@@ -601,3 +601,73 @@ fn measure(fixture: &Fixture, threshold: bool, moved: bool) -> Value {
     println!("NOTICE_COST_ROW {row}");
     row
 }
+
+/// Focused CPU attribution after a size ratio fails, without changing any
+/// production function. The message-index probe includes the boundary-row
+/// lookup and new rows; the store probes isolate serialization and persistence
+/// of the cached history text, which contains more summaries in larger sessions.
+#[test]
+#[ignore = "opt-in component CPU attribution after notice_cost exceeds its size-ratio budget"]
+fn notice_cost_profile() {
+    for shape in [Shape::Pi, Shape::OpenCode2] {
+        for size in [1_000, 150_000] {
+            let fixture = Fixture::create(shape, size, false);
+            let db = ContextDb::open(&fixture.path("context.db")).unwrap();
+            let store = Store::open(&fixture.path("mode3.db")).unwrap();
+            let mut pending = vec![fixture.entries.last().unwrap().clone()];
+            pending.push(assistant(size as u64 + 1, 2_048));
+            if matches!(shape, Shape::Pi) {
+                pending.push(entry(size as u64 + 2, Role::User, vec![]));
+            }
+            let mut indexing = Vec::new();
+            let mut saving = Vec::new();
+            let mut serialization = Vec::new();
+            for iteration in 0..TRIALS + WARM_STEPS as usize {
+                db.with_connection(|conn| {
+                    mc_module::search::messages::forget_from(
+                        conn,
+                        &fixture.key.harness,
+                        &fixture.key.session,
+                        size as u64 + 1,
+                    )
+                    .unwrap();
+                    let before = cpu_us();
+                    mc_module::search::messages::index(
+                        conn,
+                        &fixture.key.harness,
+                        &fixture.key.session,
+                        &pending,
+                    )
+                    .unwrap();
+                    let cpu = cpu_us() - before;
+                    if iteration >= WARM_STEPS as usize {
+                        indexing.push(cpu);
+                    }
+                });
+                let before = cpu_us();
+                std::hint::black_box(serde_json::to_string(&fixture.durable).unwrap());
+                let cpu = cpu_us() - before;
+                if iteration >= WARM_STEPS as usize {
+                    serialization.push(cpu);
+                }
+                let before = cpu_us();
+                store.save(&fixture.key, &fixture.durable).unwrap();
+                let cpu = cpu_us() - before;
+                if iteration >= WARM_STEPS as usize {
+                    saving.push(cpu);
+                }
+            }
+            let plan = db.with_connection(|conn| {
+                let mut statement = conn.prepare("EXPLAIN QUERY PLAN SELECT message_id, normalized_content_hash FROM message_history_source WHERE session_id = ?1 AND message_ordinal = ?2").unwrap();
+                statement.query_map(params![fixture.key.session, size as i64], |row| row.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+            });
+            println!(
+                "NOTICE_COST_PROFILE {}",
+                json!({"shape":shape.harness(),"size":size,
+                "messages_index_cpu_us":stats(&indexing),"store_save_cpu_us":stats(&saving),
+                "durable_json_cpu_us":stats(&serialization),"durable_json_bytes":serde_json::to_vec(&fixture.durable).unwrap().len(),
+                "boundary_lookup_plan":plan})
+            );
+        }
+    }
+}
