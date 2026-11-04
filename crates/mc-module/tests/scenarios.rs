@@ -1746,13 +1746,16 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
     });
     let mut runner = start_full(config, one_pass(), Some(dir.clone())).await;
     let summarizer = mc_mock_runner::child::scripted_summarizer();
+    // The facts name the first summary they come from. An unanchored fact is
+    // withheld when the run's last summary is discarded for lack of lookahead,
+    // and the run here reaches the end of what it may read.
     runner
         .host()
         .set_responder(std::sync::Arc::new(move |settings, prompt| {
             let mut reply = summarizer(settings, prompt);
             reply.text = reply.text.replace(
                 "</output>",
-                "<facts><PROJECT_RULES>\n* Releases need two reviewers.\n* Ask before pushing.\n</PROJECT_RULES></facts>\n</output>",
+                "<facts><PROJECT_RULES>\n* [at_compartment=1] Releases need two reviewers.\n* [at_compartment=1] Ask before pushing.\n</PROJECT_RULES></facts>\n</output>",
             );
             reply
         }));

@@ -3750,7 +3750,7 @@ mod summary_weight_tests {
             agent_id: None,
         };
         let request = SetupRequest::new(
-            "head",
+            "summary-weight-test",
             ModelRef::new("test", "model"),
             100_000,
             0,
@@ -3758,12 +3758,12 @@ mod summary_weight_tests {
             Vec::new(),
             1,
         );
-        let mut session = Session::new(
-            &route,
-            &request,
-            crate::preset::features("head").unwrap(),
-            None,
-        );
+        // A session with a summarizer, the only feature these tests need.
+        let features = crate::preset::Features {
+            summarizer: true,
+            ..crate::preset::Features::NONE
+        };
+        let mut session = Session::new(&route, &request, features, None);
         session.conditions.last_prompt_tokens = Some(64_000);
         let mut text = Part::new(
             "text",
