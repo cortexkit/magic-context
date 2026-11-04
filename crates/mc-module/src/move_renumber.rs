@@ -213,8 +213,8 @@ const PI_SYNTHETIC_USER_PREFIX: &str = "synth-user-";
 #[derive(Debug)]
 struct Numbered {
     /// Empty for a number the plugin kept for a message its branch walk no
-    /// longer reached (a Pi session whose file lost entries before
-    /// everything stored; see [`Numbering::align_pi`]).
+    /// longer reached (a Pi session whose file lost entries; see
+    /// [`Numbering::align_pi`]).
     mid: String,
     /// The entry of the row with this message's id.
     entry: Option<u64>,
@@ -252,6 +252,7 @@ pub struct Numbering {
     /// Every message row on the active path: its entry, or none for a marker.
     by_mid: HashMap<String, Option<u64>>,
     checksum: String,
+    alignment_warnings: Vec<String>,
 }
 
 impl Numbering {
@@ -290,6 +291,7 @@ impl Numbering {
             has_added,
             by_mid,
             checksum: checksum(messages),
+            alignment_warnings: Vec::new(),
         })
     }
 
@@ -388,30 +390,50 @@ impl Numbering {
             has_added: false,
             by_mid,
             checksum: checksum(messages),
+            alignment_warnings: Vec::new(),
         })
     }
 
     /// Line the Pi numbering up with the numbers stored for `session`. A Pi
-    /// session file can lose entries in front of everything stored (a
-    /// malformed line ends the parent chain the branch walk follows), and the
-    /// plugin then numbers the branch it still reaches from an offset, behind
-    /// numbers for the messages it no longer reaches (`pi-ordinal-alignment.ts`).
-    /// The offset is measured as the plugin measures it: the newest summary's
-    /// stored end number minus its end message's place on the branch, checked
-    /// against that summary's start and the previous summary's end. A
-    /// summary that can't be placed refuses (`ordinal_unanchored`), changing
-    /// nothing.
+    /// session file can lose entries at the front or in the middle. Summary
+    /// ids anchor the surviving messages, and each increase in their stored
+    /// number minus branch position reserves slots for unreachable messages.
+    /// Only missing-message source rows inside a summary can locate an
+    /// internal loss exactly; other source ordinals may be stale. Without
+    /// that evidence, the slots go just before the summary's end, with a
+    /// warning. Unplaceable or decreasing anchors refuse (`ordinal_unanchored`).
     pub fn align_pi(
         mut self,
         conn: &Connection,
         harness: &str,
         session: &str,
     ) -> Result<Self, String> {
+        // A failed later move step may leave already-renumbered summaries.
+        // They are runner coordinates, not anchors for the plugin numbering.
+        let done: Option<String> = conn
+            .query_row(
+                "SELECT value FROM schema_migrations_meta WHERE key = ?1",
+                params![record_key(harness, session)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(done) = done {
+            let record: Value = serde_json::from_str(&done).unwrap_or(Value::Null);
+            if record["checksum"].as_str() != Some(self.checksum.as_str()) {
+                return Err(format!(
+                    "renumber_conflict: {session}'s numbers were already converted from a different transcript"
+                ));
+            }
+            self.alignment_warnings =
+                serde_json::from_value(record["alignment_warnings"].clone()).unwrap_or_default();
+            return Ok(self);
+        }
         let rows: Vec<(i64, i64, i64, String, String)> = conn
             .prepare(
                 "SELECT sequence, start_message, end_message, start_message_id, end_message_id
                  FROM compartments WHERE session_id = ?1 AND harness = ?2
-                 ORDER BY sequence DESC LIMIT 2",
+                 ORDER BY sequence",
             )
             .and_then(|mut statement| {
                 statement
@@ -426,50 +448,154 @@ impl Numbering {
                     })?
                     .collect()
             })
-            .map_err(|error| error.to_string())?;
-        let Some((sequence, start, end, start_id, end_id)) = rows.first() else {
-            return Ok(self);
-        };
-        let place = |mid: &str| {
-            self.by_plugin
-                .iter()
-                .position(|numbered| numbered.mid == mid)
-                .map(|index| index as i64 + 1)
-        };
-        let Some(branch) = place(end_id) else {
-            return Err(format!(
-                "ordinal_unanchored: summary {sequence} of {session} ends at message {end_id}, which the branch doesn't contain"
-            ));
-        };
-        let offset = end - branch;
-        let mut checks = vec![(*start, start_id.as_str())];
-        if let Some((_, _, previous_end, _, previous_end_id)) = rows.get(1) {
-            checks.push((*previous_end, previous_end_id.as_str()));
-        }
-        for (stored, mid) in checks {
-            if let Some(found) = place(mid).filter(|_| !mid.is_empty()) {
-                if stored - found != offset {
-                    return Err(format!(
-                        "ordinal_unanchored: summary {sequence} of {session} puts message {end_id} {offset} after its branch place, but message {mid} {} after",
-                        stored - found
-                    ));
+            .map_err(|error| format!("ordinal_unanchored: summaries of {session}: {error}"))?;
+        let places: HashMap<&str, i64> = self
+            .by_plugin
+            .iter()
+            .enumerate()
+            .map(|(index, numbered)| (numbered.mid.as_str(), index as i64 + 1))
+            .collect();
+        let mut previous_end = 0;
+        let mut anchors = Vec::new();
+        let mut missing_endpoints = Vec::new();
+        for (sequence, start, end, start_id, end_id) in &rows {
+            if *start <= previous_end || end < start {
+                return Err(format!(
+                    "ordinal_unanchored: summary {sequence} of {session}: stored ranges must rise without overlap"
+                ));
+            }
+            for (stored, mid) in [(*start, start_id), (*end, end_id)] {
+                if let Some(&branch) = places.get(mid.as_str()) {
+                    anchors.push((*sequence, stored, branch));
+                } else {
+                    missing_endpoints.push((*sequence, stored, mid));
                 }
             }
+            previous_end = *end;
         }
-        if offset < 0 {
+        if !rows.is_empty() && anchors.is_empty() {
             return Err(format!(
-                "ordinal_unanchored: the numbers stored for {session} are behind its branch by {}",
-                -offset
+                "ordinal_unanchored: summaries of {session} have no message ids on the branch"
             ));
         }
-        let unreachable = (0..offset).map(|_| Numbered {
-            mid: String::new(),
-            entry: None,
-            first: None,
-            through: None,
-        });
-        self.by_plugin.splice(0..0, unreachable);
+        let mut slots = Vec::new();
+        let mut previous: Option<(i64, i64, i64)> = None;
+        let mut offset = 0;
+        for (sequence, stored, branch) in anchors {
+            let invalid = |reason: &str| {
+                format!("ordinal_unanchored: summary {sequence} of {session}: {reason}")
+            };
+            let next_offset = stored
+                .checked_sub(branch)
+                .ok_or_else(|| invalid("offset is not a whole nonnegative number of slots"))?;
+            if next_offset < offset {
+                return Err(invalid(&format!(
+                    "offset decreases from {offset} to {next_offset} at stored number {stored}"
+                )));
+            }
+            let step = next_offset - offset;
+            if let Some((_, last_stored, last_branch)) = previous {
+                if (stored > last_stored && branch <= last_branch)
+                    || (stored == last_stored && branch != last_branch)
+                {
+                    return Err(invalid("message ids do not rise in branch order"));
+                }
+            }
+            if step > 0 {
+                let Some((last_sequence, last_stored, _)) = previous else {
+                    // Before any surviving anchor, preserve the plugin's
+                    // unreachable prefix, including missing summary endpoints.
+                    slots.extend(1..=step);
+                    offset = next_offset;
+                    previous = Some((sequence, stored, branch));
+                    continue;
+                };
+                let has_missing_endpoint = missing_endpoints
+                    .iter()
+                    .any(|(_, ordinal, _)| *ordinal > last_stored && *ordinal < stored);
+                if last_sequence != sequence && !has_missing_endpoint {
+                    // No summary covers this step: reserve it in the gap,
+                    // immediately before the next summary's first message.
+                    slots.extend(stored - step..stored);
+                    offset = next_offset;
+                    previous = Some((sequence, stored, branch));
+                    continue;
+                }
+                let mut missing: Vec<i64> = conn
+                    .prepare(
+                        "SELECT message_ordinal, message_id FROM message_history_source
+                         WHERE session_id = ?1 AND harness = ?2
+                           AND message_ordinal > ?3 AND message_ordinal < ?4
+                         ORDER BY message_ordinal",
+                    )
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map(params![session, harness, last_stored, stored], |row| {
+                                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                            })?
+                            .filter_map(|row| match row {
+                                Ok((ordinal, mid))
+                                    if !self.by_mid.contains_key(&mid)
+                                        && rows.iter().any(|(_, start, end, _, _)| {
+                                            *start <= ordinal && ordinal <= *end
+                                        }) =>
+                                {
+                                    Some(Ok(ordinal))
+                                }
+                                Ok(_) => None,
+                                Err(error) => Some(Err(error)),
+                            })
+                            .collect()
+                    })
+                    .map_err(|error| invalid(&error.to_string()))?;
+                if missing.len() as i64 != step || missing.windows(2).any(|pair| pair[0] == pair[1])
+                {
+                    if has_missing_endpoint {
+                        return Err(invalid(
+                            "a missing summary endpoint has no exact unreachable slot",
+                        ));
+                    }
+                    missing = (stored - step..stored).collect();
+                    self.alignment_warnings.push(format!(
+                        "pi_alignment_fallback: summary {sequence} of {session}: placed {step} unreachable slots just before its end at {stored}; missing-message ordinals could not be determined"
+                    ));
+                }
+                slots.extend(missing);
+            }
+            offset = next_offset;
+            previous = Some((sequence, stored, branch));
+        }
+        let mut aligned = Vec::new();
+        aligned
+            .try_reserve(self.by_plugin.len().saturating_add(slots.len()))
+            .map_err(|error| format!("ordinal_unanchored: {session}: {error}"))?;
+        let mut slots = slots.into_iter().peekable();
+        for numbered in self.by_plugin {
+            while slots.peek() == Some(&(aligned.len() as i64 + 1)) {
+                aligned.push(Numbered::new("", None));
+                slots.next();
+            }
+            aligned.push(numbered);
+        }
+        if slots.next().is_some() {
+            return Err(format!(
+                "ordinal_unanchored: {session}: unreachable slots fall outside the branch numbering"
+            ));
+        }
+        self.by_plugin = aligned;
+        for (sequence, stored, mid) in missing_endpoints {
+            if !self.unreachable(stored) {
+                return Err(format!(
+                    "ordinal_unanchored: summary {sequence} of {session}: message {mid} is not on the branch and has no unreachable slot at {stored}"
+                ));
+            }
+        }
         Ok(self)
+    }
+
+    /// Summaries whose internal missing-message positions had to be estimated.
+    pub fn alignment_warnings(&self) -> &[String] {
+        &self.alignment_warnings
     }
 
     /// Whether every plugin number already is the runner's.
@@ -651,7 +777,11 @@ pub fn renumber(
         "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
         params![
             key,
-            serde_json::json!({ "checksum": numbering.checksum }).to_string()
+            serde_json::json!({
+                "checksum": numbering.checksum,
+                "alignment_warnings": numbering.alignment_warnings,
+            })
+            .to_string()
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -926,7 +1056,8 @@ impl Rewrite<'_> {
 
     /// The raw-message search index. Its rows name their message, so each
     /// moves by message id; rows for marker rows or for messages no longer on
-    /// the active path go.
+    /// the active path go. Ids remain authoritative even when a source row's
+    /// ordinal is stale or a missing Pi message's slot was only estimated.
     fn search_index(&self) -> Step {
         let sources: Vec<String> = self
             .tx

@@ -84,6 +84,9 @@ pub struct Moved {
     /// The standalone plugin's highest tag number for the session, to write
     /// as the marker's checkpoint.
     pub tag_checkpoint: u64,
+    /// Pi summaries whose missing-message slots could not be located exactly.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn fence_key(harness: &str, session: &str) -> String {
@@ -133,6 +136,7 @@ pub fn move_in(
             key.session
         ));
     }
+    let mut warnings = Vec::new();
     if let Some(messages) = &request.messages {
         // The OpenCode 1 and Pi plugins' numberings are rebuilt here; another
         // host's standalone numbering has its own rules.
@@ -147,7 +151,9 @@ pub fn move_in(
                     ))
                 }
             };
-            crate::move_renumber::renumber(conn, source, &key.session, &numbering)
+            crate::move_renumber::renumber(conn, source, &key.session, &numbering)?;
+            warnings = numbering.alignment_warnings().to_vec();
+            Ok::<_, String>(())
         })?;
     }
     if source != key.harness {
@@ -238,6 +244,7 @@ pub fn move_in(
     Ok(Moved {
         view,
         tag_checkpoint,
+        warnings,
     })
 }
 
