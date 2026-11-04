@@ -424,3 +424,81 @@ async fn restart_finishes_a_failed_chunked_revert_from_its_durable_dirty_floor()
     restarted.idle(&f.key).await.unwrap();
     f.assert_rows(150);
 }
+
+#[tokio::test]
+async fn setup_reconciles_an_older_changed_tool_even_when_the_tip_id_did_not_change() {
+    use crate::{module::Module, pass::Settings, route::Route};
+    use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+    let f = Fixture::new(5);
+    let tool = |output: &str| {
+        let mut tool = ToolPart::new(
+            "call",
+            "read",
+            serde_json::json!({"path":"a.rs"}),
+            ToolStatus::Completed,
+        );
+        tool.output = Some(output.into());
+        tool.output_bytes = Some(output.len() as u64);
+        Entry::new(
+            3,
+            "tool",
+            Role::Assistant,
+            3,
+            vec![Part::new("tool-part", PartBody::Tool(tool))],
+        )
+    };
+    f.client.entries.lock().unwrap()[2] = tool("old result");
+    let module = Module::new(
+        (*f.client).clone(),
+        Settings::default(),
+        Some(ContextDb::open(&f.path).unwrap()),
+        None,
+    );
+    let setup = || {
+        SetupRequest::new(
+            "head",
+            ModelRef::new("test", "model"),
+            1_000_000,
+            128_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            vec![],
+            1,
+        )
+        .with_newest(f.client.cursor().unwrap())
+    };
+    let route = Route {
+        session: f.key.clone(),
+        project: None,
+        workdir: None,
+        agent_id: None,
+    };
+    module.setup(route.clone(), setup()).unwrap();
+    module.idle(&f.key).await.unwrap();
+    let tip = f.client.cursor().unwrap();
+    f.client.entries.lock().unwrap()[2] = tool("updated result after interrupted notice");
+    assert_eq!(f.client.cursor().unwrap(), tip);
+    module.setup(route, setup()).unwrap();
+    module.idle(&f.key).await.unwrap();
+    let conn = Connection::open(&f.path).unwrap();
+    let digest:String=conn.query_row("SELECT source_version FROM message_history_source WHERE session_id=?1 AND message_ordinal=3",[&f.key.session],|r|r.get(0)).unwrap();
+    assert_eq!(
+        digest,
+        f.client.entries.lock().unwrap()[2].digest,
+        "stale source digest survived Setup reconciliation"
+    );
+    let source: usize = conn
+        .query_row("SELECT COUNT(*) FROM message_history_source", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let fts: usize = conn
+        .query_row("SELECT COUNT(*) FROM message_history_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        (source, fts),
+        (5, 4),
+        "tool-only output remains excluded from FTS, with one source row per entry"
+    );
+}

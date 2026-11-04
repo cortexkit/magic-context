@@ -134,6 +134,8 @@ struct RunnerState {
     offered: usize,
     views: Vec<View>,
     record_views: bool,
+    foreground_reads: usize,
+    background_reads: usize,
 }
 
 #[derive(Clone)]
@@ -168,7 +170,12 @@ impl Client {
 
 impl RunnerClient for Client {
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        if std::thread::current().name() == Some("mc-message-index") {
+            state.background_reads += 1;
+        } else {
+            state.foreground_reads += 1;
+        }
         let at = |ordinal: usize| {
             if ordinal <= state.original.len() {
                 state.original.get(ordinal.checked_sub(1)?)
@@ -527,6 +534,8 @@ fn trial_recording(
             offered: 0,
             views: Vec::new(),
             record_views,
+            foreground_reads: 0,
+            background_reads: 0,
         })));
         let route = Route {
             session: fixture.key.clone(),
@@ -567,6 +576,8 @@ fn trial_recording(
         let entries = client.step(fixture.shape);
         let request = request(&client, WARM_STEPS + 1, entries, threshold);
         let offered = client.0.lock().unwrap().offered;
+        let foreground_reads=client.0.lock().unwrap().foreground_reads;
+        let background_reads=client.0.lock().unwrap().background_reads;
         #[cfg(feature = "notice-cost-timing")]
         module.pause_search_measurement(true);
         #[cfg(feature = "notice-cost-timing")]
@@ -583,10 +594,14 @@ fn trial_recording(
         #[cfg(not(feature = "notice-cost-timing"))]
         let stages = Value::Null;
         let bg_start = cpu_us();
+        let bg_wall = Instant::now();
         #[cfg(feature = "notice-cost-timing")]
         module.pause_search_measurement(false);
         module.search_idle(&fixture.key).await.unwrap();
         let background_cpu = cpu_us() - bg_start;
+        let background_wall = bg_wall.elapsed().as_micros() as u64;
+        assert_eq!(client.0.lock().unwrap().foreground_reads,foreground_reads,"a contiguous ordinary notice unexpectedly read a foreground gap");
+        assert_eq!(client.0.lock().unwrap().background_reads-background_reads,1,"one step must produce one separate bounded search batch");
         let published = client.0.lock().unwrap().offered - offered;
         assert_eq!(published, usize::from(threshold), "wrong notice path");
         let views = client.0.lock().unwrap().views.clone();
@@ -595,7 +610,7 @@ fn trial_recording(
             wall,
             warm,
             setup_cpu,
-            json!({"stages":stages,"views":views,"background_cpu_us":background_cpu}),
+            json!({"stages":stages,"views":views,"background_cpu_us":background_cpu,"background_wall_us":background_wall}),
         )
     })
 }
@@ -659,9 +674,11 @@ fn notice_cost() {
         rows.push(measure(&moved, threshold, true));
     }
     for shape in [Shape::Pi, Shape::OpenCode2] {
-        let fixture = Fixture::with_table(shape, 1_000, false, true);
-        for threshold in [false, true] {
-            rows.push(measure(&fixture, threshold, false));
+        for size in [1_000, 150_000] {
+            let fixture = Fixture::with_table(shape, size, false, true);
+            for threshold in [false, true] {
+                rows.push(measure(&fixture, threshold, false));
+            }
         }
     }
     for shape in [Shape::Pi, Shape::OpenCode2] {
@@ -705,6 +722,7 @@ fn measure_count(fixture: &Fixture, threshold: bool, moved: bool, trials: usize)
     let mut setup = Vec::new();
     let mut stages = Vec::new();
     let mut background = Vec::new();
+    let mut background_wall = Vec::new();
     for _ in 0..trials {
         let (c, w, ws, s, details) = trial(fixture, threshold);
         cpu.push(c);
@@ -712,6 +730,7 @@ fn measure_count(fixture: &Fixture, threshold: bool, moved: bool, trials: usize)
         warm.extend(ws);
         setup.push(s);
         background.push(details["background_cpu_us"].as_u64().unwrap());
+        background_wall.push(details["background_wall_us"].as_u64().unwrap());
         if !details["stages"].is_null() {
             stages.push(details["stages"].clone());
         }
@@ -720,6 +739,8 @@ fn measure_count(fixture: &Fixture, threshold: bool, moved: bool, trials: usize)
         "path":if threshold {"build_publish"} else {"quiet"},"held_before_warmup":HELD+1,
         "shared_table":fixture.shared_table,"table_rows":fixture.table_rows,"stages":stages,
         "background_cpu_us":stats(&background),"background_steps_cpu_us":background,
+        "background_wall_us":stats(&background_wall),"background_steps_wall_us":background_wall,
+        "foreground_gap_reads":0,"background_batches_per_timed_step":1,"published_views_per_timed_step":usize::from(threshold),
         "cpu_us":stats(&cpu),"wall_us":stats(&wall),"setup_cpu_us":stats(&setup),
         "warmup_cpu_us":stats(&warm),"warmup_steps_per_trial":WARM_STEPS,
         "steps_cpu_us":cpu,"steps_wall_us":wall,"warmup_steps_cpu_us":warm,"setup_steps_cpu_us":setup});
@@ -890,9 +911,9 @@ fn notice_cost_index_tail() {
         }
         values
     }
-    for size in [1_000, 150_000] {
-        for legacy_delete in [true, false] {
-            for suppress_merges in [false, true] {
+    for legacy_delete in [true, false] {
+        for suppress_merges in [false, true] {
+            for size in [1_000, 150_000] {
                 let fixture = Fixture::with_table(Shape::Pi, size, false, true);
                 let db = ContextDb::open(&fixture.path("context.db")).unwrap();
                 let mut rows = Vec::new();

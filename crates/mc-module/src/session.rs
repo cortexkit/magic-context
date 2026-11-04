@@ -626,6 +626,15 @@ impl Session {
         if !self.index_ready {
             return;
         }
+        // A process can stop after the runner changed an older tool result but
+        // before the background dirty mark was committed. On Setup, reconcile
+        // the raw entries loaded from the summary cut through the newest row,
+        // as well as the durable archive boundary. Nothing before that cut can
+        // still carry a mutable raw tool result.
+        self.search_dirty_from = Some(
+            self.search_dirty_from
+                .map_or(self.index.base(), |from| from.min(self.index.base())),
+        );
         // After the read, so the cut message of the view the runner applies
         // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
