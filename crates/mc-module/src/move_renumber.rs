@@ -595,6 +595,10 @@ fn checksum(messages: &[HostMessage]) -> String {
 }
 
 /// The key of the record a finished rewrite leaves.
+/// Above any ordinal a transcript reaches: where a row's range waits while
+/// the rewrite moves the ranges of its table (see `Rewrite::ranges`).
+const PARKED_ORDINAL: i64 = 1 << 40;
+
 pub fn record_key(harness: &str, session: &str) -> String {
     format!("mode3_renumber:{harness}:{session}")
 }
@@ -771,12 +775,26 @@ impl Rewrite<'_> {
             statement.query_map(params![self.session], range_row)
         }?;
         let rows: Vec<(i64, i64, i64)> = bound.collect::<Result<_, _>>()?;
-        let update = format!("UPDATE {table} SET {start} = ?1, {end} = ?2 WHERE id = ?3");
+        let mut moves = Vec::new();
         for (id, from, to) in rows {
             let (first, last) = self
                 .numbering
                 .range(from, to)
                 .ok_or_else(|| self.unmapped(&format!("{table} row {id}"), from, to))?;
+            if (first, last) != (from, to) {
+                moves.push((id, first, last));
+            }
+        }
+        // A table can hold its ranges unique (fact blocks per publication).
+        // The final ranges are unique, but writing them one row at a time can
+        // land a row on a range another row hasn't left yet, so every moving
+        // row first parks on a range no ordinal reaches.
+        let update = format!("UPDATE {table} SET {start} = ?1, {end} = ?2 WHERE id = ?3");
+        for (id, _, _) in &moves {
+            let parked = PARKED_ORDINAL + id;
+            self.tx.execute(&update, params![parked, parked, id])?;
+        }
+        for (id, first, last) in moves {
             self.tx.execute(&update, params![first, last, id])?;
         }
         Ok(())

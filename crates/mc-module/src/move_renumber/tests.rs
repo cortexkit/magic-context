@@ -223,6 +223,31 @@ fn every_stored_number_moves_to_the_runners_numbering() {
     );
 }
 
+/// Two cited blocks of one publication whose numbers shift down, stored so
+/// the first row rewritten moves onto the range the second still holds. Seen on WERNI's move,
+/// where the rewrite failed on the fact-block table's unique key.
+#[test]
+fn a_range_that_moves_onto_another_rows_old_range_rewrites() {
+    let store = Store::new("shift");
+    store.summary(0, (1, "u1"), (6, "a7"));
+    store
+        .conn()
+        .execute_batch(&format!(
+            "INSERT INTO memory_publications (publication_id, project_path, source_session_id)
+                 VALUES ('p1', '/p', '{SESSION}');
+             INSERT INTO memory_fact_blocks (publication_id, source_session_id, start_ordinal, end_ordinal, role, parts_json, joined_text)
+                 VALUES ('p1', '{SESSION}', 6, 6, 'user', '[]', 'b'), ('p1', '{SESSION}', 5, 5, 'user', '[]', 'a');"
+        ))
+        .unwrap();
+    run(&store, &numbering()).unwrap();
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_ordinal || '-' || end_ordinal FROM memory_fact_blocks ORDER BY id"
+        ),
+        ["5-5", "4-4"]
+    );
+}
+
 #[test]
 fn a_retried_move_does_not_shift_the_numbers_twice() {
     let store = Store::new("retry");
