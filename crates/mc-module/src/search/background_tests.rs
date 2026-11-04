@@ -7,10 +7,13 @@ use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+type ReadRange = (Option<u64>, Option<u64>);
+
 #[derive(Clone, Default)]
 struct Fake {
     entries: Arc<Mutex<Vec<Entry>>>,
     reads: Arc<AtomicUsize>,
+    read_ranges: Arc<Mutex<Vec<ReadRange>>>,
     fail_read: Arc<AtomicUsize>,
     panic_read: Arc<AtomicUsize>,
     refuse_read: Arc<AtomicUsize>,
@@ -51,6 +54,8 @@ impl Fake {
             newest: self.cursor(),
             from,
             reconcile: None,
+            base: 1,
+            entries: Arc::new(Vec::new()),
         }
     }
 }
@@ -89,8 +94,12 @@ impl RunnerClient for Fake {
         else {
             panic!("not a compact catch-up read")
         };
+        self.read_ranges
+            .lock()
+            .unwrap()
+            .push((after_ordinal, limit));
         if let Some(limit) = limit {
-            assert_eq!(limit, PAGE_ENTRIES);
+            assert!((1..=PAGE_ENTRIES).contains(&limit));
         }
         let all = self.entries.lock().unwrap();
         let page: Vec<_> = all
@@ -190,6 +199,9 @@ async fn a_stalled_background_read_does_not_hold_rides_pre_user_or_another_sessi
         NoticeRequest::new(1, conditions.clone()).with_newest(f.client.cursor().unwrap());
     request.entries = vec![added];
     module.notice(&f.key, request).unwrap();
+    let gap_worker = f.worker();
+    let gap = SessionRef::new("runner", "pi", "missing-archive");
+    gap_worker.mark(&gap, f.client.mark(None));
     f.client.started.notified().await;
     tokio::time::timeout(Duration::from_millis(500), async {
         module.idle_foreground(&f.key).await.unwrap();
@@ -211,6 +223,7 @@ async fn a_stalled_background_read_does_not_hold_rides_pre_user_or_another_sessi
     *f.client.pause.lock().unwrap() = None;
     pause.add_permits(1);
     module.search_idle(&f.key).await.unwrap();
+    gap_worker.idle(&gap).await.unwrap();
 }
 
 struct Fixture {
@@ -274,6 +287,73 @@ async fn coalesced_batches_fill_the_gap_in_order_without_duplicate_fts_rows() {
     worker.mark(&f.key, f.client.mark(None));
     worker.idle(&f.key).await.unwrap();
     f.assert_rows(1_201);
+}
+
+#[tokio::test]
+async fn shared_notice_entries_and_setup_window_need_no_background_runner_read() {
+    let f = Fixture::new(501);
+    let mut conn = Connection::open(&f.path).unwrap();
+    let all = f.client.entries.lock().unwrap().clone();
+    super::super::messages::index(&mut conn, &f.key.harness, &f.key.session, &all[..300]).unwrap();
+    let worker = f.worker();
+    let mut mark = f.client.mark(None);
+    mark.base = 301;
+    mark.entries = Arc::new(all[300..].to_vec());
+    mark.reconcile = Some(301);
+    worker.mark(&f.key, mark.clone());
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(501);
+    worker.mark(&f.key, mark);
+    worker.idle(&f.key).await.unwrap();
+    assert_eq!(
+        f.client.reads.load(Ordering::SeqCst),
+        0,
+        "cached window or inline notice performed a runner round trip"
+    );
+}
+
+#[tokio::test]
+async fn only_a_missing_archive_range_reads_below_the_shared_window() {
+    let f = Fixture::new(501);
+    let mut conn = Connection::open(&f.path).unwrap();
+    let all = f.client.entries.lock().unwrap().clone();
+    super::super::messages::index(&mut conn, &f.key.harness, &f.key.session, &all[..250]).unwrap();
+    let worker = f.worker();
+    let mut mark = f.client.mark(None);
+    mark.base = 301;
+    mark.entries = Arc::new(all[300..].to_vec());
+    worker.mark(&f.key, mark);
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(501);
+    assert_eq!(
+        *f.client.read_ranges.lock().unwrap(),
+        vec![(Some(250), Some(50))],
+        "read escaped the real durable gap 251..300"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_gap_batch_preserves_the_newer_notices_shared_entries() {
+    let f = Fixture::new(3);
+    let worker = f.worker();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.client.pause.lock().unwrap() = Some(pause.clone());
+    f.client.fail_read.store(1, Ordering::SeqCst);
+    worker.mark(&f.key, f.client.mark(None));
+    f.client.started.notified().await;
+    *f.client.entries.lock().unwrap() = entries(4, "old");
+    let mut newer = f.client.mark(None);
+    newer.entries = Arc::new(f.client.entries.lock().unwrap().clone());
+    worker.mark(&f.key, newer);
+    *f.client.pause.lock().unwrap() = None;
+    pause.add_permits(1);
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(4);
+    assert_eq!(
+        f.client.reads.load(Ordering::SeqCst),
+        1,
+        "retry discarded the newer inline entries"
+    );
 }
 
 #[tokio::test]
@@ -512,6 +592,7 @@ async fn an_inflight_read_coalesces_a_replacement_notice_without_losing_its_floo
     worker.idle(&f.key).await.unwrap();
     let pause = Arc::new(tokio::sync::Semaphore::new(0));
     *f.client.pause.lock().unwrap() = Some(pause.clone());
+    *f.client.entries.lock().unwrap() = entries(502, "old");
     worker.mark(&f.key, f.client.mark(None));
     f.client.started.notified().await;
     let mut replacement = entries(150, "new");

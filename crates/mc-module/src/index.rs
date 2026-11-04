@@ -18,6 +18,7 @@
 
 use cortexkit_role_compaction::part::{Part, PartBody, ToolStatus};
 use cortexkit_role_compaction::read::{Cursor, Entry, Role};
+use std::sync::Arc;
 
 /// Whether `new` is `held` with only tool parts changed: the same parts in
 /// the same order, each the same or a tool part (its status, result, or a
@@ -42,7 +43,7 @@ pub struct Index {
     /// The ordinal of `entries[0]`, or of the next entry when empty.
     /// Ordinals count from 1.
     base: u64,
-    entries: Vec<Entry>,
+    entries: Arc<Vec<Entry>>,
     /// The token family the held entries' counts were made in (compaction
     /// contract W4.11): the family named by the last page or notice that
     /// carried counts.
@@ -108,7 +109,7 @@ impl Index {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             base,
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
             family: None,
             app_identity: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             app_changed: Default::default(),
@@ -125,6 +126,12 @@ impl Index {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Share the held window with asynchronous readers without copying its
+    /// entries. Later mutations copy only if a reader still holds a snapshot.
+    pub(crate) fn snapshot(&self) -> Arc<Vec<Entry>> {
+        self.entries.clone()
     }
 
     pub fn cursor(&self) -> Option<Cursor> {
@@ -157,7 +164,9 @@ impl Index {
         family: Option<&str>,
     ) -> Extend {
         if let Some(family) = family.filter(|family| self.family.as_deref() != Some(*family)) {
-            self.entries.iter_mut().for_each(clear_counts);
+            Arc::make_mut(&mut self.entries)
+                .iter_mut()
+                .for_each(clear_counts);
             // Every message's weights changed, and the apps show them.
             self.app_changed
                 .extend(self.entries.iter().map(|entry| entry.ordinal));
@@ -175,13 +184,13 @@ impl Index {
             if entry.ordinal == next {
                 self.app_changed.insert(entry.ordinal);
                 self.positions.insert(entry.mid.clone(), entry.ordinal);
-                self.entries.push(entry);
+                Arc::make_mut(&mut self.entries).push(entry);
                 continue;
             }
             if entry.ordinal > next {
                 return Extend::Gap;
             }
-            let held = &mut self.entries[(entry.ordinal - self.base) as usize];
+            let held = &mut Arc::make_mut(&mut self.entries)[(entry.ordinal - self.base) as usize];
             if held.digest == entry.digest && held.mid == entry.mid {
                 // The host's finish stamp can arrive after the message was
                 // first read. It isn't part of the transcript, so it only
@@ -221,8 +230,7 @@ impl Index {
             self.positions.remove(&entry.mid);
         }
         self.app_truncated = Some(self.app_truncated.map_or(ordinal, |old| old.min(ordinal)));
-        self.entries
-            .truncate(ordinal.saturating_sub(self.base) as usize);
+        Arc::make_mut(&mut self.entries).truncate(ordinal.saturating_sub(self.base) as usize);
     }
 
     /// Forget every entry before `ordinal`, which becomes the base. Returns
@@ -233,7 +241,7 @@ impl Index {
         if count > 0 {
             self.app_pruned = Some(self.base);
         }
-        let gone: Vec<_> = self.entries.drain(..count).collect();
+        let gone: Vec<_> = Arc::make_mut(&mut self.entries).drain(..count).collect();
         for entry in &gone {
             self.positions.remove(&entry.mid);
         }
@@ -324,6 +332,24 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_window_snapshots_are_zero_copy_and_survive_later_mutation() {
+        let mut index = Index::default();
+        index.extend(vec![entry(1, "a", "first")]);
+        let snapshot = index.snapshot();
+        assert!(
+            std::ptr::eq(index.entries(), snapshot.as_slice()),
+            "handoff copied held entries"
+        );
+        assert!(Arc::ptr_eq(&snapshot, &index.snapshot()));
+        index.extend(vec![entry(2, "b", "second")]);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(index.entries().len(), 2);
+        index.prune_before(2);
+        assert_eq!(snapshot[0].mid, "a");
+        assert_eq!(index.entries()[0].mid, "b");
+    }
     use cortexkit_role_compaction::part::Seal;
 
     fn entry(ordinal: u64, mid: &str, text: &str) -> Entry {

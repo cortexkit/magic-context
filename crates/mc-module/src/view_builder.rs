@@ -513,7 +513,7 @@ mod tests {
             EditOp::Insert {
                 at: InsertAt::Start,
                 message: InsertedMessage::new(
-                    "head",
+                    "m0",
                     Role::User,
                     vec!["unchanged history ".repeat(12_000)],
                 ),

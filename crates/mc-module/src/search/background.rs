@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
+use cortexkit_role_compaction::read::{Cursor, Detail, Entry, ReadRequest, Select, SessionRef};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Notify;
 
@@ -22,6 +22,8 @@ pub(crate) struct Mark {
     pub newest: Option<Cursor>,
     pub from: Option<u64>,
     pub reconcile: Option<u64>,
+    pub base: u64,
+    pub entries: Arc<Vec<Entry>>,
 }
 
 #[derive(Default)]
@@ -161,7 +163,11 @@ impl Background {
                             }
                             pending.warned_non_wal |= non_wal;
                             pending.error = Some(error);
-                            merge(&mut pending.mark, mark);
+                            let newer = pending.mark.take();
+                            pending.mark = Some(mark);
+                            if let Some(newer) = newer {
+                                merge(&mut pending.mark, newer);
+                            }
                         }
                     }
                     // A failed batch stays dirty but does not spin on a locked DB.
@@ -265,6 +271,8 @@ fn merge(held: &mut Option<Mark>, next: Mark) {
         old.from = old.from.into_iter().chain(next.from).min();
         old.reconcile = old.reconcile.into_iter().chain(next.reconcile).min();
         old.newest = next.newest;
+        old.base = next.base;
+        old.entries = next.entries;
     } else {
         *held = Some(next);
     }
@@ -304,12 +312,12 @@ async fn batch<C: RunnerClient>(
         .map_err(|e| e.to_string())?
         .unwrap_or(0)
         .max(0) as u64;
-    let from = mark
+    if let Some(from) = mark
         .from
         .into_iter()
         .chain((dirty > 0).then_some(dirty))
-        .min();
-    if let Some(from) = from {
+        .min()
+    {
         for _ in 0..PAGES_PER_BATCH {
             if truncate_chunk(conn, key, from).map_err(|e| e.to_string())? {
                 break;
@@ -327,124 +335,89 @@ async fn batch<C: RunnerClient>(
         }
         mark.from = None;
     }
-    if let Some(mut from) = mark.reconcile {
-        for _ in 0..PAGES_PER_BATCH {
-            let page = tokio::time::timeout(
-                Duration::from_secs(10),
-                client.read(
-                    key,
-                    ReadRequest::new(
-                        Select::After {
-                            after_ordinal: from.checked_sub(1).filter(|n| *n > 0),
-                            limit: Some(PAGE_ENTRIES),
-                        },
-                        Detail::Compact,
-                    )
-                    .with_max_bytes(PAGE_BYTES),
-                ),
-            )
-            .await
-            .map_err(|_| "search reconcile read timed out".to_owned())?
-            .map_err(|e| e.to_string())?;
-            let newest = page.head.newest.as_ref().map_or(0, |c| c.ordinal);
-            if super::messages::watermark(conn, session)
-                .map_err(|e| e.to_string())?
-                .max(0) as u64
-                > newest
-            {
-                mark.from = Some(newest + 1);
-                return Ok(true);
-            }
-            for (offset, entry) in page.entries.iter().enumerate() {
-                if entry.ordinal != from + offset as u64 {
-                    return Err("search reconcile contains an ordinal gap".into());
-                }
-            }
-            super::messages::reconcile(conn, &key.harness, session, &page.entries)
-                .map_err(|e| e.to_string())?;
-            let complete = page.entries.last().is_some_and(|last| {
-                page.head.newest.as_ref().is_some_and(|c| {
-                    c.ordinal == last.ordinal && c.mid == last.mid && c.digest == last.digest
-                })
-            });
-            if complete || (page.entries.is_empty() && from > newest) {
-                mark.reconcile = None;
-                if super::messages::watermark(conn, session)
-                    .map_err(|e| e.to_string())?
-                    .max(0) as u64
-                    == newest
-                {
-                    return Ok(false);
-                }
-                break;
-            }
-            let Some(last) = page.entries.last() else {
-                return Err("search reconcile made no progress".into());
-            };
-            from = last.ordinal + 1;
-            mark.reconcile = Some(from);
-        }
-        if mark.reconcile.is_some() {
-            return Ok(true);
-        }
-    }
-    let watermark = super::messages::watermark(conn, session)
+    let newest = mark.newest.as_ref().map_or(0, |cursor| cursor.ordinal);
+    let mut watermark = super::messages::watermark(conn, session)
         .map_err(|e| e.to_string())?
         .max(0) as u64;
-    // Verify the durable boundary on every new batch. After a crash there may
-    // be no revert event in memory: a changed/missing boundary id forces a
-    // replay from the start, so a replacement branch cannot leave stale rows.
-    let mut after = watermark.saturating_sub(1);
+    if watermark > newest {
+        mark.from = Some(mark.base.min(newest + 1));
+        return Ok(true);
+    }
+    // Setup and notices already supplied these compact entries. Compare only
+    // their changed range; no runner read is needed to reconcile this window.
+    if let Some(from) = mark.reconcile.take() {
+        let start = mark.entries.partition_point(|entry| entry.ordinal < from);
+        if let Err(error) =
+            super::messages::reconcile(conn, &key.harness, session, &mark.entries[start..])
+        {
+            mark.reconcile = Some(from);
+            return Err(error.to_string());
+        }
+    }
     for _ in 0..PAGES_PER_BATCH {
-        let request = ReadRequest::new(
-            Select::After {
-                after_ordinal: (after > 0).then_some(after),
-                limit: Some(PAGE_ENTRIES),
-            },
-            Detail::Compact,
-        )
-        .with_max_bytes(PAGE_BYTES);
-        let page = tokio::time::timeout(Duration::from_secs(10), client.read(key, request))
-            .await
-            .map_err(|_| "search read timed out".to_owned())?
-            .map_err(|e| e.to_string())?;
-        let newest = page.head.newest.as_ref().map_or(0, |c| c.ordinal);
-        if watermark > 0 && after < watermark {
-            let stored: Option<String> = conn.query_row("SELECT message_id FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2", params![session, watermark as i64], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
-            if page
-                .entries
-                .first()
-                .is_none_or(|e| e.ordinal != watermark || stored.as_deref() != Some(&e.mid))
-            {
-                truncate_chunk(conn, key, 1).map_err(|e| e.to_string())?;
-                return Ok(true);
-            }
-        }
-        if page.entries.is_empty() {
-            if newest == 0 {
-                return truncate_chunk(conn, key, 1)
-                    .map(|done| !done)
-                    .map_err(|e| e.to_string());
-            }
-            return Err("search read made no progress".into());
-        }
-        for (offset, entry) in page.entries.iter().enumerate() {
-            if entry.ordinal != after + 1 + offset as u64 {
-                return Err("search read contains an ordinal gap".into());
-            }
-        }
-        let last = page.entries.last().unwrap();
-        let complete = page.head.newest.as_ref().is_some_and(|c| {
-            c.ordinal == last.ordinal && c.mid == last.mid && c.digest == last.digest
-        });
-        super::messages::index(conn, &key.harness, session, &page.entries)
-            .map_err(|e| e.to_string())?;
-        if complete {
+        if watermark >= newest {
             return Ok(false);
         }
-        after = last.ordinal;
+        let next = watermark + 1;
+        let start = mark.entries.partition_point(|entry| entry.ordinal < next);
+        let cached = &mark.entries[start..];
+        if cached.first().is_some_and(|entry| entry.ordinal == next) {
+            let end = cached
+                .partition_point(|entry| entry.ordinal <= newest)
+                .min(PAGE_ENTRIES as usize);
+            super::messages::index(conn, &key.harness, session, &cached[..end])
+                .map_err(|e| e.to_string())?;
+        } else {
+            // Only a missing durable range can require older transcript I/O.
+            // Limit the read to that gap, stopping before the cached window.
+            let before_cached = cached.first().map_or(newest + 1, |entry| entry.ordinal);
+            let limit = PAGE_ENTRIES.min(before_cached.saturating_sub(next));
+            if limit == 0 {
+                return Err("search snapshot contains an ordinal gap".into());
+            }
+            let request = ReadRequest::new(
+                Select::After {
+                    after_ordinal: (watermark > 0).then_some(watermark),
+                    limit: Some(limit),
+                },
+                Detail::Compact,
+            )
+            .with_max_bytes(PAGE_BYTES);
+            let page = tokio::time::timeout(Duration::from_secs(10), client.read(key, request))
+                .await
+                .map_err(|_| "search gap read timed out".to_owned())?
+                .map_err(|e| e.to_string())?;
+            let actual_newest = page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal);
+            if actual_newest < newest {
+                mark.newest = page.head.newest;
+                mark.from = Some(mark.base.min(actual_newest + 1));
+                return Ok(true);
+            }
+            let entries: Vec<_> = page
+                .entries
+                .into_iter()
+                .take_while(|entry| entry.ordinal < before_cached && entry.ordinal <= newest)
+                .collect();
+            if entries.is_empty() {
+                return Err("search gap read made no progress".into());
+            }
+            for (offset, entry) in entries.iter().enumerate() {
+                if entry.ordinal != next + offset as u64 {
+                    return Err("search gap read contains an ordinal gap".into());
+                }
+            }
+            super::messages::index(conn, &key.harness, session, &entries)
+                .map_err(|e| e.to_string())?;
+        }
+        let updated = super::messages::watermark(conn, session)
+            .map_err(|e| e.to_string())?
+            .max(0) as u64;
+        if updated <= watermark {
+            return Err("search index made no progress".into());
+        }
+        watermark = updated;
     }
-    Ok(true)
+    Ok(watermark < newest)
 }
 
 /// Invalidation itself is bounded, not just subsequent inserts. The durable

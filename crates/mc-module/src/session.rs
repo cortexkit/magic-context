@@ -624,7 +624,11 @@ impl Session {
             self.index_ready = false;
             return;
         }
-        self.index_ready = self.sync(client, request.newest.as_ref()).await;
+        let force = !self.index_ready || !self.index.entries().is_empty();
+        let after = self.index.base().checked_sub(1).filter(|n| *n > 0);
+        self.index_ready = self
+            .read_until_from(client, request.newest.as_ref(), force, after)
+            .await;
         if !self.index_ready {
             return;
         }
@@ -765,8 +769,13 @@ impl Session {
                 .filter(|e| self.index.cursor().is_some_and(|c| e.ordinal <= c.ordinal))
                 .map(|e| e.ordinal)
         };
-        if let Some(from) = changed_from {
-            self.search_dirty_from = Some(self.search_dirty_from.map_or(from, |old| old.min(from)));
+        if let Some(from) = changed_from
+            .into_iter()
+            .chain(notice.entries.first().map(|entry| entry.ordinal))
+            .min()
+        {
+            self.search_reconcile_from =
+                Some(self.search_reconcile_from.map_or(from, |old| old.min(from)));
         }
         // No newest entry: the transcript is empty, and the read empties the
         // index.
@@ -3421,10 +3430,20 @@ impl Session {
         &mut self,
         client: &C,
         newest: Option<&Cursor>,
+        force: bool,
+    ) -> bool {
+        self.read_until_from(client, newest, force, self.index.read_after())
+            .await
+    }
+
+    async fn read_until_from<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        newest: Option<&Cursor>,
         mut force: bool,
+        mut after: Option<u64>,
     ) -> bool {
         let mut rebuilt = false;
-        let mut after = self.index.read_after();
         loop {
             if !std::mem::take(&mut force) && self.index.ends_at(newest) {
                 return true;
@@ -3515,11 +3534,13 @@ impl Session {
             newest: self.index.cursor(),
             from: self.search_dirty_from.take(),
             reconcile: self.search_reconcile_from.take(),
+            base: self.index.base(),
+            entries: self.index.snapshot(),
         }
     }
 
     pub(crate) fn search_enabled(&self) -> bool {
-        !self.suspended
+        !self.suspended && self.index_ready
     }
 
     fn forget_missing(&mut self) {

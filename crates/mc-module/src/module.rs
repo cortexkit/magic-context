@@ -466,6 +466,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .map(|search| search.session_guard(key));
             let mut session: Option<Session> = None;
             let mut saved: Option<crate::store::Durable> = None;
+            let mut retry_save = false;
             while let Some(job) = receiver.recv().await {
                 let settings: Settings = match (&job, &session) {
                     (Job::Idle(_), _) => Settings::default(),
@@ -639,10 +640,25 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let _ = reply.send(answer);
                     }
                     Job::Idle(reply) => {
+                        if retry_save {
+                            if let (Some(store), Some(session)) =
+                                (&inner.store, session.as_ref().filter(|s| s.compacting()))
+                            {
+                                let durable = session.durable();
+                                match store.save(session.key(), &durable) {
+                                    Ok(()) => {
+                                        saved = Some(durable);
+                                        retry_save = false;
+                                    }
+                                    Err(error) => tracing::warn!("ck-mc: {error}"),
+                                }
+                            }
+                        }
                         let _ = reply.send(());
                         // A barrier changes no session state. The preceding
-                        // job already persisted its changes before this one
-                        // was received, so avoid cloning/saving them again.
+                        // job already persisted its changes unless a failed
+                        // write above needs retrying. Successful barriers need
+                        // no extra snapshot or save.
                         continue;
                     }
                 }
@@ -663,8 +679,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     let durable = session.durable();
                     if saved.as_ref() != Some(&durable) {
                         match store.save(session.key(), &durable) {
-                            Ok(()) => saved = Some(durable),
-                            Err(error) => tracing::warn!("ck-mc: {error}"),
+                            Ok(()) => {
+                                saved = Some(durable);
+                                retry_save = false;
+                            }
+                            Err(error) => {
+                                retry_save = true;
+                                tracing::warn!("ck-mc: {error}");
+                            }
                         }
                     }
                 }

@@ -628,7 +628,7 @@ fn trial_recording(
         let background_cpu = cpu_us() - bg_start;
         let background_wall = bg_wall.elapsed().as_micros() as u64;
         assert_eq!(client.0.lock().unwrap().foreground_reads,foreground_reads,"a contiguous ordinary notice unexpectedly read a foreground gap");
-        assert_eq!(client.0.lock().unwrap().background_reads-background_reads,1,"one step must produce one separate bounded search batch");
+        assert_eq!(client.0.lock().unwrap().background_reads-background_reads,0,"a contiguous step must index shared entries without a runner read");
         let published = client.0.lock().unwrap().offered - offered;
         assert_eq!(published, usize::from(threshold), "wrong notice path");
         let views = client.0.lock().unwrap().views.clone();
