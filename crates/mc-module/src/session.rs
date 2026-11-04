@@ -48,6 +48,9 @@ pub struct Session {
     preset: crate::catalog::Preset,
     reminder_counter: u64,
     conditions: Conditions,
+    /// Whether this session already logged that its runner's conditions
+    /// leave out the prompt size while its steps report usage.
+    warned_no_prompt: bool,
     index: Index,
     scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
@@ -271,6 +274,7 @@ impl Session {
                 .unwrap_or(crate::catalog::Preset::Head),
             reminder_counter: 0,
             conditions: conditions_of(request),
+            warned_no_prompt: false,
             index: Index::default(),
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
@@ -647,6 +651,7 @@ impl Session {
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
+        self.warn_if_prompt_size_missing(&notice.entries);
         // What the runner says about the views it took comes first: a
         // rollback restores the state before the events below change it.
         let refused: Vec<u64> = notice
@@ -1508,6 +1513,26 @@ impl Session {
             } else if kind == crate::nudges::CEILING_KIND {
                 self.nudges.ceiling_sent = true;
             }
+        }
+    }
+
+    /// ck-mc measures usage only from the conditions' `last_prompt_tokens`.
+    /// A runner that leaves it out while its steps report usage keeps the
+    /// session below every threshold for good, so say so once per session.
+    fn warn_if_prompt_size_missing(&mut self, entries: &[cortexkit_role_compaction::read::Entry]) {
+        if self.warned_no_prompt || self.conditions.last_prompt_tokens.is_some() {
+            return;
+        }
+        let reported = entries
+            .iter()
+            .rev()
+            .find_map(|entry| entry.usage.as_ref().and_then(|usage| usage.prompt_tokens));
+        if let Some(prompt) = reported {
+            self.warned_no_prompt = true;
+            tracing::warn!(
+                "ck-mc: session {}: the runner's conditions carry no last_prompt_tokens, though its steps report usage ({prompt} prompt tokens); no threshold can be reached",
+                self.key.session
+            );
         }
     }
 
