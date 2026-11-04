@@ -132,6 +132,8 @@ struct RunnerState {
     added: Vec<Entry>,
     view: View,
     offered: usize,
+    views: Vec<View>,
+    record_views: bool,
 }
 
 #[derive(Clone)]
@@ -232,6 +234,9 @@ impl RunnerClient for Client {
         // model execution from the provider's process-CPU measurement.
         let mut state = self.0.lock().unwrap();
         assert!(request.view.version > state.view.version);
+        if state.record_views {
+            state.views.push(request.view.clone());
+        }
         state.view = request.view;
         state.offered += 1;
         Ok(ApplyViewAnswer::Accepted)
@@ -273,6 +278,8 @@ struct Fixture {
     view: View,
     cut: usize,
     shape: Shape,
+    shared_table: bool,
+    table_rows: usize,
 }
 
 impl Fixture {
@@ -281,6 +288,24 @@ impl Fixture {
     }
 
     fn create(shape: Shape, size: usize, moved: bool) -> Self {
+        Self::with_table(shape, size, moved, false)
+    }
+
+    fn with_table(shape: Shape, size: usize, moved: bool, shared_table: bool) -> Self {
+        Self::with_corpus(
+            shape,
+            size,
+            moved,
+            if shared_table {
+                150_000.max(size)
+            } else {
+                size
+            },
+        )
+    }
+
+    fn with_corpus(shape: Shape, size: usize, moved: bool, table_rows: usize) -> Self {
+        let shared_table = table_rows > size;
         let dir = tempfile::tempdir().unwrap();
         let key = SessionRef::new(shape.runner(), shape.harness(), "notice-cost");
         let cut = size - HELD;
@@ -296,6 +321,10 @@ impl Fixture {
             .collect();
         let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
         db.with_connection(|conn| {
+            // Fixture construction is outside every sample. Avoid thousands
+            // of durability syncs while seeding disposable archive rows, then
+            // restore SQLite's normal FULL setting before any measured work.
+            conn.pragma_update(None,"synchronous","OFF").unwrap();
             let tx = conn.transaction().unwrap();
             for (sequence, start) in (1..=cut).step_by(500).enumerate() {
                 let end = (start + 499).min(cut);
@@ -317,6 +346,13 @@ impl Fixture {
             tx.commit().unwrap();
             // A long-running head already indexed its archived transcript.
             mc_module::search::messages::index(conn, &key.harness, &key.session, &entries).unwrap();
+            if table_rows > size {
+                let other: Vec<_> = (1..=table_rows - size)
+                    .map(|n| cycle(shape, n as u64, n - 1))
+                    .collect();
+                mc_module::search::messages::index(conn, &key.harness, "other-session", &other).unwrap();
+            }
+            conn.pragma_update(None,"synchronous","FULL").unwrap();
         });
         let store = Store::open(&dir.path().join("mode3.db")).unwrap();
         let settings = Settings::default();
@@ -392,6 +428,8 @@ impl Fixture {
             view,
             cut,
             shape,
+            shared_table,
+            table_rows,
         }
     }
 
@@ -437,7 +475,7 @@ fn cpu_us() -> u64 {
 }
 
 async fn drain(module: &Module<Client>, key: &SessionRef) {
-    module.idle(key).await.unwrap();
+    module.idle_foreground(key).await.unwrap();
     // idle drains the session worker; this FIFO read additionally drains its
     // independent app projection. Its small metadata read is included in CPU.
     let meta = module
@@ -464,7 +502,15 @@ async fn notice(module: &Module<Client>, key: &SessionRef, request: NoticeReques
     drain(module, key).await;
 }
 
-fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64) {
+fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64, Value) {
+    trial_recording(fixture, threshold, false)
+}
+
+fn trial_recording(
+    fixture: &Fixture,
+    threshold: bool,
+    record_views: bool,
+) -> (u64, u64, Vec<u64>, u64, Value) {
     fixture.reset();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -476,6 +522,8 @@ fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64) {
             added: vec![],
             view: fixture.view.clone(),
             offered: 0,
+            views: Vec::new(),
+            record_views,
         })));
         let route = Route {
             session: fixture.key.clone(),
@@ -495,6 +543,7 @@ fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64) {
         );
         module.setup(route.clone(), setup).unwrap();
         drain(&module, &fixture.key).await;
+        module.search_idle(&fixture.key).await.unwrap();
         let setup_cpu = cpu_us() - before;
         let mut warm = Vec::new();
         for seq in 1..=WARM_STEPS {
@@ -503,6 +552,7 @@ fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64) {
             let before = cpu_us();
             notice(&module, &fixture.key, request).await;
             warm.push(cpu_us() - before);
+            module.search_idle(&fixture.key).await.unwrap();
         }
         let candidate = fixture.entries[fixture.cut + 1].parts[0].tag.unwrap();
         module
@@ -510,17 +560,40 @@ fn trial(fixture: &Fixture, threshold: bool) -> (u64, u64, Vec<u64>, u64) {
             .await
             .unwrap();
         drain(&module, &fixture.key).await;
+        module.search_idle(&fixture.key).await.unwrap();
         let entries = client.step(fixture.shape);
         let request = request(&client, WARM_STEPS + 1, entries, threshold);
         let offered = client.0.lock().unwrap().offered;
+        #[cfg(feature = "notice-cost-timing")]
+        module.pause_search_measurement(true);
+        #[cfg(feature = "notice-cost-timing")]
+        if std::env::var_os("NOTICE_COST_STAGES").is_some() {
+            mc_module::notice_cost_timing::begin();
+        }
         let wall = Instant::now();
         let before = cpu_us();
         notice(&module, &fixture.key, request).await;
         let cpu = cpu_us() - before;
         let wall = wall.elapsed().as_micros() as u64;
+        #[cfg(feature = "notice-cost-timing")]
+        let stages = serde_json::to_value(mc_module::notice_cost_timing::take()).unwrap();
+        #[cfg(not(feature = "notice-cost-timing"))]
+        let stages = Value::Null;
+        let bg_start = cpu_us();
+        #[cfg(feature = "notice-cost-timing")]
+        module.pause_search_measurement(false);
+        module.search_idle(&fixture.key).await.unwrap();
+        let background_cpu = cpu_us() - bg_start;
         let published = client.0.lock().unwrap().offered - offered;
         assert_eq!(published, usize::from(threshold), "wrong notice path");
-        (cpu, wall, warm, setup_cpu)
+        let views = client.0.lock().unwrap().views.clone();
+        (
+            cpu,
+            wall,
+            warm,
+            setup_cpu,
+            json!({"stages":stages,"views":views,"background_cpu_us":background_cpu}),
+        )
     })
 }
 
@@ -540,7 +613,7 @@ fn notice_cost_fixture_paths() {
     ] {
         let fixture = Fixture::create(shape, 1_000, moved);
         for threshold in [false, true] {
-            let (cpu, _, warm, _) = trial(&fixture, threshold);
+            let (cpu, _, warm, _, _) = trial(&fixture, threshold);
             assert!(cpu > 0);
             assert_eq!(warm.len(), WARM_STEPS as usize);
         }
@@ -560,6 +633,30 @@ fn notice_cost() {
         "run this measurement with --release"
     );
     let mut rows = Vec::new();
+    for shape in [Shape::Pi, Shape::OpenCode2] {
+        for size in [1_000, 150_000, 500_000] {
+            let started = Instant::now();
+            let fixture = Fixture::with_corpus(shape, size, false, 500_000);
+            println!(
+                "NOTICE_COST_SETUP shape={} size={size} table_rows=500000 wall_ms={}",
+                shape.harness(),
+                started.elapsed().as_millis()
+            );
+            for threshold in [false, true] {
+                rows.push(measure(&fixture, threshold, false));
+            }
+        }
+    }
+    let moved = Fixture::with_corpus(Shape::Pi, 150_000, true, 500_000);
+    for threshold in [false, true] {
+        rows.push(measure(&moved, threshold, true));
+    }
+    for shape in [Shape::Pi, Shape::OpenCode2] {
+        let fixture = Fixture::with_table(shape, 1_000, false, true);
+        for threshold in [false, true] {
+            rows.push(measure(&fixture, threshold, false));
+        }
+    }
     for shape in [Shape::Pi, Shape::OpenCode2] {
         // Paired sizes run back to back in this one process/job, not on
         // separately scheduled hosts. Each trial restores the same durable
@@ -582,24 +679,238 @@ fn notice_cost() {
 }
 
 fn measure(fixture: &Fixture, threshold: bool, moved: bool) -> Value {
+    measure_count(
+        fixture,
+        threshold,
+        moved,
+        if fixture.entries.len() >= 500_000 {
+            50
+        } else {
+            TRIALS
+        },
+    )
+}
+
+fn measure_count(fixture: &Fixture, threshold: bool, moved: bool, trials: usize) -> Value {
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
     let mut warm = Vec::new();
     let mut setup = Vec::new();
-    for _ in 0..TRIALS {
-        let (c, w, ws, s) = trial(fixture, threshold);
+    let mut stages = Vec::new();
+    let mut background = Vec::new();
+    for _ in 0..trials {
+        let (c, w, ws, s, details) = trial(fixture, threshold);
         cpu.push(c);
         wall.push(w);
         warm.extend(ws);
         setup.push(s);
+        background.push(details["background_cpu_us"].as_u64().unwrap());
+        if !details["stages"].is_null() {
+            stages.push(details["stages"].clone());
+        }
     }
     let row = json!({"shape":fixture.shape.harness(),"size":fixture.entries.len(),"moved":moved,
         "path":if threshold {"build_publish"} else {"quiet"},"held_before_warmup":HELD+1,
+        "shared_table":fixture.shared_table,"table_rows":fixture.table_rows,"stages":stages,
+        "background_cpu_us":stats(&background),"background_steps_cpu_us":background,
         "cpu_us":stats(&cpu),"wall_us":stats(&wall),"setup_cpu_us":stats(&setup),
         "warmup_cpu_us":stats(&warm),"warmup_steps_per_trial":WARM_STEPS,
         "steps_cpu_us":cpu,"steps_wall_us":wall,"warmup_steps_cpu_us":warm,"setup_steps_cpu_us":setup});
     println!("NOTICE_COST_ROW {row}");
     row
+}
+
+#[test]
+#[ignore = "opt-in stage attribution with notice-cost-timing enabled"]
+#[cfg(feature = "notice-cost-timing")]
+fn notice_cost_stages() {
+    let trials = std::env::var("NOTICE_COST_STAGE_TRIALS")
+        .map_or(50, |v| v.parse().expect("stage trial count"));
+    for (size, shared) in [(1_000, true), (150_000, true), (1_000, false)] {
+        let fixture = Fixture::with_table(Shape::Pi, size, false, shared);
+        measure_count(&fixture, true, false, trials);
+    }
+}
+
+#[test]
+#[ignore = "compare serialized views against an explicit pre-change reference file"]
+fn notice_cost_view_bytes() {
+    let path = std::env::var_os("NOTICE_COST_VIEW_REFERENCE").map(PathBuf::from);
+    let golden: Value = serde_json::from_str(include_str!(
+        "../benches/fixtures/notice-cost-legacy-views.json"
+    ))
+    .unwrap();
+    let mut views = Vec::new();
+    for shape in [Shape::Pi, Shape::OpenCode2] {
+        for (size, shared, moved) in [
+            (1_000, false, false),
+            (150_000, false, false),
+            (1_000, true, false),
+            (150_000, false, true),
+        ] {
+            let fixture = Fixture::with_table(shape, size, moved, shared);
+            for threshold in [false, true] {
+                let (_, _, _, _, details) = trial_recording(&fixture, threshold, true);
+                let bytes = serde_json::to_vec(&details["views"]).unwrap();
+                if path.is_none() {
+                    let key = if !threshold {
+                        "quiet"
+                    } else if size == 1_000 {
+                        "small"
+                    } else {
+                        "large"
+                    };
+                    assert_eq!(
+                        bytes,
+                        golden[key].as_str().unwrap().as_bytes(),
+                        "pre-fix view bytes changed: {shape:?}/{size}/{shared}/{moved}/{threshold}"
+                    );
+                }
+                views.push(bytes);
+            }
+        }
+    }
+    if std::env::var_os("NOTICE_COST_WRITE_REFERENCE").is_some() {
+        std::fs::write(
+            path.expect("reference output path"),
+            serde_json::to_vec(&views).unwrap(),
+        )
+        .unwrap();
+        println!("Wrote pre-change reference: {} byte arrays", views.len());
+    } else if let Some(path) = path {
+        let before: Vec<Vec<u8>> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(before.len(), views.len());
+        for (index, (before, after)) in before.iter().zip(&views).enumerate() {
+            assert_eq!(before, after, "view bytes changed at fixture/path {index}");
+        }
+        println!("All {} view byte arrays match the pre-change executable, including edit order, versions and checksums", views.len());
+    } else {
+        println!(
+            "All {} view byte arrays exactly match the committed pre-fix executable fixture",
+            views.len()
+        );
+    }
+}
+
+#[test]
+#[ignore = "migrate only an explicitly supplied offline store copy"]
+fn notice_cost_live_migration() {
+    let path = PathBuf::from(
+        std::env::var_os("NOTICE_COST_MIGRATION_COPY")
+            .expect("supply an offline SQLite backup copy"),
+    );
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        version, 3,
+        "this proof starts at the deployed version-three store"
+    );
+    let rows = {
+        let mut statement = connection
+            .prepare(
+                "SELECT runner,harness,session,state FROM sessions ORDER BY runner,harness,session",
+            )
+            .unwrap();
+        statement
+            .query_map([], |r| {
+                Ok((
+                    SessionRef::new(
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ),
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before: Vec<(SessionRef, Durable)> = rows
+        .iter()
+        .map(|(k, s)| (k.clone(), serde_json::from_str(s).unwrap()))
+        .collect();
+    drop(connection);
+    let store = Store::open(&path).unwrap();
+    for (index, (key, state)) in before.iter().enumerate() {
+        assert_eq!(
+            store.load(key).as_ref(),
+            Some(state),
+            "decoded state differs at offline-copy session {index}"
+        );
+        println!("offline-copy session row {index}: decoded equality PASS, baseline={}, pending_views={}",state.baseline.is_some(),state.unconfirmed.len());
+    }
+    println!(
+        "Migrated offline copy 3 -> 4: {}/{} session Durable values exactly equal",
+        before.len(),
+        before.len()
+    );
+}
+
+#[test]
+#[ignore = "diagnose index commit tails, not an admission run or a production setting"]
+#[cfg(feature = "notice-cost-timing")]
+fn notice_cost_index_tail() {
+    fn structure(conn: &Connection) -> Vec<u64> {
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT block FROM message_history_fts_data WHERE id=10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut cursor = 4;
+        let mut values = Vec::new();
+        while cursor < bytes.len() {
+            let mut value = 0u64;
+            for shift in 0..9 {
+                let byte = bytes[cursor];
+                cursor += 1;
+                if shift == 8 {
+                    value = (value << 8) | u64::from(byte);
+                    break;
+                }
+                value = (value << 7) | u64::from(byte & 127);
+                if byte & 128 == 0 {
+                    break;
+                }
+            }
+            values.push(value);
+        }
+        values
+    }
+    for size in [1_000, 150_000] {
+        for suppress_merges in [false, true] {
+            let fixture = Fixture::with_table(Shape::Pi, size, false, true);
+            let db = ContextDb::open(&fixture.path("context.db")).unwrap();
+            let mut rows = Vec::new();
+            db.with_connection(|conn| {
+                let mode:String=conn.pragma_query_value(None,"journal_mode",|r|r.get(0)).unwrap();
+                if suppress_merges {
+                    // A diagnostic intervention only: compare the unchanged
+                    // index function with FTS merge work deferred beyond this
+                    // short probe. No production connection uses these values.
+                    conn.execute_batch("INSERT INTO message_history_fts(message_history_fts,rank) VALUES('automerge',0); INSERT INTO message_history_fts(message_history_fts,rank) VALUES('crisismerge',1000000);").unwrap();
+                }
+                let pending=vec![fixture.entries.last().unwrap().clone(),assistant(size as u64+1,2_048),entry(size as u64+2,Role::User,vec![])];
+                for step in 0..203 {
+                    mc_module::search::messages::forget_from(conn,&fixture.key.harness,&fixture.key.session,size as u64+1).unwrap();
+                    let before=structure(conn);
+                    mc_module::notice_cost_timing::begin();
+                    let start=cpu_us();
+                    mc_module::search::messages::index(conn,&fixture.key.harness,&fixture.key.session,&pending).unwrap();
+                    let cpu=cpu_us()-start;
+                    let stages=mc_module::notice_cost_timing::take();
+                    let after=structure(conn);
+                    if step>=3 { rows.push(json!({"step":step-3,"cpu_us":cpu,"before":before,"after":after,"stages":stages})); }
+                }
+                let cpus:Vec<_>=rows.iter().map(|r|r["cpu_us"].as_u64().unwrap()).collect();
+                println!("NOTICE_COST_TAIL {}",json!({"size":size,"table_rows":150000,"journal_mode":mode,"diagnostic_merges_suppressed":suppress_merges,"cpu_us":stats(&cpus),"steps":rows}));
+            });
+        }
+    }
 }
 
 /// Focused CPU attribution after a size ratio fails, without changing any

@@ -17,6 +17,103 @@ use cortexkit_compaction_view::render::{self as view, edits_for_transcript};
 use cortexkit_compaction_view::rules;
 use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 
+/// Positive certificates for inserted payloads. The full planner still checks
+/// IDs, anchors, conflicts, cuts and transcript targets on every build; only
+/// immutable text/image validation is reused after an exact payload match.
+#[derive(Default)]
+pub(crate) struct ValidationCache {
+    inserts: Vec<EditOp>,
+}
+
+impl ValidationCache {
+    pub(crate) fn prime(&mut self, entries: &[Entry], view: &View) {
+        self.inserts = view
+            .edits
+            .iter()
+            .filter(|e| matches!(e.op, EditOp::Insert { .. }))
+            .filter(|e| view::plan(entries, std::slice::from_ref(e)).is_ok())
+            .map(|e| e.op.clone())
+            .collect();
+    }
+
+    fn check(&mut self, entries: &[Entry], edits: &[Edit]) -> Result<(), ViewRefusal> {
+        #[cfg(all(feature = "notice-cost-timing", target_os = "linux"))]
+        {
+            crate::notice_cost_timing::observe("view.held_entries", entries.len() as u64);
+            crate::notice_cost_timing::observe("view.edit_count", edits.len() as u64);
+            crate::notice_cost_timing::observe(
+                "view.max_text_bytes",
+                entries
+                    .iter()
+                    .flat_map(|e| &e.parts)
+                    .filter_map(|p| match &p.body {
+                        cortexkit_role_compaction::part::PartBody::Text { text } => {
+                            Some(text.len() as u64)
+                        }
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0),
+            );
+        }
+        let mut bounded = edits.to_vec();
+        for edit in &mut bounded {
+            if self.inserts.contains(&edit.op) {
+                let _timing = crate::notice_cost_timing::span("view.cached_payload");
+                if let EditOp::Insert { message, .. } = &mut edit.op {
+                    message.texts.clear();
+                    message.images.clear();
+                }
+            } else if matches!(edit.op, EditOp::Insert { .. }) {
+                let _timing = crate::notice_cost_timing::span("view.new_payload");
+            }
+        }
+        let targets: HashSet<&str> = edits
+            .iter()
+            .filter_map(|e| match &e.op {
+                EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } => Some(mid.as_str()),
+                EditOp::Cut { through } => Some(through.as_str()),
+                EditOp::Insert {
+                    at: cortexkit_role_compaction::view::InsertAt::Before(mid),
+                    ..
+                } => Some(mid.as_str()),
+                _ => None,
+            })
+            .collect();
+        let cut = edits
+            .iter()
+            .filter_map(|e| match &e.op {
+                EditOp::Cut { through } => entries
+                    .iter()
+                    .find(|e| &e.mid == through)
+                    .map(|e| e.ordinal),
+                _ => None,
+            })
+            .max();
+        // Planning renders every untouched part and hashes its cloned body,
+        // even though this provider discards the plan. Structural validation
+        // only needs named targets/anchors and the entire cut prefix (running
+        // calls there veto a cut). All edits remain, preserving duplicate-ID
+        // and cross-edit checks. Provider signed-part rules still see the full
+        // transcript below, independently of this structural projection.
+        let touched: Vec<_> = entries
+            .iter()
+            .filter(|e| targets.contains(e.mid.as_str()) || cut.is_some_and(|cut| e.ordinal <= cut))
+            .cloned()
+            .collect();
+        {
+            let _timing = crate::notice_cost_timing::span("view.bounded_plan");
+            view::plan(&touched, &bounded)?;
+        }
+        self.inserts = edits
+            .iter()
+            .filter(|e| matches!(e.op, EditOp::Insert { .. }))
+            .map(|e| e.op.clone())
+            .collect();
+        Ok(())
+    }
+}
+
 /// The next view, or `None` when it would change nothing: no new edit, and
 /// nothing of the previous view left out. Carried edits for which `retire`
 /// holds are left out, such as a history head with no summaries left to show.
@@ -28,6 +125,27 @@ pub fn next_view(
     version: u64,
     retire: impl Fn(&EditOp) -> bool,
 ) -> Result<Option<View>, ViewRefusal> {
+    next_view_cached(
+        previous,
+        entries,
+        new_ops,
+        rules,
+        version,
+        retire,
+        &mut ValidationCache::default(),
+    )
+}
+
+pub(crate) fn next_view_cached(
+    previous: Option<&View>,
+    entries: &[Entry],
+    new_ops: Vec<EditOp>,
+    rules: &ProviderRules,
+    version: u64,
+    retire: impl Fn(&EditOp) -> bool,
+    validation: &mut ValidationCache,
+) -> Result<Option<View>, ViewRefusal> {
+    let _timing = crate::notice_cost_timing::span("view.next");
     let previous_edits = previous
         .map(|view| view.edits.as_slice())
         .unwrap_or_default();
@@ -138,9 +256,22 @@ pub fn next_view(
         }));
     }
     let view = View::seal(version, edits);
-    view::check_carried(previous, &view)?;
-    view::apply(entries, &view)?;
-    rules::check(entries, &view.edits, rules).map_err(ViewRefusal::Rule)?;
+    let _timing = crate::notice_cost_timing::span("view.check");
+    {
+        let _timing = crate::notice_cost_timing::span("view.check_carried");
+        view::check_carried(previous, &view)?;
+    }
+    {
+        let _timing = crate::notice_cost_timing::span("view.plan");
+        // The view was sealed immediately above. Planning performs every edit
+        // and transcript check that apply performs, without constructing and
+        // hashing rendered message parts that this provider would discard.
+        validation.check(entries, &view.edits)?;
+    }
+    {
+        let _timing = crate::notice_cost_timing::span("view.rules");
+        rules::check(entries, &view.edits, rules).map_err(ViewRefusal::Rule)?;
+    }
     Ok(Some(view))
 }
 
@@ -246,5 +377,124 @@ mod tests {
             next_view(None, &[entry], vec![drop], &rules, 1, |_| false),
             Ok(Some(_))
         ));
+    }
+    #[test]
+    fn cached_insert_checks_match_full_apply_on_valid_and_invalid_views() {
+        use cortexkit_role_compaction::read::Role;
+        use cortexkit_role_compaction::view::{InsertAt, InsertedMessage};
+        let mut entries = vec![Entry::new(1, "m1", Role::User, 0, vec![])];
+        entries.push(Entry::new(
+            2,
+            "m2",
+            Role::Assistant,
+            0,
+            vec![Part::new(
+                "p2",
+                PartBody::Tool(cortexkit_role_compaction::part::ToolPart::new(
+                    "call",
+                    "read",
+                    json!({"path":"a.rs"}),
+                    cortexkit_role_compaction::part::ToolStatus::Running,
+                )),
+            )],
+        ));
+        entries.push(Entry::new(
+            3,
+            "m3",
+            Role::User,
+            0,
+            vec![Part::new(
+                "p3",
+                PartBody::Text {
+                    text: "original reference §9§".into(),
+                },
+            )
+            .with_tag(3)],
+        ));
+        let head = Edit::new(
+            1,
+            EditOp::Insert {
+                at: InsertAt::Start,
+                message: InsertedMessage::new(
+                    "head",
+                    Role::User,
+                    vec!["unchanged history ".repeat(12_000)],
+                ),
+            },
+        );
+        let before = View::seal(1, vec![head.clone()]);
+        let mut cache = ValidationCache::default();
+        cache.prime(&entries, &before);
+        let mut cases = vec![vec![head.clone()], vec![head.clone(), head.clone()]];
+        for (at, text, role) in [
+            (InsertAt::Start, "a new valid head", Role::User),
+            (InsertAt::Start, "invalid §99§ inserted tag", Role::User),
+            (
+                InsertAt::Before("missing".into()),
+                "unknown anchor",
+                Role::User,
+            ),
+            (
+                InsertAt::Start,
+                "unknown role",
+                Role::Unknown("new-role".into()),
+            ),
+        ] {
+            cases.push(vec![
+                head.clone(),
+                Edit::new(
+                    2,
+                    EditOp::Insert {
+                        at,
+                        message: InsertedMessage::new("delta", role, vec![text.into()]),
+                    },
+                ),
+            ]);
+        }
+        cases.push(vec![
+            head,
+            Edit::new(
+                2,
+                EditOp::Drop {
+                    mid: "missing".into(),
+                    part: None,
+                },
+            ),
+        ]);
+        for op in [
+            EditOp::Cut {
+                through: "m1".into(),
+            },
+            EditOp::Cut {
+                through: "m2".into(),
+            },
+            EditOp::Drop {
+                mid: "m2".into(),
+                part: Some("p2".into()),
+            },
+            EditOp::Replace {
+                mid: "m3".into(),
+                part: "p3".into(),
+                field: "text".into(),
+                value: json!("own §3§ and original §9§"),
+                expect: entries[2].parts[0].digest.clone(),
+            },
+            EditOp::Replace {
+                mid: "m3".into(),
+                part: "p3".into(),
+                field: "text".into(),
+                value: json!("foreign §7§"),
+                expect: entries[2].parts[0].digest.clone(),
+            },
+        ] {
+            cases.push(vec![Edit::new(2, op)]);
+        }
+        for edits in cases {
+            let view = View::seal(2, edits);
+            assert_eq!(
+                cache.check(&entries, &view.edits),
+                view::apply(&entries, &view).map(|_| ())
+            );
+        }
     }
 }

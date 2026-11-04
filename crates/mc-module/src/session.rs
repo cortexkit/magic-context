@@ -36,7 +36,6 @@ use crate::view_builder;
 /// How many bytes one catch-up read asks for at most.
 const READ_PAGE_BYTES: u64 = 1 << 20;
 /// Pages of old messages one pass reads to fill a search index gap.
-const SEARCH_GAP_PAGES: usize = 4;
 
 pub struct Session {
     app: crate::app_read::SessionState,
@@ -64,6 +63,8 @@ pub struct Session {
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
     ),
     index: Index,
+    view_validation: crate::view_builder::ValidationCache,
+    search_dirty_from: Option<u64>,
     scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
@@ -213,6 +214,7 @@ pub struct Session {
 /// the baseline, the caveman levels and the cut.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Unconfirmed {
+    #[serde(serialize_with = "crate::store_text::view")]
     pub view: View,
     /// The queued drops the view carried.
     covered: Vec<lanes::PartKey>,
@@ -224,6 +226,7 @@ pub struct Unconfirmed {
 struct Before {
     #[serde(default)]
     head_stale: bool,
+    #[serde(serialize_with = "crate::store_text::optional_view")]
     latest: Option<View>,
     queued: BTreeSet<lanes::PartKey>,
     refused_once: BTreeSet<lanes::PartKey>,
@@ -293,6 +296,8 @@ impl Session {
                 "default",
             ),
             index: Index::default(),
+            view_validation: Default::default(),
+            search_dirty_from: None,
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
             suspended: false,
@@ -440,6 +445,7 @@ impl Session {
 
     /// What must survive a restart.
     pub fn durable(&self) -> crate::store::Durable {
+        let _timing = crate::notice_cost_timing::span("session.durable");
         crate::store::Durable {
             app: self.app.clone(),
             compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
@@ -625,6 +631,9 @@ impl Session {
         if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
         }
+        if let Some(view) = &self.latest {
+            self.view_validation.prime(self.index.entries(), view);
+        }
         if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
@@ -691,6 +700,10 @@ impl Session {
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
+                    self.search_dirty_from = Some(
+                        self.search_dirty_from
+                            .map_or(*from_ordinal, |old| old.min(*from_ordinal)),
+                    );
                     if !self.reconcile_summaries(client, *from_ordinal, true).await {
                         self.index_ready = false;
                         return None;
@@ -716,21 +729,6 @@ impl Session {
                         self.cut = self.summarized_through();
                         self.index = Index::starting_at(self.cut.unwrap_or(1));
                     }
-                    if let Some(db) = &self.db {
-                        let (harness, session) = (&self.key.harness, &self.key.session);
-                        if let Err(error) = db.with_connection(|conn| {
-                            crate::search::messages::forget_from(
-                                conn,
-                                harness,
-                                session,
-                                *from_ordinal,
-                            )
-                        }) {
-                            tracing::warn!(
-                                "ck-mc: session {session}: search index revert failed: {error}"
-                            );
-                        }
-                    }
                 }
                 Event::ViewRefused { .. } => {}
                 Event::MarkerWritten { .. } => {}
@@ -750,6 +748,18 @@ impl Session {
         // then a change to an older message is not in it either: read from
         // the oldest entry that may have changed.
         let omitted = notice.entries.is_empty();
+        let changed_from = if omitted {
+            self.index.changeable_from()
+        } else {
+            notice
+                .entries
+                .first()
+                .filter(|e| self.index.cursor().is_some_and(|c| e.ordinal <= c.ordinal))
+                .map(|e| e.ordinal)
+        };
+        if let Some(from) = changed_from {
+            self.search_dirty_from = Some(self.search_dirty_from.map_or(from, |old| old.min(from)));
+        }
         // No newest entry: the transcript is empty, and the read empties the
         // index.
         let extended = self
@@ -797,8 +807,6 @@ impl Session {
             self.adopt_runner_view(client).await;
         }
         self.forget_missing();
-        self.fill_search_gap(client).await;
-        self.update_search_index();
         if !pass::in_force_band(&self.conditions, settings) {
             self.emergency_latched = false;
         }
@@ -830,6 +838,7 @@ impl Session {
     /// One permission for the history refresh and every mutation lane. Summary
     /// admission runs first, so a run started here also holds the queued work.
     fn decide_notice(&mut self, settings: &Settings) -> NoticePass {
+        let _timing = crate::notice_cost_timing::span("notice.decision");
         let summary = self.summary_due(settings);
         let hold = pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings);
         // A fold for a settings or window change waits out a heavy-thinking
@@ -1261,21 +1270,10 @@ impl Session {
             self.cut = self.summarized_through();
             self.index = Index::starting_at(self.cut.unwrap_or(1));
         }
-        if let Some(db) = &self.db {
-            if let Err(error) = db.with_connection(|conn| {
-                crate::search::messages::forget_from(
-                    conn,
-                    &self.key.harness,
-                    &self.key.session,
-                    ordinal,
-                )
-            }) {
-                tracing::warn!(
-                    "ck-mc: session {}: search index revert failed: {error}",
-                    self.key.session
-                );
-            }
-        }
+        self.search_dirty_from = Some(
+            self.search_dirty_from
+                .map_or(ordinal, |old| old.min(ordinal)),
+        );
     }
 
     /// The id of the last message a summary covers.
@@ -2198,6 +2196,7 @@ impl Session {
     /// is still in the transcript. Only presets with a summarizer have a
     /// head. A due fold renders `m[0]` again from everything current.
     fn history_ops(&mut self, settings: &Settings) -> (Vec<EditOp>, Option<u64>) {
+        let _timing = crate::notice_cost_timing::span("build.history_ops");
         if !self.features.summarizer {
             return (Vec::new(), None);
         }
@@ -2261,6 +2260,7 @@ impl Session {
     /// it: an empty read would otherwise state every shown memory as removed,
     /// and the next good read as updated again.
     fn render_head(&mut self, settings: &Settings) -> Vec<EditOp> {
+        let _timing = crate::notice_cost_timing::span("head.render");
         let docs = self
             .project
             .as_ref()
@@ -2675,6 +2675,7 @@ impl Session {
         cache_lost: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
+        let _timing = crate::notice_cost_timing::span("build.total");
         if !self.index_ready {
             return (None, 0);
         }
@@ -2705,6 +2706,7 @@ impl Session {
         }
         .into();
         let (history, cut) = self.history_ops(settings);
+        let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
             index: &self.index,
@@ -2895,22 +2897,25 @@ impl Session {
             history
         };
         ops.extend(history);
+        drop(lanes_timing);
         (self.seal(ops, &covered), freed)
     }
 
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
     fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+        let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
         let retire = retired_history(self.summaries.is_empty(), &ops);
         let full = self.with_replaced_outputs(&ops);
-        let built = view_builder::next_view(
+        let built = view_builder::next_view_cached(
             self.latest.as_ref(),
             full.as_deref().unwrap_or(self.index.entries()),
             ops,
             &self.conditions.rules,
             version,
             retire,
+            &mut self.view_validation,
         );
         match built {
             Ok(Some(view)) => {
@@ -2957,6 +2962,7 @@ impl Session {
     /// not sent, the runner keeps the view it has, and the queued drops it
     /// carried are forgotten, as for any view that fails ck-mc's own checks.
     fn refuse_oversized(&mut self, view: &View) -> bool {
+        let _timing = crate::notice_cost_timing::span("publish.size_check");
         let size = serde_json::to_vec(view).map_or(usize::MAX, |bytes| bytes.len());
         if size <= MAX_VIEW_BYTES {
             return false;
@@ -3137,6 +3143,7 @@ impl Session {
     }
 
     fn accept(&mut self, view: View) {
+        let _timing = crate::notice_cost_timing::span("publish.accept");
         self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
         let before = Before {
@@ -3487,93 +3494,13 @@ impl Session {
         *after = self.index.read_after();
     }
 
-    /// Index the messages between the shared search index's end and the
-    /// oldest message ck-mc holds, read from the runner. The index only
-    /// grows over contiguous messages, so without this a gap below the held
-    /// window would leave every later message unsearchable too. A gap
-    /// appears after a move-in, when the standalone plugin's index stopped
-    /// short of the cut, or when ck-mc first starts on a session after its
-    /// cut. Reads at most a few pages per pass; the next pass goes on.
-    async fn fill_search_gap<C: RunnerClient>(&self, client: &C) {
-        let Some(db) = &self.db else {
-            return;
-        };
-        let Some(first) = self.index.entries().first().map(|entry| entry.ordinal) else {
-            return;
-        };
-        let session = &self.key.session;
-        let mark =
-            match db.with_connection(|conn| crate::search::messages::watermark(conn, session)) {
-                Ok(mark) => mark.max(0) as u64,
-                Err(error) => {
-                    tracing::warn!("ck-mc: session {session}: search index unreadable: {error}");
-                    return;
-                }
-            };
-        if mark + 1 >= first {
-            return;
-        }
-        let mut after = (mark > 0).then_some(mark);
-        for _ in 0..SEARCH_GAP_PAGES {
-            let request = ReadRequest::new(
-                Select::After {
-                    after_ordinal: after,
-                    limit: None,
-                },
-                Detail::Compact,
-            )
-            .with_max_bytes(READ_PAGE_BYTES);
-            let page = match client.read(&self.key, request).await {
-                Ok(page) => page,
-                Err(error) => {
-                    tracing::info!(
-                        "ck-mc: session {session}: search gap from message {} not read: {}",
-                        mark + 1,
-                        error.message
-                    );
-                    return;
-                }
-            };
-            let entries: Vec<_> = page
-                .entries
-                .into_iter()
-                .filter(|entry| entry.ordinal < first)
-                .collect();
-            let Some(last) = entries.last().map(|entry| entry.ordinal) else {
-                return;
-            };
-            if let Err(error) = db.with_connection(|conn| {
-                crate::search::messages::index(conn, &self.key.harness, session, &entries)
-            }) {
-                tracing::warn!("ck-mc: session {session}: search indexing failed: {error}");
-                return;
-            }
-            if last + 1 >= first {
-                tracing::info!(
-                    "ck-mc: session {session}: search index filled messages {}..{last}",
-                    mark + 1
-                );
-                return;
-            }
-            match page.next_after {
-                Some(next) => after = Some(next),
-                None => return,
-            }
-        }
-    }
-
-    /// Drop held work for parts that are no longer in the transcript.
-    /// Add the session's new messages to the shared search index.
-    fn update_search_index(&self) {
-        let Some(db) = &self.db else {
-            return;
-        };
-        let (harness, session) = (&self.key.harness, &self.key.session);
-        let entries = self.index.entries();
-        if let Err(error) = db
-            .with_connection(|conn| crate::search::messages::index(conn, harness, session, entries))
-        {
-            tracing::warn!("ck-mc: session {session}: search indexing failed: {error}");
+    /// Record work for the independent search indexer. Its durable watermark
+    /// handles ordinary catch-up; the earliest replacement ordinal invalidates
+    /// rows from an undone branch before the background reader continues.
+    pub(crate) fn search_mark(&mut self) -> crate::search::background::Mark {
+        crate::search::background::Mark {
+            newest: self.index.cursor(),
+            from: self.search_dirty_from.take(),
         }
     }
 

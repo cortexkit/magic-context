@@ -613,13 +613,22 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
     let dir = scratch("search-revert");
     with_summary(&mut session, &dir, "removed");
     session.index.extend(vec![text(1, "a"), text(2, "removed")]);
-    session.update_search_index();
+    session.db.as_ref().unwrap().with_connection(|conn| {
+        crate::search::messages::index(conn, "mock", "s1", session.index.entries()).unwrap()
+    });
     *client.entries.lock().unwrap() = vec![text(1, "a")];
     let mut request = notice(&session, 1, Some(cursor(&text(1, "a"))));
     request
         .events
         .push(Event::TranscriptChanged { from_ordinal: 2 });
     session.notice(&client, &settings, request).await;
+    // Notice invalidates summary state immediately; raw search cleanup now
+    // runs on the independent indexer and is fenced only for this assertion.
+    let search =
+        crate::search::background::Background::new(Arc::new(client), dir.join("context.db"));
+    let key = session.key().clone();
+    search.mark(&key, session.search_mark());
+    search.idle(&key).await.unwrap();
     let db = session.db.as_ref().unwrap();
     assert!(db.compartments("mock", "s1").unwrap().is_empty());
     let removed: u64 = db.with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM message_history_source WHERE session_id = 's1' AND message_id = 'removed'", [], |row| row.get(0))).unwrap();

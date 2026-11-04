@@ -114,6 +114,7 @@ fn insert(
 ) -> rusqlite::Result<()> {
     let number = entry.ordinal as i64;
     let role = role_name(&entry.role);
+    let source_timing = crate::notice_cost_timing::span("search.source_insert");
     conn.execute(
         "INSERT INTO message_history_source
             (session_id, message_id, message_ordinal, source_version, normalized_content_hash, role, harness, updated_at)
@@ -124,14 +125,18 @@ fn insert(
             updated_at = excluded.updated_at",
         params![session, entry.mid, number, entry.digest, content_hash(content), role, harness, now_ms()],
     )?;
+    drop(source_timing);
     if content.is_empty() {
         return Ok(());
     }
+    let fts_timing = crate::notice_cost_timing::span("search.fts_insert");
     conn.execute(
         "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![session, number, entry.mid, role, content],
     )?;
+    drop(fts_timing);
+    let _timing = crate::notice_cost_timing::span("search.rowid_insert");
     conn.execute(
         "INSERT OR REPLACE INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
          VALUES (?1, ?2, ?3, ?4)",
@@ -150,6 +155,7 @@ pub fn index(
     session: &str,
     entries: &[Entry],
 ) -> rusqlite::Result<()> {
+    let _timing = crate::notice_cost_timing::span("search.index");
     let mark = watermark(conn, session)?;
     let start = entries.partition_point(|entry| (entry.ordinal as i64) < mark);
     let pending = &entries[start..];
@@ -171,6 +177,7 @@ pub fn index(
             }
             let content = content_of(entry);
             if number == mark {
+                let lookup_timing = crate::notice_cost_timing::span("search.boundary_lookup");
                 let stored: Option<(String, String)> = tx
                     .query_row(
                         "SELECT message_id, normalized_content_hash FROM message_history_source
@@ -179,6 +186,7 @@ pub fn index(
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
+                drop(lookup_timing);
                 if stored == Some((entry.mid.clone(), content_hash(&content))) {
                     continue;
                 }
@@ -188,6 +196,7 @@ pub fn index(
             mark = number;
         }
         set_watermark(&tx, harness, session, mark)?;
+        let _timing = crate::notice_cost_timing::span("search.commit");
         tx.commit()?;
         if stopped {
             break;

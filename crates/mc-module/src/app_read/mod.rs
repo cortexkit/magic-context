@@ -323,6 +323,7 @@ impl Replica {
     }
 
     fn update(&mut self, update: Update) {
+        let _timing = crate::notice_cost_timing::span("app.replica");
         let key = update.key;
         let h = update.header;
         let mut snapshot = self.snapshots.remove(&key).unwrap_or_else(|| Snapshot {

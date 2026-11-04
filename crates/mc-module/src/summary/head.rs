@@ -130,6 +130,7 @@ pub struct Baseline {
     /// from before it was recorded compares `profile_max_id` instead.
     #[serde(default)]
     pub profile_digest: Option<String>,
+    #[serde(serialize_with = "crate::store_text::text")]
     pub m0: String,
     #[serde(default)]
     pub committed: Vec<Committed>,
@@ -227,6 +228,7 @@ fn fit_history(
 /// checksum of the mural image `m[0]` will carry, if any: the text then ends
 /// with the block that introduces it, as the plugin's `renderM0` does.
 pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
+    let _timing = crate::notice_cost_timing::span("head.fold");
     let estimate = |text: &str| inputs.counter.count(text) as usize;
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
@@ -480,6 +482,7 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
 /// Also returns `m[1]`'s size without its memory changes, which is what the
 /// refold backstop measures ([`needs_refold`]).
 pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
+    let _timing = crate::notice_cost_timing::span("head.delta");
     let tokens = |text: &str| inputs.counter.count(text);
     let line_tokens = |lines: &[String]| line_tokens(lines, inputs.counter);
     let mut next = baseline.clone();

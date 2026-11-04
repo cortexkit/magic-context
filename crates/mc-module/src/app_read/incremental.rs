@@ -481,6 +481,7 @@ impl Session {
     }
 
     pub(crate) fn app_publish_update(&mut self, app: &crate::app_read::AppRead, checkpoint: bool) {
+        let _timing = crate::notice_cost_timing::span("app.projection");
         let old_base = self.app_projection.base;
         let initialized = self.app_projection.initialized;
         let update = self.app_update();
