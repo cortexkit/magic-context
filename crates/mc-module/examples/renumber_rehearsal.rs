@@ -31,8 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no message has an entry")?;
     let newest = Cursor::new(newest.1, &newest.0, "");
     let mut conn = rusqlite::Connection::open(db)?;
-    // Pi numbering is lined up with the stored summaries first, as move-in
-    // does, so messages the session file lost become unreachable slots.
+    // Pi numbering is lined up with the stored summaries first, so messages
+    // the session file lost become unreachable slots. A real move does the
+    // same before converting (`move_in::move_in`).
     let numbering = if messages.iter().any(|message| message.pi.is_some()) {
         Numbering::pi(&messages, &newest)?.align_pi(&conn, harness, session)?
     } else {
