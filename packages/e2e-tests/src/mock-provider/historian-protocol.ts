@@ -23,11 +23,12 @@ export function historianTurnInRequest(body: Record<string, unknown>): Historian
         if (role === "system" || role === "developer") system.push(text(content));
         if (role === "user") users.push(text(content));
     }
+    // Every host sends the two-pass system prompt on both turns of a two-pass run.
+    // A request carrying the one-pass prompt is answered as one-pass, even with the
+    // format instruction in its user turn, so a host that sends the wrong prompt
+    // fails the suite.
     const combined = system.some((part) => part.includes("Reply with exactly one JSON object under a `result` wrapper."));
-    // OpenCode 1 retains the registered XML system and sends the format contract in the user prompt.
-    const formatInstruction = system.some((part) => part.includes("You are Historian")) && users.some((part) =>
-        part.includes("Reply with exactly one JSON object with a result object. On turn one use"));
-    if (!combined && !formatInstruction)
+    if (!combined)
         return null;
     // Turn two keeps turn one's <new_messages> and reply in its conversation.
     for (const user of [...users].reverse()) {

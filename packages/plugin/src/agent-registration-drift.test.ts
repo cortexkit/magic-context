@@ -22,6 +22,7 @@ import {
     HISTORIAN_AGENT,
     HISTORIAN_EDITOR_AGENT,
     HISTORIAN_RECOMP_AGENT,
+    HISTORIAN_TWO_PASS_AGENT,
 } from "./agents/historian";
 import {
     DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS,
@@ -60,6 +61,7 @@ describe("hidden-agent registration drift guard", () => {
     const regs = buildHiddenAgentRegistrations({
         dreamerPrompt: "dreamer-prompt",
         historianPrompt: "historian-prompt",
+        historianTwoPassPrompt: "historian-two-pass-prompt",
         historianRecompPrompt: "historian-recomp-prompt",
         historianEditorPrompt: "historian-editor-prompt",
         historianDisallowed: [],
@@ -96,6 +98,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_CLASSIFIER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
+                HISTORIAN_TWO_PASS_AGENT,
                 HISTORIAN_EDITOR_AGENT,
                 HISTORIAN_RECOMP_AGENT,
             ].sort(),
@@ -110,6 +113,7 @@ describe("hidden-agent registration drift guard", () => {
                 "dreamer-reviewer-zen-blocked-read",
                 "smart-note-compiler-zen-blocked-read",
                 "historian-zen-blocked-read",
+                "historian-two-pass-zen-blocked-read",
                 "historian-recomp-zen-blocked-read",
                 "historian-editor-zen-blocked-read",
             ].sort(),
@@ -142,14 +146,18 @@ describe("hidden-agent registration drift guard", () => {
             buildHiddenAgentRegistrations({
                 dreamerPrompt: "dreamer-prompt",
                 historianPrompt: "historian-prompt",
+                historianTwoPassPrompt: "historian-two-pass-prompt",
                 historianRecompPrompt: "historian-recomp-prompt",
                 historianEditorPrompt: "historian-editor-prompt",
                 historianOverrides: resolveHistorianAgentOverrides(historianConfig),
                 historianDisallowed: [],
             }).filter((registration) =>
-                [HISTORIAN_AGENT, HISTORIAN_RECOMP_AGENT, HISTORIAN_EDITOR_AGENT].includes(
-                    registration.id,
-                ),
+                [
+                    HISTORIAN_AGENT,
+                    HISTORIAN_TWO_PASS_AGENT,
+                    HISTORIAN_RECOMP_AGENT,
+                    HISTORIAN_EDITOR_AGENT,
+                ].includes(registration.id),
             );
 
         for (const registration of registrationsFor(undefined)) {
@@ -356,7 +364,7 @@ describe("hidden-agent registration drift guard", () => {
     });
 
     test("every hidden agent has an internal-only task-routing description", () => {
-        expect(regs).toHaveLength(12);
+        expect(regs).toHaveLength(13);
         for (const registration of regs) {
             expect(registration.mode, registration.id).toBe("primary");
             expect(registration.hidden, registration.id).toBe(true);
@@ -449,6 +457,7 @@ describe("hidden-agent registration drift guard", () => {
             DREAMER_CLASSIFIER_AGENT,
             SMART_NOTE_COMPILER_AGENT,
             HISTORIAN_AGENT,
+            HISTORIAN_TWO_PASS_AGENT,
             HISTORIAN_RECOMP_AGENT,
             HISTORIAN_EDITOR_AGENT,
         ]);
@@ -500,7 +509,12 @@ describe("hidden-agent registration drift guard", () => {
 
     test("all historian variants have empty canonical tool lists and locked permissions", () => {
         expect([...HISTORIAN_ALLOWED_TOOLS]).toEqual([]);
-        for (const id of [HISTORIAN_AGENT, HISTORIAN_RECOMP_AGENT, HISTORIAN_EDITOR_AGENT]) {
+        for (const id of [
+            HISTORIAN_AGENT,
+            HISTORIAN_TWO_PASS_AGENT,
+            HISTORIAN_RECOMP_AGENT,
+            HISTORIAN_EDITOR_AGENT,
+        ]) {
             expect(byId(id)?.allowedTools).toEqual([]);
             expect(byId(id)?.lockPermissions).toBe(true);
         }
@@ -549,6 +563,7 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(DREAMER_RETROSPECTIVE_AGENT)?.maxSteps).toBe(40);
         expect(byId(SMART_NOTE_COMPILER_AGENT)?.maxSteps).toBe(8);
         expect(byId(HISTORIAN_AGENT)?.maxSteps).toBe(4);
+        expect(byId(HISTORIAN_TWO_PASS_AGENT)?.maxSteps).toBe(4);
         expect(byId(HISTORIAN_RECOMP_AGENT)?.maxSteps).toBe(4);
         expect(byId(HISTORIAN_EDITOR_AGENT)?.maxSteps).toBe(4);
     });
@@ -566,6 +581,7 @@ describe("hidden-agent registration drift guard", () => {
 
     test("each agent carries its passed-through prompt (undefined-safe)", () => {
         expect(byId(DREAMER_AGENT)?.prompt).toBe("dreamer-prompt");
+        expect(byId(HISTORIAN_TWO_PASS_AGENT)?.prompt).toBe("historian-two-pass-prompt");
         // Robustness contract: an undefined prompt is carried through (the config
         // hook skips that agent), not coerced.
         const noPrompts = buildHiddenAgentRegistrations({
@@ -594,6 +610,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_CLASSIFIER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
+                HISTORIAN_TWO_PASS_AGENT,
                 HISTORIAN_EDITOR_AGENT,
                 HISTORIAN_RECOMP_AGENT,
             ].sort(),

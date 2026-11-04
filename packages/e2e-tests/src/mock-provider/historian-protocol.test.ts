@@ -68,7 +68,10 @@ test("unscripted turn two leaves the next foreground response queued", async () 
     }
 });
 
-test("registered XML system honors the explicit format instruction across retained turns", async () => {
+// OpenCode 1 once sent the one-pass prompt on both two-pass turns, with only the
+// format instruction in the user turn. A two-pass request must carry the two-pass
+// prompt, so that shape is answered as one-pass and the suite fails on it.
+test("the one-pass system with the format instruction is not a two-pass turn", async () => {
     const mock = new MockProvider();
     const format = 'Reply with exactly one JSON object with a result object. On turn one use {"result":{"step":"turn_one","xml":"..."}}.';
     try {
@@ -78,12 +81,7 @@ test("registered XML system honors the explicit format instruction across retain
             const body = request("messages", COMPARTMENT_AGENT_SYSTEM_PROMPT, second);
             const messages = body.messages as Array<{ role: string; content: Array<{ type: string; text: string }> }>;
             messages[0].content.push({ type: "text", text: format });
-            // A separate trailing format reminder must not hide the current turn's prompt.
-            messages.push({ role: "user", content: [{ type: "text", text: format }] });
-            const result = JSON.parse(await complete(mock, baseURL, "messages", body));
-            expect(result).toEqual(second
-                ? { result: { step: "turn_two", decisions: [], scores: [] } }
-                : { result: { step: "turn_one", xml } });
+            expect(await complete(mock, baseURL, "messages", body)).toBe(xml);
         }
     } finally {
         await mock.stop();

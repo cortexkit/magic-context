@@ -38,9 +38,9 @@ import { recordToolDefinition } from "./features/magic-context/tool-definition-t
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import {
-    COMPARTMENT_AGENT_SYSTEM_PROMPT,
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
+    historianSystem,
 } from "./hooks/magic-context/compartment-prompt";
 import { recordToolParameters } from "./hooks/magic-context/dropped-input-guard";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
@@ -1095,11 +1095,8 @@ const server: Plugin = async (ctx) => {
                     // user memories are disabled. The runner only prevents those observations
                     // from reaching the user profile. Keeping one system prompt preserves
                     // prompt-cache byte stability.
-                    historianPrompt: withContentLanguageDirective(
-                        COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                        pluginConfig.language,
-                        { preserveUserQuotes: true },
-                    ),
+                    historianPrompt: historianSystem(false, pluginConfig.language),
+                    historianTwoPassPrompt: historianSystem(true, pluginConfig.language),
                     historianRecompPrompt: withContentLanguageDirective(
                         COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
                         pluginConfig.language,

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { HISTORIAN_TWO_PASS_AGENT } from "../../agents/historian";
 import {
     acquireCompartmentLease,
     releaseCompartmentLease,
@@ -57,6 +58,7 @@ import {
 } from "./producer-window-test-support";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { createTransform } from "./transform";
+import { TWO_PASS_SYSTEM } from "./two-pass-prompts/prompts.generated";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -1275,6 +1277,7 @@ describe("historian turn two on an enabled lane", () => {
         answeredModel = "fixture-historian",
     ) {
         const events: string[] = [];
+        const agents: Array<string | undefined> = [];
         const replies = new Map<string, string>();
         const prompts = new Map<string, number>();
         let created = 0;
@@ -1285,9 +1288,10 @@ describe("historian turn two on an enabled lane", () => {
                 prompt: mock(
                     async (input: {
                         path: { id: string };
-                        body: { parts: Array<{ text: string }> };
+                        body: { agent?: string; parts: Array<{ text: string }> };
                     }) => {
                         const id = input.path.id;
+                        agents.push(input.body.agent);
                         const turn = (prompts.get(id) ?? 0) + 1;
                         prompts.set(id, turn);
                         events.push(`prompt:${id}:${turn}`);
@@ -1325,8 +1329,41 @@ describe("historian turn two on an enabled lane", () => {
                 }),
             },
         } as unknown as PluginContext["client"];
-        return { client, events };
+        return { client, events, agents };
     }
+
+    it("both turns of a two-pass run name the agent registered with the recorded system", async () => {
+        useTempDataHome("turn-two-agent-");
+        const sessionId = "ses-turn-two-agent";
+        const directory = "/tmp/turn-two-agent";
+        createOpenCodeSession(sessionId);
+        const db = openDatabase();
+        seedPriorCompartment(db, sessionId);
+        const { client, agents } = twoTurnClient(directory, (prompt) =>
+            JSON.stringify({
+                result: {
+                    step: "turn_two",
+                    decisions: [...prompt.matchAll(/^## Fact (\d+)/gm)].map((match) => ({
+                        fact_id: Number(match[1]),
+                        check: "Audit fixture.",
+                        action: "new",
+                    })),
+                },
+            }),
+        );
+
+        await runHistorian(db, sessionId, client, directory, { memoryLifecycleLane: "enabled" });
+        await settleHistorianTurnTwoRuns();
+
+        // OpenCode 1 sends the system prompt registered for the agent a request
+        // names, never the run's own `system`. Both turns must therefore name the
+        // agent registered with the two-pass prompt, the prompt the stage records.
+        expect(agents).toEqual([HISTORIAN_TWO_PASS_AGENT, HISTORIAN_TWO_PASS_AGENT]);
+        const stage = db
+            .prepare("SELECT request_json FROM memory_stage_attempts WHERE stage='turn_one'")
+            .get() as { request_json: string };
+        expect(JSON.parse(stage.request_json).system).toBe(TWO_PASS_SYSTEM);
+    });
 
     it("sends turn two on turn one's child and closes the child only after turn two resolved", async () => {
         useTempDataHome("turn-two-same-child-");

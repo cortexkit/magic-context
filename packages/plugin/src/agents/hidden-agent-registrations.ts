@@ -85,6 +85,8 @@ export function buildHiddenAgentRegistrations(args: {
     dreamerPrompt: string | undefined;
     smartNoteCompilerPrompt?: string | undefined;
     historianPrompt: string | undefined;
+    /** The two-pass historian's prompt; OpenCode 1 sends it for both turns of a run. */
+    historianTwoPassPrompt?: string | undefined;
     historianRecompPrompt?: string | undefined;
     historianEditorPrompt: string | undefined;
     dreamerOverrides?: Record<string, unknown>;
@@ -257,6 +259,18 @@ export function buildHiddenAgentRegistrations(args: {
             description: HIDDEN_AGENT_DESCRIPTION,
             prompt: args.historianPrompt,
             // Each pass emits one XML answer; repairs and edits use separate prompts.
+            allowedTools: [],
+            maxSteps: 4,
+            overrides: args.historianOverrides,
+            lockPermissions: true,
+        },
+        {
+            id: "historian-two-pass",
+            mode: "primary",
+            hidden: true,
+            description: HIDDEN_AGENT_DESCRIPTION,
+            prompt: args.historianTwoPassPrompt,
+            // Each turn emits one JSON answer; repairs use separate prompts.
             allowedTools: [],
             maxSteps: 4,
             overrides: args.historianOverrides,

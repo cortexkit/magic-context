@@ -120,7 +120,7 @@ import {
 	buildCompartmentAgentPrompt,
 	buildHistorianEditorPrompt,
 	HISTORIAN_EDITOR_SYSTEM_PROMPT,
-	historianSystemPrompt as selectedHistorianSystem,
+	historianSystem,
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import {
 	prepareCompartmentDrops,
@@ -608,11 +608,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					undefined,
 					deps.resolveHostOutputLimit?.(primaryModelKey) ?? 32_000,
 				));
-	const combinedSystem = withContentLanguageDirective(
-		selectedHistorianSystem(true),
-		deps.language,
-		{ preserveUserQuotes: true },
-	);
+	const combinedSystem = historianSystem(true, deps.language);
 	const harness = resolvePiHarnessKind();
 	const requestedModel = toModelEntry(historianModel ?? fallbackModelId);
 	const route = piModelRefToCanonical(requestedModel?.model ?? "");
@@ -662,10 +658,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	if (selection.lane === "dormant") await sweep();
 	if (selection.refused) return;
 	recoverLostPiRpcStages(db);
-	let historianSystemPrompt = withContentLanguageDirective(
-		selectedHistorianSystem(selection.lane === "enabled"),
+	let historianSystemPrompt = historianSystem(
+		selection.lane === "enabled",
 		deps.language,
-		{ preserveUserQuotes: true },
 	);
 	const historianChunkTokens = producerSourceLocalBudget(
 		providerHistorianChunkTokens,
@@ -934,10 +929,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 			if (turnOneLane === "dormant" && selection.lane === "enabled")
 				await sweep();
-			historianSystemPrompt = withContentLanguageDirective(
-				selectedHistorianSystem(turnOneLane === "enabled"),
+			historianSystemPrompt = historianSystem(
+				turnOneLane === "enabled",
 				deps.language,
-				{ preserveUserQuotes: true },
 			);
 			const anchoredFacts = turnOneLane === "enabled" && projectMemoryEnabled;
 			const fitModelKey = piModelRefToCanonical(historianModel ?? "");

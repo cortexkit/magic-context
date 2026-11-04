@@ -1,4 +1,3 @@
-import { withContentLanguageDirective } from "../../agents/language-directive";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
@@ -87,7 +86,7 @@ import { toModelEntry } from "../../shared/resolve-fallbacks";
 import { beginSqliteWriterAsync, isTransientSqliteError } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
-import { buildCompartmentAgentPrompt, historianSystemPrompt } from "./compartment-prompt";
+import { buildCompartmentAgentPrompt, historianSystem } from "./compartment-prompt";
 import {
     prepareCompartmentDrops,
     queuePreparedCompartmentDrops,
@@ -355,7 +354,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         harness,
         carrier,
         model: deps.model ?? deps.fallbackModelId,
-        system: withContentLanguageDirective(historianSystemPrompt(true), deps.language),
+        system: historianSystem(true, deps.language),
     });
     const selection = selectTurnOneExecution(deps.db, {
         projectPath: selectionProjectPath,
@@ -864,10 +863,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const promptFit = fitHistorianPrompt({
             window: producerWindow,
             fallbackWindows,
-            systemPrompt: withContentLanguageDirective(
-                historianSystemPrompt(turnOneLane === "enabled"),
-                deps.language,
-            ),
+            systemPrompt: historianSystem(turnOneLane === "enabled", deps.language),
             requestedChunkTokens: historianChunkTokens,
             sessionId,
             chunkStart: Math.max(1, offset),

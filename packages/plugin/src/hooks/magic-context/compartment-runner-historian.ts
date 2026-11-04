@@ -1,6 +1,10 @@
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../../agents/historian";
+import {
+    HISTORIAN_AGENT,
+    HISTORIAN_EDITOR_AGENT,
+    HISTORIAN_TWO_PASS_AGENT,
+} from "../../agents/historian";
 import { withContentLanguageDirective } from "../../agents/language-directive";
 import {
     forgetHistorianOutputCap,
@@ -53,7 +57,7 @@ import { createChildSessionWithFence } from "./child-session-spawn";
 import {
     buildHistorianEditorPrompt,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
-    historianSystemPrompt,
+    historianSystem,
 } from "./compartment-prompt";
 import type {
     HiddenCompletion,
@@ -808,8 +812,9 @@ async function runHistorianPrompt(args: {
     modelOverride?: ModelInput;
     /** Use `write` to retain cache markers when a later turn can reuse the complete user block. */
     cacheTail?: import("../../shared/historian-cache").HistorianCacheTail;
-    /** Agent identifier to route the request to. Defaults to HISTORIAN_AGENT.
-     *  Use HISTORIAN_EDITOR_AGENT for the second pass in two-pass mode. */
+    /** Agent identifier to route the request to. Defaults to HISTORIAN_AGENT, which
+     *  a two-pass run (`turnTwoEnabled`) sends as HISTORIAN_TWO_PASS_AGENT.
+     *  Use HISTORIAN_EDITOR_AGENT for the editor's polish pass. */
     agentId?: string;
     /** Resolved historian fallback chain (forwarded to the prompt helper). */
     fallbackModels?: readonly ModelInput[];
@@ -908,12 +913,19 @@ async function runHistorianPrompt(args: {
         });
     };
 
-    let system = withContentLanguageDirective(
+    // OpenCode 1 sends the system prompt registered for the named agent, not this
+    // run's `system`, so a two-pass run names the agent registered with the
+    // two-pass prompt. Other hosts send `system` itself.
+    const agent =
+        agentId === HISTORIAN_AGENT && args.turnTwoEnabled === true
+            ? HISTORIAN_TWO_PASS_AGENT
+            : agentId;
+    let system =
         agentId === HISTORIAN_EDITOR_AGENT
-            ? HISTORIAN_EDITOR_SYSTEM_PROMPT
-            : historianSystemPrompt(args.turnTwoEnabled === true),
-        args.language,
-    );
+            ? withContentLanguageDirective(HISTORIAN_EDITOR_SYSTEM_PROMPT, args.language, {
+                  preserveUserQuotes: true,
+              })
+            : historianSystem(args.turnTwoEnabled === true, args.language);
     if (args.turnOneStageKey) {
         const row = db
             .prepare("SELECT request_json FROM memory_stage_attempts WHERE stage_key=?")
@@ -949,7 +961,7 @@ async function runHistorianPrompt(args: {
     try {
         shared.sessionLog(
             parentSessionId,
-            `historian: creating child session (agent=${toModelEntry(modelOverride)?.model ?? `agent:${agentId}`})`,
+            `historian: creating child session (agent=${toModelEntry(modelOverride)?.model ?? `agent:${agent}`})`,
         );
         const recovering =
             args.recoverTurnOne && args.turnOneStageKey
@@ -967,7 +979,7 @@ async function runHistorianPrompt(args: {
             : await executor.open({
                   parentSessionId,
                   parentInvocationId,
-                  agent: agentId,
+                  agent,
                   kind: agentId === HISTORIAN_EDITOR_AGENT ? "historian-editor" : "historian",
                   system,
                   maxOutputTokens: args.maxOutputTokens,
@@ -1058,12 +1070,11 @@ async function runHistorianPrompt(args: {
                             : {}),
                         query: { directory: sessionDirectory },
                         body: {
-                            // Use the specified agent (HISTORIAN_AGENT by default, or
-                            // HISTORIAN_EDITOR_AGENT for two-pass editor pass) so OpenCode
-                            // loads the right system prompt. When modelOverride is set,
+                            // Name the agent chosen above so OpenCode 1 loads its
+                            // registered system prompt, the one recorded as `system`. When modelOverride is set,
                             // OpenCode uses the override model but still loads the agent's
                             // registered system prompt.
-                            agent: agentId,
+                            agent,
                             ...modelBodyField(modelOverride),
                             // synthetic: true keeps this big internal prompt out of the
                             // OpenCode TUI subagent pane (would otherwise render as a huge
@@ -1165,7 +1176,7 @@ async function runHistorianPrompt(args: {
             {
                 harness: executor.capabilities.harness,
                 carrier: args.hiddenCompletionExecutor ? "hidden-completion" : "opencode-session",
-                agent: agentId,
+                agent,
             },
             args.turnTwoEnabled ? HISTORIAN_FORMAT_INSTRUCTION : undefined,
         );
@@ -1242,7 +1253,7 @@ async function runHistorianPrompt(args: {
                 retained: {
                     executor,
                     handle: retainedHandle,
-                    agent: agentId,
+                    agent,
                     system,
                     model: profile
                         ? {

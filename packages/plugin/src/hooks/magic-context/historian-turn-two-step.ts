@@ -3,7 +3,7 @@
  * turn one ran in. Only a lane enabled by `selectTurnOneExecution` reaches this.
  */
 
-import { HISTORIAN_AGENT } from "../../agents/historian";
+import { HISTORIAN_TWO_PASS_AGENT } from "../../agents/historian";
 import type { ReportedProfile } from "../../features/magic-context/memory/lifecycle-gates";
 import { lifecycleTextHash } from "../../features/magic-context/memory/lifecycle-text";
 import { HISTORIAN_FORMAT_INSTRUCTION } from "../../features/magic-context/memory/turn-one-publication";
@@ -52,12 +52,12 @@ export function openCodeTurnOneAuthorization(input: {
     const slash = route.indexOf("/");
     const provider = slash < 0 ? "" : route.slice(0, slash);
     const lane = turnTwoLaneForReport(input);
-    const blocked = needsBlockedRead(HISTORIAN_AGENT, provider);
+    const blocked = needsBlockedRead(HISTORIAN_TWO_PASS_AGENT, provider);
     const toolSurface =
         openCodeTurnTwoToolSurface({
             ...input,
             provider,
-            agent: HISTORIAN_AGENT,
+            agent: HISTORIAN_TWO_PASS_AGENT,
             observedToolSurface: blocked ? ["read"] : [],
         }) ?? [];
     return buildTurnOneAuthorizationRequest(

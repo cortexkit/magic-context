@@ -4,6 +4,7 @@ import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runne
 export function isToolFreeHiddenAgent(agent: string): boolean {
     return [
         "historian",
+        "historian-two-pass",
         "historian-recomp",
         "historian-editor",
         "dreamer-classifier",

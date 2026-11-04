@@ -1,3 +1,4 @@
+import { withContentLanguageDirective } from "../../agents/language-directive";
 import { readEnabledProjectMemories } from "../../features/magic-context/memory-enabled";
 
 // The historian system prompt is generated from historian-prompt.source.md.
@@ -14,6 +15,18 @@ export {
 /** Both historian turns use the same combined system when turn two is enabled. */
 export function historianSystemPrompt(turnTwoEnabled: boolean): string {
     return turnTwoEnabled ? TWO_PASS_SYSTEM : COMPARTMENT_AGENT_SYSTEM_PROMPT;
+}
+
+/**
+ * The historian system prompt with the configured output language. A run
+ * records this text as the prompt it sends, and the OpenCode 1 agent
+ * registrations use it too, because OpenCode 1 sends the registered prompt:
+ * one function keeps what a run records equal to what it sends.
+ */
+export function historianSystem(turnTwoEnabled: boolean, language?: string): string {
+    return withContentLanguageDirective(historianSystemPrompt(turnTwoEnabled), language, {
+        preserveUserQuotes: true,
+    });
 }
 
 export const HISTORIAN_EDITOR_SYSTEM_PROMPT = `You are a historian editor for the magic-context system, refining a historian draft. The draft was produced by a first-pass historian and may contain noise — low-signal U: lines, redundant quotes across compartments, and weak preservation decisions.

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderHistorianSystemPrompt } from "../src/hooks/magic-context/historian-prompt-render";
@@ -34,20 +35,29 @@ const formatted = execFileSync(
     ],
     { input: output, encoding: "utf8" },
 );
-const rustTarget = resolve(
-    import.meta.dir,
-    "../../../crates/mc-module/testdata/historian-two-pass-system-prompt.txt",
-);
-const system = renderHistorianSystemPrompt(
-    readFileSync(resolve(root, "system.md"), "utf8"),
-    "combined",
-);
+// ck-mc embeds its own copies of the same three prompts (`include_str!` in
+// crates/mc-module/src/summary/two_pass/), so it sends byte-identical text.
+// They're generated here with their checksums, never edited by hand.
+const rustRoot = resolve(import.meta.dir, "../../../crates/mc-module/testdata/two-pass");
+const rust: Record<string, string> = {
+    "system.md": renderHistorianSystemPrompt(
+        readFileSync(resolve(root, "system.md"), "utf8"),
+        "combined",
+    ),
+    "turn-one.md": readFileSync(resolve(root, "turn-one.md"), "utf8"),
+    "turn-two.md": readFileSync(resolve(root, "turn-two.md"), "utf8"),
+};
+rust.SHA256SUMS = Object.entries(rust)
+    .map(([file, text]) => `${createHash("sha256").update(text).digest("hex")}  ${file}\n`)
+    .join("");
 if (process.argv.includes("--check")) {
     if (readFileSync(target, "utf8") !== formatted) throw new Error("two_pass_prompts_stale");
-    if (readFileSync(rustTarget, "utf8") !== system) throw new Error("two_pass_rust_prompt_stale");
+    for (const [file, text] of Object.entries(rust))
+        if (readFileSync(resolve(rustRoot, file), "utf8") !== text)
+            throw new Error(`two_pass_rust_prompt_stale: ${file}`);
     console.log(`two-pass prompts: ${Object.keys(sources).length} sources checked`);
 } else {
     writeFileSync(target, formatted);
-    writeFileSync(rustTarget, system);
+    for (const [file, text] of Object.entries(rust)) writeFileSync(resolve(rustRoot, file), text);
     console.log(`two-pass prompts: ${Object.keys(sources).length} sources generated`);
 }
