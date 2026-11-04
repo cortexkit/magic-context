@@ -916,10 +916,17 @@ impl Handler {
 /// hook route opened for discovery.
 const MODULE_LEVEL_HARNESS: &str = "runner";
 
-/// ck-mc's `step-transform-provider/v2` description: the build, never a
-/// session.
+/// ck-mc's description of the build, never of a session: the tool-provider
+/// answer (with its `compacting-preflight/v1` capability) plus the
+/// step-transform and compaction majors. Core reads one route's answer while
+/// it composes a plan; a runner's check reads only the major it needs and
+/// ignores the rest.
 fn step_describe() -> Value {
-    let major = step::describe::Major::new(
+    let mut answer: Value = crate::catalog::role_describe_bytes()
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({"majors": [], "implementation_version": crate::version_line()}));
+    let step_major = step::describe::Major::new(
         step::PROVIDES,
         step::REQUIRED_OPS
             .iter()
@@ -927,24 +934,30 @@ fn step_describe() -> Value {
             .collect(),
         "alpha",
     );
-    serde_json::to_value(step::describe::RoleDescribe::new(
-        vec![major],
-        crate::version_line(),
-    ))
-    .expect("answers serialize")
+    if let Some(majors) = answer.get_mut("majors").and_then(Value::as_array_mut) {
+        majors.push(serde_json::to_value(step_major).expect("answers serialize"));
+        majors.push(json!({
+            "version": COMPACTION_PROVIDES,
+            "ops": [ops::COMPACTION_SETUP, ops::COMPACTION_NOTICE, ops::COMPACTION_RIDE],
+            "stability": "alpha",
+        }));
+    }
+    answer
 }
 
 /// A route to ck-mc's own management surface from a module the daemon
-/// attests, declaring no role: core reading step-transform declarations.
+/// attests, not for the app reads: core reading the declarations it composes
+/// a plan from. It may be scoped (core binds it under the head's scope) and
+/// may name a role; it serves discovery only, so neither widens anything.
 fn module_discovery(request: &RouteBindRequest) -> bool {
     matches!(
         &request.target,
         RouteTarget::ManagementSurface { module_id } if module_id == crate::MODULE_ID
     ) && matches!(request.principal, Some(Principal::Reserved { .. }))
-        && request
+        && !request
             .role_versions
             .as_ref()
-            .is_none_or(|roles| roles.is_empty())
+            .is_some_and(|roles| roles.contains_key(crate::app_read::ROLE.0))
 }
 
 /// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
@@ -1083,7 +1096,18 @@ impl ModuleHandler for Handler {
                     );
                     BindDecision::accept()
                 }
-                Err(error) => BindDecision::reject(error.code, error.message),
+                Err(error) => {
+                    tracing::warn!(
+                        target = ?request.target,
+                        principal = ?request.principal,
+                        role_versions = ?request.role_versions,
+                        scoped = request.scope.is_some(),
+                        harness = %request.identity.harness,
+                        code = %error.code,
+                        "ck-mc refused a route at bind"
+                    );
+                    BindDecision::reject(error.code, error.message)
+                }
             };
         }
         let Some(Principal::Reserved { module_id }) = &request.principal else {

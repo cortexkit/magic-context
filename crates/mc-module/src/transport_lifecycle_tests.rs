@@ -160,12 +160,13 @@ async fn cores_management_route_reads_the_step_transform_declaration() {
         .await
         .expect("role.describe");
     let describe: step::describe::RoleDescribe = serde_json::from_value(describe).unwrap();
-    assert_eq!(describe.majors[0].version, step::PROVIDES);
+    let step_major = describe
+        .majors
+        .iter()
+        .find(|major| major.version == step::PROVIDES)
+        .expect("the step-transform major");
     for op in step::REQUIRED_OPS {
-        assert!(
-            describe.majors[0].ops.iter().any(|served| served == op),
-            "{op}"
-        );
+        assert!(step_major.ops.iter().any(|served| served == op), "{op}");
     }
     let declared = handler
         .hook(
@@ -187,6 +188,46 @@ async fn cores_management_route_reads_the_step_transform_declaration() {
         hook.is_err(),
         "a hook on core's discovery route must refuse"
     );
+
+    // The tool-provider capability core's compaction gate reads is in the
+    // same answer.
+    let describe = handler
+        .hook(
+            &route,
+            &call(step::ops::ROLE_DESCRIBE, serde_json::json!({})),
+        )
+        .await
+        .expect("role.describe");
+    assert!(
+        describe["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "compacting-preflight/v1"),
+        "{describe}"
+    );
+
+    // Core binds the route under the head's scope, and may name the role.
+    request.handle = RouteHandle::detached(12, 1);
+    request.scope = Some(subc_protocol::scope::ScopeStamp::new(
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+        "head-scope",
+        1,
+        subc_protocol::scope::ScopeKind::Head,
+    ));
+    request.role_versions = Some(std::collections::BTreeMap::from([(
+        step::ROLE.into(),
+        step::VERSION.into(),
+    )]));
+    let scoped = handler.on_bind(&request).await;
+    assert!(
+        !format!("{scoped:?}").contains("not_permitted"),
+        "{scoped:?}"
+    );
+    request.scope = None;
+    request.role_versions = None;
 
     // A caller the daemon doesn't attest gets nothing on the surface.
     request.handle = RouteHandle::detached(11, 1);
