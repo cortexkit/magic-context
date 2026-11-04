@@ -305,6 +305,13 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. By default, TypeScript mode creates/re-tightens 0700 directories and 0600 files. `false` delegates TypeScript-mode permissions to the operator; Rust transform mode always keeps the shared data directory owner-only (0700), regardless of this setting. |
 
+Registry-backed metadata checks honor `npm_config_registry`, then
+`NPM_CONFIG_REGISTRY`, and otherwise use public npm. Blank values are ignored.
+An explicit per-check registry override takes precedence. The check does not
+retry public npm if the selected registry fails. These lightweight HTTP checks
+read the registry environment, not npmrc files or their authentication settings;
+the host plugin installer continues to use its own npm configuration.
+
 `protected_tags` is deprecated and ignored. Remove it and use `protected_tokens` when an explicit absolute floor is needed.
 
 ### `fail_closed_blocking`

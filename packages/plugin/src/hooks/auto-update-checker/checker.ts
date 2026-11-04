@@ -15,8 +15,8 @@ import { parse as parseJsonc } from "comment-json";
 import { log } from "../../shared/logger";
 import {
     NPM_FETCH_TIMEOUT,
-    NPM_REGISTRY_URL,
     PACKAGE_NAME,
+    resolveNpmRegistryUrl,
     USER_OPENCODE_CONFIG,
     USER_OPENCODE_CONFIG_JSONC,
 } from "./constants";
@@ -520,7 +520,7 @@ export async function getLatestVersion(
     try {
         if (options.signal?.aborted) return null;
         const response = await (options.fetch ?? fetch)(
-            buildRegistryUrl(options.registryUrl ?? NPM_REGISTRY_URL),
+            buildRegistryUrl(options.registryUrl ?? resolveNpmRegistryUrl()),
             {
                 signal: controller.signal,
                 headers: { Accept: "application/json" },

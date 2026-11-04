@@ -44,6 +44,7 @@ import {
     isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import { parseJsoncRecovering } from "@magic-context/core/shared/jsonc-parser";
+import { resolveNpmRegistryUrl } from "@magic-context/core/shared/npm-registry";
 import {
     formatOpenCodeDbDoctorLine,
     type OpenCodeDbPathResolution,
@@ -515,15 +516,7 @@ async function fetchNpmLatest(
     }
 }
 
-/**
- * Registry doctor asks for the latest version. OpenCode installs plugins through
- * npm's own config loader, which honours `npm_config_registry`; reading the
- * same variable keeps doctor's "latest" equal to what the host would install.
- */
-export function resolveNpmRegistryUrl(env: NodeJS.ProcessEnv = process.env): string {
-    const configured = (env.npm_config_registry ?? env.NPM_CONFIG_REGISTRY)?.trim();
-    return (configured || "https://registry.npmjs.org").replace(/\/+$/, "");
-}
+export { resolveNpmRegistryUrl };
 
 /** Self-version with src/dist layout fallback. */
 function getSelfVersion(): string {

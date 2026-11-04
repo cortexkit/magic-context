@@ -981,38 +981,46 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
         );
     });
 
-    it("falls back to the npm tarball when the pinned package is not installed", async () => {
+    it("uses the configured registry and tarball when the pinned package is not installed", async () => {
         const root = makeTempDir("mc-pinned-fence-");
         configurePinnedPlugin(root, `${OPENCODE_PLUGIN_NAME}@0.36.1`);
         configurePinnedPlugin(root, `${OPENCODE_PLUGIN_NAME}@0.36.1`, "tui");
         originalXdgCacheHome = process.env.XDG_CACHE_HOME;
         process.env.XDG_CACHE_HOME = root;
-        let requestCount = 0;
-
-        const findings = await inspectPinnedOpenCodePluginSchemaFences(
-            { directory: root, databaseVersion: 78 },
-            {
-                fetch: async () => {
-                    requestCount++;
-                    if (requestCount === 1) {
-                        return Response.json({
-                            version: "0.36.1",
-                            dist: { tarball: "https://registry.npmjs.org/plugin-0.36.1.tgz" },
-                        });
-                    }
-                    return new Response(createNpmTarballWithFence(77));
+        const previousRegistry = process.env.npm_config_registry;
+        process.env.npm_config_registry = "https://mirror.example/npm/";
+        const requested: string[] = [];
+        try {
+            const findings = await inspectPinnedOpenCodePluginSchemaFences(
+                { directory: root, databaseVersion: 78 },
+                {
+                    fetch: async (url) => {
+                        requested.push(String(url));
+                        if (requested.length === 1) {
+                            return Response.json({
+                                version: "0.36.1",
+                                dist: { tarball: "https://mirror.example/npm/plugin-0.36.1.tgz" },
+                            });
+                        }
+                        return new Response(createNpmTarballWithFence(77));
+                    },
                 },
-            },
-        );
-
-        expect(requestCount).toBe(2);
-        expect(findings).toContainEqual(
-            expect.objectContaining({
-                status: "fail",
-                source: "npm-tarball",
-                supportedVersion: 77,
-            }),
-        );
+            );
+            expect(requested).toEqual([
+                "https://mirror.example/npm/%40cortexkit/opencode-magic-context/0.36.1",
+                "https://mirror.example/npm/plugin-0.36.1.tgz",
+            ]);
+            expect(findings).toContainEqual(
+                expect.objectContaining({
+                    status: "fail",
+                    source: "npm-tarball",
+                    supportedVersion: 77,
+                }),
+            );
+        } finally {
+            if (previousRegistry === undefined) delete process.env.npm_config_registry;
+            else process.env.npm_config_registry = previousRegistry;
+        }
     });
 
     it("reports an unresolvable pinned fence as UNKNOWN instead of passing", async () => {

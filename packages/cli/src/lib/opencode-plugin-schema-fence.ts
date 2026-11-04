@@ -5,6 +5,7 @@ import {
     type ConfigSurface,
     findPluginEntry,
 } from "@magic-context/core/hooks/auto-update-checker/checker";
+import { resolveNpmRegistryUrl } from "@magic-context/core/shared/npm-registry";
 
 import { OPENCODE_PLUGIN_NAME } from "./opencode-plugin-cache";
 import { getOpenCodePluginCacheDir } from "./paths";
@@ -184,7 +185,7 @@ function readFenceFromNpmTarball(tarball: Uint8Array): number | null {
 
 function npmPackageVersionUrl(version: string): string {
     const packagePath = encodeURIComponent(OPENCODE_PLUGIN_NAME).replace("%2F", "/");
-    return `https://registry.npmjs.org/${packagePath}/${encodeURIComponent(version)}`;
+    return `${resolveNpmRegistryUrl()}/${packagePath}/${encodeURIComponent(version)}`;
 }
 
 async function resolveFenceFromNpmTarball(
