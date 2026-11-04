@@ -646,6 +646,9 @@ export function getPersistedToolTagAccounting(
  * boundary live-tokenizes it this pass and converges to the stored path after
  * the tagger backfills. Pre-boundary (`compacted`) messages cancel out of the
  * boundary's prefix-difference math, so including them here is harmless.
+ * `summaryRemovedTotals` uses the same owners and row order, but counts only
+ * text and tool inputs for the run cap and drain quota. Missing tool-input
+ * counts omit that owner's summary weight so callers can tokenize it live.
  */
 export function getAllStatusTagTokenTotalsFlat(
     db: Database,
@@ -653,7 +656,11 @@ export function getAllStatusTagTokenTotalsFlat(
     floor = 0,
     calibration: { proseRatio: number; toolsRatio: number } = { proseRatio: 1, toolsRatio: 1 },
     ownerMessageIds?: readonly string[],
-): { totals: Map<string, number>; nullMessageIds: Set<string> } {
+): {
+    totals: Map<string, number>;
+    summaryRemovedTotals: Map<string, number>;
+    nullMessageIds: Set<string>;
+} {
     // floor > 0 (OpenCode) loads only the live-wire range (tag_number >= floor):
     // tag_number is monotonic with message order, so every tag below the first
     // wire message is compacted-away history the boundary never indexes. The
@@ -750,7 +757,9 @@ export function getAllStatusTagTokenTotalsFlat(
         reasoning_token_count: number | null;
     }>;
     const totals = new Map<string, number>();
+    const summaryRemovedTotals = new Map<string, number>();
     const nullMessageIds = new Set<string>();
+    const nullSummaryRemovedMessageIds = new Set<string>();
     for (const row of rows) {
         // NULL-owner tool rows (pre-v10 unadopted orphans): `ownerMessageIdForTagRow`
         // would key them under the bare callId, which `storedTotalForMessage`
@@ -767,6 +776,7 @@ export function getAllStatusTagTokenTotalsFlat(
         if (row.token_count === null) {
             nullMessageIds.add(owner);
             totals.delete(owner);
+            summaryRemovedTotals.delete(owner);
             continue;
         }
         if (nullMessageIds.has(owner)) continue;
@@ -775,8 +785,23 @@ export function getAllStatusTagTokenTotalsFlat(
             ((row.token_count ?? 0) + (row.input_token_count ?? 0)) * ratio +
             (row.reasoning_token_count ?? 0) * calibration.proseRatio;
         totals.set(owner, (totals.get(owner) ?? 0) + weight);
+        // Summaries replace text and calls, not results or reasoning. Keep this
+        // independent of tag status, just like the full-size tail weight above.
+        if (row.type === "tool" && row.input_token_count === null) {
+            nullSummaryRemovedMessageIds.add(owner);
+            summaryRemovedTotals.delete(owner);
+        }
+        if (!nullSummaryRemovedMessageIds.has(owner)) {
+            const removedWeight =
+                row.type === "tool"
+                    ? (row.input_token_count ?? 0) * calibration.toolsRatio
+                    : row.type === "message"
+                      ? row.token_count * calibration.proseRatio
+                      : 0;
+            summaryRemovedTotals.set(owner, (summaryRemovedTotals.get(owner) ?? 0) + removedWeight);
+        }
     }
-    return { totals, nullMessageIds };
+    return { totals, summaryRemovedTotals, nullMessageIds };
 }
 
 /** Only message tags prove ownership of their own assistant's reasoning group.

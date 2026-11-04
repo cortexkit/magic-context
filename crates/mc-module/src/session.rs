@@ -901,8 +901,9 @@ impl Session {
             usable: ((window as f64 * threshold / 100.0).round() as u64).max(1),
             per_run_cap: cap,
         };
-        // At or over the threshold, a pass that starts no summary says why,
-        // so a head that only ever sheds drops can be explained from the log.
+        // At or over the threshold, a pass that starts no summary logs why, so
+        // a session that stays over the threshold without summarizing can be
+        // explained from the log.
         let at_threshold = usage >= threshold;
         let session = self.key.session.clone();
         let held = |why: std::fmt::Arguments<'_>| {
@@ -932,7 +933,7 @@ impl Session {
         let scan_lines = (trigger::scan_budget(budget) as f64 / ratio).floor() as u64;
         let bounded = |tail_tokens: u64, lift: bool| {
             let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
-            trigger::cap_run(entries, entry_tokens, from, until, cap)
+            trigger::cap_run(entries, entry_removed_tokens, from, until, cap)
         };
         let after_drops = force
             .then(|| self.usage_after_drops(settings, usage))
@@ -1022,7 +1023,7 @@ impl Session {
             .entries()
             .iter()
             .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
-            .map(entry_tokens)
+            .map(entry_removed_tokens)
             .sum();
         let Some(reservation) = self.drain.reserve(&quota, requested) else {
             tracing::info!(
@@ -3495,8 +3496,9 @@ impl Session {
     }
 
     /// Record work for the independent search indexer. Its durable watermark
-    /// handles ordinary catch-up; the earliest replacement ordinal invalidates
-    /// rows from an undone branch before the background reader continues.
+    /// handles ordinary catch-up, including sessions moved from the standalone
+    /// plugin with an unfinished search index. The earliest replacement ordinal
+    /// invalidates rows from an undone branch before the reader continues.
     pub(crate) fn search_mark(&mut self) -> crate::search::background::Mark {
         crate::search::background::Mark {
             newest: self.index.cursor(),
@@ -3651,6 +3653,101 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
+}
+
+/// What summarizing a message removes from the model's view: its text and
+/// tool calls (see [`tokens::removed_by_summary`]).
+fn entry_removed_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
+    entry.parts.iter().map(tokens::removed_by_summary).sum()
+}
+
+#[cfg(test)]
+mod summary_weight_tests {
+    use super::*;
+    use cortexkit_role_compaction::part::{Part, PartBody};
+    use cortexkit_role_compaction::read::{Entry, Role};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::ModelRef;
+    use cortexkit_role_compaction::tokens::PartTokens;
+
+    fn fixture(output_tokens: u64) -> Session {
+        let route = Route {
+            session: SessionRef::new("test", "mock", "summary-weight"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let request = SetupRequest::new(
+            "summary-weight-test",
+            ModelRef::new("test", "model"),
+            100_000,
+            0,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            1,
+        );
+        // A session with a summarizer, the only feature these tests need.
+        let features = crate::preset::Features {
+            summarizer: true,
+            ..crate::preset::Features::NONE
+        };
+        let mut session = Session::new(&route, &request, features, None);
+        session.conditions.last_prompt_tokens = Some(64_000);
+        let mut text = Part::new(
+            "text",
+            PartBody::Text {
+                text: "seed".into(),
+            },
+        );
+        text.tokens = Some(PartTokens::count(1));
+        let tool = |output| {
+            let mut part: Part = serde_json::from_value(serde_json::json!({
+                "id": "tool", "kind": "tool", "call_id": "read", "name": "read",
+                "input": {"path": "a"}, "status": "completed", "digest": "d",
+                "output_bytes": output * 4,
+            }))
+            .unwrap();
+            part.tokens = Some(PartTokens::tool(8, output));
+            part
+        };
+        session.index.extend_counted(
+            vec![
+                Entry::new(1, "seed", Role::Assistant, 1, vec![text]),
+                Entry::new(2, "large", Role::Assistant, 2, vec![tool(output_tokens)]),
+                Entry::new(3, "tail", Role::Assistant, 3, vec![tool(8_000)]),
+            ],
+            Some("test"),
+        );
+        session
+    }
+
+    #[test]
+    fn summary_cap_and_drain_admit_a_small_head_followed_by_large_tool_output() {
+        let mut session = fixture(30_000);
+        let request = session
+            .summary_due(&Settings::default())
+            .expect("meaningful head");
+        assert_eq!((request.from, request.until), (1, 3));
+        assert_eq!(session.drain.spent, 9);
+        assert_eq!(session.reservation.unwrap().tokens, 9);
+    }
+
+    #[test]
+    fn summary_tail_and_meaningful_threshold_still_use_full_size() {
+        let settings = Settings::default();
+        let mut below = fixture(5_990);
+        assert!(
+            below.summary_due(&settings).is_none(),
+            "5,999 raw tokens are not meaningful"
+        );
+        let mut at = fixture(5_991);
+        let request = at
+            .summary_due(&settings)
+            .expect("6,000 raw tokens are meaningful");
+        // The last tool's 8,000 output tokens protect it even though its call is tiny.
+        assert_eq!(request.until, 3);
+        assert_eq!(at.drain.spent, 9);
+    }
 }
 
 /// The part a runner's view refusal names as at fault, if it names one.

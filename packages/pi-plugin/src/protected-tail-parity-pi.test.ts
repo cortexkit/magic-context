@@ -135,6 +135,89 @@ import { computeRawRangeFingerprint } from "@magic-context/core/hooks/magic-cont
 import { selectPiHistorianRunBoundarySnapshot } from "./context-handler";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
+test("Pi summary cap admits a small head followed by large folded tool results", () => {
+	const messages = convertEntriesToRawMessages([
+		{
+			type: "message",
+			id: "seed",
+			message: { role: "assistant", content: [{ type: "text", text: "seed" }] },
+		},
+		{
+			type: "message",
+			id: "call",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "large",
+						name: "read",
+						arguments: { path: "a" },
+					},
+				],
+			},
+		},
+		{
+			type: "message",
+			id: "result",
+			message: {
+				role: "toolResult",
+				toolCallId: "large",
+				toolName: "read",
+				content: [{ type: "text", text: "result ".repeat(20_000) }],
+			},
+		},
+		{
+			type: "message",
+			id: "tail-call",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tail",
+						name: "read",
+						arguments: { path: "tail" },
+					},
+				],
+			},
+		},
+		{
+			type: "message",
+			id: "tail-result",
+			message: {
+				role: "toolResult",
+				toolCallId: "tail",
+				toolName: "read",
+				content: [{ type: "text", text: "tail ".repeat(8_000) }],
+			},
+		},
+	]);
+	const sessionId = "pi-summary-removed-weight";
+	withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+		const snapshot = resolveProtectedTailBoundary({
+			sessionId,
+			mode: "pi-trigger",
+			contextLimit: 100_000,
+			executeThresholdPercentage: 65,
+			triggerBudget: 5_000,
+			usage: { percentage: 64, inputTokens: 64_000 },
+			usageSource: "live",
+			lastCompartmentEndOrdinal: 0,
+			priorBoundaryOrdinal: 1,
+			protectedTailPolicyVersion: 3,
+			migrationFloorActive: false,
+			providerShapeVersion: "pi-folded-v1",
+			cacheNamespace: sessionId,
+		});
+		expect(snapshot.protectedTailStart).toBe(4);
+		expect(snapshot.eligibleEndOrdinal).toBe(4);
+		expect(snapshot.trueRawEligibleTokens).toBeGreaterThan(16_250);
+		expect(snapshot.summaryRemovedEligibleTokens).toBeLessThan(100);
+		expect(snapshot.oversizeAtomicUnit).toBe(false);
+	});
+});
+
 test("Pi 473-message edge waits rather than scheduling the split 299-299 chunk", () => {
 	const entries = Array.from({ length: 473 }, (_, index) => {
 		const ordinal = index + 1;
@@ -292,6 +375,7 @@ test("Pi historian runner uses the trigger boundary snapshot when the trigger re
 		createdAt: 1,
 		rawRangeFingerprint: "",
 		trueRawEligibleTokens: 20_000,
+		summaryRemovedEligibleTokens: 20_000,
 		oversizeAtomicUnit: false,
 		boundaryReason: "primary",
 	} satisfies ProtectedTailBoundarySnapshot;
