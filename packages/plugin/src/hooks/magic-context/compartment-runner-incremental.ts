@@ -942,7 +942,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                   db,
                   sessionId,
                   runId: crypto.randomUUID(),
-                  trueRawTokens: boundarySnapshot.trueRawEligibleTokens,
+                  trueRawTokens: boundarySnapshot.summaryRemovedEligibleTokens,
                   usagePercentage: boundarySnapshot.usagePercentage,
                   usable,
                   perRunCap,

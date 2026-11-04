@@ -104,7 +104,7 @@ impl Drain {
         self.spent >= limit && (self.latch_since == 0 || self.in_failure_backoff(usage.now))
     }
 
-    /// Reserve up to `requested` raw tokens for a run: what the window has
+    /// Reserve up to `requested` text and tool-input tokens for a run: what the window has
     /// left, at most one run's cap. Past a spent window the latch admits one
     /// run's worth. `None` when nothing may run.
     pub fn reserve(&mut self, usage: &Usage, requested: u64) -> Option<Reservation> {

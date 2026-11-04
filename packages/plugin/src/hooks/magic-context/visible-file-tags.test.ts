@@ -165,7 +165,7 @@ test("protected-tail stored totals fall back for unnumbered attachments but reta
                 },
             });
             expect(observedParts).toEqual(message.parts);
-            const totals = ctx.storedTokenTotalsForMessages!([message.id], [message])!;
+            const totals = ctx.storedTokenTotalsForMessages!([message.id], [message])!.totals;
             expect(totals.has(message.id)).toBe(false);
             const options = {
                 providerShapeVersion: "opencode-v1" as const,
@@ -198,7 +198,7 @@ test("protected-tail stored totals fall back for unnumbered attachments but reta
                 reasoningTokenCount: null,
             });
             expect(
-                ctx.storedTokenTotalsForMessages!([message.id], [message])!.get(message.id),
+                ctx.storedTokenTotalsForMessages!([message.id], [message])!.totals.get(message.id),
             ).toBe(33);
         });
     } finally {

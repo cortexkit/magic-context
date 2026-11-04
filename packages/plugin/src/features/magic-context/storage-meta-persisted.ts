@@ -922,6 +922,7 @@ export function reserveProtectedTailDrainTokens(args: {
     db: Database;
     sessionId: string;
     runId: string;
+    /** Original text and tool-input tokens, independent of drop state; excludes results and reasoning. */
     trueRawTokens: number;
     usagePercentage: number;
     usable: number;

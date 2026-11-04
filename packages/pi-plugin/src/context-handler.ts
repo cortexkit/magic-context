@@ -7684,6 +7684,10 @@ function ensureRunnablePiBoundaryForTests(
 		protectedTailStart: endOrdinal,
 		eligibleEndOrdinal: endOrdinal,
 		trueRawEligibleTokens: Math.max(1, snapshot.trueRawEligibleTokens),
+		summaryRemovedEligibleTokens: Math.max(
+			1,
+			snapshot.summaryRemovedEligibleTokens,
+		),
 		rawRangeFingerprint: "",
 	};
 }

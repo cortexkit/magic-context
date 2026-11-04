@@ -922,15 +922,9 @@ impl Session {
             .max(calibration.tools_ratio)
             .max(1.0);
         let scan_lines = (trigger::scan_budget(budget) as f64 / ratio).floor() as u64;
-        let cap_weight: fn(&cortexkit_role_compaction::read::Entry) -> u64 =
-            if trial_removed_measure(&self.key.session) {
-                entry_removed_tokens
-            } else {
-                entry_tokens
-            };
         let bounded = |tail_tokens: u64, lift: bool| {
             let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
-            trigger::cap_run(entries, cap_weight, from, until, cap)
+            trigger::cap_run(entries, entry_removed_tokens, from, until, cap)
         };
         let after_drops = force
             .then(|| self.usage_after_drops(settings, usage))
@@ -1020,7 +1014,7 @@ impl Session {
             .entries()
             .iter()
             .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
-            .map(cap_weight)
+            .map(entry_removed_tokens)
             .sum();
         let Some(reservation) = self.drain.reserve(&quota, requested) else {
             tracing::info!(
@@ -3739,29 +3733,93 @@ fn entry_removed_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::removed_by_summary).sum()
 }
 
-/// Sessions whose summary run cap and drain budget count only what a summary
-/// removes ([`entry_removed_tokens`]) instead of each message's full size.
-/// A temporary trial switch: a file named `dev-run-limit-text-inputs` next to
-/// context.db lists one session id per line. It is read once, at the first
-/// summary decision, and has no other effect. Remove it with the trial.
-fn trial_removed_measure(session: &str) -> bool {
-    static SESSIONS: std::sync::OnceLock<std::collections::HashSet<String>> =
-        std::sync::OnceLock::new();
-    SESSIONS
-        .get_or_init(|| {
-            let path =
-                crate::storage_paths::context_db_path().with_file_name("dev-run-limit-text-inputs");
-            std::fs::read_to_string(path)
-                .map(|text| {
-                    text.lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .contains(session)
+#[cfg(test)]
+mod summary_weight_tests {
+    use super::*;
+    use cortexkit_role_compaction::part::{Part, PartBody};
+    use cortexkit_role_compaction::read::{Entry, Role};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::ModelRef;
+    use cortexkit_role_compaction::tokens::PartTokens;
+
+    fn fixture(output_tokens: u64) -> Session {
+        let route = Route {
+            session: SessionRef::new("test", "mock", "summary-weight"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let request = SetupRequest::new(
+            "head",
+            ModelRef::new("test", "model"),
+            100_000,
+            0,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            1,
+        );
+        let mut session = Session::new(
+            &route,
+            &request,
+            crate::preset::features("head").unwrap(),
+            None,
+        );
+        session.conditions.last_prompt_tokens = Some(64_000);
+        let mut text = Part::new(
+            "text",
+            PartBody::Text {
+                text: "seed".into(),
+            },
+        );
+        text.tokens = Some(PartTokens::count(1));
+        let tool = |output| {
+            let mut part: Part = serde_json::from_value(serde_json::json!({
+                "id": "tool", "kind": "tool", "call_id": "read", "name": "read",
+                "input": {"path": "a"}, "status": "completed", "digest": "d",
+                "output_bytes": output * 4,
+            }))
+            .unwrap();
+            part.tokens = Some(PartTokens::tool(8, output));
+            part
+        };
+        session.index.extend_counted(
+            vec![
+                Entry::new(1, "seed", Role::Assistant, 1, vec![text]),
+                Entry::new(2, "large", Role::Assistant, 2, vec![tool(output_tokens)]),
+                Entry::new(3, "tail", Role::Assistant, 3, vec![tool(8_000)]),
+            ],
+            Some("test"),
+        );
+        session
+    }
+
+    #[test]
+    fn summary_cap_and_drain_admit_a_small_head_followed_by_large_tool_output() {
+        let mut session = fixture(30_000);
+        let request = session
+            .summary_due(&Settings::default())
+            .expect("meaningful head");
+        assert_eq!((request.from, request.until), (1, 3));
+        assert_eq!(session.drain.spent, 9);
+        assert_eq!(session.reservation.unwrap().tokens, 9);
+    }
+
+    #[test]
+    fn summary_tail_and_meaningful_threshold_still_use_full_size() {
+        let settings = Settings::default();
+        let mut below = fixture(5_990);
+        assert!(
+            below.summary_due(&settings).is_none(),
+            "5,999 raw tokens are not meaningful"
+        );
+        let mut at = fixture(5_991);
+        let request = at
+            .summary_due(&settings)
+            .expect("6,000 raw tokens are meaningful");
+        // The last tool's 8,000 output tokens protect it even though its call is tiny.
+        assert_eq!(request.until, 3);
+        assert_eq!(at.drain.spent, 9);
+    }
 }
 
 /// The part a runner's view refusal names as at fault, if it names one.
