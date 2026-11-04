@@ -3540,7 +3540,9 @@ impl Session {
     }
 
     pub(crate) fn search_enabled(&self) -> bool {
-        !self.suspended && self.index_ready
+        // Tools can also be served to plugin hosts; only runner compaction
+        // sessions may refresh the plugin's shared last-response metadata.
+        self.compacting() && !self.suspended && self.index_ready
     }
 
     fn forget_missing(&mut self) {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cortexkit_role_compaction::read::{Cursor, Detail, Entry, ReadRequest, Select, SessionRef};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,6 +16,7 @@ use crate::context_db::ContextDb;
 const PAGE_ENTRIES: u64 = 200;
 const PAGE_BYTES: u64 = 64 * 1024;
 const PAGES_PER_BATCH: usize = 4;
+const ACTIVITY_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct Mark {
@@ -35,6 +36,65 @@ struct Pending {
     running: bool,
     error: Option<String>,
     warned_non_wal: bool,
+    activity: Activity,
+}
+
+#[derive(Default)]
+struct Activity {
+    newest: Option<i64>,
+    last_write: Option<Instant>,
+}
+
+impl Activity {
+    fn indexed(&mut self, entry: &Entry) {
+        let at = entry.written_at.min(i64::MAX as u64) as i64;
+        self.newest = Some(self.newest.map_or(at, |previous| previous.max(at)));
+    }
+
+    fn publish(
+        &mut self,
+        conn: &mut Connection,
+        key: &SessionRef,
+        now: Instant,
+    ) -> rusqlite::Result<()> {
+        let Some(at) = self.newest else {
+            return Ok(());
+        };
+        if self
+            .last_write
+            .is_some_and(|last| now.saturating_duration_since(last) < ACTIVITY_INTERVAL)
+        {
+            return Ok(());
+        }
+        let stored: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT last_response_time FROM session_meta WHERE harness=?1 AND session_id=?2",
+                params![key.harness, key.session],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stored.flatten().is_some_and(|stored| stored >= at) {
+            self.newest = None;
+            return Ok(());
+        }
+        // Only the activity field belongs to the runner here. In particular,
+        // creating a row must not import or reset plugin cache/scheduler state.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO session_meta (harness, session_id, last_response_time) VALUES (?1, ?2, ?3)",
+            params![key.harness, key.session, at],
+        )?;
+        let updated = tx.execute(
+            "UPDATE session_meta SET last_response_time=?3 WHERE harness=?1 AND session_id=?2 AND (last_response_time IS NULL OR last_response_time<?3)",
+            params![key.harness, key.session, at],
+        )?;
+        tx.commit()?;
+        if inserted + updated > 0 {
+            self.last_write = Some(Instant::now());
+        }
+        self.newest = None;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -88,7 +148,7 @@ impl Background {
             .spawn(move || {
                 let mut db = None;
                 while let Ok(Command::Work(key, instance)) = rx.recv() {
-                    let (mut mark, generation) = {
+                    let (mut mark, generation, mut activity) = {
                         let mut state = own.state.lock().unwrap();
                         while state.paused {
                             state = own.resumed.wait(state).unwrap();
@@ -105,6 +165,7 @@ impl Background {
                         (
                             pending.mark.take().expect("dirty search session"),
                             pending.generation,
+                            std::mem::take(&mut pending.activity),
                         )
                     };
                     // Open independently: a slow reader or SQLite commit must not
@@ -114,7 +175,13 @@ impl Background {
                             db = Some(ContextDb::open_background(&path)?);
                         }
                         db.as_ref().unwrap().with_connection(|conn| {
-                            runtime.block_on(batch(client.as_ref(), conn, &key, &mut mark))
+                            runtime.block_on(batch(
+                                client.as_ref(),
+                                conn,
+                                &key,
+                                &mut mark,
+                                &mut activity,
+                            ))
                         })
                     }));
                     let result = match result {
@@ -141,6 +208,7 @@ impl Background {
                         continue;
                     };
                     pending.running = false;
+                    pending.activity = activity;
                     match result {
                         Ok(more) => {
                             pending.error = None;
@@ -293,6 +361,21 @@ async fn batch<C: RunnerClient>(
     conn: &mut Connection,
     key: &SessionRef,
     mark: &mut Mark,
+    activity: &mut Activity,
+) -> Result<bool, String> {
+    let more = index_batch(client, conn, key, mark, activity).await?;
+    activity
+        .publish(conn, key, Instant::now())
+        .map_err(|e| e.to_string())?;
+    Ok(more)
+}
+
+async fn index_batch<C: RunnerClient>(
+    client: &C,
+    conn: &mut Connection,
+    key: &SessionRef,
+    mark: &mut Mark,
+    activity: &mut Activity,
 ) -> Result<bool, String> {
     let _timing = crate::notice_cost_timing::span("search.background_batch");
     let mode: String = conn
@@ -354,6 +437,11 @@ async fn batch<C: RunnerClient>(
             return Err(error.to_string());
         }
     }
+    // The supplied tip may already be indexed, including a streamed reply
+    // reconciled above or activity held by the write-rate limit.
+    if let Some(entry) = mark.entries.iter().rev().find(|e| e.ordinal <= watermark) {
+        activity.indexed(entry);
+    }
     for _ in 0..PAGES_PER_BATCH {
         if watermark >= newest {
             return Ok(false);
@@ -361,12 +449,11 @@ async fn batch<C: RunnerClient>(
         let next = watermark + 1;
         let start = mark.entries.partition_point(|entry| entry.ordinal < next);
         let cached = &mark.entries[start..];
-        if cached.first().is_some_and(|entry| entry.ordinal == next) {
+        let updated = if cached.first().is_some_and(|entry| entry.ordinal == next) {
             let end = cached
                 .partition_point(|entry| entry.ordinal <= newest)
                 .min(PAGE_ENTRIES as usize);
-            super::messages::index(conn, &key.harness, session, &cached[..end])
-                .map_err(|e| e.to_string())?;
+            index_page(conn, key, &cached[..end], activity)?
         } else {
             // Only a missing durable range can require older transcript I/O.
             // Limit the read to that gap, stopping before the cached window.
@@ -406,18 +493,30 @@ async fn batch<C: RunnerClient>(
                     return Err("search gap read contains an ordinal gap".into());
                 }
             }
-            super::messages::index(conn, &key.harness, session, &entries)
-                .map_err(|e| e.to_string())?;
-        }
-        let updated = super::messages::watermark(conn, session)
-            .map_err(|e| e.to_string())?
-            .max(0) as u64;
+            index_page(conn, key, &entries, activity)?
+        };
         if updated <= watermark {
             return Err("search index made no progress".into());
         }
         watermark = updated;
     }
     Ok(watermark < newest)
+}
+
+fn index_page(
+    conn: &mut Connection,
+    key: &SessionRef,
+    entries: &[Entry],
+    activity: &mut Activity,
+) -> Result<u64, String> {
+    super::messages::index(conn, &key.harness, &key.session, entries).map_err(|e| e.to_string())?;
+    let watermark = super::messages::watermark(conn, &key.session)
+        .map_err(|e| e.to_string())?
+        .max(0) as u64;
+    if let Some(entry) = entries.iter().rev().find(|e| e.ordinal <= watermark) {
+        activity.indexed(entry);
+    }
+    Ok(watermark)
 }
 
 /// Invalidation itself is bounded, not just subsequent inserts. The durable

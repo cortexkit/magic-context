@@ -275,6 +275,294 @@ impl Fixture {
     }
 }
 
+fn last_active(conn: &Connection, key: &SessionRef) -> Option<i64> {
+    conn.query_row(
+        "SELECT last_response_time FROM session_meta WHERE harness=?1 AND session_id=?2",
+        params![key.harness, key.session],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .unwrap()
+    .flatten()
+}
+
+fn count_activity_writes(conn: &Connection) -> usize {
+    conn.query_row("SELECT COUNT(*) FROM activity_writes", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn track_activity_writes(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE activity_writes (at INTEGER);
+         CREATE TRIGGER activity_insert AFTER INSERT ON session_meta BEGIN
+             INSERT INTO activity_writes VALUES (NEW.last_response_time);
+         END;
+         CREATE TRIGGER activity_update AFTER UPDATE ON session_meta BEGIN
+             INSERT INTO activity_writes VALUES (NEW.last_response_time);
+         END;",
+    )
+    .unwrap();
+}
+
+// Kept verbatim from get_sessions in packages/dashboard/src-tauri/src/db.rs.
+const DASHBOARD_LIST_SQL: &str = "
+        WITH comp_stats AS (
+            SELECT session_id,
+                   COUNT(*) AS cnt,
+                   MIN(start_message) AS first_start,
+                   MAX(end_message) AS last_end
+            FROM compartments GROUP BY session_id
+        ),
+        fact_stats AS (
+            SELECT session_id, COUNT(*) AS cnt FROM session_facts GROUP BY session_id
+        ),
+        note_stats AS (
+            SELECT session_id, COUNT(*) AS cnt FROM notes WHERE type = 'session' AND status = 'active' GROUP BY session_id
+        )
+        SELECT
+            sm.session_id,
+            COALESCE(cs.cnt, 0),
+            COALESCE(fs.cnt, 0),
+            COALESCE(ns.cnt, 0),
+            cs.first_start,
+            cs.last_end,
+            sm.last_response_time,
+            sm.last_context_percentage,
+            sm.is_subagent
+        FROM session_meta sm
+        LEFT JOIN comp_stats cs ON cs.session_id = sm.session_id
+        LEFT JOIN fact_stats fs ON fs.session_id = sm.session_id
+        LEFT JOIN note_stats ns ON ns.session_id = sm.session_id
+        ORDER BY sm.last_response_time DESC NULLS LAST
+    ";
+
+#[tokio::test]
+async fn runner_activity_creates_a_minimal_row_returned_by_the_dashboard_list_query() {
+    let f = Fixture::new(3);
+    let conn = Connection::open(&f.path).unwrap();
+    assert_eq!(last_active(&conn, &f.key), None);
+    let worker = f.worker();
+    let mut mark = f.client.mark(None);
+    mark.entries = Arc::new(f.client.entries.lock().unwrap().clone());
+    worker.mark(&f.key, mark);
+    worker.idle(&f.key).await.unwrap();
+
+    let mut stmt = conn.prepare(DASHBOARD_LIST_SQL).unwrap();
+    let mut rows = stmt.query([]).unwrap();
+    let row = rows
+        .next()
+        .unwrap()
+        .expect("runner session missing from dashboard");
+    assert_eq!(row.get::<_, String>(0).unwrap(), "session");
+    for index in 1..=3 {
+        assert_eq!(row.get::<_, i64>(index).unwrap(), 0);
+    }
+    assert_eq!(row.get::<_, Option<i64>>(4).unwrap(), None);
+    assert_eq!(row.get::<_, Option<i64>>(5).unwrap(), None);
+    assert_eq!(row.get::<_, i64>(6).unwrap(), 3);
+    assert_eq!(row.get::<_, f64>(7).unwrap(), 0.0);
+    assert_eq!(row.get::<_, i64>(8).unwrap(), 0);
+    assert!(rows.next().unwrap().is_none());
+
+    let defaults: (String, Option<String>, i64) = conn
+        .query_row(
+            "SELECT harness, cache_ttl, counter FROM session_meta WHERE session_id='session'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(defaults, ("pi".into(), None, 0));
+}
+
+#[tokio::test]
+async fn runner_activity_uses_the_newest_entry_actually_indexed_in_the_batch() {
+    let f = Fixture::new(1_201);
+    let mut conn = Connection::open(&f.path).unwrap();
+    let mut activity = Activity::default();
+    let mut mark = f.client.mark(None);
+    assert!(batch(
+        f.client.as_ref(),
+        &mut conn,
+        &f.key,
+        &mut mark,
+        &mut activity
+    )
+    .await
+    .unwrap());
+    assert_eq!(last_active(&conn, &f.key), Some(800));
+    assert_eq!(
+        super::super::messages::watermark(&conn, &f.key.session).unwrap(),
+        800
+    );
+}
+
+#[tokio::test]
+async fn runner_activity_throttles_batches_for_sixty_seconds_and_keeps_pending_activity() {
+    let f = Fixture::new(2);
+    let mut conn = Connection::open(&f.path).unwrap();
+    track_activity_writes(&conn);
+    let mut activity = Activity::default();
+    batch(
+        f.client.as_ref(),
+        &mut conn,
+        &f.key,
+        &mut f.client.mark(None),
+        &mut activity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(last_active(&conn, &f.key), Some(2));
+    assert_eq!(count_activity_writes(&conn), 1);
+
+    // Transcript time can advance by hours between two adjacent batches; the
+    // write limit measures elapsed time, not the gap between entry timestamps.
+    let mut next = entries(3, "old").pop().unwrap();
+    next.written_at = 9_000_000;
+    f.client.entries.lock().unwrap().push(next);
+    batch(
+        f.client.as_ref(),
+        &mut conn,
+        &f.key,
+        &mut f.client.mark(None),
+        &mut activity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        super::super::messages::watermark(&conn, &f.key.session).unwrap(),
+        3
+    );
+    assert_eq!(last_active(&conn, &f.key), Some(2));
+    assert_eq!(count_activity_writes(&conn), 1);
+
+    let first_write = activity.last_write.unwrap();
+    activity
+        .publish(
+            &mut conn,
+            &f.key,
+            first_write + Duration::from_millis(59_999),
+        )
+        .unwrap();
+    assert_eq!(count_activity_writes(&conn), 1);
+    activity
+        .publish(&mut conn, &f.key, first_write + ACTIVITY_INTERVAL)
+        .unwrap();
+    assert_eq!(last_active(&conn, &f.key), Some(9_000_000));
+    assert_eq!(count_activity_writes(&conn), 2);
+}
+
+#[tokio::test]
+async fn runner_activity_does_not_create_metadata_without_an_indexed_entry() {
+    let f = Fixture::new(0);
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    assert_eq!(
+        last_active(&Connection::open(&f.path).unwrap(), &f.key),
+        None
+    );
+}
+
+#[tokio::test]
+async fn runner_activity_refreshes_an_existing_null_timestamp() {
+    let f = Fixture::new(3);
+    let conn = Connection::open(&f.path).unwrap();
+    conn.execute(
+        "INSERT INTO session_meta (harness, session_id) VALUES (?1, ?2)",
+        params![f.key.harness, f.key.session],
+    )
+    .unwrap();
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    assert_eq!(last_active(&conn, &f.key), Some(3));
+}
+
+#[tokio::test]
+async fn runner_activity_is_monotonic_and_scoped_to_the_harness_and_session() {
+    let f = Fixture::new(3);
+    let mut conn = Connection::open(&f.path).unwrap();
+    let plugin_session = SessionRef::new("runner", "pi", "plugin-session");
+    for key in [&f.key, &plugin_session] {
+        conn.execute(
+            "INSERT INTO session_meta (harness, session_id, last_response_time, cache_ttl, counter, is_subagent, last_context_percentage) VALUES (?1, ?2, 1000, '1h', 17, 1, 42.5)",
+            params![key.harness, key.session],
+        )
+        .unwrap();
+    }
+    track_activity_writes(&conn);
+    let mut activity = Activity::default();
+    batch(
+        f.client.as_ref(),
+        &mut conn,
+        &f.key,
+        &mut f.client.mark(None),
+        &mut activity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(last_active(&conn, &f.key), Some(1000));
+    assert_eq!(count_activity_writes(&conn), 0);
+
+    f.client
+        .entries
+        .lock()
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .written_at = 2000;
+    let mut mark = f.client.mark(None);
+    mark.entries = Arc::new(f.client.entries.lock().unwrap().clone());
+    mark.reconcile = Some(1);
+    batch(
+        f.client.as_ref(),
+        &mut conn,
+        &f.key,
+        &mut mark,
+        &mut activity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(last_active(&conn, &f.key), Some(2000));
+    assert_eq!(last_active(&conn, &plugin_session), Some(1000));
+    assert_eq!(count_activity_writes(&conn), 1);
+    let plugin_state: (String, i64, i64, f64) = conn.query_row(
+        "SELECT cache_ttl, counter, is_subagent, last_context_percentage FROM session_meta WHERE session_id='session'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(plugin_state, ("1h".into(), 17, 1, 42.5));
+
+    // session_meta has a session-id primary key. A different harness with a
+    // colliding ID must neither take over the row nor refresh its idle clock.
+    let collision = SessionRef::new("runner", "opencode2", "session");
+    let mut other = Activity::default();
+    batch(
+        f.client.as_ref(),
+        &mut conn,
+        &collision,
+        &mut mark,
+        &mut other,
+    )
+    .await
+    .unwrap();
+    assert_eq!(last_active(&conn, &collision), None);
+    assert_eq!(last_active(&conn, &f.key), Some(2000));
+    assert_eq!(count_activity_writes(&conn), 1);
+}
+
+#[test]
+fn tools_only_plugin_sessions_cannot_post_activity_marks() {
+    let route = crate::route::Route {
+        session: SessionRef::new("runner", "opencode2", "plugin-session"),
+        project: None,
+        workdir: None,
+        agent_id: None,
+    };
+    let session = crate::session::Session::tools_only(&route, None);
+    assert!(!session.search_enabled());
+}
+
 #[tokio::test]
 async fn coalesced_batches_fill_the_gap_in_order_without_duplicate_fts_rows() {
     let f = Fixture::new(1_201);
