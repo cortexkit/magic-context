@@ -224,8 +224,11 @@ fn resolve_tiers(
     let empty = Value::Null;
     let user = user.unwrap_or(&empty);
     let project = project.unwrap_or(&empty);
+    let (execute_threshold_percentage, execute_threshold_source) =
+        execute_threshold(user, project, model_key, usable);
     let mut settings = Settings {
-        execute_threshold_percentage: execute_threshold(user, project, model_key, usable),
+        execute_threshold_percentage,
+        execute_threshold_source,
         ..Settings::default()
     };
 
@@ -591,7 +594,16 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
 /// percentage. A project may only raise either kind, and may not add a token
 /// threshold where the user set none: a cloned repository must not make the
 /// session summarize earlier, and so spend more.
-fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64) -> f64 {
+/// The session's execute threshold, as a percentage of the usable window,
+/// and which setting decided it, in the names the apps' session metadata
+/// uses: `model_tokens`, `model_percentage`, `user_percentage`,
+/// `project_percentage` or `default`.
+fn execute_threshold(
+    user: &Value,
+    project: &Value,
+    model_key: &str,
+    usable: u64,
+) -> (f64, &'static str) {
     // A value outside the schema's range is dropped, as the plugin's loader
     // drops an invalid leaf: the lookup then falls through to the map's
     // `default` or to the tier below, never to a clamped value.
@@ -627,11 +639,22 @@ fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64
                 .unwrap_or(user_value)
                 .max(user_value);
             let cap = usable as f64 * MAX_EXECUTE_THRESHOLD_PERCENTAGE / 100.0;
-            return (chosen.min(cap) / usable as f64 * 100.0).min(MAX_EXECUTE_THRESHOLD_PERCENTAGE);
+            return (
+                (chosen.min(cap) / usable as f64 * 100.0).min(MAX_EXECUTE_THRESHOLD_PERCENTAGE),
+                "model_tokens",
+            );
         }
     }
     let mut user_percentages =
         valid_map(user.get("execute_threshold_percentage"), &valid_percentage);
+    let model_matched = model_key_lookup_order(model_key)
+        .iter()
+        .any(|key| user_percentages.contains_key(key));
+    let user_set = !user_percentages.is_empty()
+        || user
+            .get("execute_threshold_percentage")
+            .and_then(valid_percentage)
+            .is_some();
     let default = user
         .get("execute_threshold_percentage")
         .and_then(valid_percentage)
@@ -660,7 +683,16 @@ fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64
             .unwrap_or(user_value)
             .max(user_value)
     };
-    chosen.min(MAX_EXECUTE_THRESHOLD_PERCENTAGE)
+    let source = if chosen > user_value {
+        "project_percentage"
+    } else if model_matched {
+        "model_percentage"
+    } else if user_set {
+        "user_percentage"
+    } else {
+        "default"
+    };
+    (chosen.min(MAX_EXECUTE_THRESHOLD_PERCENTAGE), source)
 }
 
 /// Merge already-validated threshold maps. A project default only replaces

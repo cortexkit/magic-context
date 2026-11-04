@@ -435,7 +435,7 @@ impl Session {
             breakdown["unattributed"] = Value::Null;
             breakdown["estimation_source"] = Value::Null;
         }
-        let meta = json!({"session_id":self.key.session,"compartment_count":self.summaries.len(),"newest_compartment_at_ms":self.summaries.last().map(|c|c.created_at),"queued_stamp_count":p.queued,"compartment_in_progress":self.summarizing,"historian_failure_count":self.app.failures,"historian_last_error":self.app.last_error,"memory_block_count":memory_count,"cache_ttl":null,"last_response_time_ms":at,"is_subagent":!self.features.summarizer,"last_input_tokens":provider});
+        let meta = json!({"session_id":self.key.session,"compartment_count":self.summaries.len(),"newest_compartment_at_ms":self.summaries.last().map(|c|c.created_at),"queued_stamp_count":p.queued,"compartment_in_progress":self.summarizing,"historian_failure_count":self.app.failures,"historian_last_error":self.app.last_error,"memory_block_count":memory_count,"cache_ttl":null,"last_response_time_ms":at,"is_subagent":!self.features.summarizer,"last_input_tokens":provider,"execute_threshold":{"percentage":self.threshold.0,"tokens":(crate::pass::usable_window(&self.conditions) as f64 * self.threshold.0 / 100.0).floor() as u64,"source":self.threshold.1}});
         let header = Header {
             base: self.index.base(),
             newest,

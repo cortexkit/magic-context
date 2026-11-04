@@ -54,6 +54,9 @@ pub struct Session {
     /// The runner's counts of its own system text and of the tool
     /// definitions, from the newest notice that carried them. Rides never
     /// carry them, so a ride's conditions don't clear them.
+    /// The execute threshold the newest pass ran under, and which setting
+    /// decided it, for the apps' session metadata.
+    pub(crate) threshold: (f64, &'static str),
     pub(crate) surface_tokens: (
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
@@ -283,6 +286,10 @@ impl Session {
             conditions: conditions_of(request),
             warned_no_prompt: false,
             surface_tokens: (None, None),
+            threshold: (
+                crate::pass::Settings::default().execute_threshold_percentage,
+                "default",
+            ),
             index: Index::default(),
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
@@ -659,6 +666,10 @@ impl Session {
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
+        self.threshold = (
+            settings.execute_threshold_percentage,
+            settings.execute_threshold_source,
+        );
         self.surface_tokens = (
             notice.conditions.system_tokens,
             notice.conditions.tools_tokens,

@@ -687,3 +687,40 @@ fn caveman_is_off_by_default_and_its_word_rules_follow_the_language() {
         None
     );
 }
+
+/// The apps' session metadata names which setting decided the execute
+/// threshold, in the names the earlier ck-mc served.
+#[test]
+fn the_execute_threshold_names_the_setting_that_decided_it() {
+    let path = Path::new("/nonexistent/magic-context.jsonc");
+    let source = |user: Value, project: Option<Value>| {
+        let settings = resolve_tiers(Some(&user), project.as_ref(), OPUS, 100_000, path);
+        (
+            settings.execute_threshold_percentage,
+            settings.execute_threshold_source,
+        )
+    };
+    assert_eq!(source(json!({}), None), (65.0, "default"));
+    assert_eq!(
+        source(json!({"execute_threshold_percentage": 70}), None),
+        (70.0, "user_percentage")
+    );
+    assert_eq!(
+        source(
+            json!({"execute_threshold_percentage": {"default": 60, OPUS: 75}}),
+            None
+        ),
+        (75.0, "model_percentage")
+    );
+    assert_eq!(
+        source(
+            json!({"execute_threshold_percentage": 60}),
+            Some(json!({"execute_threshold_percentage": 80}))
+        ),
+        (80.0, "project_percentage")
+    );
+    assert_eq!(
+        source(json!({"execute_threshold_tokens": {OPUS: 70_000}}), None),
+        (70.0, "model_tokens")
+    );
+}

@@ -324,7 +324,13 @@ mod tests {
             )),
         );
         session.conditions.last_prompt_tokens = Some(501);
-        let counted = session.app_snapshot().breakdown;
+        session.threshold = (75.0, "user_percentage");
+        let snapshot = session.app_snapshot();
+        assert_eq!(
+            snapshot.meta["execute_threshold"],
+            json!({"percentage":75.0,"tokens":74250,"source":"user_percentage"})
+        );
+        let counted = snapshot.breakdown;
         assert_eq!(
             counted["parts"][0],
             json!({"part":"system_prompt","tokens":120,"estimate":false})

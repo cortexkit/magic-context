@@ -22,6 +22,9 @@ use crate::lanes;
 pub struct Settings {
     /// Usage, as a percentage of the usable window, at which a pass executes.
     pub execute_threshold_percentage: f64,
+    /// Which setting decided the threshold, as the apps' session metadata
+    /// names it (`default` when nothing is configured).
+    pub execute_threshold_source: &'static str,
     /// Reasoning tokens the newest assistant messages keep; older reasoning
     /// is dropped on every pass that rebuilds.
     pub keep_reasoning_tokens: u64,
@@ -123,6 +126,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             execute_threshold_percentage: 65.0,
+            execute_threshold_source: "default",
             keep_reasoning_tokens: 10_000,
             protected_tools: BTreeMap::from([("todowrite".into(), 1), ("ctx_reduce".into(), 3)]),
             protected_tokens: None,

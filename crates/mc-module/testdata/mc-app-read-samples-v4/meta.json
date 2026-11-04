@@ -19,6 +19,11 @@
         "cache_ttl": null,
         "compartment_count": 1,
         "compartment_in_progress": false,
+        "execute_threshold": {
+          "percentage": 65.0,
+          "source": "default",
+          "tokens": 64350
+        },
         "historian_failure_count": 0,
         "historian_last_error": null,
         "is_subagent": false,
@@ -32,7 +37,7 @@
       "schema": 1,
       "section": "meta",
       "state": "ready",
-      "version": "mca1:f8fcb90ed60b73148ca3084a660a7e453a57b206d75ffde107faf81ef174b9b8"
+      "version": "mca1:524a0787322dbdfd2995c425d93c0a609b4edb7f8778d9ac639db6c04c77a29b"
     }
   }
 }
