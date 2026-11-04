@@ -980,6 +980,10 @@ impl Session {
         };
         self.reservation = Some(reservation);
         self.summarizing = true;
+        tracing::info!(
+            "ck-mc: session {}: summary started over messages {from}..{until} (~{requested} tokens)",
+            self.key.session
+        );
         // The lift is spent only by a run that actually starts.
         if lift_floor {
             self.floor_lifted_for = prompt.map(|(_, mid)| mid);

@@ -614,7 +614,9 @@ async fn attempt<C: RunnerClient>(
                 tokio::time::sleep(backoff(retry)).await;
                 retry += 1;
             }
-            Err(error) => return Err(error),
+            // The child names the run to the runner's owner, who can match it
+            // against the runner's own records.
+            Err(error) => return Err(format!("{error} (child {})", child.session.session)),
         }
     }
 }
