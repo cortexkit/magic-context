@@ -969,6 +969,7 @@ impl Session {
             decision = decide(until);
         }
         if decision.is_none() {
+            let prompt_ordinal = prompt.as_ref().map(|(ordinal, _)| *ordinal);
             // At the threshold, a long turn's history after the person's
             // newest prompt cannot be summarized while that prompt stays raw.
             // Mark only when lifting that floor exposes a meaningful head;
@@ -984,9 +985,17 @@ impl Session {
                     self.floor_pending_for = prompt;
                 }
             }
+            let lifted = bounded(tail, true);
+            let weights: Vec<(u64, u64)> = entries
+                .iter()
+                .filter(|entry| entry.ordinal >= from)
+                .take(4)
+                .map(|entry| (entry.ordinal, entry_tokens(entry)))
+                .collect();
             held(format_args!(
-                "nothing to summarize: messages {from}..{until}, protected tail {tail} tokens, trigger budget {budget}, after drops {after_drops:?}, floor mark {}",
-                self.floor_pending_for.is_some()
+                "nothing to summarize: messages {from}..{until} (unfloored {lifted}), protected tail {tail} tokens, per-run cap {cap}, trigger budget {budget}, after drops {after_drops:?}, floor mark {}, prompt {:?}, first weights {weights:?}",
+                self.floor_pending_for.is_some(),
+                prompt_ordinal
             ));
             return None;
         }
