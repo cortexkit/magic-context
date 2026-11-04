@@ -610,7 +610,7 @@ async fn attempt<C: RunnerClient>(
         let send_id = child.session.session.clone();
         match call(client, &child, &send_id, prompt, call_on, usage).await {
             Ok(text) => return Ok((text, child)),
-            Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
+            Err(error) if retry < MAX_RETRIES && retryable(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
                 retry += 1;
             }
@@ -691,7 +691,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
         }
         other => other,
     }
-    .map_err(|error| format!("session.send: {error:?}"))?;
+    .map_err(|error| send_error(&error))?;
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
         return Err(format!("the runner did not start a run: {}", reply.state));
     };
@@ -793,6 +793,27 @@ fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
     usage
 }
 
+/// Marks a send the runner refused by name with the code `transient`, the
+/// contract's "nothing happened, send again". The provider-text rule in
+/// [`is_transient`] never sees that code, so without the mark a runner busy
+/// with the parent session failed the whole summary run.
+const RUNNER_TRANSIENT: &str = "the runner refused it as transient: ";
+
+/// A failed `session.send` as the run's error text.
+fn send_error(error: &crate::client::ClientError) -> String {
+    if error.code.as_deref() == Some("transient") {
+        format!("session.send: {RUNNER_TRANSIENT}{}", error.message)
+    } else {
+        format!("session.send: {error:?}")
+    }
+}
+
+/// Whether a failed summarizer call is retried: the runner said so, or the
+/// provider's error text reads as transient.
+fn retryable(error: &str) -> bool {
+    error.contains(RUNNER_TRANSIENT) || is_transient(error)
+}
+
 /// Whether a failed call is worth retrying on the same model, as the plugin
 /// decides (`historian-transient-error.ts`): provider errors arrive as free
 /// text, so each keyword must stand alone ("auth" must not match "author",
@@ -877,6 +898,18 @@ mod tests {
     }
 
     // The cases the plugin's classifier is written for.
+    /// A send the runner refused with the code `transient` is retried, while
+    /// any other refusal ends the run as before.
+    #[test]
+    fn a_send_the_runner_refuses_as_transient_is_retried() {
+        let mut transient = crate::client::ClientError::new("session changed during external I/O");
+        transient.code = Some("transient".into());
+        assert!(super::retryable(&super::send_error(&transient)));
+        let mut refused = crate::client::ClientError::new("only the session's owner may do this");
+        refused.code = Some("scope_owner_mismatch".into());
+        assert!(!super::retryable(&super::send_error(&refused)));
+    }
+
     #[test]
     fn transient_errors_retry_and_request_errors_never_do() {
         for error in [
