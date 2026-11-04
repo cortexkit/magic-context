@@ -369,6 +369,12 @@ impl Fixture {
             drop(db);
             let request = json!({"session":key,"preset":"head","project":null,"model":model(),
                 "context_window":WINDOW,"output_reserve":RESERVE,"rules":rules(),"newest":newest,"now":1});
+            let import_wall = Instant::now();
+            let import_child_cpu = child_cpu_us();
+            println!(
+                "NOTICE_COST_IMPORT_START {}",
+                json!({"size":size,"summarized_entries":cut})
+            );
             let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ck-mc"))
                 .arg("move-in")
                 .current_dir(dir.path())
@@ -390,6 +396,10 @@ impl Fixture {
                 .write_all(&serde_json::to_vec(&request).unwrap())
                 .unwrap();
             let output = child.wait_with_output().unwrap();
+            println!(
+                "NOTICE_COST_IMPORT {}",
+                json!({"size":size,"summarized_entries":cut,"wall_us":import_wall.elapsed().as_micros() as u64,"child_cpu_us":child_cpu_us()-import_child_cpu,"exit":output.status.code(),"success":output.status.success(),"stdout_bytes":output.stdout.len(),"stderr":String::from_utf8_lossy(&output.stderr)})
+            );
             assert!(
                 output.status.success(),
                 "{}",
@@ -483,6 +493,23 @@ fn cpu_us() -> u64 {
     (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
         + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64
 }
+
+fn child_cpu_us() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<nix::libc::rusage>::uninit();
+    // A successful getrusage initializes the structure. RUSAGE_CHILDREN
+    // accounts for completed subprocesses outside notice samples.
+    let usage = unsafe {
+        assert_eq!(
+            nix::libc::getrusage(nix::libc::RUSAGE_CHILDREN, usage.as_mut_ptr()),
+            0
+        );
+        usage.assume_init()
+    };
+    (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64 * 1_000_000
+        + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64
+}
+
+include!("../benches/fixtures/notice-cost-fixed-interleaved.inc.rs");
 
 async fn drain(module: &Module<Client>, key: &SessionRef) {
     module.idle_foreground(key).await.unwrap();

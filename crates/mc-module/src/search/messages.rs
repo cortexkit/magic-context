@@ -105,6 +105,70 @@ fn set_watermark(
     Ok(())
 }
 
+/// A partially backfilled map cannot reach every legacy FTS row. Match the
+/// plugin's rowid-watermark sweep as well as deleting the mapped rows.
+pub(super) fn delete_fts_range(
+    conn: &Connection,
+    session: &str,
+    from: i64,
+    through: i64,
+    limit: i64,
+) -> rusqlite::Result<bool> {
+    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3)",params![session,from,through])?;
+    let (watermark, completed): (i64, bool) = conn
+        .query_row(
+            "SELECT watermark_rowid,completed FROM message_fts_rowid_map_backfill_state WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, false));
+    if completed {
+        return Ok(false);
+    }
+    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT rowid FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4 LIMIT ?5)",params![watermark,session,from,through,limit])?;
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4)",params![watermark,session,from,through],|r|r.get(0))
+}
+
+/// Setup checks the supplied entries after a restart without rebuilding unchanged
+/// rows. Changes to an older tool's result still refresh its source digest.
+pub(super) fn reconcile(
+    conn: &mut Connection,
+    harness: &str,
+    session: &str,
+    entries: &[Entry],
+) -> rusqlite::Result<()> {
+    let mark = watermark(conn, session)?.max(0) as u64;
+    let mut changed = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.ordinal <= mark) {
+        let stored:Option<(String,String)>=conn.query_row("SELECT message_id,source_version FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",params![session,entry.ordinal as i64],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if stored
+            .as_ref()
+            .is_none_or(|(mid, digest)| mid != &entry.mid || digest != &entry.digest)
+        {
+            changed.push(entry);
+        }
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for entry in changed {
+        let number = entry.ordinal as i64;
+        delete_fts_range(&tx, session, number, number, -1)?;
+        tx.execute(
+            "DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2",
+            params![session, number],
+        )?;
+        tx.execute(
+            "DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",
+            params![session, number],
+        )?;
+        insert(&tx, harness, session, entry, &content_of(entry))?;
+    }
+    tx.commit()
+}
+
 fn insert(
     conn: &Connection,
     harness: &str,

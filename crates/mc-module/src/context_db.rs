@@ -245,18 +245,50 @@ impl ContextDb {
                 path.display()
             ));
         }
-        let mode: String = connection
-            .query_row(
-                if establish_wal {
-                    "PRAGMA journal_mode=WAL"
-                } else {
-                    "PRAGMA journal_mode"
-                },
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("context.db {}: {error}", path.display()))?;
-        if !mode.eq_ignore_ascii_case("wal") {
+        let current_mode =
+            || connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0));
+        let mut mode =
+            current_mode().map_err(|error| format!("context.db {}: {error}", path.display()))?;
+        if establish_wal && !mode.eq_ignore_ascii_case("wal") {
+            let switch = || {
+                connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            };
+            let first = switch();
+            let outcome = if first
+                .as_ref()
+                .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"))
+            {
+                first
+            } else {
+                // Startup can wait longer than an individual notice write.
+                // A legacy rollback-journal reader may hold the exclusive
+                // switch lock, but must not prevent ck-mc from starting.
+                connection
+                    .busy_timeout(Duration::from_secs(2))
+                    .map_err(|e| e.to_string())?;
+                let retry = switch();
+                connection
+                    .busy_timeout(CONTEXT_BUSY_TIMEOUT)
+                    .map_err(|e| e.to_string())?;
+                retry
+            };
+            match outcome {
+                Ok(selected) => {
+                    mode = selected;
+                    if !mode.eq_ignore_ascii_case("wal") {
+                        tracing::warn!(
+                            "ck-mc: context.db {}: WAL switch deferred; continuing in {mode} mode",
+                            path.display()
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    "ck-mc: context.db {}: WAL switch deferred; continuing in {mode} mode: {error}",
+                    path.display()
+                ),
+            }
+        }
+        if !mode.eq_ignore_ascii_case("wal") && !establish_wal {
             return Err(format!(
                 "context_wal_required: {} is in {mode} mode",
                 path.display()
@@ -265,9 +297,11 @@ impl ContextDb {
         // Match the standalone plugin: WAL remains crash-consistent without
         // syncing each commit; a power failure may lose the latest commits.
         // Never apply this durability policy to a rollback-journal database.
-        connection
-            .execute_batch("PRAGMA synchronous=NORMAL;")
-            .map_err(|error| error.to_string())?;
+        if mode.eq_ignore_ascii_case("wal") {
+            connection
+                .execute_batch("PRAGMA synchronous=NORMAL;")
+                .map_err(|error| error.to_string())?;
+        }
         #[cfg(feature = "context-db-timing")]
         let timing = timing::Timing::install(&connection);
         Ok(Self {

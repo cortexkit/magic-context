@@ -21,10 +21,12 @@ const PAGES_PER_BATCH: usize = 4;
 pub(crate) struct Mark {
     pub newest: Option<Cursor>,
     pub from: Option<u64>,
+    pub reconcile: Option<u64>,
 }
 
 #[derive(Default)]
 struct Pending {
+    instance: u64,
     mark: Option<Mark>,
     generation: u64,
     queued: bool,
@@ -35,6 +37,7 @@ struct Pending {
 
 #[derive(Default)]
 struct State {
+    serial: u64,
     sessions: HashMap<SessionRef, Pending>,
     paused: bool,
 }
@@ -53,7 +56,7 @@ pub(crate) struct Background {
 }
 
 enum Command {
-    Work(SessionRef),
+    Work(SessionRef, u64),
     Stop,
 }
 
@@ -70,6 +73,10 @@ impl Drop for Background {
 
 impl Background {
     pub fn new<C: RunnerClient>(client: Arc<C>, path: PathBuf) -> Self {
+        // Client reconnects spawn reader/writer tasks on the current runtime.
+        // They must belong to the module's continuously driven runtime, not
+        // a private runtime parked whenever this thread waits for more work.
+        let runtime = tokio::runtime::Handle::current();
         let (tx, rx) = mpsc::channel::<Command>();
         let shared = Arc::new(Shared::default());
         let own = shared.clone();
@@ -77,18 +84,20 @@ impl Background {
         let thread = std::thread::Builder::new()
             .name("mc-message-index".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("search runtime");
                 let mut db = None;
-                while let Ok(Command::Work(key)) = rx.recv() {
-                    let (mark, generation) = {
+                while let Ok(Command::Work(key, instance)) = rx.recv() {
+                    let (mut mark, generation) = {
                         let mut state = own.state.lock().unwrap();
                         while state.paused {
                             state = own.resumed.wait(state).unwrap();
                         }
-                        let pending = state.sessions.get_mut(&key).expect("queued search session");
+                        let Some(pending) = state
+                            .sessions
+                            .get_mut(&key)
+                            .filter(|p| p.instance == instance)
+                        else {
+                            continue;
+                        };
                         pending.queued = false;
                         pending.running = true;
                         (
@@ -98,26 +107,48 @@ impl Background {
                     };
                     // Open independently: a slow reader or SQLite commit must not
                     // own the foreground ContextDb mutex or a Tokio executor thread.
-                    let result = (|| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if db.is_none() {
                             db = Some(ContextDb::open_background(&path)?);
                         }
                         db.as_ref().unwrap().with_connection(|conn| {
-                            runtime.block_on(batch(client.as_ref(), conn, &key, &mark))
+                            runtime.block_on(batch(client.as_ref(), conn, &key, &mut mark))
                         })
-                    })();
+                    }));
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            // A panic poisons the private connection lock. A
+                            // fresh connection lets the next dirty retry run.
+                            db = None;
+                            let message = panic
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("unknown panic");
+                            Err(format!("search batch panicked: {message}"))
+                        }
+                    };
                     let mut state = own.state.lock().unwrap();
-                    let pending = state.sessions.get_mut(&key).unwrap();
+                    let Some(pending) = state
+                        .sessions
+                        .get_mut(&key)
+                        .filter(|p| p.instance == instance)
+                    else {
+                        own.changed.notify_waiters();
+                        continue;
+                    };
                     pending.running = false;
                     match result {
                         Ok(more) => {
                             pending.error = None;
                             pending.warned_non_wal = false;
                             if more && pending.mark.is_none() {
-                                pending.mark = Some(Mark {
-                                    newest: mark.newest,
-                                    from: None,
-                                });
+                                pending.mark = Some(mark);
+                            } else if more {
+                                let newer = pending.mark.take().unwrap();
+                                pending.mark = Some(mark);
+                                merge(&mut pending.mark, newer);
                             }
                         }
                         Err(error) => {
@@ -140,7 +171,7 @@ impl Background {
                         && (pending.error.is_none() || pending.generation != generation)
                     {
                         pending.queued = true;
-                        if next.send(Command::Work(key)).is_err() {
+                        if next.send(Command::Work(key, instance)).is_err() {
                             break;
                         }
                     }
@@ -157,16 +188,43 @@ impl Background {
 
     pub fn mark(&self, key: &SessionRef, mark: Mark) {
         let mut state = self.shared.state.lock().unwrap();
-        let p = state.sessions.entry(key.clone()).or_default();
+        if !state.sessions.contains_key(key) {
+            state.serial = state.serial.wrapping_add(1);
+            let instance = state.serial;
+            state.sessions.insert(
+                key.clone(),
+                Pending {
+                    instance,
+                    ..Pending::default()
+                },
+            );
+        }
+        let p = state.sessions.get_mut(key).unwrap();
         merge(&mut p.mark, mark);
         p.generation += 1;
         p.error = None;
         if !p.queued && !p.running {
             p.queued = true;
-            if self.tx.send(Command::Work(key.clone())).is_err() {
+            if self
+                .tx
+                .send(Command::Work(key.clone(), p.instance))
+                .is_err()
+            {
                 p.queued = false;
                 p.error = Some("search worker stopped".into());
             }
+        }
+    }
+
+    pub fn forget(&self, key: &SessionRef) {
+        self.shared.state.lock().unwrap().sessions.remove(key);
+        self.shared.changed.notify_waiters();
+    }
+
+    pub fn session_guard(&self, key: SessionRef) -> SessionGuard<'_> {
+        SessionGuard {
+            background: self,
+            key,
         }
     }
 
@@ -205,9 +263,20 @@ impl Background {
 fn merge(held: &mut Option<Mark>, next: Mark) {
     if let Some(old) = held {
         old.from = old.from.into_iter().chain(next.from).min();
+        old.reconcile = old.reconcile.into_iter().chain(next.reconcile).min();
         old.newest = next.newest;
     } else {
         *held = Some(next);
+    }
+}
+
+pub(crate) struct SessionGuard<'a> {
+    background: &'a Background,
+    key: SessionRef,
+}
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        self.background.forget(&self.key);
     }
 }
 
@@ -215,7 +284,7 @@ async fn batch<C: RunnerClient>(
     client: &C,
     conn: &mut Connection,
     key: &SessionRef,
-    mark: &Mark,
+    mark: &mut Mark,
 ) -> Result<bool, String> {
     let _timing = crate::notice_cost_timing::span("search.background_batch");
     let mode: String = conn
@@ -254,6 +323,68 @@ async fn batch<C: RunnerClient>(
             )
             .map_err(|e| e.to_string())?;
         if remaining > 0 {
+            return Ok(true);
+        }
+        mark.from = None;
+    }
+    if let Some(mut from) = mark.reconcile {
+        for _ in 0..PAGES_PER_BATCH {
+            let page = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.read(
+                    key,
+                    ReadRequest::new(
+                        Select::After {
+                            after_ordinal: from.checked_sub(1).filter(|n| *n > 0),
+                            limit: Some(PAGE_ENTRIES),
+                        },
+                        Detail::Compact,
+                    )
+                    .with_max_bytes(PAGE_BYTES),
+                ),
+            )
+            .await
+            .map_err(|_| "search reconcile read timed out".to_owned())?
+            .map_err(|e| e.to_string())?;
+            let newest = page.head.newest.as_ref().map_or(0, |c| c.ordinal);
+            if super::messages::watermark(conn, session)
+                .map_err(|e| e.to_string())?
+                .max(0) as u64
+                > newest
+            {
+                mark.from = Some(newest + 1);
+                return Ok(true);
+            }
+            for (offset, entry) in page.entries.iter().enumerate() {
+                if entry.ordinal != from + offset as u64 {
+                    return Err("search reconcile contains an ordinal gap".into());
+                }
+            }
+            super::messages::reconcile(conn, &key.harness, session, &page.entries)
+                .map_err(|e| e.to_string())?;
+            let complete = page.entries.last().is_some_and(|last| {
+                page.head.newest.as_ref().is_some_and(|c| {
+                    c.ordinal == last.ordinal && c.mid == last.mid && c.digest == last.digest
+                })
+            });
+            if complete || (page.entries.is_empty() && from > newest) {
+                mark.reconcile = None;
+                if super::messages::watermark(conn, session)
+                    .map_err(|e| e.to_string())?
+                    .max(0) as u64
+                    == newest
+                {
+                    return Ok(false);
+                }
+                break;
+            }
+            let Some(last) = page.entries.last() else {
+                return Err("search reconcile made no progress".into());
+            };
+            from = last.ordinal + 1;
+            mark.reconcile = Some(from);
+        }
+        if mark.reconcile.is_some() {
             return Ok(true);
         }
     }
@@ -323,20 +454,26 @@ fn truncate_chunk(conn: &mut Connection, key: &SessionRef, from: u64) -> rusqlit
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO message_history_index (session_id,last_indexed_ordinal,dirty_floor_ordinal,updated_at,harness) VALUES (?1,0,?2,0,?3) ON CONFLICT(session_id) DO UPDATE SET last_indexed_ordinal=MIN(last_indexed_ordinal,excluded.dirty_floor_ordinal-1), dirty_floor_ordinal=excluded.dirty_floor_ordinal", params![key.session, from as i64, key.harness])?;
     let end: Option<i64> = tx.query_row("SELECT MAX(message_ordinal) FROM (SELECT message_ordinal FROM message_history_source WHERE session_id=?1 AND message_ordinal>=?2 ORDER BY message_ordinal LIMIT ?3)", params![key.session,from as i64,PAGE_ENTRIES], |r| r.get(0))?;
+    let legacy_remains = super::messages::delete_fts_range(
+        &tx,
+        &key.session,
+        from as i64,
+        end.unwrap_or(i64::MAX),
+        PAGE_ENTRIES as i64,
+    )?;
     if let Some(end) = end {
-        tx.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3)", params![key.session,from as i64,end])?;
         tx.execute("DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3", params![key.session,from as i64,end])?;
         tx.execute("DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3", params![key.session,from as i64,end])?;
     }
     let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM message_history_source WHERE session_id=?1 AND message_ordinal>=?2)", params![key.session,from as i64], |r|r.get(0))?;
-    if !remains {
+    if !remains && !legacy_remains {
         tx.execute(
             "UPDATE message_history_index SET dirty_floor_ordinal=0 WHERE session_id=?1",
             [&key.session],
         )?;
     }
     tx.commit()?;
-    Ok(!remains)
+    Ok(!remains && !legacy_remains)
 }
 
 #[cfg(test)]

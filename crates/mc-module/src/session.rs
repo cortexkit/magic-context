@@ -63,6 +63,7 @@ pub struct Session {
     index: Index,
     view_validation: crate::view_builder::ValidationCache,
     search_dirty_from: Option<u64>,
+    search_reconcile_from: Option<u64>,
     scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
@@ -298,6 +299,7 @@ impl Session {
             index: Index::default(),
             view_validation: Default::default(),
             search_dirty_from: None,
+            search_reconcile_from: None,
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
             suspended: false,
@@ -631,10 +633,7 @@ impl Session {
         // the raw entries loaded from the summary cut through the newest row,
         // as well as the durable archive boundary. Nothing before that cut can
         // still carry a mutable raw tool result.
-        self.search_dirty_from = Some(
-            self.search_dirty_from
-                .map_or(self.index.base(), |from| from.min(self.index.base())),
-        );
+        self.search_reconcile_from = Some(self.index.base());
         // After the read, so the cut message of the view the runner applies
         // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
@@ -3515,7 +3514,12 @@ impl Session {
         crate::search::background::Mark {
             newest: self.index.cursor(),
             from: self.search_dirty_from.take(),
+            reconcile: self.search_reconcile_from.take(),
         }
+    }
+
+    pub(crate) fn search_enabled(&self) -> bool {
+        !self.suspended
     }
 
     fn forget_missing(&mut self) {

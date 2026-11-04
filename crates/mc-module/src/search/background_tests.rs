@@ -12,6 +12,8 @@ struct Fake {
     entries: Arc<Mutex<Vec<Entry>>>,
     reads: Arc<AtomicUsize>,
     fail_read: Arc<AtomicUsize>,
+    panic_read: Arc<AtomicUsize>,
+    refuse_read: Arc<AtomicUsize>,
     active: Arc<Mutex<std::collections::HashSet<SessionRef>>>,
     pause: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
     started: Arc<Notify>,
@@ -48,6 +50,7 @@ impl Fake {
         Mark {
             newest: self.cursor(),
             from,
+            reconcile: None,
         }
     }
 }
@@ -64,6 +67,17 @@ impl RunnerClient for Fake {
             pause.acquire().await.unwrap().forget();
         }
         let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.refuse_read.load(Ordering::SeqCst) == n {
+            self.active.lock().unwrap().remove(key);
+            return Err(ClientError::refused(
+                cortexkit_role_compaction::wire::codes::COMPACTION_NOT_PERMITTED,
+                "provider is no longer allowed",
+            ));
+        }
+        if self.panic_read.load(Ordering::SeqCst) == n {
+            self.active.lock().unwrap().remove(key);
+            panic!("injected runner read panic");
+        }
         if self.fail_read.load(Ordering::SeqCst) == n {
             self.active.lock().unwrap().remove(key);
             return Err(ClientError::new("injected read failure"));
@@ -276,6 +290,123 @@ async fn failed_batch_stays_dirty_and_the_next_notice_retries_it() {
     worker.mark(&f.key, f.client.mark(None));
     worker.idle(&f.key).await.unwrap();
     f.assert_rows(31);
+}
+
+#[tokio::test]
+async fn a_panicked_batch_clears_running_and_the_next_mark_retries() {
+    let f = Fixture::new(13);
+    f.client.panic_read.store(1, Ordering::SeqCst);
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(None));
+    let failed = tokio::time::timeout(Duration::from_secs(1), worker.idle(&f.key))
+        .await
+        .expect("panic left the indexer running forever");
+    assert!(failed.unwrap_err().contains("search batch panicked"));
+    assert!(!worker.shared.state.lock().unwrap().sessions[&f.key].running);
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(13);
+}
+
+#[tokio::test]
+async fn dropping_a_session_guard_forgets_pending_state_and_stale_work_is_safe() {
+    let f = Fixture::new(3);
+    let worker = f.worker();
+    let guard = worker.session_guard(f.key.clone());
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    assert!(worker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .contains_key(&f.key));
+    drop(guard);
+    assert!(!worker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .contains_key(&f.key));
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(3);
+}
+
+#[tokio::test]
+async fn forgetting_inflight_work_cannot_overwrite_the_readded_sessions_state() {
+    let f = Fixture::new(3);
+    let worker = f.worker();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.client.pause.lock().unwrap() = Some(pause.clone());
+    worker.mark(&f.key, f.client.mark(None));
+    f.client.started.notified().await;
+    worker.forget(&f.key);
+    worker.mark(&f.key, f.client.mark(None));
+    *f.client.pause.lock().unwrap() = None;
+    pause.add_permits(1);
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(3);
+}
+
+#[tokio::test]
+async fn a_revert_removes_unmapped_fts_rows_even_when_the_source_rows_are_gone() {
+    let f = Fixture::new(0);
+    let conn = Connection::open(&f.path).unwrap();
+    conn.execute_batch(
+        "UPDATE message_fts_rowid_map_backfill_state SET completed=0,watermark_rowid=0;",
+    )
+    .unwrap();
+    for ordinal in 1..=401 {
+        conn.execute("INSERT INTO message_history_fts (session_id,message_ordinal,message_id,role,content) VALUES (?1,?2,?3,'user','legacy searchable text')",params![f.key.session,ordinal,format!("legacy-{ordinal}")]).unwrap();
+    }
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(Some(1)));
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(0);
+}
+
+#[tokio::test]
+async fn a_suspended_session_posts_no_search_marks() {
+    use crate::{module::Module, pass::Settings, route::Route};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+    let f = Fixture::new(3);
+    let module = Module::new(
+        (*f.client).clone(),
+        Settings::default(),
+        Some(ContextDb::open(&f.path).unwrap()),
+        None,
+    );
+    let route = Route {
+        session: f.key.clone(),
+        project: None,
+        workdir: None,
+        agent_id: None,
+    };
+    // A refused transcript read suspends compaction and must not independently
+    // start a background retry on the very same permission refusal.
+    f.client.refuse_read.store(1, Ordering::SeqCst);
+    let setup = SetupRequest::new(
+        "head",
+        ModelRef::new("test", "model"),
+        1_000_000,
+        128_000,
+        ProviderRules::new(SignedParts::None, EditCost::Suffix),
+        vec![],
+        1,
+    )
+    .with_newest(f.client.cursor().unwrap());
+    module.setup(route, setup).unwrap();
+    module.idle_foreground(&f.key).await.unwrap();
+    module.search_idle(&f.key).await.unwrap();
+    assert_eq!(
+        f.client.reads.load(Ordering::SeqCst),
+        1,
+        "suspended Setup still posted background search work"
+    );
 }
 
 #[tokio::test]

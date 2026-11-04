@@ -194,7 +194,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
                 .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker())
+                .or_insert_with(|| self.spawn_worker(route.session.clone()))
                 .clone()
         };
         let key = route.session.clone();
@@ -282,7 +282,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
                 .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker())
+                .or_insert_with(|| self.spawn_worker(route.session.clone()))
                 .clone()
         };
         worker
@@ -454,12 +454,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         worker.send(job).map_err(|_| ModuleError::Stopped)
     }
 
-    fn spawn_worker(&self) -> mpsc::UnboundedSender<Job> {
+    fn spawn_worker(&self, key: SessionRef) -> mpsc::UnboundedSender<Job> {
         let (jobs, mut receiver) = mpsc::unbounded_channel::<Job>();
         let inner = Arc::clone(&self.inner);
         // Weak, so the worker's own handle never keeps it alive.
         let own = jobs.downgrade();
         tokio::spawn(async move {
+            let _search_guard = inner
+                .search
+                .as_ref()
+                .map(|search| search.session_guard(key));
             let mut session: Option<Session> = None;
             let mut saved: Option<crate::store::Durable> = None;
             while let Some(job) = receiver.recv().await {
@@ -644,7 +648,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 }
                 if let Some(session) = session.as_mut().filter(|_| publish_app) {
                     session.publish_app(&inner.app_read, app_checkpoint);
-                    if refresh_search {
+                    if refresh_search && session.search_enabled() {
                         if let Some(search) = &inner.search {
                             let key = session.key().clone();
                             search.mark(&key, session.search_mark());

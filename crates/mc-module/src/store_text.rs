@@ -258,8 +258,16 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?
     };
     for (runner, harness, session, text) in rows {
-        let mut value: Value = serde_json::from_str(&text)
-            .map_err(|e| format!("state_migration_failed: {session}: {e}"))?;
+        let mut value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                // Loading this row already yields no state. Leave its bytes
+                // untouched so one damaged session cannot prevent all others
+                // from opening or migrating their valid state.
+                tracing::warn!("ck-mc: session {session}: skipping undecodable state during migration: {error}");
+                continue;
+            }
+        };
         transform(&mut value, connection, true)?;
         let mut used = BTreeSet::new();
         fn reference(value: &Value, used: &mut BTreeSet<String>) {
