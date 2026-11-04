@@ -108,3 +108,92 @@ async fn an_unbound_tool_route_answers_the_catalog_and_refuses_tool_calls() {
         "{refused:?}"
     );
 }
+
+/// Core reads the step-transform declaration for a session it is composing
+/// over ck-mc's own management surface, before the session exists. That
+/// route answers `role.describe` and `transform.declare` and nothing else;
+/// a phone's management route still reaches the app reads.
+#[tokio::test]
+async fn cores_management_route_reads_the_step_transform_declaration() {
+    let client = SubcRunnerClient::new(
+        PathBuf::from("unused-connection-file"),
+        Arc::new(ChildScopes::new("ck-mc-test")),
+    );
+    let handler = Handler::new(Module::new(
+        client,
+        crate::pass::Settings::default(),
+        None,
+        None,
+    ));
+    let mut request = RouteBindRequest::new(
+        RouteHandle::detached(10, 1),
+        RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        },
+        BindIdentity::new("opencode2", "ses_head"),
+    );
+    request.principal = Some(Principal::Reserved {
+        module_id: "prefrontal-core".into(),
+    });
+    let accepted = handler.on_bind(&request).await;
+    assert!(
+        !format!("{accepted:?}").contains("not_permitted"),
+        "{accepted:?}"
+    );
+    let route = handler
+        .bound
+        .lock()
+        .unwrap()
+        .get(&10)
+        .expect("bound")
+        .route
+        .clone();
+    let call = |method: &str, params: serde_json::Value| {
+        serde_json::to_vec(&serde_json::json!({"method": method, "params": params})).unwrap()
+    };
+
+    let describe = handler
+        .hook(
+            &route,
+            &call(step::ops::ROLE_DESCRIBE, serde_json::json!({})),
+        )
+        .await
+        .expect("role.describe");
+    let describe: step::describe::RoleDescribe = serde_json::from_value(describe).unwrap();
+    assert_eq!(describe.majors[0].version, step::PROVIDES);
+    for op in step::REQUIRED_OPS {
+        assert!(
+            describe.majors[0].ops.iter().any(|served| served == op),
+            "{op}"
+        );
+    }
+    let declared = handler
+        .hook(
+            &route,
+            // No preset named: the declaration defaults to the head preset,
+            // the one core asks for when it composes a head.
+            &call(step::ops::TRANSFORM_DECLARE, serde_json::json!({})),
+        )
+        .await
+        .expect("transform.declare");
+    assert!(declared.to_string().contains("pre_user"), "{declared}");
+    let hook = handler
+        .hook(
+            &route,
+            &call(step::ops::TRANSFORM_HOOK, serde_json::json!({})),
+        )
+        .await;
+    assert!(
+        hook.is_err(),
+        "a hook on core's discovery route must refuse"
+    );
+
+    // A caller the daemon doesn't attest gets nothing on the surface.
+    request.handle = RouteHandle::detached(11, 1);
+    request.principal = Some(Principal::Unverified);
+    let refused = handler.on_bind(&request).await;
+    assert!(
+        format!("{refused:?}").contains("not_permitted"),
+        "{refused:?}"
+    );
+}

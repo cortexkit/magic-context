@@ -870,6 +870,9 @@ impl Handler {
     async fn hook(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
         let (method, params) = wire::decode(body)?;
         match method.as_str() {
+            // A runner handed a plan naming ck-mc checks this before it routes
+            // a hook here, and refuses the provider when an op is missing.
+            step::ops::ROLE_DESCRIBE => Ok(step_describe()),
             step::ops::TRANSFORM_DECLARE => {
                 let request: DeclareRequest = wire::params(params)?;
                 let preset = request.preset.as_deref().unwrap_or("head");
@@ -912,6 +915,37 @@ impl Handler {
 /// The bind harness a runner declares on a route bound to no session: a
 /// hook route opened for discovery.
 const MODULE_LEVEL_HARNESS: &str = "runner";
+
+/// ck-mc's `step-transform-provider/v2` description: the build, never a
+/// session.
+fn step_describe() -> Value {
+    let major = step::describe::Major::new(
+        step::PROVIDES,
+        step::REQUIRED_OPS
+            .iter()
+            .map(|op| (*op).to_owned())
+            .collect(),
+        "alpha",
+    );
+    serde_json::to_value(step::describe::RoleDescribe::new(
+        vec![major],
+        crate::version_line(),
+    ))
+    .expect("answers serialize")
+}
+
+/// A route to ck-mc's own management surface from a module the daemon
+/// attests, declaring no role: core reading step-transform declarations.
+fn module_discovery(request: &RouteBindRequest) -> bool {
+    matches!(
+        &request.target,
+        RouteTarget::ManagementSurface { module_id } if module_id == crate::MODULE_ID
+    ) && matches!(request.principal, Some(Principal::Reserved { .. }))
+        && request
+            .role_versions
+            .as_ref()
+            .is_none_or(|roles| roles.is_empty())
+}
 
 /// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
 /// time marker or a memory hint, with ck-mc's budget, passing on any
@@ -1022,6 +1056,31 @@ impl ModuleHandler for Handler {
                         .lock()
                         .expect("app routes")
                         .insert(request.handle.channel, caller);
+                    BindDecision::accept()
+                }
+                // Core composes a session's plan before the session exists, so
+                // it reads ck-mc's step-transform declaration over ck-mc's own
+                // management surface (step-transform-provider/v2 allows a
+                // declaration on a module route). An attested module that is
+                // not a phone gets that discovery only: `role.describe` and
+                // `transform.declare`, never a hook or an app read.
+                Err(_) if module_discovery(request) => {
+                    self.bound.lock().expect("bound routes").insert(
+                        request.handle.channel,
+                        Bound {
+                            route: Route {
+                                session: SessionRef::new(
+                                    "",
+                                    MODULE_LEVEL_HARNESS,
+                                    request.identity.session.clone(),
+                                ),
+                                project: None,
+                                workdir: None,
+                                agent_id: None,
+                            },
+                            role: RouteRole::Hooks,
+                        },
+                    );
                     BindDecision::accept()
                 }
                 Err(error) => BindDecision::reject(error.code, error.message),
