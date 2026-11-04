@@ -546,6 +546,39 @@ fn role_describe_advertises_compacting_preflight() {
     );
 }
 
+/// Core admits ck-mc as a plan sender only when `reminder_templates`
+/// names every template the sender carries, with that template's digest and
+/// a delivery the sends use.
+#[test]
+fn role_describe_lists_every_reminder_template_with_digest_and_delivery() {
+    let answer: Value =
+        serde_json::from_slice(&tool_catalog::role_describe_bytes().unwrap()).unwrap();
+    let sender: cortexkit_role_llm_runner::delivery_order::PlanSender =
+        serde_json::from_value(answer["reminder_templates"]["sender"].clone()).unwrap();
+    assert_eq!(sender.module, "magic-context");
+    let listed = answer["reminder_templates"]["templates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(listed.len(), sender.templates.len());
+    for (template, entry) in sender.templates.iter().zip(listed) {
+        assert_eq!(entry["id"], json!(template.id));
+        assert_eq!(
+            entry["digest"],
+            json!(cortexkit_role_llm_runner::delivery_order::template_digest(
+                template
+            ))
+        );
+        let expected = if template.id == crate::nudges::KEEP_TEMPLATE
+            || template.id.starts_with("mc.ctx_reduce.ceiling.")
+        {
+            "steer"
+        } else {
+            "tool_result"
+        };
+        assert_eq!(entry["delivery"], json!([expected]), "{}", template.id);
+    }
+}
+
 #[test]
 fn text_revision_is_the_one_config_json_records() {
     assert_eq!(

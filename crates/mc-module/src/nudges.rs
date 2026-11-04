@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Entry, Role};
 use cortexkit_role_llm_runner::delivery_order::{
-    template_digest, PartRef, PlanSender, Slot, Template, TemplateUse,
+    template_digest, Mode, PartRef, PlanSender, Slot, Template, TemplateUse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -164,6 +164,31 @@ pub fn templates() -> Vec<Template> {
 /// The plan `senders` entry that admits ck-mc's sends and its templates.
 pub fn plan_sender() -> PlanSender {
     PlanSender::new("magic-context").with_templates(templates())
+}
+
+/// How ck-mc sends a template: the ceiling reminder and the `ctx_keep`
+/// request as a steer, every other reminder with the next tool result.
+pub fn delivery(template_id: &str) -> Mode {
+    if template_id == KEEP_TEMPLATE || template_id.starts_with("mc.ctx_reduce.ceiling.") {
+        Mode::Steer
+    } else {
+        Mode::ToolResult
+    }
+}
+
+/// The template list core checks before it admits ck-mc as a plan sender:
+/// each template's id, its digest and how ck-mc delivers it.
+pub fn template_catalog() -> Vec<Value> {
+    templates()
+        .iter()
+        .map(|template| {
+            json!({
+                "id": template.id,
+                "digest": template_digest(template),
+                "delivery": [delivery(&template.id)],
+            })
+        })
+        .collect()
 }
 
 /// A use of the template `id` with `slots`.
