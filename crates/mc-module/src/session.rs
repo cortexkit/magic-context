@@ -35,6 +35,8 @@ use crate::view_builder;
 
 /// How many bytes one catch-up read asks for at most.
 const READ_PAGE_BYTES: u64 = 1 << 20;
+/// Pages of old messages one pass reads to fill a search index gap.
+const SEARCH_GAP_PAGES: usize = 4;
 
 pub struct Session {
     app: crate::app_read::SessionState,
@@ -795,6 +797,7 @@ impl Session {
             self.adopt_runner_view(client).await;
         }
         self.forget_missing();
+        self.fill_search_gap(client).await;
         self.update_search_index();
         if !pass::in_force_band(&self.conditions, settings) {
             self.emergency_latched = false;
@@ -3482,6 +3485,81 @@ impl Session {
         self.index = Index::starting_at(self.cut.unwrap_or(1));
         *rebuilt = true;
         *after = self.index.read_after();
+    }
+
+    /// Index the messages between the shared search index's end and the
+    /// oldest message ck-mc holds, read from the runner. The index only
+    /// grows over contiguous messages, so without this a gap below the held
+    /// window would leave every later message unsearchable too. A gap
+    /// appears after a move-in, when the standalone plugin's index stopped
+    /// short of the cut, or when ck-mc first starts on a session after its
+    /// cut. Reads at most a few pages per pass; the next pass goes on.
+    async fn fill_search_gap<C: RunnerClient>(&self, client: &C) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let Some(first) = self.index.entries().first().map(|entry| entry.ordinal) else {
+            return;
+        };
+        let session = &self.key.session;
+        let mark =
+            match db.with_connection(|conn| crate::search::messages::watermark(conn, session)) {
+                Ok(mark) => mark.max(0) as u64,
+                Err(error) => {
+                    tracing::warn!("ck-mc: session {session}: search index unreadable: {error}");
+                    return;
+                }
+            };
+        if mark + 1 >= first {
+            return;
+        }
+        let mut after = (mark > 0).then_some(mark);
+        for _ in 0..SEARCH_GAP_PAGES {
+            let request = ReadRequest::new(
+                Select::After {
+                    after_ordinal: after,
+                    limit: None,
+                },
+                Detail::Compact,
+            )
+            .with_max_bytes(READ_PAGE_BYTES);
+            let page = match client.read(&self.key, request).await {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::info!(
+                        "ck-mc: session {session}: search gap from message {} not read: {}",
+                        mark + 1,
+                        error.message
+                    );
+                    return;
+                }
+            };
+            let entries: Vec<_> = page
+                .entries
+                .into_iter()
+                .filter(|entry| entry.ordinal < first)
+                .collect();
+            let Some(last) = entries.last().map(|entry| entry.ordinal) else {
+                return;
+            };
+            if let Err(error) = db.with_connection(|conn| {
+                crate::search::messages::index(conn, &self.key.harness, session, &entries)
+            }) {
+                tracing::warn!("ck-mc: session {session}: search indexing failed: {error}");
+                return;
+            }
+            if last + 1 >= first {
+                tracing::info!(
+                    "ck-mc: session {session}: search index filled messages {}..{last}",
+                    mark + 1
+                );
+                return;
+            }
+            match page.next_after {
+                Some(next) => after = Some(next),
+                None => return,
+            }
+        }
     }
 
     /// Drop held work for parts that are no longer in the transcript.

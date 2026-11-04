@@ -61,7 +61,7 @@ fn content_hash(content: &str) -> String {
 }
 
 /// The session's index watermark: every message up to it is indexed.
-fn watermark(conn: &Connection, session: &str) -> rusqlite::Result<i64> {
+pub(crate) fn watermark(conn: &Connection, session: &str) -> rusqlite::Result<i64> {
     Ok(conn
         .query_row(
             "SELECT last_indexed_ordinal FROM message_history_index WHERE session_id = ?1",
@@ -165,7 +165,7 @@ pub fn index(
             if number > mark + 1 {
                 // The watermark only moves over contiguous messages; ck-mc's
                 // view does not hold the missing ones, so stop here.
-                tracing::info!("ck-mc: session {session}: search index stops at message {mark}; message {number} follows a gap");
+                tracing::debug!("ck-mc: session {session}: search index stops at message {mark}; message {number} follows a gap");
                 stopped = true;
                 break;
             }

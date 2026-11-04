@@ -3736,6 +3736,19 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         requests[1].usage.cache_read_tokens,
         requests[0].usage.prompt_tokens
     );
+    // Search covers the old messages as well as the new ones: the index
+    // starts below the cut, so ck-mc reads the gap from the runner.
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    for text in ["Old message 3", "Where were we"] {
+        let found: i64 = db
+            .query_row(
+                "SELECT count(*) FROM message_history_fts WHERE session_id = 's1' AND content LIKE ?1",
+                [format!("%{text}%")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "{text}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
