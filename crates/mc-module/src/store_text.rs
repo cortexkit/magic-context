@@ -9,11 +9,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const MIN_BYTES: usize = 4_096;
 
 #[derive(Clone, Default)]
-pub(crate) struct Cache(Vec<(String, String)>);
+pub(crate) struct Cache(Vec<(Arc<str>, String)>);
 
 thread_local! {
     static ENCODER: RefCell<Option<Encoding>> = const { RefCell::new(None) };
@@ -32,7 +33,12 @@ fn reference(text: &str) -> Option<Value> {
         if text.len() < MIN_BYTES {
             return None;
         }
-        let id = match encoder.cache.0.iter().find(|(held, _)| held == text) {
+        let id = match encoder
+            .cache
+            .0
+            .iter()
+            .find(|(held, _)| held.as_ref() == text)
+        {
             Some((_, id)) => id.clone(),
             None => {
                 let id = format!("{:x}", Sha256::digest(text.as_bytes()));
@@ -42,7 +48,7 @@ fn reference(text: &str) -> Option<Value> {
                 if encoder.cache.0.len() == 8 {
                     encoder.cache.0.remove(0);
                 }
-                encoder.cache.0.push((text.to_owned(), id.clone()));
+                encoder.cache.0.push((Arc::from(text), id.clone()));
                 id
             }
         };

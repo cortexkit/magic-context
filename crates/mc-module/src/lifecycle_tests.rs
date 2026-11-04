@@ -637,6 +637,28 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
 }
 
 #[test]
+fn quiet_durable_snapshots_share_the_unchanged_history_baseline() {
+    let (mut session, _, _, _, _) = fixture();
+    session.baseline = Some(Arc::new(Baseline {
+        m0: "unchanged history ".repeat(12_000),
+        ..Baseline::default()
+    }));
+    let first = session.durable();
+    let second = session.durable();
+    assert!(Arc::ptr_eq(
+        first.baseline.as_ref().unwrap(),
+        second.baseline.as_ref().unwrap()
+    ));
+    let bytes = serde_json::to_vec(&first).unwrap();
+    let decoded: crate::store::Durable = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(first, decoded);
+    assert_eq!(
+        serde_json::to_value(first).unwrap()["baseline"]["m0"],
+        session.baseline.as_ref().unwrap().m0
+    );
+}
+
+#[test]
 fn lifecycle_the_index_keeps_compact_sizes_tags_and_full_checksums() {
     use cortexkit_role_compaction::part::{Seal, ToolPart, ToolStatus};
     let mut transcript = mc_mock_runner::transcript::Transcript::new(40);
@@ -981,10 +1003,10 @@ fn lifecycle_a_shape_fold_waits_out_a_heavy_thinking_turn() {
     session.index.extend(vec![text(1, "task"), thinking]);
     let mut shape = session.head_shape(&settings);
     shape.memory_enabled = !shape.memory_enabled;
-    session.baseline = Some(Baseline {
+    session.baseline = Some(Arc::new(Baseline {
         shape: Some(shape),
         ..Baseline::default()
-    });
+    }));
     let pass = session.decide_notice(&settings);
     assert!(!pass.rebuild, "the shape fold rebuilt during the hold");
     assert!(!session.fold_due);

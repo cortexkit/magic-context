@@ -124,7 +124,9 @@ pub struct Session {
     summaries: Vec<StoredCompartment>,
     /// What the head's baseline (`m[0]`, see the crate docs) holds; `None`
     /// until the first summary reaches a view.
-    baseline: Option<Baseline>,
+    /// Immutable between accepted views: saved-state comparisons and snapshots
+    /// share it instead of copying the full history on every quiet notice.
+    baseline: Option<Arc<Baseline>>,
     /// A summarizer run is in progress.
     summarizing: bool,
     /// The next view re-renders the baseline (`m[0]`), because the
@@ -139,7 +141,7 @@ pub struct Session {
     workdir: Option<String>,
     /// The baseline a view being published was built on; it replaces
     /// `baseline` once the runner takes the view.
-    next_baseline: Option<Baseline>,
+    next_baseline: Option<Arc<Baseline>>,
     /// How far each compressed text part is compressed, as the applied view
     /// shows it.
     caveman: lanes::CavemanState,
@@ -229,7 +231,7 @@ struct Before {
     queued: BTreeSet<lanes::PartKey>,
     refused_once: BTreeSet<lanes::PartKey>,
     emergency_latched: bool,
-    baseline: Option<Baseline>,
+    baseline: Option<Arc<Baseline>>,
     fold_due: bool,
     caveman: lanes::CavemanState,
     cut: Option<u64>,
@@ -2350,7 +2352,7 @@ impl Session {
         let mut base = match (&self.baseline, self.fold_due) {
             (Some(baseline), false) => {
                 fresh_fold = false;
-                baseline.clone()
+                baseline.as_ref().clone()
             }
             _ => folded(&fold_inputs),
         };
@@ -2401,7 +2403,10 @@ impl Session {
                 }
             }
         }
-        self.next_baseline = Some(next);
+        self.next_baseline = Some(match &self.baseline {
+            Some(held) if held.as_ref() == &next => held.clone(),
+            _ => Arc::new(next),
+        });
         ops
     }
 

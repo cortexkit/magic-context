@@ -26,10 +26,9 @@ mod enabled {
         // Each synchronous stage stays on its calling thread. Thread CPU lets
         // work be attributed to its calling thread, including the independent
         // phone/desktop read-projection thread.
-        use nix::sys::resource::{getrusage, UsageWho};
-        use nix::sys::time::TimeValLike;
-        let usage = getrusage(UsageWho::RUSAGE_THREAD).expect("thread CPU usage");
-        (usage.user_time().num_microseconds() + usage.system_time().num_microseconds()) as u64
+        use nix::time::{clock_gettime, ClockId};
+        let time = clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID).expect("thread CPU clock");
+        time.tv_sec() as u64 * 1_000_000_000 + time.tv_nsec() as u64
     }
 
     pub fn begin() {
@@ -79,8 +78,8 @@ mod enabled {
             });
             SAMPLES.lock().unwrap().push(Sample {
                 stage,
-                cpu_us: total,
-                exclusive_us: exclusive,
+                cpu_us: total / 1_000,
+                exclusive_us: exclusive / 1_000,
                 observed: None,
             });
         }

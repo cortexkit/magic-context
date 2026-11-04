@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cortexkit_role_compaction::read::SessionRef;
@@ -48,7 +48,7 @@ pub struct Durable {
     pub emergency_latched: bool,
     pub keep_requested: bool,
     /// What the head's `m[0]` holds, so a restart does not re-render it.
-    pub baseline: Option<Baseline>,
+    pub baseline: Option<Arc<Baseline>>,
     /// The `ctx_reduce` reminders' cadence, so a restart neither repeats a
     /// reminder nor forgets a grace.
     #[serde(default)]
@@ -723,7 +723,7 @@ mod tests {
         })).unwrap();
         let state = Durable {
             version: 2,
-            baseline: Some(base),
+            baseline: Some(Arc::new(base)),
             unconfirmed: vec![pending],
             ..Durable::default()
         };
@@ -768,10 +768,10 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let key = SessionRef::new("runner", "pi", "retry");
         let state = Durable {
-            baseline: Some(Baseline {
+            baseline: Some(Arc::new(Baseline {
                 m0: "immutable history ".repeat(1_000),
                 ..Baseline::default()
-            }),
+            })),
             ..Durable::default()
         };
         let conn = Connection::open(&path).unwrap();
@@ -790,17 +790,17 @@ mod tests {
         let one = SessionRef::new("runner", "pi", "one");
         let two = SessionRef::new("runner", "pi", "two");
         let original = Durable {
-            baseline: Some(Baseline {
+            baseline: Some(Arc::new(Baseline {
                 m0: "old history ".repeat(1_000),
                 ..Baseline::default()
-            }),
+            })),
             ..Durable::default()
         };
         let newer = Durable {
-            baseline: Some(Baseline {
+            baseline: Some(Arc::new(Baseline {
                 m0: "new history ".repeat(1_000),
                 ..Baseline::default()
-            }),
+            })),
             ..Durable::default()
         };
         store.save(&one, &original).unwrap();

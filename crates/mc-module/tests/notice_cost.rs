@@ -735,7 +735,9 @@ fn notice_cost_stages() {
         .map_or(50, |v| v.parse().expect("stage trial count"));
     for (size, shared) in [(1_000, true), (150_000, true), (1_000, false)] {
         let fixture = Fixture::with_table(Shape::Pi, size, false, shared);
-        measure_count(&fixture, true, false, trials);
+        for threshold in [false, true] {
+            measure_count(&fixture, threshold, false, trials);
+        }
     }
 }
 
