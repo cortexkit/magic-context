@@ -1658,6 +1658,14 @@ impl Session {
             return None;
         }
         self.conditions = ride.conditions.clone();
+        tracing::info!(
+            "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {:?}, applied view {:?}",
+            self.key.session,
+            ride.causes,
+            ride.request_tokens,
+            ride.conditions.last_prompt_tokens,
+            ride.applied_view.as_ref().map(|view| view.version),
+        );
         self.settle_unconfirmed(ride.applied_view.as_ref(), &[]);
         let over_limit = ride
             .has(RideCause::OverLimit)
