@@ -16,7 +16,7 @@
  *   # Add `--system <file>` to any sending mode to replace the recorded system
  *   # prompt, for example with the one-pass prompt OpenCode 1's registered
  *   # historian agent sends.
- *   # Write Anthropic Messages bodies for another seat to send:
+ *   # Write Anthropic Messages bodies for someone else to send:
  *   bun replay-turn-two.ts --cases <cases.json> --out <dir> --mode anthropic-bodies
  *   # Parse replies another seat returned (<dir>/<n>.reply.txt):
  *   bun replay-turn-two.ts --cases <cases.json> --out <dir> --mode replies
