@@ -56,6 +56,7 @@ impl Fake {
             reconcile: None,
             base: 1,
             entries: Arc::new(Vec::new()),
+            is_subagent: false,
         }
     }
 }
@@ -375,6 +376,63 @@ async fn runner_activity_creates_a_minimal_row_returned_by_the_dashboard_list_qu
 }
 
 #[tokio::test]
+async fn runner_activity_classifies_new_rows_from_the_session_preset() {
+    use crate::{module::Module, pass::Settings, route::Route};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+
+    for (preset, expected) in [("worker", 1), ("reader", 1), ("head", 0)] {
+        let f = Fixture::new(3);
+        let module = Module::new(
+            (*f.client).clone(),
+            Settings::default(),
+            Some(ContextDb::open(&f.path).unwrap()),
+            None,
+        );
+        let route = Route {
+            session: f.key.clone(),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let setup = SetupRequest::new(
+            preset,
+            ModelRef::new("test", "model"),
+            1_000_000,
+            128_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            vec![],
+            1,
+        )
+        .with_newest(f.client.cursor().unwrap());
+        module.setup(route, setup).unwrap();
+        module.idle_foreground(&f.key).await.unwrap();
+        module.search_idle(&f.key).await.unwrap();
+
+        let conn = Connection::open(&f.path).unwrap();
+        let is_subagent: i64 = conn
+            .query_row(
+                "SELECT is_subagent FROM session_meta WHERE harness=?1 AND session_id=?2",
+                params![f.key.harness, f.key.session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_subagent, expected, "preset {preset}");
+        assert_eq!(last_active(&conn, &f.key), Some(3));
+    }
+}
+
+#[test]
+fn coalesced_activity_marks_keep_the_latest_preset_classification() {
+    let client = Fake::default();
+    let mut held = Some(client.mark(None));
+    let mut next = client.mark(None);
+    next.is_subagent = true;
+    merge(&mut held, next);
+    assert!(held.unwrap().is_subagent);
+}
+
+#[tokio::test]
 async fn runner_activity_uses_the_newest_entry_actually_indexed_in_the_batch() {
     let f = Fixture::new(1_201);
     let mut conn = Connection::open(&f.path).unwrap();
@@ -440,12 +498,13 @@ async fn runner_activity_throttles_batches_for_sixty_seconds_and_keeps_pending_a
         .publish(
             &mut conn,
             &f.key,
+            false,
             first_write + Duration::from_millis(59_999),
         )
         .unwrap();
     assert_eq!(count_activity_writes(&conn), 1);
     activity
-        .publish(&mut conn, &f.key, first_write + ACTIVITY_INTERVAL)
+        .publish(&mut conn, &f.key, false, first_write + ACTIVITY_INTERVAL)
         .unwrap();
     assert_eq!(last_active(&conn, &f.key), Some(9_000_000));
     assert_eq!(count_activity_writes(&conn), 2);

@@ -25,6 +25,7 @@ pub(crate) struct Mark {
     pub reconcile: Option<u64>,
     pub base: u64,
     pub entries: Arc<Vec<Entry>>,
+    pub is_subagent: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +56,7 @@ impl Activity {
         &mut self,
         conn: &mut Connection,
         key: &SessionRef,
+        is_subagent: bool,
         now: Instant,
     ) -> rusqlite::Result<()> {
         let Some(at) = self.newest else {
@@ -77,12 +79,12 @@ impl Activity {
             self.newest = None;
             return Ok(());
         }
-        // Only the activity field belongs to the runner here. In particular,
-        // creating a row must not import or reset plugin cache/scheduler state.
+        // Presets without a summarizer classify new rows as subagents. Existing
+        // classification and plugin cache/scheduler state remain untouched.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let inserted = tx.execute(
-            "INSERT OR IGNORE INTO session_meta (harness, session_id, last_response_time) VALUES (?1, ?2, ?3)",
-            params![key.harness, key.session, at],
+            "INSERT OR IGNORE INTO session_meta (harness, session_id, last_response_time, is_subagent) VALUES (?1, ?2, ?3, ?4)",
+            params![key.harness, key.session, at, is_subagent],
         )?;
         let updated = tx.execute(
             "UPDATE session_meta SET last_response_time=?3 WHERE harness=?1 AND session_id=?2 AND (last_response_time IS NULL OR last_response_time<?3)",
@@ -341,6 +343,7 @@ fn merge(held: &mut Option<Mark>, next: Mark) {
         old.newest = next.newest;
         old.base = next.base;
         old.entries = next.entries;
+        old.is_subagent = next.is_subagent;
     } else {
         *held = Some(next);
     }
@@ -365,7 +368,7 @@ async fn batch<C: RunnerClient>(
 ) -> Result<bool, String> {
     let more = index_batch(client, conn, key, mark, activity).await?;
     activity
-        .publish(conn, key, Instant::now())
+        .publish(conn, key, mark.is_subagent, Instant::now())
         .map_err(|e| e.to_string())?;
     Ok(more)
 }

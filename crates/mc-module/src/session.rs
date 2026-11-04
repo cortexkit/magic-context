@@ -3536,6 +3536,7 @@ impl Session {
             reconcile: self.search_reconcile_from.take(),
             base: self.index.base(),
             entries: self.index.snapshot(),
+            is_subagent: !self.features.summarizer,
         }
     }
 
