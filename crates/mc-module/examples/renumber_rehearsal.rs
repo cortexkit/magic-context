@@ -8,7 +8,9 @@
 //!
 //! `messages.json` is the list the runner's move tool would send: every
 //! message row of the session's active path in host order, each
-//! `{mid, entry, finished_summary}`. Never point it at the live database.
+//! `{mid, entry, finished_summary}`; on Pi, every journal entry of the active
+//! branch with its `pi` kind, which selects the Pi plugin's numbering. Never
+//! point it at the live database.
 
 use cortexkit_role_compaction::read::Cursor;
 use mc_module::move_renumber::{renumber, HostMessage, Numbering};
@@ -27,12 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rev()
         .find_map(|message| message.entry.map(|entry| (message.mid.clone(), entry)))
         .ok_or("no message has an entry")?;
-    let numbering = Numbering::opencode(&messages, &Cursor::new(newest.1, &newest.0, ""))?;
+    let newest = Cursor::new(newest.1, &newest.0, "");
+    let numbering = if messages.iter().any(|message| message.pi.is_some()) {
+        Numbering::pi(&messages, &newest)?
+    } else {
+        Numbering::opencode(&messages, &newest)?
+    };
     let mut conn = rusqlite::Connection::open(db)?;
     renumber(&mut conn, harness, session, &numbering)?;
-    println!(
-        "renumbered {session}: newest entry {} ({})",
-        newest.1, newest.0
-    );
+    println!("renumbered {session}: newest entry {}", newest.ordinal);
     Ok(())
 }
