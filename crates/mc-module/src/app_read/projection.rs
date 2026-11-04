@@ -303,6 +303,38 @@ mod tests {
         }
     }
 
+    /// The breakdown scales to the usable window, the model's window less
+    /// the output reserve, as the standalone plugin reports it; and it shows
+    /// the runner's own counts of its system text and tool definitions.
+    #[test]
+    fn breakdown_uses_the_usable_window_and_the_runners_surface_counts() {
+        let mut session = session();
+        session.conditions.last_prompt_tokens = Some(500);
+        let unknown = session.app_snapshot().breakdown;
+        assert_eq!(unknown["context_window"]["tokens"], json!(100000 - 1000));
+        assert_eq!(unknown["parts"][0]["tokens"], Value::Null);
+        assert_eq!(unknown["parts"][1]["tokens"], Value::Null);
+
+        session.surface_tokens = (
+            Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(
+                120, true,
+            )),
+            Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(
+                80, false,
+            )),
+        );
+        session.conditions.last_prompt_tokens = Some(501);
+        let counted = session.app_snapshot().breakdown;
+        assert_eq!(
+            counted["parts"][0],
+            json!({"part":"system_prompt","tokens":120,"estimate":false})
+        );
+        assert_eq!(
+            counted["parts"][1],
+            json!({"part":"tool_definitions","tokens":80,"estimate":true})
+        );
+    }
+
     fn session() -> Session {
         let route = Route {
             session: SessionRef::new("runner", "test", "incremental"),

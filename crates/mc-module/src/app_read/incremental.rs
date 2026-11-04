@@ -400,9 +400,16 @@ impl Session {
                 pending.before.baseline.as_ref()
             })
             .map_or(0, |b| b.seen.len());
+        let surface = |name, counted: Option<cortexkit_role_compaction::tokens::SurfaceTokens>| {
+            counted.map_or(PartTokens::unknown(name), |counted| PartTokens {
+                part: name,
+                tokens: Some(counted.count),
+                estimate: !counted.exact,
+            })
+        };
         let parts = [
-            PartTokens::unknown("system_prompt"),
-            PartTokens::unknown("tool_definitions"),
+            surface("system_prompt", self.surface_tokens.0),
+            surface("tool_definitions", self.surface_tokens.1),
             PartTokens::estimate("memory", p.head[0]),
             PartTokens::estimate("project_docs", p.head[1]),
             PartTokens::estimate("user_profile", p.head[2]),
@@ -411,7 +418,13 @@ impl Session {
             PartTokens::estimate("tool_calls_results", p.tool),
             PartTokens::estimate("last_user_message", 0),
         ];
-        let mut breakdown = breakdown(&parts, provider, self.conditions.context_window);
+        // The window the apps scale to is the usable one, as the standalone
+        // plugin reports it: the model's window less the output reserve.
+        let mut breakdown = breakdown(
+            &parts,
+            provider,
+            crate::pass::usable_window(&self.conditions),
+        );
         breakdown["managed"] = json!({"value":!self.tools_only&&!self.suspended});
         breakdown["as_of"] = json!({"step_ref":usage.map(|u|&u.mid),"at_ms":at});
         breakdown["parts"][2]["count"] = json!(memory_count);

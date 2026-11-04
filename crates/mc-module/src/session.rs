@@ -51,6 +51,13 @@ pub struct Session {
     /// Whether this session already logged that its runner's conditions
     /// leave out the prompt size while its steps report usage.
     warned_no_prompt: bool,
+    /// The runner's counts of its own system text and of the tool
+    /// definitions, from the newest notice that carried them. Rides never
+    /// carry them, so a ride's conditions don't clear them.
+    pub(crate) surface_tokens: (
+        Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
+        Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
+    ),
     index: Index,
     scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
@@ -275,6 +282,7 @@ impl Session {
             reminder_counter: 0,
             conditions: conditions_of(request),
             warned_no_prompt: false,
+            surface_tokens: (None, None),
             index: Index::default(),
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
@@ -651,6 +659,10 @@ impl Session {
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
+        self.surface_tokens = (
+            notice.conditions.system_tokens,
+            notice.conditions.tools_tokens,
+        );
         self.warn_if_prompt_size_missing(&notice.entries);
         // What the runner says about the views it took comes first: a
         // rollback restores the state before the events below change it.

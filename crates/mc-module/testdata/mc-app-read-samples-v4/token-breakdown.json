@@ -22,7 +22,7 @@
         },
         "context_window": {
           "source": "usage",
-          "tokens": 100000
+          "tokens": 99000
         },
         "estimation_source": "legacy_estimate",
         "last_user_message_in_history_raw": true,
@@ -86,7 +86,7 @@
       "schema": 1,
       "section": "token_breakdown",
       "state": "ready",
-      "version": "mca1:b42b313a601fd10643f67219e87836e0bfcc43cffb69f385f4275cb0835cde06"
+      "version": "mca1:e3ea12f31ae8167569cf0648cdfb263c6ed75c39959b02d25ce66c6eeeadf497"
     }
   }
 }
