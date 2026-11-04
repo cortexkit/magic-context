@@ -32,6 +32,17 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("auto_update"))).toBe(true);
     });
 
+    it("strips pi_binary from project config", () => {
+        const raw: Record<string, unknown> = {
+            pi_binary: "/tmp/attacker-pi",
+            dreamer: { model: "x" },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("pi_binary" in raw).toBe(false);
+        expect(raw.dreamer).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("pi_binary"))).toBe(true);
+    });
+
     it("strips fail_closed_blocking from project config (user-tier only)", () => {
         const raw: Record<string, unknown> = {
             fail_closed_blocking: false,

@@ -545,6 +545,86 @@ describe("subagent-runner pure helpers", () => {
 		);
 	});
 
+	it("pi_binary short-circuits every executable-detection step", () => {
+		const piBinary = "/home/u/.local/share/mise/shims/pi";
+		const invocation = __test.resolvePiInvocation({
+			// An embedded editor host that would otherwise be spawned as Pi.
+			execPath: "/home/u/ide/code/code",
+			argv1:
+				"/home/u/ide/code/resources/app/out/vs/workbench/api/node/extensionHostProcess.js",
+			piBinary,
+			resolvePackageJson: () => null,
+			fs: {
+				existsSync: (path) => path === piBinary,
+				statSync: () => ({ isFile: () => true }),
+			},
+		});
+		expect(invocation.command).toBe(piBinary);
+		expect(invocation.prefixArgs).toEqual([]);
+		expect(invocation.targetHarness).toBe("pi");
+		expect(invocation.fallbackDiagnostic).toBeUndefined();
+		expect(invocation.failureHint).toBeUndefined();
+	});
+
+	it("flags a configured pi_binary that is not a readable file", () => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: "/home/u/ide/code/code",
+			argv1: "/not-a-pi-host/cli.js",
+			piBinary: "/missing/pi",
+			fs: {
+				existsSync: () => false,
+				statSync: () => ({ isFile: () => false }),
+			},
+		});
+		expect(invocation.command).toBe("/missing/pi");
+		expect(invocation.fallbackDiagnostic).toContain(
+			"configured pi_binary /missing/pi is not a readable file",
+		);
+	});
+
+	it("expands ~/ in a configured pi_binary", () => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: "/runtime/node",
+			argv1: "/not-a-pi-host/cli.js",
+			piBinary: "~/bin/pi",
+			fs: {
+				existsSync: (path) => path === join(homedir(), "bin", "pi"),
+				statSync: () => ({ isFile: () => true }),
+			},
+		});
+		expect(invocation.command).toBe(join(homedir(), "bin", "pi"));
+		expect(invocation.fallbackDiagnostic).toBeUndefined();
+	});
+
+	it("hints the pi_binary setting when an embedded host is spawned as Pi", () => {
+		const host = "/home/u/ide/code/code";
+		const hostScript =
+			"/home/u/ide/code/resources/app/out/vs/workbench/api/node/extensionHostProcess.js";
+		const invocation = __test.resolvePiInvocation({
+			execPath: host,
+			argv1: hostScript,
+			env: {},
+			resolvePackageJson: () => null,
+			fs: {
+				existsSync: (path) => path === hostScript,
+				statSync: () => ({ isFile: () => true }),
+			},
+		});
+		expect(invocation.command).toBe(host);
+		expect(invocation.failureHint).toContain("pi_binary");
+	});
+
+	it("does not hint pi_binary for a renamed packaged Pi binary", () => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: "/opt/pi-next/pi-custom",
+			argv1: "/$bunfs/root/pi",
+			env: {},
+			resolvePackageJson: () => null,
+		});
+		expect(invocation.command).toBe("/opt/pi-next/pi-custom");
+		expect(invocation.failureHint).toBeUndefined();
+	});
+
 	it("rejects a package bin that escapes its package root", () => {
 		const fixture = writePiCliFixture("../outside-cli.js");
 		try {

@@ -1004,6 +1004,9 @@ export interface MagicContextConfig {
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;
+    /** Executable Magic Context spawns as Pi for its child processes.
+     *  USER config only; skips the built-in executable detection. */
+    pi_binary?: string;
     /** Output language for generated Magic Context prose. USER config only. */
     language?: string;
     /** Active user-owned model profile after user/project resolution. */
@@ -1216,6 +1219,14 @@ export const MagicContextConfigSchema = z
             .optional()
             .describe(
                 "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
+            ),
+        pi_binary: z
+            .string()
+            .trim()
+            .min(1)
+            .optional()
+            .describe(
+                "Path to the Pi executable Magic Context spawns for its child processes (historian, dreamer, recomp, wrapup). Setting it skips the built-in executable detection, which cannot identify a Pi CLI when Pi runs inside another host process (a VS Code extension hosting the SDK, an embedded web server). The value must be something the host can exec directly: a `pi` shim, a compiled Pi binary, or a CLI script with a shebang on POSIX (not a bare script path on Windows). A leading `~/` is expanded to the user's home directory. Security: USER-only in config loader — a repository must not choose which executable this machine runs.",
             ),
         language: z
             .string()
@@ -1687,6 +1698,7 @@ export const MagicContextConfigSchema = z
 export const LIVE_RELOAD_CONFIG_PATHS = [
     "cache_ttl",
     "toast_duration_ms",
+    "pi_binary",
     "historian.opencode.model",
     "historian.opencode.fallback_models",
     "historian.opencode.variant",

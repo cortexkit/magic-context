@@ -322,6 +322,8 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    supply its contents.
  *  - `auto_update` — a repo must not suppress plugin self-updates (which can
  *    carry security fixes).
+ *  - `pi_binary` — a repo must not choose which executable the host runs as Pi
+ *    for every child process (historian, dreamer, recomp, wrapup).
  *  - `fail_closed_blocking` — a repo must not un-block (or force-block) the
  *    loud inoperability gate; only the user may restore silent degrade.
  *  - `debug_rpc` — a repo must not enable process heap capture or memory diagnostics.
@@ -377,6 +379,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.auto_update;
         warnings.push(
             "Ignoring auto_update from project config (security: this setting only honors user-level config).",
+        );
+    }
+
+    if ("pi_binary" in projectRaw) {
+        delete projectRaw.pi_binary;
+        warnings.push(
+            "Ignoring pi_binary from project config (security: only user-level config may choose which executable the host runs as Pi).",
         );
     }
 

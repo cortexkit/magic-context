@@ -70,6 +70,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `memory.git_commit_indexing.enabled`
 - `memory.git_commit_indexing.max_commits`
 - `memory.git_commit_indexing.since_days`
+- `pi_binary`
 - `toast_duration_ms`
 <!-- LIVE-CONFIG-KEYS-END -->
 
@@ -286,6 +287,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `enabled` | `boolean` | `true` | Master toggle. |
 | `allow_home_project` | `boolean` | `false` | User-config-only opt-in for a Magic Context session launched from exactly `$HOME`. See below. |
 | `auto_update` | `boolean` | `true` | User-config-only plugin self-update toggle; project configs cannot disable it. |
+| `pi_binary` | `string` | unset | User-config-only path to the Pi executable Magic Context spawns for historian, dreamer, recomp, and wrapup. Setting it skips the built-in executable detection, which cannot identify a Pi CLI when Pi runs inside another host process (a VS Code extension hosting the SDK, an embedded web server). Must be directly executable: a `pi` shim, a compiled Pi binary, or a CLI script with a shebang on POSIX. A leading `~/` expands to the home directory. Project configs cannot set this. |
 | `fail_closed_blocking` | `boolean` | `true` | User-config-only. When Magic Context cannot operate (schema fence mismatch, storage open/migration failure), block the primary-session prompt with a loud recovery error instead of silently degrading to native compaction. Set `false` only to restore the old degrade-silently behavior (not recommended). Project configs cannot set this. |
 | `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, as a 2-letter ISO 639-1 code, for example `"tr"`, `"es"`, or `"pt"`. Structural tokens stay in English. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |

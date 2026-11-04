@@ -119,6 +119,8 @@ interface PiInvocation {
 	targetHarness: PiHarnessKind;
 	/** Present only after the resolver fell through to a PATH-based invocation. */
 	fallbackDiagnostic?: string;
+	/** Extra guidance appended to spawn/exit failures; never changes how we spawn. */
+	failureHint?: string;
 }
 
 interface ResolvePiInvocationOptions {
@@ -127,6 +129,8 @@ interface ResolvePiInvocationOptions {
 	platform?: NodeJS.Platform;
 	env?: NodeJS.ProcessEnv;
 	fs?: Partial<PiResolutionFs>;
+	/** User-level `pi_binary`: skips every executable-detection step below. */
+	piBinary?: string;
 	/** Override used by tests to control package.json resolution from the running entry's Node module paths. */
 	resolvePackageJson?: (from: string | undefined) => string | null;
 }
@@ -394,6 +398,79 @@ function formatCheckedPaths(checkedPaths: readonly string[]): string {
 		: visible.join(", ");
 }
 
+/** Executables that host Pi in-process instead of being Pi themselves. */
+const EMBEDDED_HOST_IMAGE_NAMES = new Set([
+	"code",
+	"code-insiders",
+	"code-oss",
+	"codium",
+	"cursor",
+	"windsurf",
+	"electron",
+]);
+
+/**
+ * Whether `execPath` looks like an editor/Electron host rather than a Pi binary.
+ * Used ONLY to word a failure hint: the resolver's order must keep running the
+ * same steps, so a packaged Pi binary that was renamed is still spawned as-is.
+ */
+function looksLikeEmbeddedHost(
+	execPath: string,
+	env: NodeJS.ProcessEnv,
+): boolean {
+	if (env.ELECTRON_RUN_AS_NODE === "1") return true;
+	if (env.VSCODE_PID || env.VSCODE_IPC_HOOK_CLI) return true;
+	return EMBEDDED_HOST_IMAGE_NAMES.has(
+		basename(execPath)
+			.toLowerCase()
+			.replace(/\.exe$/, ""),
+	);
+}
+
+const PI_BINARY_HINT =
+	"host executable looks like an embedded editor or SDK host, not Pi; set pi_binary in your user magic-context.jsonc to the Pi executable this session should spawn";
+
+/** Expand a user-supplied `pi_binary`; a bare command name stays a PATH lookup. */
+function normalizeConfiguredPiBinary(value: string): string {
+	const trimmed = value.trim();
+	if (trimmed === "~") return homedir();
+	if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+		return join(homedir(), trimmed.slice(2));
+	}
+	return trimmed;
+}
+
+function resolveConfiguredPiBinary(
+	piBinary: string,
+	fs: PiResolutionFs,
+): PiInvocation {
+	const command = normalizeConfiguredPiBinary(piBinary);
+	const targetHarness =
+		piHarnessKindFromExecutable(command) ?? resolvePiHarnessKind();
+	// A bare command name is a PATH lookup, so only a path-shaped value can be
+	// checked here; an explicit path that does not resolve is a config error we
+	// must surface instead of spawning it blindly.
+	const pathShaped = isAbsolute(command) || command.includes(sep);
+	let usable = !pathShaped;
+	if (pathShaped) {
+		try {
+			usable = fs.existsSync(command) && fs.statSync(command).isFile();
+		} catch {
+			usable = false;
+		}
+	}
+	return {
+		command,
+		prefixArgs: [],
+		targetHarness,
+		...(usable
+			? {}
+			: {
+					fallbackDiagnostic: `configured pi_binary ${command} is not a readable file`,
+				}),
+	};
+}
+
 function resolvePiInvocation(
 	options: ResolvePiInvocationOptions = {},
 ): PiInvocation {
@@ -404,6 +481,10 @@ function resolvePiInvocation(
 	const env = options.env ?? process.env;
 	const resolvePackageJson =
 		options.resolvePackageJson ?? defaultResolvePiPackageJson;
+	const configuredPiBinary = options.piBinary?.trim();
+	if (configuredPiBinary) {
+		return resolveConfiguredPiBinary(configuredPiBinary, fs);
+	}
 	const running = resolvePiCliFromRunningEntry(currentScript, fs);
 	const checkedPaths = [...running.checkedPaths];
 
@@ -425,6 +506,9 @@ function resolvePiInvocation(
 			prefixArgs: [],
 			targetHarness:
 				piHarnessKindFromExecutable(execPath) ?? resolvePiHarnessKind(),
+			...(looksLikeEmbeddedHost(execPath, env)
+				? { failureHint: PI_BINARY_HINT }
+				: {}),
 		};
 	}
 
@@ -512,9 +596,18 @@ function describeSpawnFailure(
 	invocation: PiInvocation,
 ): string {
 	const message = error instanceof Error ? error.message : String(error);
-	return invocation.fallbackDiagnostic
+	const cause = invocation.fallbackDiagnostic
 		? `${message} after ${invocation.fallbackDiagnostic}`
 		: message;
+	return invocation.failureHint
+		? `${cause} (${invocation.failureHint})`
+		: cause;
+}
+
+/** Suffix for a child that started but exited non-zero (e.g. an editor CLI rejecting Pi flags). */
+function describeInvocationHint(invocation: PiInvocation): string {
+	if (!invocation.failureHint) return "";
+	return ` (${invocation.failureHint})`;
 }
 
 /** Resolve an optional child extension bundled beside the Pi plugin entry. */
@@ -968,8 +1061,8 @@ export class PiSubagentRunner implements SubagentRunner {
 	 * How to invoke a Pi subagent (command + fixed leading args + shell flag).
 	 * Resolved once at construction in the host process so `process.argv[1]`
 	 * points at the host `cli.js`. See {@link resolvePiInvocation} for the
-	 * cross-platform order; an explicit `options.piBinary` overrides it (test
-	 * seam + advanced users who point at their own pi build).
+	 * cross-platform order; `options.piBinary` (the user-level `pi_binary`
+	 * setting) skips that detection entirely.
 	 */
 	private readonly invocation: PiInvocation;
 	private readonly spawnImpl: typeof childProcess.spawn;
@@ -998,15 +1091,10 @@ export class PiSubagentRunner implements SubagentRunner {
 	) {
 		this.invocation =
 			options.invocation ??
-			(options.piBinary
-				? {
-						command: options.piBinary,
-						prefixArgs: [],
-						targetHarness:
-							piHarnessKindFromExecutable(options.piBinary) ??
-							resolvePiHarnessKind(),
-					}
-				: resolvePiInvocation({ platform: options.platform }));
+			resolvePiInvocation({
+				platform: options.platform,
+				piBinary: options.piBinary,
+			});
 		this.spawnImpl = options.spawnImpl ?? childProcess.spawn;
 		this.platform = options.platform ?? process.platform;
 		this.extraArgs = options.extraArgs ?? [];
@@ -2461,7 +2549,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					settle({
 						ok: false,
 						reason: "non_zero_exit",
-						error: `pi exited (code=${code}, signal=${signal}) without emitting agent_end. stderr: ${summarizeChildStderr(stderr) || "(empty)"}`,
+						error: `pi exited (code=${code}, signal=${signal}) without emitting agent_end. stderr: ${summarizeChildStderr(stderr) || "(empty)"}${describeInvocationHint(this.invocation)}`,
 						durationMs: Date.now() - startTime,
 						meta: {
 							stderr: stderr.length > 0 ? stderr : undefined,

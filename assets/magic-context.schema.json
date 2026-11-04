@@ -45,6 +45,12 @@
       "description": "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
       "type": "boolean"
     },
+    "pi_binary": {
+      "description": "Path to the Pi executable Magic Context spawns for its child processes (historian, dreamer, recomp, wrapup). Setting it skips the built-in executable detection, which cannot identify a Pi CLI when Pi runs inside another host process (a VS Code extension hosting the SDK, an embedded web server). The value must be something the host can exec directly: a `pi` shim, a compiled Pi binary, or a CLI script with a shebang on POSIX (not a bare script path on Windows). A leading `~/` is expanded to the user's home directory. Security: USER-only in config loader — a repository must not choose which executable this machine runs.",
+      "x-mc-live-reload": true,
+      "type": "string",
+      "minLength": 1
+    },
     "language": {
       "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
       "type": "string"

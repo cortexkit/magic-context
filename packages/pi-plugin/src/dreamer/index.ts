@@ -76,6 +76,8 @@ export interface PiDreamerOptions {
 	smartNotesEnabled?: boolean;
 	mural?: { enabled: boolean };
 	language?: string;
+	/** User-level `pi_binary`: forwarded to every Dreamer child runner. */
+	piBinary?: string;
 	gitCommitIndexing: {
 		enabled: boolean;
 		since_days: number;
@@ -138,7 +140,7 @@ interface ProjectRegistration {
 	modelRegistry?: PiDreamerOptions["modelRegistry"];
 }
 
-type PiSubagentRunnerFactory = () => PiSubagentRunner;
+type PiSubagentRunnerFactory = (opts: PiDreamerOptions) => PiSubagentRunner;
 
 const warnedUnknownModels = new Set<string>();
 const modelAvailability = new WeakMap<object, Map<string, boolean>>();
@@ -239,8 +241,8 @@ export function abortInFlightDreamers(registrationOwner: object): void {
 }
 
 let sessionCounter = 0;
-let piSubagentRunnerFactory: PiSubagentRunnerFactory = () =>
-	new PiSubagentRunner();
+let piSubagentRunnerFactory: PiSubagentRunnerFactory = (opts) =>
+	new PiSubagentRunner({ piBinary: opts.piBinary });
 let startDreamScheduleTimerFn: typeof defaultStartDreamScheduleTimer =
 	defaultStartDreamScheduleTimer;
 
@@ -562,7 +564,7 @@ function createPiDreamerClient(
 		sessionId: string,
 	) => DreamTokenBudgetState | undefined;
 } {
-	const runner = piSubagentRunnerFactory();
+	const runner = piSubagentRunnerFactory(opts);
 	const budgetStates = new Map<
 		string,
 		{ spent: number; finalizeFired: boolean }
@@ -996,7 +998,8 @@ export const __test = {
 		inFlightDreams.clear();
 		dreamAbortControllers.clear();
 		sessionCounter = 0;
-		piSubagentRunnerFactory = () => new PiSubagentRunner();
+		piSubagentRunnerFactory = (opts) =>
+			new PiSubagentRunner({ piBinary: opts.piBinary });
 		startDreamScheduleTimerFn = defaultStartDreamScheduleTimer;
 	},
 };

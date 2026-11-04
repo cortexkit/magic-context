@@ -1104,7 +1104,7 @@ export function resolveHistorianFromConfig(
 	const fallbackModels = validated?.fallbackModels ?? resolved.fallbacks;
 
 	return {
-		runner: new PiSubagentRunner(),
+		runner: new PiSubagentRunner({ piBinary: config.pi_binary }),
 		model,
 		modelConfigKey: resolved.primary?.sourceConfigKey,
 		fallbackModels,
@@ -1893,6 +1893,7 @@ async function startPiMagicContextRuntime(
 			projectIdentity: current.projectIdentity,
 			registrationOwner: dreamerRegistrationOwner,
 			config: timerConfig,
+			piBinary: current.config.pi_binary,
 			modelRegistry,
 			sampleDreamRun: () => {
 				const fresh = liveReaderFor(current.projectDir, current.config).poll()
@@ -2101,8 +2102,6 @@ async function startPiMagicContextRuntime(
 	// Step 5c: register the diagnostic/admin slash commands so Pi reaches
 	// command-surface parity with the OpenCode plugin. Their user-facing output
 	// uses model-invisible custom entries when the runtime can render them.
-	const recompRunner = new PiSubagentRunner();
-	const wrapupRunner = new PiSubagentRunner();
 	registerCtxStatusCommand(pi, {
 		smartNotesEnabled: config.smart_notes.enabled,
 		db,
@@ -2199,7 +2198,7 @@ async function startPiMagicContextRuntime(
 	// avoids cross-cancellation. Same model + fallback chain as historian.
 	registerCtxRecompCommand(pi, {
 		db,
-		runner: recompRunner,
+		runner: new PiSubagentRunner({ piBinary: config.pi_binary }),
 		...buildPiHistorianCommandOptions(
 			bootProjectDeps.historianConfig,
 			bootProjectDeps.config,
@@ -2221,7 +2220,7 @@ async function startPiMagicContextRuntime(
 			);
 			return {
 				db,
-				runner: recompRunner,
+				runner: new PiSubagentRunner({ piBinary: fresh.pi_binary }),
 				...buildPiHistorianCommandOptions(historian, current.config),
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
@@ -2235,7 +2234,7 @@ async function startPiMagicContextRuntime(
 	registerCtxWrapupCommand(pi, {
 		shutdownSignal: commandLifecycleController.signal,
 		db,
-		runner: wrapupRunner,
+		runner: new PiSubagentRunner({ piBinary: config.pi_binary }),
 		...buildPiHistorianCommandOptions(
 			bootProjectDeps.historianConfig,
 			bootProjectDeps.config,
@@ -2266,7 +2265,7 @@ async function startPiMagicContextRuntime(
 			);
 			return {
 				db,
-				runner: wrapupRunner,
+				runner: new PiSubagentRunner({ piBinary: fresh.pi_binary }),
 				...buildPiHistorianCommandOptions(historian, current.config),
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
