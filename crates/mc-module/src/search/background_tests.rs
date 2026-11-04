@@ -279,6 +279,51 @@ async fn failed_batch_stays_dirty_and_the_next_notice_retries_it() {
 }
 
 #[tokio::test]
+async fn not_wal_stays_dirty_and_only_foreground_open_establishes_wal() {
+    let f = Fixture::new(13);
+    let conn = Connection::open(&f.path).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=DELETE;").unwrap();
+    let worker = f.worker();
+    for _ in 0..2 {
+        worker.mark(&f.key, f.client.mark(None));
+        assert!(worker
+            .idle(&f.key)
+            .await
+            .unwrap_err()
+            .contains("context_wal_required:"));
+        assert_eq!(
+            conn.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
+        assert!(worker.shared.state.lock().unwrap().sessions[&f.key].warned_non_wal);
+        let rows: usize = conn
+            .query_row("SELECT COUNT(*) FROM message_history_source", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+    drop(conn);
+    let foreground = ContextDb::open(&f.path).unwrap();
+    foreground.with_connection(|conn| {
+        assert_eq!(
+            conn.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            conn.pragma_query_value(None, "synchronous", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+    });
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(13);
+}
+
+#[tokio::test]
 async fn failed_database_write_retries_without_advancing_the_watermark() {
     let f = Fixture::new(17);
     let worker = f.worker();
@@ -326,4 +371,56 @@ async fn revert_and_replacement_remove_stale_rows_and_restart_detects_a_lost_rev
         let stale: usize = conn.query_row("SELECT COUNT(*) FROM message_history_source WHERE message_ordinal>100 AND message_id LIKE 'old-%'", [], |r|r.get(0)).unwrap();
         assert_eq!(stale, 0);
     }
+}
+
+#[tokio::test]
+async fn an_inflight_read_coalesces_a_replacement_notice_without_losing_its_floor() {
+    let f = Fixture::new(501);
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.client.pause.lock().unwrap() = Some(pause.clone());
+    worker.mark(&f.key, f.client.mark(None));
+    f.client.started.notified().await;
+    let mut replacement = entries(150, "new");
+    replacement[..100].clone_from_slice(&entries(100, "old"));
+    *f.client.entries.lock().unwrap() = replacement;
+    for _ in 0..20 {
+        worker.mark(&f.key, f.client.mark(Some(101)));
+    }
+    *f.client.pause.lock().unwrap() = None;
+    pause.add_permits(1);
+    worker.idle(&f.key).await.unwrap();
+    f.assert_rows(150);
+}
+
+#[tokio::test]
+async fn restart_finishes_a_failed_chunked_revert_from_its_durable_dirty_floor() {
+    let f = Fixture::new(501);
+    let worker = f.worker();
+    worker.mark(&f.key, f.client.mark(None));
+    worker.idle(&f.key).await.unwrap();
+    let mut replacement = entries(150, "new");
+    replacement[..100].clone_from_slice(&entries(100, "old"));
+    *f.client.entries.lock().unwrap() = replacement;
+    let conn = Connection::open(&f.path).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_second_delete_chunk BEFORE DELETE ON message_history_source WHEN (SELECT COUNT(*) FROM message_history_source)<301 BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END;").unwrap();
+    worker.mark(&f.key, f.client.mark(Some(101)));
+    assert!(worker.idle(&f.key).await.is_err());
+    let floor: u64 = conn
+        .query_row(
+            "SELECT dirty_floor_ordinal FROM message_history_index WHERE session_id=?1",
+            [&f.key.session],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 101);
+    drop(worker);
+    conn.execute_batch("DROP TRIGGER fail_second_delete_chunk;")
+        .unwrap();
+    let restarted = f.worker();
+    restarted.mark(&f.key, f.client.mark(None));
+    restarted.idle(&f.key).await.unwrap();
+    f.assert_rows(150);
 }

@@ -183,7 +183,9 @@ impl Store {
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         connection
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS state_texts (id TEXT PRIMARY KEY, text TEXT NOT NULL);",
+                "CREATE TABLE IF NOT EXISTS state_texts (id TEXT PRIMARY KEY, text TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS state_text_refs (runner TEXT,harness TEXT,session TEXT,id TEXT,PRIMARY KEY(runner,harness,session,id));
+                 CREATE INDEX IF NOT EXISTS state_text_refs_id ON state_text_refs(id);",
             )
             .map_err(|error| error.to_string())?;
         if version < 4 {
@@ -255,10 +257,11 @@ impl Store {
         let legacy = self.legacy_v3;
         #[cfg(not(test))]
         let legacy = false;
-        let (text, texts) = if legacy {
+        let (text, texts, used) = if legacy {
             (
                 serde_json::to_string(state).expect("legacy state serializes"),
                 vec![],
+                BTreeSet::new(),
             )
         } else {
             crate::store_text::encode(state, &mut next_cache)
@@ -274,6 +277,41 @@ impl Store {
                     params![id, text],
                 )
                 .map_err(|e| e.to_string())?;
+        }
+        let retired = {
+            let mut stmt = transaction
+                .prepare(
+                    "SELECT id FROM state_text_refs WHERE runner=?1 AND harness=?2 AND session=?3",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![key.runner, key.harness, key.session], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            rows
+        };
+        transaction
+            .execute(
+                "DELETE FROM state_text_refs WHERE runner=?1 AND harness=?2 AND session=?3",
+                params![key.runner, key.harness, key.session],
+            )
+            .map_err(|e| e.to_string())?;
+        for id in &used {
+            transaction
+                .execute(
+                    "INSERT INTO state_text_refs VALUES (?1,?2,?3,?4)",
+                    params![key.runner, key.harness, key.session, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        // Only the retiring session's old references need checking. An index
+        // on id finds strings still referenced by another session or by the
+        // saved state needed if the runner refuses an unconfirmed view.
+        for id in retired.iter().filter(|id| !used.contains(*id)) {
+            transaction.execute("DELETE FROM state_texts WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM state_text_refs WHERE id=?1)",[id]).map_err(|e|e.to_string())?;
         }
         #[cfg(test)]
         let started = std::time::Instant::now();
@@ -743,5 +781,50 @@ mod tests {
             .unwrap();
         store.save(&key, &state).unwrap();
         assert_eq!(store.load(&key), Some(state));
+    }
+
+    #[test]
+    fn retired_history_text_is_collected_only_after_its_last_session_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let one = SessionRef::new("runner", "pi", "one");
+        let two = SessionRef::new("runner", "pi", "two");
+        let original = Durable {
+            baseline: Some(Baseline {
+                m0: "old history ".repeat(1_000),
+                ..Baseline::default()
+            }),
+            ..Durable::default()
+        };
+        let newer = Durable {
+            baseline: Some(Baseline {
+                m0: "new history ".repeat(1_000),
+                ..Baseline::default()
+            }),
+            ..Durable::default()
+        };
+        store.save(&one, &original).unwrap();
+        store.save(&two, &original).unwrap();
+        store.save(&one, &newer).unwrap();
+        assert_eq!(store.load(&two), Some(original));
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM state_texts", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            2
+        );
+        store.save(&two, &newer).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM state_texts", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.load(&one), Some(newer.clone()));
+        assert_eq!(store.load(&two), Some(newer));
     }
 }

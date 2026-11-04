@@ -8,6 +8,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 const MIN_BYTES: usize = 4_096;
 
@@ -21,6 +22,7 @@ thread_local! {
 struct Encoding {
     cache: Cache,
     added: Vec<(String, String)>,
+    used: BTreeSet<String>,
 }
 
 fn reference(text: &str) -> Option<Value> {
@@ -44,6 +46,7 @@ fn reference(text: &str) -> Option<Value> {
                 id
             }
         };
+        encoder.used.insert(id.clone());
         Some(json!({"mode3_text":id}))
     })
 }
@@ -51,18 +54,20 @@ fn reference(text: &str) -> Option<Value> {
 pub(crate) fn encode(
     state: &crate::store::Durable,
     cache: &mut Cache,
-) -> (String, Vec<(String, String)>) {
+) -> (String, Vec<(String, String)>, BTreeSet<String>) {
     ENCODER.with(|slot| {
         assert!(slot.borrow().is_none(), "nested store text encoder");
         *slot.borrow_mut() = Some(Encoding {
             cache: std::mem::take(cache),
             added: vec![],
+            used: BTreeSet::new(),
         });
     });
     let text = serde_json::to_string(state).expect("state serializes");
     let encoding = ENCODER.with(|slot| slot.borrow_mut().take().unwrap());
     *cache = encoding.cache;
-    (text, encoding.added)
+    cache.0.retain(|(_, id)| encoding.used.contains(id));
+    (text, encoding.added, encoding.used)
 }
 
 pub(crate) fn text<S: Serializer>(text: &str, serializer: S) -> Result<S::Ok, S::Error> {
@@ -250,6 +255,34 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), String> {
         let mut value: Value = serde_json::from_str(&text)
             .map_err(|e| format!("state_migration_failed: {session}: {e}"))?;
         transform(&mut value, connection, true)?;
+        let mut used = BTreeSet::new();
+        fn reference(value: &Value, used: &mut BTreeSet<String>) {
+            if let Some(id) = value.get("mode3_text").and_then(Value::as_str) {
+                used.insert(id.to_owned());
+            }
+        }
+        fn view_references(value: &Value, used: &mut BTreeSet<String>) {
+            if let Some(edits) = value.get("edits").and_then(Value::as_array) {
+                for edit in edits.iter().filter(|e| e["op"] == "insert") {
+                    if let Some(texts) = edit["message"]["texts"].as_array() {
+                        for text in texts {
+                            reference(text, used);
+                        }
+                    }
+                }
+            }
+        }
+        reference(&value["baseline"]["m0"], &mut used);
+        if let Some(pending) = value["unconfirmed"].as_array() {
+            for pending in pending {
+                view_references(&pending["view"], &mut used);
+                view_references(&pending["before"]["latest"], &mut used);
+                reference(&pending["before"]["baseline"]["m0"], &mut used);
+            }
+        }
+        for id in used {
+            connection.execute("INSERT OR IGNORE INTO state_text_refs (runner,harness,session,id) VALUES (?1,?2,?3,?4)",params![runner,harness,session,id]).map_err(|e|e.to_string())?;
+        }
         connection
             .execute(
                 "UPDATE sessions SET state=?4 WHERE runner=?1 AND harness=?2 AND session=?3",

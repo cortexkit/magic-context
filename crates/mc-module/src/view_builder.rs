@@ -23,6 +23,8 @@ use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 #[derive(Default)]
 pub(crate) struct ValidationCache {
     inserts: Vec<EditOp>,
+    hash_prefix: Vec<(Edit, sha2::Sha256)>,
+    wire_sizes: Vec<(Edit, usize)>,
 }
 
 impl ValidationCache {
@@ -34,6 +36,74 @@ impl ValidationCache {
             .filter(|e| view::plan(entries, std::slice::from_ref(e)).is_ok())
             .map(|e| e.op.clone())
             .collect();
+        self.seal(view.version, view.edits.clone());
+        self.encoded_size(view);
+    }
+
+    /// RFC 8785 orders the sealed object's keys as edits, then version. Reuse
+    /// SHA-256 state only for an exact unchanged leading edit sequence; encode
+    /// changed edits and the version through the same pinned JCS serializer.
+    /// This produces the contract's checksum without hashing old history again.
+    fn seal(&mut self, version: u64, edits: Vec<Edit>) -> View {
+        use sha2::{Digest, Sha256};
+        let _timing = crate::notice_cost_timing::span("view.checksum");
+        let mut hash = Sha256::new();
+        hash.update(b"{\"edits\":[");
+        let mut unchanged = true;
+        let mut prefix = Vec::new();
+        for (index, edit) in edits.iter().enumerate() {
+            if index > 0 {
+                hash.update(b",");
+            }
+            if unchanged
+                && self
+                    .hash_prefix
+                    .get(index)
+                    .is_some_and(|(old, _)| old == edit)
+            {
+                hash = self.hash_prefix[index].1.clone();
+            } else {
+                unchanged = false;
+                let value = serde_json::to_value(edit).expect("edit value");
+                hash.update(serde_jcs::to_vec(&value).expect("canonical edit"));
+            }
+            // Cache hashes for up to four leading edits to bound memory even
+            // for a long cumulative edit list.
+            if index < 4 {
+                prefix.push((edit.clone(), hash.clone()));
+            }
+        }
+        hash.update(b"],\"version\":");
+        hash.update(serde_jcs::to_vec(&serde_json::json!(version)).expect("canonical version"));
+        hash.update(b"}");
+        let mut view = View::seal(version, vec![]);
+        view.checksum = format!("{:x}", hash.finalize());
+        view.edits = edits;
+        self.hash_prefix = prefix;
+        view
+    }
+
+    pub(crate) fn encoded_size(&mut self, view: &View) -> usize {
+        let header =
+            serde_json::json!({"version":view.version,"checksum":view.checksum,"edits":[]});
+        let mut size = serde_json::to_vec(&header).expect("view header").len();
+        let mut next = Vec::new();
+        for (index, edit) in view.edits.iter().enumerate() {
+            let bytes = self
+                .wire_sizes
+                .iter()
+                .find(|(old, _)| old == edit)
+                .map(|(_, size)| *size)
+                .unwrap_or_else(|| serde_json::to_vec(edit).expect("edit bytes").len());
+            size = size
+                .saturating_add(bytes)
+                .saturating_add(usize::from(index > 0));
+            if index < 4 {
+                next.push((edit.clone(), bytes));
+            }
+        }
+        self.wire_sizes = next;
+        size
     }
 
     fn check(&mut self, entries: &[Entry], edits: &[Edit]) -> Result<(), ViewRefusal> {
@@ -255,7 +325,7 @@ pub(crate) fn next_view_cached(
             )
         }));
     }
-    let view = View::seal(version, edits);
+    let view = validation.seal(version, edits);
     let _timing = crate::notice_cost_timing::span("view.check");
     {
         let _timing = crate::notice_cost_timing::span("view.check_carried");
@@ -282,6 +352,33 @@ mod tests {
     use cortexkit_role_compaction::read::Role;
     use cortexkit_role_compaction::rules::{EditCost, SignedParts};
     use serde_json::json;
+
+    #[test]
+    fn cached_sealing_and_size_match_contract_bytes_on_every_change() {
+        let mut cache = ValidationCache::default();
+        for version in [1, 2, 10, 9_007_199_254_740_993, u64::MAX] {
+            for suffix in ["same", "changed", "same"] {
+                let mut edits = vec![
+                    Edit::new(
+                        1,
+                        insert("m0", &"history \"\\\n 雪 §quoted§ ".repeat(12_000)),
+                    ),
+                    Edit::new(1, insert("m1", "delta")),
+                ];
+                edits.push(Edit::new(version,EditOp::Replace {mid:"target".into(),part:"part".into(),field:"input.options".into(),value:json!({"z":1e21,"a":-0.0,"fraction":1.25,"unicode":"\u{1f600}","suffix":suffix}),expect:"digest".into()}));
+                let reference = View::seal(version, edits.clone());
+                let next = cache.seal(version, edits);
+                assert_eq!(
+                    serde_json::to_vec(&next).unwrap(),
+                    serde_json::to_vec(&reference).unwrap()
+                );
+                assert_eq!(
+                    cache.encoded_size(&next),
+                    serde_json::to_vec(&reference).unwrap().len()
+                );
+            }
+        }
+    }
 
     fn insert(id: &str, text: &str) -> EditOp {
         EditOp::Insert {

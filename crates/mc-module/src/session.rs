@@ -35,8 +35,6 @@ use crate::view_builder;
 
 /// How many bytes one catch-up read asks for at most.
 const READ_PAGE_BYTES: u64 = 1 << 20;
-/// Pages of old messages one pass reads to fill a search index gap.
-
 pub struct Session {
     app: crate::app_read::SessionState,
     app_projection: app_projection::Projection,
@@ -2964,7 +2962,7 @@ impl Session {
     /// carried are forgotten, as for any view that fails ck-mc's own checks.
     fn refuse_oversized(&mut self, view: &View) -> bool {
         let _timing = crate::notice_cost_timing::span("publish.size_check");
-        let size = serde_json::to_vec(view).map_or(usize::MAX, |bytes| bytes.len());
+        let size = self.view_validation.encoded_size(view);
         if size <= MAX_VIEW_BYTES {
             return false;
         }

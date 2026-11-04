@@ -436,13 +436,16 @@ impl Fixture {
     fn reset(&self) {
         let db = ContextDb::open(&self.path("context.db")).unwrap();
         db.with_connection(|conn| {
-            mc_module::search::messages::forget_from(
-                conn,
-                &self.key.harness,
-                &self.key.session,
-                self.entries.len() as u64 + 1,
-            )
-            .unwrap()
+            // Reset only the few trial rows by their indexed rowids, outside
+            // every CPU sample. A full FTS-table scan here would make 500k
+            // fixture maintenance dominate the opt-in measurement's runtime.
+            let tx=conn.transaction().unwrap();
+            let from=self.entries.len() as i64+1;
+            tx.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal>=?2)",params![self.key.session,from]).unwrap();
+            tx.execute("DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal>=?2",params![self.key.session,from]).unwrap();
+            tx.execute("DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal>=?2",params![self.key.session,from]).unwrap();
+            tx.execute("UPDATE message_history_index SET last_indexed_ordinal=?2,dirty_floor_ordinal=0 WHERE session_id=?1",params![self.key.session,from-1]).unwrap();
+            tx.commit().unwrap();
         });
         let conn = Connection::open(self.path("mode3.db")).unwrap();
         conn.execute_batch("DELETE FROM app_read_snapshots; DELETE FROM app_read_decisions;")
@@ -632,6 +635,10 @@ fn notice_cost() {
         !cfg!(debug_assertions),
         "run this measurement with --release"
     );
+    assert!(
+        cfg!(feature = "notice-cost-timing"),
+        "enable notice-cost-timing to separate foreground and background process CPU"
+    );
     let mut rows = Vec::new();
     for shape in [Shape::Pi, Shape::OpenCode2] {
         for size in [1_000, 150_000, 500_000] {
@@ -733,7 +740,7 @@ fn notice_cost_stages() {
 }
 
 #[test]
-#[ignore = "compare serialized views against an explicit pre-change reference file"]
+#[ignore = "opt-in byte-for-byte comparison with committed pre-change view arrays"]
 fn notice_cost_view_bytes() {
     let path = std::env::var_os("NOTICE_COST_VIEW_REFERENCE").map(PathBuf::from);
     let golden: Value = serde_json::from_str(include_str!(
@@ -882,11 +889,13 @@ fn notice_cost_index_tail() {
         values
     }
     for size in [1_000, 150_000] {
-        for suppress_merges in [false, true] {
-            let fixture = Fixture::with_table(Shape::Pi, size, false, true);
-            let db = ContextDb::open(&fixture.path("context.db")).unwrap();
-            let mut rows = Vec::new();
-            db.with_connection(|conn| {
+        for legacy_delete in [true, false] {
+            for suppress_merges in [false, true] {
+                let fixture = Fixture::with_table(Shape::Pi, size, false, true);
+                let db = ContextDb::open(&fixture.path("context.db")).unwrap();
+                let mut rows = Vec::new();
+                db.with_connection(|conn| {
+                if legacy_delete { conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;").unwrap(); }
                 let mode:String=conn.pragma_query_value(None,"journal_mode",|r|r.get(0)).unwrap();
                 if suppress_merges {
                     // A diagnostic intervention only: compare the unchanged
@@ -909,6 +918,7 @@ fn notice_cost_index_tail() {
                 let cpus:Vec<_>=rows.iter().map(|r|r["cpu_us"].as_u64().unwrap()).collect();
                 println!("NOTICE_COST_TAIL {}",json!({"size":size,"table_rows":150000,"journal_mode":mode,"diagnostic_merges_suppressed":suppress_merges,"cpu_us":stats(&cpus),"steps":rows}));
             });
+            }
         }
     }
 }

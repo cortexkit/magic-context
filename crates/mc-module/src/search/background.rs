@@ -30,6 +30,7 @@ struct Pending {
     queued: bool,
     running: bool,
     error: Option<String>,
+    warned_non_wal: bool,
 }
 
 #[derive(Default)]
@@ -99,7 +100,7 @@ impl Background {
                     // own the foreground ContextDb mutex or a Tokio executor thread.
                     let result = (|| {
                         if db.is_none() {
-                            db = Some(ContextDb::open(&path)?);
+                            db = Some(ContextDb::open_background(&path)?);
                         }
                         db.as_ref().unwrap().with_connection(|conn| {
                             runtime.block_on(batch(client.as_ref(), conn, &key, &mark))
@@ -111,6 +112,7 @@ impl Background {
                     match result {
                         Ok(more) => {
                             pending.error = None;
+                            pending.warned_non_wal = false;
                             if more && pending.mark.is_none() {
                                 pending.mark = Some(Mark {
                                     newest: mark.newest,
@@ -119,10 +121,14 @@ impl Background {
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(
-                                "ck-mc: session {}: background search index: {error}",
-                                key.session
-                            );
+                            let non_wal = error.contains("context_wal_required:");
+                            if !non_wal || !pending.warned_non_wal {
+                                tracing::warn!(
+                                    "ck-mc: session {}: background search index: {error}",
+                                    key.session
+                                );
+                            }
+                            pending.warned_non_wal |= non_wal;
                             pending.error = Some(error);
                             merge(&mut pending.mark, mark);
                         }
@@ -212,6 +218,12 @@ async fn batch<C: RunnerClient>(
     mark: &Mark,
 ) -> Result<bool, String> {
     let _timing = crate::notice_cost_timing::span("search.background_batch");
+    let mode: String = conn
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!("context_wal_required: indexer found {mode}"));
+    }
     let session = &key.session;
     let dirty: u64 = conn
         .query_row(

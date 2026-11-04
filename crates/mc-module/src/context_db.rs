@@ -208,6 +208,16 @@ impl ContextDb {
     /// Open an existing store. Refuses a missing file (standalone plugins
     /// create it) and any schema version but [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_writable(path, true)
+    }
+
+    /// The background indexer must never change the shared store's mode. Its
+    /// foreground owner establishes WAL first; a legacy mode stays retryable.
+    pub(crate) fn open_background(path: &Path) -> Result<Self, String> {
+        Self::open_writable(path, false)
+    }
+
+    fn open_writable(path: &Path, establish_wal: bool) -> Result<Self, String> {
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -235,6 +245,29 @@ impl ContextDb {
                 path.display()
             ));
         }
+        let mode: String = connection
+            .query_row(
+                if establish_wal {
+                    "PRAGMA journal_mode=WAL"
+                } else {
+                    "PRAGMA journal_mode"
+                },
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("context.db {}: {error}", path.display()))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(format!(
+                "context_wal_required: {} is in {mode} mode",
+                path.display()
+            ));
+        }
+        // Match the standalone plugin: WAL remains crash-consistent without
+        // syncing each commit; a power failure may lose the latest commits.
+        // Never apply this durability policy to a rollback-journal database.
+        connection
+            .execute_batch("PRAGMA synchronous=NORMAL;")
+            .map_err(|error| error.to_string())?;
         #[cfg(feature = "context-db-timing")]
         let timing = timing::Timing::install(&connection);
         Ok(Self {

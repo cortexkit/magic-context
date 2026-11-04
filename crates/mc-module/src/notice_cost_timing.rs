@@ -94,6 +94,12 @@ pub use enabled::*;
 pub struct Span;
 
 #[cfg(not(all(feature = "notice-cost-timing", target_os = "linux")))]
+impl Drop for Span {
+    #[inline(always)]
+    fn drop(&mut self) {}
+}
+
+#[cfg(not(all(feature = "notice-cost-timing", target_os = "linux")))]
 #[inline(always)]
 pub fn span(_: &'static str) -> Span {
     Span
