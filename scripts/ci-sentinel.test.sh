@@ -2,6 +2,7 @@
 # Hermetic watcher tests: fake gh uses real jq to evaluate the script's queries.
 # No GitHub calls or real launchctl commands, including the installer tests.
 set -eu
+finished=0
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 SENTINEL="$ROOT/scripts/ci-sentinel.sh"
 command -v jq >/dev/null
@@ -10,7 +11,13 @@ printf 'ci-sentinel shell tests on %s; ' "$(uname -s)"
 jq --version
 python3 --version
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$TMP" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 REAL_SLEEP=$(command -v sleep)
 REAL_DATE=$(command -v date)
 export REAL_SLEEP REAL_DATE
@@ -434,3 +441,4 @@ run_test 'clean-window output contract is preserved' expiry
 run_test 'launchd install and uninstall are repeatable with mocks' installation
 [ "$COUNT" -gt 0 ] || fail 'no tests selected'
 printf 'Passed %s ci-sentinel tests\n' "$COUNT"
+finished=1

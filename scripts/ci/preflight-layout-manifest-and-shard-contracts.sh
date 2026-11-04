@@ -5,6 +5,8 @@ source scripts/ci/checks.sh
 check cortexkit-layout bash scripts/check-cortexkit-layout.sh
 check docs-layout bash scripts/check-docs-layout.sh
 check docs-layout-tests bash scripts/check-docs-layout.test.sh
+check shell-exit-guards bash scripts/check-shell-exit-guards.sh
+check shell-exit-guard-tests bash scripts/check-shell-exit-guards.test.sh
 check cargo-pins-self-test python3 scripts/cargo-lock-pins.py --self-test
 check nextest-inventory-self-test python3 scripts/check-nextest-inventory.py --self-test
 check artifact-wait-self-test python3 scripts/wait-ci-artifact.py --self-test

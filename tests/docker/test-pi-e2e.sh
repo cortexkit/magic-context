@@ -12,6 +12,7 @@
 # ----------------------------------------------------------------------
 
 set -euo pipefail
+finished=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -159,7 +160,13 @@ JSON
 node /test/aimock-server.cjs > /tmp/aimock.log 2>&1 &
 AIMOCK_PID=$!
 # shellcheck disable=SC2064
-trap "kill $AIMOCK_PID 2>/dev/null || true" EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+kill "$AIMOCK_PID" 2>/dev/null || true
+exit "$status"' EXIT
 
 # Wait for aimock to be ready (max 15s).
 for _ in $(seq 1 15); do
@@ -217,6 +224,7 @@ echo "  FAIL: $FAIL"
 echo ""
 if [[ $FAIL -eq 0 ]]; then
     echo -e "${GREEN}All Pi E2E checks passed.${NC}"
+    finished=1
     exit 0
 else
     echo -e "${RED}Pi E2E checks failed.${NC}"

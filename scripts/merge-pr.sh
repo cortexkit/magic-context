@@ -8,6 +8,7 @@
 # AFT's gh shim may refuse read-only GraphQL until gh api graphql is declared;
 # this script reports that limitation and never bypasses the shim.
 set -euo pipefail
+finished=0
 
 REVIEW_BOTS='["cubic-dev-ai", "greptile-apps"]'
 REPOSITORY=cortexkit/magic-context
@@ -164,7 +165,10 @@ Ask the contributor to reword the commit, or squash the PR into one commit with 
 head=''
 title=''
 check_findings
-[ "$findings_only" -eq 0 ] || exit 0
+if [ "$findings_only" -ne 0 ]; then
+  finished=1
+  exit 0
+fi
 check_runs
 check_title
 
@@ -192,15 +196,19 @@ added=0
 changed_file=''
 cleanup() {
   local status=$?
+  if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf '%s\n' "$0: exited before successful completion" >&2
+    status=1
+  fi
   trap - EXIT
   if [ "$added" -eq 1 ]; then
     if ! timeout "$COMMAND_TIMEOUT" git worktree remove --force "$worktree"; then
       printf 'merge-pr: Could not remove temporary worktree: %s\n' "$worktree" >&2
-      status=1
+      [ "$status" -ne 0 ] || status=1
     fi
   fi
   if [ -n "$changed_file" ]; then
-    timeout "$COMMAND_TIMEOUT" rm -f "$changed_file" || status=1
+    timeout "$COMMAND_TIMEOUT" rm -f "$changed_file" || { [ "$status" -ne 0 ] || status=1; }
   fi
   exit "$status"
 }
@@ -212,6 +220,7 @@ if [ "$ci_gate" -eq 1 ]; then
   tested_sha=$(run git -C "$worktree" rev-parse HEAD)
   if [ "$dry_run" -eq 1 ]; then
     printf 'Dry run passed. Would push %s to train/check-pr-%s, wait for CI, then fast-forward master and push that SHA.\n' "$tested_sha" "$number"
+    finished=1
     exit 0
   fi
   # This disposable branch is replaced on retries; master is never force-pushed.
@@ -296,6 +305,7 @@ fi
 check_title
 if [ "$dry_run" -eq 1 ]; then
   printf 'Dry run passed. Would merge %s with message "Merge PR #%s: %s", then push origin master.\n' "$head" "$number" "$title"
+  finished=1
   exit 0
 fi
 
@@ -321,3 +331,4 @@ else
   run git push origin master
 fi
 run git log --oneline -1
+finished=1

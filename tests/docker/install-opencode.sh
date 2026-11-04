@@ -17,6 +17,7 @@
 # installed this way: its images install `@opencode/cli` from npm (see
 # tests/docker/opencode2/Dockerfile), and this installer cannot unpack a 2.x release.
 set -euo pipefail
+finished=0
 
 retry() {
     # retry <label> <cmd...>: five attempts with linear backoff, loud on give-up.
@@ -35,7 +36,13 @@ retry() {
 }
 
 installer="$(mktemp)"
-trap 'rm -f "$installer"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -f "$installer" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 
 fetch_installer() {
     curl -fsSL --connect-timeout 15 --max-time 120 https://opencode.ai/install -o "$installer" \
@@ -71,3 +78,4 @@ if ! command -v opencode >/dev/null 2>&1; then
     exit 1
 fi
 opencode --version
+finished=1

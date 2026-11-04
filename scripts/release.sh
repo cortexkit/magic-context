@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+finished=0
+# Bash 3 can report status 0 for nounset failures while an EXIT trap is installed.
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+exit "$status"' EXIT
 
 # release.sh — Tag and push a new magic-context release
 #
@@ -121,6 +129,7 @@ if [[ "$DRY" == "--dry" ]]; then
   bun scripts/version-sync.mjs "$VERSION" --dry-run
   echo ""
   echo "[DRY RUN] Would commit, tag $TAG, and push to origin."
+  finished=1
   exit 0
 fi
 
@@ -598,3 +607,4 @@ if [ -n "$MISSING" ]; then
     echo "    A staged version cannot be re-published (E409); if it never lands, the next patch version is the recovery." >&2
     exit 1
 fi
+finished=1

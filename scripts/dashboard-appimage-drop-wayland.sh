@@ -27,6 +27,7 @@
 # The signature Tauri wrote for the original file is deleted first, so a
 # failure at any step leaves no signature that belongs to a different file.
 set -euo pipefail
+finished=0
 
 if [[ $# -ne 1 ]]; then
   echo "usage: $0 <path/to/App.AppImage>" >&2
@@ -58,7 +59,13 @@ fi
 rm -f "$signature"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$work" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 
 offset="$("$appimage" --appimage-offset)"
 head -c "$offset" "$appimage" >"$work/runtime"
@@ -97,3 +104,4 @@ if [[ ! -s "$signature" ]]; then
   exit 1
 fi
 echo "repacked and re-signed $appimage"
+finished=1

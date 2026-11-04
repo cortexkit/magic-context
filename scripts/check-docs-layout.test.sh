@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Exercise the real guard in a disposable repository; no operator files are used.
 set -euo pipefail
+finished=0
 root=$(git rev-parse --show-toplevel)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/mc-docs-layout.XXXXXX")
-trap 'rm -rf "$fixture"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$fixture" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 cp "$root/.gitignore" "$fixture/.gitignore"
 mkdir -p "$fixture/scripts"
 cp "$root/scripts/check-docs-layout.sh" "$root/scripts/check-cortexkit-layout.sh" "$fixture/scripts/"
@@ -65,3 +72,4 @@ bash scripts/check-cortexkit-layout.sh
 bash scripts/check-docs-layout.sh
 checks=$((checks + 1))
 printf 'bash %s: %s layout checks passed\n' "$BASH_VERSION" "$checks"
+finished=1

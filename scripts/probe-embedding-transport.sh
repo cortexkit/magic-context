@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Offline Linux cost and failure probes; the trained model is downloaded locally before this script.
 set -euo pipefail
+finished=0
 cd "$(dirname "$0")/.."
 bun --version
 node --version
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 bun build scripts/fixtures/embedding-transport-probe.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker-process.ts \
@@ -36,3 +43,4 @@ done
 if [[ ${ORT_TRANSPORT_BENCH:-1} == 1 ]]; then
     node -e 'const rows=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse); for(const row of rows){ const {samplesMs,...summary}=row; console.log(JSON.stringify(summary));} console.log(`Benchmark summary: ${rows.length} scenarios, ${rows.reduce((n,r)=>n+r.batches,0)} batches`);' "$report"
 fi
+finished=1

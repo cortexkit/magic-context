@@ -2,6 +2,7 @@
 # Compare database schema versions before replacement, and render-format epoch
 # constants (versions of cached prompt formats) when both revisions declare them.
 set -euo pipefail
+finished=0
 umask 077
 
 usage() { echo "usage: $0 [--dry-run] [--no-restart] [--require-epochs-unchanged] [--source-ref REF] STAGED_BINARY" >&2; exit 2; }
@@ -100,9 +101,16 @@ check_shared_declarations() {
 check_shared_declarations
 publish_shared_stage() (
     set -euo pipefail
+    finished=0
     local card_name card sidecar
     local card_tmp="" sidecar_tmp="" manifest_tmp="" card_digest declared_at
-    trap 'rm -f "$card_tmp" "$sidecar_tmp" "$manifest_tmp"' EXIT
+    trap 'status=$?
+    if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+        printf "%s\n" "$0: exited before successful completion" >&2
+        status=1
+    fi
+    rm -f "$card_tmp" "$sidecar_tmp" "$manifest_tmp" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+    exit "$status"' EXIT
     card_name=$(basename "$shared_stage")
     card="$shared_staging/$card_name"
     sidecar="$card.sha256"
@@ -132,6 +140,7 @@ publish_shared_stage() (
         "$card" "$staged_sha" "$declared_at" > "$manifest_tmp"
     mv -f "$manifest_tmp" "$shared_staging/magic-context.current"
     manifest_tmp=""
+    finished=1
 )
 if [[ -n "$source_ref" ]]; then
     source_sha=$(git rev-parse --verify "${source_ref}^{commit}") || die "unknown source ref: $source_ref"
@@ -240,6 +249,7 @@ rollback=$bin_dir/staging/ck-mc.rollback.$deployed_sha
 printf -v rollback_cmd 'cp %q %q && ck module restart magic-context' "$rollback" "$deployed"
 if ((dry_run)); then
     echo "dry-run: would preserve $deployed as $rollback (without overwriting), atomically place $staged, restart magic-context, verify inode/version/digest/health"
+    finished=1
     exit 0
 fi
 [[ "$staged" != "$deployed" ]] || die "staged path is the deployed binary"
@@ -253,7 +263,13 @@ else
 fi
 [[ $(shasum -a 256 "$staged" | cut -d' ' -f1) == "$staged_digest" ]] || die "staged binary changed since preflight"
 tmp=$(mktemp "$bin_dir/.ck-mc.XXXXXXXX") || die "cannot make placement temp"
-trap 'rm -f "$tmp"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -f "$tmp" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 cp -p "$staged" "$tmp"
 [[ $(shasum -a 256 "$tmp" | cut -d' ' -f1) == "$staged_digest" ]] || die "staged binary changed during placement"
 mv -f "$tmp" "$deployed"
@@ -265,6 +281,7 @@ if ((no_restart)); then
     trap - ERR
     publish_shared_stage
     echo "placed ck-mc $staged_sha on disk without restarting; the running module still uses the previous build until magic-context restarts. Verify after that restart: ck --json provenance magic-context (build $staged_sha) and ck --json health magic-context. Rollback: $rollback_cmd"
+    finished=1
     exit 0
 fi
 ck module restart magic-context
@@ -315,3 +332,4 @@ done
 trap - ERR
 publish_shared_stage
 echo "placed ck-mc $staged_sha; context.db $context_live/$context_supported store.db $store_live/$store_supported; inode/version/digest/health ok"
+finished=1

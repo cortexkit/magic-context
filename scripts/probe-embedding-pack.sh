@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Compare clean package file lists against the pre-subprocess commit, without changing any branch.
 set -euo pipefail
+finished=0
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 scratch=$(mktemp -d "$root/.issue672-pack.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 mkdir -p "$scratch/base" "$scratch/new" "$scratch/home" "$scratch/cache"
 git archive e75dcf1a1daf47e49c01364db6f1866bf792e0d3 | tar -x -C "$scratch/base"
 git archive HEAD | tar -x -C "$scratch/new"
@@ -57,3 +64,4 @@ for (const pkg of ['plugin', 'pi-plugin']) {
 }
 console.log('Packed file-list summary: 4 npm pack --dry-run calls, 3 subprocess entries present');
 JS
+finished=1

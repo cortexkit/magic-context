@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+finished=0
 
 # The serve must have been restarted with debug_rpc=true in the trusted user
 # magic-context config, or with MAGIC_CONTEXT_DEBUG_RPC=1 in its environment.
@@ -47,7 +48,13 @@ if [[ "$record_pid" != "$pid" || -z "$port" || -z "$token" ]]; then
 fi
 
 response_file="$(mktemp "${TMPDIR:-/tmp}/mc-heap-rpc.XXXXXX")"
-trap 'rm -f "$response_file"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -f "$response_file" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 http_status="$({ curl --silent --show-error \
   --output "$response_file" \
   --write-out '%{http_code}' \
@@ -68,3 +75,4 @@ bun -e 'const r=await Bun.file(process.argv[1]).json(); console.log(JSON.stringi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 printf '\nAttribution command:\n  bun %q %q\n' "$repo_root/packages/plugin/scripts/attribute-heap.ts" "$snapshot_path"
+finished=1

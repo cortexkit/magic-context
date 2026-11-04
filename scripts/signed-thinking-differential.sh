@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compare the serialized request bytes from every audit pass, not only provider rejection verdicts.
 set -euo pipefail
+finished=0
 
 compare() {
     python3 - "$1" "$2" <<'PY'
@@ -104,6 +105,7 @@ PY
 # Comparison-only mode tests missing passes, byte changes and exception rules without running the suites.
 if [[ "${1:-}" == --compare-only && $# == 3 ]]; then
     compare "$2" "$3"
+    finished=1
     exit
 fi
 if [[ $# != 1 ]]; then
@@ -125,8 +127,12 @@ scratch=$(mktemp -d "$root/.signed-thinking-differential.XXXXXX")
 owned=false
 cleanup() {
     local status=$?
-    if $owned; then git -C "$root" worktree remove --force "$scratch/base" || status=1; fi
-    rm -rf "$scratch"
+    if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+        printf '%s\n' "$0: exited before successful completion" >&2
+        status=1
+    fi
+    if $owned; then git -C "$root" worktree remove --force "$scratch/base" || { [ "$status" -ne 0 ] || status=1; }; fi
+    rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
     exit "$status"
 }
 trap cleanup EXIT
@@ -176,3 +182,4 @@ validate_capture "$scratch/golden-base"
 capture "$root" "$scratch/golden-head"
 validate_capture "$scratch/golden-head"
 compare "$scratch/golden-base" "$scratch/golden-head"
+finished=1

@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
+finished=0
 lane=${1:?usage: prepare-container-image.sh lane image}
 image=${2:?image tag required}
 case "$lane" in opencode-1|opencode-2|omp) ;; *) exit 2 ;; esac
 repo=$(git rev-parse --show-toplevel)
 name="two-pass-install-${lane}-$$"
 cleanup() { docker stop -t 1 "$name" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+cleanup || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 # Installation has registry access but no credential, home, store, or Docker-socket mount.
 docker run -d --rm --name "$name" --cpus 4 --memory 8g --pids-limit 1024 \
     --network bridge --entrypoint /bin/bash -v "$repo:/source:ro" oven/bun:1.4.2 -c 'exec sleep infinity' >/dev/null
@@ -24,3 +31,4 @@ docker exec "$name" /bin/bash -c '
 # Snapshot only the credential-free install layer. Runtime uses no mounts and a fresh tmpfs auth root.
 docker commit "$name" "$image" >/dev/null
 printf 'PREPARED %s %s\n' "$lane" "$image"
+finished=1

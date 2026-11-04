@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+finished=0
 
 : "${SUBC_CONNECTION_FILE:?SUBC_CONNECTION_FILE must name the mounted connection file}"
 : "${DRIVE_REPO:=/snapshot/repo}"
@@ -26,7 +27,14 @@ forwarder_pid=$!
 cleanup() {
     kill "$forwarder_pid" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+cleanup || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
+trap cleanup INT TERM
 sleep 0.2
 if ! kill -0 "$forwarder_pid" 2>/dev/null; then
     printf 'subc forwarder failed to start; see /tmp/mc-drive-socat.log\n' >&2
@@ -62,3 +70,4 @@ if ! tmux has-session -t drive 2>/dev/null; then
 fi
 
 exec tail -f /dev/null
+finished=1

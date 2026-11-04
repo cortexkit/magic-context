@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Real local macOS native loads. Interposition observes getenv; Seatbelt prevents outbound traffic.
 set -euo pipefail
+finished=0
 cd "$(dirname "$0")/.."
 uname -a
 bun --version
 node --version
 cc --version
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 cc -dynamiclib scripts/fixtures/onnx-telemetry-macos-probe.c -o "$scratch/guard.dylib"
 python3 scripts/fixtures/make-onnx-telemetry-model.py "$scratch/model"
 bun build scripts/fixtures/onnx-telemetry-load.ts \
@@ -58,3 +65,4 @@ for case in ${ORT_PROBE_CASES:-bun-baseline bun-fixed node-fixed}; do
     fi
 done
 echo 'macOS selected native-load cases passed'
+finished=1

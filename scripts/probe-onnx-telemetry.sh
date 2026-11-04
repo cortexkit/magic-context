@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Linux-only offline integration probe. Native DNS/connect are denied before ORT loads.
 set -euo pipefail
+finished=0
 cd "$(dirname "$0")/.."
 bun --version
 node --version
@@ -8,7 +9,13 @@ cc --version
 python3 --version
 strace --version
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 cc -shared -fPIC -I/usr/include/node scripts/fixtures/onnx-telemetry-probe.c -ldl -o "$scratch/guard.so"
 cp "$scratch/guard.so" "$scratch/probe.node"
 python3 scripts/fixtures/make-onnx-telemetry-model.py "$scratch/model"
@@ -104,3 +111,4 @@ if [[ ${ORT_PROBE_COMPILED_HOST:-1} == 1 ]]; then
     echo 'PASS: compiled host native opt-out, zero outbound attempts, zero device IDs'
 fi
 echo "Integration summary: $probes native-env probes, $controls positive telemetry controls, $optouts opted-out real loads passed"
+finished=1

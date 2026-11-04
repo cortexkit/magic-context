@@ -14,6 +14,7 @@
 # The host must have libwayland installed (the release runners do, through the
 # WebKitGTK build dependencies); otherwise check 2 cannot resolve it and fails.
 set -euo pipefail
+finished=0
 
 if [[ $# -ne 1 ]]; then
   echo "usage: $0 <path/to/App.AppImage>" >&2
@@ -26,7 +27,13 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 failed=0
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$work" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 (cd "$work" && "$appimage" --appimage-extract >/dev/null)
 appdir="$work/squashfs-root"
 
@@ -87,3 +94,4 @@ if [[ $failed -ne 0 ]]; then
   exit 1
 fi
 echo "AppImage verification passed: $appimage"
+finished=1

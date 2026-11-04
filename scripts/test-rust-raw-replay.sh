@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Offline host/module/provider-byte regressions; no daemon or live store is used.
 set -euo pipefail
+finished=0
 cd "$(dirname "$0")/.."
 if [[ ${MC_RAW_REPLAY_REQUIRED:-0} == 1 && -z ${MC_RAW_REPLAY_BASELINE_ARCHIVE:-} ]]; then
     echo "Required MC_RAW_REPLAY_BASELINE_ARCHIVE (pinned released baseline sources) is missing" >&2
     exit 1
 fi
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+exit "$status"' EXIT
 
 if [[ -n ${MC_RAW_REPLAY_BASELINE_ARCHIVE:-} ]]; then
     mkdir "$scratch/base"
@@ -57,3 +64,4 @@ BUN_JSC_useOMGJIT=0 bun test --timeout 120000 \
     packages/plugin/src/features/magic-context/transform-decision-log.test.ts \
     packages/plugin/scripts/cache-bust-scheduler-log.test.ts \
     packages/plugin/scripts/cache-bust-sentinel.test.ts "$@"
+finished=1

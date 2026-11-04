@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+finished=0
 
 PASS=0
 FAIL=0
@@ -102,7 +103,13 @@ JSON
 
 node /test/aimock-server.cjs > /tmp/aimock.log 2>&1 &
 AIMOCK_PID=$!
-trap 'kill $AIMOCK_PID 2>/dev/null || true' EXIT
+trap 'status=$?
+if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+    printf "%s\n" "$0: exited before successful completion" >&2
+    status=1
+fi
+kill "$AIMOCK_PID" 2>/dev/null || true
+exit "$status"' EXIT
 for _ in $(seq 1 15); do
     if curl -fsS http://127.0.0.1:4010/v1/models > /dev/null 2>&1; then
         break
@@ -234,3 +241,4 @@ section "Summary"
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"
 test "$FAIL" -eq 0
+finished=1
