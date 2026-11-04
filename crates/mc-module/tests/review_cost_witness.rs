@@ -1,11 +1,11 @@
-//! Witness tests from an independent review of the notice-cost changes
-//! (plan-only view checks, the version-4 store, the background search
-//! indexer and the WAL open of `context.db`).
+//! Regression tests for properties ck-mc kept before its per-notice cost
+//! work moved message search indexing to a background thread, stored large
+//! history text by content digest in the version-4 `mode3.db`, and made
+//! writable opens of `context.db` switch it to WAL.
 //!
-//! Each test states a property the module had before those changes and fails
-//! where the changes break it. They drive the public `Module` API only and
-//! use `Module::idle`, which exists on both sides of the change, so the same
-//! file also runs against the earlier code.
+//! Each test states one such property. They drive the public `Module` API
+//! and `Module::idle` only, which exist before and after that work, so the
+//! same file runs against both versions of the code.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -200,15 +200,15 @@ impl RunnerClient for Runner {
     }
 
     async fn send(&self, _: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
-        Err(ClientError::new("no reminders in this witness"))
+        Err(ClientError::new("no reminders in this test"))
     }
 
     async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
-        Err(ClientError::new("no summarizer runs in this witness"))
+        Err(ClientError::new("no summarizer runs in this test"))
     }
 
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
-        Err(ClientError::new("no summarizer runs in this witness"))
+        Err(ClientError::new("no summarizer runs in this test"))
     }
 }
 
@@ -216,7 +216,7 @@ impl Router for Runner {
     async fn select(&self, _: SelectRequest) -> Result<SelectAnswer, RouteError> {
         Err(RouteError {
             code: "routing_unavailable".into(),
-            message: "no routing in this witness".into(),
+            message: "no routing in this test".into(),
         })
     }
 
@@ -276,16 +276,16 @@ async fn settle(module: &Module<Runner>, key: &SessionRef, what: &str) {
         .unwrap();
 }
 
-/// Rule: no background work may block a runner call on a session's worker
-/// (the brief: "It never blocks a ride, the pre_user hook or a view for any
-/// session"). The background indexer runs its batches with
+/// Rule: background search indexing never blocks a runner call on a
+/// session's worker, so a ride, the `pre_user` hook or a view handed to the
+/// runner never waits for it. The background indexer runs its batches with
 /// `runtime.block_on` on a private current-thread runtime
 /// (search/background.rs, `Background::new`). When one of its runner reads
 /// is the call that (re)opens the daemon connection, the connection's I/O
 /// task is spawned on that private runtime, which only runs while a batch is
 /// in flight. Every later runner call from a session worker then waits on
-/// a task nothing polls. Before the change, all runner calls ran on the
-/// module's own runtime.
+/// a task nothing polls. Before indexing moved to that thread, all runner
+/// calls ran on the module's own runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_runner_call_after_the_indexer_reopened_the_connection_completes() {
     let dir = tempfile::tempdir().unwrap();
@@ -334,16 +334,17 @@ async fn a_runner_call_after_the_indexer_reopened_the_connection_completes() {
 
 /// Rule: a revert removes every search row of the reverted messages, so
 /// `ctx_search` never returns text from a branch that no longer exists.
-/// Before the change, `search::messages::forget_from` deleted
-/// `message_history_fts` rows by session and ordinal. The background
-/// indexer's `truncate_chunk` (search/background.rs) deletes FTS rows only
-/// through `message_fts_rowid_map`, so an FTS row with no map entry
-/// survives. Such rows are expected: rows written before the map existed
-/// are mapped only when the plugin's global rowid backfill reaches them
-/// (`deleteUnmappedMessageFtsRows` in the plugin's
-/// message-fts-rowid-map.ts sweeps them for exactly this reason). ck-mc's
-/// message search reads `message_history_fts` without the map when no date
-/// range is given, so the reverted text stays searchable.
+/// Before indexing moved to the background thread,
+/// `search::messages::forget_from` deleted `message_history_fts` rows by
+/// session and ordinal. The background indexer's `truncate_chunk`
+/// (search/background.rs) deletes FTS rows only through
+/// `message_fts_rowid_map`, so an FTS row with no map entry survives. Such
+/// rows are expected: rows written before the map existed are mapped only
+/// when the plugin's global rowid backfill reaches them
+/// (`deleteUnmappedMessageFtsRows` in the plugin's message-fts-rowid-map.ts
+/// sweeps them for exactly this reason). ck-mc's message search reads
+/// `message_history_fts` without the map when no date range is given, so
+/// the reverted text stays searchable.
 #[tokio::test]
 async fn a_revert_removes_reverted_text_from_search_even_without_a_rowid_map_entry() {
     let dir = tempfile::tempdir().unwrap();
@@ -359,7 +360,8 @@ async fn a_revert_removes_reverted_text_from_search_even_without_a_rowid_map_ent
         .setup(route(&key), setup_request(runner.newest()))
         .unwrap();
     // A notice carrying the newest entry again indexes the session on both
-    // sides of the change (before it, indexing ran only on notices).
+    // sides of the background-indexing change (before it, indexing ran only
+    // on notices).
     let mut first = NoticeRequest::new(1, conditions(2)).with_newest(runner.newest().unwrap());
     first.entries = vec![text_entry(
         3,
@@ -421,8 +423,8 @@ async fn a_revert_removes_reverted_text_from_search_even_without_a_rowid_map_ent
 
 /// Rule: indexing work does not grow with session length when nothing
 /// changed. A Setup for a transcript the index already holds, unchanged,
-/// rewrites no search rows. After the change every Setup marks the session
-/// dirty from the start of its held window (`Session::setup` sets
+/// rewrites no search rows. With background indexing every Setup marks the
+/// session dirty from the start of its held window (`Session::setup` sets
 /// `search_dirty_from` to `index.base()`, which is 1 for a session without
 /// a summary), and the indexer deletes and re-inserts every row from there.
 /// Until it finishes, `ctx_search` finds none of those messages.
@@ -512,11 +514,11 @@ fn a_version_three_store_with_one_undecodable_row_still_opens() {
 /// `PRAGMA journal_mode=WAL`). Moving a rollback-journal file to WAL needs
 /// an exclusive lock, so while any other process holds even a read
 /// transaction the switch fails after the 250 ms busy timeout, and the open
-/// fails with it: `ck-mc` does not start. Before the change the open did not
-/// touch the journal mode and succeeded. Only a file still in rollback mode
-/// is affected; the plugin switches `context.db` to WAL on every writable
-/// open, so a store any current plugin host has opened is already WAL (the
-/// control test below).
+/// fails with it: `ck-mc` does not start. Before `ContextDb::open` made the
+/// switch it left the journal mode alone and succeeded. Only a file still in
+/// rollback mode is affected; the plugin switches `context.db` to WAL on
+/// every writable open, so a store any current plugin host has opened is
+/// already WAL (the control test below).
 #[test]
 fn a_rollback_journal_context_db_opens_while_another_process_reads_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -542,7 +544,7 @@ fn a_rollback_journal_context_db_opens_while_another_process_reads_it() {
 
 /// Control for the test above: once the file is in WAL mode the switch is a
 /// no-op that takes no write lock, so the open succeeds while another
-/// process holds the write lock. Passes before and after the change.
+/// process holds the write lock. Passes with and without the WAL switch.
 #[test]
 fn control_a_wal_context_db_opens_while_another_process_holds_its_write_lock() {
     let dir = tempfile::tempdir().unwrap();
