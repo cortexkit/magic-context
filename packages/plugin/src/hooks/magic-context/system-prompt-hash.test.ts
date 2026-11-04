@@ -56,6 +56,7 @@ import {
 } from "./ctx-reduce-availability";
 import { clearSystemPromptEdit, hasSystemPromptEdit } from "./pending-materialization";
 import { createSystemPromptHashHandler, isMagicContextInternalAgent } from "./system-prompt-hash";
+import { TWO_PASS_SYSTEM } from "./two-pass-prompts/prompts.generated";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -876,6 +877,7 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
             dreamerPrompt: DREAMER_SYSTEM_PROMPT,
             smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
             historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+            historianTwoPassPrompt: TWO_PASS_SYSTEM,
             historianRecompPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
             historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
             historianDisallowed: [],
