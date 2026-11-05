@@ -17,9 +17,12 @@ Additions:
   System prompt and tool definitions use the runner's counts of those fixed
   prompt sections, or null when absent. Memory, project docs and user profile
   use cached counts of their blocks in the synthetic messages at the start of
-  the model's context (the history head). Each rendered summary adds an item with `compartment_id`, numeric
-  `tier` and its count in the session model's tokenizer. Summary counts exclude
-  the shared history wrapper. A summary archived by the renderer has no item.
+  the model's context (the history head). Each rendered summary adds an item
+  with `compartment_id`, numeric `tier` and its count in the session model's
+  tokenizer. A summary's count covers only its own rendered text, not the
+  `<session-history>` tags that enclose all summaries, so the items can sum to
+  a little less than the head's history total. A summary archived by the
+  renderer has no item.
   Unmanaged sessions have an empty list.
 
 The examples include counted text, a runner-counted tool result, stamped and
