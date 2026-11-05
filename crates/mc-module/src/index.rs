@@ -68,6 +68,11 @@ fn clear_counts(entry: &mut Entry) {
     entry.reasoning_tokens = None;
     for part in &mut entry.parts {
         part.tokens = None;
+        if let PartBody::Tool(tool) = &mut part.body {
+            for ride in &mut tool.delivered {
+                ride.tokens = None;
+            }
+        }
     }
 }
 
@@ -82,9 +87,20 @@ fn refresh_counts(held: &mut Entry, new: &Entry) -> bool {
         changed = true;
     }
     for (held, new) in held.parts.iter_mut().zip(&new.parts) {
-        if held.id == new.id && new.tokens.is_some() && held.tokens != new.tokens {
+        if held.id != new.id {
+            continue;
+        }
+        if new.tokens.is_some() && held.tokens != new.tokens {
             held.tokens = new.tokens;
             changed = true;
+        }
+        if let (PartBody::Tool(held), PartBody::Tool(new)) = (&mut held.body, &new.body) {
+            for (held, new) in held.delivered.iter_mut().zip(&new.delivered) {
+                if new.tokens.is_some() && held.tokens != new.tokens {
+                    held.tokens = new.tokens;
+                    changed = true;
+                }
+            }
         }
     }
     changed
@@ -407,6 +423,34 @@ mod tests {
         // A new family discards every count held in the old one.
         index.extend_counted([counted(3, "c", text, 7)], Some("o200k/1"));
         assert_eq!(counts(&index), [5, 5, 7]);
+    }
+
+    #[test]
+    fn ride_counts_arriving_later_refresh_without_content_changes() {
+        use cortexkit_role_compaction::part::Delivered;
+        use cortexkit_role_compaction::tokens::TokenCount;
+
+        let mut message = call(1, "a", true);
+        let PartBody::Tool(tool) = &mut message.parts[0].body else {
+            unreachable!()
+        };
+        tool.delivered = vec![Delivered::new("sender", "ride")];
+        let uncounted = message.clone();
+        let mut index = Index::default();
+        index.extend_counted([message.clone()], Some("family-a"));
+        assert_eq!(counts(&index), [4]);
+
+        let PartBody::Tool(tool) = &mut message.parts[0].body else {
+            unreachable!()
+        };
+        tool.delivered[0].tokens = Some(TokenCount::new(9));
+        assert_eq!(
+            index.extend_counted([message], Some("family-a")),
+            Extend::Continued
+        );
+        assert_eq!(counts(&index), [12]);
+        index.extend_counted([uncounted], None);
+        assert_eq!(counts(&index), [12]);
     }
 
     #[test]

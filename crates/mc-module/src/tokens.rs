@@ -4,9 +4,12 @@
 //!
 //! A runner that holds a part's content counts it with the model family's
 //! tokenizer and sends the count with the part (compaction contract W4.11);
-//! the index keeps only counts in the family the runner currently names.
+//! the index keeps only part and ride counts in the family the runner
+//! currently names.
 //! Without a count, the cost is estimated from sizes at one token per four
 //! bytes.
+//! Rides are module-sent text delivered alongside a tool result; replacing
+//! that result also removes its rides from the model's view.
 
 use cortexkit_role_compaction::part::{AttachmentItem, FileMedia, Part, PartBody, ToolPart};
 use cortexkit_role_compaction::tokens::PartTokens;
@@ -23,6 +26,7 @@ pub fn bytes(bytes: u64) -> u64 {
 /// [`crate::lanes`] uses the step's reported count when it has one.
 pub fn part(part: &Part) -> u64 {
     match (&part.body, part.tokens) {
+        // The contract's W4.11 tool output count already includes delivered text.
         (PartBody::Tool(_), Some(PartTokens::Tool(counted))) => counted.input + counted.output,
         (PartBody::Text { .. } | PartBody::File(_), Some(PartTokens::Count(counted))) => {
             counted.count
@@ -37,13 +41,9 @@ fn estimate(part: &Part) -> u64 {
         PartBody::Reasoning { text_bytes, .. } => bytes(text_bytes.unwrap_or(0)),
         PartBody::Tool(tool) => {
             let input = serde_json::to_string(&tool.input).map_or(0, |input| input.len() as u64);
-            let delivered: u64 = tool
-                .delivered
-                .iter()
-                .map(|delivered| delivered.text_bytes)
-                .sum();
-            bytes(tool.name.len() as u64 + input + tool.output_bytes.unwrap_or(0) + delivered)
+            bytes(tool.name.len() as u64 + input + tool.output_bytes.unwrap_or(0))
                 + attachments(tool)
+                + rides(tool)
         }
         PartBody::File(file) => media(file),
         PartBody::Opaque(opaque) => bytes(opaque.size.unwrap_or(0)),
@@ -64,12 +64,13 @@ pub fn removed_by_summary(part: &Part) -> u64 {
     }
 }
 
-/// What a tool part's result costs: its output and attachments, without the
-/// call. `part` is the tool part holding `tool`.
+/// What a tool part's result costs: its output, attachments and delivered
+/// module text, without the call. `part` is the tool part holding `tool`.
 pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
     match part.tokens {
+        // W4.11 includes delivered text in this full-result count already.
         Some(PartTokens::Tool(counted)) => counted.output,
-        _ => bytes(tool.output_bytes.unwrap_or(0)) + attachments(tool),
+        _ => bytes(tool.output_bytes.unwrap_or(0)) + attachments(tool) + rides(tool),
     }
 }
 
@@ -81,6 +82,16 @@ pub fn tool_output(part: &Part, tool: &ToolPart) -> u64 {
         Some(PartTokens::Tool(counted)) => counted.output,
         _ => bytes(tool.output_bytes.unwrap_or(0)),
     }
+}
+
+fn rides(tool: &ToolPart) -> u64 {
+    tool.delivered
+        .iter()
+        .map(|ride| {
+            ride.tokens
+                .map_or_else(|| bytes(ride.text_bytes), |tokens| tokens.count)
+        })
+        .sum()
 }
 
 fn attachments(tool: &ToolPart) -> u64 {
@@ -108,6 +119,10 @@ fn media(file: &FileMedia) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::Index;
+    use cortexkit_role_compaction::part::Delivered;
+    use cortexkit_role_compaction::read::{Entry, Role};
+    use cortexkit_role_compaction::tokens::TokenCount;
 
     fn tool(counts: Option<PartTokens>) -> Part {
         let mut part: Part = serde_json::from_value(serde_json::json!({
@@ -154,5 +169,102 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(removed_by_summary(&text), 3);
+    }
+
+    fn with_rides(counts: Option<PartTokens>, rides: Vec<Delivered>) -> Part {
+        let mut part = tool(counts);
+        let PartBody::Tool(body) = &mut part.body else {
+            unreachable!()
+        };
+        body.delivered = rides;
+        part
+    }
+
+    fn result(part: &Part) -> u64 {
+        let PartBody::Tool(body) = &part.body else {
+            unreachable!()
+        };
+        tool_result(part, body)
+    }
+
+    #[test]
+    fn a_counted_tool_result_already_includes_its_rides() {
+        let part = with_rides(
+            Some(PartTokens::tool(12, 700)),
+            vec![Delivered::new("sender", "ride").with_tokens(TokenCount::new(9))],
+        );
+        assert_eq!(super::part(&part), 712);
+        assert_eq!(result(&part), 700);
+        assert_eq!(removed_by_summary(&part), 12);
+    }
+
+    #[test]
+    fn an_estimated_tool_result_adds_counted_rides() {
+        let part = with_rides(
+            None,
+            vec![Delivered::new("sender", "ride").with_tokens(TokenCount::new(9))],
+        );
+        assert_eq!(super::part(&part), 1016);
+        assert_eq!(result(&part), 1009);
+        assert_eq!(removed_by_summary(&part), 7);
+    }
+
+    #[test]
+    fn an_estimated_tool_result_adds_each_rides_text_bytes() {
+        let part = with_rides(
+            None,
+            serde_json::from_value(serde_json::json!([
+                {"sender": "sender", "text_bytes": 17},
+                {"sender": "sender", "text_bytes": 1}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(super::part(&part), 1013);
+        assert_eq!(result(&part), 1006);
+        assert_eq!(removed_by_summary(&part), 7);
+    }
+
+    #[test]
+    fn ride_counts_in_another_family_are_estimated() {
+        let part = with_rides(
+            None,
+            vec![Delivered::new("sender", "ride").with_tokens(TokenCount::new(9))],
+        );
+        let mut index = Index::default();
+        index.extend_counted(
+            [Entry::new(1, "m1", Role::Assistant, 0, vec![part])],
+            Some("family-a"),
+        );
+        assert_eq!(result(&index.entries()[0].parts[0]), 1009);
+        index.extend_counted([], Some("family-b"));
+        let part = &index.entries()[0].parts[0];
+        assert_eq!(super::part(part), 1008);
+        assert_eq!(result(part), 1001);
+    }
+
+    #[test]
+    fn ride_counts_without_a_family_are_estimated() {
+        let part = with_rides(
+            None,
+            vec![Delivered::new("sender", "ride").with_tokens(TokenCount::new(9))],
+        );
+        let mut index = Index::default();
+        index.extend([Entry::new(1, "m1", Role::Assistant, 0, vec![part])]);
+        let part = &index.entries()[0].parts[0];
+        assert_eq!(super::part(part), 1008);
+        assert_eq!(result(part), 1001);
+    }
+
+    #[test]
+    fn tool_output_stays_unchanged_when_rides_are_added_to_the_result() {
+        for counts in [None, Some(PartTokens::tool(12, 700))] {
+            let part = with_rides(counts, vec![Delivered::new("sender", "ride")]);
+            let PartBody::Tool(body) = &part.body else {
+                unreachable!()
+            };
+            let expected = if counts.is_some() { 700 } else { 1000 };
+            assert_eq!(tool_output(&part, body), expected);
+            assert_eq!(result(&part), if counts.is_some() { 700 } else { 1001 });
+        }
     }
 }
