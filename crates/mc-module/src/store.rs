@@ -109,7 +109,7 @@ pub struct Store {
 }
 
 /// The newest mode3.db schema this build can read and write.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -148,13 +148,6 @@ impl Store {
                      png BLOB NOT NULL,
                      PRIMARY KEY (runner, harness, session)
                  );
-                  CREATE TABLE IF NOT EXISTS app_read_snapshots (
-                      runner TEXT NOT NULL,
-                      harness TEXT NOT NULL,
-                      session TEXT NOT NULL,
-                      snapshot TEXT NOT NULL,
-                      PRIMARY KEY (runner, harness, session)
-                  );
                   CREATE TABLE IF NOT EXISTS app_read_message_index (
                       runner TEXT NOT NULL,
                       harness TEXT NOT NULL,
@@ -190,6 +183,13 @@ impl Store {
             .map_err(|error| error.to_string())?;
         if version < 4 {
             crate::store_text::migrate(&connection)?;
+        }
+        connection
+            .execute_batch(crate::app_read::persistence::SCHEMA)
+            .map_err(|error| error.to_string())?;
+        if version < 5 {
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS app_read_snapshots (runner TEXT NOT NULL,harness TEXT NOT NULL,session TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(runner,harness,session));").map_err(|error|error.to_string())?;
+            crate::app_read::persistence::migrate(&connection)?;
         }
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -356,18 +356,31 @@ impl Store {
         Ok(store)
     }
 
-    /// Serialize before taking the store lock; the single-row upsert commits
-    /// the complete app projection in one short SQLite transaction.
+    #[cfg(test)]
     pub(crate) fn save_app_snapshot(
         &self,
         snapshot: &crate::app_read::Snapshot,
     ) -> Result<(), String> {
-        let key = &snapshot.key;
-        let text = serde_json::to_string(snapshot).expect("snapshot JSON");
-        let connection = self.lock();
+        self.save_app_checkpoint(
+            &snapshot.key,
+            &crate::app_read::persistence::Checkpoint::full(snapshot),
+        )?;
+        self.save_app_decisions(&snapshot.key, &snapshot.decisions)
+    }
+
+    pub(crate) fn save_app_checkpoint(
+        &self,
+        key: &SessionRef,
+        checkpoint: &crate::app_read::persistence::Checkpoint,
+    ) -> Result<(), String> {
+        let mut connection = self.lock();
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let result=connection.execute("INSERT INTO app_read_snapshots VALUES (?1,?2,?3,?4) ON CONFLICT(runner,harness,session) DO UPDATE SET snapshot=excluded.snapshot",params![key.runner,key.harness,key.session,text]);
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = connection.transaction()?;
+            checkpoint.write(&tx, key)?;
+            tx.commit()
+        })();
         #[cfg(test)]
         {
             self.record_write(started);
@@ -618,7 +631,7 @@ mod tests {
             println!("offline-copy row {index}: harness={} session_sha256={:x} decoded equality PASS baseline={} pending_views={}",key.harness,Sha256::digest(key.session.as_bytes()),expected.baseline.is_some(),expected.unconfirmed.len());
         }
         println!(
-            "Offline copy migrated 3 -> 4: {}/{} sessions decoded identically",
+            "Offline copy migrated 3 -> 5: {}/{} sessions decoded identically",
             before.len(),
             before.len()
         );
@@ -633,9 +646,9 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
-        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_snapshots','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 3);
+        assert_eq!(version, 5);
+        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 5);
     }
 
     #[test]
@@ -673,7 +686,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
     #[test]
     fn repeated_successful_save_does_not_write_again() {
@@ -742,7 +755,7 @@ mod tests {
                 .lock()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
         for key in &keys {
             assert_eq!(migrated.load(key), Some(state.clone()));

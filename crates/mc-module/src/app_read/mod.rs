@@ -15,6 +15,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
+pub(crate) mod persistence;
 mod search;
 mod states;
 mod watch;
@@ -57,7 +58,7 @@ mod stamp_map {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Serialize, Deserialize)]
 pub(crate) struct Header {
     pub base: u64,
     pub newest: u64,
@@ -230,17 +231,11 @@ impl Replica {
                 tracing::warn!("ck-mc: app session lookup: {error}");
             }
         }
-        let rows = (|| -> rusqlite::Result<Vec<String>> {
-            conn.prepare("SELECT snapshot FROM app_read_snapshots")?
-                .query_map([], |row| row.get(0))?
-                .collect()
-        })();
+        let rows = persistence::load(conn);
         match rows {
             Ok(rows) => {
-                for row in rows {
-                    if let Ok(snapshot) = serde_json::from_str::<Snapshot>(&row) {
-                        self.publish(snapshot);
-                    }
+                for snapshot in rows {
+                    self.publish(snapshot);
                 }
             }
             Err(error) => {

@@ -1,6 +1,8 @@
 //! Projection built by a session's own work, never by an app request.
 use super::*;
-use crate::app_read::{Message, Snapshot};
+use crate::app_read::Message;
+#[cfg(test)]
+use crate::app_read::Snapshot;
 use serde_json::json;
 #[path = "incremental.rs"]
 mod incremental;
@@ -457,6 +459,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply["messages"][0]["state"], "raw");
+    }
+
+    #[tokio::test]
+    async fn app_read_dirty_checkpoint_writes_only_changed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let app = crate::app_read::AppRead::new(Some(path.clone()), None);
+        let mut session = session();
+        session.index_ready = true;
+        session.summaries.push(StoredCompartment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 10,
+            content: "unchanged summary".into(),
+            ..Default::default()
+        });
+        session.set_store(Some(store));
+        session.publish_app(&app, true);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE checkpoint_events(table_name TEXT);")
+            .unwrap();
+        let tables: Vec<String> = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_snapshots')").unwrap().query_map([],|row|row.get(0)).unwrap().collect::<Result<_,_>>().unwrap();
+        for table in tables {
+            for op in ["INSERT", "UPDATE", "DELETE"] {
+                conn.execute_batch(&format!("CREATE TRIGGER observe_{table}_{op} AFTER {op} ON {table} BEGIN INSERT INTO checkpoint_events VALUES('{table}'); END;")).unwrap();
+            }
+        }
+        session
+            .index
+            .extend([Entry::new(201, "m201", Role::Assistant, 201, vec![])]);
+        session.publish_app(&app, false);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM checkpoint_events", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        session.app_age_snapshot();
+        session.publish_app(&app, false);
+        let events: Vec<(String,u64)> = conn.prepare("SELECT table_name,count(*) FROM checkpoint_events GROUP BY table_name ORDER BY table_name").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ("app_read_headers".into(), 1),
+                ("app_read_messages".into(), 1)
+            ]
+        );
+
+        // A busy writer must not acknowledge pending rows or summaries. The next
+        // checkpoint retries the complete delta, including intervening updates.
+        session
+            .index
+            .extend([Entry::new(202, "m202", Role::Assistant, 202, vec![])]);
+        session.summaries[0].content = "updated summary".into();
+        session.app_projection.summaries_dirty = true;
+        session.app_age_snapshot();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        session.publish_app(&app, false);
+        conn.execute_batch("ROLLBACK;").unwrap();
+        session
+            .index
+            .extend([Entry::new(203, "m203", Role::Assistant, 203, vec![])]);
+        session.publish_app(&app, false);
+        let reloaded = crate::app_read::AppRead::new(Some(path), None);
+        let reply = reloaded
+            .read(
+                "context.states",
+                json!({"session":session.key,"message_ids":["m201","m202","m203"]}),
+            )
+            .await
+            .unwrap();
+        for row in reply["messages"].as_array().unwrap() {
+            assert_eq!(row["state"], "raw");
+        }
+        let summary = reloaded
+            .read(
+                "context.compartment",
+                json!({"session":session.key,"compartment_id":"1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            summary["compartment"]["summary_markdown"],
+            "updated summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_read_cut_and_revert_delete_checkpoint_rows_before_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let app = crate::app_read::AppRead::new(Some(path.clone()), None);
+        let mut session = session();
+        session.index_ready = true;
+        session.set_store(Some(store));
+        session.publish_app(&app, true);
+        session.cut = Some(100);
+        let gone = session.index.prune_before(100);
+        session.app_persist_cut(&gone);
+        session.publish_app(&app, false);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let ids = || {
+            conn.prepare("SELECT message_id FROM app_read_messages ORDER BY ordinal")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            ids(),
+            (100..=200).map(|n| format!("m{n}")).collect::<Vec<_>>()
+        );
+        let cut = crate::app_read::AppRead::new(Some(path.clone()), None);
+        let reply = cut
+            .read(
+                "context.states",
+                json!({"session":session.key,"message_ids":["m1","m99","m100","m200"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["messages"][0]["state"], "outside");
+        assert_eq!(reply["messages"][1]["state"], "outside");
+        assert_eq!(reply["messages"][2]["state"], "raw");
+        assert_eq!(reply["messages"][2]["items"][0]["state"], "dropped");
+        assert_eq!(reply["messages"][3]["state"], "raw");
+        session.index.truncate(150);
+        session.publish_app(&app, false);
+        assert_eq!(
+            ids(),
+            (100..150).map(|n| format!("m{n}")).collect::<Vec<_>>()
+        );
+        let reverted = crate::app_read::AppRead::new(Some(path), None);
+        let reply = reverted
+            .read(
+                "context.states",
+                json!({"session":session.key,"message_ids":["m149","m150","m200"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["messages"][0]["state"], "raw");
+        assert_eq!(reply["messages"][1]["state"], "outside");
+        assert_eq!(reply["messages"][2]["state"], "outside");
     }
 
     #[test]

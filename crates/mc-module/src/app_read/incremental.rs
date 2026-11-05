@@ -79,6 +79,10 @@ pub(crate) struct Projection {
     persisted: Option<(u64, String)>,
     snapshot_saved: Option<std::time::Instant>,
     snapshot_dirty: bool,
+    snapshot_rows: BTreeMap<String, Arc<Message>>,
+    snapshot_removed: BTreeSet<String>,
+    snapshot_reset: bool,
+    snapshot_summaries: bool,
     pending_rows: BTreeMap<u64, IndexRow>,
     revert_from: Option<u64>,
     revert_dirty: Option<u64>,
@@ -119,6 +123,10 @@ impl Default for Projection {
             persisted: None,
             snapshot_saved: None,
             snapshot_dirty: false,
+            snapshot_rows: BTreeMap::new(),
+            snapshot_removed: BTreeSet::new(),
+            snapshot_reset: false,
+            snapshot_summaries: false,
             pending_rows: BTreeMap::new(),
             revert_from: None,
             revert_dirty: None,
@@ -155,6 +163,8 @@ impl Projection {
                 self.queued -= old.stamps;
             }
             self.positions.remove(&old.mid);
+            self.snapshot_rows.remove(&old.mid);
+            self.snapshot_removed.insert(old.mid);
             self.usages.remove(&ordinal);
             self.stamped.remove(&ordinal);
         }
@@ -200,6 +210,9 @@ impl Session {
             .last()
             .map_or(self.cut.unwrap_or(0), |e| e.ordinal);
         if reset {
+            p.snapshot_reset = true;
+            p.snapshot_rows.clear();
+            p.snapshot_removed.clear();
             if self.index_ready {
                 let (tip, mid) = p.persisted.as_ref().expect("initialized tip");
                 if *tip > newest {
@@ -594,6 +607,13 @@ impl Session {
             decisions,
             reverted: reverted.is_some(),
         };
+        // Publishing consumes the projection's row dirtiness every update, but
+        // checkpoints may wait a minute or fail. Retain the latest changed rows
+        // independently until a transaction commits successfully.
+        p.snapshot_rows.extend(update.rows.iter().cloned());
+        p.snapshot_summaries |= update.compartments.is_some();
+        p.snapshot_dirty |=
+            !update.rows.is_empty() || update.reset_from.is_some() || update.prune_before.is_some();
         p.base = self.index.base();
         p.initialized = true;
         self.app_projection = p;
@@ -605,8 +625,6 @@ impl Session {
         let old_base = self.app_projection.base;
         let initialized = self.app_projection.initialized;
         let update = self.app_update();
-        self.app_projection.snapshot_dirty |=
-            !update.rows.is_empty() || update.reset_from.is_some() || update.prune_before.is_some();
         let checkpoint = checkpoint
             || (initialized && old_base != self.index.base())
             || update.reverted
@@ -635,10 +653,24 @@ impl Session {
             self.app_update();
         }
         if let Some(store) = &self.store {
-            match store.save_app_snapshot(&self.app_materialize()) {
+            let p = &self.app_projection;
+            let checkpoint = crate::app_read::persistence::Checkpoint::new(
+                p.header.as_ref().expect("projection header"),
+                p.snapshot_rows
+                    .iter()
+                    .map(|(mid, row)| (mid.as_str(), row.as_ref())),
+                p.snapshot_summaries.then_some(p.compartments.as_slice()),
+                p.snapshot_removed.iter().map(String::as_str),
+                p.snapshot_reset,
+            );
+            match store.save_app_checkpoint(&self.key, &checkpoint) {
                 Ok(()) => {
                     self.app_projection.snapshot_saved = Some(std::time::Instant::now());
                     self.app_projection.snapshot_dirty = false;
+                    self.app_projection.snapshot_rows.clear();
+                    self.app_projection.snapshot_removed.clear();
+                    self.app_projection.snapshot_reset = false;
+                    self.app_projection.snapshot_summaries = false;
                 }
                 Err(error) => tracing::warn!("ck-mc: {error}"),
             }
@@ -701,6 +733,7 @@ impl Session {
         self.app_persist_index();
     }
 
+    #[cfg(test)]
     pub(super) fn app_materialize(&self) -> Snapshot {
         let p = &self.app_projection;
         let h = p.header.as_ref().expect("projection header");

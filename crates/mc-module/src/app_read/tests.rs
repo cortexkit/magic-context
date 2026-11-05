@@ -761,3 +761,100 @@ fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
     assert_eq!(compartment["compartment"]["first_at_ms"], 10);
     assert_eq!(compartment["compartment"]["last_at_ms"], 10);
 }
+
+#[tokio::test]
+async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mode3.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA user_version=4; CREATE TABLE app_read_snapshots(runner TEXT,harness TEXT,session TEXT,snapshot TEXT,PRIMARY KEY(runner,harness,session)); CREATE TABLE app_read_decisions(runner TEXT,harness TEXT,session TEXT,decisions TEXT,PRIMARY KEY(runner,harness,session));").unwrap();
+    let mut snapshot = fixture();
+    snapshot.decisions = vec![json!({"view_version":1,"status":"accepted","at_ms":10})];
+    let before = AppRead::new(None, None);
+    before.publish(snapshot.clone());
+    for session in ["s", "another"] {
+        let mut saved = snapshot.clone();
+        saved.key.session = session.into();
+        conn.execute(
+            "INSERT INTO app_read_snapshots VALUES(?1,?2,?3,?4)",
+            params![
+                saved.key.runner,
+                saved.key.harness,
+                session,
+                serde_json::to_string(&saved).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO app_read_snapshots VALUES('runner','test','broken','not JSON')",
+        [],
+    )
+    .unwrap();
+    // Decisions written after the last snapshot must still take precedence.
+    conn.execute(
+        "INSERT INTO app_read_decisions VALUES(?1,?2,'another','[]')",
+        params![snapshot.key.runner, snapshot.key.harness],
+    )
+    .unwrap();
+    drop(conn);
+    let store = crate::store::Store::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='app_read_snapshots'",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM app_read_headers", [], |row| row
+            .get::<_, u64>(0))
+            .unwrap(),
+        2
+    );
+    let after = AppRead::new(Some(path.clone()), None);
+    for (op, params) in [
+        ("session_data.read", json!({"section":"meta"})),
+        ("session_data.read", json!({"section":"token_breakdown"})),
+        (
+            "context.states",
+            json!({"message_ids":["m1","m2","m3","missing"]}),
+        ),
+        ("context.compartment", json!({"compartment_id":"1"})),
+        (
+            "context.cache_why",
+            json!({"producers":[{"producer_ref":"step-1","at_ms":10}]}),
+        ),
+    ] {
+        let params = request(params);
+        let expected = before.read(op, params.clone()).await.unwrap();
+        let mut actual = after.read(op, params).await.unwrap();
+        // The envelope records request time, not checkpoint content.
+        actual["as_of_ms"] = expected["as_of_ms"].clone();
+        assert_eq!(result_bytes(actual), result_bytes(expected), "changed {op}");
+    }
+    assert_eq!(
+        store.app_decisions(&SessionRef::new(
+            &snapshot.key.runner,
+            &snapshot.key.harness,
+            "another"
+        )),
+        Vec::<Value>::new()
+    );
+    drop(store);
+    drop(crate::store::Store::open(&path).unwrap());
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM app_read_headers", [], |row| row
+            .get::<_, u64>(0))
+            .unwrap(),
+        2
+    );
+}

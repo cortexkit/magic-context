@@ -99,9 +99,19 @@ async fn app_read_seed_cost() {
     .await
     .unwrap();
     let setup_write_max_us = store.take_write_max_ns() / 1000;
+    assert!(setup_write_max_us < 100_000, "checkpoint write lock exceeded 100 ms");
+    session.index.extend([entry(9001)]);
+    session.publish_app(&app, false);
+    let started = Instant::now();
+    session.app_save_snapshot();
+    let dirty_save_us = started.elapsed().as_micros();
+    let dirty_write_max_us = store.take_write_max_ns() / 1000;
+    assert!(dirty_write_max_us < 100_000, "dirty checkpoint write lock exceeded 100 ms");
+    let conn = rusqlite::Connection::open(&store.path).unwrap();
+    let dirty_bytes: u64 = conn.query_row("SELECT (SELECT length(CAST(header AS BLOB)) FROM app_read_headers) + (SELECT length(CAST(row AS BLOB)) FROM app_read_messages WHERE message_id='m9001')", [], |row| row.get(0)).unwrap();
     store.take_app_writes();
     let mut times = Vec::new();
-    for ordinal in 9001..=9030 {
+    for ordinal in 9002..=9031 {
         let next=entry(ordinal);
         let started = Instant::now();
         session.index.extend([next]);
@@ -141,5 +151,5 @@ async fn app_read_seed_cost() {
         "ordinary notices append one identity each, without checkpoints or decision writes"
     );
     println!("APP_READ_COST messages=9000 summaries=93 notices=30 mean_us={} p95_us={} max_us={} mode3_write_max_us={} setup_write_max_us={} index_rows={} snapshot_writes={} decision_writes={}", times.iter().sum::<u64>()/times.len() as u64/1000, times[28]/1000, times[29]/1000, store.take_write_max_ns()/1000,setup_write_max_us,writes.0,writes.1,writes.2);
-    println!("APP_SNAPSHOT_COST messages=9000 bytes={snapshot_bytes} materialize_us={materialize_us} serialize_and_save_us={save_us} states_50_mean_us={} states_50_p95_us={} breakdown_mean_us={} breakdown_p95_us={}", state_reads.iter().sum::<u128>()/30, state_reads[28], breakdown_reads.iter().sum::<u128>()/30, breakdown_reads[28]);
+    println!("APP_SNAPSHOT_COST messages=9000 bytes={snapshot_bytes} materialize_us={materialize_us} serialize_and_save_us={save_us} dirty_rows=1 dirty_bytes={dirty_bytes} dirty_serialize_and_save_us={dirty_save_us} dirty_write_max_us={dirty_write_max_us} states_50_mean_us={} states_50_p95_us={} breakdown_mean_us={} breakdown_p95_us={}", state_reads.iter().sum::<u128>()/30, state_reads[28], breakdown_reads.iter().sum::<u128>()/30, breakdown_reads[28]);
 }
