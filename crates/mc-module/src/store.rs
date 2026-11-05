@@ -637,6 +637,63 @@ mod tests {
         );
     }
 
+    /// Rehearses the version-four app snapshot split on a copy of a real
+    /// store: every saved snapshot must load back from the new rows exactly as
+    /// it was stored whole. Decisions are compared apart because the replica
+    /// reads them from their own table, which may be newer than the snapshot.
+    #[test]
+    #[ignore = "explicit offline backup only; never opens a live store"]
+    fn offline_copy_version_four_migration_preserves_every_app_snapshot() {
+        let path = PathBuf::from(
+            std::env::var_os("APP_SNAPSHOT_MIGRATION_COPY").expect("supply an offline backup copy"),
+        );
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
+        let mut before: Vec<crate::app_read::Snapshot> = {
+            let mut stmt = conn
+                .prepare("SELECT snapshot FROM app_read_snapshots")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|text| serde_json::from_str(&text.unwrap()).expect("version-four snapshot"))
+                .collect();
+            rows
+        };
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+        let mut after = crate::app_read::persistence::load(&store.lock()).unwrap();
+        let order = |s: &crate::app_read::Snapshot| {
+            (
+                s.key.runner.clone(),
+                s.key.harness.clone(),
+                s.key.session.clone(),
+            )
+        };
+        before.sort_by_key(order);
+        after.sort_by_key(order);
+        assert_eq!(after.len(), before.len(), "session count changed");
+        for (expected, loaded) in before.iter_mut().zip(after.iter_mut()) {
+            expected.decisions.clear();
+            loaded.decisions.clear();
+            assert!(
+                loaded == expected,
+                "snapshot differs for {}/{}",
+                expected.key.harness,
+                expected.key.session
+            );
+        }
+        println!(
+            "Offline copy migrated 4 -> 5: {}/{} app snapshots load identically",
+            before.len(),
+            before.len()
+        );
+    }
+
     #[test]
     fn a_new_store_records_the_supported_schema_version() {
         let root = tempfile::tempdir().unwrap();
