@@ -178,9 +178,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-compaction-view"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b28a734f0941bd09befde57aaa5aab348a6519b47fe650864f81bdc85b4e587"
+checksum = "237d91b2af3e67549885778460914498d252b611f4e5b06a74370e742e85c9d6"
 dependencies = [
  "cortexkit-role-compaction",
  "serde",
