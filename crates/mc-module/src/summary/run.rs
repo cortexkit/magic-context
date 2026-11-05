@@ -638,6 +638,7 @@ async fn call<C: RunnerClient>(
         output_tokens: target.output_tokens,
         system: call_on.system,
         deadline: call_on.deadline,
+        continuation: false,
     };
     let reply = send_and_wait(client, child, send_id, prompt, &how, usage).await?;
     if reply.length_capped {
@@ -654,6 +655,12 @@ pub(crate) struct Model<'a> {
     pub output_tokens: u64,
     pub system: &'a str,
     pub deadline: tokio::time::Instant,
+    /// The send continues a child an earlier send created, as the second
+    /// turn does. Runners fix a child's tools when its first send creates it
+    /// and refuse `tools` on every later send, even an unchanged empty list
+    /// (llm-runner §9.3.1), so a continuation leaves them out; the child
+    /// still has none.
+    pub continuation: bool,
 }
 
 /// A completed call's reply.
@@ -719,7 +726,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
 
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system
-/// prompt, one model step and no tools.
+/// prompt, one model step and, on the send that creates the child, no tools.
 fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
     let mut model = json!({
         "provider": how.model.provider,
@@ -732,15 +739,17 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
     if temperature {
         generation["temperature"] = json!(TEMPERATURE);
     }
-    let Value::Object(params) = json!({
+    let Value::Object(mut params) = json!({
         "model": model,
         "system": how.system,
         "generation": generation,
         "stop_when": {"max_steps": 1},
-        "tools": [],
     }) else {
         unreachable!("an object literal");
     };
+    if !how.continuation {
+        params.insert("tools".into(), json!([]));
+    }
     params
 }
 

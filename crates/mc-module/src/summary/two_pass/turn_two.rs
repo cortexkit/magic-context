@@ -204,6 +204,8 @@ impl Carrier {
             output_tokens: self.output_tokens,
             system,
             deadline: tokio::time::Instant::now() + TIMEOUT,
+            // Turn one created the child.
+            continuation: true,
         };
         let mut usage: Option<StepUsage> = None;
         run::send_and_wait(

@@ -82,21 +82,30 @@ pub struct Runs {
 
 impl Runs {
     /// Start a run in `child`, or return the run an earlier send with the
-    /// same key started there. A send whose run parameters don't decode is
-    /// refused naming the field, as a runner refuses it.
+    /// same key started there. A refused send is answered with the field it
+    /// names and why, as a runner refuses it: run parameters that don't
+    /// decode, or `tools` on a send into a child that already ran. Like the
+    /// live runners, the mock freezes a child's tools when its first send
+    /// creates it, and refuses `tools` on every later send, even unchanged
+    /// (llm-runner §9.3.1).
     pub fn start(
         &mut self,
         child: &str,
         request: SendRequest,
         responder: &Responder,
-    ) -> Result<String, String> {
+    ) -> Result<String, (&'static str, String)> {
         let key = format!("{child}\u{0}{}", request.send_id);
         if let Some(run_id) = self.by_send_id.get(&key) {
             return Ok(run_id.clone());
         }
+        if request.runner_params.contains_key("tools")
+            && self.runs.iter().any(|run| run.child == child)
+        {
+            return Err(("tools", "a child's tools are fixed by its first send".into()));
+        }
         let mut settings: RunSettings =
             serde_json::from_value(serde_json::Value::Object(request.runner_params.clone()))
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| ("runner_params", error.to_string()))?;
         settings.child = child.to_owned();
         settings.route_decision_id = request.route_decision_id.clone();
         let prompt = request.prompt_text().to_owned();

@@ -471,7 +471,7 @@ impl Host {
             let run_id = state
                 .runs
                 .start(bound_session, request, &responder)
-                .map_err(|error| Refusal::invalid_params("runner_params", error))?;
+                .map_err(|(field, error)| Refusal::invalid_params(field, error))?;
             if let Some(log) = &mut state.observations {
                 log.values.children.push(ChildObservation {
                     session: bound_session.to_owned(),
