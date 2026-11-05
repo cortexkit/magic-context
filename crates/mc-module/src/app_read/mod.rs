@@ -277,6 +277,20 @@ impl Replica {
     }
 
     fn publish(&mut self, mut snapshot: Snapshot) {
+        if snapshot.breakdown.get("items").is_none() {
+            // Older snapshots retain block totals, but not summary tiers or
+            // part identities. Upgrade only the attribution they can prove.
+            let parts = snapshot.breakdown["parts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            snapshot.breakdown["items"] = json!(["system_prompt", "tool_definitions", "memory", "project_docs", "user_profile"].into_iter().filter_map(|name| {
+                let part = parts.iter().find(|part| part["part"] == name)?;
+                Some(json!({"item":name,"tokens":part["tokens"],"source":if matches!(name, "system_prompt" | "tool_definitions") {
+                    if part["tokens"].is_null() {"estimate"} else {"runner"}
+                } else {"counted"}}))
+            }).collect::<Vec<_>>());
+        }
         if let Some(previous) = self
             .snapshots
             .get(&snapshot.key)

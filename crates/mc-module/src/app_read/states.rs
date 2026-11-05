@@ -20,6 +20,11 @@ pub(super) fn message_state(snapshot: &Snapshot, mid: &str, ordinal: Option<u64>
     };
     let message = snapshot.messages.get(mid).unwrap_or(&archived);
     let mut row = message.row.clone();
+    // Older snapshots predate per-part accounting and cannot recover part
+    // identities without the transcript. Keep their item list explicitly empty.
+    if row.get("items").is_none() {
+        row["items"] = json!([]);
+    }
     if let Some(compartment) = snapshot.compartments.iter().find(|c| {
         c["first_message_ordinal"].as_u64().unwrap_or(u64::MAX) <= message.ordinal
             && c["last_message_ordinal"].as_u64().unwrap_or(0) >= message.ordinal

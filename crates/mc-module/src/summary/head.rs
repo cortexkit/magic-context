@@ -20,7 +20,7 @@ use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedImage, InsertedM
 use serde::{Deserialize, Serialize};
 
 use super::render::{
-    render_compartment_at_tier, render_stored_compartments, DecayRenderCompartment,
+    render_compartment_at_tier, render_decayed_with_items, DecayRenderCompartment,
 };
 use crate::context_db::{StoredCompartment, StoredMemory};
 use crate::memory;
@@ -109,6 +109,10 @@ pub struct Committed {
 /// and the memory changes shown in `m[1]` since.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Baseline {
+    /// Per-summary attribution for the frozen baseline and its current delta.
+    /// Older baselines have no attribution until the next head rebuild.
+    #[serde(default)]
+    pub summary_items: Vec<SummaryItem>,
     /// The highest summary sequence in `m[0]`.
     pub through_sequence: i64,
     /// The highest memory id that existed at the fold. Only read for a
@@ -148,6 +152,13 @@ pub struct Baseline {
     /// kept apart from this record, which is saved often.
     #[serde(default)]
     pub mural: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryItem {
+    pub compartment_id: String,
+    pub tier: u8,
+    pub tokens: u64,
 }
 
 /// The settings that decide what `m[0]` may hold. The plugin folds `m[0]` on
@@ -230,9 +241,19 @@ fn fit_history(
 pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
     let _timing = crate::notice_cost_timing::span("head.fold");
     let estimate = |text: &str| inputs.counter.count(text) as usize;
+    let summaries: Vec<_> = inputs
+        .summaries
+        .iter()
+        .map(DecayRenderCompartment::from)
+        .collect();
+    let rendered_items = std::cell::RefCell::new(Vec::new());
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
-        |budget| render_stored_compartments(inputs.summaries, budget, estimate),
+        |budget| {
+            let (text, items) = render_decayed_with_items(&summaries, budget, estimate);
+            *rendered_items.borrow_mut() = items;
+            text
+        },
         estimate,
     );
     let memories = match inputs.workspace {
@@ -271,6 +292,15 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
         sections.push(crate::mural::BLOCK.to_owned());
     }
     Baseline {
+        summary_items: rendered_items
+            .into_inner()
+            .into_iter()
+            .map(|(i, tier, text)| SummaryItem {
+                compartment_id: inputs.summaries[i].sequence.to_string(),
+                tier,
+                tokens: inputs.counter.count(&text),
+            })
+            .collect(),
         through_sequence: inputs
             .summaries
             .last()
@@ -486,14 +516,29 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
     let tokens = |text: &str| inputs.counter.count(text);
     let line_tokens = |lines: &[String]| line_tokens(lines, inputs.counter);
     let mut next = baseline.clone();
+    next.summary_items.retain(|item| {
+        item.compartment_id
+            .parse::<i64>()
+            .is_ok_and(|id| id <= baseline.through_sequence)
+    });
     let mut blocks = Vec::new();
     let newer_summaries: Vec<String> = inputs
         .summaries
         .iter()
         .filter(|summary| summary.sequence > baseline.through_sequence)
-        .map(DecayRenderCompartment::from)
-        .filter(|summary| !summary.is_no_content())
-        .map(|summary| render_compartment_at_tier(&summary, 1))
+        .filter_map(|summary| {
+            let rendered = DecayRenderCompartment::from(summary);
+            if rendered.is_no_content() {
+                return None;
+            }
+            let text = render_compartment_at_tier(&rendered, 1);
+            next.summary_items.push(SummaryItem {
+                compartment_id: summary.sequence.to_string(),
+                tier: 1,
+                tokens: tokens(&text),
+            });
+            Some(text)
+        })
         .collect();
     if !newer_summaries.is_empty() {
         blocks.push(format!(

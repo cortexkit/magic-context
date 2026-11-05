@@ -5,13 +5,17 @@ use super::*;
 use crate::app_read::{Header, IndexRow, Update};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PartInfo {
     id: String,
     kind: &'static str,
     tag: Option<u64>,
     tokens: u64,
     bytes: Option<u64>,
+    tool: Option<String>,
+    item_tokens: u64,
+    source: &'static str,
+    runner_tokens: Option<cortexkit_role_compaction::tokens::PartTokens>,
 }
 struct Cached {
     mid: String,
@@ -39,8 +43,15 @@ struct HeadSlot {
     counts: [u64; 3],
 }
 
+#[derive(PartialEq)]
+struct Replacement {
+    since: u64,
+    tokens: u64,
+}
+
 pub(crate) struct Projection {
     identity: u64,
+    model: String,
     live: BTreeMap<u64, Cached>,
     positions: HashMap<String, u64>,
     usages: BTreeMap<u64, Usage>,
@@ -58,12 +69,16 @@ pub(crate) struct Projection {
     cut: Option<u64>,
     dropped: BTreeSet<lanes::PartKey>,
     dropped_messages: BTreeSet<String>,
+    replacements: BTreeMap<lanes::PartKey, Replacement>,
     head: [u64; 4],
     head_slots: HashMap<String, HeadSlot>,
+    head_items: Vec<Value>,
     base: u64,
     initialized: bool,
     header: Option<Arc<Header>>,
     persisted: Option<(u64, String)>,
+    snapshot_saved: Option<std::time::Instant>,
+    snapshot_dirty: bool,
     pending_rows: BTreeMap<u64, IndexRow>,
     revert_from: Option<u64>,
     revert_dirty: Option<u64>,
@@ -76,6 +91,7 @@ impl Default for Projection {
     fn default() -> Self {
         Self {
             identity: 0,
+            model: String::new(),
             live: BTreeMap::new(),
             positions: HashMap::new(),
             usages: BTreeMap::new(),
@@ -93,12 +109,16 @@ impl Default for Projection {
             cut: None,
             dropped: BTreeSet::new(),
             dropped_messages: BTreeSet::new(),
+            replacements: BTreeMap::new(),
             head: [0; 4],
             head_slots: HashMap::new(),
+            head_items: Vec::new(),
             base: 0,
             initialized: false,
             header: None,
             persisted: None,
+            snapshot_saved: None,
+            snapshot_dirty: false,
             pending_rows: BTreeMap::new(),
             revert_from: None,
             revert_dirty: None,
@@ -144,12 +164,24 @@ impl Projection {
 impl Session {
     pub(crate) fn app_update(&mut self) -> Update {
         let mut p = std::mem::take(&mut self.app_projection);
+        let model = format!(
+            "{}/{}",
+            self.conditions.model.provider, self.conditions.model.model
+        );
+        let model_changed = p.model != model;
+        let counter = crate::count::Counter::for_model(Some(&model));
+        p.model = model;
         #[cfg(test)]
         {
             p.rebuilt_rows = 0;
             p.head_rebuilds = 0;
         }
-        let (identity, changed, truncated, pruned) = self.index.app_changes();
+        let (identity, mut changed, truncated, pruned) = self.index.app_changes();
+        if model_changed {
+            changed.extend(self.index.entries().iter().map(|entry| entry.ordinal));
+            p.head_slots.clear();
+            p.replacements.clear();
+        }
         if p.persisted.is_none() {
             p.persisted = Some(
                 self.store
@@ -220,21 +252,39 @@ impl Session {
                 tool: 0,
                 stamps: 0,
             });
-            if row.row.is_none() || row.digest != entry.digest {
+            if model_changed
+                || row.row.is_none()
+                || row.digest != entry.digest
+                || row
+                    .parts
+                    .iter()
+                    .zip(&entry.parts)
+                    .any(|(old, new)| old.runner_tokens != new.tokens)
+            {
                 row.parts = entry
                     .parts
                     .iter()
-                    .map(|part| PartInfo {
-                        id: part.id.clone(),
-                        kind: kind(&part.body),
-                        tag: part.tag,
-                        tokens: crate::tokens::part(part),
-                        bytes: match &part.body {
-                            PartBody::Text { text } => Some(text.len() as u64),
-                            PartBody::Reasoning { text_bytes, .. } => *text_bytes,
-                            PartBody::Tool(tool) => tool.output_bytes,
-                            _ => None,
-                        },
+                    .map(|part| {
+                        let (item_tokens, source) = item_tokens(part, counter);
+                        PartInfo {
+                            id: part.id.clone(),
+                            kind: kind(&part.body),
+                            tag: part.tag,
+                            tokens: crate::tokens::part(part),
+                            item_tokens,
+                            source,
+                            runner_tokens: part.tokens,
+                            tool: match &part.body {
+                                PartBody::Tool(tool) => Some(tool.name.clone()),
+                                _ => None,
+                            },
+                            bytes: match &part.body {
+                                PartBody::Text { text } => Some(text.len() as u64),
+                                PartBody::Reasoning { text_bytes, .. } => *text_bytes,
+                                PartBody::Tool(tool) => tool.output_bytes,
+                                _ => None,
+                            },
+                        }
                     })
                     .collect();
                 row.digest = entry.digest.clone();
@@ -284,7 +334,8 @@ impl Session {
             .map_or((self.latest.as_ref(), self.cut), |pending| {
                 (pending.before.latest.as_ref(), pending.before.cut)
             });
-        let view_changed = reset
+        let view_changed = model_changed
+            || reset
             || !p.initialized
             || p.cut != cut
             || p.view.as_ref().map(|(v, h)| (*v, h.as_str()))
@@ -292,6 +343,7 @@ impl Session {
         if view_changed {
             let mut dropped = BTreeSet::new();
             let mut messages = BTreeSet::new();
+            let mut replacements = BTreeMap::new();
             for edit in view.map(|v| v.edits.as_slice()).unwrap_or_default() {
                 match &edit.op {
                     EditOp::Drop {
@@ -310,6 +362,23 @@ impl Session {
                         value,
                         ..
                     } => {
+                        if matches!(field.as_str(), "text" | "output") {
+                            if let Some(text) = value.as_str() {
+                                let key = (mid.clone(), part.clone());
+                                let tokens = p
+                                    .replacements
+                                    .get(&key)
+                                    .filter(|old| old.since == edit.since)
+                                    .map_or_else(|| counter.count(text), |old| old.tokens);
+                                replacements.insert(
+                                    key,
+                                    Replacement {
+                                        since: edit.since,
+                                        tokens,
+                                    },
+                                );
+                            }
+                        }
                         let info = p
                             .positions
                             .get(mid)
@@ -338,6 +407,11 @@ impl Session {
             );
             p.dirty
                 .extend(p.dropped_messages.symmetric_difference(&messages).cloned());
+            for key in p.replacements.keys().chain(replacements.keys()) {
+                if p.replacements.get(key) != replacements.get(key) {
+                    p.dirty.insert(key.0.clone());
+                }
+            }
             if p.cut != cut {
                 let end = p.cut.unwrap_or(0).max(cut.unwrap_or(0));
                 p.dirty
@@ -345,16 +419,32 @@ impl Session {
             }
             p.dropped = dropped;
             p.dropped_messages = messages;
+            p.replacements = replacements;
             p.cut = cut;
             p.view = view.map(|view| (view.version, view.checksum.clone()));
             // The head is counted in the reading model's vocabulary, as the
             // head composer counts it against its budgets.
-            let counter = crate::count::Counter::for_model(Some(&format!(
-                "{}/{}",
-                self.conditions.model.provider, self.conditions.model.model
-            )));
             let (head, rebuilt) = head_counts(view, &mut p.head_slots, counter);
             p.head = head;
+            p.head_items = self
+                .unconfirmed
+                .first()
+                .map_or(self.baseline.as_ref(), |pending| {
+                    pending.before.baseline.as_ref()
+                })
+                .map(|baseline| {
+                    baseline
+                        .summary_items
+                        .iter()
+                        .map(|item| {
+                            json!({
+                                "item":"summary", "compartment_id":item.compartment_id,
+                                "tier":item.tier, "tokens":item.tokens, "source":"counted"
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             #[cfg(test)]
             {
                 p.head_rebuilds = rebuilt;
@@ -374,8 +464,15 @@ impl Session {
             if !summarized {
                 p.queued -= cached.stamps;
             }
-            let (message, raw, tool, stamps) =
-                message(self, cached, ordinal, &p.dropped, &p.dropped_messages, cut);
+            let (message, raw, tool, stamps) = message(
+                self,
+                cached,
+                ordinal,
+                &p.dropped,
+                &p.dropped_messages,
+                &p.replacements,
+                cut,
+            );
             cached.raw = raw;
             cached.tool = tool;
             cached.stamps = stamps;
@@ -438,10 +535,23 @@ impl Session {
         breakdown["managed"] = json!({"value":!self.tools_only&&!self.suspended});
         breakdown["as_of"] = json!({"step_ref":usage.map(|u|&u.mid),"at_ms":at});
         breakdown["parts"][2]["count"] = json!(memory_count);
+        let mut items = vec![
+            json!({"item":"system_prompt","tokens":parts[0].tokens,"source":if self.surface_tokens.0.is_some() {"runner"} else {"estimate"}}),
+            json!({"item":"tool_definitions","tokens":parts[1].tokens,"source":if self.surface_tokens.1.is_some() {"runner"} else {"estimate"}}),
+        ];
+        for (item, tokens) in ["memory", "project_docs", "user_profile"]
+            .into_iter()
+            .zip(p.head)
+        {
+            items.push(json!({"item":item,"tokens":tokens,"source":"counted"}));
+        }
+        items.extend(p.head_items.iter().cloned());
+        breakdown["items"] = json!(items);
         if self.tools_only || self.suspended {
             breakdown["total"] = Value::Null;
             breakdown["context_window"] = Value::Null;
             breakdown["parts"] = json!([]);
+            breakdown["items"] = json!([]);
             breakdown["unattributed"] = Value::Null;
             breakdown["estimation_source"] = Value::Null;
         }
@@ -495,8 +605,16 @@ impl Session {
         let old_base = self.app_projection.base;
         let initialized = self.app_projection.initialized;
         let update = self.app_update();
-        let checkpoint =
-            checkpoint || (initialized && old_base != self.index.base()) || update.reverted;
+        self.app_projection.snapshot_dirty |=
+            !update.rows.is_empty() || update.reset_from.is_some() || update.prune_before.is_some();
+        let checkpoint = checkpoint
+            || (initialized && old_base != self.index.base())
+            || update.reverted
+            || (self.app_projection.snapshot_dirty
+                && self
+                    .app_projection
+                    .snapshot_saved
+                    .is_none_or(|saved| saved.elapsed() >= std::time::Duration::from_secs(60)));
         self.app_persist_index();
         if let Some(store) = &self.store {
             if self.app_decisions_dirty {
@@ -507,13 +625,30 @@ impl Session {
             }
         }
         if checkpoint {
-            if let Some(store) = &self.store {
-                if let Err(error) = store.save_app_snapshot(&self.app_materialize()) {
-                    tracing::warn!("ck-mc: {error}");
-                }
-            }
+            self.app_save_snapshot();
         }
         app.update(update);
+    }
+
+    pub(crate) fn app_save_snapshot(&mut self) {
+        if !self.app_projection.initialized {
+            self.app_update();
+        }
+        if let Some(store) = &self.store {
+            match store.save_app_snapshot(&self.app_materialize()) {
+                Ok(()) => {
+                    self.app_projection.snapshot_saved = Some(std::time::Instant::now());
+                    self.app_projection.snapshot_dirty = false;
+                }
+                Err(error) => tracing::warn!("ck-mc: {error}"),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn app_age_snapshot(&mut self) {
+        self.app_projection.snapshot_saved =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
     }
 
     fn app_persist_index(&mut self) {
@@ -612,6 +747,7 @@ fn message(
     ordinal: u64,
     dropped: &BTreeSet<lanes::PartKey>,
     messages: &BTreeSet<String>,
+    replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
 ) -> (Message, u64, u64, usize) {
     let mut stamped = Vec::new();
@@ -619,6 +755,7 @@ fn message(
     let mut raw = 0;
     let mut tool = 0;
     let mut tagged = 0;
+    let mut items = Vec::with_capacity(cached.parts.len());
     let before = session
         .unconfirmed
         .first()
@@ -630,6 +767,20 @@ fn message(
         let removed = cut || messages.contains(&cached.mid) || dropped.contains(&key);
         let queued =
             session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
+        let (tokens, source) = if cut || messages.contains(&cached.mid) {
+            (0, "counted")
+        } else if let Some(replacement) = replacements.get(&key) {
+            (replacement.tokens, "counted")
+        } else if removed {
+            (0, "counted")
+        } else {
+            (part.item_tokens, part.source)
+        };
+        let mut item = json!({"part_ref":{"part_key":part.id},"kind":part.kind,"tokens":tokens,"source":source,"state":if removed {"dropped"} else if queued {"stamped"} else {"live"}});
+        if let Some(tool) = &part.tool {
+            item["tool"] = json!(tool);
+        }
+        items.push(item);
         let size =
             json!({"bytes":part.bytes,"tokens":part.tokens,"input_bytes":null,"input_tokens":null});
         if queued && !removed {
@@ -658,12 +809,33 @@ fn message(
         Message {
             ordinal,
             at_ms: cached.at_ms,
-            row: json!({"message_id":cached.mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"parts":{"tagged":tagged,"stamped":stamps,"dropped":gone.len()},"stamped_parts":stamped,"dropped_parts":gone}),
+            row: json!({"message_id":cached.mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"parts":{"tagged":tagged,"stamped":stamps,"dropped":gone.len()},"stamped_parts":stamped,"dropped_parts":gone,"items":items}),
         },
         raw,
         tool,
         stamps,
     )
+}
+fn item_tokens(
+    part: &cortexkit_role_compaction::part::Part,
+    counter: crate::count::Counter,
+) -> (u64, &'static str) {
+    use cortexkit_role_compaction::tokens::PartTokens;
+    match (&part.body, part.tokens) {
+        (PartBody::Tool(tool), counts) => (
+            crate::tokens::tool_result(part, tool),
+            if matches!(counts, Some(PartTokens::Tool(_))) {
+                "runner"
+            } else {
+                "estimate"
+            },
+        ),
+        (PartBody::Text { .. } | PartBody::File(_), Some(PartTokens::Count(_))) => {
+            (crate::tokens::part(part), "runner")
+        }
+        (PartBody::Text { text }, _) => (counter.count(text), "counted"),
+        _ => (crate::tokens::part(part), "estimate"),
+    }
 }
 fn kind(body: &PartBody) -> &'static str {
     match body {

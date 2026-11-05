@@ -262,6 +262,15 @@ mod tests {
                     ordinal * 10,
                     vec![part],
                 );
+                if ordinal == 2 {
+                    let mut tool: Part = serde_json::from_value(json!({
+                        "id":"tool", "kind":"tool", "call_id":"c", "name":"read",
+                        "input":{"path":"source.rs"}, "status":"completed", "digest":"d", "output_bytes":4000
+                    })).unwrap();
+                    tool.tokens =
+                        Some(cortexkit_role_compaction::tokens::PartTokens::tool(12, 700));
+                    entry.parts.push(tool);
+                }
                 if ordinal == 3 {
                     let mut usage = StepUsage::default();
                     usage.prompt_tokens = Some(80);
@@ -269,7 +278,13 @@ mod tests {
                 }
                 entries.push(entry);
             }
-            session.index.extend(entries);
+            session.index.extend_counted(entries, Some("claude-v5/1"));
+            session.surface_tokens = (
+                Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(
+                    120, true,
+                )),
+                None,
+            );
             session.queued.insert(("m2".into(), "p".into()));
             session.app.stamps.insert(("m2".into(), "p".into()), 123);
             session.conditions.last_prompt_tokens = Some(80);
@@ -301,6 +316,28 @@ mod tests {
                 created_at: 40,
                 ..Default::default()
             });
+            let inputs = crate::summary::head::Inputs {
+                counter: crate::count::Counter::for_model(Some("provider/model")),
+                summaries: &session.summaries,
+                docs: "<project-docs>Project layout</project-docs>",
+                profile: &[],
+                profile_max_id: 0,
+                memories: &[],
+                workspace: None,
+                gone: &[],
+                history_budget_tokens: 1000,
+                history_local_budget_tokens: 1000,
+                memory_budget_tokens: 1000,
+                profile_budget_tokens: 1000,
+            };
+            let baseline = crate::summary::head::fold(&inputs, None);
+            let (m1, next, _) = crate::summary::head::delta(&baseline, &inputs);
+            let ops = crate::summary::head::head_ops(&next.m0, &m1, None);
+            session.next_baseline = Some(next.into());
+            let view = session.seal(ops, &[]).unwrap();
+            session.accept(view.clone());
+            session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+            session.app_decisions[1]["at_ms"] = json!(40);
             session.app_snapshot()
         }
     }
@@ -380,6 +417,231 @@ mod tests {
             )
         }));
         session
+    }
+
+    #[tokio::test]
+    async fn app_read_refreshes_changed_rows_in_the_saved_snapshot_after_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+        let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
+        let mut session = session();
+        session.index_ready = true;
+        session.set_store(Some(store.clone()));
+        session.publish_app(&app, true);
+        session.index.extend([Entry::new(
+            201,
+            "m201",
+            Role::Assistant,
+            201,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "newer row".into(),
+                },
+            )],
+        )]);
+        session.publish_app(&app, false);
+        assert_eq!(
+            store.take_app_writes().1,
+            1,
+            "no immediate full snapshot on a notice"
+        );
+        session.app_age_snapshot();
+        session.publish_app(&app, false);
+        let reloaded = crate::app_read::AppRead::new(Some(store.path.clone()), None);
+        let reply = reloaded
+            .read(
+                "context.states",
+                json!({"session":session.key,"message_ids":["m201"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["messages"][0]["state"], "raw");
+    }
+
+    #[test]
+    fn app_read_items_use_runner_tool_output_not_input() {
+        let mut session = session();
+        let mut part: Part = serde_json::from_value(json!({
+            "id":"tool", "kind":"tool", "call_id":"c", "name":"read",
+            "input":{"path":"source.rs"}, "status":"completed", "digest":"d", "output_bytes":4000
+        }))
+        .unwrap();
+        part.tokens = Some(cortexkit_role_compaction::tokens::PartTokens::tool(12, 700));
+        session.index.extend_counted(
+            [Entry::new(
+                201,
+                "tool-message",
+                Role::Assistant,
+                201,
+                vec![part],
+            )],
+            Some("claude-v5/1"),
+        );
+        assert_eq!(
+            session.app_snapshot().messages["tool-message"].row["items"],
+            json!([
+                {"part_ref":{"part_key":"tool"}, "kind":"tool", "tool":"read", "tokens":700, "source":"runner", "state":"live"}
+            ])
+        );
+    }
+
+    #[test]
+    fn app_read_items_count_text_with_the_models_tokenizer() {
+        let mut session = session();
+        session.conditions.model = ModelRef::new("anthropic", "claude-opus-5-5");
+        let text = "Read the source; preserve the cached prefix. ".repeat(30);
+        session.index.extend([Entry::new(
+            201,
+            "text-message",
+            Role::User,
+            201,
+            vec![Part::new("text", PartBody::Text { text: text.clone() })],
+        )]);
+        let tokens = cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, &text).unwrap();
+        assert_ne!(tokens, crate::tokens::bytes(text.len() as u64));
+        assert_eq!(
+            session.app_snapshot().messages["text-message"].row["items"][0],
+            json!(
+                {"part_ref":{"part_key":"text"}, "kind":"text", "tokens":tokens, "source":"counted", "state":"live"}
+            )
+        );
+        assert!(
+            session.app_update().rows.is_empty(),
+            "unchanged parts reuse their counts"
+        );
+    }
+
+    #[test]
+    fn app_read_items_count_dropped_placeholders_and_whole_removals() {
+        let mut session = session();
+        session.conditions.model = ModelRef::new("anthropic", "claude-opus-5-5");
+        let mut part = Part::new(
+            "p",
+            PartBody::Text {
+                text: "original output ".repeat(100),
+            },
+        );
+        part.tag = Some(201);
+        session
+            .index
+            .extend([Entry::new(201, "m201", Role::Assistant, 201, vec![part])]);
+        session.app_update();
+        let view = session
+            .seal(
+                vec![EditOp::Replace {
+                    mid: "m201".into(),
+                    part: "p".into(),
+                    field: "text".into(),
+                    value: json!("[dropped §201§]"),
+                    expect: session.index.at(201).unwrap().parts[0].digest.clone(),
+                }],
+                &[],
+            )
+            .unwrap();
+        session.accept(view.clone());
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        let item = session.app_snapshot().messages["m201"].row["items"][0].clone();
+        assert_eq!(item["state"], "dropped");
+        assert_eq!(item["source"], "counted");
+        assert_eq!(
+            item["tokens"],
+            cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, "[dropped §201§]").unwrap()
+        );
+        let view = session
+            .seal(
+                vec![EditOp::Drop {
+                    mid: "m3".into(),
+                    part: Some("p".into()),
+                }],
+                &[],
+            )
+            .unwrap();
+        session.accept(view.clone());
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        assert_eq!(
+            session.app_snapshot().messages["m3"].row["items"][0]["tokens"],
+            0
+        );
+    }
+
+    #[test]
+    fn app_read_summary_items_count_each_rendered_tier_with_the_model_tokenizer() {
+        use crate::summary::{head, render};
+        let mut session = session();
+        session.conditions.model = ModelRef::new("anthropic", "claude-opus-5-5");
+        let summaries: Vec<_> = (1..=4)
+            .map(|sequence| StoredCompartment {
+                sequence,
+                start_message: sequence * 10,
+                end_message: sequence * 10 + 9,
+                title: format!("Work {sequence}"),
+                content: "Fallback".into(),
+                p1: Some("Detailed decisions and source review. ".repeat(100)),
+                p2: Some("Shorter decisions. ".repeat(20)),
+                p3: Some("Brief decisions.".into()),
+                p4: Some("Cue".into()),
+                importance: 50,
+                legacy: i32::from(sequence == 1),
+                ..Default::default()
+            })
+            .collect();
+        let mut inputs = head::Inputs {
+            counter: crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5")),
+            summaries: &summaries[..3],
+            docs: "",
+            profile: &[],
+            profile_max_id: 0,
+            memories: &[],
+            workspace: None,
+            gone: &[],
+            history_budget_tokens: 10000,
+            history_local_budget_tokens: 10000,
+            memory_budget_tokens: 1000,
+            profile_budget_tokens: 1000,
+        };
+        let baseline = head::fold(&inputs, None);
+        inputs.summaries = &summaries;
+        let (m1, next, _) = head::delta(&baseline, &inputs);
+        let ops = head::head_ops(&next.m0, &m1, None);
+        session.next_baseline = Some(next.into());
+        let view = session.seal(ops, &[]).unwrap();
+        session.accept(view.clone());
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        let snapshot = session.app_snapshot();
+        let items: Vec<_> = snapshot.breakdown["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["item"] == "summary")
+            .collect();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().any(|item| item["tier"].as_u64().unwrap() > 1));
+        for item in items {
+            let id: usize = item["compartment_id"].as_str().unwrap().parse().unwrap();
+            let text = render::render_compartment_at_tier(
+                &render::DecayRenderCompartment::from(&summaries[id - 1]),
+                item["tier"].as_u64().unwrap() as u8,
+            );
+            let head = if id == 4 { &m1 } else { &baseline.m0 };
+            assert!(
+                head.contains(&text),
+                "attribution must describe the bytes actually rendered"
+            );
+            assert_eq!(
+                item["tokens"],
+                cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, &text).unwrap()
+            );
+            assert_eq!(item["source"], "counted");
+        }
+        assert!(session.app_update().rows.is_empty());
+        assert_eq!(session.app_projection.head_rebuilds, 0);
+        let mut old = serde_json::to_value(baseline).unwrap();
+        old.as_object_mut().unwrap().remove("summary_items");
+        assert!(serde_json::from_value::<head::Baseline>(old)
+            .unwrap()
+            .summary_items
+            .is_empty());
     }
 
     #[test]

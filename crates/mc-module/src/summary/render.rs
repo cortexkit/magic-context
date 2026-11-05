@@ -330,9 +330,25 @@ pub fn render_decayed_compartments(
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
 ) -> String {
+    render_decayed_with_items(compartments, history_budget_tokens, estimate_tokens).0
+}
+
+/// Retain the final tier and exact rendered bytes for attribution, after the
+/// budget guard has finished demoting summaries. Indices refer to the input.
+pub(crate) fn render_decayed_with_items(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> (String, Vec<(usize, u8, String)>) {
     if compartments.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
+    let indices: Vec<_> = compartments
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.is_no_content())
+        .map(|(i, _)| i)
+        .collect();
     let filtered;
     let compartments = if compartments
         .iter()
@@ -382,7 +398,15 @@ pub fn render_decayed_compartments(
         body = render(&tiers);
         guard -= 1;
     }
-    body
+    let items = compartments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let text = render_one_compartment(c, tiers[i]);
+            (!text.is_empty()).then(|| (indices[i], tiers[i], text))
+        })
+        .collect();
+    (body, items)
 }
 
 /// Extract a top-level m0 block slice (e.g. "session-history") for budget measurement

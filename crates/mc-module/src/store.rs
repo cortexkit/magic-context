@@ -356,8 +356,8 @@ impl Store {
         Ok(store)
     }
 
-    /// Checkpoint a projection only on Setup, a cut, or a transcript replacement.
-    /// Ordinary notices persist only newly observed message identities.
+    /// Serialize before taking the store lock; the single-row upsert commits
+    /// the complete app projection in one short SQLite transaction.
     pub(crate) fn save_app_snapshot(
         &self,
         snapshot: &crate::app_read::Snapshot,

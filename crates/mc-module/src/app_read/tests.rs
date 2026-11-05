@@ -412,8 +412,30 @@ async fn published_replica_survives_restart_and_does_not_take_the_session_store_
     assert_eq!(read.unwrap().unwrap()["row"]["compartment_count"], 1);
 }
 
+#[test]
+fn samples_v5_remain_pinned() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v5");
+    let sums = std::fs::read_to_string(root.join("SHA256SUMS")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(sums.as_bytes())),
+        "3bfc8103328650fd551e1b2847c195f28e438704f6a1f97db8688a5f4477e536"
+    );
+    for line in sums.lines() {
+        let (hash, name) = line.split_once("  ").unwrap();
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(root.join(name)).unwrap())
+            ),
+            hash,
+            "changed v5 sample {name}"
+        );
+    }
+}
+
 #[tokio::test]
-async fn samples_v5() {
+async fn samples_v6() {
     let (_dir, conn) = search_db();
     let mut replica = replica(Some(conn));
     replica.snapshots.clear();
@@ -451,7 +473,7 @@ async fn samples_v5() {
         ),
     ];
     let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v5");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v6");
     let regenerate = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES").is_some();
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {

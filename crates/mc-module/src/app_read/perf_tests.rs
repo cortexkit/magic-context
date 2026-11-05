@@ -85,6 +85,13 @@ async fn app_read_seed_cost() {
     session.app_decisions_revision += 1;
     session.app_decisions_dirty = true;
     session.publish_app(&app, true);
+    let started = Instant::now();
+    let snapshot = session.app_materialize();
+    let materialize_us = started.elapsed().as_micros();
+    let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap().len();
+    let started = Instant::now();
+    store.save_app_snapshot(&snapshot).unwrap();
+    let save_us = started.elapsed().as_micros();
     app.read(
         "session_data.read",
         json!({"session":route.session,"section":"meta"}),
@@ -112,6 +119,20 @@ async fn app_read_seed_cost() {
     .unwrap();
     times.sort_unstable();
     let writes = store.take_app_writes();
+    let mut state_reads = Vec::new();
+    let mut breakdown_reads = Vec::new();
+    for _ in 0..30 {
+        let started = Instant::now();
+        let states = app.read("context.states", json!({"session":route.session,"message_ids":(8951..=9000).map(|i| format!("m{i}")).collect::<Vec<_>>()})).await.unwrap();
+        assert_eq!(states["messages"].as_array().unwrap().len(), 50);
+        state_reads.push(started.elapsed().as_micros());
+        let started = Instant::now();
+        let breakdown = app.read("session_data.read", json!({"session":route.session,"section":"token_breakdown"})).await.unwrap();
+        assert_eq!(breakdown["row"]["items"].as_array().unwrap().len(), 5);
+        breakdown_reads.push(started.elapsed().as_micros());
+    }
+    state_reads.sort_unstable();
+    breakdown_reads.sort_unstable();
     let mean=times.iter().sum::<u64>()/times.len() as u64;
     assert!(mean < 5_000_000,"mean app-read notice cost must stay below 5 ms");
     assert_eq!(
@@ -120,4 +141,5 @@ async fn app_read_seed_cost() {
         "ordinary notices append one identity each, without checkpoints or decision writes"
     );
     println!("APP_READ_COST messages=9000 summaries=93 notices=30 mean_us={} p95_us={} max_us={} mode3_write_max_us={} setup_write_max_us={} index_rows={} snapshot_writes={} decision_writes={}", times.iter().sum::<u64>()/times.len() as u64/1000, times[28]/1000, times[29]/1000, store.take_write_max_ns()/1000,setup_write_max_us,writes.0,writes.1,writes.2);
+    println!("APP_SNAPSHOT_COST messages=9000 bytes={snapshot_bytes} materialize_us={materialize_us} serialize_and_save_us={save_us} states_50_mean_us={} states_50_p95_us={} breakdown_mean_us={} breakdown_p95_us={}", state_reads.iter().sum::<u128>()/30, state_reads[28], breakdown_reads.iter().sum::<u128>()/30, breakdown_reads[28]);
 }
