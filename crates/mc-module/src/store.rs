@@ -639,8 +639,9 @@ mod tests {
 
     /// Rehearses the version-four app snapshot split on a copy of a real
     /// store: every saved snapshot must load back from the new rows exactly as
-    /// it was stored whole. Decisions are compared apart because the replica
-    /// reads them from their own table, which may be newer than the snapshot.
+    /// it was stored whole. Decisions are left out of the comparison: app reads
+    /// take them from their own table (`app_read_decisions`), which may be newer
+    /// than the copy inside the old snapshot.
     #[test]
     #[ignore = "explicit offline backup only; never opens a live store"]
     fn offline_copy_version_four_migration_preserves_every_app_snapshot() {
