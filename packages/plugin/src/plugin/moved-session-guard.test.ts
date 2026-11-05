@@ -106,8 +106,9 @@ test("the shared gate refuses a moved session in every hook and fails its transf
     expect(reads()).toBe(5);
 });
 
-// Moves happen while hosts keep running (2026-11-05: a moved head's old copy
-// woke on a cached "not moved" answer and ran turns on its pre-move state).
+// A session can be moved to mode 3 while this host process keeps running. On
+// 2026-11-05 a moved session's old copy in a running host woke on a cached
+// "not moved" answer and ran turns on its pre-move history.
 test("a session moved while the process runs is refused from its next call", () => {
     const dir = createTestTempDirFromPath(join(tmpdir(), "moved-session-guard-"));
     dirs.push(dir);
