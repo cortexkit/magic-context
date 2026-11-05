@@ -34,6 +34,8 @@ import golden from "./smart-notes-on.golden.json";
 // default-on must preserve sessions' cached prompts. Source copies came from git show at
 // 8d8f44bdaaba450ae136e20dd2476b3b41294416; SHA-256 hashes JSON.stringify of rendered strings
 // and { description, schema } tool surfaces, not expectations calculated by the gated implementation.
+// The `guidance/...` digests were re-taken once, when the `<system-reminder>` sentence changed to
+// say a wrapped instruction has its author's authority; the switch must still change nothing.
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const expected = golden as Record<string, string>;
