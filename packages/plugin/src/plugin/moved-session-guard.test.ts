@@ -101,8 +101,26 @@ test("the shared gate refuses a moved session in every hook and fails its transf
     } as never);
     await hooks.tool!.ctx_reduce.execute({} as never, { sessionID: STANDALONE } as never);
     expect(calls).toEqual(["transform", "chat.message", "event", "tool"]);
-    // Each session is looked up once; the answer is cached for the process.
-    expect(reads()).toBe(2);
+    // A moved session is looked up once and cached; a session that wasn't
+    // moved is looked up on every call, since it can be moved later.
+    expect(reads()).toBe(5);
+});
+
+// Moves happen while hosts keep running (2026-11-05: a moved head's old copy
+// woke on a cached "not moved" answer and ran turns on its pre-move state).
+test("a session moved while the process runs is refused from its next call", () => {
+    const dir = createTestTempDirFromPath(join(tmpdir(), "moved-session-guard-"));
+    dirs.push(dir);
+    process.env.XDG_DATA_HOME = dir;
+    const db = openDatabase();
+    if (!db) throw new Error("context.db did not open");
+    const check = createMovedSessionCheck(() => db);
+    expect(check(STANDALONE)).toBe(false);
+    db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
+        `${MODE3_MOVE_RECORD_PREFIX}${STANDALONE}`,
+        JSON.stringify({ version: 1, session: STANDALONE }),
+    );
+    expect(check(STANDALONE)).toBe(true);
 });
 
 test("per-session RPC requests about a moved session are refused", async () => {

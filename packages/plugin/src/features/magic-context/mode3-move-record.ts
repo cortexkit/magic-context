@@ -24,10 +24,10 @@ export function isSessionMovedToMode3(db: Database, sessionId: string): boolean 
 }
 
 /**
- * A per-process check for moved sessions. A session is only moved offline,
- * with every host stopped, so an answer read once holds for the life of this
- * process and is cached. While storage is not open yet the check answers
- * "not moved" without caching, and asks again on the next call.
+ * A per-process check for moved sessions. A session can be moved while this
+ * host keeps running, so "not moved" is asked again on every call; only
+ * "moved" is cached, because a move is never undone. While storage is not open
+ * yet the check answers "not moved" and asks again on the next call.
  */
 export function createMovedSessionCheck(
     openDb: () => Database | null,
@@ -46,9 +46,10 @@ export function createMovedSessionCheck(
         if (!db) return false;
         try {
             const moved = isSessionMovedToMode3(db, sessionId);
-            known.set(sessionId, moved);
-            if (moved)
+            if (moved) {
+                known.set(sessionId, true);
                 log(`[magic-context] session ${sessionId} was moved to mode 3; standing down`);
+            }
             return moved;
         } catch (error) {
             log(`[magic-context] moved-session check failed for ${sessionId}`, error);
