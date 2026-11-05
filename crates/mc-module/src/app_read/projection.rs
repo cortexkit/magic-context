@@ -89,12 +89,14 @@ fn breakdown(parts: &[PartTokens<'_>], provider: Option<u64>, window: u64) -> Va
     json!({"managed":{"value":true}, "as_of":{"step_ref":null, "at_ms":null}, "total":{"tokens":total, "source":if provider.is_some() {"provider"} else {"estimate"}}, "context_window":{"tokens":window, "source":"usage"}, "parts":parts.iter().map(|part| json!({"part":part.part,"tokens":part.tokens,"estimate":part.estimate})).collect::<Vec<_>>(), "unattributed":total.saturating_sub(estimated), "estimation_source":"legacy_estimate", "last_user_message_in_history_raw":true})
 }
 
-fn block_tokens(text: &str, tag: &str) -> u64 {
+/// The tokens of every `tag` block in a history-head text, counted with
+/// `counter`.
+fn block_tokens(text: &str, tag: &str, counter: crate::count::Counter) -> u64 {
     let pattern = regex::Regex::new(&format!("(?s)<{tag}(?:\\s[^>]*)?>.*?</{tag}>"))
         .expect("fixed block tag");
     pattern
         .find_iter(text)
-        .map(|m| crate::tokens::bytes(m.as_str().len() as u64))
+        .map(|m| counter.count(m.as_str()))
         .sum()
 }
 
@@ -435,6 +437,43 @@ mod tests {
         assert!(summary.rows.is_empty());
         assert_eq!(summary.compartments.unwrap().len(), 1);
         assert_eq!(summary.header.meta["queued_stamp_count"], 0);
+    }
+
+    /// The head's blocks are counted in the reading model's vocabulary, the
+    /// one the head composer fills its budgets in, not at four bytes a
+    /// token: on Claude that would show the summaries about a third low.
+    #[test]
+    fn breakdown_counts_the_head_with_the_models_tokenizer() {
+        use cortexkit_role_compaction::view::{InsertAt, InsertedMessage};
+        let mut session = session();
+        session.conditions.model = ModelRef::new("anthropic", "claude-opus-5-5");
+        let memory = format!(
+            "<project-memory>{}</project-memory>",
+            "Decided: the runner fixes a child's tools at its first send. ".repeat(200)
+        );
+        let history = format!(
+            "<session-history>{}</session-history>",
+            "Reviewed the move, merged the fix and placed the build on the Mac. ".repeat(400)
+        );
+        let text = format!("{memory}\n{history}");
+        let head = EditOp::Insert {
+            at: InsertAt::Start,
+            message: InsertedMessage::new("m0", Role::User, vec![text.clone()]),
+        };
+        let view = session.seal(vec![head], &[]).unwrap();
+        session.accept(view.clone());
+        session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        let parts = session.app_snapshot().breakdown["parts"].clone();
+        let claude =
+            |text: &str| cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, text).unwrap();
+        assert_eq!(parts[2]["part"], "memory");
+        assert_eq!(parts[2]["tokens"], json!(claude(&memory)));
+        assert_eq!(parts[5]["part"], "history_summaries");
+        assert_eq!(parts[5]["tokens"], json!(claude(&text) - claude(&memory)));
+        assert_ne!(
+            parts[5]["tokens"],
+            json!(crate::tokens::bytes(history.len() as u64 + 1))
+        );
     }
 
     #[test]

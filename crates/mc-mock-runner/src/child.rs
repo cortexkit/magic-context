@@ -101,7 +101,10 @@ impl Runs {
         if request.runner_params.contains_key("tools")
             && self.runs.iter().any(|run| run.child == child)
         {
-            return Err(("tools", "a child's tools are fixed by its first send".into()));
+            return Err((
+                "tools",
+                "a child's tools are fixed by its first send".into(),
+            ));
         }
         let mut settings: RunSettings =
             serde_json::from_value(serde_json::Value::Object(request.runner_params.clone()))

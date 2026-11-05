@@ -29,9 +29,13 @@ struct Usage {
     at_ms: u64,
     prompt: Option<u64>,
 }
+/// One history-head insert's token counts, kept while the view replays its
+/// bytes unchanged (same `since`).
 struct HeadSlot {
     since: u64,
-    bytes: u64,
+    /// The whole insert.
+    total: u64,
+    /// Its memory, project-docs and user-profile blocks.
     counts: [u64; 3],
 }
 
@@ -343,7 +347,13 @@ impl Session {
             p.dropped_messages = messages;
             p.cut = cut;
             p.view = view.map(|view| (view.version, view.checksum.clone()));
-            let (head, rebuilt) = head_counts(view, &mut p.head_slots);
+            // The head is counted in the reading model's vocabulary, as the
+            // head composer counts it against its budgets.
+            let counter = crate::count::Counter::for_model(Some(&format!(
+                "{}/{}",
+                self.conditions.model.provider, self.conditions.model.model
+            )));
+            let (head, rebuilt) = head_counts(view, &mut p.head_slots, counter);
             p.head = head;
             #[cfg(test)]
             {
@@ -689,7 +699,11 @@ fn summary_ranges(summaries: &[StoredCompartment]) -> BTreeMap<u64, u64> {
     merged.into_iter().collect()
 }
 
-fn head_counts(view: Option<&View>, slots: &mut HashMap<String, HeadSlot>) -> ([u64; 4], usize) {
+fn head_counts(
+    view: Option<&View>,
+    slots: &mut HashMap<String, HeadSlot>,
+    counter: crate::count::Counter,
+) -> ([u64; 4], usize) {
     // An insert retains its `since` version while its bytes are replayed.
     // Dropping a conversation part must not re-count the unchanged large head.
     let mut previous = std::mem::take(slots);
@@ -706,31 +720,32 @@ fn head_counts(view: Option<&View>, slots: &mut HashMap<String, HeadSlot>) -> ([
                 let text = message.texts.join("\n");
                 HeadSlot {
                     since: edit.since,
-                    bytes: text.len() as u64,
+                    total: counter.count(&text),
                     counts: [
-                        block_tokens(&text, "project-memory")
-                            + block_tokens(&text, "memory-updates"),
-                        block_tokens(&text, "project-docs"),
-                        block_tokens(&text, "user-profile"),
+                        block_tokens(&text, "project-memory", counter)
+                            + block_tokens(&text, "memory-updates", counter),
+                        block_tokens(&text, "project-docs", counter),
+                        block_tokens(&text, "user-profile", counter),
                     ],
                 }
             });
         slots.insert(message.id.clone(), slot);
     }
     let mut counts = [0; 3];
-    let mut bytes = slots.len().saturating_sub(1) as u64;
+    let mut total = 0;
     for slot in slots.values() {
-        bytes += slot.bytes;
+        total += slot.total;
         for (sum, value) in counts.iter_mut().zip(slot.counts) {
             *sum += value;
         }
     }
+    // The history summaries are what the head holds besides those blocks.
     (
         [
             counts[0],
             counts[1],
             counts[2],
-            crate::tokens::bytes(bytes).saturating_sub(counts.iter().sum()),
+            total.saturating_sub(counts.iter().sum()),
         ],
         rebuilt,
     )
