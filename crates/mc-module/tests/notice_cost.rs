@@ -431,7 +431,9 @@ impl Fixture {
                 Some(Arc::new(db)),
             );
             session.load_summaries();
-            let view = session.first_view_after_move(&settings, &newest).unwrap();
+            let view = session
+                .first_view_after_move(&settings, Some((newest.ordinal, newest.mid.as_str())))
+                .unwrap();
             store.save(&key, &session.durable()).unwrap();
             view
         };

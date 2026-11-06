@@ -201,6 +201,7 @@ fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
         now: 1,
         messages: None,
         source_harness: None,
+        before_newest: Some("m1".into()),
     }
 }
 

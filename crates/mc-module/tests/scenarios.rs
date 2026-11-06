@@ -3679,6 +3679,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         now: 1,
         messages: None,
         source_harness: None,
+        before_newest: Some("msg00005".into()),
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {
@@ -3721,8 +3722,10 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         .await;
     assert_clean(&runner);
     let host = runner.host();
-    // The model sees the summaries and the memory, none of the old
-    // messages, and numbers continuing above 42.
+    // The model sees the summaries and the memory, and of the old messages
+    // only the newest: the cut stops before it, as after any cut. It sits
+    // before the runner's marker, so it carries no number, and numbers
+    // continue above 42 with the first new message.
     let (m0, _) = head_texts(host);
     assert!(
         m0.contains("Set up the parser") && m0.contains("Fixed the crash"),
@@ -3735,7 +3738,10 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         .flat_map(|message| &message.parts)
         .map(|part| format!("{part:?}"))
         .collect();
-    assert!(!rendered.contains("Old message"), "{rendered}");
+    assert!(
+        !rendered.contains("Old message 5") && rendered.contains("Old message 6"),
+        "{rendered}"
+    );
     let first = seen(host, 43).unwrap_or_default();
     assert!(first.contains("Where were we?"), "{first}");
     // No rebuild: the first request writes the cache once with the moved
@@ -3794,6 +3800,7 @@ fn a_session_that_changes_harness_moves_every_row_to_the_runners_harness() {
         now: 1,
         messages: None,
         source_harness: Some("opencode".into()),
+        before_newest: Some("msg00001".into()),
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {

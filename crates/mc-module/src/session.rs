@@ -2251,6 +2251,15 @@ impl Session {
                 })
             });
             let Some(running) = running else {
+                // The newest message is never cut, so the request always
+                // ends with a message the runner shows as it is (broca
+                // refuses such a cut by name). Summaries normally end before
+                // it anyway; a session moved in fully summarized is the
+                // exception, until a newer message arrives.
+                if end + 1 == entries.len() {
+                    let before = end.checked_sub(1)?;
+                    return Some((entries[before].ordinal, entries[before].mid.clone()));
+                }
                 return Some((entries[end].ordinal, through));
             };
             tracing::info!(
@@ -2632,12 +2641,16 @@ impl Session {
 
     /// The first view of a session moved in from a standalone host whose
     /// summaries cover its whole transcript: the history head, and a cut
-    /// through `newest`, the transcript's last message. The session then
-    /// holds it as accepted, ready to be saved.
+    /// through `cut` (ordinal, message id), the message before the
+    /// transcript's last one. The last
+    /// message stays shown, as after every other cut (a runner may refuse a
+    /// cut through its newest message), though its summary covers it too.
+    /// No cut when the transcript holds one message. The session then holds
+    /// the view as accepted, ready to be saved.
     pub fn first_view_after_move(
         &mut self,
         settings: &Settings,
-        newest: &Cursor,
+        cut: Option<(u64, &str)>,
     ) -> Result<View, String> {
         self.fold_due = true;
         let mut ops = self.render_head(settings);
@@ -2646,9 +2659,11 @@ impl Session {
                 "history_head_unavailable: cannot render the moved session's history head".into(),
             );
         }
-        ops.push(EditOp::Cut {
-            through: newest.mid.clone(),
-        });
+        if let Some((_, mid)) = cut {
+            ops.push(EditOp::Cut {
+                through: mid.to_string(),
+            });
+        }
         let version = self.version + 1;
         let view = View::seal(
             version,
@@ -2661,8 +2676,8 @@ impl Session {
             self.fold_due = false;
         }
         self.version = version;
-        self.cut = Some(newest.ordinal);
-        self.index = Index::starting_at(newest.ordinal);
+        self.cut = cut.map(|(ordinal, _)| ordinal);
+        self.index = Index::starting_at(self.cut.unwrap_or(1));
         self.latest = Some(view.clone());
         Ok(view)
     }

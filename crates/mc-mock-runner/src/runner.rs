@@ -389,6 +389,18 @@ impl State {
         }
         view::check_carried(self.latest_view(), view)?;
         let entries = self.transcript.entries();
+        // broca refuses a cut through the transcript's newest message, so its
+        // requests always end with a message shown as it is. The mock holds
+        // ck-mc to the same rule.
+        let newest = entries.last().map(|entry| entry.mid.as_str());
+        if view.edits.iter().any(
+            |edit| matches!(&edit.op, EditOp::Cut { through } if Some(through.as_str()) == newest),
+        ) {
+            return Err(ViewRefusal::Unknown {
+                name: "cut_through_newest".into(),
+                fields: serde_json::Map::new(),
+            });
+        }
         view::apply(entries, view)?;
         rules::check(entries, &view.edits, &self.config.rules).map_err(ViewRefusal::Rule)?;
         Ok(())
@@ -607,6 +619,16 @@ impl<P: Provider> Runner<P> {
             for (role, text) in &moved.messages {
                 transcript.append_unnumbered(role.clone(), text, config.start_ms);
             }
+            // The same rule `check` applies to every later view: broca refuses
+            // to install a moved view that cuts through the newest message.
+            let newest = transcript.entries().last().map(|entry| entry.mid.clone());
+            assert!(
+                !moved.view.edits.iter().any(|edit| matches!(
+                    &edit.op,
+                    EditOp::Cut { through } if Some(through) == newest.as_ref()
+                )),
+                "cut_through_newest: the moved view cuts through the newest message"
+            );
             applied = Some(moved.view.clone());
         }
         let state = State {

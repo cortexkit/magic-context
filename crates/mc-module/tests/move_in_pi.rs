@@ -112,6 +112,7 @@ impl Fixture {
             now: 1,
             messages: Some(messages),
             source_harness: None,
+            before_newest: None,
         };
         Self { dir, conn, request }
     }

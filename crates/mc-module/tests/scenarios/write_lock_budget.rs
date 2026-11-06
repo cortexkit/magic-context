@@ -307,6 +307,7 @@ async fn werni_sized_writes_stay_within_budget() {
             now: 1_000_000,
             messages: None,
             source_harness: None,
+            before_newest: Some(format!("msg{:05}", MESSAGES - 1)),
         },
     )
     .unwrap();

@@ -116,7 +116,10 @@ fn surface_fixture(summaries: usize, memories: usize, tier_repeat: usize) -> Fix
         .unwrap()
     });
     let view = session
-        .first_view_after_move(&surface_settings(), &cursor(&entries[cut - 4]))
+        .first_view_after_move(
+            &surface_settings(),
+            Some((entries[cut - 4].ordinal, entries[cut - 4].mid.as_str())),
+        )
         .unwrap();
     let durable = session.durable();
     store.save(&key, &durable).unwrap();

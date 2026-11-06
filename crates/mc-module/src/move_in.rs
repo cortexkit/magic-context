@@ -12,8 +12,10 @@
 //! 3. refuses, by name, a session whose summaries stop short of the
 //!    transcript's end;
 //! 4. builds the session's first view, the history head and a cut through the
-//!    newest message, and saves it as ck-mc's accepted view, so the runner's
-//!    Setup finds it applied;
+//!    message before the newest one, and saves it as ck-mc's accepted view, so
+//!    the runner's Setup finds it applied. The newest message stays shown,
+//!    as after any cut, so the request ends with a message the runner shows
+//!    as it is;
 //! 5. answers that view and the standalone plugin's highest tag number. The
 //!    runner's own move installs the view as its stored current view and
 //!    writes the number as the checkpoint on its compaction marker, so new
@@ -74,6 +76,10 @@ pub struct MoveRequest {
     /// to the runner's harness (see [`rekey`]). Absent: the same harness.
     #[serde(default)]
     pub source_harness: Option<String>,
+    /// The id of the runner's entry before the newest one, which the first
+    /// view's cut goes through. Needed only without `messages`, which name it.
+    #[serde(default)]
+    pub before_newest: Option<String>,
 }
 
 /// What the runner's move tool installs. `ck-mc move-in` prints it as JSON.
@@ -87,6 +93,29 @@ pub struct Moved {
     /// Pi summaries whose missing-message slots could not be located exactly.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// The runner's entry before the newest one, which the first view's cut goes
+/// through, read from the move list. `None` for a one-message transcript.
+fn cut_before_newest(request: &MoveRequest) -> Result<Option<(u64, &str)>, String> {
+    let Some(before) = request.newest.ordinal.checked_sub(1).filter(|&o| o > 0) else {
+        return Ok(None);
+    };
+    let Some(messages) = &request.messages else {
+        return request
+            .before_newest
+            .as_deref()
+            .map(|mid| Some((before, mid)))
+            .ok_or_else(|| {
+                "invalid_request: the first view's cut goes through the message before the newest one; name it in `messages` or `before_newest`".to_string()
+            });
+    };
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.entry == Some(before))
+        .map(|message| Some((before, message.mid.as_str())))
+        .ok_or_else(|| format!("invalid_messages: no row in the move list is entry {before}, the one before the newest"))
 }
 
 pub fn fence_key(harness: &str, session: &str) -> String {
@@ -203,7 +232,8 @@ pub fn move_in(
             .context_window
             .saturating_sub(request.output_reserve),
     );
-    let view = session.first_view_after_move(&settings, &request.newest)?;
+    let cut = cut_before_newest(request)?;
+    let view = session.first_view_after_move(&settings, cut)?;
     let tag_checkpoint: u64 = db.with_connection(|conn| {
         conn.query_row(
             "SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1 AND harness = ?2",
@@ -223,7 +253,7 @@ pub fn move_in(
         "runner": key.runner,
         "state": "moved",
         "tag_checkpoint": tag_checkpoint,
-        "cut": request.newest.mid,
+        "cut": cut.map(|(_, mid)| mid),
         "view_version": view.version,
         "view_checksum": view.checksum,
         "moved_at": request.now,
