@@ -1,10 +1,16 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 
 /** Where a detectable OpenCode installation was found. */
-export type OpenCodeInstallSource = "PATH" | "home-bin" | "openchamber" | "desktop" | "app";
+export type OpenCodeInstallSource =
+    | "PATH"
+    | "home-bin"
+    | "openchamber"
+    | "desktop"
+    | "desktop-cli"
+    | "app";
 
 /** A single OpenCode installation found by the filesystem detection ladder. */
 export interface OpenCodeInstallation {
@@ -17,13 +23,14 @@ export interface OpenCodeInstallation {
 /**
  * How OpenCode is present on this machine.
  *
- * - `cli`: a runnable `opencode` binary exists (stock install, PATH, or a
- *   version-manager / package-manager shim). `opencode models` /
- *   `opencode --version` work.
- * - `desktop`: only the OpenCode Desktop app is installed. Desktop ships NO
- *   invocable `opencode` CLI on any OS (its server runs as a JS sidecar inside
- *   Electron), so the CLI commands are unavailable; setup must degrade to
- *   manual model entry rather than claim OpenCode is absent (issue #196).
+ * - `cli`: a runnable `opencode` binary exists (stock install, PATH, a
+ *   version-manager / package-manager shim, or the `opencode-cli` sidecar that
+ *   OpenCode Desktop downloads under its userData directory). `opencode models`
+ *   / `opencode --version` work.
+ * - `desktop`: only the OpenCode Desktop app is installed, without a runnable
+ *   bundled sidecar CLI. The Desktop GUI still counts as an install, so setup
+ *   must degrade to manual model entry rather than claim OpenCode is absent
+ *   (issue #196).
  * - `none`: no sign of OpenCode at all.
  *
  * `detectOpenCodeInstallations` exposes every rung. `detectOpenCode` below keeps
@@ -53,6 +60,8 @@ const OPENCODE_DESKTOP_SETTINGS_FILE = "opencode.settings";
 export interface DetectDeps {
     exists: (path: string) => boolean;
     isExecutable: (path: string) => boolean;
+    /** Directory listing, used to find the versioned Desktop sidecar CLI. */
+    readdir: (path: string) => string[];
     home: string;
     platform: NodeJS.Platform;
     env: NodeJS.ProcessEnv;
@@ -69,6 +78,7 @@ function defaultDeps(overrides: Partial<DetectDeps> = {}): DetectDeps {
     return {
         exists: overrides.exists ?? existsSync,
         isExecutable: overrides.isExecutable ?? isExecutableFile,
+        readdir: overrides.readdir ?? ((path) => readdirSync(path)),
         home: overrides.home ?? (env.HOME?.trim() || homedir()),
         platform: overrides.platform ?? process.platform,
         env,
@@ -193,6 +203,38 @@ function desktopAppPaths(d: DetectDeps): string[] {
     }
 }
 
+/**
+ * The `opencode-cli` sidecar that OpenCode Desktop downloads under its
+ * per-channel userData directory (`<userData>/cli/<version>-<arch>/`). Recent
+ * Desktop releases ship a runnable CLI there even when no `opencode` binary is
+ * on PATH; probing it lets setup and doctor enumerate the models of the host
+ * the user is actually running instead of degrading to manual entry.
+ *
+ * Newest version first, so a stale sidecar left behind by an upgrade is never
+ * preferred over the one the current Desktop release downloaded.
+ */
+function desktopBundledCliCandidates(d: DetectDeps): string[] {
+    const binary = d.platform === "win32" ? "opencode-cli.exe" : "opencode-cli";
+    const candidates: string[] = [];
+    for (const appId of OPENCODE_DESKTOP_APP_IDS) {
+        const cliRoot = join(desktopUserDataDir(d, appId), "cli");
+        let entries: string[];
+        try {
+            entries = d.readdir(cliRoot);
+        } catch {
+            continue;
+        }
+        const newestFirst = entries
+            .slice()
+            .sort((a, b) => b.localeCompare(a, "en", { numeric: true, sensitivity: "base" }));
+        for (const entry of newestFirst) {
+            const candidate = join(cliRoot, entry, binary);
+            if (d.isExecutable(candidate)) candidates.push(candidate);
+        }
+    }
+    return candidates;
+}
+
 /** The Desktop "has run" settings markers across all release channels. */
 export function openCodeDesktopSettingsMarkers(deps?: Partial<DetectDeps>): string[] {
     const d = defaultDeps(deps);
@@ -206,8 +248,9 @@ export function openCodeDesktopSettingsMarkers(deps?: Partial<DetectDeps>): stri
  *
  * This intentionally keeps the existing probes and their priority: the
  * resolved PATH binary is the active install, followed by the stock home-bin
- * binary, other known CLI locations, the CLI bundled in OpenChamber, Desktop
- * userData markers, and GUI app paths. Pure filesystem checks (no exec) keep this safe in restricted shells.
+ * binary, other known CLI locations, the CLI bundled in OpenChamber, the CLI
+ * sidecar bundled in OpenCode Desktop, Desktop userData markers, and GUI app
+ * paths. Pure filesystem checks (no exec) keep this safe in restricted shells.
  * Pass `deps` to test against a virtual filesystem.
  */
 export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCodeInstallation[] {
@@ -237,6 +280,10 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
         if (d.isExecutable(candidate)) {
             addCandidate(installations, seenRealpaths, d, candidate, "openchamber", "cli");
         }
+    }
+
+    for (const candidate of desktopBundledCliCandidates(d)) {
+        addCandidate(installations, seenRealpaths, d, candidate, "desktop-cli", "cli");
     }
 
     for (const appId of OPENCODE_DESKTOP_APP_IDS) {

@@ -74,8 +74,8 @@ export class OpenCodeAdapter implements HarnessAdapter {
     /**
      * Resolved on first use, not at construction: the registry instantiates
      * adapters at import time and running `opencode --version` there would cost
-     * every command a process spawn. A Desktop-only install has no runnable
-     * binary to version; it counts as 1.x until Desktop ships a 2.x line.
+     * every command a process spawn. A Desktop install without a runnable
+     * bundled sidecar has no binary to version and counts as 1.x.
      */
     private get resolvedHostGeneration(): OpenCodeHostGeneration {
         if (this.hostGeneration) return this.hostGeneration;

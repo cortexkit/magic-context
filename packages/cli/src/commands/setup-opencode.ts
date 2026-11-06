@@ -34,7 +34,7 @@ import {
     readMagicContextConfigForSetup,
 } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
-import { detectOpenCode } from "../lib/opencode-detect";
+import { detectOpenCode, detectOpenCodeInstallations } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
 import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
@@ -406,8 +406,11 @@ export async function runSetup(dryRun = false): Promise<number> {
     s.start("Checking OpenCode installation");
 
     const detection = detectOpenCode();
-    // Desktop-only installs have no binary to version and keep the 1.x key.
+    // Older Desktop installs may have no runnable sidecar CLI; those keep the
+    // 1.x config key. A runnable CLI overrides this below.
     let hostGeneration: OpenCodeHostGeneration = "v1";
+    let cliBinary: string | null = detection.kind === "cli" ? detection.binary : null;
+    let cliVersion: string | null = null;
     if (detection.kind === "none") {
         s.stop("OpenCode not found");
         const shouldContinue = await confirm(
@@ -420,29 +423,45 @@ export async function runSetup(dryRun = false): Promise<number> {
             return 1;
         }
     } else if (detection.kind === "desktop") {
-        // OpenCode Desktop ships no invocable `opencode` CLI on any OS (its
-        // server runs as a JS sidecar inside Electron), so `opencode models`
-        // and `opencode --version` are unavailable. Recognize the install and
-        // fall through to manual model entry instead of claiming OpenCode is
-        // absent.
-        s.stop("OpenCode Desktop detected (CLI not installed)");
+        // No runnable CLI was found. The Desktop GUI still counts as an
+        // install, so fall through to manual model entry instead of claiming
+        // OpenCode is absent.
+        s.stop("OpenCode Desktop detected (no runnable CLI found)");
         log.info(
-            "Model auto-discovery needs the OpenCode CLI; you will enter models manually. Install the CLI to auto-populate: https://opencode.ai",
+            "Model auto-discovery needs a runnable OpenCode CLI; you will enter models manually. Install the CLI to auto-populate: https://opencode.ai",
         );
-    } else {
-        const version = getOpenCodeVersion(detection.binary);
-        s.stop(`OpenCode ${version ?? ""} detected`);
-        hostGeneration = openCodeHostGenerationFromVersion(version);
+    } else if (cliBinary) {
+        cliVersion = getOpenCodeVersion(cliBinary);
+        s.stop(`OpenCode ${cliVersion ?? ""} detected`);
     }
 
     // ─── Step 2: Get available models ───────────────────
     s.start("Fetching available models");
 
-    // Only the CLI can enumerate the authed/resolved model list; Desktop-only
-    // installs have no on-disk equivalent, so models stay empty and the model
-    // prompts fall back to free-text entry. Use the resolved binary path so a
-    // stock CLI that is not on PATH still enumerates.
-    const allModels = detection.kind === "cli" ? getAvailableModels(detection.binary) : [];
+    // Only a CLI can enumerate the authed/resolved model list. Probe every
+    // detected CLI rung, not just the first: a stale 1.x npm shim on PATH can
+    // fail against a 2.x config while the Desktop-bundled sidecar (the host the
+    // user actually runs) enumerates it fine. The first successful catalog
+    // also selects the host generation, so setup writes the matching config
+    // key. If none works, the model prompts fall back to free-text entry.
+    const cliInstallations = detectOpenCodeInstallations().filter(
+        (installation) => installation.kind === "cli",
+    );
+    let allModels: string[] = [];
+    for (const installation of cliInstallations) {
+        const models = getAvailableModels(installation.path);
+        if (models.length === 0) continue;
+        allModels = models;
+        if (installation.path !== cliBinary) {
+            cliBinary = installation.path;
+            cliVersion = getOpenCodeVersion(cliBinary);
+            log.info(`Using the model catalog from ${cliBinary}`);
+        }
+        break;
+    }
+    if (cliVersion) {
+        hostGeneration = openCodeHostGenerationFromVersion(cliVersion);
+    }
     if (allModels.length > 0) {
         s.stop(`Found ${allModels.length} models`);
     } else {
