@@ -324,6 +324,36 @@ fn the_message_list_must_end_at_the_newest_message_with_rising_entries() {
     assert!(refused.starts_with("invalid_messages:"), "{refused}");
 }
 
+/// OpenCode 2's conversion drops an assistant step that ended with no
+/// content, so a session can end in plugin-numbered rows the runner doesn't
+/// have. A summary ending on one still maps, to the newest entry.
+#[test]
+fn rows_the_runner_left_out_after_the_newest_entry_map_to_it() {
+    let mut rows = transcript();
+    for mid in ["dead8", "dead9"] {
+        rows.push(HostMessage {
+            mid: mid.into(),
+            entry: None,
+            finished_summary: false,
+            added: false,
+            pi: None,
+        });
+    }
+    let numbering = Numbering::opencode(&rows, &newest()).unwrap();
+    let store = Store::new("trailing");
+    store.summary(0, (1, "u1"), (8, "dead9"));
+    run(&store, &numbering).unwrap();
+    assert_eq!(
+        store.query::<String>("SELECT start_message || '-' || end_message FROM compartments"),
+        ["1-5"]
+    );
+    // A list that stops short of the newest entry still refuses.
+    let mut short = rows.clone();
+    short.retain(|row| row.mid != "a7");
+    let refused = Numbering::opencode(&short, &newest()).unwrap_err();
+    assert!(refused.starts_with("invalid_messages:"), "{refused}");
+}
+
 #[test]
 fn a_transcript_without_compactions_changes_no_number() {
     let store = Store::new("identity");

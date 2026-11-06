@@ -282,7 +282,15 @@ impl Numbering {
                 by_plugin.push(Numbered::new(&message.mid, message.entry));
             }
         }
-        match messages.last() {
+        // Rows after the newest entry are ones the runner left out: OpenCode 2's
+        // conversion drops an assistant step that ended with no content, and a
+        // session can end in such steps. The plugin numbered them, and its
+        // summaries may end on one; `position` maps them to the last entry.
+        let last_entry = messages
+            .iter()
+            .rev()
+            .find(|message| message.entry.is_some());
+        match last_entry {
             Some(last) if last.mid == newest.mid && last.entry == Some(newest.ordinal) => {}
             _ => return Err(not_at_newest(newest)),
         }
