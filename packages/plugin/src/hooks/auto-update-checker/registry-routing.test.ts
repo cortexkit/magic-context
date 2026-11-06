@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 let importCounter = 0;
 function freshChecker() {
@@ -22,7 +23,7 @@ beforeEach(() => {
     delete process.env.NPM_CONFIG_REGISTRY;
     // Isolate from the developer's own ~/.npmrc. The lowercase spelling wins.
     delete process.env.npm_config_userconfig;
-    userConfigDir = mkdtempSync(join(tmpdir(), "mc-registry-routing-"));
+    userConfigDir = createTestTempDirFromPath(join(tmpdir(), "mc-registry-routing-"));
     process.env.NPM_CONFIG_USERCONFIG = join(userConfigDir, ".npmrc");
 });
 
@@ -32,7 +33,6 @@ afterEach(() => {
         else process.env[key] = value;
     }
     for (const server of servers.splice(0)) server.stop(true);
-    rmSync(userConfigDir, { recursive: true, force: true });
 });
 
 function registry(status = 200) {

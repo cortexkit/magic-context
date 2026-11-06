@@ -1,25 +1,20 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NPM_REGISTRY_URL, resolveNpmRegistryUrl, resolveUserNpmrcPath } from "./npm-registry";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const PACKAGE = "@cortexkit/opencode-magic-context";
-const roots: string[] = [];
 
 /** An isolated home, so the developer's own .npmrc never leaks in. */
 function sandbox(user?: string) {
-    const root = mkdtempSync(join(tmpdir(), "mc-npm-registry-"));
-    roots.push(root);
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-npm-registry-"));
     const home = join(root, "home");
     mkdirSync(home, { recursive: true });
     if (user !== undefined) writeFileSync(join(home, ".npmrc"), user);
     return { root, home, env: { HOME: home } as NodeJS.ProcessEnv };
 }
-
-afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
 
 describe("resolveNpmRegistryUrl", () => {
     test("uses public npm only when nothing is configured", () => {
