@@ -141,6 +141,8 @@ export function publishRecoverableCompactionMarker(
                     sessionId,
                     [intended, ...(previous ? [previous] : []), ...(pending ? [pending] : [])],
                     args.summaryText,
+                    boundary.id,
+                    previous,
                 );
                 if (inspection.kind === "deferred") {
                     reason = "candidate-preparation";
@@ -158,15 +160,24 @@ export function publishRecoverableCompactionMarker(
                 }
                 cut = "definitely-no-cut";
                 const host = inspection.marker;
-                if (host && ((pending && samePair(host, pending)) || samePair(host, intended))) {
-                    const adopted = pending && samePair(host, pending) ? pending : intended;
+                if (inspection.markerAtTarget) {
+                    // The host cut already matches the validated rebuilding boundary.
+                    // Adopt its actual row IDs. The validated rebuild supplies the
+                    // current compartment end; no original target is inferred.
+                    intended = { ...intended, ...inspection.markerAtTarget };
                     recovered =
-                        adopted === pending ? "pending-intent-recovered" : "adopted-existing-pair";
+                        pending && samePair(intended, pending)
+                            ? "pending-intent-recovered"
+                            : "adopted-existing-pair";
+                    cut = "uncertain";
+                    return { kind: "committed", marker: inspection.markerAtTarget };
+                }
+                if (host && pending && samePair(host, pending)) {
+                    recovered = "pending-intent-recovered";
                     // The host pair exists before its ownership record is finalized in context.db.
                     // OpenCode may now load different messages than the older cached request contains.
                     cut = "uncertain";
-                    if (samePair(host, intended)) return { kind: "committed", marker: host };
-                    persist(adopted);
+                    persist(pending);
                 }
                 // Preserve the existing JSON, including a cleared marker kept for replay,
                 // and durably stage all four new IDs before touching the host rows.
@@ -180,10 +191,23 @@ export function publishRecoverableCompactionMarker(
                 );
                 writingState = false;
                 cut = "uncertain";
-                const replacement = replaceCompactionMarker(host, {
-                    ...args,
-                    resolvedBoundary: boundary,
-                });
+                // Unrecorded marker pairs stay intact. Sweeping them needs the
+                // separate 5-second host-store removal connection and checks for
+                // surviving native tail_start_id references, outside this writer
+                // lock; it is not part of publishing a new cut.
+                const ownedHost =
+                    host &&
+                    ((previous && samePair(host, previous)) || (pending && samePair(host, pending)))
+                        ? host
+                        : null;
+                const replacement = replaceCompactionMarker(
+                    ownedHost,
+                    {
+                        ...args,
+                        resolvedBoundary: boundary,
+                    },
+                    true,
+                );
                 if (recovered && replacement.kind !== "committed")
                     return { kind: "uncertain", error: replacement.error };
                 if (replacement.kind !== "committed")
