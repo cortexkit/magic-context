@@ -4,6 +4,7 @@ import {
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { NativeFoldReplay } from "../fold/native-replay";
+import { RAW_HISTORY_ACCOUNT } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
@@ -187,16 +188,21 @@ test("idle recovery queues at most one compaction for one expired response windo
     }
 }, 60000);
 
-test("manual compact without compartments refuses without losing raw conversation", async () => {
+test("manual compact without compartments answers while preserving raw conversation bytes", async () => {
     const f = await oc2ContextFixture(10869, options);
     try {
-        await f.pass();
-        await expect(f.nativeFold(3, 0, "", "manual")).rejects.toThrow(
-            "could not preserve the host checkpoint",
-        );
+        const before = await f.pass();
+        const cut = await f.nativeFold(3, 0, "", "manual");
+        const stored = f.raw.prepare("SELECT data FROM session_message WHERE id = ?").get(cut) as {
+            data: string;
+        };
+        expect(JSON.parse(stored.data).summary).toBe(RAW_HISTORY_ACCOUNT);
         const after = await f.pass();
+        expect(after.bytes).toBe(before.bytes);
         for (const row of f.rows)
             expect(after.draft.messages.some((message) => message.id === row.id)).toBe(true);
+        await f.restart();
+        expect((await f.pass()).bytes).toBe(before.bytes);
     } finally {
         await f.cleanup();
     }

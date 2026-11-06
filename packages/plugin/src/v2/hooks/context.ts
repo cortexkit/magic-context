@@ -148,6 +148,7 @@ import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-desc
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
 import { HostFoldIdle } from "../fold/idle";
+import { stageManualBaseline } from "../fold/manual-baseline";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
@@ -157,12 +158,13 @@ import {
     isLocalCheckpoint,
     NativeFoldReplay,
     nativeRowID,
+    nativeRowSequence,
 } from "../fold/native-replay";
 import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
-import { hasFoldSummary } from "../fold/summary";
+import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
@@ -308,7 +310,7 @@ function bindKeptInstructionCoordinates(
         ) {
             selected.forEach((row, index) => {
                 const message = pending[index];
-                if (message) bindNativeRowID(message, row.id);
+                if (message) bindNativeRowID(message, row.id, row.seq);
             });
         }
         pending = [];
@@ -856,12 +858,12 @@ function coveredInstructionRows(
     sessionID: string,
     throughSeq: number,
     model: SessionContext["model"],
-    afterSeq = -1,
+    retired: (row: { type: string; id: string; seq: number }) => boolean = () => false,
 ): V2Message[] {
     if (throughSeq < 0) return [];
     return reader
         .instructionRowsThrough(sessionID, throughSeq)
-        .filter((row) => row.seq > afterSeq)
+        .filter((row) => !retired(row))
         .flatMap((row) => restoreRow(row, model))
         .map((message) => markCoveredInstructionRow(message));
 }
@@ -1548,12 +1550,14 @@ export async function registerContext(context: V2Context) {
                   canReplay: (sessionID, reader) => nativeFoldReplay.canReplay(sessionID, reader),
                   canFold: async (sessionID, reader) => {
                       const meta = getOrCreateSessionMeta(storage.require(), sessionID);
-                      const summary =
-                          servedModuleM0Text(sessionID) ??
-                          (await nativeFoldReplay.baseline(sessionID)) ??
-                          meta.cachedM0Bytes?.toString("utf8");
+                      const summary = [
+                          servedModuleM0Text(sessionID),
+                          await nativeFoldReplay.baseline(sessionID),
+                          meta.cachedM0Bytes?.toString("utf8"),
+                      ].find((value) => value !== RAW_HISTORY_ACCOUNT && hasFoldSummary(value));
                       return (
                           !meta.isSubagent &&
+                          summary !== RAW_HISTORY_ACCOUNT &&
                           hasFoldSummary(summary) &&
                           nativeFoldReplay.canFold(sessionID, reader)
                       );
@@ -1856,7 +1860,7 @@ export async function registerContext(context: V2Context) {
             const moduleBaseline = rustModeModuleClient
                 ? servedModuleM0Text(draft.sessionID)
                 : undefined;
-            // A usable history always answers; empty history is refused instead.
+            // Every requested host checkpoint needs an explicit Magic Context account.
             // Leaving `result` unset is not an option.
             // On GA 2.0.5 an unanswered request is not a polite decline: the host
             // summarizes with its own model and, when that answer is not in the
@@ -1876,37 +1880,87 @@ export async function registerContext(context: V2Context) {
             if (nativeFoldReplay) {
                 try {
                     const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
-                    const summary =
-                        (manual ? (moduleBaseline ?? materialize(draft)) : moduleBaseline) ??
-                        (await nativeFoldReplay.baseline(draft.sessionID)) ??
-                        state.cachedM0Bytes?.toString("utf8") ??
-                        (await folds.read(draft.sessionID))?.submitted;
-                    if (manual) {
-                        if (!hasFoldSummary(summary))
-                            throw new V2ContextRefusal("Magic Context has no history to compact.");
-                        await nativeFoldReplay.prepareManualFold(draft.sessionID, reader);
-                        dropSlot(draft.sessionID, "manual host compaction");
-                        generateReplay.forget(draft.sessionID);
-                        restoredRows.forget(draft.sessionID);
-                        historyRefreshSessions.add(draft.sessionID);
-                        requestPendingMaterialization(
-                            pendingMaterializationSessions,
-                            draft.sessionID,
-                            "host_compaction",
-                        );
-                    }
+                    const staged =
+                        manual && moduleBaseline == null
+                            ? stageManualBaseline(storage.require(), draft.sessionID, () =>
+                                  materialize(draft),
+                              )
+                            : undefined;
+                    const publishedHistory = Boolean(
+                        storage
+                            .require()
+                            .prepare("SELECT 1 FROM compartments WHERE session_id = ? LIMIT 1")
+                            .get(draft.sessionID),
+                    );
+                    // Published history in the frozen baseline (M0) answers with
+                    // those bytes. If history is only in the incremental update
+                    // (M1), keep the frozen baseline and replay the update unchanged.
+                    // With no history, use the fixed raw-history account without
+                    // replacing either provider history head.
+                    const candidate = [
+                        moduleBaseline,
+                        await nativeFoldReplay.baseline(draft.sessionID),
+                        state.cachedM0Bytes?.toString("utf8"),
+                        (await folds.read(draft.sessionID))?.submitted,
+                    ].find(
+                        (value) =>
+                            value !== RAW_HISTORY_ACCOUNT &&
+                            ((publishedHistory && value?.includes("<session-history>")) ||
+                                hasFoldSummary(value)),
+                    );
+                    const manualHistory =
+                        manual && hasFoldSummary(staged?.summary ?? moduleBaseline);
+                    const summary = manualHistory
+                        ? (staged?.summary ?? candidate ?? RAW_HISTORY_ACCOUNT)
+                        : (candidate ?? RAW_HISTORY_ACCOUNT);
+                    const manualReplay =
+                        manualHistory && summary
+                            ? await nativeFoldReplay.prepareManualFold(
+                                  draft.sessionID,
+                                  reader,
+                                  staged
+                                      ? staged.boundaryID
+                                      : (
+                                            storage
+                                                .require()
+                                                .prepare(
+                                                    "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
+                                                )
+                                                .get(draft.sessionID) as { id: string | null }
+                                        ).id,
+                                  summary,
+                              )
+                            : undefined;
                     if (
-                        hasFoldSummary(summary) &&
+                        (hasFoldSummary(summary) || publishedHistory) &&
                         (await nativeFoldReplay.supply({
                             draft,
                             reader,
                             previousCut: reader.latestCompaction(draft.sessionID),
                             summary,
+                            manual: manualReplay
+                                ? { replay: manualReplay, commit: () => staged?.commit() }
+                                : undefined,
                         }))
                     ) {
+                        if (manualHistory) {
+                            dropSlot(draft.sessionID, "manual host compaction");
+                            generateReplay.forget(draft.sessionID);
+                            restoredRows.forget(draft.sessionID);
+                            historyRefreshSessions.add(draft.sessionID);
+                            requestPendingMaterialization(
+                                pendingMaterializationSessions,
+                                draft.sessionID,
+                                "host_compaction",
+                            );
+                        }
                         draft.result = { summary, metadata: { keepID: undefined } };
                         return;
                     }
+                    if (manual)
+                        throw new V2ContextRefusal(
+                            "Magic Context could not admit the manual fold.",
+                        );
                 } catch (error) {
                     if (error instanceof V2ContextRefusal || manual) throw error;
                     nativeFoldReplay.invalidate(draft.sessionID, true);
@@ -1922,10 +1976,11 @@ export async function registerContext(context: V2Context) {
                 runningCut: running?.seq,
                 // Kept lazy for the TypeScript lane: materializing writes cache state and
                 // must only happen when the fold identity is actually new.
-                materialize: () => moduleBaseline ?? materialize(draft),
+                materialize: () => {
+                    const summary = moduleBaseline ?? materialize(draft);
+                    return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
+                },
             });
-            if (!hasFoldSummary(fold.submitted))
-                throw new V2ContextRefusal("Magic Context has no history to compact.");
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
             // explains a session's checkpoint cadence.
@@ -1967,15 +2022,21 @@ export async function registerContext(context: V2Context) {
         reader: V2StoreReader,
         messages: V2Message[],
     ) => {
-        const retired =
-            (await nativeFoldReplay?.retiredInstructionThrough(sessionID, reader)) ?? -1;
-        if (retired < 0) return messages;
+        const retired = await nativeFoldReplay?.instructionRetirement(sessionID, reader);
+        if (!retired) return messages;
         return messages.filter((message) => {
             const id = nativeRowID(message);
             return (
                 message.role !== "system" ||
                 !id ||
-                (reader.sequenceForId(sessionID, id) ?? Infinity) > retired
+                !retired({
+                    type: "system",
+                    id,
+                    seq:
+                        nativeRowSequence(message) ??
+                        reader.sequenceForId(sessionID, id) ??
+                        Infinity,
+                })
             );
         });
     };
@@ -2046,7 +2107,8 @@ export async function registerContext(context: V2Context) {
             : null;
         const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader);
         const retiredInstructions =
-            (await nativeFoldReplay?.retiredInstructionThrough(draft.sessionID, reader)) ?? -1;
+            (await nativeFoldReplay?.instructionRetirement(draft.sessionID, reader)) ??
+            (() => false);
         const boundary = Math.max(
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
@@ -2067,7 +2129,7 @@ export async function registerContext(context: V2Context) {
         const present = new Set(args.messages.map((message) => message.id));
         const restored = restoredRows
             .rows(reader, draft.sessionID, boundary, cut.seq)
-            .filter((row) => row.type !== "system" || row.seq > retiredInstructions)
+            .filter((row) => !retiredInstructions(row))
             .filter((row) => !present.has(row.id))
             .flatMap((row) =>
                 restoreRow(

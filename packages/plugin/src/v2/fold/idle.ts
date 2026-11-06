@@ -9,6 +9,7 @@ interface IdleWindow {
 /** Schedule a host-side fold only after the served request's frozen cache TTL expires. */
 export class HostFoldIdle {
     private readonly windows = new Map<string, IdleWindow>();
+    private readonly attempted = new Map<string, { cacheTtl: string; lastResponseTime: number }>();
     constructor(
         private readonly fold: (sessionID: string, eligible: () => boolean) => Promise<void>,
         private readonly now = Date.now,
@@ -31,6 +32,9 @@ export class HostFoldIdle {
             ttl = 5 * 60 * 1000;
         }
         if (!Number.isFinite(ttl) || lastResponseTime <= 0) return;
+        const attempted = this.attempted.get(sessionID);
+        if (attempted?.cacheTtl === cacheTtl && attempted.lastResponseTime === lastResponseTime)
+            return;
         const window: IdleWindow = { cacheTtl, lastResponseTime };
         this.windows.set(sessionID, window);
         const eligible = () =>
@@ -40,6 +44,9 @@ export class HostFoldIdle {
             if (this.windows.get(sessionID) !== window) return;
             if (eligible()) {
                 window.timer = undefined;
+                // Keep the response window marked as attempted even if its timer
+                // is canceled or the host does not admit the queued checkpoint.
+                this.attempted.set(sessionID, { cacheTtl, lastResponseTime });
                 const release = () => {
                     if (this.windows.get(sessionID) === window) this.windows.delete(sessionID);
                 };
@@ -57,5 +64,6 @@ export class HostFoldIdle {
 
     dispose(): void {
         for (const sessionID of this.windows.keys()) this.active(sessionID);
+        this.attempted.clear();
     }
 }

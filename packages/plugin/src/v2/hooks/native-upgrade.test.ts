@@ -94,6 +94,8 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
             repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])?.content[0]?.text,
         ).toBe(summary);
         expect(sent).not.toContain("<conversation-checkpoint>");
+        const delta = repaired.draft.messages.find((message) => message.id === HEAD_IDS[1]);
+        expect(JSON.stringify(delta?.content)).toContain("Review history 0");
         expect((await f.pass()).bytes).toBe(repaired.bytes);
     } finally {
         await f.cleanup();
