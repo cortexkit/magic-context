@@ -11,6 +11,7 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { parseAgentDeliverReply } from "./cache-bust-sentinel";
+import { parseStepRender } from "./step-render-log";
 
 const HOUR = 3_600_000;
 const WINDOW = 10 * 60_000;
@@ -74,8 +75,8 @@ function parse(line: string): { sessionId: string; at: number; pass?: Pass; kind
     // a Rust pass's module time, so the same thresholds apply, including the
     // alert when module time keeps rising across 20 passes. Pi session ids are
     // UUIDs, so this match takes any session token.
-    const step = line.match(/\bstep render session=(\S+) elapsed_ms=(\d+) wait_ms=(\d+)/);
-    if (step) return { sessionId: step[1]!, at, pass: { at, elapsed: Number(step[2]), module: Number(step[3]) } };
+    const step = parseStepRender(line);
+    if (step) return { sessionId: step.sessionId, at, pass: { at, elapsed: step.elapsed, module: step.wait } };
     const sessionId = line.match(/\[magic-context\]\[([^\]]+)\]/)?.[1] ?? line.match(/\bsession=(ses_[\w-]+)/)?.[1];
     const hold = line.match(/\[magic-context\] slow write transaction: site=(\S+) held=([\d.]+)ms(?:\s|$)/);
     if (hold && Number.isFinite(Number(hold[2]))) return { sessionId: UNKNOWN_SESSION, at, hold: { site: hold[1]!, ms: Number(hold[2]) } };

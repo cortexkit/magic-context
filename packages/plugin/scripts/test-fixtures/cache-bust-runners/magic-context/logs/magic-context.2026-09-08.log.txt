@@ -1,0 +1,14 @@
+2026-09-08T09:59:59.000Z INFO mc_module::session: ck-mc: session ses_runner: setup (opencode, preset full, model anthropic/claude-opus-4-6, window 1000000, reserve 32000, applied view None)
+2026-09-08T09:59:59.010Z INFO mc_module::session: ck-mc: session ses_runner: view 1 accepted (2 edits)
+2026-09-08T11:47:50.000Z INFO mc_module::session: ck-mc: session ses_runner: summary started over messages 1..80 (~20000 tokens)
+2026-09-08T11:47:59.000Z INFO mc_module::session: ck-mc: session ses_runner: 1 summaries published, through message 80
+2026-09-08T11:47:59.010Z INFO mc_module::session: ck-mc: session ses_runner: view 2 accepted (4 edits, cut through msg_80)
+2026-09-08T11:48:30.000Z INFO mc_module::session: ck-mc: session ses_runner: 1 summaries published, through message 90
+2026-09-08T11:48:40.000Z INFO mc_module::session: ck-mc: session ses_runner: no summary at 76% (threshold 75%): summary already running
+2026-09-08T09:59:59.000Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: setup (pi, preset full, model anthropic/claude-opus-4-6, window 1000000, reserve 32000, applied view None)
+2026-09-08T09:59:59.010Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: view 1 accepted (2 edits)
+2026-09-08T11:47:50.000Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: summary started over messages 1..80 (~20000 tokens)
+2026-09-08T11:47:59.000Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: 1 summaries published, through message 80
+2026-09-08T11:47:59.010Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: view 2 accepted (4 edits, cut through msg_80)
+2026-09-08T11:48:30.000Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: 1 summaries published, through message 90
+2026-09-08T11:48:40.000Z INFO mc_module::session: ck-mc: session 11111111-2222-4333-8444-555555555555: no summary at 76% (threshold 75%): summary already running

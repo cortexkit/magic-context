@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripSystemInjection } from "../src/hooks/magic-context/system-injection-stripper";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import { type CacheBustDecisionAttribution } from './cache-bust-attribution';
 import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
+import { loadRunnerSession, runnerDumpDirectory } from "./cache-bust-runner-sources";
+import { joinRequestsToViews, loadRunnerEvidence, parseRunnerDecision } from "./cache-bust-runner-log";
+import { parseStepRender } from "./step-render-log";
 
 type UsageFixture = {
     cache_read_input_tokens?: number;
@@ -121,6 +125,220 @@ function snapshotsFor(dir: string, session: string) {
         __test.parseArgs(["bun", "analyze-cache-busts.ts", "--session", session, "--dir", dir]),
     );
 }
+
+describe("analyze-cache-bust Thalamus runners", () => {
+    const piId = "11111111-2222-4333-8444-555555555555";
+    const fixture = join(import.meta.dir, "test-fixtures/cache-bust-runners");
+    function setup() {
+        const root = mkdtempSync(join(tmpdir(), "cache-bust-runners-"));
+        tempDirs.push(root);
+        cpSync(fixture, root, { recursive: true });
+        for (const module of ["magic-context", "thalamus-harness", "thalamus-pi"]) {
+            const log = join(root, module, "logs", `${module}.2026-09-08.log`);
+            renameSync(`${log}.txt`, log);
+        }
+        const path = join(root, "thalamus-harness/opencode2-server/data/opencode/opencode.db");
+        mkdirSync(join(path, ".."), { recursive: true });
+        const db = new Database(path);
+        db.exec(readFileSync(join(root, "oc2.sql"), "utf8"));
+        return { root, db, path };
+    }
+    function analyze(root: string, kind: "oc2" | "pi") {
+        const runner = loadRunnerSession(root, kind === "oc2" ? "ses_runner" : piId, kind)!;
+        const evidence = loadRunnerEvidence(root, runner);
+        return { runner, evidence, rows: __test.analyzeSnapshots(__test.runnerSnapshots(runner, []), [], { runnerEvidence: evidence }) };
+    }
+    function cli(root: string, kind: "auto" | "oc2" | "pi", session: string, extra: string[] = []) {
+        return Bun.spawnSync([process.execPath, join(import.meta.dir, "analyze-cache-busts.ts"),
+            "--session", session, "--source", kind, "--runner-data-dir", root,
+            "--anthropic-dir", join(root, "missing"), "--openai-dir", join(root, "missing"),
+            ...(extra.includes("--since") ? [] : ["--since", "2026-09-08T11:00:00Z"]), ...extra], { env: { ...process.env }, timeout: 10_000 });
+    }
+
+    test("OC2 runner CLI classifies a 107-minute short read as EXPIRED without dumps", () => {
+        const { root, db } = setup();
+        try {
+            const run = cli(root, "auto", "ses_runner");
+            expect(run.exitCode).toBe(0);
+            const output = run.stdout.toString();
+            expect(output).toContain("Source: oc2; files read:");
+            expect(output).toContain("opencode.db");
+            expect(output).toContain("magic-context.2026-09-08.log");
+            expect(output).toContain("thalamus-harness.2026-09-08.log");
+            expect(output).toContain("EXPIRED | read=100 write=12000 input=10 floor=11936 gap=107.0m");
+            expect(output).toContain("VIEW | read=100");
+            expect(output).toContain("view=2 edits=4 cut=msg_80");
+            expect(output).toContain("UNEXPLAINED (no bytes) | read=100");
+            expect(output).not.toContain("LATENCY (meter)");
+        } finally { db.close(); }
+    });
+
+    test("reads uncheckpointed OC2 WAL rows without changing the store or reading account tables", () => {
+        const { root, db, path } = setup();
+        try {
+            // No credential/account tables exist in this synthetic store. Leave
+            // its writer open so the latest assistants are still in the WAL.
+            const before = [path, `${path}-wal`].map((file) => readFileSync(file));
+            const { runner, rows } = analyze(root, "oc2");
+            expect(runner.requests.map((request) => request.sequence)).toEqual([1, 2, 3, 4]);
+            expect(runner.requests[0]).toMatchObject({ model: "claude-opus-4-6", provider: "anthropic", variant: "max", streamedAt: 1788861600100, completedAt: 1788861601000, usage: { reasoning: 5, output: 20 } });
+            expect(rows.map((row) => row.verdict)).toEqual(["BASE", "EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"]);
+            expect(rows[1]!.byteVerdict).toBeUndefined();
+            expect(rows[1]!.meterVsBytes).toBeUndefined();
+            expect([path, `${path}-wal`].map((file) => readFileSync(file))).toEqual(before);
+        } finally { db.close(); }
+    });
+
+    test("Pi sessions resolve through hosted-heads and preserve the native meter and parent ids", () => {
+        const { root, db } = setup(); db.close();
+        const { runner, rows } = analyze(root, "pi");
+        expect(runner.requests).toHaveLength(4);
+        expect(runner.requests[0]).toMatchObject({ id: "a1", parentId: "user", at: 1788861600000, usage: { input: 10, cacheRead: 10000, cacheWrite: 2000, totalTokens: 12030, cost: { total: 0.1 } } });
+        expect(rows.map((row) => row.verdict)).toEqual(["BASE", "EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"]);
+        const run = cli(root, "pi", piId);
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout.toString()).toContain("Source: pi; files read:");
+        expect(run.stdout.toString()).toContain("hosted-heads/head.json");
+        expect(run.stdout.toString()).toContain("thalamus-pi/anthropic-auth-dumps");
+    });
+
+    test("runner cache lifetime is configurable and short reads never count uncached input as reuse", () => {
+        const { root, db } = setup(); db.close();
+        const { runner, evidence } = analyze(root, "oc2");
+        const snaps = __test.runnerSnapshots(runner, []);
+        snaps[1]!.usage!.input = 500_000;
+        snaps[1]!.usage!.cacheCreation = 0;
+        const row = __test.analyzeSnapshots(snaps, [], { runnerEvidence: evidence, cacheTtlMs: 2 * 3_600_000 })[1]!;
+        expect(row.shortRead).toBe(true);
+        expect(row.verdict).toBe("UNEXPLAINED (no bytes)");
+        expect(row.byteVerdict).toBeUndefined();
+        const run = cli(root, "oc2", "ses_runner", ["--cache-ttl", "2h"]);
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout.toString()).toContain("Cache lifetime: 2h");
+        expect(run.stdout.toString()).toContain("EXPIRED=0");
+    });
+
+    test("only new accepted views, Setup and rides explain short reads; summaries alone do not", () => {
+        const { root, db } = setup(); db.close();
+        const { runner, evidence } = analyze(root, "oc2");
+        const snaps = __test.runnerSnapshots(runner, []);
+        const at = "2026-09-08T11:48:59.000Z";
+        for (const body of [
+            "setup (opencode, preset full, model anthropic/claude, window 1000000, reserve 32000, applied view Some(2))",
+            "ride [OverLimit, CacheExpired], request Some(50000) tokens, last prompt Some(49000), applied view Some(2)",
+        ]) {
+            const event = parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: ${body}`, "ses_runner")!;
+            const row = __test.analyzeSnapshots(snaps, [], { runnerEvidence: { ...evidence, decisions: [...evidence.decisions, event] } })[3]!;
+            expect(row.verdict).toBe("VIEW");
+            expect(row.runnerDecisions!.at(-1)!.detail).toBe(body);
+        }
+        expect(__test.analyzeSnapshots(snaps, [], { runnerEvidence: evidence })[3]!.verdict).toBe("UNEXPLAINED (no bytes)");
+        expect(parseRunnerDecision(`${at} INFO ck-mc: session other: view 3 accepted (2 edits)`, "ses_runner")).toBeNull();
+        expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: runner refused view 3: invalid`, "ses_runner")).toBeNull();
+        for (const [suffix, cut] of [["", "unlogged"], [", no cut", "none"], [", cut through msg_99", "msg_99"]]) {
+            expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: view 3 accepted (2 edits${suffix})`, "ses_runner")!.detail).toBe(`view=3 edits=2 cut=${cut}`);
+        }
+    });
+
+    test("step-render parsing and the time join are shared, bounded and one-to-one", () => {
+        const line = "2026-09-08T11:48:00.020Z INFO step_render: step render session=ses_runner elapsed_ms=20 wait_ms=15 entries=429 view=2 cached=false";
+        const render = parseStepRender(line)!;
+        expect(render).toMatchObject({ sessionId: "ses_runner", elapsed: 20, wait: 15, entries: 429, view: 2 });
+        expect(parseStepRender(line.replace("view=2", "view=none"))!.view).toBeNull();
+        expect(joinRequestsToViews([render.at - 20, render.at + 20], [render])).toEqual([render, undefined]);
+        expect(joinRequestsToViews([render.at - 60_001], [render])).toEqual([undefined]);
+        expect(joinRequestsToViews([render.at - 30_000, render.at], [render])).toEqual([undefined, render]);
+        const { root, db } = setup(); db.close();
+        const { runner, evidence } = analyze(root, "oc2");
+        const unseen = parseRunnerDecision("2026-09-08T11:48:59.000Z INFO ck-mc: session ses_runner: view 99 accepted (1 edits)", "ses_runner")!;
+        const row = __test.analyzeSnapshots(__test.runnerSnapshots(runner, []), [], { runnerEvidence: { ...evidence, decisions: [...evidence.decisions, unseen] } })[3]!;
+        expect(row.renderedView).toBe(2);
+        expect(row.verdict).toBe("UNEXPLAINED (no bytes)");
+    });
+
+    test("keep-warm sends touch the cache but never become steps or byte baselines", () => {
+        const { root, db } = setup(); db.close();
+        const dir = runnerDumpDirectory(root, "oc2");
+        mkdirSync(dir, { recursive: true });
+        writeDump(dir, "2026-09-08T11-46-00-000Z-000099-ses_runner-prewarm-cachekeep", "2026-09-08T11:46:00.000Z", "ses_runner", bodyWithBreakpointMessage("KEEPWARM BODY MUST NOT BE A BASELINE"));
+        const noBytesRun = cli(root, "oc2", "ses_runner");
+        expect(noBytesRun.exitCode).toBe(0);
+        const noBytes = noBytesRun.stdout.toString();
+        expect(noBytes).toContain("4 metered step(s); 1 keep-warm cache touch(es)");
+        expect(noBytes).toContain("UNEXPLAINED (no bytes) | read=100 write=12000 input=10 floor=11936 gap=1.0m");
+        expect(noBytes).toContain("EXPIRED=0");
+        for (const [time, sequence, text] of [["10-00", 1, "step-prefix-before"], ["11-47", 2, "step-prefix-after"]] as const) {
+            writeDump(dir, `2026-09-08T${time}-00-000Z-00000${sequence}-ses_runner-fetch-messages`, `2026-09-08T${time.replace("-", ":")}:00.000Z`, "ses_runner", bodyWithBreakpointMessage(text));
+        }
+        const bytesRun = cli(root, "oc2", "ses_runner", ["--all-rows", "--show-diff"]);
+        expect(bytesRun.exitCode).toBe(0);
+        const bytes = bytesRun.stdout.toString();
+        expect(bytes).toContain("BUST (meter)");
+        expect(bytes).toContain("step-prefix-[before]");
+        expect(bytes).toContain("step-prefix-[after]");
+        expect(bytes).not.toContain("KEEPWARM BODY");
+        expect(bytes).toContain("read=100 (write=12,000");
+    });
+
+    test("OC2 dump-dir override and Pi default dumps reuse the existing byte-diff path", () => {
+        const { root, db } = setup(); db.close();
+        for (const kind of ["oc2", "pi"] as const) {
+            const dir = kind === "oc2" ? join(root, "override-dumps") : runnerDumpDirectory(root, kind);
+            mkdirSync(dir, { recursive: true });
+            const session = kind === "oc2" ? "ses_runner" : piId;
+            for (const [sequence, time, text] of [[1, "10-00", "before"], [2, "11-47", "after"]] as const) {
+                const stem = `2026-09-08T${time}-00-000Z-00000${sequence}-${session}-fetch-messages`;
+                writeDump(dir, stem, `2026-09-08T${time.replace("-", ":")}:00.000Z`, session, bodyWithBreakpointMessage(text));
+            }
+            const run = cli(root, kind, session, [...(kind === "oc2" ? ["--dump-dir", dir] : []), "--show-diff"]);
+            expect(run.exitCode).toBe(0);
+            const output = run.stdout.toString();
+            expect(output).toContain(`Source: ${kind}; files read:`);
+            expect(output).toContain("BUST (meter)");
+            expect(output).toContain("segment diff @char");
+            expect(output).toContain(dir);
+            expect(output).toContain("read=100 (write=12,000");
+        }
+    });
+
+    test("a swept earlier dump is not borrowed from the next runner step", () => {
+        const { root, db } = setup(); db.close();
+        const { runner } = analyze(root, "oc2");
+        const second = runner.requests[1]!;
+        runner.requests[0]!.at = second.at - 30_000;
+        const dir = join(root, "rolling-dumps");
+        mkdirSync(dir);
+        writeDump(dir, "2026-09-08T11-47-00-000Z-000002-ses_runner-fetch-messages", "2026-09-08T11:47:00.000Z", "ses_runner", bodyWithBreakpointMessage("only the second step remains"));
+        const dumps = snapshotsFor(dir, "ses_runner");
+        const snapshots = __test.runnerSnapshots(runner, dumps);
+        expect(snapshots[0]!.bytesMissing).toBe(true);
+        expect(snapshots[1]!.bodyPath).toBe(dumps[0]!.bodyPath);
+        expect(__test.analyzeSnapshots(snapshots)[1]!.byteVerdict).toBeUndefined();
+    });
+
+    test("meter-only requests retain the Anthropic repeated-short-read rule without inferring bytes", () => {
+        const { root, db } = setup(); db.close();
+        const { runner } = analyze(root, "oc2");
+        runner.requests[1]!.usage!.cacheWrite = 0;
+        runner.requests[2]!.usage!.cacheWrite = 0;
+        const rows = __test.analyzeSnapshots(__test.runnerSnapshots(runner, []));
+        expect(rows[2]!.meterFloor).toBe(36);
+        expect(rows[2]!.shortRead).toBe(true);
+        expect(rows[2]!.verdict).toBe("UNEXPLAINED (no bytes)");
+        expect(rows[2]!.byteVerdict).toBeUndefined();
+    });
+
+    test("missing or unsupported native usage refuses a clean result instead of guessing", () => {
+        const { root, db } = setup(); db.close();
+        const { runner } = analyze(root, "oc2");
+        runner.requests[1]!.usage = undefined;
+        runner.requests[2]!.provider = "unknown";
+        runner.requests[2]!.model = "unknown-model";
+        const snaps = __test.runnerSnapshots(runner, []);
+        expect(__test.analyzeSnapshots(snaps).map((row) => row.verdict)).toEqual(["BASE", "UNMETERED", "UNMETERED", "UNEXPLAINED (no bytes)"]);
+        expect(__test.meterCoverage(snaps).refusals).toHaveLength(2);
+    });
+});
 
 describe("analyze-cache-bust dump discovery", () => {
     test("claims slow passes once across consecutive requests, including BASE and UNMETERED", () => {

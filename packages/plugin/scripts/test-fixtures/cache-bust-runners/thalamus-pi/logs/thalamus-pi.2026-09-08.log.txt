@@ -1,0 +1,4 @@
+2026-09-08T10:00:00.020Z INFO step_render: step render session=11111111-2222-4333-8444-555555555555 elapsed_ms=20 wait_ms=15 entries=421 view=1 cached=false
+2026-09-08T11:47:00.020Z INFO step_render: step render session=11111111-2222-4333-8444-555555555555 elapsed_ms=20 wait_ms=15 entries=425 view=1 cached=false
+2026-09-08T11:48:00.020Z INFO step_render: step render session=11111111-2222-4333-8444-555555555555 elapsed_ms=20 wait_ms=15 entries=429 view=2 cached=false
+2026-09-08T11:49:00.020Z INFO step_render: step render session=11111111-2222-4333-8444-555555555555 elapsed_ms=20 wait_ms=15 entries=433 view=2 cached=false
