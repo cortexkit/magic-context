@@ -866,7 +866,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						db,
 						sessionId,
 						runId: crypto.randomUUID(),
-						trueRawTokens: boundarySnapshot.trueRawEligibleTokens,
+						trueRawTokens: boundarySnapshot.summaryRemovedEligibleTokens,
 						usagePercentage: boundarySnapshot.usagePercentage,
 						usable,
 						perRunCap,

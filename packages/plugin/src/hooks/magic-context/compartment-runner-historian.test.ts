@@ -131,7 +131,7 @@ test("OpenCode 1 records the configured model and session.error when a child has
     expect(row).toMatchObject({
         providerId: "provider-not-configured",
         modelId: "model-missing",
-        status: "empty",
+        status: "failed",
     });
     expect(row?.error).toContain("No reply: OpenCode refused the model");
     expect(row?.error).toContain(suggestion);
@@ -241,6 +241,102 @@ test("a timed-out primary historian falls back to the next model and publishes i
     expect(statuses).toContain("timed_out");
     expect(statuses).toContain("completed");
     expect(invocations.find((row) => row.status === "completed")?.task).toBe("fallback");
+});
+
+test("a free-model retry error falls back in a fresh historian child without accepting partial output", async () => {
+    const directory = createTestTempDirFromPath(join(tmpdir(), "mc-historian-provider-fallback-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    const attempted: string[] = [];
+    const messages = new Map<string, unknown[]>();
+    const retrying = new Set<string>();
+    let nextChild = 0;
+    const output = (text: string) =>
+        `<output><compartment start="1" end="1" title="History"><p1>${text}</p1></compartment></output>`;
+    const abort = mock(async ({ path }: { path: { id: string } }) => {
+        retrying.delete(path.id);
+        return {};
+    });
+    const client = {
+        session: {
+            create: async () => ({ data: { id: `provider-child-${nextChild++}` } }),
+            promptAsync: async ({
+                path,
+                body,
+            }: {
+                path: { id: string };
+                body: { model: { providerID: string; modelID: string } };
+            }) => {
+                const model = `${body.model.providerID}/${body.model.modelID}`;
+                attempted.push(model);
+                const primary = model === "opencode/free-model";
+                if (primary) retrying.add(path.id);
+                messages.set(path.id, [
+                    {
+                        info: {
+                            id: `${path.id}-assistant`,
+                            role: "assistant",
+                            time: { created: 1, ...(primary ? {} : { completed: 2 }) },
+                            ...(primary ? {} : { finish: "stop" }),
+                        },
+                        parts: [
+                            {
+                                type: "text",
+                                text: output(
+                                    primary ? "Incomplete primary." : "Fallback kept this.",
+                                ),
+                            },
+                            ...(primary
+                                ? [
+                                      {
+                                          type: "retry",
+                                          error: {
+                                              name: "APIError",
+                                              data: {
+                                                  statusCode: 429,
+                                                  message: "Free usage limit reached",
+                                              },
+                                          },
+                                      },
+                                  ]
+                                : []),
+                        ],
+                    },
+                ]);
+                return { data: undefined };
+            },
+            status: async () => ({
+                data: Object.fromEntries([...retrying].map((id) => [id, { type: "retry" }])),
+            }),
+            messages: async ({ path }: { path: { id: string } }) => ({
+                data: messages.get(path.id) ?? [],
+            }),
+            abort,
+            delete: async () => ({}),
+        },
+    } as unknown as PluginContext["client"];
+    const startedAt = Date.now();
+    const result = await runValidatedHistorianPass({
+        client,
+        db,
+        parentSessionId: "parent-provider-fallback",
+        sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: preserve this",
+        timeoutMs: 5_000,
+        model: { model: "opencode/free-model" },
+        fallbackModels: [{ model: "prov/fallback" }],
+        chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
+        priorCompartments: [],
+        sequenceOffset: 0,
+        dumpLabelBase: "provider-fallback",
+    });
+    expect(attempted).toEqual(["opencode/free-model", "prov/fallback"]);
+    expect(nextChild).toBe(2);
+    expect(abort).toHaveBeenCalledWith({ path: { id: "provider-child-0" } });
+    expect(result.ok).toBe(true);
+    expect(result.compartments?.[0]?.content).toContain("Fallback kept this.");
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
 });
 
 test("a failed historian repair passes its repair prompt to fallback models", async () => {

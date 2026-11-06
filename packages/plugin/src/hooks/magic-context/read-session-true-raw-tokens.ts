@@ -50,6 +50,8 @@ export interface TrueRawTokenIndexBuildOptions extends TrueRawEstimateOptions {
     cacheNamespace: string;
     /** Stored totals must already use these same ratios; tokenizer caches remain raw. */
     calibration?: { proseRatio: number; toolsRatio: number; systemRatio: number };
+    /** Cap/drain weight excludes results, reasoning and media; tail sizing stays full. */
+    measure?: "full" | "summary-removed";
     /**
      * Durable per-message token source. When provided and it returns a non-null
      * value for a message, that value is used as the message's total instead of
@@ -173,7 +175,13 @@ function looksImageLike(part: Record<string, unknown>): boolean {
         mediaType.startsWith("image/") ||
         part.image_url !== undefined ||
         part.imageUrl !== undefined ||
-        part.image !== undefined
+        part.image !== undefined ||
+        // Some hosts omit MIME metadata on inline file parts. Keep their
+        // encoded payload out of the full-size prose estimate as well as caps.
+        (type.includes("file") &&
+            ((typeof part.url === "string" && part.url.startsWith("data:image/")) ||
+                (typeof part.data === "string" &&
+                    /^(?:data:image\/|\/9j\/|iVBORw0KGgo|R0lGOD)/.test(part.data))))
     );
 }
 
@@ -661,11 +669,14 @@ export function buildTrueRawTokenIndex(
         } else {
             const raw = tokenForMessage(message, options);
             const seed = options.calibration;
-            total = seed
-                ? (raw.toolInput + raw.toolOutput) * seed.toolsRatio +
-                  (raw.text + raw.reasoning + raw.other) * seed.proseRatio +
-                  raw.image
-                : raw.total;
+            total =
+                options.measure === "summary-removed"
+                    ? raw.text * (seed?.proseRatio ?? 1) + raw.toolInput * (seed?.toolsRatio ?? 1)
+                    : seed
+                      ? (raw.toolInput + raw.toolOutput) * seed.toolsRatio +
+                        (raw.text + raw.reasoning + raw.other) * seed.proseRatio +
+                        raw.image
+                      : raw.total;
         }
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);

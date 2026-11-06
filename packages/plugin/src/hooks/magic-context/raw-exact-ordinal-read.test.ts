@@ -106,6 +106,7 @@ function snapshotAt(offset: number, tail = 3): ProtectedTailBoundarySnapshot {
             end,
         ),
         trueRawEligibleTokens: 1000,
+        summaryRemovedEligibleTokens: 1000,
         oversizeAtomicUnit: false,
         boundaryReason: "test-legacy",
     };

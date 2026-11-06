@@ -4,7 +4,7 @@ import type { MessageLike } from "./tag-messages";
 function buildIssue423Fixture(
     count: number,
     firstOutputMultiplier: number,
-    options: { reasoning: boolean; openTail: boolean },
+    options: { reasoning: boolean; openTail: boolean; firstInputMultiplier?: number },
 ) {
     const output = "result value\n".repeat(1667);
     const pi: Array<Record<string, unknown>> = [
@@ -19,16 +19,21 @@ function buildIssue423Fixture(
     ];
     const finalIndex = options.openTail ? count : count - 1;
     for (let i = 0; i <= finalIndex; i++) {
-        const name =
-            i >= count - 4 && i < count
-                ? "ctx_reduce"
-                : i % 3 === 0
-                  ? "read"
-                  : i % 3 === 1
-                    ? "edit"
-                    : "bash";
+        const firstInputMultiplier = options.firstInputMultiplier ?? 0;
+        const largeInput = i === 0 && firstInputMultiplier > 0;
+        const name = largeInput
+            ? "write"
+            : i >= count - 4 && i < count
+              ? "ctx_reduce"
+              : i % 3 === 0
+                ? "read"
+                : i % 3 === 1
+                  ? "edit"
+                  : "bash";
         const callID = `call-${i}`;
-        const input = { index: i };
+        const input = largeInput
+            ? { filePath: "first.ts", content: output.repeat(firstInputMultiplier) }
+            : { index: i };
         const text = output.repeat(i === 0 ? firstOutputMultiplier : 1);
         const reasoning = options.reasoning
             ? [{ type: "thinking", thinking: `reasoning-${i}`, signature: `sig-${i}` }]
@@ -81,10 +86,11 @@ function buildIssue423Fixture(
 }
 
 /** One prompt followed by completed tool rounds, then one invocation still awaiting its result. */
-export function issue423Fixture(count = 120, firstOutputMultiplier = 1) {
+export function issue423Fixture(count = 120, firstOutputMultiplier = 1, firstInputMultiplier = 0) {
     return buildIssue423Fixture(count, firstOutputMultiplier, {
         reasoning: false,
         openTail: true,
+        firstInputMultiplier,
     });
 }
 
