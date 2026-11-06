@@ -299,4 +299,80 @@ describe("entry digest cache work per pass", () => {
             for (const count of reused) expect(count).toBeGreaterThan(40);
         }
     });
+
+    it("keeps all of a long session among many small ones while the total allows it", () => {
+        const cache = new LkgEntryDigestCache({
+            sessionMaxBytes: 4_000_000,
+            totalMaxBytes: 4_000_000,
+            maxSessions: 64,
+        });
+        // About 1.4 MB for the long session; an even split over 11 sessions
+        // would give it about 360 KB.
+        const small = Array.from({ length: 10 }, (_, index) => history(`small${index}`, 2, 1_000));
+        const long = history("long", 70, 10_000);
+        for (const [index, current] of small.entries())
+            cache.digests(`s${index}`, reloaded(current));
+        cache.digests("long", reloaded(long));
+        const work = workDuring(() => {
+            const { stats } = cache.digests("long", reloaded(long));
+            expect(stats.reused).toBe(70);
+            expect(stats.retained).toBe(70);
+        });
+        expect(work.hashedMessages).toBe(0);
+        expect(cache.stats().totalBytes).toBeLessThanOrEqual(4_000_000);
+    });
+
+    it("gives the budget a small session does not need to the long sessions, within the ceiling", () => {
+        const cache = new LkgEntryDigestCache({
+            sessionMaxBytes: 3_000_000,
+            totalMaxBytes: 3_000_000,
+            maxSessions: 64,
+        });
+        // One session of about 100 KB and three of about 1.4 MB: an even split
+        // gives each long session 750 KB (about 37 messages); a split by need
+        // gives each about 966 KB (about 48 messages).
+        const sessions = [
+            history("small", 5, 10_000),
+            history("a", 70, 10_000),
+            history("b", 70, 10_000),
+            history("c", 70, 10_000),
+        ];
+        const retained = new Map<number, number>();
+        for (let pass = 0; pass < 3; pass += 1) {
+            for (const [index, current] of sessions.entries()) {
+                const { stats } = cache.digests(String(index), reloaded(current));
+                expect(cache.stats().totalBytes).toBeLessThanOrEqual(3_000_000);
+                if (pass === 2) retained.set(index, stats.retained);
+            }
+        }
+        expect(retained.get(0)).toBe(5);
+        for (const index of [1, 2, 3]) expect(retained.get(index)).toBeGreaterThan(40);
+    });
+
+    it("digests every message of a session over the per-session cap and keeps a leading share", () => {
+        const cache = new LkgEntryDigestCache({
+            sessionMaxBytes: 1_000_000,
+            totalMaxBytes: 4_000_000,
+            maxSessions: 64,
+        });
+        // About 1.4 MB of need against a 1 MB cap.
+        const long = history("over", 70, 10_000);
+        const first = cache.digests("over", reloaded(long));
+        expect(first.digests).toEqual(long.map((entry) => lkgContentDigest(entry)));
+        expect(first.stats.retainedBytes).toBeLessThanOrEqual(1_000_000);
+        const { digests, stats } = cache.digests("over", reloaded(long));
+        expect(digests).toEqual(long.map((entry) => lkgContentDigest(entry)));
+        expect(stats.reused).toBe(first.stats.retained);
+        expect(stats.retainedBytes).toBeLessThanOrEqual(1_000_000);
+    });
+
+    it("does not evict a long session when more than 16 sessions are served", () => {
+        const project = createLkgEntryProjector();
+        const long = history("long", 70, 10_000);
+        project("long", reloaded(long));
+        for (let index = 0; index < 20; index += 1)
+            project(`child${index}`, reloaded(history(`child${index}`, 2, 1_000)));
+        const work = workDuring(() => project("long", reloaded(long)));
+        expect(work.hashedMessages).toBe(0);
+    });
 });
