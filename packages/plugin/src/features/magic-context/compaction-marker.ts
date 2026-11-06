@@ -595,29 +595,31 @@ export function inspectCompactionMarkerPublication(
     const pairs: Array<{
         summaryId: string;
         boundaryId: string;
-        partId: string;
-        compactionData: string;
+        partId: string | null;
+        compactionData: string | null;
     }> = [];
     for (const id of basis.ids) {
         const rows = db
             .prepare(
                 `SELECT m.id AS summaryId, p.message_id AS boundaryId, p.id AS partId,
                         p.data AS compactionData
-             FROM message m JOIN part p ON p.message_id = json_extract(m.data, '$.parentID')
-               AND +p.session_id = m.session_id
-              WHERE m.id = ? AND m.session_id = ? AND json_extract(m.data, '$.summary') = 1
-                AND json_extract(m.data, '$.providerID') = 'magic-context'
-                AND json_extract(p.data, '$.type') = 'compaction'`,
+              FROM message m LEFT JOIN part p ON p.message_id = json_extract(m.data, '$.parentID')
+                AND +p.session_id = m.session_id
+                AND json_extract(p.data, '$.type') = 'compaction'
+               WHERE m.id = ? AND m.session_id = ? AND json_extract(m.data, '$.summary') = 1
+                 AND json_extract(m.data, '$.providerID') = 'magic-context'`,
             )
             .all(id, sessionId) as typeof pairs;
+        // Keep owned summaries with a missing compaction part visible to validation.
         const canonical = rows.filter((row) =>
-            isMcCanonicalCompactionPartData(JSON.parse(row.compactionData)),
+            isMcCanonicalCompactionPartData(JSON.parse(row.compactionData ?? "null")),
         );
         if (rows.length > 0 && canonical.length === 0) return { kind: "ambiguous" };
         pairs.push(...canonical);
     }
     const verified: Array<CompactionMarkerState & { timeCreated: number }> = [];
     for (const pair of pairs) {
+        if (pair.partId === null) return { kind: "ambiguous" };
         // Several summaries sharing one boundary/part cannot be paired uniquely.
         if (verified.some((marker) => marker.boundaryMessageId === pair.boundaryId))
             return { kind: "ambiguous" };
@@ -987,6 +989,34 @@ export function replaceCompactionMarker(
                     "host store changed after marker candidate preparation; marker unchanged",
                 );
             if (existing) {
+                // Native compaction can retain any of these rows as its tail boundary.
+                // Refuse under the writer lock rather than leave a dangling reference.
+                const referenced = db
+                    .prepare(
+                        `WITH deleted(id) AS (VALUES (?), (?), (?)), surviving(data) AS (
+                            SELECT data FROM part WHERE session_id = ?
+                              AND id NOT IN (SELECT id FROM deleted)
+                              AND json_extract(data, '$.type') = 'compaction'
+                            UNION ALL
+                            SELECT data FROM message WHERE session_id = ?
+                              AND id NOT IN (SELECT id FROM deleted)
+                        )
+                        SELECT 1 FROM surviving
+                        WHERE json_extract(data, '$.tail_start_id') IN (SELECT id FROM deleted)
+                           OR json_extract(data, '$.compaction.tail_start_id') IN (SELECT id FROM deleted)
+                        LIMIT 1`,
+                    )
+                    .get(
+                        existing.summaryMessageId,
+                        existing.summaryPartId,
+                        existing.compactionPartId,
+                        args.sessionId,
+                        args.sessionId,
+                    );
+                if (referenced)
+                    throw new Error(
+                        "a surviving tail_start_id references a recorded marker row; marker unchanged",
+                    );
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);
                 db.prepare("DELETE FROM message WHERE id = ?").run(existing.summaryMessageId);
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.compactionPartId);

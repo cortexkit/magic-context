@@ -212,3 +212,59 @@ describe("compaction marker review witnesses", () => {
         expect(getPersistedCompactionMarkerState(f.db, f.sid)).toBeNull();
     });
 });
+
+describe("recorded marker native tail references", () => {
+    for (const location of ["part", "message"] as const) {
+        for (const target of ["summaryMessageId", "summaryPartId", "compactionPartId"] as const) {
+            it(`refuses replacement when a native ${location} references the recorded ${target}`, async () => {
+                const f = fixture();
+                expect((await apply(f, first)).kind).toBe("applied");
+                const recorded = getPersistedCompactionMarkerState(f.db, f.sid)!;
+                const native = await seed(f, second);
+                f.oc
+                    .prepare(
+                        "UPDATE message SET data = json_set(data, '$.providerID', 'host', '$.modelID', 'host') WHERE id = ?",
+                    )
+                    .run(native.summaryMessageId);
+                if (location === "part") {
+                    f.oc
+                        .prepare(
+                            "UPDATE part SET data = json_set(data, '$.tail_start_id', ?) WHERE id = ?",
+                        )
+                        .run(recorded[target], native.compactionPartId);
+                } else {
+                    f.oc
+                        .prepare(
+                            "UPDATE message SET data = json_set(data, '$.compaction.tail_start_id', ?) WHERE id = ?",
+                        )
+                        .run(recorded[target], native.summaryMessageId);
+                }
+                f.oc
+                    .prepare(
+                        "INSERT INTO message VALUES ('third', ?, 3000, 3000, '{\"role\":\"user\"}')",
+                    )
+                    .run(f.sid);
+                appendCompartments(f.db, f.sid, [
+                    {
+                        sequence: 2,
+                        startMessage: 21,
+                        endMessage: 30,
+                        startMessageId: "third",
+                        endMessageId: "third",
+                        title: "third",
+                        content: "third",
+                    },
+                ]);
+                const before = hostRows(f.oc);
+                const outcome = await apply(f, {
+                    ordinal: 30,
+                    endMessageId: "third",
+                    publishedAt: 3,
+                });
+                expect(outcome.kind).toBe("retryable-failure");
+                expect(hostRows(f.oc)).toEqual(before);
+                expect(getPersistedCompactionMarkerState(f.db, f.sid)).toEqual(recorded);
+            });
+        }
+    }
+});
