@@ -3036,8 +3036,19 @@ impl Session {
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {
+                // The cache-bust analyzer parses this line to tell which request
+                // first carried a rebuilt view and how far its cut reached, so
+                // keep its shape: `cut through <message id>` or `no cut`.
+                let cut = view
+                    .edits
+                    .iter()
+                    .find_map(|edit| match &edit.op {
+                        EditOp::Cut { through } => Some(format!("cut through {through}")),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "no cut".to_string());
                 tracing::info!(
-                    "ck-mc: session {}: view {} accepted ({} edits)",
+                    "ck-mc: session {}: view {} accepted ({} edits, {cut})",
                     self.key.session,
                     view.version,
                     view.edits.len()
