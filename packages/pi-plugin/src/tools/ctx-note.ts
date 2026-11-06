@@ -127,6 +127,24 @@ const ParamsSchema = Type.Object(
 
 type CtxNoteParams = Static<typeof ParamsSchema>;
 
+/** Reject invalid raw arguments before host coercion. */
+function rejectInvalidNoteArguments(args: unknown): void {
+	if (args === null || typeof args !== "object") return;
+	const record = args as Record<string, unknown>;
+	if (record.content !== undefined && typeof record.content !== "string") {
+		throw new Error("Error: 'content' must be a string.");
+	}
+	if (
+		record.note_ids !== undefined &&
+		(!Array.isArray(record.note_ids) ||
+			record.note_ids.some(
+				(id) => typeof id !== "number" || !Number.isSafeInteger(id) || id < 1,
+			))
+	) {
+		throw new Error("Error: 'note_ids' must be an array of positive note IDs.");
+	}
+}
+
 function ok(text: string) {
 	return { content: [{ type: "text" as const, text }], details: undefined };
 }
@@ -275,6 +293,10 @@ export function createCtxNoteTool(
 			? CTX_NOTE_DESCRIPTION
 			: withoutSmartNoteText(CTX_NOTE_DESCRIPTION),
 		parameters,
+		prepareArguments(args) {
+			rejectInvalidNoteArguments(args);
+			return args as Static<typeof ParamsSchema>;
+		},
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {
 			params = unwrapImitatedReducedArgs(params, ["action", "content"], {
 				action: {

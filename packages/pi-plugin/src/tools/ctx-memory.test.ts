@@ -2020,4 +2020,367 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 	});
+
+	// pi validates with @earendil-works/pi-schema, which coerces these raw
+	// shapes before validation: null content becomes the string "null" and a
+	// null ids array becomes [0]. prepareArguments runs first, so the tool
+	// rejects them before a memory is written with either.
+	describe("prepareArguments rejects arguments that schema coercion would mangle", () => {
+		it("throws when content is null", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "write",
+						category: "PROJECT_RULES",
+						content: null,
+						ids: [],
+					}),
+				).toThrow("Error: 'content' must be a string.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it('passes the literal string "null" through unchanged', () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const args = {
+					action: "write",
+					category: "PROJECT_RULES",
+					content: "null",
+					ids: [],
+				};
+				expect(tool.prepareArguments?.(args)).toBe(args);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("throws when ids is null", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "get",
+						category: "PROJECT_RULES",
+						content: "",
+						ids: null,
+					}),
+				).toThrow("Error: 'ids' must be an array of positive memory IDs.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("throws when ids is a bare string", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "get",
+						category: "PROJECT_RULES",
+						content: "",
+						ids: "1",
+					}),
+				).toThrow("Error: 'ids' must be an array of positive memory IDs.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("passes a well-formed ids list through unchanged", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const args = {
+					action: "get",
+					category: "PROJECT_RULES",
+					content: "",
+					ids: [1],
+				};
+				expect(tool.prepareArguments?.(args)).toBe(args);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("rejects non-string content and preserves omitted or string content", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				for (const content of [null, 1, false, [], {}]) {
+					expect(() => tool.prepareArguments?.({ content })).toThrow(
+						"Error: 'content' must be a string.",
+					);
+				}
+				for (const args of [
+					{},
+					{ content: undefined },
+					{ content: "null" },
+					{ content: "正文" },
+				]) {
+					expect(tool.prepareArguments?.(args)).toBe(args);
+				}
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("rejects invalid raw reasons before conversion without archiving", async () => {
+			for (const allowDreamerActions of [false, true]) {
+				const db = createTestDb();
+				try {
+					const tool = createCtxMemoryTool({
+						db,
+						memoryEnabled: true,
+						embeddingEnabled: false,
+						allowDreamerActions,
+					});
+					const prepareArguments = tool.prepareArguments;
+					if (!prepareArguments) throw new Error("prepareArguments is missing");
+					const ctx = fakeContext("ses-reason-memory");
+					const projectPath = resolveProjectIdentity(ctx.cwd);
+					const successor = insertMemory(db, {
+						projectPath,
+						category: "PROJECT_RULES",
+						content: "A surviving project fact.",
+					});
+					const target = insertMemory(db, {
+						projectPath,
+						category: "PROJECT_RULES",
+						content: "A redundant project fact.",
+					});
+					db.prepare("UPDATE memories SET metadata_json = ? WHERE id = ?").run(
+						JSON.stringify({ archive_reason: "existing reason" }),
+						target.id,
+					);
+					const base = {
+						action: "archive" as const,
+						category: "PROJECT_RULES" as const,
+						content: "",
+						ids: [target.id],
+						...(allowDreamerActions ? { superseded_by: successor.id } : {}),
+					};
+					const before = db
+						.prepare("SELECT * FROM memories WHERE id = ?")
+						.get(target.id);
+					const mutations = db
+						.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+						.all();
+					let converted = false;
+					const invoke = async (raw: unknown) => {
+						const prepared = prepareArguments(raw);
+						converted = true;
+						const args = Value.Convert(
+							tool.parameters,
+							prepared,
+						) as typeof prepared;
+						return tool.execute(
+							"archive-reason",
+							args,
+							new AbortController().signal,
+							undefined,
+							ctx as never,
+						);
+					};
+					for (const reason of [null, 42, false, [], {}]) {
+						await expect(invoke({ ...base, reason })).rejects.toThrow(
+							"Error: 'reason' must be a string.",
+						);
+						expect(converted).toBe(false);
+						expect(getMemoryById(db, target.id)?.status).toBe("active");
+						expect(
+							db.prepare("SELECT * FROM memories WHERE id = ?").get(target.id),
+						).toEqual(before);
+						expect(
+							db.prepare("SELECT * FROM memory_mutation_log ORDER BY id").all(),
+						).toEqual(mutations);
+					}
+					const validReasons: Array<{ reason?: string }> = [
+						{},
+						{ reason: undefined },
+						{ reason: "" },
+						{ reason: "example" },
+						{ reason: "null" },
+					];
+					for (const [index, extra] of validReasons.entries()) {
+						const memory = insertMemory(db, {
+							projectPath,
+							category: "PROJECT_RULES",
+							content: `A redundant fact number ${index}.`,
+						});
+						const args = { ...base, ids: [memory.id], ...extra };
+						expect(prepareArguments(args)).toBe(args);
+						const result = await invoke(args);
+						expect(result.content[0]?.text).toContain("Archived memory");
+						expect(getMemoryById(db, memory.id)?.status).toBe("archived");
+						const row = db
+							.prepare("SELECT metadata_json FROM memories WHERE id = ?")
+							.get(memory.id) as { metadata_json: string | null };
+						const metadata = row.metadata_json
+							? JSON.parse(row.metadata_json)
+							: {};
+						expect(metadata.archive_reason).toBe(extra.reason || undefined);
+						expect(
+							db.prepare("SELECT * FROM memory_mutation_log ORDER BY id").all(),
+						).toHaveLength(mutations.length + index + 1);
+					}
+				} finally {
+					closeQuietly(db);
+				}
+			}
+		});
+
+		it("rejects invalid raw IDs before conversion without changing memories or mutations", async () => {
+			for (const allowDreamerActions of [false, true]) {
+				const db = createTestDb();
+				try {
+					const tool = createCtxMemoryTool({
+						db,
+						memoryEnabled: true,
+						embeddingEnabled: false,
+						allowDreamerActions,
+					});
+					const prepareArguments = tool.prepareArguments;
+					if (!prepareArguments) throw new Error("prepareArguments is missing");
+					const ctx = fakeContext("ses-fraction-memory") as never;
+					const signal = new AbortController().signal;
+					for (const content of ["原有记忆一", "原有记忆二"]) {
+						const result = await tool.execute(
+							"seed",
+							{ action: "write", category: "PROJECT_RULES", content, ids: [] },
+							signal,
+							undefined,
+							ctx,
+						);
+						expect(result.isError).not.toBe(true);
+					}
+					const before = [getMemoryById(db, 1), getMemoryById(db, 2)];
+					expect(before[0]).not.toBeNull();
+					const mutations = db
+						.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+						.all();
+					for (const action of [
+						"write",
+						"get",
+						"update",
+						"archive",
+						"merge",
+					] as const) {
+						for (const ids of [
+							null,
+							"3",
+							[null],
+							["3"],
+							[1.5],
+							["1.5"],
+							[0],
+							[-3],
+							[1e20],
+							[Number.MAX_SAFE_INTEGER + 1],
+						]) {
+							const raw = {
+								action,
+								category: "PROJECT_RULES",
+								content: "修改内容",
+								ids,
+							};
+							let converted = false;
+							expect(() => {
+								const prepared = prepareArguments(raw);
+								converted = true;
+								Value.Convert(tool.parameters, prepared);
+							}).toThrow(
+								"Error: 'ids' must be an array of positive memory IDs.",
+							);
+							expect(converted).toBe(false);
+							expect([getMemoryById(db, 1), getMemoryById(db, 2)]).toEqual(
+								before,
+							);
+							expect(
+								db
+									.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+									.all(),
+							).toEqual(mutations);
+						}
+					}
+					for (const ids of [[], [1], [Number.MAX_SAFE_INTEGER], undefined]) {
+						const args = {
+							action: "write",
+							category: "PROJECT_RULES",
+							content: "null",
+							ids,
+						};
+						expect(prepareArguments(args)).toBe(args);
+					}
+					const missing = {
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "null",
+					};
+					expect(prepareArguments(missing)).toBe(missing);
+					const get = await tool.execute(
+						"get-valid",
+						prepareArguments({
+							action: "get",
+							category: "PROJECT_RULES",
+							content: "",
+							ids: [1],
+						}),
+						signal,
+						undefined,
+						ctx,
+					);
+					expect(get.isError).not.toBe(true);
+					const write = await tool.execute(
+						"write-null",
+						prepareArguments({ ...missing, ids: [] }),
+						signal,
+						undefined,
+						ctx,
+					);
+					expect(write.isError).not.toBe(true);
+					expect(getMemoryById(db, 3)?.content).toBe("null");
+				} finally {
+					closeQuietly(db);
+				}
+			}
+		});
+
+		it("keeps the provider schema unchanged for memory IDs", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const prepareArguments = tool.prepareArguments;
+				if (!prepareArguments) throw new Error("prepareArguments is missing");
+				const base = {
+					action: "get",
+					category: "PROJECT_RULES",
+					content: "",
+				};
+				expect(Value.Check(tool.parameters, { ...base, ids: [0] })).toBe(true);
+				expect(() => prepareArguments({ ...base, ids: [0] })).toThrow();
+				expect(Value.Check(tool.parameters, { ...base, ids: [1] })).toBe(true);
+				expect(Value.Check(tool.parameters, { ...base, ids: [] })).toBe(true);
+				expect(
+					Value.Check(tool.parameters, {
+						...base,
+						ids: [],
+						content: undefined,
+					}),
+				).toBe(false);
+				const { content: _content, ...missingContent } = base;
+				expect(
+					Value.Check(tool.parameters, { ...missingContent, ids: [] }),
+				).toBe(false);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	});
 });
