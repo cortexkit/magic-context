@@ -118,6 +118,38 @@ fn cut_before_newest(request: &MoveRequest) -> Result<Option<(u64, &str)>, Strin
         .ok_or_else(|| format!("invalid_messages: no row in the move list is entry {before}, the one before the newest"))
 }
 
+/// The message ids a fully summarized session's newest summary may end at:
+/// the transcript's newest message, or a row after it that the runner left
+/// out (OpenCode 2's conversion drops an assistant step that ended with no
+/// content), which renumbering maps to the newest entry.
+fn summary_ends(request: &MoveRequest) -> Vec<&str> {
+    let mut ends = vec![request.newest.mid.as_str()];
+    if let Some(messages) = &request.messages {
+        if let Some(last) = messages.iter().rposition(|message| message.entry.is_some()) {
+            ends.extend(
+                messages[last + 1..]
+                    .iter()
+                    .map(|message| message.mid.as_str()),
+            );
+        }
+    }
+    ends
+}
+
+fn renumbering_unsupported(source: &str) -> String {
+    format!(
+        "renumbering_unsupported: converting message numbers is built for OpenCode 1 and Pi sessions, not {source}"
+    )
+}
+
+fn not_summarized(session: &str, reaches: Option<&str>, request: &MoveRequest) -> String {
+    format!(
+        "session_not_summarized: the summaries of {session} end at {}, not at its newest message {}; run /ctx-wrapup 0 first",
+        reaches.unwrap_or("nothing"),
+        request.newest.mid
+    )
+}
+
 pub fn fence_key(harness: &str, session: &str) -> String {
     format!("mode3_move:{harness}:{session}")
 }
@@ -165,6 +197,26 @@ pub fn move_in(
             key.session
         ));
     }
+    // Checked before anything is written: renumbering and re-keying commit on
+    // their own, so a refusal after them would leave a half-moved session. A
+    // move list for a host whose numbering isn't built refuses first, by name.
+    if request.messages.is_some() && !matches!(source, "opencode" | "pi") {
+        return Err(renumbering_unsupported(source));
+    }
+    let ends = summary_ends(request);
+    let newest_end: Option<String> = db.with_connection(|conn| {
+        conn.query_row(
+            "SELECT end_message_id FROM compartments WHERE session_id = ?1 AND harness IN (?2, ?3)
+             ORDER BY sequence DESC LIMIT 1",
+            params![key.session, source, key.harness],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+    })?;
+    if !newest_end.as_deref().is_some_and(|end| ends.contains(&end)) {
+        return Err(not_summarized(&key.session, newest_end.as_deref(), request));
+    }
     let mut warnings = Vec::new();
     if let Some(messages) = &request.messages {
         // The OpenCode 1 and Pi plugins' numberings are rebuilt here; another
@@ -172,13 +224,12 @@ pub fn move_in(
         db.with_connection(|conn| {
             let numbering = match source {
                 "opencode" => crate::move_renumber::Numbering::opencode(messages, &request.newest)?,
-                "pi" => crate::move_renumber::Numbering::pi(messages, &request.newest)?
-                    .align_pi(conn, source, &key.session)?,
-                other => {
-                    return Err(format!(
-                        "renumbering_unsupported: converting message numbers is built for OpenCode 1 and Pi sessions, not {other}"
-                    ))
-                }
+                "pi" => crate::move_renumber::Numbering::pi(messages, &request.newest)?.align_pi(
+                    conn,
+                    source,
+                    &key.session,
+                )?,
+                other => return Err(renumbering_unsupported(other)),
             };
             crate::move_renumber::renumber(conn, source, &key.session, &numbering)?;
             warnings = numbering.alignment_warnings().to_vec();
@@ -212,15 +263,10 @@ pub fn move_in(
     let mut session = Session::new(&route, &setup, features, Some(Arc::clone(&db)));
     session.load_summaries();
     let reaches = session.last_summary_end();
-    if reaches.as_deref() != Some(request.newest.mid.as_str())
+    if !reaches.as_deref().is_some_and(|end| ends.contains(&end))
         || session.last_summary_ordinal() != Some(request.newest.ordinal)
     {
-        return Err(format!(
-            "session_not_summarized: the summaries of {} end at {}, not at its newest message {}; run /ctx-wrapup 0 first",
-            key.session,
-            reaches.as_deref().unwrap_or("nothing"),
-            request.newest.mid
-        ));
+        return Err(not_summarized(&key.session, reaches.as_deref(), request));
     }
     let settings = config.resolve(
         request
