@@ -404,12 +404,17 @@ function resolvePiInvocation(
 	const env = options.env ?? process.env;
 	const resolvePackageJson =
 		options.resolvePackageJson ?? defaultResolvePiPackageJson;
+	// An embedded editor is not a JavaScript CLI runtime. Use PATH Node for
+	// package scripts instead of re-launching the Electron application.
+	const scriptRuntime = isGenericRuntimeExecutable(execPath)
+		? execPath
+		: "node";
 	const running = resolvePiCliFromRunningEntry(currentScript, fs);
 	const checkedPaths = [...running.checkedPaths];
 
 	if (running.cliPath) {
 		return {
-			command: execPath,
+			command: scriptRuntime,
 			prefixArgs: [running.cliPath],
 			targetHarness:
 				running.targetHarness ??
@@ -418,7 +423,11 @@ function resolvePiInvocation(
 		};
 	}
 
-	if (!isGenericRuntimeExecutable(execPath)) {
+	if (
+		piHarnessKindFromExecutable(execPath) !== undefined ||
+		(!isGenericRuntimeExecutable(execPath) &&
+			currentScript?.startsWith(BUN_VIRTUAL_SCRIPT_PREFIX))
+	) {
 		// For a packaged single-file CLI, the executable itself parses argv.
 		return {
 			command: execPath,
@@ -436,7 +445,7 @@ function resolvePiInvocation(
 	);
 	if (bundled.cliPath) {
 		return {
-			command: execPath,
+			command: scriptRuntime,
 			prefixArgs: [bundled.cliPath],
 			targetHarness:
 				bundled.targetHarness ??

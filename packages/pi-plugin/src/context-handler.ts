@@ -321,6 +321,11 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
+import {
+	piDropBranchIds,
+	reconcilePiDropBranches,
+	trackPiDropLeaf,
+} from "./drop-branches-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
@@ -657,6 +662,7 @@ function logPiLkgRecovery(sessionId: string, message: string): void {
 }
 
 export const __test = {
+	convertLocatedPiUserEntry,
 	stripMcOwnedPiCompactionSummary,
 	readPiFallbackFingerprintHeaders,
 	setBeforePipelineForTests(fn: (() => Promise<void>) | undefined) {
@@ -1265,7 +1271,9 @@ function convertLocatedPiUserEntry(
 			).find((message) => message.id === messageId);
 			return converted ? { ...converted, ordinal: rawOrdinal } : null;
 		}
-		pendingToolStart = -1;
+		// System and other non-chat rows take an ordinal above, but only a user
+		// or assistant row consumes the buffered tool results in the raw converter.
+		if (role === "user" || role === "assistant") pendingToolStart = -1;
 	}
 	return null;
 }
@@ -4303,6 +4311,16 @@ export function registerPiContextHandler(
 		return s;
 	};
 
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "ctx_reduce") return;
+		const sessionId = resolveSessionId(ctx);
+		if (sessionId)
+			trackPiDropLeaf(
+				baseOptions.db,
+				sessionId,
+				ctx.sessionManager.getLeafId(),
+			);
+	});
 	pi.on("session_tree", (event, ctx) => {
 		if (event.oldLeafId === event.newLeafId) return;
 		const sessionId = resolveSessionId(ctx);
@@ -5630,6 +5648,7 @@ export function registerPiContextHandler(
 				);
 			}
 			const pipelineArgs: RunPipelineArgs = {
+				dropBranchEntries: branchEntries ?? undefined,
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
 				assertCurrentPass,
@@ -8353,6 +8372,7 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	dropBranchEntries?: readonly unknown[];
 	evaluateHistorianBeforeReclaim?: (
 		result: Pick<
 			RunPipelineResult,
@@ -8863,6 +8883,15 @@ function resolvePiSignedThinkingHold(args: {
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	args.assertCurrentPass?.();
 	if (args.compactionOff) return runCompactionOffPipeline(args);
+	const dropBranchEntries = args.dropBranchEntries;
+	const dropBranchIds = dropBranchEntries
+		? piDropBranchIds(dropBranchEntries)
+		: null;
+	trackPiDropLeaf(
+		args.db,
+		args.sessionId,
+		dropBranchIds ? ([...dropBranchIds].at(-1) ?? null) : null,
+	);
 	const thinkingRecovery = prepareLatestThinkingRecovery({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -9575,6 +9604,22 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
 	let publishedWorkDrainAllowed = isCacheBustingPass;
 	stripUnheldSignedTurnOnBust();
+	if (
+		reconcilePiDropBranches(
+			args.db,
+			args.sessionId,
+			dropBranchIds,
+			isCacheBustingPass && !protectedSignedPrefix,
+		)
+	) {
+		args.tagger.cleanup(args.sessionId);
+		args.tagger.initFromDb(args.sessionId, args.db);
+		nativeRemovalInputs = getNativeReplayState(
+			args.db,
+			args.sessionId,
+		).toolInputs;
+		recordFirstApplicationWireEdit(true);
+	}
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
