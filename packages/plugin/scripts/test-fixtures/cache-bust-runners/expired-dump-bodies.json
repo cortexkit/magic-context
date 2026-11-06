@@ -1,0 +1,10 @@
+{
+  "previous": {
+    "system": [{ "type": "text", "text": "synthetic system before idle gap", "cache_control": { "type": "ephemeral" } }],
+    "messages": [{ "role": "user", "content": "unchanged question" }]
+  },
+  "current": {
+    "system": [{ "type": "text", "text": "synthetic system after idle gap", "cache_control": { "type": "ephemeral" } }],
+    "messages": [{ "role": "user", "content": "unchanged question" }]
+  }
+}
