@@ -427,6 +427,7 @@ async function runValidatedHistorianPassImpl(
     },
     attempts: { primaryAttempts: number; primaryRejections: number },
 ): Promise<ValidatedHistorianPassResult> {
+    const primaryModel = toModelEntry(args.model)?.model ?? null;
     attempts.primaryAttempts += 1;
     const firstRun = await runHistorianPrompt({
         ...args,
@@ -434,8 +435,11 @@ async function runValidatedHistorianPassImpl(
         modelOverride: args.model,
         agentId: args.agentId,
     });
+    const firstRunSwitchedModel =
+        primaryModel !== null && (firstRun.producingModel ?? primaryModel) !== primaryModel;
+    if (firstRunSwitchedModel) attempts.primaryRejections += 1;
     if (!firstRun.ok || !firstRun.result) {
-        attempts.primaryRejections += 1;
+        if (!firstRunSwitchedModel) attempts.primaryRejections += 1;
         if (firstRun.refusal?.terminal)
             return {
                 ok: false,
@@ -477,7 +481,7 @@ async function runValidatedHistorianPassImpl(
         return finalResult;
     }
 
-    attempts.primaryRejections += 1;
+    if (!firstRunSwitchedModel) attempts.primaryRejections += 1;
     await args.callbacks?.onRepairRetry?.(firstValidation.error ?? "invalid compartment output");
     const repairPrompt = buildHistorianRepairPrompt(
         args.prompt,
@@ -493,8 +497,11 @@ async function runValidatedHistorianPassImpl(
         modelOverride: args.model,
         agentId: args.agentId,
     });
+    const repairRunSwitchedModel =
+        primaryModel !== null && (repairRun.producingModel ?? primaryModel) !== primaryModel;
+    if (repairRunSwitchedModel) attempts.primaryRejections += 1;
     if (!repairRun.ok || !repairRun.result) {
-        attempts.primaryRejections += 1;
+        if (!repairRunSwitchedModel) attempts.primaryRejections += 1;
         if (repairRun.refusal?.terminal)
             return {
                 ok: false,
@@ -538,7 +545,7 @@ async function runValidatedHistorianPassImpl(
         return finalResult;
     }
 
-    attempts.primaryRejections += 1;
+    if (!repairRunSwitchedModel) attempts.primaryRejections += 1;
     return runFallbackHistorianPass({
         ...args,
         prompt: repairPrompt,
