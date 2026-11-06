@@ -129,7 +129,7 @@ const ParamsShape = {
 				"Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
 		},
 	),
-	ids: Type.Array(Type.Integer({ minimum: 1 }), {
+	ids: Type.Array(Type.Number({ minimum: 1 }), {
 		description:
 			"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
 	}),
@@ -184,16 +184,12 @@ const DreamerParamsSchema = Type.Object(
 
 type CtxMemoryParams = Static<typeof DreamerParamsSchema>;
 
-/** pi validates with @earendil-works/pi-schema, which coerces a loosely typed
- *  required string or array of numbers before validation: raw null becomes the
- *  string "null" for content and [null] -> [0] for ids. This runs before
- *  validation, so those raw shapes are rejected here and the model gets an
- *  error result instead of a memory written with a "null" body or id 0. */
+/** 在宿主转换参数前拒绝非字符串正文及非数组编号，避免转换改变原始含义。 */
 function rejectInvalidMemoryArguments(args: unknown): void {
 	if (args === null || typeof args !== "object") return;
 	const record = args as Record<string, unknown>;
-	if (record.content === null) {
-		throw new Error("Error: 'content' must be a string, not null.");
+	if (record.content !== undefined && typeof record.content !== "string") {
+		throw new Error("Error: 'content' must be a string.");
 	}
 	if (record.ids !== undefined && !Array.isArray(record.ids)) {
 		throw new Error("Error: 'ids' must be an array of positive memory IDs.");

@@ -2037,7 +2037,7 @@ describe("createCtxMemoryTool", () => {
 						content: null,
 						ids: [],
 					}),
-				).toThrow("Error: 'content' must be a string, not null.");
+				).toThrow("Error: 'content' must be a string.");
 			} finally {
 				closeQuietly(db);
 			}
@@ -2109,6 +2109,116 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
+		it("正文拒绝非字符串，缺失及字符串保持原样", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				for (const content of [null, 1, false, [], {}]) {
+					expect(() => tool.prepareArguments?.({ content })).toThrow(
+						"Error: 'content' must be a string.",
+					);
+				}
+				for (const args of [
+					{},
+					{ content: undefined },
+					{ content: "null" },
+					{ content: "正文" },
+				]) {
+					expect(tool.prepareArguments?.(args)).toBe(args);
+				}
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("小数编号不能修改已有记忆", async () => {
+			for (const allowDreamerActions of [false, true]) {
+				const db = createTestDb();
+				try {
+					const tool = createCtxMemoryTool({
+						db,
+						memoryEnabled: true,
+						embeddingEnabled: false,
+						allowDreamerActions,
+					});
+					const ctx = fakeContext("ses-fraction-memory") as never;
+					const signal = new AbortController().signal;
+					for (const content of ["原有记忆一", "原有记忆二"]) {
+						const result = await tool.execute(
+							"seed",
+							{ action: "write", category: "PROJECT_RULES", content, ids: [] },
+							signal,
+							undefined,
+							ctx,
+						);
+						expect(result.isError).not.toBe(true);
+					}
+					const before = [getMemoryById(db, 1), getMemoryById(db, 2)];
+					expect(before[0]).not.toBeNull();
+					const mutations = db
+						.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+						.all();
+					for (const action of ["get", "update", "archive", "merge"] as const) {
+						for (const id of [1.5, "1.5"]) {
+							const raw = {
+								action,
+								category: "PROJECT_RULES",
+								content: "修改内容",
+								ids: action === "merge" ? [id, 2] : [id],
+							};
+							const prepared = tool.prepareArguments?.(raw) ?? raw;
+							const converted = (
+								typeof id === "number"
+									? Value.Convert(tool.parameters, prepared)
+									: prepared
+							) as {
+								action: typeof action;
+								category: string;
+								content: string;
+								ids: number[];
+							};
+							expect(converted.ids[0]).toBe(id);
+							expect(Value.Check(tool.parameters, converted)).toBe(
+								typeof id === "number",
+							);
+							const result = await tool.execute(
+								"fraction",
+								converted,
+								signal,
+								undefined,
+								ctx,
+							);
+							expect(result.isError).toBe(true);
+							expect(result.content[0]?.text).toContain("integer");
+							expect([getMemoryById(db, 1), getMemoryById(db, 2)]).toEqual(
+								before,
+							);
+							expect(
+								db
+									.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+									.all(),
+							).toEqual(mutations);
+						}
+					}
+					const write = await tool.execute(
+						"write-filler",
+						{
+							action: "write",
+							category: "PROJECT_RULES",
+							content: "无关编号",
+							ids: [1.5],
+						},
+						signal,
+						undefined,
+						ctx,
+					);
+					expect(write.isError).not.toBe(true);
+				} finally {
+					closeQuietly(db);
+				}
+			}
+		});
+
 		it("rejects memory id 0 at the provider-schema level", () => {
 			const db = createTestDb();
 			try {
@@ -2120,6 +2230,18 @@ describe("createCtxMemoryTool", () => {
 				};
 				expect(Value.Check(tool.parameters, { ...base, ids: [0] })).toBe(false);
 				expect(Value.Check(tool.parameters, { ...base, ids: [1] })).toBe(true);
+				expect(Value.Check(tool.parameters, { ...base, ids: [] })).toBe(true);
+				expect(
+					Value.Check(tool.parameters, {
+						...base,
+						ids: [],
+						content: undefined,
+					}),
+				).toBe(false);
+				const { content: _content, ...missingContent } = base;
+				expect(
+					Value.Check(tool.parameters, { ...missingContent, ids: [] }),
+				).toBe(false);
 			} finally {
 				closeQuietly(db);
 			}

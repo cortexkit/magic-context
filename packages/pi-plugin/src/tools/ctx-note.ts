@@ -95,7 +95,7 @@ const ParamsSchema = Type.Object(
 			}),
 		),
 		note_ids: Type.Array(
-			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+			Type.Number({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 			{
 				maxItems: 50,
 				description:
@@ -127,15 +127,12 @@ const ParamsSchema = Type.Object(
 
 type CtxNoteParams = Static<typeof ParamsSchema>;
 
-/** pi validates with @earendil-works/pi-schema, which coerces a loosely typed
- *  required string before validation: raw null becomes the string "null" and
- *  would be stored as the note body. This runs before validation, so a raw
- *  null is rejected here and the model gets an error result instead. */
-function rejectNullContent(args: unknown): void {
+/** 在宿主转换参数前拒绝非字符串正文，避免转换改变原始含义。 */
+function rejectInvalidContent(args: unknown): void {
 	if (args === null || typeof args !== "object") return;
 	const record = args as Record<string, unknown>;
-	if (record.content === null) {
-		throw new Error("Error: 'content' must be a string, not null.");
+	if (record.content !== undefined && typeof record.content !== "string") {
+		throw new Error("Error: 'content' must be a string.");
 	}
 }
 
@@ -288,7 +285,7 @@ export function createCtxNoteTool(
 			: withoutSmartNoteText(CTX_NOTE_DESCRIPTION),
 		parameters,
 		prepareArguments(args) {
-			rejectNullContent(args);
+			rejectInvalidContent(args);
 			return args as Static<typeof ParamsSchema>;
 		},
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {
