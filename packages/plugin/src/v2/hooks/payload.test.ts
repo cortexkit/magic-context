@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it, spyOn } from "bun:test";
-import { Message } from "@opencode/ai/schema/messages";
+import { Message, ToolResultValue } from "@opencode/ai/schema/messages";
 import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
@@ -243,10 +243,12 @@ describe("adaptPayload", () => {
             state: { status: "error", output: JSON.stringify(failure) },
         });
         payload.commit();
-        expect(callsAndResults(context.messages).results[0]).toMatchObject({
-            resultType: "error",
-            result: failure,
-        });
+        const restored = callsAndResults(context.messages).results[0];
+        // A restored failed call must already be in the host's finished shape;
+        // OpenCode 2.2 validates the request against it and refuses otherwise.
+        expect(restored.result).toEqual({ type: "error", value: failure });
+        expect("resultType" in restored).toBe(false);
+        expect(ToolResultValue.is(restored.result)).toBe(true);
     });
 
     it("keeps error drop marker bytes and call pairing", () => {
