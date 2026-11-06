@@ -191,6 +191,9 @@ function rejectInvalidMemoryArguments(args: unknown): void {
 	if (record.content !== undefined && typeof record.content !== "string") {
 		throw new Error("Error: 'content' must be a string.");
 	}
+	if (record.reason !== undefined && typeof record.reason !== "string") {
+		throw new Error("Error: 'reason' must be a string.");
+	}
 	if (
 		record.ids !== undefined &&
 		(!Array.isArray(record.ids) ||

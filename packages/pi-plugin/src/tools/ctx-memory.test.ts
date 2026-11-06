@@ -2131,6 +2131,111 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
+		it("rejects invalid raw reasons before conversion without archiving", async () => {
+			for (const allowDreamerActions of [false, true]) {
+				const db = createTestDb();
+				try {
+					const tool = createCtxMemoryTool({
+						db,
+						memoryEnabled: true,
+						embeddingEnabled: false,
+						allowDreamerActions,
+					});
+					const prepareArguments = tool.prepareArguments;
+					if (!prepareArguments) throw new Error("prepareArguments is missing");
+					const ctx = fakeContext("ses-reason-memory");
+					const projectPath = resolveProjectIdentity(ctx.cwd);
+					const successor = insertMemory(db, {
+						projectPath,
+						category: "PROJECT_RULES",
+						content: "A surviving project fact.",
+					});
+					const target = insertMemory(db, {
+						projectPath,
+						category: "PROJECT_RULES",
+						content: "A redundant project fact.",
+					});
+					db.prepare("UPDATE memories SET metadata_json = ? WHERE id = ?").run(
+						JSON.stringify({ archive_reason: "existing reason" }),
+						target.id,
+					);
+					const base = {
+						action: "archive" as const,
+						category: "PROJECT_RULES" as const,
+						content: "",
+						ids: [target.id],
+						...(allowDreamerActions ? { superseded_by: successor.id } : {}),
+					};
+					const before = db
+						.prepare("SELECT * FROM memories WHERE id = ?")
+						.get(target.id);
+					const mutations = db
+						.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
+						.all();
+					let converted = false;
+					const invoke = async (raw: unknown) => {
+						const prepared = prepareArguments(raw);
+						converted = true;
+						const args = Value.Convert(
+							tool.parameters,
+							prepared,
+						) as typeof prepared;
+						return tool.execute(
+							"archive-reason",
+							args,
+							new AbortController().signal,
+							undefined,
+							ctx as never,
+						);
+					};
+					for (const reason of [null, 42, false, [], {}]) {
+						await expect(invoke({ ...base, reason })).rejects.toThrow(
+							"Error: 'reason' must be a string.",
+						);
+						expect(converted).toBe(false);
+						expect(getMemoryById(db, target.id)?.status).toBe("active");
+						expect(
+							db.prepare("SELECT * FROM memories WHERE id = ?").get(target.id),
+						).toEqual(before);
+						expect(
+							db.prepare("SELECT * FROM memory_mutation_log ORDER BY id").all(),
+						).toEqual(mutations);
+					}
+					const validReasons: Array<{ reason?: string }> = [
+						{},
+						{ reason: undefined },
+						{ reason: "" },
+						{ reason: "example" },
+						{ reason: "null" },
+					];
+					for (const [index, extra] of validReasons.entries()) {
+						const memory = insertMemory(db, {
+							projectPath,
+							category: "PROJECT_RULES",
+							content: `A redundant fact number ${index}.`,
+						});
+						const args = { ...base, ids: [memory.id], ...extra };
+						expect(prepareArguments(args)).toBe(args);
+						const result = await invoke(args);
+						expect(result.content[0]?.text).toContain("Archived memory");
+						expect(getMemoryById(db, memory.id)?.status).toBe("archived");
+						const row = db
+							.prepare("SELECT metadata_json FROM memories WHERE id = ?")
+							.get(memory.id) as { metadata_json: string | null };
+						const metadata = row.metadata_json
+							? JSON.parse(row.metadata_json)
+							: {};
+						expect(metadata.archive_reason).toBe(extra.reason || undefined);
+						expect(
+							db.prepare("SELECT * FROM memory_mutation_log ORDER BY id").all(),
+						).toHaveLength(mutations.length + index + 1);
+					}
+				} finally {
+					closeQuietly(db);
+				}
+			}
+		});
+
 		it("rejects invalid raw IDs before conversion without changing memories or mutations", async () => {
 			for (const allowDreamerActions of [false, true]) {
 				const db = createTestDb();
