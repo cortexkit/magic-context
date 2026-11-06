@@ -22,7 +22,7 @@ import {
     type PreparedConfigUpdate,
     preparePluginUpdate,
 } from "./checker";
-import { CACHE_DIR, NPM_FETCH_TIMEOUT, NPM_REGISTRY_URL, PACKAGE_NAME } from "./constants";
+import { CACHE_DIR, NPM_FETCH_TIMEOUT, PACKAGE_NAME, resolveNpmRegistryUrl } from "./constants";
 import { compareSemverCore } from "./semver";
 import type { AutoUpdateCheckerOptions } from "./types";
 
@@ -82,7 +82,7 @@ export function createAutoUpdateCheckerHook(
         enabled = true,
         showStartupToast = true,
         autoUpdate = true,
-        npmRegistryUrl = NPM_REGISTRY_URL,
+        npmRegistryUrl = resolveNpmRegistryUrl(process.env, { packageName: PACKAGE_NAME }),
         fetchTimeoutMs = NPM_FETCH_TIMEOUT,
         signal = new AbortController().signal,
         storageDir = null,
