@@ -1,6 +1,7 @@
 import {
     type CompactionMarkerReplacementOutcome,
     type CompactionMarkerState,
+    compareOpenCodeMessagesByCanonicalOrder,
     findBoundaryUserMessage,
     type InjectCompactionMarkerArgs,
     inspectCompactionMarkerPublication,
@@ -161,6 +162,22 @@ export function publishRecoverableCompactionMarker(
                 cut = "definitely-no-cut";
                 const host = inspection.marker;
                 if (inspection.markerAtTarget) {
+                    // Adoption leaves every other pair intact. A recorded cut beyond
+                    // the rebuilding boundary would still hide uncovered history.
+                    const hostOrder = host
+                        ? compareOpenCodeMessagesByCanonicalOrder(
+                              sessionId,
+                              host.boundaryMessageId,
+                              boundary.id,
+                          )
+                        : 0;
+                    if (hostOrder === null || hostOrder > 0) {
+                        reason = "ahead-of-target-left-alone";
+                        return {
+                            kind: cut,
+                            error: new Error("a later recorded host cut prevents target adoption"),
+                        };
+                    }
                     // The host cut already matches the validated rebuilding boundary.
                     // Adopt its actual row IDs. The validated rebuild supplies the
                     // current compartment end; no original target is inferred.
