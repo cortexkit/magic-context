@@ -3723,9 +3723,9 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
     assert_clean(&runner);
     let host = runner.host();
     // The model sees the summaries and the memory, and of the old messages
-    // only the newest: the cut stops before it, as after any cut. It sits
-    // before the runner's marker, so it carries no number, and numbers
-    // continue above 42 with the first new message.
+    // only the newest: the cut stops before it, as after any cut. The
+    // runner numbers from the cut, so that message takes 43, the first
+    // number above any the model has seen, and the new ones follow.
     let (m0, _) = head_texts(host);
     assert!(
         m0.contains("Set up the parser") && m0.contains("Fixed the crash"),
@@ -3742,7 +3742,9 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         !rendered.contains("Old message 5") && rendered.contains("Old message 6"),
         "{rendered}"
     );
-    let first = seen(host, 43).unwrap_or_default();
+    let kept = seen(host, 43).unwrap_or_default();
+    assert!(kept.contains("Old message 6"), "{kept}");
+    let first = seen(host, 44).unwrap_or_default();
     assert!(first.contains("Where were we?"), "{first}");
     // No rebuild: the first request writes the cache once with the moved
     // view, and the next one reads all of it.

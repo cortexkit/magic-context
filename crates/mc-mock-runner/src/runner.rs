@@ -616,8 +616,30 @@ impl<P: Provider> Runner<P> {
         let mut transcript = Transcript::new(config.tag_checkpoint);
         let mut applied = None;
         if let Some(moved) = &config.moved_in {
+            // As THALAMUS's runner does, a moved session's numbering starts at
+            // the moved view's cut: messages through it stay unnumbered, and
+            // the parts of any moved message after it are numbered from the
+            // checkpoint up, before the first new message.
+            let cut = moved.view.edits.iter().find_map(|edit| match &edit.op {
+                EditOp::Cut { through } => Some(through.clone()),
+                _ => None,
+            });
+            let mut past_cut = cut.is_none();
             for (role, text) in &moved.messages {
-                transcript.append_unnumbered(role.clone(), text, config.start_ms);
+                if past_cut {
+                    let body = PartBody::Text { text: text.clone() };
+                    transcript.append(
+                        role.clone(),
+                        None,
+                        vec![(Seal::None, body)],
+                        None,
+                        None,
+                        config.start_ms,
+                    );
+                } else {
+                    let entry = transcript.append_unnumbered(role.clone(), text, config.start_ms);
+                    past_cut = Some(&entry.mid) == cut.as_ref();
+                }
             }
             // The same rule `check` applies to every later view: broca refuses
             // to install a moved view that cuts through the newest message.
