@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,7 @@ const original = {
     npm_config_registry: process.env.npm_config_registry,
     NPM_CONFIG_REGISTRY: process.env.NPM_CONFIG_REGISTRY,
     NPM_CONFIG_USERCONFIG: process.env.NPM_CONFIG_USERCONFIG,
+    npm_config_userconfig: process.env.npm_config_userconfig,
 };
 let userConfigDir = "";
 const servers: ReturnType<typeof Bun.serve>[] = [];
@@ -19,7 +20,8 @@ const servers: ReturnType<typeof Bun.serve>[] = [];
 beforeEach(() => {
     delete process.env.npm_config_registry;
     delete process.env.NPM_CONFIG_REGISTRY;
-    // Isolate from the developer's own ~/.npmrc.
+    // Isolate from the developer's own ~/.npmrc. The lowercase spelling wins.
+    delete process.env.npm_config_userconfig;
     userConfigDir = mkdtempSync(join(tmpdir(), "mc-registry-routing-"));
     process.env.NPM_CONFIG_USERCONFIG = join(userConfigDir, ".npmrc");
 });
@@ -75,19 +77,6 @@ describe("update-check registry routing", () => {
         expect(await getLatestVersion("latest", { timeoutMs: 1000 })).toBe("0.49.35");
         expect(fromFile.requests).toEqual([]);
         expect(fromEnv.requests).toHaveLength(1);
-    });
-
-    test("reads the given project's .npmrc rather than the process directory's", async () => {
-        const { getLatestVersion } = await freshChecker();
-        const mirror = registry();
-        const project = join(userConfigDir, "served-project");
-        mkdirSync(project);
-        writeFileSync(join(project, "package.json"), "{}");
-        writeFileSync(join(project, ".npmrc"), `registry=${mirror.url}\n`);
-        expect(await getLatestVersion("latest", { directory: project, timeoutMs: 1000 })).toBe(
-            "0.49.35",
-        );
-        expect(mirror.requests).toEqual(["/npm/%40cortexkit/opencode-magic-context"]);
     });
 
     test("preserves an explicit per-check registry override", async () => {

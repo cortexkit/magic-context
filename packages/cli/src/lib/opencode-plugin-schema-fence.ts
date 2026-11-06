@@ -216,19 +216,15 @@ export function selectRegistryTarballUrl(tarball: string, registryUrl: string): 
     const index = pathname.lastIndexOf(marker);
     if (index === -1) return null;
     const file = pathname.slice(index + marker.length);
-    if (!/^[\w.-]+\.tgz$/.test(file)) return null;
+    if (!/^[\w.+-]+\.tgz$/.test(file)) return null;
     return new URL(`${OPENCODE_PLUGIN_NAME}/-/${file}`, registry);
 }
 
 async function resolveFenceFromNpmTarball(
     requestedVersion: string,
-    directory: string,
     fetchImpl: typeof globalThis.fetch,
 ): Promise<ResolvedPluginFence | null> {
-    const registryUrl = resolveNpmRegistryUrl(process.env, {
-        cwd: directory,
-        packageName: OPENCODE_PLUGIN_NAME,
-    });
+    const registryUrl = resolveNpmRegistryUrl(process.env, { packageName: OPENCODE_PLUGIN_NAME });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), NPM_TIMEOUT_MS);
     try {
@@ -268,7 +264,6 @@ async function resolveFenceFromNpmTarball(
 async function resolvePluginFence(
     specifier: string,
     requestedVersion: string,
-    directory: string,
     deps: Required<Pick<PinnedPluginSchemaFenceDeps, "fetch" | "getOpenCodePluginCacheDir">>,
 ): Promise<ResolvedPluginFence | null> {
     const installed = findInstalledPluginPackage(
@@ -282,7 +277,7 @@ async function resolvePluginFence(
             return { version: installed.version, supportedVersion, source: "installed" };
         }
     }
-    return resolveFenceFromNpmTarball(requestedVersion, directory, deps.fetch);
+    return resolveFenceFromNpmTarball(requestedVersion, deps.fetch);
 }
 
 /**
@@ -309,12 +304,7 @@ export async function inspectPinnedOpenCodePluginSchemaFences(
 
         let resolved = resolvedBySpecifier.get(entry.entry);
         if (!resolved) {
-            resolved = resolvePluginFence(
-                entry.entry,
-                entry.pinnedVersion,
-                options.directory,
-                resolutionDeps,
-            );
+            resolved = resolvePluginFence(entry.entry, entry.pinnedVersion, resolutionDeps);
             resolvedBySpecifier.set(entry.entry, resolved);
         }
         const fence = await resolved;

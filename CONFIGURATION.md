@@ -305,18 +305,19 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. By default, TypeScript mode creates/re-tightens 0700 directories and 0600 files. `false` delegates TypeScript-mode permissions to the operator; Rust transform mode always keeps the shared data directory owner-only (0700), regardless of this setting. |
 
-Registry-backed metadata checks select a registry the way npm does. They
-read `npm_config_registry` (or `NPM_CONFIG_REGISTRY`), then the project
-`.npmrc` (in the nearest directory with a `package.json` or `node_modules`),
-then the user `.npmrc` (`NPM_CONFIG_USERCONFIG`, or `~/.npmrc`), and otherwise
-use public npm. A `@cortexkit:registry` entry takes priority over the default
-`registry`, as it does in npm. `${VAR}` references are expanded in the user
-`.npmrc` only. A project `.npmrc` value that uses one is ignored, because the
-check runs automatically in any opened repository. Blank values are ignored. An explicit per-check registry override takes precedence.
+Registry-backed metadata checks read `npm_config_registry` (or
+`NPM_CONFIG_REGISTRY`), then the user `.npmrc` (`npm_config_userconfig` or
+`NPM_CONFIG_USERCONFIG`, otherwise `~/.npmrc`), and otherwise use public npm.
+Within each source, a `@cortexkit:registry` entry (or the
+`npm_config_@cortexkit:registry` variable) takes priority over the default
+`registry`. `${VAR}` references in the user `.npmrc` are expanded, and inline
+comments are removed as npm does. A project `.npmrc` and npm's global config
+are not read, so a cloned repository can't choose where the check goes. Blank
+values are ignored. An explicit per-check registry override takes precedence.
 The check does not retry public npm if the selected registry fails. Tarball
 downloads stay on the selected registry, and HTTP is used only when that
-registry is HTTP. These checks read only the registry keys. They do not use
-npmrc authentication, and the host plugin installer keeps its own npm
+registry is HTTP. Only the registry keys are read. The checks don't use npmrc
+authentication, and the host plugin installer keeps its own npm
 configuration.
 
 `protected_tags` is deprecated and ignored. Remove it and use `protected_tokens` when an explicit absolute floor is needed.

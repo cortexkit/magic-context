@@ -507,8 +507,6 @@ export async function getLatestVersion(
     channel = "latest",
     options: {
         registryUrl?: string;
-        /** Project directory whose .npmrc applies. Defaults to the process cwd. */
-        directory?: string;
         timeoutMs?: number;
         signal?: AbortSignal;
         fetch?: typeof fetch;
@@ -524,10 +522,7 @@ export async function getLatestVersion(
         const response = await (options.fetch ?? fetch)(
             buildRegistryUrl(
                 options.registryUrl ??
-                    resolveNpmRegistryUrl(process.env, {
-                        cwd: options.directory,
-                        packageName: PACKAGE_NAME,
-                    }),
+                    resolveNpmRegistryUrl(process.env, { packageName: PACKAGE_NAME }),
             ),
             {
                 signal: controller.signal,

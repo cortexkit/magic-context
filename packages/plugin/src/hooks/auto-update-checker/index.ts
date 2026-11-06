@@ -82,10 +82,7 @@ export function createAutoUpdateCheckerHook(
         enabled = true,
         showStartupToast = true,
         autoUpdate = true,
-        npmRegistryUrl = resolveNpmRegistryUrl(process.env, {
-            cwd: ctx.directory,
-            packageName: PACKAGE_NAME,
-        }),
+        npmRegistryUrl = resolveNpmRegistryUrl(process.env, { packageName: PACKAGE_NAME }),
         fetchTimeoutMs = NPM_FETCH_TIMEOUT,
         signal = new AbortController().signal,
         storageDir = null,

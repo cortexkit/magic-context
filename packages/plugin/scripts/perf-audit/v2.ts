@@ -116,7 +116,7 @@ try {
         reads = 0;
         await measure(`V2-3 ${size} events`, 1, async () => {
             await storage.set("version-check-at", Date.now());
-            const checks = startUpdateChecks({ storage, location: { directory: process.cwd() }, event: { subscribe: async function* () { for (let i = 0; i < size; i++) yield {}; } } }, async () => null);
+            const checks = startUpdateChecks({ storage, event: { subscribe: async function* () { for (let i = 0; i < size; i++) yield {}; } } }, async () => null);
             await checks.done;
         });
         console.log(`V2-3 storage reads=${reads}`);

@@ -49,13 +49,12 @@ export function formatUpdateAvailableMessage(latest: string, current: string): s
  * v1 checker's singular-plugin configuration writer against plural plugins.
  */
 export function startUpdateChecks(
-    context: Pick<V2Context, "event" | "storage" | "location">,
+    context: Pick<V2Context, "event" | "storage">,
     check: (signal: AbortSignal) => Promise<string | null> = (signal) => {
         // A source checkout is a local development installation, not a registry install.
         return packageInfo().development
             ? Promise.resolve(null)
-            : // The service can serve several projects; this location's .npmrc applies.
-              getLatestVersion("latest", { directory: context.location.directory, signal });
+            : getLatestVersion("latest", { signal });
     },
 ) {
     const controller = new AbortController();

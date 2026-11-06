@@ -1,13 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 export const NPM_REGISTRY_URL = "https://registry.npmjs.org";
 
 export interface NpmRegistryOptions {
-    /** Directory used to find the project .npmrc. Defaults to the process cwd. */
-    cwd?: string;
-    /** Package name. A scoped package honors `@scope:registry` as npm does. */
+    /** Package name. A scoped package honors `@scope:registry`. */
     packageName?: string;
     /** Test seam: returns file contents, or null when the file is unreadable. */
     readFile?: (path: string) => string | null;
@@ -23,30 +21,20 @@ function readTextFile(path: string): string | null {
     }
 }
 
-/** npm's user config: NPM_CONFIG_USERCONFIG, else ~/.npmrc. */
-export function resolveUserNpmrcPath(env: NodeJS.ProcessEnv = process.env): string {
-    const custom = env.npm_config_userconfig?.trim() || env.NPM_CONFIG_USERCONFIG?.trim();
-    if (custom) return custom;
-    return join(env.HOME?.trim() || homedir(), ".npmrc");
+function firstSet(...values: Array<string | undefined>): string | undefined {
+    for (const value of values) {
+        const trimmed = value?.trim();
+        if (trimmed) return trimmed;
+    }
+    return undefined;
 }
 
-/**
- * npm's project config lives in its local prefix: the nearest ancestor with a
- * package.json or node_modules, or the starting directory when there is none.
- */
-export function resolveProjectNpmrcPath(cwd: string): string {
-    let directory = cwd;
-    while (true) {
-        if (
-            existsSync(join(directory, "package.json")) ||
-            existsSync(join(directory, "node_modules"))
-        ) {
-            return join(directory, ".npmrc");
-        }
-        const parent = dirname(directory);
-        if (parent === directory) return join(cwd, ".npmrc");
-        directory = parent;
-    }
+/** npm's user config: npm_config_userconfig or NPM_CONFIG_USERCONFIG, else ~/.npmrc. */
+export function resolveUserNpmrcPath(env: NodeJS.ProcessEnv = process.env): string {
+    return (
+        firstSet(env.npm_config_userconfig, env.NPM_CONFIG_USERCONFIG) ??
+        join(env.HOME?.trim() || homedir(), ".npmrc")
+    );
 }
 
 /** Replace ${VAR} as npm does. An unset variable makes the value unusable. */
@@ -64,23 +52,45 @@ function expandEnv(value: string, env: NodeJS.ProcessEnv): string | null {
     return missing ? null : expanded;
 }
 
-function unquote(value: string): string {
+/**
+ * Decode an ini value as npm's `ini` parser does: a fully quoted value is
+ * taken literally, otherwise an unescaped `;` or `#` starts a comment and
+ * `\;`, `\#` and `\\` are escapes.
+ */
+function decodeIniValue(value: string): string {
     if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
+        if (value[0] === '"') {
+            try {
+                return JSON.parse(value) as string;
+            } catch {}
+        }
         return value.slice(1, -1);
     }
-    return value;
+    let decoded = "";
+    let escaping = false;
+    for (const char of value) {
+        if (escaping) {
+            decoded += "\\;#".includes(char) ? char : `\\${char}`;
+            escaping = false;
+        } else if (char === ";" || char === "#") {
+            break;
+        } else if (char === "\\") {
+            escaping = true;
+        } else {
+            decoded += char;
+        }
+    }
+    return (escaping ? `${decoded}\\` : decoded).trim();
 }
 
 /**
  * Read only the registry keys from an .npmrc. Other keys, including auth
- * tokens, are never retained or reported. `env` is null for a file the user
- * does not control: a repository's .npmrc could otherwise put an environment
- * secret into a registry URL that the update check then requests.
+ * tokens, are never retained or reported.
  */
 function readRegistryKeys(
     text: string | null,
     scope: string | null,
-    env: NodeJS.ProcessEnv | null,
+    env: NodeJS.ProcessEnv,
 ): RegistryKeys {
     const keys: RegistryKeys = {};
     if (text === null) return keys;
@@ -93,8 +103,7 @@ function readRegistryKeys(
         const isRegistry = key === "registry";
         const isScoped = scope !== null && key === `${scope}:registry`;
         if (!isRegistry && !isScoped) continue;
-        const raw = unquote(line.slice(separator + 1).trim());
-        const value = (env ? expandEnv(raw, env) : raw.includes("${") ? null : raw)?.trim();
+        const value = expandEnv(decodeIniValue(line.slice(separator + 1).trim()), env)?.trim();
         if (!value) continue;
         if (isRegistry) keys.registry = value;
         else keys.scoped = value;
@@ -109,13 +118,12 @@ function packageScope(packageName: string | undefined): string | null {
 }
 
 /**
- * Select the registry npm would use, without running npm: the environment,
- * then the project .npmrc, then the user .npmrc, then public npm. As in npm,
- * each key resolves through those layers and a scoped registry for the
- * package's scope takes priority over the default registry. Unlike npm, the
- * project file's `${VAR}` references are not expanded: the check runs
- * automatically in any opened repository, so a value that needs expansion is
- * ignored there.
+ * Select the registry for a metadata check from the environment, then the
+ * user's .npmrc, then public npm. Within each source, a registry for the
+ * package's scope takes priority over the default registry. A repository's
+ * project .npmrc and npm's global config are deliberately not read: the
+ * check runs automatically, and a cloned repository must not choose where it
+ * goes.
  */
 export function resolveNpmRegistryUrl(
     env: NodeJS.ProcessEnv = process.env,
@@ -123,15 +131,23 @@ export function resolveNpmRegistryUrl(
 ): string {
     const read = options.readFile ?? readTextFile;
     const scope = packageScope(options.packageName);
-    const layers: RegistryKeys[] = [
-        {
-            registry:
-                env.npm_config_registry?.trim() || env.NPM_CONFIG_REGISTRY?.trim() || undefined,
-        },
-        readRegistryKeys(read(resolveProjectNpmrcPath(options.cwd ?? process.cwd())), scope, null),
-        readRegistryKeys(read(resolveUserNpmrcPath(env)), scope, env),
+    const sources: Array<() => RegistryKeys> = [
+        () => ({
+            registry: firstSet(env.npm_config_registry, env.NPM_CONFIG_REGISTRY),
+            scoped:
+                scope === null
+                    ? undefined
+                    : firstSet(
+                          env[`npm_config_${scope}:registry`],
+                          env[`NPM_CONFIG_${scope}:registry`],
+                      ),
+        }),
+        () => readRegistryKeys(read(resolveUserNpmrcPath(env)), scope, env),
     ];
-    const scoped = layers.find((layer) => layer.scoped)?.scoped;
-    const registry = layers.find((layer) => layer.registry)?.registry;
-    return (scoped || registry || NPM_REGISTRY_URL).replace(/\/+$/, "");
+    for (const source of sources) {
+        const keys = source();
+        const selected = keys.scoped || keys.registry;
+        if (selected) return selected.replace(/\/+$/, "");
+    }
+    return NPM_REGISTRY_URL;
 }

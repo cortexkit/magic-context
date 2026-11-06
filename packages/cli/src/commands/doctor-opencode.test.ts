@@ -990,6 +990,8 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
         process.env.XDG_CACHE_HOME = root;
         const previousRegistry = process.env.npm_config_registry;
         const previousUserConfig = process.env.NPM_CONFIG_USERCONFIG;
+        const previousLowerUserConfig = process.env.npm_config_userconfig;
+        delete process.env.npm_config_userconfig;
         process.env.npm_config_registry = "https://mirror.example/npm/";
         process.env.NPM_CONFIG_USERCONFIG = join(root, "absent.npmrc");
         const requested: string[] = [];
@@ -1025,6 +1027,8 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
             else process.env.npm_config_registry = previousRegistry;
             if (previousUserConfig === undefined) delete process.env.NPM_CONFIG_USERCONFIG;
             else process.env.NPM_CONFIG_USERCONFIG = previousUserConfig;
+            if (previousLowerUserConfig !== undefined)
+                process.env.npm_config_userconfig = previousLowerUserConfig;
         }
     });
 
@@ -1038,6 +1042,8 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
         process.env.XDG_CACHE_HOME = root;
         const previousRegistry = process.env.npm_config_registry;
         const previousUserConfig = process.env.NPM_CONFIG_USERCONFIG;
+        const previousLowerUserConfig = process.env.npm_config_userconfig;
+        delete process.env.npm_config_userconfig;
         process.env.npm_config_registry = registry;
         process.env.NPM_CONFIG_USERCONFIG = join(root, "absent.npmrc");
         const requested: string[] = [];
@@ -1060,6 +1066,8 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
             else process.env.npm_config_registry = previousRegistry;
             if (previousUserConfig === undefined) delete process.env.NPM_CONFIG_USERCONFIG;
             else process.env.NPM_CONFIG_USERCONFIG = previousUserConfig;
+            if (previousLowerUserConfig !== undefined)
+                process.env.npm_config_userconfig = previousLowerUserConfig;
         }
     }
 
@@ -1082,6 +1090,17 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
         );
         expect(result.requested[1]).toBe(
             "https://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        );
+        expect(result.status).toBe("fail");
+    });
+
+    it("moves a tarball for a SemVer build-metadata version onto the selected registry", async () => {
+        const result = await inspectThroughRegistry(
+            "https://mirror.example/npm/",
+            "https://registry.npmjs.org/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1+build.4.tgz",
+        );
+        expect(result.requested[1]).toBe(
+            "https://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1+build.4.tgz",
         );
         expect(result.status).toBe("fail");
     });
