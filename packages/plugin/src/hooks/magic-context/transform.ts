@@ -496,6 +496,7 @@ export interface TransformDeps {
             updatedAt: number;
             lastResponseTime?: number;
             hasUsageTokens?: boolean;
+            sourceMessageId?: string;
         }
     >;
     db: ContextDatabase;
@@ -1928,7 +1929,10 @@ export function createTransform(deps: TransformDeps) {
             newTailTokens: () => {
                 let tokens = 0;
                 for (const message of entryOrderForThinkingFit.slice(
-                    unmeasuredTailStart(entryOrderForThinkingFit),
+                    unmeasuredTailStart(
+                        entryOrderForThinkingFit,
+                        deps.contextUsageMap.get(sessionId)?.sourceMessageId,
+                    ),
                 )) {
                     const estimate = estimateMessageTokens(message, true);
                     tokens += estimate.conversation + estimate.toolCall;

@@ -21,6 +21,7 @@ import {
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
 import * as eventResolvers from "./event-resolvers";
+import { estimateMessageTokens } from "./final-wire-token-estimate";
 import * as hostServedRows from "./host-served-rows";
 import * as injection from "./inject-compartments";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -70,7 +71,10 @@ function session(
     recordToolDefinition(model.providerID, model.modelID, undefined, "read", "Read a file", {
         type: "object",
     });
-    const usage = new Map<string, { usage: Usage; updatedAt: number; hasUsageTokens: boolean }>();
+    const usage = new Map<
+        string,
+        { usage: Usage; updatedAt: number; hasUsageTokens: boolean; sourceMessageId?: string }
+    >();
     const control = { decision: "defer" as "execute" | "defer" };
     const transform = createTransform({
         db,
@@ -137,12 +141,17 @@ function session(
         control,
         user,
         step,
-        setUsage(percentage: number) {
+        setUsage(
+            percentage: number,
+            sourceMessageId?: string,
+            inputTokens = Math.round(160 * percentage),
+        ) {
             now += 5_000;
             usage.set(sessionId, {
-                usage: { percentage, inputTokens: Math.round(160 * percentage) },
+                usage: { percentage, inputTokens },
                 updatedAt: now,
                 hasUsageTokens: true,
+                sourceMessageId,
             });
         },
         cleanup() {
@@ -421,15 +430,60 @@ it("a large tail the last measured request did not include keeps the copy far fr
 });
 
 it("an assistant step without parts does not end the measured request", () => {
-    const user = { info: { role: "user" }, parts: [{ type: "text" }] };
-    const answered = { info: { role: "assistant" }, parts: [{ type: "tool" }] };
-    const pending = { info: { role: "assistant" }, parts: [] };
+    const user = { info: { id: "user", role: "user" }, parts: [{ type: "text" }] };
+    const answered = { info: { id: "answered", role: "assistant" }, parts: [{ type: "tool" }] };
+    const pending = { info: { id: "pending", role: "assistant" }, parts: [] };
     // The pending step has not answered, so the tool output of the step before it
     // is still new input.
-    expect(unmeasuredTailStart([user, answered, pending])).toBe(1);
-    expect(unmeasuredTailStart([user, answered, pending, pending])).toBe(1);
-    expect(unmeasuredTailStart([user, answered])).toBe(1);
-    expect(unmeasuredTailStart([user, answered, user])).toBe(1);
-    expect(unmeasuredTailStart([user, pending])).toBe(0);
-    expect(unmeasuredTailStart([user])).toBe(0);
+    expect(unmeasuredTailStart([user, answered, pending], "answered")).toBe(1);
+    expect(unmeasuredTailStart([user, answered, pending, pending], "answered")).toBe(1);
+    expect(unmeasuredTailStart([user, answered], "answered")).toBe(1);
+    expect(unmeasuredTailStart([user, answered, user], "answered")).toBe(1);
+    expect(unmeasuredTailStart([user, pending], "answered")).toBe(0);
+    expect(unmeasuredTailStart([user], "answered")).toBe(0);
+});
+
+it("keeps tool results from two replies without recorded usage in the unmeasured tail", async () => {
+    const s = session("unrecorded-replies", {
+        providerID: "anthropic",
+        modelID: "claude-opus-5-5",
+    });
+    const user = s.user();
+    const measured = s.step({ heavy: true, output: "measured reply" });
+    const first = s.step({ heavy: true, output: "large tool result one ".repeat(5_000) });
+    const newest = s.step({ heavy: true, output: "large tool result two ".repeat(5_000) });
+    const newestEstimate = estimateMessageTokens(newest, true);
+    const newestTokens = newestEstimate.conversation + newestEstimate.toolCall;
+    const contextLimit =
+        400_000 + SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS + Math.ceil(newestTokens * 1.5);
+    const limit = spyOn(eventResolvers, "resolveTrustedContextLimit").mockReturnValue(contextLimit);
+    const clones = spyOn(hostServedRows, "cloneKeepingCoveredInstructionMarks");
+    const observations: Array<{ held: boolean; copied: boolean }> = [];
+    observeSignedThinkingFitSnapshotForTests((observation) =>
+        observations.push({ held: observation.held, copied: observation.snapshot !== null }),
+    );
+    try {
+        const rows = [user, measured, first, newest];
+        resolveCtxReduceAvailabilityFromMessages(s.sessionId, rows as never);
+        s.setUsage(40, measured.info.id, 400_000);
+        expect(newestTokens).toBeGreaterThan(10_000);
+        await s.transform({}, { messages: structuredClone(rows) });
+        expect(observations).toEqual([{ held: true, copied: true }]);
+        expect(clones).toHaveBeenCalledTimes(1);
+        expect(unmeasuredTailStart(rows, measured.info.id)).toBe(1);
+    } finally {
+        clones.mockRestore();
+        limit.mockRestore();
+        s.cleanup();
+    }
+}, 30_000);
+
+it("counts the whole history as the tail when the usage source id is absent or missing", () => {
+    const entries = [
+        { info: { id: "user", role: "user" }, parts: [{ type: "text" }] },
+        { info: { id: "reply", role: "assistant" }, parts: [{ type: "text" }] },
+    ];
+    expect(unmeasuredTailStart(entries)).toBe(0);
+    expect(unmeasuredTailStart(entries, "missing")).toBe(0);
+    expect(unmeasuredTailStart([], "missing")).toBe(0);
 });

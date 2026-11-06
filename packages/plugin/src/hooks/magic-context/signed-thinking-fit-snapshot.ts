@@ -35,19 +35,17 @@ export const SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS = 250_000;
  * cannot arrive in it. An unknown limit or input keeps the copy.
  */
 /**
- * The index of the first message that the last measured request did not
- * include. That request produced the newest assistant message that has parts,
- * so its output and every message after it are new. An assistant step without
- * parts has not answered yet: the output before it is still new input.
+ * The measured reply's output and all subsequent messages are new input.
+ * Subsequent replies can have no usage data, so the newest reply is not a safe boundary.
+ * Without the source message, count the full history to keep the copy safe.
  */
 export function unmeasuredTailStart(
-    entries: readonly { info: { role?: string }; parts?: readonly unknown[] }[],
+    entries: readonly { info: { id?: string } }[],
+    sourceMessageId?: string,
 ): number {
-    for (let index = entries.length - 1; index >= 0; index--) {
-        const entry = entries[index];
-        if (entry?.info.role === "assistant" && (entry.parts?.length ?? 0) > 0) return index;
-    }
-    return 0;
+    if (sourceMessageId === undefined) return 0;
+    const index = entries.findIndex((entry) => entry.info.id === sourceMessageId);
+    return index < 0 ? 0 : index;
 }
 
 export function takeSignedThinkingFitSnapshot<T extends { info: object }>(args: {

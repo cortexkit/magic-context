@@ -1527,6 +1527,7 @@ export async function registerContext(context: V2Context) {
                     persistV2UsageReading({
                         db: usageDb,
                         sessionID: draft.sessionID,
+                        sourceMessageId: latest?.id,
                         draftModel: draft.model,
                         reading,
                         contextUsageMap: usage,

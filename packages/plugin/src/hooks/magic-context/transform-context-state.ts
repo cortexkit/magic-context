@@ -11,6 +11,7 @@ type ContextUsageCacheEntry = {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    sourceMessageId?: string;
 };
 
 // Refused turns never reach the provider, so their last reading cannot refresh.

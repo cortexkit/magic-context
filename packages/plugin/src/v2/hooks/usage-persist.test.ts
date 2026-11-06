@@ -65,6 +65,38 @@ async function configure272kWindow(): Promise<void> {
 }
 
 describe("persistV2UsageReading", () => {
+    it("records the usage row id and keeps it after a reply without input usage", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-usage-source-");
+        const db = openDatabase();
+        const sessionID = "v2-usage-source";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const persist = (sourceMessageId: string, inputTokens: number, completed: number) =>
+            persistV2UsageReading({
+                db,
+                sessionID,
+                sourceMessageId,
+                contextUsageMap,
+                draftModel: { providerID: "test-provider", id: "test-model" },
+                reading: {
+                    inputTokens,
+                    completed,
+                    finish: "stop",
+                    limit: 1_000_000,
+                    admissionLimit: 1_000_000,
+                    modelKey: "test-provider/test-model",
+                },
+            });
+        persist("measured", 400_000, 1000);
+        expect(contextUsageMap.get(sessionID)?.sourceMessageId).toBe("measured");
+        const measured = contextUsageMap.get(sessionID);
+        persist("unmeasured-1", 0, 2000);
+        persist("unmeasured-2", 0, 3000);
+        expect(contextUsageMap.get(sessionID)).toBe(measured);
+        expect(contextUsageMap.get(sessionID)?.sourceMessageId).toBe("measured");
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(400_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3000);
+    });
+
     it("dates provider usage by completion when the store is read after a fold", () => {
         process.env.XDG_DATA_HOME = makeTempDir("v2-usage-age-");
         const db = openDatabase();
