@@ -28,6 +28,7 @@ import {
     observeSignedThinkingFitSnapshotForTests,
     SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS,
     takeSignedThinkingFitSnapshot,
+    unmeasuredTailStart,
 } from "./signed-thinking-fit-snapshot";
 import type { MessageLike } from "./tag-messages";
 import { createTransform } from "./transform";
@@ -417,4 +418,18 @@ it("a large tail the last measured request did not include keeps the copy far fr
     } finally {
         clones.mockRestore();
     }
+});
+
+it("an assistant step without parts does not end the measured request", () => {
+    const user = { info: { role: "user" }, parts: [{ type: "text" }] };
+    const answered = { info: { role: "assistant" }, parts: [{ type: "tool" }] };
+    const pending = { info: { role: "assistant" }, parts: [] };
+    // The pending step has not answered, so the tool output of the step before it
+    // is still new input.
+    expect(unmeasuredTailStart([user, answered, pending])).toBe(1);
+    expect(unmeasuredTailStart([user, answered, pending, pending])).toBe(1);
+    expect(unmeasuredTailStart([user, answered])).toBe(1);
+    expect(unmeasuredTailStart([user, answered, user])).toBe(1);
+    expect(unmeasuredTailStart([user, pending])).toBe(0);
+    expect(unmeasuredTailStart([user])).toBe(0);
 });

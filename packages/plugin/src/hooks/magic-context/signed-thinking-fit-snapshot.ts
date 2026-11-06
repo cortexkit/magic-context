@@ -34,6 +34,22 @@ export const SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS = 250_000;
  * A held pass is always inside an assistant tool loop, so new user content
  * cannot arrive in it. An unknown limit or input keeps the copy.
  */
+/**
+ * The index of the first message that the last measured request did not
+ * include. That request produced the newest assistant message that has parts,
+ * so its output and every message after it are new. An assistant step without
+ * parts has not answered yet: the output before it is still new input.
+ */
+export function unmeasuredTailStart(
+    entries: readonly { info: { role?: string }; parts?: readonly unknown[] }[],
+): number {
+    for (let index = entries.length - 1; index >= 0; index--) {
+        const entry = entries[index];
+        if (entry?.info.role === "assistant" && (entry.parts?.length ?? 0) > 0) return index;
+    }
+    return 0;
+}
+
 export function takeSignedThinkingFitSnapshot<T extends { info: object }>(args: {
     sessionId: string;
     /** The pass's messages in the order the host handed them over. */
