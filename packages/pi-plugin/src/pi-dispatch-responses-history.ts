@@ -158,6 +158,33 @@ export function piResponsesAssistantTexts(
 		!Array.isArray(payload.items)
 	)
 		return texts;
+	// Codex rejects hidden-only native replay, then sanitizes its block fallback
+	// too. Empty output_text parts need not bind one-to-one to prepared blocks:
+	// neither representation produces a visible row. Include demoted thinking in
+	// the visible check so reasoning converted into text is not treated as blank.
+	if (
+		host === "omp" &&
+		model.api === "openai-codex-responses" &&
+		texts.every((text) => !/\S/u.test(JSON.parse(text)[0])) &&
+		payload.items.every((value) => {
+			const item = object(value);
+			return (
+				item?.type === "reasoning" ||
+				(item?.type === "message" &&
+					item.role === "assistant" &&
+					Array.isArray(item.content) &&
+					item.content.every((value) => {
+						const part = object(value);
+						return (
+							part?.type === "output_text" &&
+							typeof part.text === "string" &&
+							!/\S/u.test(part.text)
+						);
+					}))
+			);
+		})
+	)
+		return [];
 	// Matching API/model/provider selects cached wire items instead of converting
 	// the prepared blocks. The cache's dt flag marks items to append; without it,
 	// replay replaces all preceding input. Allow only append-only text whose v1
