@@ -10,6 +10,7 @@ import {
 	type PendingPiCompactionMarker,
 } from "@magic-context/core/features/magic-context/storage";
 import { log } from "@magic-context/core/shared/logger";
+import { copyPiDropBranches } from "./drop-branches-pi";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
 const CONTENT_ID_SUFFIX = /:(?:p|file)\d+$/;
@@ -294,13 +295,20 @@ async function inheritPiCloneSession(
 		}
 
 		stage = "copy-state";
+		const filter = createCloneFilter(branchEntries);
 		const result = copySessionStateForClone(
 			deps.db,
 			sourceSessionId,
 			destinationSessionId,
 			{
-				...createCloneFilter(branchEntries),
+				...filter,
 				requireEmptyDestinationMeta: isStartup,
+				selectPendingPiMarker: (raw, compartments) => {
+					// The copier selects metadata after copying tags, inside its guarded
+					// transaction. Carry provenance atomically with those same tag rows.
+					copyPiDropBranches(deps.db, sourceSessionId, destinationSessionId);
+					return filter.selectPendingPiMarker(raw, compartments);
+				},
 			},
 		);
 		if (result.kind === "destination-not-empty") {
