@@ -210,6 +210,7 @@ describe("historian child session cleanup", () => {
                         createdAt: Date.now(),
                         rawRangeFingerprint: "",
                         trueRawEligibleTokens: 1_000,
+                        summaryRemovedEligibleTokens: 1_000,
                         oversizeAtomicUnit: false,
                         boundaryReason: "test",
                     },

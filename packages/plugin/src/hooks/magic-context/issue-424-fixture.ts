@@ -1,7 +1,12 @@
 import type { RawMessage } from "./read-session-raw";
 
 /** Parallel results finish in reverse order; selected batches insert a user message before their final result. */
-export function issue424Fixture(count = 300, firstOutputMultiplier = 1, seed = 1) {
+export function issue424Fixture(
+    count = 300,
+    firstPayloadMultiplier = 1,
+    seed = 1,
+    payload: "outputs" | "inputs" = "outputs",
+) {
     const pi: Array<Record<string, unknown>> = [
         { role: "user", content: "Investigate the entire project." },
     ];
@@ -21,6 +26,15 @@ export function issue424Fixture(count = 300, firstOutputMultiplier = 1, seed = 1
     for (let batch = 0; batch < count; batch++) {
         random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
         const calls = Array.from({ length: 2 + (random % 2) }, (_, i) => `batch-${batch}-${i}`);
+        const multiplier = batch === 0 ? firstPayloadMultiplier : 1;
+        const name = payload === "inputs" ? "write" : "read";
+        const input =
+            payload === "inputs"
+                ? {
+                      filePath: `batch-${batch}.ts`,
+                      content: "result value\n".repeat(1667 * multiplier),
+                  }
+                : { batch };
         push(
             {
                 role: "assistant",
@@ -28,16 +42,16 @@ export function issue424Fixture(count = 300, firstOutputMultiplier = 1, seed = 1
                 content: calls.map((id) => ({
                     type: "toolCall",
                     id,
-                    name: "read",
-                    arguments: { batch },
+                    name,
+                    arguments: input,
                 })),
             },
             "assistant",
             calls.map((callID) => ({
                 type: "tool",
                 callID,
-                tool: "read",
-                state: { input: { batch }, status: "running" },
+                tool: name,
+                state: { input, status: "running" },
             })),
         );
         for (let i = calls.length - 1; i >= 0; i--) {
@@ -46,14 +60,14 @@ export function issue424Fixture(count = 300, firstOutputMultiplier = 1, seed = 1
                     { type: "text", text: "Also check the related tests." },
                 ]);
             }
-            const text = "result value\n".repeat(1667 * (batch === 0 ? firstOutputMultiplier : 1));
+            const text = "result value\n".repeat(1667 * (payload === "outputs" ? multiplier : 1));
             const callID = calls[i];
             if (callID === undefined) throw new Error("Missing fixture call");
             push(
                 {
                     role: "toolResult",
                     toolCallId: callID,
-                    toolName: "read",
+                    toolName: name,
                     content: [{ type: "text", text }],
                 },
                 "user",
@@ -61,7 +75,7 @@ export function issue424Fixture(count = 300, firstOutputMultiplier = 1, seed = 1
                     {
                         type: "tool",
                         callID,
-                        tool: "read",
+                        tool: name,
                         state: { output: text, status: "completed" },
                     },
                 ],

@@ -221,6 +221,9 @@ export function createV1HiddenCompletionExecutor(
         },
         async attempt(handle, request) {
             if (!client) throw new Error("Hidden completion client is unavailable");
+            // Dreamer fallbacks can reuse a child; a previous model's failure
+            // must not poison collection after the next model succeeds.
+            hostErrors.delete(handle.id);
             const identity = runIdentities.get(handle.id);
             const requestedModel = request.body?.model;
             const requestedRef =
@@ -280,12 +283,12 @@ export function createV1HiddenCompletionExecutor(
             });
             const assistantFailure = extractLatestAssistantFailure(messages);
             const hostError = hostErrors.get(handle.id);
-            if (assistantFailure) {
-                const finish = assistantFailure.finish
+            if (assistantFailure || hostError !== undefined) {
+                const finish = assistantFailure?.finish
                     ? ` (finish=${assistantFailure.finish})`
                     : "";
                 const error = new Error(
-                    `Historian host recorded an assistant error${finish}: ${describeAssistantFailure(assistantFailure.error)}`,
+                    `Historian host recorded an assistant error${finish}: ${describeAssistantFailure(assistantFailure?.error ?? hostError)}`,
                     hostError === undefined ? undefined : { cause: hostError },
                 );
                 annotateSubagentInvocationError(error, {
