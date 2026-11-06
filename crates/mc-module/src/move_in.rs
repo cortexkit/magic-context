@@ -331,6 +331,8 @@ pub fn move_in(
 /// already holds rows for the session under both harnesses. A retry after
 /// the rows moved finds none under `from` and changes nothing.
 fn rekey(conn: &mut Connection, session: &str, from: &str, to: &str) -> Result<(), String> {
+    #[cfg(test)]
+    let _measure = tests::Measure::new("rekey");
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -372,6 +374,8 @@ fn rekey(conn: &mut Connection, session: &str, from: &str, to: &str) -> Result<(
         }
     }
     for table in moving {
+        #[cfg(test)]
+        let _measure = tests::Measure::new(&format!("rekey/{table}"));
         tx.execute(
             &format!("UPDATE \"{table}\" SET harness = ?3 WHERE session_id = ?1 AND harness = ?2"),
             params![session, from, to],
@@ -380,3 +384,6 @@ fn rekey(conn: &mut Connection, session: &str, from: &str, to: &str) -> Result<(
     }
     tx.commit().map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

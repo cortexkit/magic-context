@@ -750,6 +750,8 @@ pub fn renumber(
     session: &str,
     numbering: &Numbering,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    let _measure = crate::move_in::tests::Measure::new("renumber");
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -861,6 +863,8 @@ impl Rewrite<'_> {
     /// Summary ranges, after checking that each summary's stored message ids
     /// name the messages the transcript has at its numbers.
     fn summaries(&self) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new("renumber/compartments");
         let rows: Vec<(i64, i64, i64, i64, String, String)> = self
             .tx
             .prepare(
@@ -909,6 +913,8 @@ impl Rewrite<'_> {
     /// The `start`..`end` range columns of `table`'s rows matching `filter`
     /// (whose `?1` is the session and `?2`, if used, the harness).
     fn ranges(&self, table: &str, start: &str, end: &str, filter: &str) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new(&format!("renumber/{table}"));
         let select = format!("SELECT id, {start}, {end} FROM {table} WHERE {filter}");
         let mut statement = self.tx.prepare(&select)?;
         let bound = if filter.contains("?2") {
@@ -945,6 +951,8 @@ impl Rewrite<'_> {
     /// The source ranges inside `table`'s `source_candidate_provenance`
     /// lists that belong to this session (and harness, where recorded).
     fn provenance(&self, table: &str, has_harness: bool) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new(&format!("renumber/{table}"));
         let rows: Vec<(i64, String)> = self
             .tx
             .prepare(&format!(
@@ -995,6 +1003,8 @@ impl Rewrite<'_> {
     /// Per-message depth rows, keyed by number: each moves to its message's
     /// entry; a marker row's has nothing to describe and goes.
     fn compression_depth(&self) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new("renumber/compression_depth");
         let rows: Vec<(i64, i64)> = self
             .tx
             .prepare(
@@ -1027,6 +1037,8 @@ impl Rewrite<'_> {
     /// Positions in the session: note anchors and the search indexer's
     /// progress.
     fn positions(&self) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new("renumber/positions");
         let notes: Vec<(i64, i64)> = self
             .tx
             .prepare(
@@ -1071,6 +1083,8 @@ impl Rewrite<'_> {
     /// the active path go. Ids remain authoritative even when a source row's
     /// ordinal is stale or a missing Pi message's slot was only estimated.
     fn search_index(&self) -> Step {
+        #[cfg(test)]
+        let _measure = crate::move_in::tests::Measure::new("renumber/search_index");
         let sources: Vec<String> = self
             .tx
             .prepare(
