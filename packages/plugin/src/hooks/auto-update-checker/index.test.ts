@@ -187,6 +187,9 @@ describe("auto-update-checker/index", () => {
         // Even after waiting longer than initDelayMs would be, no check fires
         await new Promise((r) => setTimeout(r, 50));
         expect(showToast).not.toHaveBeenCalled();
+        // Disabling the checker means no npm request at all (#854): the
+        // registry lookup is the request.
+        expect(checkerMocks.getLatestVersion).not.toHaveBeenCalled();
     });
 
     test("on-disk timestamp dedupes concurrent plugin instances", async () => {

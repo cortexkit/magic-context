@@ -428,4 +428,5 @@ function showToast(
     ctx.client.tui.showToast({ body: { title, message, variant, duration } }).catch(() => {});
 }
 
+export { resolveNpmRegistry } from "./resolve-npm-registry";
 export type { AutoUpdateCheckerOptions } from "./types";
