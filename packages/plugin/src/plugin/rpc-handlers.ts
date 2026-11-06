@@ -48,7 +48,6 @@ import { getQuickJsNativeMemoryStats } from "../features/magic-context/smart-not
 import {
     type ContextDatabase as Database,
     openCurrentDatabase as openDatabase,
-    setSessionWorkMetrics,
 } from "../features/magic-context/storage";
 import {
     getPersistedSchemaVersion,
@@ -63,8 +62,11 @@ import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-
 import {
     computeOpenCodeWorkMetricsIncremental,
     emptyWorkMetricsCarry,
-    type WorkMetricsCarry,
 } from "../features/magic-context/work-metrics";
+import {
+    readSessionWorkMetricsCarry,
+    setSessionWorkMetricsCarry,
+} from "../features/magic-context/work-metrics-carry-storage";
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
 import {
     type EmbedHistoryDeps,
@@ -111,6 +113,7 @@ import { getHarness } from "../shared/harness";
 import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
+import { resolveOpenCodeDbPath } from "../shared/opencode-db-path";
 import { pluginPackageVersion } from "../shared/plugin-package-version";
 import { canonicalProjectDirectory } from "../shared/project-directory-key";
 import { pushNotification } from "../shared/rpc-notifications";
@@ -139,12 +142,6 @@ import {
 import { renderCapabilityRefusal } from "../shared/user-facing-codes";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
-// Per-process incremental work-metrics state, keyed by generation and session. The RPC server
-// is long-lived, so the carry survives across polls and each poll folds only
-// assistant rows newer than its watermark (≈0 when idle). Lost on restart —
-// the next successful poll re-folds the session once and replaces the persisted
-// fallback with fresh metrics.
-const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
 export async function executeRustRecompRpc(
     moduleClient: RustModeModuleClient | undefined,
     sessionId: string,
@@ -245,19 +242,20 @@ function resolveSidebarWorkMetrics(
         return { newWorkTokens: persistedNewWork, totalInputTokens: persistedTotalInput };
     }
     try {
-        const carryKey = `${generation}:${sessionId}`;
-        const carry = workMetricsCarryBySession.get(carryKey) ?? emptyWorkMetricsCarry();
+        // Loading the small per-agent carry on every poll survives module
+        // recreation without relying on a process-local cache.
+        const source = `${generation}:${resolveOpenCodeDbPath(generation).path}`;
+        const carry = readSessionWorkMetricsCarry(db, sessionId, source) ?? emptyWorkMetricsCarry();
         const { carry: nextCarry, metrics } = withReadOnlySessionDb(
             (openCodeDb) =>
                 computeOpenCodeWorkMetricsIncremental(openCodeDb, sessionId, carry, generation),
             generation,
         );
-        workMetricsCarryBySession.set(carryKey, nextCarry);
-        // Write-through so the value warm-starts the sidebar after a restart.
+        // Persist the watermark with the totals, not the provisional streaming row.
         try {
-            setSessionWorkMetrics(db, sessionId, metrics.newWorkTokens, metrics.totalInputTokens);
+            setSessionWorkMetricsCarry(db, sessionId, source, nextCarry, metrics);
         } catch {
-            // Non-fatal: the in-memory value is still returned below.
+            // Non-fatal: the freshly computed value is still returned below.
         }
         return metrics;
     } catch {
