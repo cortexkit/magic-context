@@ -463,6 +463,7 @@ describe("runCompartmentAgent wrapup controls", () => {
                     eligibleEndMessageId: "m-8",
                     rawRangeFingerprint: "",
                     trueRawEligibleTokens: 1_000,
+                    summaryRemovedEligibleTokens: 1_000,
                 };
                 const chunk = readSessionChunk(sessionId, 220, 1, snapshot.eligibleEndOrdinal);
                 expect(chunk.hasMore).toBe(true);
@@ -507,6 +508,7 @@ describe("runCompartmentAgent wrapup controls", () => {
                     eligibleEndMessageId: "m-4",
                     rawRangeFingerprint: "",
                     trueRawEligibleTokens: 1_000,
+                    summaryRemovedEligibleTokens: 1_000,
                 };
                 const chunk = readSessionChunk(sessionId, 10_000, 1, 5);
                 expect(chunk.completedToolArcs).toEqual([{ start: 2, end: 3 }]);
@@ -644,6 +646,7 @@ describe("runCompartmentAgent wrapup controls", () => {
                 createdAt: Date.now(),
                 rawRangeFingerprint: "",
                 trueRawEligibleTokens: 10_000,
+                summaryRemovedEligibleTokens: 10_000,
                 oversizeAtomicUnit: false,
                 boundaryReason: "test",
             };

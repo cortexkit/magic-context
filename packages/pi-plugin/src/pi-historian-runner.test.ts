@@ -193,6 +193,7 @@ function makeBoundarySnapshot(
 		createdAt: 1,
 		rawRangeFingerprint: "",
 		trueRawEligibleTokens: 1000,
+		summaryRemovedEligibleTokens: 1000,
 		oversizeAtomicUnit: false,
 		boundaryReason: "test",
 		...overrides,
@@ -557,6 +558,24 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("reserves summary-removed tokens rather than the full eligible history", async () => {
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: makeBoundarySnapshot({
+				trueRawEligibleTokens: 1000,
+				summaryRemovedEligibleTokens: 10,
+			}),
+		});
+		try {
+			expect(runner.run).toHaveBeenCalled();
+			expect(
+				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
+			).toBe(10);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("rolls back reserved drain tokens when the Pi chunk is empty", async () => {
 		const emptyMessages = rawMessages(4).map((message) => ({
 			...message,
@@ -629,6 +648,7 @@ describe("runPiHistorian", () => {
 				eligibleEndOrdinal: 1,
 				eligibleEndMessageId: null,
 				trueRawEligibleTokens: 0,
+				summaryRemovedEligibleTokens: 0,
 			}),
 		);
 		const { db, runner } = await runHistorianWith({

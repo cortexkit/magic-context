@@ -36,10 +36,17 @@ export function registerIssue424CapacityTests(
     run: (args: Issue424CapacityRun) => Promise<string[]>,
 ) {
     for (const steering of [false, true]) {
-        test(`issue 424 ${harness} six-cap component reaches producer and publishes whole (${steering ? "large steering" : "tool outputs"})`, async () => {
-            const fixture = issue424Fixture(60, steering ? 1 : 20);
+        test(`issue 424 ${harness} six-cap component reaches producer and publishes whole (${steering ? "large steering" : "tool inputs"})`, async () => {
+            // Outputs no longer count toward the run cap. Write inputs or steering
+            // text must exceed six times that cap to keep proving whole admission.
+            const fixture = issue424Fixture(
+                60,
+                steering ? 1 : 15,
+                1,
+                steering ? "outputs" : "inputs",
+            );
             if (steering) {
-                const text = `${"result value\n".repeat(60000)}CAPACITY_STEERING_END`;
+                const text = `${"result value\n".repeat(65000)}CAPACITY_STEERING_END`;
                 fixture.raw.splice(3, 0, {
                     ordinal: 0,
                     id: "capacity-steer",
@@ -86,10 +93,10 @@ export function registerIssue424CapacityTests(
                     cacheNamespace: sessionId,
                 });
                 const cap = selectPerRunCap(boundary);
-                const rawMass = boundary.diagnostics!.head.completedFence.tokenMass;
+                const summaryMass = boundary.diagnostics!.head.completedFence.tokenMass;
                 expect(cap).toBe(30970);
-                expect(rawMass).toBeGreaterThan(6 * cap);
-                expect(rawMass).toBeLessThan(7 * cap);
+                expect(summaryMass).toBeGreaterThan(6 * cap);
+                expect(summaryMass).toBeLessThan(7 * cap);
                 expect(boundary.eligibleEndOrdinal).toBe(
                     (harness === "pi" ? 4 : 5) + Number(steering),
                 );
@@ -130,7 +137,7 @@ export function registerIssue424CapacityTests(
                     [2, chunk.endIndex],
                 ]);
                 console.log(
-                    `capacity ${harness} ${steering ? "steering" : "tools"}: raw=${rawMass} cap=${cap} producerSourceTokens=${estimateTokens(chunk.text)} range=2-${chunk.endIndex} validated=true`,
+                    `capacity ${harness} ${steering ? "steering" : "tools"}: summaryRemoved=${summaryMass} cap=${cap} producerSourceTokens=${estimateTokens(chunk.text)} range=2-${chunk.endIndex} validated=true`,
                 );
             } finally {
                 dispose();

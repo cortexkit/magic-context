@@ -741,6 +741,7 @@ function pressureGateSnapshot(
         createdAt: 1,
         rawRangeFingerprint: "stable",
         trueRawEligibleTokens: 500,
+        summaryRemovedEligibleTokens: 500,
         oversizeAtomicUnit: false,
         boundaryReason: "size-walk",
     };
@@ -780,6 +781,7 @@ it("treats an emergency-scaled complete small head as runnable even below the fo
             contextLimit: 12_000,
             executeThresholdPercentage: 65,
             trueRawEligibleTokens: 1,
+            summaryRemovedEligibleTokens: 1,
             trueRawTailTokens: 2_000,
             boundaryReason: "size-walk",
             rawRangeFingerprint: "stable",

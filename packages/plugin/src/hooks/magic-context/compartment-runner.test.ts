@@ -3250,6 +3250,7 @@ describe("runCompartmentAgent", () => {
             createdAt: Date.now(),
             rawRangeFingerprint: "",
             trueRawEligibleTokens: 0,
+            summaryRemovedEligibleTokens: 0,
             oversizeAtomicUnit: false,
             boundaryReason: "size-walk",
         };
@@ -3394,15 +3395,23 @@ it("rolls back protected-tail drain reservation when publish throws after histor
         createdAt: Date.now(),
         rawRangeFingerprint: "",
         trueRawEligibleTokens: 500,
+        summaryRemovedEligibleTokens: 7,
         oversizeAtomicUnit: false,
         boundaryReason: "size-walk",
     };
 
+    let reservedAtDispatch = 0;
     const client = {
         session: {
             get: mock(async () => ({ data: { directory: "/tmp/parent" } })),
             create: mock(async () => ({ data: { id: "ses-agent" } })),
-            prompt: mock(async () => ({})),
+            prompt: mock(async () => {
+                reservedAtDispatch = loadProtectedTailMeta(
+                    db,
+                    "ses-drain-rollback",
+                ).protectedTailDrainTokens;
+                return {};
+            }),
             messages: mock(async () => ({
                 data: [
                     {
@@ -3430,6 +3439,7 @@ it("rolls back protected-tail drain reservation when publish throws after histor
         currentContextLimit: 8_000,
     });
 
+    expect(reservedAtDispatch).toBe(7);
     expect(loadProtectedTailMeta(db, "ses-drain-rollback").protectedTailDrainTokens).toBe(0);
 });
 
