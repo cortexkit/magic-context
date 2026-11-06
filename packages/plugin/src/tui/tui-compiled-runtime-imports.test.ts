@@ -38,7 +38,7 @@ describe("compiled TUI runtime imports", () => {
             const full = join(dir, entry);
             if (statSync(full).isDirectory()) {
                 found.push(...compiledFiles(full));
-            } else if (entry.endsWith(".ts") || entry.endsWith(".tsx")) {
+            } else if (entry.endsWith(".ts") || entry.endsWith(".tsx") || entry.endsWith(".js")) {
                 found.push(full);
             }
         }
