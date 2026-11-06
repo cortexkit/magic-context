@@ -14,7 +14,11 @@ import {
 import { describeAssistantError } from "./assistant-message-extractor";
 import { sessionLog } from "./logger";
 import type { PromptArgs, PromptTransport } from "./model-suggestion-retry";
-import { noteModelActivityMonitored, noteModelOutputReceived } from "./model-suggestion-retry";
+import {
+    abortChildRun,
+    noteModelActivityMonitored,
+    noteModelOutputReceived,
+} from "./model-suggestion-retry";
 
 type Client = ReturnType<typeof createOpencodeClient> | undefined;
 
@@ -196,6 +200,28 @@ function messageId(message: unknown): string | null {
     return typeof id === "string" ? id : null;
 }
 
+function recordedAssistantError(message: unknown): unknown {
+    const info = infoOf(message);
+    if (info.error != null) return info.error;
+    // A completed step can retain retry parts from a provider attempt that
+    // already recovered before this poll. Its successful settlement wins.
+    if (isSettledAssistant(message)) return undefined;
+    const parts = (message as { parts?: unknown[] } | null)?.parts;
+    if (!Array.isArray(parts)) return undefined;
+    // OpenCode records a failed provider attempt as a retry part before it
+    // settles the assistant row or emits session.error.
+    const retry = parts
+        .slice()
+        .reverse()
+        .find(
+            (part) =>
+                part !== null &&
+                typeof part === "object" &&
+                (part as { type?: unknown }).type === "retry",
+        ) as { error?: unknown } | undefined;
+    return retry?.error ?? undefined;
+}
+
 /** An assistant message the host has finished writing, successfully or not. */
 function isSettledAssistant(message: unknown): boolean {
     const info = infoOf(message);
@@ -355,6 +381,26 @@ export async function promptAsyncAndWaitForIdle(
     // Dispatch can fail before an assistant row exists. The plugin event hook
     // retains that provider/model error while this child is actively awaited.
     activeSessionErrors.set(sessionId, undefined);
+    const failForHostError = async (hostError: unknown): Promise<never> => {
+        // Stop the host's retry loop before handing the attempt to our model
+        // chain; otherwise the failed model keeps making requests in parallel.
+        await abortChildRun(client, sessionId);
+        const error = new Error(
+            `Host recorded session error: ${describeAssistantError(hostError)}`,
+        );
+        Object.assign(error, {
+            name: "DreamerProviderOutputFailureError",
+            transient: true,
+            [HOST_SESSION_ERROR]: true,
+            hostError,
+        });
+        annotateSubagentInvocationError(error, {
+            attemptedModel: requestModelRef(request),
+            modelConfigKey: options.modelConfigKey,
+            hostError,
+        });
+        throw error;
+    };
     try {
         let sent: unknown;
         try {
@@ -395,24 +441,23 @@ export async function promptAsyncAndWaitForIdle(
             await sleep(pollIntervalMs, signal);
             const hostError = activeSessionErrors.get(sessionId);
             if (hostError !== undefined) {
-                const error = new Error(
-                    `Host recorded session error: ${describeAssistantError(hostError)}`,
-                );
-                Object.assign(error, {
-                    name: "DreamerProviderOutputFailureError",
-                    transient: true,
-                    [HOST_SESSION_ERROR]: true,
-                    hostError,
-                });
-                annotateSubagentInvocationError(error, {
-                    attemptedModel: requestModelRef(request),
-                    modelConfigKey: options.modelConfigKey,
-                    hostError,
-                });
-                throw error;
+                await failForHostError(hostError);
             }
             const status = await readStatus(session, sessionId, dir, signal);
             const messages = await readMessages(session, sessionId, dir, signal);
+            const latestAssistant = messages
+                .slice()
+                .reverse()
+                .find((message) => {
+                    const id = messageId(message);
+                    return (
+                        id !== null &&
+                        !completionBaseline.has(id) &&
+                        infoOf(message).role === "assistant"
+                    );
+                });
+            const assistantError = recordedAssistantError(latestAssistant);
+            if (assistantError !== undefined) await failForHostError(assistantError);
             if (
                 !sawOutput &&
                 messages.some((message) => {

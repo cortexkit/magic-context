@@ -3,6 +3,7 @@ import {
     clearSyntheticCandidates,
     deliverSynthetic,
     isAdmittedSynthetic,
+    observeSyntheticAdmissionEvent,
     syntheticCandidates,
 } from "./channel2";
 
@@ -29,11 +30,17 @@ test("synthetic candidates bridge a delayed SQL projection without bypassing adm
         expect(id).toBe(sentID);
         expect(syntheticCandidates(context, "other", new Set())).toEqual(new Set());
         expect(syntheticCandidates(context, "s", new Set())).toEqual(new Set([id]));
+        observeSyntheticAdmissionEvent(context, {
+            type: "session.revert.committed",
+            data: { sessionID: "s" },
+        });
+        expect(syntheticCandidates(context, "s", new Set())).toEqual(new Set([id]));
+        expect(await isAdmittedSynthetic(context, "s", id)).toBe(true);
         const stored = new Set([id, "host-synthetic"]);
         expect(syntheticCandidates(context, "s", stored)).toEqual(stored);
         // A native synthetic from another plugin is only a candidate, not admitted.
         expect(await isAdmittedSynthetic(context, "s", "host-synthetic")).toBe(false);
-        records.set(`synthetic/s/${id}`, { id: "wrong" });
+        await context.storage.set(`synthetic/s/${id}`, { id: "wrong" });
         expect(await isAdmittedSynthetic(context, "s", id)).toBe(false);
         // Once SQL has observed a send, it no longer needs the pending bridge.
         expect(syntheticCandidates(context, "s", new Set())).toEqual(new Set());

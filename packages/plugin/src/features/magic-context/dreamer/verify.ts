@@ -32,6 +32,7 @@ import {
     normalizeVerificationFiles,
     readGitHead,
     recordMemoryVerifications,
+    updateMemoryVerification,
 } from "../memory";
 import { computeNormalizedHash } from "../memory/normalize-hash";
 import { queueMemoryMutation } from "../storage-memory-mutation-log";
@@ -70,6 +71,7 @@ import {
     type VerifyPromptMemory,
     validateVerifyManifest,
 } from "./verify-prompt";
+import { recordVerificationVerdict, verificationFilesFingerprint } from "./verify-state";
 
 /**
  * verify / verify-broad: check file-mapped memories against the CURRENT source
@@ -460,6 +462,7 @@ async function verifyOneBatch(
     let budgetFinalized = false;
     let failedCompletion: HiddenCompletion | undefined;
     let headAtPrompt: string | null = null;
+    const skipSnapshots = new Map<number, string | null>();
     const onBudgetUpdate: NonNullable<VerifyArgs["onBudgetUpdate"]> = (state) => {
         budgetFinalized ||= state.finalizeFired;
         args.onBudgetUpdate?.({
@@ -476,6 +479,17 @@ async function verifyOneBatch(
         });
     };
     try {
+        if (!args.moduleRoute) {
+            for (const memory of batch) {
+                skipSnapshots.set(
+                    memory.id,
+                    await shared.raceWithSignal(
+                        verificationFilesFingerprint(args.sessionDirectory, memory.mappedFiles),
+                        batchSignal,
+                    ),
+                );
+            }
+        }
         headAtPrompt = await shared.raceWithSignal(readGitHead(args.sessionDirectory), batchSignal);
         const evidence =
             !args.forceBroad && batch.every((m) => m.verifiedAt)
@@ -548,6 +562,7 @@ async function verifyOneBatch(
                 run.validated,
                 evidence?.head ?? headAtPrompt,
                 budgetFinalized,
+                skipSnapshots,
             );
         }
         const client = args.client;
@@ -628,6 +643,7 @@ async function verifyOneBatch(
             run.validated,
             evidence?.head ?? headAtPrompt,
             budgetFinalized,
+            skipSnapshots,
         );
     } catch (error) {
         const desc = describeError(error);
@@ -670,6 +686,7 @@ async function verifyOneBatch(
                 recovered,
                 headAtPrompt,
                 true,
+                skipSnapshots,
             );
             return {
                 ...counts,
@@ -724,7 +741,8 @@ async function verifyOneBatch(
  * - archive: archive + queue an archive mutation (m[1] delta). Skipped when the
  *   memory is no longer primary-mutable (already archived/superseded), so a stale
  *   manifest can't fight a concurrent change.
- * - skip/refusal: count the verdict for progress without changing the memory.
+ * - skip: remember the backing-file snapshot without claiming content verification.
+ * - refusal: count the refusal without changing the memory.
  * Directive-shaped PROJECT_RULES and unsafe content-loss rewrites are refused
  * before either the local or MODULE authority write path is built.
  * All writes happen under ONE lease-guarded transaction.
@@ -743,6 +761,7 @@ async function applyParsedVerifyManifest(
     parsed: ParsedVerifyManifest,
     headAtPrompt?: string | null,
     budgetFinalized = false,
+    skipSnapshots?: Map<number, string | null>,
 ): Promise<VerifyVerdictCounts> {
     const batchIds = new Set(batch.map((m) => m.id));
     const batchById = new Map(batch.map((memory) => [memory.id, memory]));
@@ -793,6 +812,7 @@ async function applyParsedVerifyManifest(
     type VerifyWrite =
         | { kind: "verify"; id: number; files: string[] }
         | { kind: "update"; id: number; files: string[]; content: string; hash: string }
+        | { kind: "skip"; id: number; fingerprint: string | null }
         | { kind: "archive"; id: number; reason: string };
     const writes: VerifyWrite[] = [];
     let refused = 0;
@@ -850,6 +870,18 @@ async function applyParsedVerifyManifest(
             continue;
         }
         writes.push({ kind: "archive", id: a.id, reason: a.reason });
+    }
+    // Module-owned memories keep their existing authority path; local skip
+    // snapshots must not bypass the module's memory command contract.
+    if (!args.moduleRoute) {
+        for (const entry of valid.skipped) {
+            const original = batchById.get(entry.id);
+            if (!original) continue;
+            const fingerprint = skipSnapshots
+                ? (skipSnapshots.get(entry.id) ?? null)
+                : await verificationFilesFingerprint(args.sessionDirectory, original.mappedFiles);
+            writes.push({ kind: "skip", id: entry.id, fingerprint });
+        }
     }
 
     let verified = 0;
@@ -924,8 +956,16 @@ async function applyParsedVerifyManifest(
             if (!isPrimaryMutable(memory)) continue;
             if (w.kind === "verify") {
                 recordMemoryVerifications(args.db, w.id, w.files, now);
-                if (verifiedHead) recordVerifiedCommit(args.db, memory, now, verifiedHead);
+                updateMemoryVerification(args.db, w.id, "verified");
+                recordVerificationVerdict(args.db, memory, "verified", now);
+                const verifiedMemory = getMemoryById(args.db, w.id);
+                if (verifiedHead && verifiedMemory)
+                    recordVerifiedCommit(args.db, verifiedMemory, now, verifiedHead);
                 verified += 1;
+            } else if (w.kind === "skip") {
+                if (memory.content !== batchById.get(w.id)?.content) continue;
+                updateMemoryVerification(args.db, w.id, "unverified");
+                recordVerificationVerdict(args.db, memory, "skip", now, w.fingerprint);
             } else if (w.kind === "update") {
                 // memories has UNIQUE(project_path, category, normalized_hash).
                 // A rewrite that lands on another memory's exact content would
@@ -946,6 +986,8 @@ async function applyParsedVerifyManifest(
                     continue;
                 }
                 rewriteMemoryContent(args.db, memory, w.content, w.hash);
+                updateMemoryVerification(args.db, w.id, "unverified");
+                recordVerificationVerdict(args.db, memory, "update", now);
                 queueMemoryMutation(args.db, {
                     projectPath: args.projectIdentity,
                     mutationType: "update",
@@ -956,6 +998,8 @@ async function applyParsedVerifyManifest(
                 updated += 1;
             } else {
                 archiveMemory(args.db, w.id, w.reason);
+                updateMemoryVerification(args.db, w.id, "stale");
+                recordVerificationVerdict(args.db, memory, "archive", now);
                 queueMemoryMutation(args.db, {
                     projectPath: args.projectIdentity,
                     mutationType: "archive",

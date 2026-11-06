@@ -143,6 +143,39 @@ function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
     return { db, rows, reader, loads, kv, storage, logs, cache, replay, make, begin, finish };
 }
 
+test("v3 capture reads the served baseline a constant number of times and preserves replay bytes", async () => {
+    const f = fixture(50);
+    const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+    const head: V2Message = { role: "user", content: [{ type: "text", text: "head" }] };
+    const native = [head, ...raw];
+    const draft = context([message(HEAD_IDS[0], "head"), ...raw]);
+    const before = JSON.stringify(draft);
+    const baseline = spyOn(
+        f.replay as unknown as { servedBaseline: (draft: SessionContext) => string | undefined },
+        "servedBaseline",
+    );
+    try {
+        // Initialize the replay floor, then count a capture independently of setup.
+        await f.replay.capture(draft, native);
+        baseline.mockClear();
+        await f.replay.capture(draft, native);
+        expect(baseline).toHaveBeenCalledTimes(3);
+        expect(JSON.stringify(draft)).toBe(before);
+        f.begin();
+        expect(
+            await f.replay.supply({ draft: context([]), reader: f.reader, summary: "head" }),
+        ).toBe(true);
+        const cut = f.finish();
+        const cold = f.make();
+        expect(await cold.admits("s", cut, f.reader)).toBe(true);
+        expect(JSON.stringify(await cold.restore("s", cut, "p/m", { bounded: true }))).toBe(
+            JSON.stringify(raw),
+        );
+    } finally {
+        baseline.mockRestore();
+    }
+});
+
 test("v3 warm capture reuses evicted identity stamps but reloads changed source coordinates", async () => {
     const f = fixture(3, 0, { maxSessions: 1, maxSessionBytes: 1 });
     const stamps = spyOn(f.reader, "rowStampsThrough");

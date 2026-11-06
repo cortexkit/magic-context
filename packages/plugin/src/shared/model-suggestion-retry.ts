@@ -429,7 +429,7 @@ async function promptWithTimeout(
  * instance-scoped fiber that `POST /session/{id}/abort` interrupts. Best-effort —
  * a failure here must not mask the original timeout/abort error.
  */
-async function abortChildRun(client: Client, sessionId: string): Promise<void> {
+export async function abortChildRun(client: Client, sessionId: string): Promise<void> {
     if (!client) return;
     try {
         // Bound the abort call: it's best-effort cleanup, and if the abort

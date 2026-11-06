@@ -1649,7 +1649,177 @@ describe("recoverable two-store marker publication", () => {
         }
     });
 
-    it("leaves two candidate pairs untouched and logs ambiguity", async () => {
+    function seedOwnedPair(home: string, sid: string, target: PendingCompactionMarker) {
+        const marker = injectCompactionMarker({
+            sessionId: sid,
+            endOrdinal: target.ordinal,
+            endMessageId: target.endMessageId,
+            directory: home,
+            summaryText: MARKER_SUMMARY_TEXT,
+        });
+        expect(marker).not.toBeNull();
+        return marker!;
+    }
+
+    it("ignores native compaction pairs while publishing and advancing a recorded MC marker", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            for (const [index, tailStart] of [true, false].entries()) {
+                const id = `native-${index}`;
+                insertUserMessage(oc, id, sid, 100 + index * 100);
+                expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+                const marker = seedOwnedPair(home, sid, { ...first, endMessageId: id });
+                oc.prepare(
+                    "UPDATE message SET data = json_set(data, '$.providerID', 'host-provider', '$.modelID', 'host-model') WHERE id = ?",
+                ).run(marker.summaryMessageId);
+                if (tailStart)
+                    oc.prepare(
+                        "UPDATE part SET data = json_set(data, '$.tail_start_id', 'first') WHERE id = ?",
+                    ).run(marker.compactionPartId);
+            }
+            const nativeRows = hostRows(oc);
+            expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe(
+                "applied",
+            );
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "applied",
+            );
+            expect(pairCount(oc)).toBe(3);
+            const after = hostRows(oc);
+            for (const row of nativeRows.messages) expect(after.messages).toContainEqual(row);
+            for (const row of nativeRows.parts) expect(after.parts).toContainEqual(row);
+            expect(getPersistedCompactionMarkerState(db, sid)?.targetEndMessageId).toBe("second");
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("prefers the verified recorded pair, else recovers the newest covered orphan without host writes", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            const older = seedOwnedPair(home, sid, first);
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            const newer = seedOwnedPair(home, sid, second);
+            // Older plugin versions did not use the current deterministic IDs.
+            oc.prepare("UPDATE message SET id = 'orphan-summary' WHERE id = ?").run(
+                newer.summaryMessageId,
+            );
+            oc.prepare(
+                "UPDATE part SET message_id = 'orphan-summary', id = 'orphan-text' WHERE id = ?",
+            ).run(newer.summaryPartId);
+            oc.prepare("UPDATE part SET id = 'orphan-compaction' WHERE id = ?").run(
+                newer.compactionPartId,
+            );
+            const orphan = {
+                ...newer,
+                summaryMessageId: "orphan-summary",
+                summaryPartId: "orphan-text",
+                compactionPartId: "orphan-compaction",
+            };
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            expect(
+                compactionMarker.inspectCompactionMarkerPublication(
+                    sid,
+                    [older],
+                    MARKER_SUMMARY_TEXT,
+                    "second",
+                    older,
+                ),
+            ).toMatchObject({ kind: "verified", marker: older });
+            expect(
+                compactionMarker.inspectCompactionMarkerPublication(
+                    sid,
+                    [],
+                    MARKER_SUMMARY_TEXT,
+                    "second",
+                    null,
+                ),
+            ).toMatchObject({ kind: "verified", marker: orphan });
+            const before = hostRows(oc);
+            forbidHostWrites(oc);
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "applied",
+            );
+            expect(getPersistedCompactionMarkerState(db, sid)).toMatchObject({
+                ...orphan,
+                targetEndMessageId: "second",
+                boundaryOrdinal: 20,
+            });
+            expect(hostRows(oc)).toEqual(before);
+            expect(pairCount(oc)).toBe(2);
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("publishes beyond a covered orphan without deleting its rows or native tail references", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            const orphan = seedOwnedPair(home, sid, first);
+            oc.prepare("INSERT INTO part VALUES ('native-ref', 'tail', ?, 3000, 3000, ?)").run(
+                sid,
+                JSON.stringify({
+                    type: "compaction",
+                    auto: true,
+                    tail_start_id: orphan.summaryMessageId,
+                }),
+            );
+            const before = hostRows(oc);
+            for (const table of ["message", "part"])
+                oc.exec(
+                    `CREATE TRIGGER no_sweep_${table} BEFORE DELETE ON ${table} BEGIN SELECT RAISE(ABORT, 'publication must retain orphan rows'); END`,
+                );
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "applied",
+            );
+            const after = hostRows(oc);
+            for (const row of before.messages) expect(after.messages).toContainEqual(row);
+            for (const row of before.parts) expect(after.parts).toContainEqual(row);
+            expect(pairCount(oc)).toBe(2);
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("leaves an unrecorded future cut untouched rather than publishing uncovered history", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            seedOwnedPair(home, sid, second);
+            const before = hostRows(oc);
+            expect(await applyDeferredCompactionMarker(db, sid, first, home)).toMatchObject({
+                kind: "retryable-failure",
+            });
+            expect(hostRows(oc)).toEqual(before);
+            expect(markerJson(db, sid)).toBe("");
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("refuses an owned summary with several canonical compaction parts on its boundary", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+            seedOwnedPair(home, sid, first);
+            oc.prepare("INSERT INTO part VALUES ('ambiguous-part', 'first', ?, 1000, 1000, ?)").run(
+                sid,
+                JSON.stringify({ type: "compaction", auto: true }),
+            );
+            const before = hostRows(oc);
+            expect(await applyDeferredCompactionMarker(db, sid, first, home)).toMatchObject({
+                kind: "retryable-failure",
+            });
+            expect(hostRows(oc)).toEqual(before);
+            expect(markerJson(db, sid)).toBe("");
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("leaves multiple owned pairs untouched when one is corrupt and logs ambiguity", async () => {
         const { home, sid, oc, db } = fixture();
         for (const target of [first, second]) {
             expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
@@ -1664,6 +1834,9 @@ describe("recoverable two-store marker publication", () => {
             ).not.toBeNull();
         }
         expect(pairCount(oc)).toBe(2);
+        oc.prepare(
+            "UPDATE part SET data = json_set(data, '$.text', 'corrupt placeholder') WHERE message_id IN (SELECT id FROM message WHERE json_extract(data, '$.parentID') = 'first') AND json_extract(data, '$.type') = 'text'",
+        ).run();
         const before = hostRows(oc);
         const logged = spyOn(logger, "sessionLog");
         try {
@@ -1772,6 +1945,19 @@ describe("recoverable two-store marker publication", () => {
             "retryable-failure",
         );
         db.exec("DROP TRIGGER fail_finalization");
+        // An older unrecorded marker pair must neither block recovery nor be swept
+        // by a pass replaying the already cached request.
+        expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+        expect(
+            injectCompactionMarker({
+                sessionId: sid,
+                endOrdinal: first.ordinal,
+                endMessageId: first.endMessageId,
+                directory: home,
+                summaryText: MARKER_SUMMARY_TEXT,
+            }),
+        ).not.toBeNull();
+        expect(pairCount(oc)).toBe(2);
         setPendingCompactionMarkerState(db, sid, second);
         const source = [
             {

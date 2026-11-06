@@ -218,6 +218,7 @@ function fullTokenOracle(
         FROM tags WHERE session_id=?${floor > 0 ? " AND tag_number >= ?" : ""}`)
         .all(SESSION, ...(floor > 0 ? [floor] : [])) as TagRow[];
     const totals = new Map<string, number>();
+    const summaryRemovedTotals = new Map<string, number>();
     const nulls = new Set<string>();
     for (const row of rows) {
         if (row.type === "tool" && row.tool_owner_message_id === null) continue;
@@ -230,6 +231,7 @@ function fullTokenOracle(
         if (row.token_count === null) {
             nulls.add(owner);
             totals.delete(owner);
+            summaryRemovedTotals.delete(owner);
             continue;
         }
         if (nulls.has(owner)) continue;
@@ -238,8 +240,15 @@ function fullTokenOracle(
                 (row.type === "tool" ? calibration.toolsRatio : calibration.proseRatio) +
             (row.reasoning_token_count ?? 0) * calibration.proseRatio;
         totals.set(owner, (totals.get(owner) ?? 0) + weight);
+        const removedWeight =
+            row.type === "message"
+                ? row.token_count * calibration.proseRatio
+                : row.type === "tool"
+                  ? (row.input_token_count ?? 0) * calibration.toolsRatio
+                  : 0;
+        summaryRemovedTotals.set(owner, (summaryRemovedTotals.get(owner) ?? 0) + removedWeight);
     }
-    return { totals, nullMessageIds: nulls };
+    return { totals, summaryRemovedTotals, nullMessageIds: nulls };
 }
 
 it("seeded owner subsets preserve exact floating sums and boundary decisions before and after ANALYZE", async () => {
@@ -305,6 +314,12 @@ it("seeded owner subsets preserve exact floating sums and boundary decisions bef
                         expect(Object.is(actual.totals.get(owner), full.totals.get(owner))).toBe(
                             true,
                         );
+                        expect(
+                            Object.is(
+                                actual.summaryRemovedTotals.get(owner),
+                                full.summaryRemovedTotals.get(owner),
+                            ),
+                        ).toBe(true);
                         expect(actual.nullMessageIds.has(owner)).toBe(
                             full.nullMessageIds.has(owner),
                         );
@@ -334,6 +349,7 @@ it("seeded owner subsets preserve exact floating sums and boundary decisions bef
                                 ...ctx,
                                 storedTokenTotalsForMessages: undefined,
                                 storedTokenTotals: frozen.totals,
+                                storedSummaryRemovedTokenTotals: frozen.summaryRemovedTotals,
                                 createdAt: 1234,
                             };
                             expect(
