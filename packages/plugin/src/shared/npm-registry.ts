@@ -73,12 +73,14 @@ function unquote(value: string): string {
 
 /**
  * Read only the registry keys from an .npmrc. Other keys, including auth
- * tokens, are never retained or reported.
+ * tokens, are never retained or reported. `env` is null for a file the user
+ * does not control: a repository's .npmrc could otherwise put an environment
+ * secret into a registry URL that the update check then requests.
  */
 function readRegistryKeys(
     text: string | null,
     scope: string | null,
-    env: NodeJS.ProcessEnv,
+    env: NodeJS.ProcessEnv | null,
 ): RegistryKeys {
     const keys: RegistryKeys = {};
     if (text === null) return keys;
@@ -91,7 +93,8 @@ function readRegistryKeys(
         const isRegistry = key === "registry";
         const isScoped = scope !== null && key === `${scope}:registry`;
         if (!isRegistry && !isScoped) continue;
-        const value = expandEnv(unquote(line.slice(separator + 1).trim()), env)?.trim();
+        const raw = unquote(line.slice(separator + 1).trim());
+        const value = (env ? expandEnv(raw, env) : raw.includes("${") ? null : raw)?.trim();
         if (!value) continue;
         if (isRegistry) keys.registry = value;
         else keys.scoped = value;
@@ -109,7 +112,10 @@ function packageScope(packageName: string | undefined): string | null {
  * Select the registry npm would use, without running npm: the environment,
  * then the project .npmrc, then the user .npmrc, then public npm. As in npm,
  * each key resolves through those layers and a scoped registry for the
- * package's scope takes priority over the default registry.
+ * package's scope takes priority over the default registry. Unlike npm, the
+ * project file's `${VAR}` references are not expanded: the check runs
+ * automatically in any opened repository, so a value that needs expansion is
+ * ignored there.
  */
 export function resolveNpmRegistryUrl(
     env: NodeJS.ProcessEnv = process.env,
@@ -122,7 +128,7 @@ export function resolveNpmRegistryUrl(
             registry:
                 env.npm_config_registry?.trim() || env.NPM_CONFIG_REGISTRY?.trim() || undefined,
         },
-        readRegistryKeys(read(resolveProjectNpmrcPath(options.cwd ?? process.cwd())), scope, env),
+        readRegistryKeys(read(resolveProjectNpmrcPath(options.cwd ?? process.cwd())), scope, null),
         readRegistryKeys(read(resolveUserNpmrcPath(env)), scope, env),
     ];
     const scoped = layers.find((layer) => layer.scoped)?.scoped;

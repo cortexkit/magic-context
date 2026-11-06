@@ -310,8 +310,9 @@ read `npm_config_registry` (or `NPM_CONFIG_REGISTRY`), then the project
 `.npmrc` (in the nearest directory with a `package.json` or `node_modules`),
 then the user `.npmrc` (`NPM_CONFIG_USERCONFIG`, or `~/.npmrc`), and otherwise
 use public npm. A `@cortexkit:registry` entry takes priority over the default
-`registry`, as it does in npm. `${VAR}` references are expanded, and blank
-values are ignored. An explicit per-check registry override takes precedence.
+`registry`, as it does in npm. `${VAR}` references are expanded in the user
+`.npmrc` only. A project `.npmrc` value that uses one is ignored, because the
+check runs automatically in any opened repository. Blank values are ignored. An explicit per-check registry override takes precedence.
 The check does not retry public npm if the selected registry fails. Tarball
 downloads stay on the selected registry, and HTTP is used only when that
 registry is HTTP. These checks read only the registry keys. They do not use

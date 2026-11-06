@@ -17,6 +17,7 @@ function oneEventContext() {
             },
         },
         storage: { get: async () => undefined, set: async () => {} },
+        location: { directory: process.cwd() },
     };
 }
 
@@ -31,6 +32,7 @@ describe("OpenCode 2 update notice", () => {
         Date.now = () => now;
         try {
             const context = {
+                location: { directory: process.cwd() },
                 event: {
                     subscribe: async function* () {
                         yield {};
@@ -68,6 +70,7 @@ describe("OpenCode 2 update notice", () => {
         let checks = 0;
         let sets = 0;
         const context = {
+            location: { directory: process.cwd() },
             event: {
                 subscribe: async function* () {
                     for (let i = 0; i < 1000; i++) yield {};
