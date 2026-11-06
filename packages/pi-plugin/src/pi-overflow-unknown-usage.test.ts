@@ -23,12 +23,15 @@ import {
 	signalPiPendingMaterialization,
 } from "./context-handler";
 import { getPiChannel1Baseline } from "./ctx-reduce-nudge-pi";
+import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
+	estimatePiOverflowRecoveryInputTokens,
 	piRecoveryFitCalibration,
 	piRecoveryToolImageTokens,
 	resolvePiOverflowRecoveryUsage,
 } from "./pi-overflow-recovery";
 import * as pressure from "./pi-pressure";
+import { resolvePiEffectiveSystemState } from "./system-entry-pi";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -355,6 +358,69 @@ it("requires both rebuild permission and provider provenance before counting", (
 				usableHardLimit: 100_000,
 			}),
 		).toBe(usage);
+	}
+});
+
+it("counts system entries and tool deltas only through the effective host envelope", () => {
+	const system = [
+		{
+			role: "system",
+			content: "Initial instructions",
+			sections: { task: "Old task" },
+			toolsAdded: [
+				{
+					name: "old",
+					description: "Old tool",
+					parameters: { type: "object" },
+				},
+			],
+		},
+		{
+			role: "system",
+			content: [{ type: "text", text: "Additional instructions" }],
+			sections: { task: "Current task" },
+			toolsRemoved: [{ name: "old" }],
+			toolsAdded: [
+				{
+					name: "read",
+					description: "Read a file",
+					parameters: { type: "object" },
+				},
+			],
+		},
+	];
+	const effective = resolvePiEffectiveSystemState(system);
+	expect(effective.prompt).toBe(
+		"Initial instructions\n\nAdditional instructions\n\nCurrent task",
+	);
+	expect(effective.tools.map((tool) => tool.name)).toEqual(["read"]);
+	const envelope = readPiLkgFitEnvelope(
+		{ getSystemPrompt: () => effective.prompt },
+		{ getAllTools: () => [system[1].toolsAdded[0]] },
+		modelKey,
+		calibrationForModelKey(modelKey),
+	);
+	const conversation = [userMessage("Hello", 1)];
+	const withoutRows = estimatePiOverflowRecoveryInputTokens(
+		conversation,
+		envelope,
+	);
+	expect(withoutRows).toBeGreaterThan(0);
+	expect(
+		estimatePiOverflowRecoveryInputTokens(
+			[...system, ...conversation],
+			envelope,
+		),
+	).toBe(withoutRows);
+	for (const unsupported of [
+		{ role: "unknown", content: "Hello" },
+		{ role: "user", content: [{ type: "unknown", text: "Hello" }] },
+		{ role: "system", content: [{ type: "unknown", text: "Hello" }] },
+		{ role: "system", content: [{ type: "image", data: "AAAA" }] },
+	]) {
+		expect(
+			estimatePiOverflowRecoveryInputTokens([unsupported], envelope),
+		).toBeUndefined();
 	}
 });
 
