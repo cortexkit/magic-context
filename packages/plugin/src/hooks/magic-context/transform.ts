@@ -175,6 +175,7 @@ import {
     hasPendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";
+import { prepareStructuralSentinelChoices } from "./project-structural-sentinels";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -963,6 +964,14 @@ export function createTransform(deps: TransformDeps) {
             if (deps.compactionOff === true) return;
             throw degradedPassError(site, error);
         };
+
+        if (deps.storeGeneration === "v1" && !deps.compactionOff && deps.transformMode !== "rust") {
+            try {
+                prepareStructuralSentinelChoices({ db, sessionId, messages });
+            } catch (error) {
+                failPass("session-meta-early-return", error, "fatal");
+            }
+        }
 
         // Runs before anything reads a saved coordinate. Every ordinal this
         // session stored is a position in the message list some host served; if

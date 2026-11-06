@@ -1,3 +1,4 @@
+import { isRecord } from "../../shared/record-type-guard";
 import { providerVisiblePart } from "./provider-visible-parts";
 import { isStructuralNoiseSentinel } from "./strip-structural-noise";
 import type { MessageLike } from "./tag-messages";
@@ -18,7 +19,19 @@ function visibleGroup(group: readonly MessageLike[]): string {
         group.map((message) => ({
             role: message.info.role,
             parts: message.parts
-                .filter((part) => !isStructuralNoiseSentinel(part))
+                // The snapshot precedes structural stripping and persisted-edit
+                // replay. Compare native markers and our later placeholders in
+                // the same representation without hiding native empty text edits.
+                .filter(
+                    (part) =>
+                        !isStructuralNoiseSentinel(part) &&
+                        !(
+                            isRecord(part) &&
+                            (part.type === "step-start" ||
+                                part.type === "step-finish" ||
+                                part.type === "meta")
+                        ),
+                )
                 .map(providerVisiblePart),
         })),
     );

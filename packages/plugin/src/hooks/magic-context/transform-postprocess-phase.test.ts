@@ -582,6 +582,8 @@ it("cache thread: projects only generated structural sentinels after tagging and
         },
     ];
     let previous = [structuredClone(history)];
+    const { prepareStructuralSentinelChoices } = await import("./project-structural-sentinels");
+    prepareStructuralSentinelChoices({ db, sessionId, messages: [structuredClone(history)] });
     const serve = async () => {
         const messages = source();
         const tagger = createTagger();
@@ -682,6 +684,7 @@ it("cache thread: projects only generated structural sentinels after tagging and
     );
     updateReplayDocument(db, sessionId, (document) => {
         delete document.structuralSentinelOmissions;
+        delete document.structuralSentinelChoices;
         return true;
     });
     const legacy = source();

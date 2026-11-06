@@ -5,12 +5,18 @@ import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { getOrCreateSessionMeta, getTagsBySession } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { readReplayEnvelope } from "../../features/magic-context/storage-replay-document";
+import {
+    readReplayEnvelope,
+    writeReplayDocument,
+} from "../../features/magic-context/storage-replay-document";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { buildLkgPrefix } from "./lkg-replay";
-import { projectStructuralSentinels } from "./project-structural-sentinels";
+import {
+    prepareStructuralSentinelChoices,
+    projectStructuralSentinels,
+} from "./project-structural-sentinels";
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { stripStructuralNoise } from "./strip-structural-noise";
 import { type MessageLike, tagMessages } from "./tag-messages";
@@ -144,6 +150,10 @@ test("review: a known new signed reply omits sentinels without opening rebuild p
 
 test("review: unknown previous history cannot authorize a first sentinel omission", () => {
     const db = database();
+    // An old replay document proves this session was already managed, even
+    // when its last-good request is unavailable.
+    getOrCreateSessionMeta(db, "review-unknown");
+    writeReplayDocument(db, "review-unknown", { version: 2, trailingBlank: {} });
     const messages = [signedReply()];
     stripStructuralNoise(messages);
     const before = JSON.stringify(messages);
@@ -281,6 +291,8 @@ test("review: tool coordinates stay stable until final sentinel projection", () 
     messages[0].parts.splice(3, 0, tool);
     const tagger = createTagger();
     tagger.initFromDb(sessionId, db);
+    // Production records the fresh-session shape before allocating any tags.
+    prepareStructuralSentinelChoices({ db, sessionId, messages });
     const tagged = tagMessages(sessionId, messages, tagger, db);
     stripStructuralNoise(messages);
     expect(messages[0].parts[3]).toBe(tool);
