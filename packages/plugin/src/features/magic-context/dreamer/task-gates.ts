@@ -1,4 +1,5 @@
 import { DREAM_TASK_PROMOTION_DEFAULTS } from "../../../config/schema/magic-context";
+import { getHarness } from "../../../shared/harness";
 import type { Database, Statement } from "../../../shared/sqlite";
 import { isKnownAutocommit } from "../../../shared/sqlite-helpers";
 import { hasMemoryClassifiedAtColumn } from "../memory/storage-memory";
@@ -111,23 +112,29 @@ export function countProjectSessionsSince(
     // maintain the message index. Fall back per session to its indexing time,
     // not the project binding time (which changes without new messages). Keep
     // the ledger authoritative so reindexing old Pi history does not reopen work.
+    // Count project sessions for the current harness, excluding subagents.
+    // Keep this pre-gate in context.db; the history provider still performs
+    // native hidden-session checks and determines precise user-message activity.
+    const scope = `FROM session_projects sp
+        LEFT JOIN session_meta m ON m.session_id = sp.session_id
+       WHERE sp.project_path = ? AND sp.harness = ?
+         AND COALESCE(m.is_subagent, 0) = 0`;
     const row =
         since === null
             ? db
-                  .prepare<[string], { cnt: number }>(
-                      "SELECT COUNT(*) AS cnt FROM session_projects WHERE project_path = ?",
-                  )
-                  .get(projectPath)
+                  .prepare<[string, string], { cnt: number }>(`SELECT COUNT(*) AS cnt ${scope}`)
+                  .get(projectPath, getHarness())
             : db
-                  .prepare<[string, number], { cnt: number }>(
-                      `SELECT COUNT(*) AS cnt FROM session_projects sp
-                        LEFT JOIN schema_migrations_meta activity
-                          ON activity.key = 'retrospective_activity:' || sp.session_id
-                        LEFT JOIN message_history_index history ON history.session_id = sp.session_id
-                       WHERE sp.project_path = ?
-                         AND COALESCE(CAST(activity.value AS INTEGER), history.updated_at) > ?`,
+                  .prepare<[string, string, number], { cnt: number }>(
+                      `SELECT COUNT(*) AS cnt ${scope}
+                          AND COALESCE(
+                              (SELECT CAST(value AS INTEGER) FROM schema_migrations_meta
+                               WHERE key = 'retrospective_activity:' || sp.session_id),
+                              (SELECT updated_at FROM message_history_index
+                               WHERE session_id = sp.session_id AND harness = sp.harness)
+                          ) > ?`,
                   )
-                  .get(projectPath, since);
+                  .get(projectPath, getHarness(), since);
     return row?.cnt ?? 0;
 }
 
@@ -146,6 +153,13 @@ function countMappedMemories(db: Database, projectPath: string): number {
     return row?.cnt ?? 0;
 }
 
+// Backlog probes are status counts. The executor checks the stored file snapshot
+// against disk before deciding whether a skipped claim needs another model call.
+const CURRENT_VERIFY_SKIP_SQL = `COALESCE(CASE WHEN json_valid(m.metadata_json) THEN
+    json_extract(m.metadata_json, '$.dreamerVerifySkip.contentHash') = m.normalized_hash
+    AND json_type(m.metadata_json, '$.dreamerVerifySkip.fingerprint') = 'text'
+    ELSE 0 END, 0)`;
+
 function countUnverifiedMappedMemories(db: Database, projectPath: string): number {
     const row = db
         .prepare<[string, number], { cnt: number }>(
@@ -156,7 +170,8 @@ function countUnverifiedMappedMemories(db: Database, projectPath: string): numbe
                 AND m.status IN ('active','permanent')
                 AND (m.expires_at IS NULL OR m.expires_at > ?)
                 AND v.file_path <> ''
-                AND v.verified_at = 0`,
+                AND v.verified_at = 0
+                AND NOT (${CURRENT_VERIFY_SKIP_SQL})`,
         )
         .get(projectPath, Date.now());
     return row?.cnt ?? 0;
@@ -174,6 +189,7 @@ function countBroadCycleCandidates(
               WHERE m.project_path = ?
                 AND m.status IN ('active','permanent')
                 AND (m.expires_at IS NULL OR m.expires_at > ?)
+                AND NOT (${CURRENT_VERIFY_SKIP_SQL})
                 AND (
                     SELECT MAX(v.verified_at)
                       FROM memory_verifications v
@@ -402,13 +418,14 @@ export function getDreamTaskBacklog(
                 projectPath,
                 "verify-broad",
             )?.lastBroadRunAt;
-            // With no open cycle, the next broad run will open one over the whole
+            // With no open cycle, the next broad run will open one over the eligible
             // mapped pool. Once open, report only the memories not yet verified for
             // that cycle so run telemetry reflects the resumable backlog.
-            const pending =
-                cycleStartAt == null
-                    ? total
-                    : countBroadCycleCandidates(db, projectPath, cycleStartAt);
+            const pending = countBroadCycleCandidates(
+                db,
+                projectPath,
+                cycleStartAt ?? Number.MAX_SAFE_INTEGER,
+            );
             return { pending, total };
         }
         case "curate": {
@@ -584,6 +601,7 @@ export function getDreamTaskBacklogs(
     const optionKey = (value: number | null | undefined) =>
         value === undefined ? "omitted" : value === null ? "null" : `number:${value}`;
     const key = JSON.stringify([
+        getHarness(),
         projectPath,
         tasks,
         optionKey(options.lastRunAt),
