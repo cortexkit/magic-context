@@ -10000,3 +10000,118 @@ it("headless proven overflow joins its background historian before refusing", as
 		closeQuietly(db);
 	}
 });
+
+it("invalidates pre-publication pressure through repeated Pi turns without discarding fresh pressure", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-stale-published-pressure";
+	const fake = createFakePi();
+	const logger = await import("@magic-context/core/shared/logger");
+	const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
+	const clock = spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+	const originalTimer = globalThis.setTimeout;
+	// Exercise the real budget rejection without spending the production 21s
+	// waiting for a fake historian that only the test can finish.
+	const timers = spyOn(globalThis, "setTimeout").mockImplementation(((
+		...args: Parameters<typeof setTimeout>
+	) => {
+		if (typeof args[1] === "number" && args[1] > 19_000 && args[1] <= 21_000)
+			args[1] = 5;
+		return originalTimer(...args);
+	}) as typeof setTimeout);
+	let finish!: () => void;
+	const slow = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	let restoreHistorian: (() => void) | undefined;
+	try {
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const attempt = async () => {
+			const messages = [
+				userMessage("Continue", 1),
+				assistantMessage("Earlier work", 2),
+			];
+			try {
+				await handler({ messages: messages as never[] }, {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						["entry-1", "entry-2"],
+						messages,
+					),
+					getContextUsage: () => ({
+						tokens: 97_000,
+						percent: 97,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				return "provider";
+			} catch (error) {
+				expect(error).toMatchObject({ name: "PiDegradedPassError" });
+				expect(String(error)).toContain("stage=emergency historian");
+				expect(String(error)).toContain("This request was not sent.");
+				return "refused";
+			}
+		};
+		await attempt();
+		clock.mockReturnValue(Date.now() + 100);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			cacheTtl: "59m",
+			lastInputTokens: 97_000,
+			lastContextPercentage: 97,
+		});
+		restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(
+			sessionId,
+			slow,
+		);
+		expect(await attempt()).toBe("refused");
+		clock.mockReturnValue(Date.now() + 100);
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 1,
+				startMessageId: "entry-1",
+				endMessageId: "entry-1",
+				title: "Earlier work",
+				content: "Earlier work was summarized.",
+			},
+		]);
+		finish();
+		// Keep another slow background run present, so stale pressure would
+		// enter the blocking join even after the publication has landed.
+		restoreHistorian();
+		restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(
+			sessionId,
+			new Promise(() => {}),
+		);
+		const turns = [await attempt(), await attempt(), await attempt()];
+		console.log(`Pi post-publication turns: ${turns.join(", ")}`);
+		expect(turns).toEqual(["provider", "provider", "provider"]);
+		expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(0);
+		expect(
+			log.mock.calls.some(([, line]) =>
+				String(line).includes("refused turn recovery"),
+			),
+		).toBe(true);
+		clock.mockReturnValue(Date.now() + 100);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			lastInputTokens: 97_000,
+			lastContextPercentage: 97,
+		});
+		expect(await attempt()).toBe("refused");
+	} finally {
+		finish();
+		restoreHistorian?.();
+		timers.mockRestore();
+		clock.mockRestore();
+		log.mockRestore();
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});

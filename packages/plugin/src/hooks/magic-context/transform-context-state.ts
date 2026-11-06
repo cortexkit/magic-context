@@ -2,6 +2,7 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { loadPersistedUsage, type PersistedUsageState } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
+import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 
@@ -11,6 +12,53 @@ type ContextUsageCacheEntry = {
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
 };
+
+// Refused turns never reach the provider, so their last reading cannot refresh.
+// Keep only the first refusal for that reading; retries must not move the boundary
+// past a summary or fold that could let the blocked session continue.
+const usageRefusals = new WeakMap<ContextDatabase, Map<string, number>>();
+
+export function recordUsageRefusal(
+    db: ContextDatabase,
+    sessionId: string,
+    refusedAt = Date.now(),
+): void {
+    let sessions = usageRefusals.get(db);
+    if (!sessions) {
+        sessions = new Map();
+        usageRefusals.set(db, sessions);
+    }
+    if (!sessions.has(sessionId)) sessions.set(sessionId, refusedAt);
+}
+
+/** Reset a pre-refusal reading only when history changes after that refusal. */
+export function shouldResetRefusedUsage(
+    db: ContextDatabase,
+    sessionId: string,
+    meta: Pick<SessionMeta, "lastResponseTime" | "cachedM0MaterializedAt">,
+    liveReading?: ContextUsageCacheEntry,
+): boolean {
+    const refusals = usageRefusals.get(db);
+    const refusedAt = refusals?.get(sessionId);
+    if (refusedAt === undefined) return false;
+
+    // A real new reading ends the blocked epoch. The idle clock may lag a
+    // newly delivered OpenCode measurement, so prefer its own timestamp.
+    const readingAt = liveReading?.hasUsageTokens ? liveReading.updatedAt : meta.lastResponseTime;
+    if (readingAt > refusedAt) {
+        refusals?.delete(sessionId);
+        return false;
+    }
+    const now = Date.now();
+    const foldedAt = meta.cachedM0MaterializedAt ?? 0;
+    // A future timestamp cannot establish event order after a clock rewind.
+    if (foldedAt > refusedAt && foldedAt <= now) return true;
+    return !!db
+        .prepare(
+            "SELECT 1 FROM compartments WHERE session_id = ? AND harness = ? AND created_at > ? AND created_at <= ? LIMIT 1",
+        )
+        .get(sessionId, getHarness(), refusedAt, now);
+}
 
 function loadPersistedUsageWatermark(db: ContextDatabase, sessionId: string): number | null {
     const result = db

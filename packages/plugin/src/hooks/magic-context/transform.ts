@@ -214,9 +214,11 @@ import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform
 import {
     contextUsagePassSnapshot,
     loadContextUsage,
+    recordUsageRefusal,
     resolveSchedulerDecision,
     resolveUnknownUsageFromWireEstimate,
     savedProviderReadingForPass,
+    shouldResetRefusedUsage,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -1483,21 +1485,34 @@ export function createTransform(deps: TransformDeps) {
         const isFirstTransformPassForSession = !loadedSessions.has(sessionId);
         loadedSessions.add(sessionId);
 
-        // First-pass reset MUST run BEFORE loadContextUsage so threshold checks
-        // (95% blocking, 80% emergency nudge) don't fire on stale data from a
-        // different model, reverted message, or previous session state.
+        // A refused turn cannot refresh provider usage. Reset only after new
+        // history lands after that refusal; a healthy session keeps its reading.
+        // Publishing a summary does not itself allow rewriting the cached prefix.
         // `persistedUsageBeforeResets` (captured above, before the model-change
         // clear too) holds the pre-reset usage that restart recovery and
         // protected-tail boundary sizing rely on.
         const earlyStateSnapshot = loadTransformPassStateSnapshot(db, sessionId);
         const historianFailureState = earlyStateSnapshot.historianFailure;
 
-        if (isFirstTransformPassForSession && sessionMeta) {
+        const liveUsageBeforeReset = deps.contextUsageMap.get(sessionId);
+        const usageResetAfterRefusal = shouldResetRefusedUsage(
+            db,
+            sessionId,
+            sessionMeta,
+            liveUsageBeforeReset,
+        );
+        if ((isFirstTransformPassForSession || usageResetAfterRefusal) && sessionMeta) {
             const persistedPct = sessionMeta.lastContextPercentage ?? 0;
-            if (persistedPct > 0) {
+            // Another process can reset stored counters while this process retains its provider sample.
+            if (
+                persistedPct > 0 ||
+                (usageResetAfterRefusal &&
+                    (sessionMeta.lastInputTokens > 0 || deps.contextUsageMap.has(sessionId)))
+            ) {
+                const resetPct = persistedPct || liveUsageBeforeReset?.usage.percentage || 0;
                 sessionLog(
                     sessionId,
-                    `transform: first pass reset — percentage=${persistedPct.toFixed(1)}% — clearing stale usage state`,
+                    `transform: ${isFirstTransformPassForSession ? "first pass" : "refused turn recovery"} reset — percentage=${resetPct.toFixed(1)}% — clearing stale usage state`,
                 );
                 updateSessionMeta(db, sessionId, {
                     lastContextPercentage: 0,
@@ -1514,8 +1529,8 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        // Compute context usage AFTER first-pass reset so threshold checks use
-        // clean state (0%) instead of stale values from a previous model/session.
+        // Compute usage after the reset, falling back to the estimated size of
+        // the outgoing request until a new provider reading arrives.
         let contextUsageEarly = loadContextUsage(
             deps.contextUsageMap,
             db,
@@ -3041,15 +3056,17 @@ export function createTransform(deps: TransformDeps) {
             // as before: recovery is a fit decision, and the emergency planner
             // must plan its reclaim against the whole rejected request.
             const overflowRecoveryPass = usagePercentageSynthetic || emergencyRecoveryArmed;
-            const savedProviderReading = overflowRecoveryPass
-                ? null
-                : savedProviderReadingForPass({
-                      persisted: persistedUsageBeforeResets,
-                      currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
-                      contextLimit: resolvedContextLimit,
-                      lastResponseTime: sessionMeta.lastResponseTime,
-                      cacheExpired: hardCacheExpired,
-                  });
+            const savedProviderReading =
+                overflowRecoveryPass || usageResetAfterRefusal
+                    ? null
+                    : savedProviderReadingForPass({
+                          persisted: persistedUsageBeforeResets,
+                          currentModelKey:
+                              currentModelKeyForBoundary ?? (hardModelKey || undefined),
+                          contextLimit: resolvedContextLimit,
+                          lastResponseTime: sessionMeta.lastResponseTime,
+                          cacheExpired: hardCacheExpired,
+                      });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
                 pressureEstimate = estimateFinalWireInputTokens({
@@ -3610,6 +3627,7 @@ export function createTransform(deps: TransformDeps) {
                 try {
                     // OpenCode 2 supplies a refusal callback because it has no v1 client abort method.
                     await host.hostRefuse(deps.client, sessionId);
+                    recordUsageRefusal(db, sessionId);
                 } catch (error) {
                     sessionLog(
                         sessionId,
@@ -4089,7 +4107,17 @@ export function createTransform(deps: TransformDeps) {
     };
 
     const timedTransform: typeof transform = (input, output) =>
-        withTransformTimingSummary(() => transform(input, output));
+        withTransformTimingSummary(async () => {
+            const sessionId = findSessionId(output.messages as MessageLike[]);
+            try {
+                await transform(input, output);
+            } catch (error) {
+                // These refusals propagate; the wrapper does not replay a previously prepared request.
+                if (sessionId && !deps.compactionOff && error instanceof EmergencyFailClosedError)
+                    recordUsageRefusal(deps.db, sessionId);
+                throw error;
+            }
+        });
     return Object.assign(timedTransform, {
         clearSessionLogState,
         invalidateRustWireState(sessionId: string): void {
