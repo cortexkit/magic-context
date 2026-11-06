@@ -19,7 +19,7 @@
 // current or future, isolated or not — to read production storage or user-tier
 // config. Tests that set their own XDG_DATA_HOME or XDG_CONFIG_HOME still work
 // because they override the preload root per test.
-import { afterAll } from "bun:test";
+import { afterAll, afterEach } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -28,12 +28,21 @@ import {
     sweepStaleTestTempDirs,
 } from "./src/shared/test-temp-dir";
 import { __setLocalEmbeddingPoolingTestFallback } from "./src/features/magic-context/memory/local-embedding-pooling";
+import { resetReusableWorkersForTests } from "./src/shared/reusable-worker";
+
+// Pooled threads and idle timers must not outlive the test that created them.
+afterEach(resetReusableWorkersForTests);
 
 // Retry cleanup from interrupted earlier runs before creating this process's root.
 // `bun test --parallel` launches separate worker processes, so include the PID to
 // keep each live storage root visibly process-scoped.
 sweepStaleTestTempDirs();
-installTestTempDirCleanup(afterAll);
+installTestTempDirCleanup((cleanup) =>
+    afterAll(async () => {
+        await resetReusableWorkersForTests();
+        cleanup();
+    }),
+);
 const { dir: isolatedDataHome } = createTestTempDir("mc-plugin-test-xdg-pid-", `${process.pid}-`);
 
 // MAGIC_CONTEXT_TEST_DATA_DIR is the BULLETPROOF guard: resolveDatabasePath()

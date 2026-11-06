@@ -1,6 +1,7 @@
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { createFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { reuseWorker } from "@magic-context/core/shared/reusable-worker";
 import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";
 import { createWorkerShutdown } from "@magic-context/core/shared/worker-shutdown";
 import { decodePiHydrationOperation } from "./tag-snapshot-codec-pi";
@@ -326,8 +327,10 @@ export function startPiTagSnapshotWorker(
 		options.byteLimit,
 		options.cachedFallback,
 	);
-	const worker = inRootAsyncContext(
-		() => new Worker(entry, { workerData: request }),
+	const worker = inRootAsyncContext(() =>
+		options.entry
+			? new Worker(entry, { workerData: request })
+			: reuseWorker(entry, { workerData: request }),
 	);
 	// The worker reads a close request between pages, while it waits for a
 	// packet's credit, and then exits at once. A page is one read transaction of

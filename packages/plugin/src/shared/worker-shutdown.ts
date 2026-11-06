@@ -48,6 +48,7 @@ export function isWorkerCloseMessage(message: unknown): boolean {
 export function exitOnWorkerClose(
     port: WorkerClosePort | null,
     closeConnections: () => void,
+    exitThread = true,
 ): { closePort(): void } {
     const listener = (message: unknown) => {
         if (!isWorkerCloseMessage(message)) return;
@@ -56,27 +57,30 @@ export function exitOnWorkerClose(
         } finally {
             // Exit even if a close threw: the thread is ending and a connection
             // that could not close is released by the thread's teardown instead.
-            process.exit(0);
+            if (exitThread) process.exit(0);
+            // A reusable job with no asynchronous work left releases only its
+            // job port, after closing the connection and removing this listener.
+            closePort();
         }
     };
     if (!port) return { closePort() {} };
-    port.on("message", listener);
+    const owner = port;
+    owner.on("message", listener);
     let closed = false;
-    return {
-        closePort() {
-            if (closed) return;
-            closed = true;
-            // Close on a later timer turn, not synchronously: on Bun 1.3.14 a
-            // port closed while an entry module with a top-level await is still
-            // evaluating does not end the thread. Every current caller closes
-            // its port at the end of the module body or later, so the timer runs
-            // after evaluation has finished.
-            setTimeout(() => {
-                port.off("message", listener);
-                port.close();
-            });
-        },
-    };
+    function closePort() {
+        if (closed) return;
+        closed = true;
+        // Close on a later timer turn, not synchronously: on Bun 1.3.14 a
+        // port closed while an entry module with a top-level await is still
+        // evaluating does not end the thread. Every current caller closes
+        // its port at the end of the module body or later, so the timer runs
+        // after evaluation has finished.
+        setTimeout(() => {
+            owner.off("message", listener);
+            owner.close();
+        });
+    }
+    return { closePort };
 }
 
 /** The parts of a worker's parent port that {@link exitOnWorkerClose} uses. */
