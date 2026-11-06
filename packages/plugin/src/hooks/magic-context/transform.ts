@@ -192,6 +192,7 @@ import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
 } from "./reasoning-budget";
+import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
@@ -2557,15 +2558,20 @@ export function createTransform(deps: TransformDeps) {
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
-        // A recovery prefix is always normalized once a pass may rewrite it,
-        // even with nothing untagged: until then every pass re-serves its bytes.
+        let recoveryReleased = false;
         const untaggedReplayTailServed =
             !!recovery.prefix ||
             (untaggedReplayIds.size > 0 &&
                 messages.some((message) => untaggedReplayIds.has(message.info.id ?? "")));
+        const releaseRecoveryReplay = untaggedReplayTailServed
+            ? () => {
+                  recoveryReleased = true;
+              }
+            : undefined;
         const normalizeRecoveryTail = untaggedReplayTailServed
             ? () => {
                   if (recoveryNormalized) return;
+                  recoveryReleased = true;
                   const tail = messages.filter((message) =>
                       untaggedReplayIds.has(message.info.id ?? ""),
                   );
@@ -2723,6 +2729,9 @@ export function createTransform(deps: TransformDeps) {
             `targets=${targetTagNumbers.length} fetched=${targetsSliceTags.length}`,
         );
 
+        const recoveryBeforePostprocess = recovery.prefix
+            ? snapshotRecoveryMessages(messages)
+            : undefined;
         let didMutateFromFlushedStatuses = false;
         // Only run mutation stages when tagging succeeded. With targets={}
         // applyFlushedStatuses can't drive any of the persisted drops/
@@ -3144,7 +3153,9 @@ export function createTransform(deps: TransformDeps) {
         const tPostProcess = performance.now();
         dropProjectionEmergency = contextUsage.percentage >= 95;
         const postTransformResult = await runPostTransformPhase({
+            opencode1: deps.storeGeneration === "v1",
             opencode2: deps.storeGeneration === "v2",
+            releaseRecoveryPrefix: releaseRecoveryReplay,
             normalizeRecoveryTail,
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
@@ -3281,7 +3292,17 @@ export function createTransform(deps: TransformDeps) {
         // The pass recorded any strip the mode switch required; later passes
         // replay it from the persisted ledger.
         compactionModeTransitionPending.delete(sessionId);
-        if (recovery.prefix && !recoveryNormalized) {
+        if (recovery.prefix && recoveryReleased && !recoveryNormalized) {
+            if (!recoveryBeforePostprocess)
+                throw new Error("Cannot release recovery without its pre-edit snapshot");
+            const released = releaseRecoveryPrefix({
+                frozen: JSON.parse(recovery.prefix.json),
+                before: recoveryBeforePostprocess,
+                after: messages,
+            });
+            messages.splice(0, messages.length, ...released);
+        }
+        if (recovery.prefix && !recoveryReleased) {
             const renderedById = new Map<string, MessageLike[]>();
             for (const message of messages) {
                 if (!message.info.id) continue;
@@ -3295,7 +3316,12 @@ export function createTransform(deps: TransformDeps) {
             messages.splice(0, messages.length, ...JSON.parse(recovery.prefix.json), ...suffix);
         }
         const recoveryReleaseReason =
-            recovery.rebuildReason ?? (recoveryNormalized ? "recovery_tail_normalized" : undefined);
+            recovery.rebuildReason ??
+            (recoveryNormalized
+                ? "recovery_tail_normalized"
+                : recoveryReleased
+                  ? "recovery_prefix_released"
+                  : undefined);
         if (recoveryReleaseReason) postTransformResult.bustedThisPass = true;
         passOutcome.markFinalized();
 
