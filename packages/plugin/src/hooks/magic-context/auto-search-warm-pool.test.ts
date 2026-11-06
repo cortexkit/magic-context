@@ -225,9 +225,9 @@ test("worker diagnostics report cold starts, warm reuse and signature-invalidate
 
 test("a peek after the session's chunk rows are deleted reports the changed signature and serves nothing", async () => {
     const db = fixture();
-    expect((await warmCompartmentChunkSearchPool(db, "session", "/synthetic", "model")).outcome).toBe(
-        "refreshed",
-    );
+    expect(
+        (await warmCompartmentChunkSearchPool(db, "session", "/synthetic", "model")).outcome,
+    ).toBe("refreshed");
     const before = createAutoSearchDiagnostics(0.6);
     expect(
         peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model", null, before),
