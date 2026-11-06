@@ -15,9 +15,13 @@
  * 2. The host's own schema, reached from the draft message's class:
  *    `Message.fields.content.value` (the content-part union) → the member whose `type` is
  *    the literal "media" → `fields.media` (`Media.AssetSchema`) → `ast.encoding[0]
- *    .transformation.decode`, whose `run(some(encoded))` returns `Success(some(asset))`.
- *    That transformation is the host's `new Asset(encoded)`. It depends on Effect Schema
- *    internals, so every step is checked and any mismatch counts as unavailable.
+ *    .transformation.decode`. OpenCode 2.0.22 (Effect 4.0.0-rc.112) exposes a getter whose
+ *    `run(some(encoded), {})` returns `Success(some(asset))`. OpenCode 2.2.3 (Effect 4.0.6)
+ *    uses a plain `{ _tag: "Transform", transform }` getter whose `transform(encoded)`
+ *    returns the asset directly. Both invoke the host's `new Asset(encoded)`. Other getter
+ *    tags are unavailable: they need optional/effectful evaluation rather than a direct
+ *    synchronous transform. This depends on Effect Schema internals, so every step is
+ *    checked and any mismatch counts as unavailable.
  */
 
 type Part = Record<string, unknown>;
@@ -100,11 +104,21 @@ function decodeThroughHostSchema(encoded: Part & { source: Part }): object | str
     const decode = Array.isArray(encoding)
         ? ((encoding[0] as Part | undefined)?.transformation as Part | undefined)?.decode
         : undefined;
-    const run = (decode as Part | undefined)?.run;
-    if (typeof run !== "function") return "host media schema has no decode transformation";
-    const result = run.call(decode, { _tag: "Some", value: encoded }, {}) as Part | undefined;
-    const option = result?._tag === "Success" ? (result.value as Part | undefined) : undefined;
-    const asset = option?._tag === "Some" ? option.value : undefined;
+    const getter = decode as Part | undefined;
+    let asset: unknown;
+    if (getter?._tag === "Transform") {
+        if (typeof getter.transform !== "function")
+            return "host media schema has no decode transformation";
+        asset = getter.transform(encoded);
+    } else {
+        if (getter?._tag !== undefined)
+            return `host media schema has unsupported decode transformation: ${String(getter._tag)}`;
+        const run = getter?.run;
+        if (typeof run !== "function") return "host media schema has no decode transformation";
+        const result = run.call(decode, { _tag: "Some", value: encoded }, {}) as Part | undefined;
+        const option = result?._tag === "Success" ? (result.value as Part | undefined) : undefined;
+        asset = option?._tag === "Some" ? option.value : undefined;
+    }
     if (!isClassInstance(asset) || (asset as Part).source !== source)
         return "host media schema decode did not return an asset";
     return asset;

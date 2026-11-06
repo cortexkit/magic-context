@@ -143,3 +143,91 @@ describe("host media classes", () => {
         expect(hostUsesMediaAssets()).toBe(false);
     });
 });
+
+describe("host media schema decoding", () => {
+    function rememberSchema(decode: unknown): void {
+        class SchemaMessage extends HostMessage {
+            static fields = {
+                content: {
+                    value: {
+                        members: [
+                            {
+                                fields: {
+                                    type: { ast: { literal: "media" } },
+                                    media: { ast: { encoding: [{ transformation: { decode } }] } },
+                                },
+                            },
+                        ],
+                    },
+                },
+            };
+        }
+        rememberHostMedia([new SchemaMessage([{ type: "text", text: "hello" }])]);
+    }
+
+    function expectImageAsset(): void {
+        const asset = hostMediaAsset("iVBORw0KGgo=", "image/png");
+        expect(asset).toBeInstanceOf(HostAsset);
+        expect((asset as HostAsset).source).toEqual({
+            type: "base64",
+            data: "iVBORw0KGgo=",
+            mediaType: "image/png",
+        });
+    }
+
+    it("rebuilds an asset through the legacy run getter without a live image", () => {
+        rememberSchema({
+            run(
+                input: { _tag: string; value: { source: { mediaType: string } } },
+                options: unknown,
+            ) {
+                expect(input._tag).toBe("Some");
+                expect(options).toEqual({});
+                return {
+                    _tag: "Success",
+                    value: { _tag: "Some", value: new HostAsset(input.value) },
+                };
+            },
+        });
+        expectImageAsset();
+    });
+
+    it("rebuilds an asset through the Effect 4.0.x Transform getter without a live image", () => {
+        rememberSchema({
+            _tag: "Transform",
+            transform: (encoded: { source: { mediaType: string } }) => new HostAsset(encoded),
+        });
+        expectImageAsset();
+    });
+
+    it.each([
+        "TransformOptional",
+        "TransformEffect",
+        "Unknown",
+    ])("reports the unsupported %s getter without invoking it", (tag) => {
+        const unexpected = () => {
+            throw new Error("unsupported getters must not run");
+        };
+        rememberSchema({ _tag: tag, transform: unexpected, run: unexpected });
+        expect(hostMediaAsset("iVBORw0KGgo=", "image/png")).toBe(
+            `no Media.Asset seen in this process; host media schema has unsupported decode transformation: ${tag}`,
+        );
+    });
+
+    it.each([
+        [
+            "plain record",
+            (encoded: { source: { mediaType: string } }) => ({ source: encoded.source }),
+        ],
+        [
+            "copied source",
+            (encoded: { source: { mediaType: string } }) =>
+                new HostAsset({ source: { ...encoded.source } }),
+        ],
+    ])("rejects a Transform getter returning a %s", (_name, transform) => {
+        rememberSchema({ _tag: "Transform", transform });
+        expect(hostMediaAsset("iVBORw0KGgo=", "image/png")).toBe(
+            "no Media.Asset seen in this process; host media schema decode did not return an asset",
+        );
+    });
+});
