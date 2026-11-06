@@ -129,13 +129,16 @@ export function cancelPiAbandonedPendingDrops(
 	ids: ReadonlySet<string> | null,
 ): number {
 	if (!ids) return 0;
+	const abandoned = (saved: Journal) =>
+		Object.entries(saved.pending).filter(([, leaf]) => !ids.has(leaf));
+	// This runs on every pass. Look first without the write lock, so a pass with
+	// nothing to cancel never takes it; recheck inside the transaction.
+	if (!abandoned(journal(state(db, sessionId)[KEY])).length) return 0;
 	return db
 		.transaction(() => {
 			const document = state(db, sessionId);
 			const saved = journal(document[KEY]);
-			const offPending = Object.entries(saved.pending).filter(
-				([, leaf]) => !ids.has(leaf),
-			);
+			const offPending = abandoned(saved);
 			if (!offPending.length) return 0;
 			for (const [tag] of offPending) {
 				db.prepare(
