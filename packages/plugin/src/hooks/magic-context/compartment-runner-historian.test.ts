@@ -55,7 +55,7 @@ test("N1 primary rejected twice then fallback publishes; only a clean primary re
             priorCompartments: [],
             sequenceOffset: 0,
             dumpLabelBase: "sidebar",
-            model: "configured/primary",
+            model: "actual/primary",
             fallbackModels: ["configured/fallback"],
         });
     for (const runs of [1, 2]) {
@@ -164,6 +164,125 @@ test("N1 recognizes a configured fallback selected inside the host transport", a
         sinceLastClean: { fallbackRuns: 1 },
     });
 });
+
+for (const scenario of [
+    {
+        name: "N1 counts an unavailable primary once when the host fallback output is valid",
+        outputs: [{ model: "fallback", valid: true }],
+        outcome: "fallback",
+        primaryAttempts: 1,
+        primaryRejections: 1,
+    },
+    {
+        name: "N1 keeps a rejected primary attempt after a valid primary repair",
+        outputs: [
+            { model: "primary", valid: false },
+            { model: "primary", valid: true },
+        ],
+        outcome: "ok",
+        primaryAttempts: 2,
+        primaryRejections: 1,
+    },
+    {
+        name: "N1 excludes explicit fallback attempts after two rejected primary outputs",
+        outputs: [
+            { model: "primary", valid: false },
+            { model: "primary", valid: false },
+            { model: "fallback", valid: true },
+        ],
+        outcome: "fallback",
+        primaryAttempts: 2,
+        primaryRejections: 2,
+    },
+    {
+        name: "N1 does not charge invalid host fallback output twice against the primary",
+        outputs: [
+            { model: "fallback", valid: false },
+            { model: "primary", valid: true },
+        ],
+        outcome: "ok",
+        primaryAttempts: 2,
+        primaryRejections: 1,
+    },
+    {
+        name: "N1 counts a repair-time host fallback as a second primary rejection",
+        outputs: [
+            { model: "primary", valid: false },
+            { model: "fallback", valid: true },
+        ],
+        outcome: "fallback",
+        primaryAttempts: 2,
+        primaryRejections: 2,
+    },
+    {
+        name: "N1 attributes unknown producer metadata to the requested primary",
+        outputs: [{ model: null, valid: true }],
+        outcome: "ok",
+        primaryAttempts: 1,
+        primaryRejections: 0,
+    },
+] as const) {
+    test(scenario.name, async () => {
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-sidebar-attribution-"));
+        tempDirs.push(directory);
+        process.env.XDG_DATA_HOME = directory;
+        const db = openDatabase();
+        const sessionId = scenario.name;
+        let opened = 0;
+        const executor: HiddenCompletionExecutor = {
+            capabilities: { tools: false, harness: "opencode2" },
+            open: async () => ({ id: `attribution-${++opened}` }),
+            attempt: async () => {},
+            close: async () => {},
+            collect: async () => {
+                const output = scenario.outputs[opened - 1];
+                if (!output) throw new Error("Unexpected historian attempt");
+                return {
+                    text: output.valid
+                        ? '<output><compartment start="1" end="1" title="History"><p1>Keep this.</p1></compartment></output>'
+                        : "invalid compartment output",
+                    reasoning: null,
+                    lengthCapped: false,
+                    ...(output.model ? { providerId: "actual", modelId: output.model } : {}),
+                    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                };
+            },
+        };
+        try {
+            const result = await runValidatedHistorianPass({
+                client: undefined,
+                hiddenCompletionExecutor: executor,
+                db,
+                parentSessionId: sessionId,
+                sessionDirectory: directory,
+                prompt: "Messages 1-1:\n1: U: Keep this.",
+                chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "m1" }] },
+                priorCompartments: [],
+                sequenceOffset: 0,
+                dumpLabelBase: "attribution",
+                model: "actual/primary",
+                fallbackModels: ["actual/fallback"],
+            });
+            expect(result.ok).toBe(true);
+            expect(opened).toBe(scenario.outputs.length);
+            result.finishSidebarRun?.(true);
+            const clean = scenario.primaryRejections === 0 && scenario.outcome === "ok";
+            expect(buildSidebarSnapshot(db, sessionId, process.cwd()).historianRun).toMatchObject({
+                outcome: scenario.outcome,
+                model: scenario.outcome === "fallback" ? "actual/fallback" : "actual/primary",
+                primaryAttempts: scenario.primaryAttempts,
+                primaryRejections: scenario.primaryRejections,
+                sinceLastClean: {
+                    primaryAttempts: clean ? 0 : scenario.primaryAttempts,
+                    primaryRejections: scenario.primaryRejections,
+                    fallbackRuns: scenario.outcome === "fallback" ? 1 : 0,
+                },
+            });
+        } finally {
+            clearSidebarObservations(sessionId);
+        }
+    });
+}
 
 test("historian ledger distinguishes empty, reasoning-only, length-capped and valid output", async () => {
     const directory = createTestTempDirFromPath(join(tmpdir(), "mc-historian-ledger-"));
