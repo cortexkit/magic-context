@@ -364,49 +364,143 @@ pub(crate) fn render_decayed_with_items(
         compartments
     };
     let mut tiers = compute_tiers(compartments, history_budget_tokens);
+    let mut pieces = TierPieces::new(compartments);
+    let mut body = pieces.join(&tiers);
 
-    let render = |tiers: &[u8]| -> String {
-        let mut parts = Vec::new();
-        for (i, c) in compartments.iter().enumerate() {
-            let rendered = render_one_compartment(c, tiers[i]);
-            if !rendered.is_empty() {
-                parts.push(rendered);
-            }
-        }
-        parts.join("\n\n")
-    };
-
-    let mut body = render(&tiers);
     // Budget guard: the curve already targets the budget, but estimate drift or a very
-    // tight budget can overshoot. Demote oldest-first until it fits.
-    let mut guard = compartments.len() * 5;
-    while history_budget_tokens > 0.0
-        && estimate_tokens(&body) as f64 > history_budget_tokens
-        && guard > 0
-    {
-        let mut demoted = false;
-        for t in tiers.iter_mut() {
-            if *t < 5 {
-                *t += 1;
-                demoted = true;
+    // tight budget can overshoot. Demote oldest-first until it fits. This follows the
+    // plugin's renderer (decay-render.ts): it first demotes against the sum of each
+    // summary's own count, then checks the joined body, whose separators and
+    // boundary tokens the sum misses, and keeps demoting while that is over.
+    // Re-rendering and re-counting the whole history after every single demotion
+    // instead costs (demotions x history size) of tokenizer work, which took seconds
+    // with an exact tokenizer on a head with hundreds of summaries, while the head
+    // waited for the view.
+    if history_budget_tokens > 0.0 {
+        let mut running: i64 = (0..tiers.len())
+            .map(|i| pieces.tokens(i, tiers[i], &estimate_tokens) as i64)
+            .sum();
+        let mut guard = compartments.len() * 5;
+        let mut oldest = 0usize;
+        while running as f64 > history_budget_tokens && guard > 0 {
+            if !demote_oldest(
+                &mut tiers,
+                &mut oldest,
+                &mut pieces,
+                &mut running,
+                &estimate_tokens,
+            ) {
                 break;
             }
+            guard -= 1;
         }
-        if !demoted {
-            break;
+        body = pieces.join(&tiers);
+        while estimate_tokens(&body) as f64 > history_budget_tokens && guard > 0 {
+            if !demote_oldest(
+                &mut tiers,
+                &mut oldest,
+                &mut pieces,
+                &mut running,
+                &estimate_tokens,
+            ) {
+                break;
+            }
+            guard -= 1;
+            body = pieces.join(&tiers);
         }
-        body = render(&tiers);
-        guard -= 1;
     }
-    let items = compartments
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            let text = render_one_compartment(c, tiers[i]);
+    let items = (0..compartments.len())
+        .filter_map(|i| {
+            let text = pieces.text(i, tiers[i]).to_string();
             (!text.is_empty()).then(|| (indices[i], tiers[i], text))
         })
         .collect();
     (body, items)
+}
+
+/// Moves the oldest summary that can still shrink one tier down and updates the
+/// running sum. `oldest` only moves forward, because tiers only ever grow.
+fn demote_oldest(
+    tiers: &mut [u8],
+    oldest: &mut usize,
+    pieces: &mut TierPieces<'_>,
+    running: &mut i64,
+    estimate_tokens: &impl Fn(&str) -> usize,
+) -> bool {
+    while *oldest < tiers.len() && tiers[*oldest] >= 5 {
+        *oldest += 1;
+    }
+    let Some(tier) = tiers.get(*oldest).copied() else {
+        return false;
+    };
+    *running += pieces.tokens(*oldest, tier + 1, estimate_tokens) as i64
+        - pieces.tokens(*oldest, tier, estimate_tokens) as i64;
+    tiers[*oldest] = tier + 1;
+    true
+}
+
+/// Each summary's rendered text and token count at a tier, computed on first use.
+/// Both are fixed for the length of one render, so no summary is rendered or
+/// counted twice at the same tier.
+struct TierPieces<'a> {
+    compartments: &'a [DecayRenderCompartment],
+    text: std::collections::HashMap<(usize, u8), String>,
+    tokens: std::collections::HashMap<(usize, u8), usize>,
+}
+
+impl<'a> TierPieces<'a> {
+    fn new(compartments: &'a [DecayRenderCompartment]) -> Self {
+        Self {
+            compartments,
+            text: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+        }
+    }
+
+    fn text(&mut self, index: usize, tier: u8) -> &str {
+        let compartments = self.compartments;
+        self.text
+            .entry((index, tier))
+            .or_insert_with(|| render_one_compartment(&compartments[index], tier))
+    }
+
+    fn tokens(
+        &mut self,
+        index: usize,
+        tier: u8,
+        estimate_tokens: &impl Fn(&str) -> usize,
+    ) -> usize {
+        if let Some(&tokens) = self.tokens.get(&(index, tier)) {
+            return tokens;
+        }
+        let text = self.text(index, tier);
+        let tokens = if text.is_empty() {
+            0
+        } else {
+            estimate_tokens(text)
+        };
+        self.tokens.insert((index, tier), tokens);
+        tokens
+    }
+
+    /// The non-empty summaries at their tiers, joined by blank lines.
+    fn join(&mut self, tiers: &[u8]) -> String {
+        for (index, &tier) in tiers.iter().enumerate() {
+            self.text(index, tier);
+        }
+        let mut body = String::new();
+        for (index, &tier) in tiers.iter().enumerate() {
+            let text = &self.text[&(index, tier)];
+            if text.is_empty() {
+                continue;
+            }
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(text);
+        }
+        body
+    }
 }
 
 /// Extract a top-level m0 block slice (e.g. "session-history") for budget measurement
@@ -593,6 +687,41 @@ mod tests {
         );
         // the newest should retain more fidelity than the oldest after demotion
         assert!(out.contains(" · NEW"), "newest survives: {out}");
+    }
+
+    #[test]
+    fn budget_guard_counts_each_summary_once_not_the_whole_history_per_demotion() {
+        // Hundreds of summaries over budget need hundreds of demotions. Counting the
+        // whole joined history after each one fed the exact tokenizer hundreds of
+        // copies of the history (seconds on a real head while it waited for its
+        // view). Each summary is now counted once per tier, plus a few joined-body
+        // checks, so the counted text stays within a small multiple of the history.
+        // Every tier is as long as the full text, so only the last tier saves space
+        // and fitting takes several demotions per summary dropped.
+        let text = "a summary sentence about the work. ".repeat(20);
+        let comps: Vec<_> = (0..300i64)
+            .map(|i| DecayRenderCompartment {
+                p2: Some(text.clone()),
+                p3: Some(text.clone()),
+                p4: Some(text.clone()),
+                ..comp(i * 2 + 1, i * 2 + 2, &format!("S{i}"), &text, 50)
+            })
+            .collect();
+        let counted = std::cell::Cell::new(0usize);
+        let chars = |s: &str| {
+            counted.set(counted.get() + s.len());
+            s.chars().count()
+        };
+        let full = render_decayed_compartments(&comps, 0.0, |s: &str| s.chars().count());
+        let budget = full.chars().count() as f64 * 0.4;
+        let out = render_decayed_compartments(&comps, budget, chars);
+        assert!(out.chars().count() as f64 <= budget, "fits the budget");
+        assert!(
+            counted.get() < full.len() * 10,
+            "counted {} bytes for a {}-byte history",
+            counted.get(),
+            full.len()
+        );
     }
 
     #[test]

@@ -511,6 +511,9 @@ fn child_cpu_us() -> u64 {
 
 include!("../benches/fixtures/notice-cost-fixed-interleaved.inc.rs");
 
+#[cfg(feature = "notice-cost-timing")]
+include!("../benches/fixtures/surface-ride-cost.inc.rs");
+
 async fn drain(module: &Module<Client>, key: &SessionRef) {
     module.idle_foreground(key).await.unwrap();
     // idle drains the session worker; this FIFO read additionally drains its
