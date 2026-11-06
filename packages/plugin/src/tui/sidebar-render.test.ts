@@ -145,6 +145,7 @@ beforeAll(() => {
             stdout: "pipe",
             stderr: "pipe",
             env: { ...process.env, BUN_BE_BUN: "1" },
+            windowsHide: true,
         },
     );
     if (child.exitCode !== 0) throw new Error(child.stderr.toString());
@@ -162,6 +163,7 @@ beforeAll(() => {
             stdout: "pipe",
             stderr: "pipe",
             env: { ...process.env, BUN_BE_BUN: "1" },
+            windowsHide: true,
         },
     );
     if (raw.exitCode !== 0) throw new Error(raw.stderr.toString());
