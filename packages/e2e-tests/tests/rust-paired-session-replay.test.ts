@@ -30,22 +30,16 @@ describe.skipIf(!rustPrereqs.ok)("TS/Rust paired-session wire replay", () => {
     it("keeps the H13 empty, dropped-placeholder, and signed-thinking value spaces aligned", async () => {
         const result = await runPairedSessionReplay({ providerID: "anthropic" });
 
-        expect(namedDivergences(result)).toEqual([
-            "isolated-assistant-dropped-placeholder:reasoning_signature_shapes",
-            "raw-empty-assistant-text:reasoning_signature_shapes",
-            "observe-empty-and-placeholder:reasoning_signature_shapes",
-        ]);
-        expect(namedDivergences(result, true)).toEqual([]);
+        // The plugin no longer serves its empty structural placeholder beside
+        // signed reasoning, so signed thinking keeps its native position on both
+        // sides and no pass needs an adjudicated difference.
+        expect(namedDivergences(result)).toEqual([]);
         expect(result.passes).toHaveLength(4);
         for (const pass of result.passes) {
             expect(pass.empty_content_shapes.classification).toBe("matched_value_space");
             expect(pass.dropped_placeholder_shapes.classification).toBe("matched_value_space");
             expect(pass.tool_pairing_shapes.classification).toBe("matched_value_space");
-            if (pass.reasoning_signature_shapes.classification === "divergent_value_space") {
-                expect(pass.reasoning_signature_shapes.adjudication?.decision).toBe(
-                    "intentional_difference",
-                );
-            }
+            expect(pass.reasoning_signature_shapes.classification).toBe("matched_value_space");
         }
 
         const droppedPass = result.passes.find(

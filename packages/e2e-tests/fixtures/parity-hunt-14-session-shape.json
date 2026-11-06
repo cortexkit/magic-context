@@ -74,35 +74,6 @@
                         "output_tokens": 20
                     }
                 }
-            ],
-            "adjudications": [
-                {
-                    "pass": "isolated-assistant-dropped-placeholder",
-                    "axis": "reasoning_signature_shapes",
-                    "ts_only": ["thinking:nonzero_index:signed"],
-                    "rust_only": ["thinking:index_0:signed"],
-                    "decision": "intentional_difference",
-                    "reason": "Rust serves the provider-native signed-thinking vector verbatim; TS provider projection adds tag and blank text around it. Preserving native content-array positions is the signed-reasoning safety exception.",
-                    "source": "crates/mc-module/src/codec/opencode.rs:459-477,759-776"
-                },
-                {
-                    "pass": "raw-empty-assistant-text",
-                    "axis": "reasoning_signature_shapes",
-                    "ts_only": ["thinking:nonzero_index:signed"],
-                    "rust_only": ["thinking:index_0:signed"],
-                    "decision": "intentional_difference",
-                    "reason": "Rust serves the provider-native signed-thinking vector verbatim; TS provider projection adds tag and blank text around it. Preserving native content-array positions is the signed-reasoning safety exception.",
-                    "source": "crates/mc-module/src/codec/opencode.rs:459-477,759-776"
-                },
-                {
-                    "pass": "observe-empty-and-placeholder",
-                    "axis": "reasoning_signature_shapes",
-                    "ts_only": ["thinking:nonzero_index:signed"],
-                    "rust_only": ["thinking:index_0:signed"],
-                    "decision": "intentional_difference",
-                    "reason": "Rust serves the provider-native signed-thinking vector verbatim; TS provider projection adds tag and blank text around it. Preserving native content-array positions is the signed-reasoning safety exception.",
-                    "source": "crates/mc-module/src/codec/opencode.rs:459-477,759-776"
-                }
             ]
         },
         {
