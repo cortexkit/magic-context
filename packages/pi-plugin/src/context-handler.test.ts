@@ -9926,7 +9926,9 @@ it("unknown-limit overflow floors pressure after the raw-branch guard discards a
 	};
 	try {
 		recordOverflowDetected(db, sessionId, undefined, "mock/mock");
-		await handler({ messages: messages as never[] }, ctx as never);
+		await expect(
+			handler({ messages: messages as never[] }, ctx as never),
+		).rejects.toThrow("unknown-usage");
 		expect(
 			lines.some((line) =>
 				line.includes("overflow recovery flag set — bumping percentage to 95%"),

@@ -420,6 +420,11 @@ import {
 	resolvePiOrdinalAlignmentForContext,
 } from "./pi-ordinal-alignment";
 import {
+	piRecoveryFitCalibration,
+	piRecoveryToolImageTokens,
+	resolvePiOverflowRecoveryUsage,
+} from "./pi-overflow-recovery";
+import {
 	clearPiLiveUsageClassification,
 	formatPiPressureForLog,
 	isPiLiveUsageRawBranchEstimate,
@@ -4212,12 +4217,17 @@ function adoptPiFallbackTags(
 interface PiHistorianStateSnapshot {
 	detectedContextLimit: number;
 	needsEmergencyRecovery: boolean;
+	emergencyRecoveryOrigin:
+		| "provider_overflow"
+		| "proactive_model_shrink"
+		| null;
 	historianFailureCount: number;
 }
 
 const EMPTY_PI_HISTORIAN_STATE_SNAPSHOT: PiHistorianStateSnapshot = {
 	detectedContextLimit: 0,
 	needsEmergencyRecovery: false,
+	emergencyRecoveryOrigin: null,
 	historianFailureCount: 0,
 };
 
@@ -4227,7 +4237,7 @@ function loadPiHistorianStateSnapshot(
 ): PiHistorianStateSnapshot {
 	const row = db
 		.prepare(
-			`SELECT detected_context_limit, needs_emergency_recovery,
+			`SELECT detected_context_limit, needs_emergency_recovery, emergency_recovery_origin,
 			        historian_failure_count
 			   FROM session_meta
 			  WHERE session_id = ?`,
@@ -4236,6 +4246,7 @@ function loadPiHistorianStateSnapshot(
 		| {
 				detected_context_limit?: unknown;
 				needs_emergency_recovery?: unknown;
+				emergency_recovery_origin?: unknown;
 				historian_failure_count?: unknown;
 		  }
 		| undefined;
@@ -4248,6 +4259,11 @@ function loadPiHistorianStateSnapshot(
 		needsEmergencyRecovery:
 			typeof row?.needs_emergency_recovery === "number" &&
 			row.needs_emergency_recovery > 0,
+		emergencyRecoveryOrigin:
+			row?.emergency_recovery_origin === "provider_overflow" ||
+			row?.emergency_recovery_origin === "proactive_model_shrink"
+				? row.emergency_recovery_origin
+				: null,
 		historianFailureCount:
 			typeof row?.historian_failure_count === "number" &&
 			row.historian_failure_count >= 0
@@ -5630,6 +5646,9 @@ export function registerPiContextHandler(
 				);
 			}
 			const pipelineArgs: RunPipelineArgs = {
+				providerOverflowRecovery:
+					emergencyRecoveryArmed &&
+					historianStateForPass.emergencyRecoveryOrigin === "provider_overflow",
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
 				assertCurrentPass,
@@ -6275,176 +6294,181 @@ export function registerPiContextHandler(
 					result.syntheticLeadingCount = prefix.length;
 			}
 
-			// Walk Pi's final rendered entry stream once to calculate both nudge-channel
-			// totals. A cache-busting pass replaces the saved baseline; a deferred pass
-			// keeps it and adds only newly appended content and protection-boundary moves.
-			const tChannelAccounting = performance.now();
-			try {
-				const sessionMetaForCh1 = sessionMeta;
-				if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
-					const { tags, protectedTagNumbers, pendingDropTagNumbers } =
-						result.channelBaselineSnapshot;
-					const stableId = (message: unknown): string | undefined =>
-						message && typeof message === "object"
-							? result.postCommitEntryIdByRef.get(message)
-							: undefined;
-					const hygieneCalibration = sessionDecisionCalibration(
-						options.db,
-						sessionId,
-					);
-					const hygieneUnitsVersion = transitionSessionHygieneUnits(
-						options.db,
-						sessionId,
-						result.bustedThisPass,
-						hygieneCalibration,
-					);
-					const previousBaseline = getPiChannel1Baseline(sessionId);
-					const baseline = refreshPiTailHygieneBaseline({
-						messages: outputMessages,
-						providerApi: ctx.model?.api,
-						tags,
-						tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
-						protectedTagNumbers,
-						protectedTools: options.protectedTools,
-						pendingDropTagNumbers,
-						stableId,
-						// Only active rows can be protected; the active projection gives
-						// the same numbers without sorting every historical tag.
-						protectedToolTags: protectedToolTagNumbers(
-							result.channelBaselineSnapshot.activeTags,
-							options.protectedTools,
-						),
-						syntheticLeadingCount: result.syntheticLeadingCount,
-						cacheBusting: result.bustedThisPass,
-						previous: previousBaseline,
-						calibration:
-							hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
-								? hygieneCalibration
-								: undefined,
-						hygieneUnitsVersion,
-					});
-					const effective = effectivePiTailHygiene(baseline);
-					// One line per invalidation event, not one per pass: the baseline
-					// only carries a mismatch on the pass that re-measured because of it.
-					if (baseline.lastPrefixMismatch) {
-						sessionLog(
+			// Only the request that survives recovery may publish nudge baselines or metrics.
+			const publishFinalRequestAccounting = () => {
+				// Walk Pi's final rendered entry stream once to calculate both nudge-channel
+				// totals. A cache-busting pass replaces the saved baseline; a deferred pass
+				// keeps it and adds newly appended content and changes in which tags are protected.
+				const tChannelAccounting = performance.now();
+				try {
+					const sessionMetaForCh1 = sessionMeta;
+					if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
+						const { tags, protectedTagNumbers, pendingDropTagNumbers } =
+							result.channelBaselineSnapshot;
+						const stableId = (message: unknown): string | undefined =>
+							message && typeof message === "object"
+								? result.postCommitEntryIdByRef.get(message)
+								: undefined;
+						const hygieneCalibration = sessionDecisionCalibration(
+							options.db,
 							sessionId,
-							formatTailHygienePrefixMismatch(
-								baseline.lastPrefixMismatch,
-								baseline.baselineGeneration,
-							),
 						);
-					}
-					const durableGrace =
-						baseline.evaluable && !baseline.generationInvalidated
-							? captureChannel1PostReduceGraceBaseline(
-									options.db,
-									sessionId,
-									effective.u,
-								)
-							: getChannel1NudgeState(options.db, sessionId);
-					baseline.channel1PostReduceGrace =
-						durableGrace.postReduceGracePending ||
-						durableGrace.postReduceGraceBaselineU !== undefined
-							? {
-									pending: durableGrace.postReduceGracePending === true,
-									baselineU: durableGrace.postReduceGraceBaselineU,
-									preReduceLevel:
-										durableGrace.postReduceGracePreLevel ?? durableGrace.level,
-								}
-							: undefined;
-					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
-						options.db,
-						sessionId,
-						protectedTagNumbers,
-					);
-					const channelState = {
-						...baseline,
-						usableWindow: usageContextLimit ?? 0,
-						realUserTurnCount: baseline.realUserTurnCount,
-						reducedSinceRefresh: false,
-						agentDropsAppliedThisPass: result.agentDropsAppliedThisPass,
-						oldestReclaimableToolTags,
-					};
-					setPiChannel1Baseline(sessionId, channelState);
-
-					const channel2Evaluation = evaluateChannel2(channelState);
-					if (channel2Evaluation.evaluable) {
-						try {
-							rearmChannel2AfterMeasuredCollapse({
-								db: options.db,
-								sessionId,
-								baseline: channelState,
-								rebuilding: result.bustedThisPass,
-								previous: previousBaseline,
-							});
-						} catch (error) {
-							sessionLog(
-								sessionId,
-								`pi channel2 U-collapse reset failed: ${error instanceof Error ? error.message : String(error)}`,
-							);
-						}
-						if (channel2Evaluation.shouldTrigger) {
-							casChannel2NudgeState(options.db, sessionId, "", "pending");
-						} else {
-							casChannel2NudgeState(options.db, sessionId, "pending", "");
-						}
-					}
-
-					assertTailHygieneLastWriter = () =>
-						assertPiTailHygieneContentUnchanged({
+						const hygieneUnitsVersion = transitionSessionHygieneUnits(
+							options.db,
+							sessionId,
+							result.bustedThisPass,
+							hygieneCalibration,
+						);
+						const previousBaseline = getPiChannel1Baseline(sessionId);
+						const baseline = refreshPiTailHygieneBaseline({
 							messages: outputMessages,
+							providerApi: ctx.model?.api,
 							tags,
+							tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
 							protectedTagNumbers,
+							protectedTools: options.protectedTools,
 							pendingDropTagNumbers,
 							stableId,
+							// Only active rows can be protected; the active projection gives
+							// the same numbers without sorting every historical tag.
+							protectedToolTags: protectedToolTagNumbers(
+								result.channelBaselineSnapshot.activeTags,
+								options.protectedTools,
+							),
 							syntheticLeadingCount: result.syntheticLeadingCount,
-							expectedSignature: baseline.contentSignature,
+							cacheBusting: result.bustedThisPass,
+							previous: previousBaseline,
+							calibration:
+								hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
+									? hygieneCalibration
+									: undefined,
+							hygieneUnitsVersion,
 						});
-				} else {
-					clearPiChannel1State(sessionId);
-				}
-			} catch (err) {
-				const stale = getPiChannel1Baseline(sessionId);
-				if (stale) {
-					stale.evaluable = false;
-					stale.generationInvalidated = true;
-				}
-				sessionLog(
-					sessionId,
-					`channel1 baseline / channel2 trigger failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-			logTransformTiming(
-				sessionId,
-				"channelNudgeAccounting",
-				tChannelAccounting,
-			);
+						const effective = effectivePiTailHygiene(baseline);
+						// One line per invalidation event, not one per pass: the baseline
+						// only carries a mismatch on the pass that re-measured because of it.
+						if (baseline.lastPrefixMismatch) {
+							sessionLog(
+								sessionId,
+								formatTailHygienePrefixMismatch(
+									baseline.lastPrefixMismatch,
+									baseline.baselineGeneration,
+								),
+							);
+						}
+						const durableGrace =
+							baseline.evaluable && !baseline.generationInvalidated
+								? captureChannel1PostReduceGraceBaseline(
+										options.db,
+										sessionId,
+										effective.u,
+									)
+								: getChannel1NudgeState(options.db, sessionId);
+						baseline.channel1PostReduceGrace =
+							durableGrace.postReduceGracePending ||
+							durableGrace.postReduceGraceBaselineU !== undefined
+								? {
+										pending: durableGrace.postReduceGracePending === true,
+										baselineU: durableGrace.postReduceGraceBaselineU,
+										preReduceLevel:
+											durableGrace.postReduceGracePreLevel ??
+											durableGrace.level,
+									}
+								: undefined;
+						const oldestReclaimableToolTags =
+							getOldestActiveUnprotectedToolTags(
+								options.db,
+								sessionId,
+								protectedTagNumbers,
+							);
+						const channelState = {
+							...baseline,
+							usableWindow: usageContextLimit ?? 0,
+							realUserTurnCount: baseline.realUserTurnCount,
+							reducedSinceRefresh: false,
+							agentDropsAppliedThisPass: result.agentDropsAppliedThisPass,
+							oldestReclaimableToolTags,
+						};
+						setPiChannel1Baseline(sessionId, channelState);
 
-			// Work-metrics update runs on EVERY transform pass (not just
-			// execute passes). The Pi compute helper is pure-read on
-			// outputMessages; setSessionWorkMetrics is a pure write to
-			// session_meta (no tag state, no message[0] mutation, no
-			// cache-busting). Gating on executedWorkThisPass would mean
-			// sessions sitting below execute threshold never see populated
-			// values, making Pi's status surface permanently zero.
-			const tWorkMetrics = performance.now();
-			budget.stage = "bookkeeping";
-			try {
-				const metrics = computePiWorkMetrics(outputMessages as unknown[]);
-				setSessionWorkMetrics(
-					options.db,
+						const channel2Evaluation = evaluateChannel2(channelState);
+						if (channel2Evaluation.evaluable) {
+							try {
+								rearmChannel2AfterMeasuredCollapse({
+									db: options.db,
+									sessionId,
+									baseline: channelState,
+									rebuilding: result.bustedThisPass,
+									previous: previousBaseline,
+								});
+							} catch (error) {
+								sessionLog(
+									sessionId,
+									`pi channel2 U-collapse reset failed: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							}
+							if (channel2Evaluation.shouldTrigger) {
+								casChannel2NudgeState(options.db, sessionId, "", "pending");
+							} else {
+								casChannel2NudgeState(options.db, sessionId, "pending", "");
+							}
+						}
+
+						assertTailHygieneLastWriter = () =>
+							assertPiTailHygieneContentUnchanged({
+								messages: outputMessages,
+								tags,
+								protectedTagNumbers,
+								pendingDropTagNumbers,
+								stableId,
+								syntheticLeadingCount: result.syntheticLeadingCount,
+								expectedSignature: baseline.contentSignature,
+							});
+					} else {
+						clearPiChannel1State(sessionId);
+					}
+				} catch (err) {
+					const stale = getPiChannel1Baseline(sessionId);
+					if (stale) {
+						stale.evaluable = false;
+						stale.generationInvalidated = true;
+					}
+					sessionLog(
+						sessionId,
+						`channel1 baseline / channel2 trigger failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+				logTransformTiming(
 					sessionId,
-					metrics.newWorkTokens,
-					metrics.totalInputTokens,
+					"channelNudgeAccounting",
+					tChannelAccounting,
 				);
-			} catch (err) {
-				sessionLog(
-					sessionId,
-					`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-			logTransformTiming(sessionId, "workMetrics", tWorkMetrics);
+
+				// Work-metrics update runs on EVERY transform pass (not just
+				// execute passes). The Pi compute helper is pure-read on
+				// outputMessages; setSessionWorkMetrics is a pure write to
+				// session_meta (no tag state, no message[0] mutation, no
+				// cache-busting). Gating on executedWorkThisPass would mean
+				// sessions sitting below execute threshold never see populated
+				// values, making Pi's status surface permanently zero.
+				const tWorkMetrics = performance.now();
+				budget.stage = "bookkeeping";
+				try {
+					const metrics = computePiWorkMetrics(outputMessages as unknown[]);
+					setSessionWorkMetrics(
+						options.db,
+						sessionId,
+						metrics.newWorkTokens,
+						metrics.totalInputTokens,
+					);
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+				logTransformTiming(sessionId, "workMetrics", tWorkMetrics);
+			};
 
 			const tStableIdSchemePersist = performance.now();
 			if (stableIdSchemeCutover && !options.compactionOff) {
@@ -6640,6 +6664,35 @@ export function registerPiContextHandler(
 					);
 				if (getHarness() === "pi") {
 					const fitCase = classifyPiOutgoingFit(estimate, outgoingFitLimit);
+					// Only an already-permitted rebuild may price recovery from the
+					// rendered request. Pi's original message list still contains tool outputs removed
+					// from previous outgoing requests. The provider's last successful
+					// input-token reading also predates the rejected request.
+					const recoverUnknownUsage =
+						usageInputTokens <= 0 &&
+						result.prefixBustPermitted &&
+						emergencyRecoveryArmed &&
+						historianStateForPass.emergencyRecoveryOrigin ===
+							"provider_overflow";
+					let unknownUsageRecovered = false;
+					const recoveryUsage = resolvePiOverflowRecoveryUsage({
+						usage: pipelineArgs.contextUsage,
+						pricedPass: result.prefixBustPermitted,
+						providerOverflow: recoverUnknownUsage,
+						messages: outputMessages,
+						envelope,
+						usableHardLimit: outgoingFitLimit,
+					});
+					if (
+						recoverUnknownUsage &&
+						(!(recoveryUsage.inputTokens > 0) ||
+							!((emergencyCeilingTokens ?? 0) > 0) ||
+							!Number.isFinite(outgoingFitLimit) ||
+							!((outgoingFitLimit ?? 0) > 0))
+					)
+						throw contextRefusalError(
+							"Provider overflow recovery has unknown-usage: a complete outgoing request estimate and context limit are required before retrying",
+						);
 					const currentUpperCursor = () =>
 						piUpperReclaimCursor({
 							sessionId,
@@ -6651,7 +6704,7 @@ export function registerPiContextHandler(
 							input: inputForFitReclaim ?? event.messages,
 						});
 					const upperCursor =
-						fitCase === "upper-estimate-pressure"
+						fitCase === "upper-estimate-pressure" && !recoverUnknownUsage
 							? currentUpperCursor()
 							: undefined;
 					if (fitCase === "over-window-proof") {
@@ -6669,6 +6722,7 @@ export function registerPiContextHandler(
 						forceMaterialization ||
 						isEmergency;
 					const reclaimHeld =
+						!recoverUnknownUsage &&
 						fitCase === "upper-estimate-pressure" &&
 						(result.strictThinkingKept ||
 							!upperPassEligible ||
@@ -6687,7 +6741,7 @@ export function registerPiContextHandler(
 						// Never copy an already-rendered prefix to retry its injection.
 						requestPiFitReclaimInput(sessionId);
 					if (
-						fitCase !== "fits-or-unknown" &&
+						(fitCase !== "fits-or-unknown" || recoverUnknownUsage) &&
 						!reclaimHeld &&
 						!fitReclaimedThisPass &&
 						!inputForFitReclaim
@@ -6697,7 +6751,7 @@ export function registerPiContextHandler(
 							branchEntries,
 						);
 					if (
-						fitCase !== "fits-or-unknown" &&
+						(fitCase !== "fits-or-unknown" || recoverUnknownUsage) &&
 						!reclaimHeld &&
 						!fitReclaimedThisPass &&
 						inputForFitReclaim
@@ -6707,6 +6761,7 @@ export function registerPiContextHandler(
 							: undefined;
 						if (!upperCursor || reservation) {
 							let reclaimCompleted = false;
+							const recoveryRetryStart = performance.now();
 							try {
 								sessionLog(
 									sessionId,
@@ -6772,7 +6827,9 @@ export function registerPiContextHandler(
 										schedulerDecision: "execute",
 										schedulerDeferReason: null,
 										forceMaterialization: true,
-										upperEstimateOnly: fitCase === "upper-estimate-pressure",
+										upperEstimateOnly:
+											!recoverUnknownUsage &&
+											fitCase === "upper-estimate-pressure",
 										forceSignedRebuildForFit: fitCase === "over-window-proof",
 										isCacheBusting:
 											historyRefreshSessions.has(sessionId) ||
@@ -6785,14 +6842,19 @@ export function registerPiContextHandler(
 													sessionMeta: freshMeta,
 												})
 											: undefined,
-										contextUsage: {
-											percentage: usagePercentage,
-											inputTokens: usageInputTokens,
-										},
+										contextUsage: recoverUnknownUsage
+											? recoveryUsage
+											: pipelineArgs.contextUsage,
 									}),
 								);
 								outputMessages = result.messages as PiAgentMessage[];
 								observePipelineResultForTests(sessionId, result);
+								unknownUsageRecovered = recoverUnknownUsage;
+								if (recoverUnknownUsage)
+									sessionLog(
+										sessionId,
+										`overflow unknown-usage recovery: inputTokens=${recoveryUsage.inputTokens} retryMs=${(performance.now() - recoveryRetryStart).toFixed(1)}`,
+									);
 								// Reclaim replaces the postprocessed output with a pristine-input
 								// rebuild. Restore the todo pair before stripping and measuring it.
 								injectTodo();
@@ -6837,6 +6899,10 @@ export function registerPiContextHandler(
 							}
 						}
 					}
+					if (recoverUnknownUsage && !unknownUsageRecovered)
+						throw contextRefusalError(
+							"Provider overflow recovery has unknown-usage: a pristine request is required for emergency reclaim",
+						);
 				}
 				const refusal = outgoingContextRefusal(
 					estimate,
@@ -6855,6 +6921,7 @@ export function registerPiContextHandler(
 				)
 					throw new PiDegradedPassError("outgoing-over-window");
 			}
+			publishFinalRequestAccounting();
 			let serializedOutput: PiLkgSerializedOutput | undefined;
 			let numbersCommitted = false;
 			budget.stage = "LKG/served publication";
@@ -8349,6 +8416,7 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	providerOverflowRecovery?: boolean;
 	evaluateHistorianBeforeReclaim?: (
 		result: Pick<
 			RunPipelineResult,
@@ -10596,6 +10664,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (shouldRunHeuristics && args.heuristics) {
 		try {
 			const tHeuristic = performance.now();
+			const providerOverflow = args.providerOverflowRecovery === true;
+			const recoveryCalibration = sessionDecisionCalibration(
+				args.db,
+				args.sessionId,
+			);
 			const independentMutationBeforeHeuristics =
 				pendingOpsDidMutate ||
 				systemPrefixChangedThisPass ||
@@ -10655,6 +10728,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 										ceilingTokens: args.emergencyCeilingTokens,
 										usagePercentage: args.contextUsage.percentage,
 										passAlreadyPriced: independentMutationBeforeHeuristics,
+										serializedImageTokens: providerOverflow
+											? piRecoveryToolImageTokens(workingMessages)
+											: undefined,
+										fitCalibration: providerOverflow
+											? piRecoveryFitCalibration(recoveryCalibration)
+											: undefined,
 									}
 								: undefined,
 						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
