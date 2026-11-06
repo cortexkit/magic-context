@@ -2,7 +2,10 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAutoSearchDiagnostics } from "../../features/magic-context/auto-search-diagnostics";
-import { peekCompartmentChunkSearchPool } from "../../features/magic-context/compartment-chunk-embedding";
+import {
+    peekCompartmentChunkSearchPool,
+    warmCompartmentChunkSearchPool,
+} from "../../features/magic-context/compartment-chunk-embedding";
 import * as embedding from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { type UnifiedSearchResult, unifiedSearch } from "../../features/magic-context/search";
@@ -205,9 +208,38 @@ test("worker diagnostics report cold starts, warm reuse and signature-invalidate
     expect(JSON.stringify(warm.diagnostics)).not.toContain("stored");
     db.prepare("DELETE FROM compartment_chunk_embeddings").run();
     const invalidated = await search();
-    expect(invalidated.diagnostics.pool).toBe("cold");
-    expect(invalidated.diagnostics.peek).toBe("signature-changed");
+    // The worker's pool maintenance (right after each search, then every five
+    // seconds) may rebuild the pool for the emptied table before this search
+    // peeks. Either way the deleted rows must never be served: the peek sees
+    // the changed signature, or it hits a pool rebuilt with no rows. The peek's
+    // own signature check is pinned without a worker in the next test.
+    expect(hasChunkHit(invalidated.results)).toBe(false);
+    if (invalidated.diagnostics.peek === "hit") {
+        expect(invalidated.diagnostics.pool).toBe("warm");
+        expect(invalidated.diagnostics.poolRows).toBe(0);
+    } else {
+        expect(invalidated.diagnostics.pool).toBe("cold");
+        expect(invalidated.diagnostics.peek).toBe("signature-changed");
+    }
 }, 15000);
+
+test("a peek after the session's chunk rows are deleted reports the changed signature and serves nothing", async () => {
+    const db = fixture();
+    expect((await warmCompartmentChunkSearchPool(db, "session", "/synthetic", "model")).outcome).toBe(
+        "refreshed",
+    );
+    const before = createAutoSearchDiagnostics(0.6);
+    expect(
+        peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model", null, before),
+    ).toHaveLength(1);
+    expect(before.peek).toBe("hit");
+    db.prepare("DELETE FROM compartment_chunk_embeddings").run();
+    const after = createAutoSearchDiagnostics(0.6);
+    expect(
+        peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model", null, after),
+    ).toBeNull();
+    expect(after.peek).toBe("signature-changed");
+});
 
 test("a session still searching serves the turn without a hint and freezes that", async () => {
     const db = fixture();
