@@ -27,7 +27,7 @@ import {
 } from "../../features/magic-context/memory/project-identity";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
-import { createScheduler } from "../../features/magic-context/scheduler";
+import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
     getOrCreateSessionMeta,
@@ -83,7 +83,7 @@ import {
     noteLkgProviderResponse,
 } from "../../hooks/magic-context/lkg-measured-request";
 import { lkgReplayLimit, measureLkgReplay } from "../../hooks/magic-context/lkg-replay-fit";
-import { getSlot } from "../../hooks/magic-context/lkg-slot";
+import { dropSlot, getSlot } from "../../hooks/magic-context/lkg-slot";
 import { createModuleToolBackends } from "../../hooks/magic-context/module-tool-backends";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
@@ -162,6 +162,7 @@ import { controlKey, effortPart, rememberedControlKey } from "../fold/native-rep
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
+import { hasFoldSummary } from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
@@ -855,10 +856,12 @@ function coveredInstructionRows(
     sessionID: string,
     throughSeq: number,
     model: SessionContext["model"],
+    afterSeq = -1,
 ): V2Message[] {
     if (throughSeq < 0) return [];
     return reader
         .instructionRowsThrough(sessionID, throughSeq)
+        .filter((row) => row.seq > afterSeq)
         .flatMap((row) => restoreRow(row, model))
         .map((message) => markCoveredInstructionRow(message));
 }
@@ -1543,7 +1546,18 @@ export async function registerContext(context: V2Context) {
                   storage: nativeFoldMemory,
                   openReader: openStoreReader,
                   canReplay: (sessionID, reader) => nativeFoldReplay.canReplay(sessionID, reader),
-                  canFold: (sessionID, reader) => nativeFoldReplay.canFold(sessionID, reader),
+                  canFold: async (sessionID, reader) => {
+                      const meta = getOrCreateSessionMeta(storage.require(), sessionID);
+                      const summary =
+                          servedModuleM0Text(sessionID) ??
+                          (await nativeFoldReplay.baseline(sessionID)) ??
+                          meta.cachedM0Bytes?.toString("utf8");
+                      return (
+                          !meta.isSubagent &&
+                          hasFoldSummary(summary) &&
+                          nativeFoldReplay.canFold(sessionID, reader)
+                      );
+                  },
                   threshold: Number(process.env.MC_OC2_HOST_FOLD_ROWS ?? 1000),
                   log: sessionLog,
               })
@@ -1831,6 +1845,10 @@ export async function registerContext(context: V2Context) {
                 draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
             );
             const running = reader.latestRunningCompaction(draft.sessionID);
+            const attempt = running && nativeFoldMemory?.admission(draft.sessionID, running.id);
+            const manual =
+                running?.data.reason === "manual" &&
+                !(attempt?.status === "pending" && attempt.owner_token);
             // In Rust mode the module composes m[0] and the host renders none, so the
             // checkpoint has to be the module's own baseline. Composing a TypeScript one
             // here would give the session two different histories: the one the host
@@ -1838,7 +1856,8 @@ export async function registerContext(context: V2Context) {
             const moduleBaseline = rustModeModuleClient
                 ? servedModuleM0Text(draft.sessionID)
                 : undefined;
-            // This hook ALWAYS answers, and leaving `result` unset is not an option.
+            // A usable history always answers; empty history is refused instead.
+            // Leaving `result` unset is not an option.
             // On GA 2.0.5 an unanswered request is not a polite decline: the host
             // summarizes with its own model and, when that answer is not in the
             // template it requires, records a `compaction.failed` row and ends the
@@ -1858,22 +1877,38 @@ export async function registerContext(context: V2Context) {
                 try {
                     const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
                     const summary =
-                        moduleBaseline ??
+                        (manual ? (moduleBaseline ?? materialize(draft)) : moduleBaseline) ??
                         (await nativeFoldReplay.baseline(draft.sessionID)) ??
                         state.cachedM0Bytes?.toString("utf8") ??
-                        "<session-history></session-history>";
+                        (await folds.read(draft.sessionID))?.submitted;
+                    if (manual) {
+                        if (!hasFoldSummary(summary))
+                            throw new V2ContextRefusal("Magic Context has no history to compact.");
+                        await nativeFoldReplay.prepareManualFold(draft.sessionID, reader);
+                        dropSlot(draft.sessionID, "manual host compaction");
+                        generateReplay.forget(draft.sessionID);
+                        restoredRows.forget(draft.sessionID);
+                        historyRefreshSessions.add(draft.sessionID);
+                        requestPendingMaterialization(
+                            pendingMaterializationSessions,
+                            draft.sessionID,
+                            "host_compaction",
+                        );
+                    }
                     if (
-                        await nativeFoldReplay.supply({
+                        hasFoldSummary(summary) &&
+                        (await nativeFoldReplay.supply({
                             draft,
                             reader,
                             previousCut: reader.latestCompaction(draft.sessionID),
                             summary,
-                        })
+                        }))
                     ) {
                         draft.result = { summary, metadata: { keepID: undefined } };
                         return;
                     }
                 } catch (error) {
+                    if (error instanceof V2ContextRefusal || manual) throw error;
                     nativeFoldReplay.invalidate(draft.sessionID, true);
                     sessionLog(
                         draft.sessionID,
@@ -1889,6 +1924,8 @@ export async function registerContext(context: V2Context) {
                 // must only happen when the fold identity is actually new.
                 materialize: () => moduleBaseline ?? materialize(draft),
             });
+            if (!hasFoldSummary(fold.submitted))
+                throw new V2ContextRefusal("Magic Context has no history to compact.");
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
             // explains a session's checkpoint cadence.
@@ -1925,6 +1962,23 @@ export async function registerContext(context: V2Context) {
     // rule picked. Rust mode reads times only for temporal awareness.
     const temporalTimes = config.temporal_awareness === true;
     const anchorTimesOnly = !temporalTimes && !rustModeModuleClient;
+    const retireInstructionMessages = async (
+        sessionID: string,
+        reader: V2StoreReader,
+        messages: V2Message[],
+    ) => {
+        const retired =
+            (await nativeFoldReplay?.retiredInstructionThrough(sessionID, reader)) ?? -1;
+        if (retired < 0) return messages;
+        return messages.filter((message) => {
+            const id = nativeRowID(message);
+            return (
+                message.role !== "system" ||
+                !id ||
+                (reader.sequenceForId(sessionID, id) ?? Infinity) > retired
+            );
+        });
+    };
     /** The ids of the messages whose stored times this pass reads. */
     const timeIds = (messages: readonly V2Message[]): string[] => {
         if (temporalTimes) return messages.flatMap((message) => (message.id ? [message.id] : []));
@@ -1991,6 +2045,8 @@ export async function registerContext(context: V2Context) {
             ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
             : null;
         const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader);
+        const retiredInstructions =
+            (await nativeFoldReplay?.retiredInstructionThrough(draft.sessionID, reader)) ?? -1;
         const boundary = Math.max(
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
@@ -2011,6 +2067,7 @@ export async function registerContext(context: V2Context) {
         const present = new Set(args.messages.map((message) => message.id));
         const restored = restoredRows
             .rows(reader, draft.sessionID, boundary, cut.seq)
+            .filter((row) => row.type !== "system" || row.seq > retiredInstructions)
             .filter((row) => !present.has(row.id))
             .flatMap((row) =>
                 restoreRow(
@@ -2039,6 +2096,7 @@ export async function registerContext(context: V2Context) {
                       draft.sessionID,
                       Math.min(boundary, cut.seq),
                       draft.model,
+                      retiredInstructions,
                   )),
             ...restored,
             ...args.messages.filter((message) => message !== args.incoming),
@@ -2409,6 +2467,11 @@ export async function registerContext(context: V2Context) {
                                 });
                             }
                         } else if (localCut) return undefined;
+                        messages = await retireInstructionMessages(
+                            draft.sessionID,
+                            reader,
+                            messages,
+                        );
                         times = readTimes(reader, messages);
                     }
                 } finally {
@@ -2780,6 +2843,11 @@ export async function registerContext(context: V2Context) {
                         })),
                     );
                 }
+                draft.messages = await retireInstructionMessages(
+                    draft.sessionID,
+                    reader,
+                    draft.messages,
+                );
                 messageTimes = readTimes(reader, draft.messages);
             } finally {
                 reader.close();
@@ -3102,6 +3170,25 @@ export async function registerContext(context: V2Context) {
                 ) {
                     await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID, true);
                     await nativeFoldReplay?.commitEditedAdmission(draft.sessionID);
+                    if (db && hostFoldIdle) {
+                        const meta = getOrCreateSessionMeta(db, draft.sessionID);
+                        // Timers do not survive reloads. Recover an expired window
+                        // only after the shared transform has actually rebuilt the
+                        // cold request. A pass that only replays a still-cached
+                        // request must never queue a host compaction.
+                        if (
+                            computeHardCacheExpired(
+                                meta.cacheTtl,
+                                meta.lastResponseTime,
+                                Date.now(),
+                            )
+                        )
+                            hostFoldIdle.idle(
+                                draft.sessionID,
+                                meta.cacheTtl,
+                                meta.lastResponseTime,
+                            );
+                    }
                 }
             } finally {
                 admissionRebuildPasses.delete(draft.sessionID);

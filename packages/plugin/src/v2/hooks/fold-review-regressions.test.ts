@@ -11,6 +11,7 @@ test("kept and hidden repeated instructions preserve coordinates and adjacent ef
         cacheTtl: "never",
     });
     try {
+        f.compartment(0);
         f.instruction("REPEATED_AUTHORED_INSTRUCTION");
         f.user("source anchor between instructions", 1000);
         f.instruction("REPEATED_AUTHORED_INSTRUCTION");
@@ -67,6 +68,7 @@ for (const keptCount of [2, 3]) {
             cacheTtl: "never",
         });
         try {
+            f.compartment(0);
             const hiddenID = f.rows[1]!.id;
             const keptID = f.rows.at(-1)!.id;
             let folded = false;
