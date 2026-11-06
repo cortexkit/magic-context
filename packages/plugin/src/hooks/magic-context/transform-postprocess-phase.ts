@@ -174,7 +174,10 @@ import {
     postprocessReplaySnapshot,
     postprocessTailTags,
 } from "./postprocess-read-cache";
-import { projectStructuralSentinels } from "./project-structural-sentinels";
+import {
+    prepareStructuralSentinelChoices,
+    projectStructuralSentinels,
+} from "./project-structural-sentinels";
 import { providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import { DEFAULT_KEEP_REASONING_TOKENS, opencodeReasoningBudgetCutoff } from "./reasoning-budget";
@@ -1697,6 +1700,7 @@ interface RunPostTransformPhaseArgs {
      */
     compactionModeTransition?: boolean;
     readLastServedMessages?: () => readonly unknown[] | null;
+    structuralSentinelUpgradeFailed?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -2094,6 +2098,15 @@ export async function runPostTransformPhase(
     };
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
+    let structuralSentinelUpgradeFailed = args.structuralSentinelUpgradeFailed ?? false;
+    if (
+        !structuralSentinelUpgradeFailed &&
+        args.opencode1 &&
+        !compactionOff &&
+        modelAcceptsEmptyContent(args.resolvedProviderID)
+    )
+        structuralSentinelUpgradeFailed =
+            prepareStructuralSentinelChoices(args).structuralSentinelUpgrade === undefined;
     if (!modelAcceptsEmptyContent(args.resolvedProviderID) && !compactionOff)
         captureInlineThinkingRepairs(
             args.messages,
@@ -5038,7 +5051,7 @@ export async function runPostTransformPhase(
             sessionId: args.sessionId,
             messages: args.messages,
             rebuilding: canNormalizeRecoveredShape && bustedThisPass,
-            readPreviouslyServed: args.readLastServedMessages,
+            deferUpgrade: structuralSentinelUpgradeFailed,
         });
     }
     sessionLog(

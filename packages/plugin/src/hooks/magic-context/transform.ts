@@ -175,6 +175,7 @@ import {
     hasPendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";
+import { prepareStructuralSentinelChoices } from "./project-structural-sentinels";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -965,6 +966,13 @@ export function createTransform(deps: TransformDeps) {
             if (deps.compactionOff === true) return;
             throw degradedPassError(site, error);
         };
+
+        const structuralSentinelUpgradeFailed =
+            deps.storeGeneration === "v1" &&
+            !deps.compactionOff &&
+            deps.transformMode !== "rust" &&
+            prepareStructuralSentinelChoices({ db, sessionId, messages })
+                .structuralSentinelUpgrade === undefined;
 
         // Runs before anything reads a saved coordinate. Every ordinal this
         // session stored is a position in the message list some host served; if
@@ -3172,6 +3180,7 @@ export function createTransform(deps: TransformDeps) {
         const postTransformResult = await runPostTransformPhase({
             opencode1: deps.storeGeneration === "v1",
             opencode2: deps.storeGeneration === "v2",
+            structuralSentinelUpgradeFailed,
             releaseRecoveryPrefix: releaseRecoveryReplay,
             normalizeRecoveryTail,
             compactionMarkerStrategy:

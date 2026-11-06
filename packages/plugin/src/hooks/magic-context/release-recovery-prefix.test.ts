@@ -19,8 +19,9 @@ test("a conversation-only recovery release preserves frozen bytes before its own
         message("later", "untagged later reply"),
     ];
     after[0].parts.unshift({ type: "step-start" });
-    stripStructuralNoise(after);
+    after[0].parts.push({ type: "meta" }, { type: "step-finish" });
     const before = snapshotRecoveryMessages(after);
+    stripStructuralNoise(after);
     after[0].parts.shift();
     after[0].info.time = { created: 999 };
     after[1].parts = [{ type: "text", text: "[dropped §5§]" }];
@@ -31,4 +32,19 @@ test("a conversation-only recovery release preserves frozen bytes before its own
     expect(JSON.stringify(releaseRecoveryPrefix({ frozen: released, before, after }))).toBe(
         JSON.stringify(released),
     );
+});
+
+test("a recovery release still detects an edit to native empty text", () => {
+    const raw: MessageLike = {
+        info: { id: "native-empty", role: "assistant" },
+        parts: [{ type: "step-start" }, { type: "text", text: "" }],
+    };
+    const frozen = structuredClone([raw]);
+    stripStructuralNoise(frozen);
+    frozen[0].parts.push({ type: "text", text: "previously served note" });
+    const after = [raw];
+    const before = snapshotRecoveryMessages(after);
+    stripStructuralNoise(after);
+    after[0].parts.pop();
+    expect(releaseRecoveryPrefix({ frozen, before, after })[0]).toBe(after[0]);
 });
