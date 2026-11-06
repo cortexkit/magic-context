@@ -132,7 +132,8 @@ export function piWithoutDateReminders(
 			const role =
 				api === "ollama-chat"
 					? "system"
-					: api === "openai-completions" && developerRole
+					: api === "openai-codex-responses" ||
+							(api === "openai-completions" && developerRole)
 						? "developer"
 						: "user";
 			if (

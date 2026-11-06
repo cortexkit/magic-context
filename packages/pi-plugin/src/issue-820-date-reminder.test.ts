@@ -84,6 +84,8 @@ const otherConverters = await Promise.all(
 				.convertMessages,
 			responses: (await import(`${path}src/providers/openai-shared.ts`))
 				.buildResponsesInput,
+			codex: (await import(`${path}src/providers/openai-codex-responses.ts`))
+				.convertCodexResponsesMessages,
 			google: (await import(`${path}src/providers/google-shared.ts`))
 				.convertMessages,
 		};
@@ -380,17 +382,19 @@ for (const converter of otherConverters) {
 			const encode = (ctx: unknown) =>
 				api.startsWith("google-")
 					? { contents: converter.google(target, ctx) }
-					: api.endsWith("responses")
-						? {
-								input: converter.responses({
-									model: target,
-									context: ctx,
-									strictResponsesPairing: false,
-									supportsImageDetailOriginal: false,
-									nativeHistory: { replay: true, filterReasoning: false },
-								}),
-							}
-						: { messages: converter.chat(target, ctx, target.compat) };
+					: api === "openai-codex-responses"
+						? { input: converter.codex(target, ctx) }
+						: api.endsWith("responses")
+							? {
+									input: converter.responses({
+										model: target,
+										context: ctx,
+										strictResponsesPairing: false,
+										supportsImageDetailOriginal: false,
+										nativeHistory: { replay: true, filterReasoning: false },
+									}),
+								}
+							: { messages: converter.chat(target, ctx, target.compat) };
 			const wire = encode(sent);
 			expect(
 				piPreparedStructureMismatch(wire, prepared.structure),
@@ -546,3 +550,95 @@ for (const api of ["bedrock-converse-stream", "ollama-chat"]) {
 		expect(piPreparedStructureMismatch(altered, plan)).toBeDefined();
 	});
 }
+
+test("Codex date rollover after a tool result and anchored replay keep prepared bytes unchanged", () => {
+	const injector = new hosts[2].DateCwdReminderInjector();
+	const target = {
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		id: "gpt-5",
+		input: ["text"],
+		identity: { class: "gpt" },
+		compat: { supportsDeveloperRole: true, supportsImageDetailOriginal: false },
+	};
+	const cwd = "C:/work/project";
+	const user = (text = "question", timestamp = 1) => ({
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp,
+	});
+	const messages: any[] = history();
+	messages[0] = user();
+	Object.assign(messages[1], {
+		api: target.api,
+		provider: target.provider,
+		model: target.id,
+	});
+	const converter = otherConverters.at(-1)!;
+	const request = (date: string) => {
+		const before = JSON.stringify(messages);
+		const prepared = preparePiDispatch(messages, target, true, cwd);
+		const sent = injector.transform(
+			{ systemPrompt: ["system"], messages: prepared.messages },
+			date,
+			cwd,
+		);
+		const payload = { input: converter.codex(target, sent) };
+		const bytes = JSON.stringify(payload);
+		expect(
+			piPreparedStructureMismatch(payload, prepared.structure),
+		).toBeUndefined();
+		expect(JSON.stringify(payload)).toBe(bytes);
+		expect(JSON.stringify(messages)).toBe(before);
+		expect(JSON.stringify(prepared.messages)).toBe(before);
+		return { payload, plan: prepared.structure };
+	};
+	injector.transform(
+		{ systemPrompt: ["system"], messages: messages.slice(0, 2) },
+		"2026-01-01",
+		cwd,
+	);
+	const first = request("2026-01-02");
+	expect(first.payload.input.at(-1).role).toBe("developer");
+	const original = structuredClone(first.payload.input.at(-1));
+	messages.push(user("next", 4));
+	const replay = request("2026-01-02");
+	expect(replay.payload.input.slice(0, -1)).toEqual(first.payload.input);
+	expect(replay.payload.input.at(-2)).toEqual(original);
+	for (const change of [
+		(row: any) => {
+			row.content[0].text = row.content[0].text.replace(
+				cwd,
+				"C:/other/project",
+			);
+		},
+		(row: any) => {
+			row.content[0].text = "arbitrary developer control";
+		},
+		(row: any) => {
+			row.content[0].text = row.content[0].text.replace(
+				"2026-01-02",
+				"2026-02-30",
+			);
+		},
+		(row: any) => {
+			row.role = "user";
+		},
+		(row: any) => {
+			row.extra = "unmanaged";
+		},
+		(row: any) => {
+			row.content.push({ type: "input_text", text: "extra" });
+		},
+	]) {
+		const altered = structuredClone(first.payload);
+		change(altered.input.at(-1));
+		expect(piPreparedStructureMismatch(altered, first.plan)).toBeDefined();
+	}
+	const leading = structuredClone(first.payload);
+	leading.input.unshift(leading.input.pop());
+	expect(piPreparedStructureMismatch(leading, first.plan)).toBeDefined();
+	const wrongUser = structuredClone(first.payload);
+	wrongUser.input[0].role = "developer";
+	expect(piPreparedStructureMismatch(wrongUser, first.plan)).toBeDefined();
+});
