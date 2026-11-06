@@ -1,6 +1,7 @@
 import { promptAsyncAndWaitForIdle } from "../../shared/prompt-async-transport";
 import { drainNotifications } from "../../shared/rpc-notifications";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { rememberWaitingMessages, sidebarObservations } from "./sidebar-observations";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -1470,6 +1471,7 @@ describe("createEventHandler", () => {
         useTempDataHome("context-event-explicit-delete-");
         const deps = createDeps(new Map());
         const sessionId = "ses-explicit-delete";
+        rememberWaitingMessages(sessionId, 12);
         seedRetainedSession(deps.db, sessionId, Date.now() - 25 * 60 * 60 * 1000);
         const before = snapshotSessionRows(deps.db, sessionId);
         expect(before.compartments).toHaveLength(40);
@@ -1483,6 +1485,7 @@ describe("createEventHandler", () => {
         for (const [table, rows] of Object.entries(snapshotSessionRows(deps.db, sessionId))) {
             expect(rows, `${table} retained deleted session data`).toEqual([]);
         }
+        expect(sidebarObservations(sessionId).waitingMessages).toBeUndefined();
     });
 
     it("retries a failed deleted-session cleanup from its durable marker", async () => {

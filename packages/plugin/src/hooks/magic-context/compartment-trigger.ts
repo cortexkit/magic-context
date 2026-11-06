@@ -48,6 +48,7 @@ import {
 import { estimateTrueRawMessageTokens } from "./read-session-true-raw-tokens";
 import { reasoningBudgetCutoff } from "./reasoning-budget";
 import { modelAcceptsEmptyContent } from "./sentinel";
+import { rememberWaitingMessages } from "./sidebar-observations";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -398,6 +399,7 @@ function getUnsummarizedTailInfo(
 
             const rawEligibility = getRawHistoryEligibility(db, sessionId);
             if (!rawEligibility.hasRawBeyondLastCompartment) {
+                rememberWaitingMessages(sessionId, 0);
                 return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal: rawEligibility.offset };
             }
 
@@ -418,6 +420,11 @@ function getUnsummarizedTailInfo(
             const hasProtectedEligibleHead =
                 boundary.offset <
                 Math.min(boundary.protectedTailStart, boundary.eligibleEndOrdinal);
+            rememberWaitingMessages(
+                sessionId,
+                Math.min(boundary.protectedTailStart, boundary.eligibleEndOrdinal) -
+                    boundary.offset,
+            );
 
             if (!hasProtectedEligibleHead) {
                 return {

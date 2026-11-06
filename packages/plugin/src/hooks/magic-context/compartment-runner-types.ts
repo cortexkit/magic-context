@@ -280,9 +280,14 @@ export interface HistorianRunResult {
     failureReason?: string;
     dumpPath?: string;
     invocationId?: number;
+    producingModel?: string | null;
 }
 
-export type ValidatedHistorianPassResult =
+export type ValidatedHistorianPassResult = {
+    producingModel?: string | null;
+    usedFallback?: boolean;
+    finishSidebarRun?: (published: boolean) => void;
+} & (
     | {
           ok: true;
           compartments: CandidateCompartment[];
@@ -312,7 +317,8 @@ export type ValidatedHistorianPassResult =
           error: string;
           failureReason?: string;
           invocationId?: number | null;
-      };
+      }
+);
 
 export interface StoredCompartmentRange {
     startMessage: number;

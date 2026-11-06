@@ -341,6 +341,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
     // durable and already signaled, so a later throw is a failed side step, not a
     // failed historian run.
     let publishCommitted = false;
+    let finishSidebarRun: ((published: boolean) => void) | undefined;
     let retainDrainReservationForRetryThrottle = false;
     let issueNotified = false;
     let drainReservation: ReturnType<typeof reserveProtectedTailDrainTokens>["reservation"] = null;
@@ -1002,6 +1003,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             twoPass: deps.historianTwoPass,
             language: deps.language,
         });
+        finishSidebarRun = validatedPass.finishSidebarRun;
         // A window refusal here comes from a fallback too small to hold even a
         // minimal prompt (every other chain model was fitted above). Treat it like
         // any other failed pass: count it, notify, and keep
@@ -1406,6 +1408,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // drop queue) is already in the transaction above; embedding registration
         // and provider calls below are post-commit best-effort and must never leave
         // a committed publish marked failed or unsignaled.
+        finishSidebarRun?.(true);
         deps.onCompartmentStatePublished?.(sessionId);
 
         // Inject compaction marker into OpenCode's DB.
@@ -1649,6 +1652,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             await notifyHistorianIssue(buildHistorianFailureNotice(failCount, desc.brief));
         }
     } finally {
+        finishSidebarRun?.(publishCommitted);
         if (!completedSuccessfully) {
             if (!retainDrainReservationForRetryThrottle) {
                 rollbackDrainReservation();
