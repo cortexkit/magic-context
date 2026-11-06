@@ -1,15 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	utimesSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeRequestBody } from "../../plugin/scripts/cache-bust-body-sources";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	capturePiServedArray,
 	flushPiServedArrayLedger,
@@ -25,7 +20,7 @@ afterEach(() => {
 });
 
 function temporaryDirectory(label: string): string {
-	const directory = mkdtempSync(join(tmpdir(), label));
+	const directory = createTestTempDirFromPath(join(tmpdir(), label));
 	temporaryDirectories.push(directory);
 	return directory;
 }

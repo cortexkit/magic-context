@@ -33,7 +33,7 @@
  * short read more than --cache-ttl (default 5m) after the prefix was last read
  * in full or written is `idle_cache_expiry`.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
 import {
@@ -59,6 +59,10 @@ import {
 	resolvePiBodiesDirectory,
 } from "../../plugin/scripts/cache-bust-body-sources";
 import { loadSessionDecisions } from "../../plugin/scripts/cache-bust-sentinel";
+import {
+	FileLineReadError,
+	readFileLines,
+} from "../../plugin/scripts/read-file-lines";
 import { getMagicContextStorageDir } from "../../plugin/src/shared/data-path";
 import {
 	getPiServedArrayLedgerPath,
@@ -281,75 +285,79 @@ function parseArgs(argv: string[]): Args {
 	};
 }
 
-function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
-	let lines: string[];
-	try {
-		lines = readFileSync(filePath, "utf8").split("\n");
-	} catch {
-		return undefined;
-	}
+function parsePiSessionFile(
+	filePath: string,
+	bufferBytes?: number,
+): PiSessionFile | undefined {
 	let sessionId = "";
 	let cwd: string | undefined;
 	const entries: SessionEntryMarker[] = [];
 	const usage: PiUsageRow[] = [];
 	let ordinal = 0;
-	for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-		const raw = lines[lineIndex].trim();
-		if (!raw) continue;
-		let entry: Json;
-		try {
-			entry = JSON.parse(raw) as Json;
-		} catch {
-			continue;
+	let lineIndex = 0;
+	try {
+		for (const line of readFileLines(filePath, bufferBytes)) {
+			lineIndex += 1;
+			const raw = line.trim();
+			if (!raw) continue;
+			let entry: Json;
+			try {
+				entry = JSON.parse(raw) as Json;
+			} catch {
+				continue;
+			}
+			const type = typeof entry.type === "string" ? entry.type : "unknown";
+			const marker = {
+				ordinal,
+				line: lineIndex,
+				type,
+				toolName: entryToolName(entry),
+			};
+			entries.push(marker);
+			ordinal += 1;
+			if (type === "session" && typeof entry.id === "string") {
+				sessionId = entry.id;
+				cwd = typeof entry.cwd === "string" ? entry.cwd : cwd;
+				continue;
+			}
+			if (type !== "message") continue;
+			const message = asJson(entry.message);
+			if (message?.role !== "assistant") continue;
+			const usageValue = message.usage ?? message.tokens;
+			const usageRecord = asJson(usageValue);
+			if (!usageRecord) continue;
+			const cache = asJson(usageRecord.cache);
+			const input = getAnyNumber(usageRecord, ["input", "inputTokens"]);
+			const cacheRead = cache
+				? getAnyNumber(cache, ["read", "cacheRead", "cache_read"])
+				: getAnyNumber(usageRecord, ["cache_read", "cacheRead"]);
+			const cacheWrite = cache
+				? getAnyNumber(cache, ["write", "cacheWrite", "cache_write"])
+				: getAnyNumber(usageRecord, ["cache_write", "cacheWrite"]);
+			const timestamp =
+				parseTimestamp(message.timestamp) || parseTimestamp(entry.timestamp);
+			if (timestamp === 0) continue;
+			usage.push({
+				timestamp,
+				createdAt: new Date(timestamp).toISOString(),
+				line: lineIndex,
+				ordinal: marker.ordinal,
+				messageId:
+					typeof entry.id === "string" ? entry.id : `line-${lineIndex}`,
+				input,
+				cacheRead,
+				cacheWrite,
+				total: input + cacheRead + cacheWrite,
+				...(typeof message.api === "string" ? { api: message.api } : {}),
+				...(typeof message.provider === "string"
+					? { provider: message.provider }
+					: {}),
+				...(typeof message.model === "string" ? { model: message.model } : {}),
+			});
 		}
-		const type = typeof entry.type === "string" ? entry.type : "unknown";
-		const marker = {
-			ordinal,
-			line: lineIndex + 1,
-			type,
-			toolName: entryToolName(entry),
-		};
-		entries.push(marker);
-		ordinal += 1;
-		if (type === "session" && typeof entry.id === "string") {
-			sessionId = entry.id;
-			cwd = typeof entry.cwd === "string" ? entry.cwd : cwd;
-			continue;
-		}
-		if (type !== "message") continue;
-		const message = asJson(entry.message);
-		if (message?.role !== "assistant") continue;
-		const usageValue = message.usage ?? message.tokens;
-		const usageRecord = asJson(usageValue);
-		if (!usageRecord) continue;
-		const cache = asJson(usageRecord.cache);
-		const input = getAnyNumber(usageRecord, ["input", "inputTokens"]);
-		const cacheRead = cache
-			? getAnyNumber(cache, ["read", "cacheRead", "cache_read"])
-			: getAnyNumber(usageRecord, ["cache_read", "cacheRead"]);
-		const cacheWrite = cache
-			? getAnyNumber(cache, ["write", "cacheWrite", "cache_write"])
-			: getAnyNumber(usageRecord, ["cache_write", "cacheWrite"]);
-		const timestamp =
-			parseTimestamp(message.timestamp) || parseTimestamp(entry.timestamp);
-		if (timestamp === 0) continue;
-		usage.push({
-			timestamp,
-			createdAt: new Date(timestamp).toISOString(),
-			line: lineIndex + 1,
-			ordinal: marker.ordinal,
-			messageId:
-				typeof entry.id === "string" ? entry.id : `line-${lineIndex + 1}`,
-			input,
-			cacheRead,
-			cacheWrite,
-			total: input + cacheRead + cacheWrite,
-			...(typeof message.api === "string" ? { api: message.api } : {}),
-			...(typeof message.provider === "string"
-				? { provider: message.provider }
-				: {}),
-			...(typeof message.model === "string" ? { model: message.model } : {}),
-		});
+	} catch (error) {
+		if (error instanceof FileLineReadError) return undefined;
+		throw error;
 	}
 	if (!sessionId) return undefined;
 	usage.sort(
@@ -399,11 +407,12 @@ function loadLedger(
 	storageDir: string,
 	since?: number,
 	until?: number,
+	bufferBytes?: number,
 ): PiServedArrayDigestRecord[] {
 	const ledgerPath = getPiServedArrayLedgerPath(sessionId, storageDir);
 	if (!existsSync(ledgerPath)) return [];
 	const records: PiServedArrayDigestRecord[] = [];
-	for (const raw of readFileSync(ledgerPath, "utf8").split("\n")) {
+	for (const raw of readFileLines(ledgerPath, bufferBytes)) {
 		if (!raw.trim()) continue;
 		try {
 			const value = JSON.parse(raw);

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readFileLines } from "./read-file-lines";
 
 export type BodyProvider = "anthropic" | "openai" | "gemini";
 
@@ -417,7 +418,7 @@ export function clippedBodyPairVersions(divergence: BodyPairDivergence): {
 
 function sessionCwdFromJsonl(sessionPath: string): string | undefined {
     try {
-        for (const raw of readFileSync(sessionPath, "utf8").split("\n")) {
+        for (const raw of readFileLines(sessionPath)) {
             if (!raw.trim()) continue;
             const entry = asJson(JSON.parse(raw));
             if (entry?.type === "session" && typeof entry.cwd === "string") return entry.cwd;
