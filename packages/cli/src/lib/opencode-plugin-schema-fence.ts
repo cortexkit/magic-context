@@ -183,19 +183,57 @@ function readFenceFromNpmTarball(tarball: Uint8Array): number | null {
     return fenceValues.size === 1 ? ([...fenceValues][0] ?? null) : null;
 }
 
-function npmPackageVersionUrl(version: string): string {
-    const packagePath = encodeURIComponent(OPENCODE_PLUGIN_NAME).replace("%2F", "/");
-    return `${resolveNpmRegistryUrl()}/${packagePath}/${encodeURIComponent(version)}`;
+const NPM_PACKAGE_PATH = encodeURIComponent(OPENCODE_PLUGIN_NAME).replace("%2F", "/");
+
+/**
+ * Keep the tarball download on the selected registry. A tarball URL from the
+ * metadata is used as-is when it is under that registry. A standard npm
+ * tarball path on another host is moved onto the registry, since mirrors
+ * often return upstream URLs. Anything else is refused rather than fetched
+ * from an unconfigured host. HTTP is accepted only for an HTTP registry.
+ */
+export function selectRegistryTarballUrl(tarball: string, registryUrl: string): URL | null {
+    let registry: URL;
+    let candidate: URL;
+    try {
+        registry = new URL(`${registryUrl.replace(/\/+$/, "")}/`);
+        candidate = new URL(tarball);
+    } catch {
+        return null;
+    }
+    if (registry.protocol !== "https:" && registry.protocol !== "http:") return null;
+    if (candidate.origin === registry.origin && candidate.pathname.startsWith(registry.pathname)) {
+        return candidate;
+    }
+    // Registries write the scope as either "@" or "%40" in tarball paths.
+    let pathname: string;
+    try {
+        pathname = decodeURIComponent(candidate.pathname);
+    } catch {
+        return null;
+    }
+    const marker = `/${OPENCODE_PLUGIN_NAME}/-/`;
+    const index = pathname.lastIndexOf(marker);
+    if (index === -1) return null;
+    const file = pathname.slice(index + marker.length);
+    if (!/^[\w.-]+\.tgz$/.test(file)) return null;
+    return new URL(`${OPENCODE_PLUGIN_NAME}/-/${file}`, registry);
 }
 
 async function resolveFenceFromNpmTarball(
     requestedVersion: string,
+    directory: string,
     fetchImpl: typeof globalThis.fetch,
 ): Promise<ResolvedPluginFence | null> {
+    const registryUrl = resolveNpmRegistryUrl(process.env, {
+        cwd: directory,
+        packageName: OPENCODE_PLUGIN_NAME,
+    });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), NPM_TIMEOUT_MS);
     try {
-        const metadataResponse = await fetchImpl(npmPackageVersionUrl(requestedVersion), {
+        const metadataUrl = `${registryUrl}/${NPM_PACKAGE_PATH}/${encodeURIComponent(requestedVersion)}`;
+        const metadataResponse = await fetchImpl(metadataUrl, {
             signal: controller.signal,
             headers: { Accept: "application/json" },
         });
@@ -208,8 +246,8 @@ async function resolveFenceFromNpmTarball(
             return null;
         }
 
-        const tarballUrl = new URL(metadata.dist.tarball);
-        if (tarballUrl.protocol !== "https:") return null;
+        const tarballUrl = selectRegistryTarballUrl(metadata.dist.tarball, registryUrl);
+        if (!tarballUrl) return null;
         const tarballResponse = await fetchImpl(tarballUrl, { signal: controller.signal });
         if (!tarballResponse.ok) return null;
         const contentLength = Number(tarballResponse.headers.get("content-length"));
@@ -230,6 +268,7 @@ async function resolveFenceFromNpmTarball(
 async function resolvePluginFence(
     specifier: string,
     requestedVersion: string,
+    directory: string,
     deps: Required<Pick<PinnedPluginSchemaFenceDeps, "fetch" | "getOpenCodePluginCacheDir">>,
 ): Promise<ResolvedPluginFence | null> {
     const installed = findInstalledPluginPackage(
@@ -243,7 +282,7 @@ async function resolvePluginFence(
             return { version: installed.version, supportedVersion, source: "installed" };
         }
     }
-    return resolveFenceFromNpmTarball(requestedVersion, deps.fetch);
+    return resolveFenceFromNpmTarball(requestedVersion, directory, deps.fetch);
 }
 
 /**
@@ -270,7 +309,12 @@ export async function inspectPinnedOpenCodePluginSchemaFences(
 
         let resolved = resolvedBySpecifier.get(entry.entry);
         if (!resolved) {
-            resolved = resolvePluginFence(entry.entry, entry.pinnedVersion, resolutionDeps);
+            resolved = resolvePluginFence(
+                entry.entry,
+                entry.pinnedVersion,
+                options.directory,
+                resolutionDeps,
+            );
             resolvedBySpecifier.set(entry.entry, resolved);
         }
         const fence = await resolved;

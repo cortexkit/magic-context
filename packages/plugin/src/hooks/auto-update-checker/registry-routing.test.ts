@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let importCounter = 0;
 function freshChecker() {
@@ -8,12 +11,17 @@ function freshChecker() {
 const original = {
     npm_config_registry: process.env.npm_config_registry,
     NPM_CONFIG_REGISTRY: process.env.NPM_CONFIG_REGISTRY,
+    NPM_CONFIG_USERCONFIG: process.env.NPM_CONFIG_USERCONFIG,
 };
+let userConfigDir = "";
 const servers: ReturnType<typeof Bun.serve>[] = [];
 
 beforeEach(() => {
     delete process.env.npm_config_registry;
     delete process.env.NPM_CONFIG_REGISTRY;
+    // Isolate from the developer's own ~/.npmrc.
+    userConfigDir = mkdtempSync(join(tmpdir(), "mc-registry-routing-"));
+    process.env.NPM_CONFIG_USERCONFIG = join(userConfigDir, ".npmrc");
 });
 
 afterEach(() => {
@@ -22,6 +30,7 @@ afterEach(() => {
         else process.env[key] = value;
     }
     for (const server of servers.splice(0)) server.stop(true);
+    rmSync(userConfigDir, { recursive: true, force: true });
 });
 
 function registry(status = 200) {
@@ -48,6 +57,25 @@ describe("update-check registry routing", () => {
             expect(mirror.requests).toEqual(["/npm/%40cortexkit/opencode-magic-context"]);
         });
     }
+
+    test("fetches metadata through the registry in the user .npmrc", async () => {
+        const { getLatestVersion } = await freshChecker();
+        const mirror = registry();
+        writeFileSync(process.env.NPM_CONFIG_USERCONFIG as string, `registry=${mirror.url}\n`);
+        expect(await getLatestVersion("latest", { timeoutMs: 1000 })).toBe("0.49.35");
+        expect(mirror.requests).toEqual(["/npm/%40cortexkit/opencode-magic-context"]);
+    });
+
+    test("prefers the environment registry over the user .npmrc", async () => {
+        const { getLatestVersion } = await freshChecker();
+        const fromFile = registry();
+        const fromEnv = registry();
+        writeFileSync(process.env.NPM_CONFIG_USERCONFIG as string, `registry=${fromFile.url}\n`);
+        process.env.npm_config_registry = fromEnv.url;
+        expect(await getLatestVersion("latest", { timeoutMs: 1000 })).toBe("0.49.35");
+        expect(fromFile.requests).toEqual([]);
+        expect(fromEnv.requests).toHaveLength(1);
+    });
 
     test("preserves an explicit per-check registry override", async () => {
         const { getLatestVersion } = await freshChecker();

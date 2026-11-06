@@ -305,12 +305,18 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. By default, TypeScript mode creates/re-tightens 0700 directories and 0600 files. `false` delegates TypeScript-mode permissions to the operator; Rust transform mode always keeps the shared data directory owner-only (0700), regardless of this setting. |
 
-Registry-backed metadata checks honor `npm_config_registry`, then
-`NPM_CONFIG_REGISTRY`, and otherwise use public npm. Blank values are ignored.
-An explicit per-check registry override takes precedence. The check does not
-retry public npm if the selected registry fails. These lightweight HTTP checks
-read the registry environment, not npmrc files or their authentication settings;
-the host plugin installer continues to use its own npm configuration.
+Registry-backed metadata checks select a registry the way npm does. They
+read `npm_config_registry` (or `NPM_CONFIG_REGISTRY`), then the project
+`.npmrc` (in the nearest directory with a `package.json` or `node_modules`),
+then the user `.npmrc` (`NPM_CONFIG_USERCONFIG`, or `~/.npmrc`), and otherwise
+use public npm. A `@cortexkit:registry` entry takes priority over the default
+`registry`, as it does in npm. `${VAR}` references are expanded, and blank
+values are ignored. An explicit per-check registry override takes precedence.
+The check does not retry public npm if the selected registry fails. Tarball
+downloads stay on the selected registry, and HTTP is used only when that
+registry is HTTP. These checks read only the registry keys. They do not use
+npmrc authentication, and the host plugin installer keeps its own npm
+configuration.
 
 `protected_tags` is deprecated and ignored. Remove it and use `protected_tokens` when an explicit absolute floor is needed.
 

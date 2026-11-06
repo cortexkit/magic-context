@@ -520,7 +520,10 @@ export async function getLatestVersion(
     try {
         if (options.signal?.aborted) return null;
         const response = await (options.fetch ?? fetch)(
-            buildRegistryUrl(options.registryUrl ?? resolveNpmRegistryUrl()),
+            buildRegistryUrl(
+                options.registryUrl ??
+                    resolveNpmRegistryUrl(process.env, { packageName: PACKAGE_NAME }),
+            ),
             {
                 signal: controller.signal,
                 headers: { Accept: "application/json" },
