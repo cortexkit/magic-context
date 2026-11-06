@@ -183,6 +183,7 @@ import {
     deliverPendingChannel2,
     deliverSynthetic,
     isAdmittedSynthetic,
+    observeSyntheticAdmissionEvent,
     syntheticCandidates,
 } from "./channel2";
 import { registerV2Commands } from "./commands";
@@ -1576,6 +1577,7 @@ export async function registerContext(context: V2Context) {
                         }
                         if (!event.data?.sessionID) continue;
                         const sessionID = event.data.sessionID;
+                        observeSyntheticAdmissionEvent(context, event);
                         overflowRecovery.observeTerminal(event, (id, messageID) => {
                             const reader = openStoreReader();
                             try {
