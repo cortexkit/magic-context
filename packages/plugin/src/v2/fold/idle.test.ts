@@ -87,3 +87,16 @@ test("a repeated idle notification replaces its deadline rather than queuing twi
     f.advance(101);
     expect(f.calls).toHaveLength(1);
 });
+
+test("settlement and cancellation cannot re-arm an attempted response window", async () => {
+    const f = fixture();
+    f.idle.idle("s", "100", 10_000);
+    f.advance(101);
+    await Promise.resolve();
+    f.idle.active("s");
+    f.idle.idle("s", "100", 10_000);
+    expect(f.calls).toHaveLength(1);
+    f.idle.idle("s", "100", 10_101);
+    f.advance(101);
+    expect(f.calls).toHaveLength(2);
+});

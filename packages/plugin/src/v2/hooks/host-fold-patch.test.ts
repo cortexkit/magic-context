@@ -1,6 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
-import { hasFoldSummary } from "../fold/summary";
+import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import {
+    addCodeModeEntries,
+    codeModeInstructionMetadata,
+    renderCodeModeCatalog,
+    replaceCodeModeCatalog,
+} from "./__tests__/code-mode-catalog.fixture";
 import { installBusyAdmission, oc2ContextFixture, prose } from "./__tests__/oc2-context.fixture";
 
 const settle = async () => {
@@ -8,23 +14,28 @@ const settle = async () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
 };
 
-test("host folds reject a missing or markup-only history summary", async () => {
+test("required host checkpoints answer without empty history and preserve raw replay", async () => {
     expect(hasFoldSummary(undefined)).toBe(false);
     expect(hasFoldSummary("<session-history> \n</session-history>")).toBe(false);
     const f = await oc2ContextFixture(9838, { area: "host-fold-patch", instructions: false });
     try {
-        await f.pass();
+        const before = await f.pass();
         f.db
             .prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?")
             .run(f.session);
         await f.restart();
-        await expect(f.nativeFold()).rejects.toThrow("could not preserve the host checkpoint");
+        const cut = await f.nativeFold();
         const completed = f.raw
             .prepare(
                 "SELECT COUNT(*) AS n FROM session_message WHERE type = 'compaction' AND json_extract(data, '$.status') = 'completed'",
             )
             .get() as { n: number };
-        expect(completed.n).toBe(0);
+        expect(completed.n).toBe(1);
+        const stored = f.raw.prepare("SELECT data FROM session_message WHERE id = ?").get(cut) as {
+            data: string;
+        };
+        expect(JSON.parse(stored.data).summary).toBe(RAW_HISTORY_ACCOUNT);
+        expect((await f.pass()).bytes).toBe(before.bytes);
     } finally {
         await f.cleanup();
     }
@@ -130,7 +141,7 @@ test("a claimed idle fold with host reason manual is not a user compaction", asy
     }
 }, 60000);
 
-test("manual compact retires old notices and frozen replay but preserves every unsummarized turn", async () => {
+test("manual compact keeps an uncovered sole catalog and every unsummarized turn", async () => {
     const f = await oc2ContextFixture(9866, {
         area: "host-fold-patch",
         instructions: false,
@@ -140,10 +151,7 @@ test("manual compact retires old notices and frozen replay but preserves every u
     const admission = installBusyAdmission();
     try {
         f.compartment(4);
-        f.instruction(
-            "This catalog supersedes the previous catalog: OLD_CATALOG " +
-                "catalog entry ".repeat(3000),
-        );
+        f.instruction(renderCodeModeCatalog([`OLD_CATALOG ${"catalog entry ".repeat(3000)}`]));
         f.respond();
         const before = await f.pass();
         f.compartment(12);
@@ -154,8 +162,7 @@ test("manual compact retires old notices and frozen replay but preserves every u
             .map((row) => row.id);
         await f.nativeFold(3, 3, "", "manual");
         const after = await f.pass();
-        expect(after.bytes).not.toContain("OLD_CATALOG");
-        expect(after.bytes.length).toBeLessThan(before.bytes.length);
+        expect(after.bytes).toContain("OLD_CATALOG");
         for (const id of tailIds)
             expect(after.draft.messages.some((message) => message.id === id)).toBe(true);
         expect(after.draft.messages.some((message) => message.id === f.rows[6]!.id)).toBe(false);
@@ -164,10 +171,10 @@ test("manual compact retires old notices and frozen replay but preserves every u
         expect((await f.pass()).bytes).toBe(after.bytes);
         await f.restart();
         expect((await f.pass()).bytes).toBe(after.bytes);
-        f.instruction("NEW_EPOCH_CATALOG");
+        f.instruction(addCodeModeEntries(["NEW_EPOCH_CATALOG"]), codeModeInstructionMetadata);
         const next = await f.pass();
         expect(next.bytes).toContain("NEW_EPOCH_CATALOG");
-        expect(next.bytes).not.toContain("OLD_CATALOG");
+        expect(next.bytes).toContain("OLD_CATALOG");
     } finally {
         admission.restore();
         await f.cleanup();
@@ -183,13 +190,15 @@ test("manual compact payload accounting separates notices from the unsummarized 
     });
     try {
         f.compartment(12);
+        const initial = renderCodeModeCatalog(["INITIAL_CATALOG"]);
+        f.instruction(initial);
         const notices: string[] = [];
         for (let i = 0; i < 51; i++) {
-            const notice =
-                `This catalog supersedes the previous catalog: ${i}\n` +
-                "catalog item: available tool\n".repeat(335);
+            const notice = replaceCodeModeCatalog([
+                `CATALOG_${i}\n${"catalog item: available tool\n".repeat(335)}`,
+            ]);
             notices.push(notice);
-            f.instruction(notice);
+            f.instruction(notice, codeModeInstructionMetadata);
         }
         const tail = "UNSUMMARIZED_CONVERSATION\n" + prose.repeat(1800);
         f.user(tail, 1000);
@@ -201,7 +210,16 @@ test("manual compact payload accounting separates notices from the unsummarized 
                 .flatMap((message) => message.content)
                 .some((part) => part.text?.includes(tail)),
         ).toBe(true);
-        expect(after.bytes).not.toContain("This catalog supersedes");
+        const afterText = after.draft.messages
+            .flatMap((message) => message.content.map((part) => part.text ?? ""))
+            .join("\n");
+        expect(afterText).not.toContain(initial);
+        for (const notice of notices.slice(0, -1)) expect(afterText).not.toContain(notice);
+        expect(afterText).toContain(notices.at(-1)!);
+        const reclaimedBytes = Buffer.byteLength(notices.slice(0, -1).join(""));
+        expect(Buffer.byteLength(before.bytes) - Buffer.byteLength(after.bytes)).toBeGreaterThan(
+            reclaimedBytes * 0.9,
+        );
         expect(estimateTokens(after.bytes)).toBeLessThan(estimateTokens(before.bytes));
         console.log(
             "manual compact accounting " +
