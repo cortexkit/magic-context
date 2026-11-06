@@ -173,6 +173,65 @@ describe("analyze-cache-bust Thalamus runners", () => {
         } finally { db.close(); }
     });
 
+    test("expired runner bytes remain a note rather than a cache bust after 107 minutes", () => {
+        const { root, db } = setup();
+        db.run("UPDATE session_message SET data = json_set(data, '$.tokens.cache.read', 0) WHERE seq = 2");
+        db.close();
+        const bodies = JSON.parse(readFileSync(join(fixture, "expired-dump-bodies.json"), "utf8"));
+        for (const kind of ["oc2", "pi"] as const) {
+            const session = kind === "oc2" ? "ses_runner" : piId;
+            const dir = runnerDumpDirectory(root, kind);
+            mkdirSync(dir, { recursive: true });
+            for (const [sequence, time, body] of [[1, "10-00", bodies.previous], [2, "11-47", bodies.current]] as const) {
+                writeDump(dir, `2026-09-08T${time}-00-000Z-00000${sequence}-${session}-fetch-messages`, `2026-09-08T${time.replace("-", ":")}:00.000Z`, session, body);
+            }
+            const run = cli(root, kind, session, ["--until", "2026-09-08T11:47:00Z"]);
+            expect(run.exitCode).toBe(0);
+            const output = run.stdout.toString();
+            expect(output).toContain("EXPIRED");
+            expect(output).toContain("gap=107.0m");
+            expect(output).toContain("bytes also changed at message[0] role=system");
+            expect(output).not.toContain("BUST (meter)");
+            expect(output).not.toContain("provider_full_miss");
+            const runner = loadRunnerSession(root, session, kind)!;
+            const snapshots = __test.runnerSnapshots(runner, snapshotsFor(dir, session));
+            const row = __test.analyzeSnapshots(snapshots)[1]!;
+            expect(row.verdict).toBe("EXPIRED");
+            expect(row.divergenceIndex).toBe(0);
+            expect(row.idleGapMs).toBe(107 * 60_000);
+            const warm = __test.analyzeSnapshots(snapshots, [], { cacheTouches: [snapshots[1]!.requestTimestampMs - 60_000] })[1]!;
+            expect(warm.verdict).toBe("BUST");
+            expect(warm.idleGapMs).toBe(60_000);
+        }
+    });
+
+    test("runner evidence reads only window dates and the preceding day", () => {
+        const { root, db } = setup(); db.close();
+        const sinceMs = Date.parse("2026-09-08T11:00:00Z");
+        const untilMs = Date.parse("2026-09-08T12:00:00Z");
+        for (const module of ["magic-context", "thalamus-harness", "thalamus-pi"]) {
+            const directory = join(root, module, "logs");
+            writeFileSync(join(directory, `${module}.2026-09-07.log`), "2026-09-07T23:59:00.000Z INFO ck-mc: session ses_runner: view 0 accepted (0 edits)\n");
+            // Excluded dates are unreadable as files: hiding their names in the
+            // header without preventing the reads cannot satisfy this test.
+            for (const date of ["2026-09-06", "2026-09-09"]) mkdirSync(join(directory, `${module}.${date}.log`));
+        }
+        for (const kind of ["oc2", "pi"] as const) {
+            const session = kind === "oc2" ? "ses_runner" : piId;
+            const runner = loadRunnerSession(root, session, kind)!;
+            const evidence = loadRunnerEvidence(root, runner, undefined, { sinceMs, untilMs });
+            const module = kind === "oc2" ? "thalamus-harness" : "thalamus-pi";
+            expect(evidence.files).toEqual(["magic-context", module].flatMap((name) => ["2026-09-07", "2026-09-08"].map((date) => join(root, name, "logs", `${name}.${date}.log`))));
+            if (kind === "oc2") expect(evidence.decisions.some((event) => event.detail === "view=0 edits=0 cut=unlogged")).toBe(true);
+            const run = cli(root, kind, session, ["--until", "2026-09-08T12:00:00Z"]);
+            expect(run.exitCode).toBe(0);
+            const output = run.stdout.toString();
+            expect(output).toContain(`${module}.2026-09-07.log`);
+            expect(output).not.toContain("2026-09-06.log");
+            expect(output).not.toContain("2026-09-09.log");
+        }
+    });
+
     test("reads uncheckpointed OC2 WAL rows without changing the store or reading account tables", () => {
         const { root, db, path } = setup();
         try {
@@ -278,6 +337,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
         expect(bytes).toContain("step-prefix-[after]");
         expect(bytes).not.toContain("KEEPWARM BODY");
         expect(bytes).toContain("read=100 (write=12,000");
+        expect(bytes).toContain("gap=1.0m");
     });
 
     test("OC2 dump-dir override and Pi default dumps reuse the existing byte-diff path", () => {
@@ -290,7 +350,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
                 const stem = `2026-09-08T${time}-00-000Z-00000${sequence}-${session}-fetch-messages`;
                 writeDump(dir, stem, `2026-09-08T${time.replace("-", ":")}:00.000Z`, session, bodyWithBreakpointMessage(text));
             }
-            const run = cli(root, kind, session, [...(kind === "oc2" ? ["--dump-dir", dir] : []), "--show-diff"]);
+            const run = cli(root, kind, session, [...(kind === "oc2" ? ["--dump-dir", dir] : []), "--show-diff", "--cache-ttl", "2h"]);
             expect(run.exitCode).toBe(0);
             const output = run.stdout.toString();
             expect(output).toContain(`Source: ${kind}; files read:`);
@@ -298,6 +358,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
             expect(output).toContain("segment diff @char");
             expect(output).toContain(dir);
             expect(output).toContain("read=100 (write=12,000");
+            expect(output).toContain("gap=107.0m");
         }
     });
 

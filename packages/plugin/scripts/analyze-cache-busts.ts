@@ -1194,13 +1194,28 @@ export function analyzeSnapshots(
         };
         const lastTouch = options.cacheTouches?.filter((at) => at <= current.requestTimestampMs).reduce((latest, at) => Math.max(latest, at), -Infinity);
         if (lastTouch !== undefined && lastTouch > (prefixRefreshedAtMs ?? -Infinity)) prefixRefreshedAtMs = lastTouch;
+        const previousRequestAt = snaps[index - 1]?.requestTimestampMs ?? previous.requestTimestampMs;
+        const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
+        // Once a runner's cache has expired, changing bytes cannot incur an
+        // additional cache miss. Preserve the diff as evidence, not a bust.
+        if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
+            rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
+                ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
+                comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
+                divergenceClass: "idle_cache_expiry", ...runnerFields });
+            previousMetered = current;
+            previousMeteredDecision = decision;
+            latencyReference = undefined;
+            previousBustDivergenceIndex = undefined;
+            if (refreshesCachedPrefix(reading, { shortRead, explicitBreakpoints })) prefixRefreshedAtMs = current.requestTimestampMs;
+            continue;
+        }
         if (noBytes) {
             // Without both wire bodies, identical empty segment arrays prove
             // nothing. Only elapsed cache lifetime or logged view changes can
             // explain a short read; never call it provider latency or a BUST.
-            const previousRequestAt = snaps[index - 1]?.requestTimestampMs ?? previous.requestTimestampMs;
-            const idleGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
-            const verdict: MeterVerdict = !shortRead ? "STABLE" : idleGapMs > cacheTtlMs ? "EXPIRED"
+            const idleGapMs = runnerGapMs;
+            const verdict: MeterVerdict = !shortRead ? "STABLE"
                 : runnerDecisions?.changes.length ? "VIEW" : "UNEXPLAINED (no bytes)";
             rows.push({ current, previous, divergenceIndex: -1, verdict, shortRead, meterFloor,
                 comparableRead, epsilon, prevTotal, idleGapMs, ...runnerFields });
@@ -1210,14 +1225,14 @@ export function analyzeSnapshots(
             continue;
         }
         const idleGapMs =
-            current.requestTimestampMs - (prefixRefreshedAtMs ?? previous.requestTimestampMs);
+            current.runnerRequest ? runnerGapMs : current.requestTimestampMs - (prefixRefreshedAtMs ?? previous.requestTimestampMs);
         const idleCacheExpiry =
             shortRead &&
-            isIdleCacheExpiry(
+            (current.runnerRequest ? runnerGapMs > cacheTtlMs : isIdleCacheExpiry(
                 current.requestTimestampMs,
                 prefixRefreshedAtMs ?? previous.requestTimestampMs,
                 cacheTtlMs,
-            );
+            ));
         const missingBreakpointAfterRead = isMissingBreakpointAfterRead(reading, {
             shortRead,
             explicitBreakpoints,
@@ -1404,7 +1419,9 @@ function meterCell(row: AnalysisRow): string {
     const floorBasis = isImplicitPrefixCache(row.current.usage?.provider ?? row.current.provider)
         ? `prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()}`
         : `prev read+write-${row.epsilon?.toLocaleString()}; prevTotal=${row.prevTotal?.toLocaleString()}`;
-    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (${floorBasis})${reference}${rewritten}${wireModel}`;
+    const gap = row.current.runnerRequest && row.shortRead && row.idleGapMs !== undefined
+        ? `; gap=${(row.idleGapMs / 60_000).toFixed(1)}m` : "";
+    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (${floorBasis})${reference}${rewritten}${wireModel}${gap}`;
 }
 
 const HELP = `usage: bun scripts/analyze-cache-busts.ts --session <prefix> [options]
@@ -1476,7 +1493,11 @@ function main(): void {
         .filter((candidate) => candidate.session === runner.session)
         .flatMap((candidate) => loadCandidateSnapshots(candidate, dumpOptions)) : selection.snapshots;
     const allSnaps = runner ? runnerSnapshots(runner, dumps, opts.meter) : dumps;
-    const evidence = runner ? loadRunnerEvidence(opts.runnerDataDir, runner, opts.mcLogPath) : undefined;
+    const since = runner ? resolveTimeBound(opts.since) : undefined;
+    const until = runner ? resolveTimeBound(opts.until) : undefined;
+    const evidence = runner ? loadRunnerEvidence(opts.runnerDataDir, runner, opts.mcLogPath, {
+        sinceMs: since ? Date.parse(since) : undefined, untilMs: until ? Date.parse(until) : undefined,
+    }) : undefined;
     const touches = runner ? keepWarmTouches(opts.sources, runner.session) : [];
     let rows = analyzeSnapshots(
         allSnaps,
@@ -1484,8 +1505,6 @@ function main(): void {
         { cacheTtlMs: opts.cacheTtl ? parseCacheTtl(opts.cacheTtl) : undefined, runnerEvidence: evidence, cacheTouches: touches.map((touch) => touch.at) },
     );
     if (runner) {
-        const since = resolveTimeBound(opts.since);
-        const until = resolveTimeBound(opts.until);
         rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
         if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
     }
@@ -1580,6 +1599,7 @@ function main(): void {
             opts.allRows ||
             row.verdict === "BUST" ||
             row.verdict === "LATENCY" ||
+            row.verdict === "EXPIRED" ||
             (row.verdict === "UNMETERED" && row.byteVerdict === "BUST");
         if (!shouldPrint) continue;
         if (row.verdict === "BUST") bustCount += 1;
@@ -1598,7 +1618,7 @@ function main(): void {
         const index = row.divergenceIndex;
         const segment =
             index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
-        const attribution = segment
+        const attribution = row.verdict === "EXPIRED" ? "(expired cache)" : segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
             : `(identical; bytes ${row.byteVerdict})`;
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
@@ -1610,6 +1630,9 @@ function main(): void {
         console.log(
             `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
         );
+        if (row.verdict === "EXPIRED" && segment) {
+            console.log(`          └─ bytes also changed at ${segment.id}`);
+        }
         if (row.divergenceClass) {
             console.log(`          └─ divergence-class: ${row.divergenceClass}`);
         }
@@ -1678,7 +1701,7 @@ function main(): void {
     const expiryCount = rows.filter((row) => row.divergenceClass === "idle_cache_expiry").length;
     if (expiryCount > 0) {
         console.log(
-            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? (runner ? "1h" : "5m")} after the prefix was last read in full or written (idle_cache_expiry; --cache-ttl changes the window).`,
+            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? (runner ? "1h" : "5m")} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
         );
     }
     if (unmeteredBustCount > 0) {

@@ -42,12 +42,21 @@ export function parseRunnerDecision(line: string, session: string): RunnerDecisi
     return null;
 }
 
-export function loadRunnerEvidence(root: string, runner: RunnerSession, mcLogPath?: string): RunnerEvidence {
+export function loadRunnerEvidence(root: string, runner: RunnerSession, mcLogPath?: string, window: { sinceMs?: number; untilMs?: number } = {}): RunnerEvidence {
     const files: string[] = [];
     const decisions: RunnerDecision[] = [];
     const renders: StepRender[] = [];
+    const through = window.untilMs ?? Date.now();
+    const from = window.sinceMs ?? runner.requests.reduce((earliest, request) => Math.min(earliest, request.at), through);
+    // Log names use UTC dates. Include the preceding day so the first request
+    // in the requested window can find decisions from its previous request.
+    const firstDate = new Date(from - 86_400_000).toISOString().slice(0, 10);
+    const lastDate = new Date(through).toISOString().slice(0, 10);
     const daily = (directory: string, prefix: string): string[] => existsSync(directory)
-        ? readdirSync(directory).filter((name) => new RegExp(`^${prefix}\\.\\d{4}-\\d\\d-\\d\\d\\.log$`).test(name)).sort().map((name) => join(directory, name)) : [];
+        ? readdirSync(directory).filter((name) => {
+            const date = new RegExp(`^${prefix}\\.(\\d{4}-\\d\\d-\\d\\d)\\.log$`).exec(name)?.[1];
+            return date !== undefined && date >= firstDate && date <= lastDate;
+        }).sort().map((name) => join(directory, name)) : [];
     const mcFiles = mcLogPath ? (existsSync(mcLogPath) ? [mcLogPath] : []) : daily(join(root, "magic-context/logs"), "magic-context");
     const module = runner.kind === "oc2" ? "thalamus-harness" : "thalamus-pi";
     const stepFiles = daily(join(root, module, "logs"), module);
