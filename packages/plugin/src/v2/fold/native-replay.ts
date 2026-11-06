@@ -73,6 +73,30 @@ export function bindNativeRowID(message: V2Message, id: string, seq?: number): v
     coordinates.set(message, id);
     if (seq !== undefined) sequences.set(message, seq);
 }
+/**
+ * The capture-only inputs of a native input: the model and each effort control
+ * with its position (the last message with a host id before it, and the count
+ * of messages without an id after that one). A capture records these, and the
+ * source rows cannot rebuild them, so a change requires a fresh capture.
+ *
+ * The position uses host ids only, not the source coordinates that a capture
+ * binds on its copy: a host draft has none bound, so a key that used them would
+ * never match the key of the capture.
+ */
+export function captureInputsKey(model: string, messages: readonly V2Message[]): string {
+    const parts: unknown[] = [model];
+    let previous: string | undefined;
+    let unnamed = 0;
+    for (const message of messages) {
+        const part = effortPart(message);
+        if (part) parts.push([previous, unnamed, part.effort, part.previous]);
+        else if (message.id) {
+            previous = message.id;
+            unnamed = 0;
+        } else unnamed += 1;
+    }
+    return JSON.stringify(parts);
+}
 export function copyNativeInput(messages: readonly V2Message[]): V2Message[] {
     const copies = reviveNative(encodeNative(messages));
     copies.forEach((copy, i) => {
@@ -177,6 +201,19 @@ export class NativeFoldReplay {
     private readonly sources = new Map<string, string>();
     private readonly staleHeads = new Set<string>();
     private readonly unprovenControls = new Set<string>();
+    // What the last capture of each session recorded: its capture inputs key,
+    // the served head and the head's boundary. A pass may skip the native copy
+    // only while all three are unchanged (see captureCurrent and
+    // noteSkippedCapture).
+    private readonly captureInputs = new Map<
+        string,
+        { key: string; head: string | undefined; boundary: string | undefined }
+    >();
+    // The capture inputs key and served head of a session's last native copy
+    // that did not give a current capture (the capture did not run or failed).
+    // The same inputs are not copied again until the served head changes (see
+    // copyWanted, settleCopy and noteSkippedCapture).
+    private readonly failedCopies = new Map<string, { key: string; head: string | undefined }>();
     private readonly editedAdmissions = new Map<
         string,
         {
@@ -227,8 +264,60 @@ export class NativeFoldReplay {
         )
             this.invalidate(sessionID);
     }
+    /**
+     * True when a pass may skip the native copy and capture: the last capture
+     * of this session succeeded with the same model and effort controls, and
+     * nothing has invalidated it since. The rows themselves need no capture,
+     * because a missing row is restored from the host store.
+     */
+    captureCurrent(sessionID: string, model: string, messages: readonly V2Message[]): boolean {
+        return this.captureCurrentFor(sessionID, captureInputsKey(model, messages));
+    }
+    /** {@link captureCurrent} for a {@link captureInputsKey} the caller already computed. */
+    captureCurrentFor(sessionID: string, key: string): boolean {
+        if (this.options.protocol !== 3) return false;
+        if (this.unavailable.has(sessionID) || this.unprovenControls.has(sessionID)) return false;
+        return this.captureInputs.get(sessionID)?.key === key;
+    }
+    /**
+     * Whether a pass that may skip the capture should copy its native input:
+     * the capture is not current, and the last copy with the same inputs did
+     * not fail to give a current capture. This bounds the copies to one for
+     * each change of model, effort controls or served head while the capture
+     * cannot run. `key` is the {@link captureInputsKey} of the pass's draft.
+     */
+    copyWanted(sessionID: string, key: string): boolean {
+        if (this.captureCurrentFor(sessionID, key)) return false;
+        return this.failedCopies.get(sessionID)?.key !== key;
+    }
+    /**
+     * Called after a pass that tried to copy for the capture, whether or not
+     * the copy succeeded: records whether the pass gave a current capture.
+     * `key` is the capture inputs key of the draft before the transform.
+     */
+    settleCopy(draft: SessionContext, key: string): void {
+        if (this.captureCurrentFor(draft.sessionID, key)) this.failedCopies.delete(draft.sessionID);
+        else this.failedCopies.set(draft.sessionID, { key, head: this.servedBaseline(draft) });
+    }
+    /**
+     * Called after a pass that skipped the capture. When the capture was not
+     * current at the start of the pass, or the served head or its boundary
+     * differs from the last capture, the stored head and controls are stale:
+     * a host fold is refused until a pass captures again. A changed served
+     * head also lets the next pass try a failed copy once more.
+     */
+    noteSkippedCapture(draft: SessionContext, boundary: string | undefined, current = true): void {
+        const recorded = this.captureInputs.get(draft.sessionID);
+        const head = this.servedBaseline(draft);
+        const failed = this.failedCopies.get(draft.sessionID);
+        if (failed && failed.head !== head) this.failedCopies.delete(draft.sessionID);
+        if (current && recorded && head === recorded.head && boundary === recorded.boundary) return;
+        this.captureInputs.delete(draft.sessionID);
+        this.unprovenControls.add(draft.sessionID);
+    }
     invalidate(sessionID: string, suppressNomination = false): void {
         if (this.stampMRU?.sessionID === sessionID) this.stampMRU = undefined;
+        this.captureInputs.delete(sessionID);
         if (suppressNomination) this.unavailable.add(sessionID);
         this.dirty.add(sessionID);
         this.changed.add(sessionID);
@@ -1297,6 +1386,11 @@ export class NativeFoldReplay {
                 this.unavailable.delete(draft.sessionID);
                 this.changed.delete(draft.sessionID);
                 this.staleHeads.delete(draft.sessionID);
+                this.captureInputs.set(draft.sessionID, {
+                    key: captureInputsKey(tail.model, native),
+                    head: tail.baseline,
+                    boundary: boundary?.id,
+                });
             } finally {
                 reader.close();
             }
@@ -1766,6 +1860,8 @@ export class NativeFoldReplay {
     async forget(sessionID: string): Promise<void> {
         if (this.stampMRU?.sessionID === sessionID) this.stampMRU = undefined;
         this.unprovenControls.delete(sessionID);
+        this.captureInputs.delete(sessionID);
+        this.failedCopies.delete(sessionID);
         this.cancelLegacyUpgrade(sessionID);
         this.cancelEditedAdmission(sessionID);
         // The session id locates the v2 key and matching legacy keys without any

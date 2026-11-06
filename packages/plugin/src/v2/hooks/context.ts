@@ -147,12 +147,13 @@ import { CTX_NOTE_LIGHT_DESCRIPTION } from "../../tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
-import { HostFoldIdle } from "../fold/idle";
+import { HostFoldIdle, idleFoldCanArm } from "../fold/idle";
 import { stageManualBaseline } from "../fold/manual-baseline";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
     bindNativeRowID,
+    captureInputsKey,
     copyNativeInput,
     forgetNativeFoldProvenance,
     isLocalCheckpoint,
@@ -2930,13 +2931,45 @@ export async function registerContext(context: V2Context) {
                     );
             }
             let nativeMessages: V2Message[] | undefined;
-            if (nativeFoldReplay) {
+            // The copy feeds the capture for the idle host fold and the
+            // compaction hook. When the idle fold can never arm, the
+            // full-history copy is made only to make the capture current, and
+            // at most once for the same model and effort controls while the
+            // capture cannot run (a served checkpoint, a failure). Missing rows
+            // are restored from the source store. A skipped pass whose capture
+            // does not hold its model, effort controls, head and boundary marks
+            // the capture unproven after the transform, so a host fold does not
+            // use it.
+            const captureModel = `${draft.model.providerID}/${draft.model.id}`;
+            const mayskipCapture =
+                !!nativeFoldReplay &&
+                !!db &&
+                upgradeCheckpointSequence === undefined &&
+                !idleFoldCanArm(getOrCreateSessionMeta(db, draft.sessionID).cacheTtl);
+            // The only walk of the history for these checks in a pass. It is
+            // taken before the transform edits the draft, so a copy that throws
+            // is settled with the same key as the next pass's draft.
+            const captureKey = mayskipCapture
+                ? captureInputsKey(captureModel, draft.messages)
+                : undefined;
+            const captureCurrent =
+                captureKey !== undefined &&
+                !!nativeFoldReplay?.captureCurrentFor(draft.sessionID, captureKey);
+            const skippedCapture =
+                captureKey !== undefined &&
+                (captureCurrent || !nativeFoldReplay?.copyWanted(draft.sessionID, captureKey));
+            if (nativeFoldReplay && !skippedCapture) {
                 try {
                     nativeMessages = copyNativeInput(draft.messages);
                 } catch {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
                 }
             }
+            if (nativeFoldReplay)
+                sessionLog(
+                    draft.sessionID,
+                    `v2 native input: ${nativeMessages ? "copied" : "skipped"} reason=${skippedCapture ? (captureCurrent ? "capture-current" : "capture-unavailable") : nativeMessages ? "capture" : "copy-failed"}`,
+                );
             const mapped = adaptPayload(draft, admitted, messageTimes, anchorTimesOnly);
             bindSystemDateRequestIdentity(mapped, draft);
             checkpointPassPermissions.delete(draft.sessionID);
@@ -3037,21 +3070,36 @@ export async function registerContext(context: V2Context) {
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;
+            const captureBoundary = (): { id: string; summary: string } | undefined => {
+                const state = db && getOrCreateSessionMeta(db, draft.sessionID);
+                const boundary = db
+                    ?.prepare(
+                        "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                    )
+                    .get(draft.sessionID) as { id: string | null } | undefined;
+                return boundary?.id && state?.cachedM0Bytes
+                    ? { id: boundary.id, summary: state.cachedM0Bytes.toString("utf8") }
+                    : undefined;
+            };
+            if (skippedCapture && !checkpoint) {
+                try {
+                    nativeFoldReplay?.noteSkippedCapture(
+                        draft,
+                        captureBoundary()?.id,
+                        captureCurrent,
+                    );
+                } catch (error) {
+                    nativeFoldReplay?.invalidate(draft.sessionID, true);
+                    sessionLog(
+                        draft.sessionID,
+                        "v2 host fold: skipped capture check failed",
+                        error,
+                    );
+                }
+            }
             if (nativeMessages && (!checkpoint || upgradeCheckpointSequence !== undefined)) {
                 try {
-                    const state = db && getOrCreateSessionMeta(db, draft.sessionID);
-                    const boundary = db
-                        ?.prepare(
-                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
-                        )
-                        .get(draft.sessionID) as { id: string | null } | undefined;
-                    await nativeFoldReplay?.capture(
-                        draft,
-                        nativeMessages,
-                        boundary?.id && state?.cachedM0Bytes
-                            ? { id: boundary.id, summary: state.cachedM0Bytes.toString("utf8") }
-                            : undefined,
-                    );
+                    await nativeFoldReplay?.capture(draft, nativeMessages, captureBoundary());
                 } catch (error) {
                     nativeFoldReplay?.invalidate(draft.sessionID, true);
                     sessionLog(
@@ -3061,6 +3109,8 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
+            if (captureKey !== undefined && !skippedCapture)
+                nativeFoldReplay?.settleCopy(draft, captureKey);
             if (checkpointPermission === true && replayHead === undefined)
                 admissionRebuildPasses.add(draft.sessionID);
             const capturedSlot = getSlot(draft.sessionID);
