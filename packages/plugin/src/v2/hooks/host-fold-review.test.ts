@@ -6,6 +6,12 @@ import {
 import { NativeFoldReplay } from "../fold/native-replay";
 import { RAW_HISTORY_ACCOUNT } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
+import {
+    addCodeModeEntries,
+    codeModeInstructionMetadata,
+    renderCodeModeCatalog,
+    replaceCodeModeCatalog,
+} from "./__tests__/code-mode-catalog.fixture";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
 const options = {
@@ -19,14 +25,135 @@ test("manual compact keeps an unsummarized instruction that still applies", asyn
     const f = await oc2ContextFixture(10866, options);
     try {
         f.compartment(4);
-        const instruction = "Never run deployment commands without explicit user approval.";
+        const instruction = renderCodeModeCatalog(["KEEP_THIS_APPLICABLE_CATALOG"]);
         f.instruction(instruction);
+        const applicable = "Never run deployment commands without explicit user approval.";
+        f.instruction(applicable);
         f.user("Continue the code review; do not deploy.", 1000);
         const before = await f.pass();
-        expect(before.bytes).toContain(instruction);
+        expect(
+            before.draft.messages
+                .flatMap((message) => message.content.map((part) => part.text ?? ""))
+                .join("\n"),
+        ).toContain(instruction);
+        expect(
+            before.draft.messages.flatMap((message) => message.content.map((part) => part.text)),
+        ).toContain(applicable);
         await f.nativeFold(3, 0, "", "manual");
         const after = await f.pass();
-        expect(after.bytes.includes(instruction)).toBe(true);
+        expect(
+            after.draft.messages
+                .flatMap((message) => message.content.map((part) => part.text ?? ""))
+                .join("\n")
+                .includes(instruction),
+        ).toBe(true);
+        expect(after.bytes.includes(applicable)).toBe(true);
+        expect(
+            after.draft.messages.flatMap((message) => message.content.map((part) => part.text)),
+        ).toContain(applicable);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+for (const version of ["2.0.22", "2.1.4", "2.2.3"] as const) {
+    test(`manual compact retires catalogs before a full replacement but keeps later increments (${version})`, async () => {
+        const f = await oc2ContextFixture(
+            11866 + ["2.0.22", "2.1.4", "2.2.3"].indexOf(version),
+            options,
+        );
+        try {
+            f.compartment(4);
+            const initial = renderCodeModeCatalog(["INITIAL_CATALOG"], version);
+            const before = addCodeModeEntries(["BEFORE_REPLACEMENT"]);
+            const oldFull = replaceCodeModeCatalog(["OLD_FULL_CATALOG"], version);
+            const beforeLatest = addCodeModeEntries(["BEFORE_LATEST_REPLACEMENT"]);
+            const latest = `${replaceCodeModeCatalog(["LATEST_FULL_CATALOG"], version)}\n\nPreserve the current working branch.`;
+            const after = addCodeModeEntries(["AFTER_REPLACEMENT"]);
+            f.instruction(initial);
+            const otherSource = renderCodeModeCatalog(["UNRELATED_INSTRUCTION_SOURCE"], version);
+            f.instruction(otherSource, {
+                notice: "instructions",
+                instructionSources: ["plugin/policy"],
+            });
+            const combined = `${replaceCodeModeCatalog(["COMBINED_INSTRUCTION_SOURCES"], version)}\n\nDo not deploy without explicit approval.`;
+            f.instruction(combined, {
+                notice: "instructions",
+                instructionSources: ["core/codemode", "plugin/policy"],
+            });
+            for (const text of [before, oldFull, beforeLatest])
+                f.instruction(text, codeModeInstructionMetadata);
+            f.instruction(latest, {
+                notice: "instructions",
+                instructionSources: ["core/codemode", "plugin/policy"],
+            });
+            f.instruction(after, codeModeInstructionMetadata);
+            await f.pass();
+            await f.nativeFold(3, 0, "", "manual");
+            const folded = await f.pass();
+            const sent = folded.draft.messages
+                .flatMap((message) => message.content.map((part) => part.text ?? ""))
+                .join("\n");
+            for (const text of [initial, before, oldFull, beforeLatest])
+                expect(sent).not.toContain(text);
+            for (const text of [latest, after, otherSource, combined]) expect(sent).toContain(text);
+            await f.restart();
+            expect((await f.pass()).bytes).toBe(folded.bytes);
+        } finally {
+            await f.cleanup();
+        }
+    }, 60000);
+}
+
+test("manual compact keeps the initial catalog and incremental changes without a full replacement", async () => {
+    const f = await oc2ContextFixture(11870, options);
+    try {
+        f.compartment(4);
+        const instructions = [
+            renderCodeModeCatalog(["INITIAL_CATALOG"]),
+            addCodeModeEntries(["FIRST_ADDITION"]),
+            addCodeModeEntries(["SECOND_ADDITION"]),
+        ];
+        for (const [index, text] of instructions.entries())
+            f.instruction(text, index === 0 ? undefined : codeModeInstructionMetadata);
+        await f.pass();
+        await f.nativeFold(3, 0, "", "manual");
+        const after = await f.pass();
+        const sent = after.draft.messages
+            .flatMap((message) => message.content.map((part) => part.text ?? ""))
+            .join("\n");
+        for (const text of instructions) expect(sent).toContain(text);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+test("manual compact can retire a catalog re-stated by its fresh summary", async () => {
+    const f = await oc2ContextFixture(11871, options);
+    try {
+        f.compartment(4);
+        const catalog = renderCodeModeCatalog(["SUMMARY_RESTATES_THIS_CATALOG"]);
+        f.instruction(catalog);
+        const before = await f.pass();
+        expect(
+            before.draft.messages
+                .flatMap((message) => message.content.map((part) => part.text ?? ""))
+                .join("\n")
+                .split(catalog),
+        ).toHaveLength(2);
+        f.db
+            .prepare(
+                "UPDATE compartments SET content = ?, p1 = ?, p2 = ?, p3 = ?, p4 = ? WHERE session_id = ?",
+            )
+            .run(catalog, catalog, catalog, catalog, catalog, f.session);
+        await f.nativeFold(3, 0, "", "manual");
+        const after = await f.pass();
+        expect(
+            after.draft.messages
+                .flatMap((message) => message.content.map((part) => part.text ?? ""))
+                .join("\n")
+                .split(catalog),
+        ).toHaveLength(2);
     } finally {
         await f.cleanup();
     }

@@ -1,6 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import {
+    addCodeModeEntries,
+    codeModeInstructionMetadata,
+    renderCodeModeCatalog,
+    replaceCodeModeCatalog,
+} from "./__tests__/code-mode-catalog.fixture";
 import { installBusyAdmission, oc2ContextFixture, prose } from "./__tests__/oc2-context.fixture";
 
 const settle = async () => {
@@ -145,10 +151,7 @@ test("manual compact keeps an uncovered sole catalog and every unsummarized turn
     const admission = installBusyAdmission();
     try {
         f.compartment(4);
-        f.instruction(
-            "This catalog supersedes the previous catalog: OLD_CATALOG " +
-                "catalog entry ".repeat(3000),
-        );
+        f.instruction(renderCodeModeCatalog([`OLD_CATALOG ${"catalog entry ".repeat(3000)}`]));
         f.respond();
         const before = await f.pass();
         f.compartment(12);
@@ -168,7 +171,7 @@ test("manual compact keeps an uncovered sole catalog and every unsummarized turn
         expect((await f.pass()).bytes).toBe(after.bytes);
         await f.restart();
         expect((await f.pass()).bytes).toBe(after.bytes);
-        f.instruction("NEW_EPOCH_CATALOG");
+        f.instruction(addCodeModeEntries(["NEW_EPOCH_CATALOG"]), codeModeInstructionMetadata);
         const next = await f.pass();
         expect(next.bytes).toContain("NEW_EPOCH_CATALOG");
         expect(next.bytes).toContain("OLD_CATALOG");
@@ -187,13 +190,15 @@ test("manual compact payload accounting separates notices from the unsummarized 
     });
     try {
         f.compartment(12);
+        const initial = renderCodeModeCatalog(["INITIAL_CATALOG"]);
+        f.instruction(initial);
         const notices: string[] = [];
         for (let i = 0; i < 51; i++) {
-            const notice =
-                `This catalog supersedes the previous catalog: ${i}\n` +
-                "catalog item: available tool\n".repeat(335);
+            const notice = replaceCodeModeCatalog([
+                `CATALOG_${i}\n${"catalog item: available tool\n".repeat(335)}`,
+            ]);
             notices.push(notice);
-            f.instruction(notice);
+            f.instruction(notice, codeModeInstructionMetadata);
         }
         const tail = "UNSUMMARIZED_CONVERSATION\n" + prose.repeat(1800);
         f.user(tail, 1000);
@@ -208,6 +213,7 @@ test("manual compact payload accounting separates notices from the unsummarized 
         const afterText = after.draft.messages
             .flatMap((message) => message.content.map((part) => part.text ?? ""))
             .join("\n");
+        expect(afterText).not.toContain(initial);
         for (const notice of notices.slice(0, -1)) expect(afterText).not.toContain(notice);
         expect(afterText).toContain(notices.at(-1)!);
         const reclaimedBytes = Buffer.byteLength(notices.slice(0, -1).join(""));

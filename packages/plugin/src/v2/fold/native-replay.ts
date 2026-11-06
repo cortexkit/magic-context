@@ -8,6 +8,7 @@ import {
     type V2RowStamp,
     type V2StoreReader,
 } from "../store-reader";
+import { codeModeCatalogKind } from "./code-mode-catalog";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "./host-media";
 import type { NativeFoldCache, NativeRowRecord } from "./memory-cache";
 import { encodeNative, NativeReplayUnavailable, reviveNative } from "./native-codec";
@@ -274,18 +275,20 @@ export class NativeFoldReplay {
         if (!floor) throw new NativeReplayUnavailable("Manual compaction has no history boundary");
         const instructions = reader.instructionRowsThrough(sessionID, running.seq - 1);
         const retiredInstructionIDs: string[] = [];
-        let newerCatalog = false;
+        let newerFullCatalog = false;
         for (const instruction of [...instructions].reverse()) {
             const text = instruction.data.text ?? "";
-            const catalog = text.startsWith("This catalog supersedes the previous catalog:");
+            const catalog = codeModeCatalogKind(instruction.data);
             // Beyond summary coverage, retire only a same-identity replacement
             // (the host's catalog notice) or content re-stated by the fresh fold.
             if (
                 instruction.seq > floor.after &&
-                ((catalog && newerCatalog) || (text.length > 0 && summary.includes(text)))
+                ((catalog && catalog !== "combined-replacement" && newerFullCatalog) ||
+                    (text.length > 0 && summary.includes(text)))
             )
                 retiredInstructionIDs.push(instruction.id);
-            if (catalog) newerCatalog = true;
+            if (catalog === "replacement" || catalog === "combined-replacement")
+                newerFullCatalog = true;
         }
         return {
             floor,

@@ -40,6 +40,7 @@ type Row = {
     updated?: number;
     /** The model an assistant row was answered by, when not the fixture's first model. */
     model?: string;
+    metadata?: Record<string, unknown>;
 };
 
 /**
@@ -190,7 +191,11 @@ export async function oc2ContextFixture(
                               cache: { read: 0, write: 0 },
                           },
                       }
-                    : { text: row.text, time: { created: row.created } };
+                    : {
+                          text: row.text,
+                          time: { created: row.created },
+                          ...(row.metadata ? { metadata: row.metadata } : {}),
+                      };
             raw.prepare(
                 "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
             ).run(
@@ -484,8 +489,9 @@ export async function oc2ContextFixture(
             persist();
         },
         /** An OpenCode 2 instruction update (for example the daily date line). */
-        instruction(text: string) {
+        instruction(text: string, metadata?: Record<string, unknown>) {
             addRow("system", text, 1000);
+            rows.at(-1)!.metadata = metadata;
             persist();
         },
         /** The host edits a stored message in place (same id, new text). */
