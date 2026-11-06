@@ -1700,6 +1700,7 @@ interface RunPostTransformPhaseArgs {
      */
     compactionModeTransition?: boolean;
     readLastServedMessages?: () => readonly unknown[] | null;
+    structuralSentinelUpgradeFailed?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -2097,8 +2098,15 @@ export async function runPostTransformPhase(
     };
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
-    if (args.opencode1 && !compactionOff && modelAcceptsEmptyContent(args.resolvedProviderID))
-        prepareStructuralSentinelChoices(args);
+    let structuralSentinelUpgradeFailed = args.structuralSentinelUpgradeFailed ?? false;
+    if (
+        !structuralSentinelUpgradeFailed &&
+        args.opencode1 &&
+        !compactionOff &&
+        modelAcceptsEmptyContent(args.resolvedProviderID)
+    )
+        structuralSentinelUpgradeFailed =
+            prepareStructuralSentinelChoices(args).structuralSentinelUpgrade === undefined;
     if (!modelAcceptsEmptyContent(args.resolvedProviderID) && !compactionOff)
         captureInlineThinkingRepairs(
             args.messages,
@@ -5043,6 +5051,7 @@ export async function runPostTransformPhase(
             sessionId: args.sessionId,
             messages: args.messages,
             rebuilding: canNormalizeRecoveredShape && bustedThisPass,
+            deferUpgrade: structuralSentinelUpgradeFailed,
         });
     }
     sessionLog(

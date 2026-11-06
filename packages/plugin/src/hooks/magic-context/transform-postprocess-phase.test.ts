@@ -684,7 +684,7 @@ it("cache thread: projects only generated structural sentinels after tagging and
     );
     updateReplayDocument(db, sessionId, (document) => {
         delete document.structuralSentinelOmissions;
-        delete document.structuralSentinelChoices;
+        delete document.structuralSentinelUpgrade;
         return true;
     });
     const legacy = source();

@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { convertToModelMessages, type UIMessage } from "ai";
+import { convertToLanguageModelPrompt } from "ai/internal";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { getOrCreateSessionMeta, getTagsBySession } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -228,7 +230,7 @@ test("review: OpenCode 2 does not adopt the OpenCode 1 sentinel projection", asy
     expect(JSON.stringify(messages)).toBe(before);
 });
 
-test("review: frozen omissions survive two database reopenings and reasoning clearing", () => {
+test("review: frozen omissions survive two database reopenings and reasoning clearing", async () => {
     const directory = createTestTempDirFromPath(join(tmpdir(), "mc-thread-review-"));
     directories.push(directory);
     const path = join(directory, "context.db");
@@ -252,9 +254,12 @@ test("review: frozen omissions survive two database reopenings and reasoning cle
             const bytes = JSON.stringify(messages);
             if (expected === undefined) expected = bytes;
             else expect(bytes).toBe(expected);
-            expect(readReplayEnvelope(db, "review-restarts").structuralSentinelOmissions).toEqual([
-                "signed",
-            ]);
+            expect(readReplayEnvelope(db, "review-restarts").structuralSentinelUpgrade).toEqual({
+                keep: [],
+            });
+            expect(
+                readReplayEnvelope(db, "review-restarts").structuralSentinelOmissions,
+            ).toBeUndefined();
 
             const cleared = [signedReply()];
             (cleared[0].parts[1] as { text: string }).text = "[cleared]";
@@ -266,12 +271,28 @@ test("review: frozen omissions survive two database reopenings and reasoning cle
                 rebuilding: false,
                 readPreviouslyServed: () => null,
             });
-            // A cleared-reasoning slot is not a structural marker; its own
-            // removal policy must remain separate from the persisted omission.
-            expect(cleared[0].parts).toEqual([
-                { type: "text", text: "" },
-                { type: "text", text: "original reply" },
-            ]);
+            // After reasoning clearing, empty text is no longer expanded to a
+            // space. ai@6.0.168 drops metadata-free text with its
+            // `part.text !== '' || part.providerOptions != null` filter, so compare
+            // served bytes rather than requiring the in-memory message parts to shrink.
+            const served = await convertToLanguageModelPrompt({
+                prompt: {
+                    messages: await convertToModelMessages([
+                        {
+                            id: "signed",
+                            role: "assistant",
+                            parts: cleared[0].parts as UIMessage["parts"],
+                        },
+                    ]),
+                },
+                supportedUrls: {},
+                download: undefined,
+            });
+            expect(JSON.stringify(served)).toBe(
+                JSON.stringify([
+                    { role: "assistant", content: [{ type: "text", text: "original reply" }] },
+                ]),
+            );
         } finally {
             db.close();
         }

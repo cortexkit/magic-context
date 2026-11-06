@@ -965,13 +965,12 @@ export function createTransform(deps: TransformDeps) {
             throw degradedPassError(site, error);
         };
 
-        if (deps.storeGeneration === "v1" && !deps.compactionOff && deps.transformMode !== "rust") {
-            try {
-                prepareStructuralSentinelChoices({ db, sessionId, messages });
-            } catch (error) {
-                failPass("session-meta-early-return", error, "fatal");
-            }
-        }
+        const structuralSentinelUpgradeFailed =
+            deps.storeGeneration === "v1" &&
+            !deps.compactionOff &&
+            deps.transformMode !== "rust" &&
+            prepareStructuralSentinelChoices({ db, sessionId, messages })
+                .structuralSentinelUpgrade === undefined;
 
         // Runs before anything reads a saved coordinate. Every ordinal this
         // session stored is a position in the message list some host served; if
@@ -3164,6 +3163,7 @@ export function createTransform(deps: TransformDeps) {
         const postTransformResult = await runPostTransformPhase({
             opencode1: deps.storeGeneration === "v1",
             opencode2: deps.storeGeneration === "v2",
+            structuralSentinelUpgradeFailed,
             releaseRecoveryPrefix: releaseRecoveryReplay,
             normalizeRecoveryTail,
             compactionMarkerStrategy:
