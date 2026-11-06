@@ -34,7 +34,7 @@
  * in full or written is `idle_cache_expiry`.
  */
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
 import {
 	type AnalyzedCacheRequest,
@@ -369,6 +369,7 @@ function parsePiSessionFile(
 
 async function discoverPiSessionFiles(
 	roots: readonly string[],
+	matchesSession?: (sessionId: string) => boolean,
 ): Promise<PiSessionFile[]> {
 	const files: PiSessionFile[] = [];
 	const seenPaths = new Set<string>();
@@ -382,11 +383,49 @@ async function discoverPiSessionFiles(
 			const filePath = join(root, relativePath);
 			if (seenPaths.has(filePath)) continue;
 			seenPaths.add(filePath);
+			if (matchesSession) {
+				const filenameId =
+					/^\d{4}-\d{2}-\d{2}T[^_]+_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(
+						basename(filePath),
+					)?.[1];
+				// Pi/OMP writers preserve one leading session header (after OMP's title slot).
+				// Only skip a native filename when that first header confirms its id.
+				// Renamed/legacy files and mismatched headers need the full parser's last
+				// header semantics. Manually concatenated native files with later id-changing
+				// headers are outside the single-header format supported by this shortcut.
+				if (
+					filenameId &&
+					!matchesSession(filenameId) &&
+					firstSessionHeaderId(filePath) === filenameId
+				)
+					continue;
+			}
 			const parsed = parsePiSessionFile(filePath);
-			if (parsed) files.push(parsed);
+			if (parsed && (!matchesSession || matchesSession(parsed.sessionId)))
+				files.push(parsed);
 		}
 	}
 	return files;
+}
+
+function firstSessionHeaderId(filePath: string): string | undefined {
+	try {
+		let skippedTitle = false;
+		for (const raw of readFileLines(filePath, 64 * 1024)) {
+			if (!raw.trim()) continue;
+			const entry = asJson(JSON.parse(raw));
+			if (entry?.type === "title" && !skippedTitle) {
+				skippedTitle = true;
+				continue;
+			}
+			return entry?.type === "session" && typeof entry.id === "string"
+				? entry.id
+				: undefined;
+		}
+	} catch {
+		// An unfamiliar or partially written header falls back to full parsing.
+	}
+	return undefined;
 }
 
 function validLedgerRecord(value: unknown): value is PiServedArrayDigestRecord {
@@ -928,8 +967,12 @@ export async function analyzePiCacheBustSession(
 		options.piDir ?? getPiSessionsRoot(),
 		options.ompDir ?? getOmpSessionsRoot(),
 	].filter((root, index, all) => all.indexOf(root) === index);
-	const candidates = (await discoverPiSessionFiles(roots))
-		.filter((session) => session.sessionId === options.sessionId)
+	const candidates = (
+		await discoverPiSessionFiles(
+			roots,
+			(sessionId) => sessionId === options.sessionId,
+		)
+	)
 		.map((session) => {
 			const stat = statSync(session.path);
 			return { session, mtimeMs: stat.mtimeMs, size: stat.size };
@@ -1065,8 +1108,8 @@ async function main(): Promise<void> {
 		options.piDir ?? getPiSessionsRoot(),
 		options.ompDir ?? getOmpSessionsRoot(),
 	].filter((root, index, all) => all.indexOf(root) === index);
-	const sessions = (await discoverPiSessionFiles(roots)).filter((session) =>
-		session.sessionId.startsWith(options.sessionPrefix),
+	const sessions = await discoverPiSessionFiles(roots, (sessionId) =>
+		sessionId.startsWith(options.sessionPrefix),
 	);
 	if (sessions.length === 0) {
 		console.error(
