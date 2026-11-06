@@ -174,6 +174,7 @@ import {
     postprocessReplaySnapshot,
     postprocessTailTags,
 } from "./postprocess-read-cache";
+import { projectStructuralSentinels } from "./project-structural-sentinels";
 import { providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import { DEFAULT_KEEP_REASONING_TOKENS, opencodeReasoningBudgetCutoff } from "./reasoning-budget";
@@ -1625,7 +1626,9 @@ export const defaultCompactionMarkerStrategy: CompactionMarkerStrategy = {
 };
 
 interface RunPostTransformPhaseArgs {
+    opencode1?: boolean;
     opencode2?: boolean;
+    releaseRecoveryPrefix?: () => void;
     /** Add §N§ reduction handles to messages sent untagged during recovery, once a fold replaces the provider's cached prefix. */
     normalizeRecoveryTail?: () => void;
     compactionMarkerStrategy?: CompactionMarkerStrategy;
@@ -2344,6 +2347,8 @@ export async function runPostTransformPhase(
     // lane that rides a fold consults it: legacy skeleton conversion, pending-op
     // drains, heuristics, synthetic todo and sentinel first-application.
     let foldBustsServedPrefixThisPass = false;
+    let foldChangesHeadThisPass = false;
+    let recoveryExternalFoldCause: string | null = null;
     let publishedM1RefreshedThisPass = false;
     let prefixPreflightFailed = false;
     const softRefreshOpportunity =
@@ -2487,11 +2492,27 @@ export async function runPostTransformPhase(
             // execute without it, keep the permission executed folds always had.
             foldBustsServedPrefixThisPass =
                 foldExecutedThisPass && (committedFoldBustsServedPrefix ?? true);
+            foldChangesHeadThisPass = foldExecutedThisPass && committedFoldChangesHead === true;
             publishedM1RefreshedThisPass =
                 !foldResult.materializationContentionRetryExhausted &&
                 previousM1 !== args.sessionMeta.cachedM1Bytes?.toString("utf8");
             m0RematerializedThisPass = foldResult.m0RematerializedThisPass;
             m0MaterializeReason = foldResult.decision.reason;
+            // An unknown previous identity is not proof that this request
+            // changed before the conversation. Tool-definition adoption is
+            // already excluded by the materialization decision itself.
+            if (!prefixPreflightFailed && foldExecutedThisPass) {
+                const decision = foldResult.decision;
+                if (
+                    (decision.reason === "system_hash" &&
+                        decision.systemHashPrev &&
+                        decision.systemHashPrev !== "0") ||
+                    (decision.reason === "model_change" && decision.m0ModelKeyPrev) ||
+                    decision.reason === "tool_definitions"
+                ) {
+                    recoveryExternalFoldCause = decision.reason;
+                }
+            }
             // Only a committed fold persisted the conversions; render them now,
             // before the batch finalizes, so this pass serves what later passes
             // replay from the new drop modes.
@@ -2749,17 +2770,38 @@ export async function runPostTransformPhase(
             newTargets = args.targets;
         }
     }
-    // Keep recovery bytes until the shared permission allows a cache rewrite
-    // (for example, a user flush or pressure relief). Normalize before applying
-    // drops so the saved drop state and the request sent to the provider agree.
-    // Normalizing tags the messages appended after a last-good replay, which
-    // lie in front of thinking signed after it. A held pass keeps that thinking
-    // (idle expiry or a first render can admit it without stripping), so it
-    // keeps replaying the recovered prefix instead; the next pass that strips
-    // the turn or ends the hold normalizes. Until then the replay serves the
-    // recorded prefix byte for byte.
+    // Recovery tags and first-time sentinel omissions in served history may
+    // ride only a proven earlier request change: changed memory/docs (m[0]) or
+    // history (m[1]) bytes, or an executed system-prompt, model/provider or tool-
+    // definition fold. A later conversation repair cannot move its first edit
+    // backwards. Sessions rendering no history head instead normalize on
+    // scheduler execution, a pressure-driven rebuild or explicit flush; an
+    // otherwise deferred repair does not qualify. Their rewrite may then start
+    // at the oldest recovered reply.
+    const recoveryHasHistoryHead =
+        m0M1EnabledForFold || (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0;
+    const recoveryHeadChangedThisPass =
+        !prefixPreflightFailed &&
+        (foldChangesHeadThisPass ||
+            (!firstRenderBust && publishedM1RefreshedThisPass) ||
+            (!m0M1EnabledForFold && legacyPublishedHeadChanged(args)));
+    const recoveryHeadlessRebuild =
+        !recoveryHasHistoryHead &&
+        (args.schedulerDecision === "execute" ||
+            isExplicitFlush ||
+            forceMaterialization ||
+            emergencyDropEligible);
+    const recoveredShapeRewriteProof = recoveryHeadChangedThisPass
+        ? "head_bytes"
+        : (recoveryExternalFoldCause ?? (recoveryHeadlessRebuild ? "headless_rebuild" : null));
+    const canNormalizeRecoveredShape =
+        isCacheBustingPass && !activeThinkingPrefixHold && recoveredShapeRewriteProof !== null;
+    sessionLog(
+        args.sessionId,
+        `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} idle_expiry=${idleExpiryRebuild} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
+    );
     let recoveryTailNormalizedThisPass = false;
-    if (args.normalizeRecoveryTail && isCacheBustingPass && !activeThinkingPrefixHold) {
+    if (args.normalizeRecoveryTail && canNormalizeRecoveredShape) {
         args.normalizeRecoveryTail();
         recoveryTailNormalizedThisPass = true;
         args.tags = getTagsBySession(args.db, args.sessionId);
@@ -4980,6 +5022,24 @@ export async function runPostTransformPhase(
         }
         if (reasoningRemovalEnabled)
             removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID);
+    }
+    // Releasing frozen recovery and tagging its untagged tail are separate
+    // decisions. A conversation-only rebuild must serve its authorized edits
+    // now, but cannot spend that permission on tags before its first edit.
+    const releaseRecoveryThisPass = canEditWholePrefix;
+    if (releaseRecoveryThisPass) args.releaseRecoveryPrefix?.();
+    sessionLog(
+        args.sessionId,
+        `recovery projection: case=${canNormalizeRecoveredShape ? recoveredShapeRewriteProof : releaseRecoveryThisPass ? "conversation_only" : "defer"} released=${releaseRecoveryThisPass} normalized=${recoveryTailNormalizedThisPass}`,
+    );
+    if (canUseEmptySentinels && args.opencode1) {
+        projectStructuralSentinels({
+            db: args.db,
+            sessionId: args.sessionId,
+            messages: args.messages,
+            rebuilding: canNormalizeRecoveredShape && bustedThisPass,
+            readPreviouslyServed: args.readLastServedMessages,
+        });
     }
     sessionLog(
         args.sessionId,

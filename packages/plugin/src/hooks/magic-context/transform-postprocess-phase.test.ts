@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { convertToModelMessages, type UIMessage } from "ai";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import * as embeddingModule from "../../features/magic-context/memory/embedding";
@@ -541,6 +542,274 @@ it("repairs previously served tag-emptied history through one shared rebuild, th
         previous = structuredClone(messages);
     }
     db.close();
+});
+
+it("cache thread: projects only generated structural sentinels after tagging and freezes defer bytes", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const sessionId = "signed-structural-projection";
+    const history: MessageLike = {
+        info: { id: "history", role: "user" },
+        parts: [{ type: "text", text: "work" }],
+    };
+    const source = (): MessageLike[] => [
+        structuredClone(history),
+        {
+            info: { id: "signed", role: "assistant" },
+            parts: [
+                { type: "step-start", snapshot: "snapshot" },
+                {
+                    type: "reasoning",
+                    text: "thinking",
+                    metadata: { anthropic: { signature: "sig" } },
+                },
+                // Native empty text is not ours to remove: OpenCode uses it to
+                // preserve positions when its SDK splits and regroups steps.
+                { type: "text", text: "" },
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "call",
+                    state: {
+                        status: "completed",
+                        input: { filePath: "file.ts" },
+                        output: "result",
+                    },
+                },
+                { type: "step-finish", reason: "tool-calls" },
+            ],
+        },
+    ];
+    let previous = [structuredClone(history)];
+    const serve = async () => {
+        const messages = source();
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        const signed = messages[1].parts[1];
+        const tool = messages[1].parts[3];
+        const tagRows = getTagsBySession(db, sessionId);
+        const toolTag = tagRows.find((tag) => tag.type === "tool");
+        expect(toolTag).toBeDefined();
+        expect(tagged.targets.get(toolTag!.tagNumber)?.readInput?.()).toEqual({
+            filePath: "file.ts",
+        });
+        expect(stripStructuralNoise(messages)).toBe(2);
+        // Projection must not shift the coordinates while tag targets are in use.
+        expect(messages[1].parts[1]).toBe(signed);
+        expect(messages[1].parts[3]).toBe(tool);
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...tagged,
+                tagger,
+                tags: tagRows,
+                resolvedProviderID: "anthropic",
+                opencode1: true,
+                resolvedModelID: "claude-opus-5-5",
+                activeThinkingTurn: true,
+                activeThinkingPrefixHold: true,
+                thinkingBindingRecoveryEnabledForModel: true,
+                readLastServedMessages: () => previous,
+            }),
+        );
+        expect(result.prefixMutationPermitted).toBe(false);
+        expect(result.bustedThisPass).toBe(false);
+        expect(messages[1].parts).toEqual([signed, { type: "text", text: "" }, tool]);
+        expect((messages[1].parts[0] as { metadata: unknown }).metadata).toEqual({
+            anthropic: { signature: "sig" },
+        });
+        expect(JSON.stringify(tool)).toContain(`§${toolTag!.tagNumber}§`);
+        return messages;
+    };
+    const first = await serve();
+    previous = structuredClone(first);
+    expect(JSON.stringify(await serve())).toBe(JSON.stringify(first));
+
+    // This is the UI-message shape OpenCode 1.19.4 passes to ai@6.0.168.
+    // Its native leading step-start must be a no-op, and only the native empty
+    // text (not our removed placeholders) may become a space beside thinking.
+    const hostParts = (parts: unknown[]): UIMessage["parts"] =>
+        parts.flatMap<unknown>((value) => {
+            const part = value as {
+                type: string;
+                text?: string;
+                metadata?: UIMessage["metadata"];
+                state?: { input: unknown; output: unknown };
+            };
+            if (part.type === "step-start") return [{ type: "step-start" }];
+            if (part.type === "reasoning")
+                return [{ type: "reasoning", text: part.text, providerMetadata: part.metadata }];
+            if (part.type === "text")
+                return [{ type: "text", text: part.text === "" ? " " : part.text }];
+            if (part.type === "tool")
+                return [
+                    {
+                        type: "tool-read",
+                        toolCallId: "call",
+                        state: "output-available",
+                        input: part.state?.input,
+                        output: part.state?.output,
+                    },
+                ];
+            return [];
+        }) as UIMessage["parts"];
+    const convert = (parts: unknown[]) =>
+        convertToModelMessages([
+            {
+                id: "signed",
+                role: "assistant",
+                parts: hostParts(parts),
+            },
+        ]);
+    const converted = await convert(first[1].parts);
+    expect(converted).toEqual(await convert([{ type: "step-start" }, ...first[1].parts]));
+    expect(converted.map((message) => message.role)).toEqual(["assistant", "tool"]);
+    expect(converted[0].content).toEqual([
+        {
+            type: "reasoning",
+            text: "thinking",
+            providerOptions: { anthropic: { signature: "sig" } },
+        },
+        { type: "text", text: " " },
+        { type: "tool-call", toolCallId: "call", toolName: "read", input: { filePath: "file.ts" } },
+    ]);
+
+    // Removing the omission ledger models an upgrade of already served history:
+    // its old empty slots cannot disappear on an otherwise identical warm pass.
+    const { updateReplayDocument } = await import(
+        "../../features/magic-context/storage-replay-document"
+    );
+    updateReplayDocument(db, sessionId, (document) => {
+        delete document.structuralSentinelOmissions;
+        return true;
+    });
+    const legacy = source();
+    const legacyTagger = createTagger();
+    legacyTagger.initFromDb(sessionId, db);
+    const tagged = tagMessages(sessionId, legacy, legacyTagger, db);
+    stripStructuralNoise(legacy);
+    previous = structuredClone(legacy);
+    const result = await runPostTransformPhase(
+        basePostTransformArgs(db, sessionId, legacy, {
+            ...tagged,
+            tagger: legacyTagger,
+            tags: getTagsBySession(db, sessionId),
+            resolvedProviderID: "anthropic",
+            opencode1: true,
+            readLastServedMessages: () => previous,
+        }),
+    );
+    expect(result.prefixMutationPermitted).toBe(false);
+    expect(JSON.stringify(legacy)).toBe(JSON.stringify(previous));
+    expect(legacy[1].parts[0]).toEqual({ type: "text", text: "" });
+});
+
+it("cache thread: a signed served-shape repair cannot retag an earlier recovery tail", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const { markServedShapeRepair } = await import("./served-shape-repair");
+    const sessionId = "bounded-recovery-tags";
+    const projectionModule = await import("./project-structural-sentinels");
+    const projection = spyOn(projectionModule, "projectStructuralSentinels");
+    const source = (): MessageLike[] => [
+        {
+            info: { id: "recovered-a", role: "user" },
+            parts: [{ type: "text", text: "untagged a" }],
+        },
+        {
+            info: { id: "recovered-b", role: "assistant" },
+            parts: [{ type: "text", text: "untagged b" }],
+        },
+        {
+            info: { id: "repair", role: "assistant" },
+            parts: [
+                { type: "text", text: "" },
+                {
+                    type: "reasoning",
+                    text: "signed thought",
+                    metadata: { anthropic: { signature: "sig" } },
+                },
+            ],
+        },
+    ];
+    let previous = source();
+    let normalized = false;
+    const logs: string[] = [];
+    const log = spyOn(loggerModule, "sessionLog").mockImplementation((_session, ...parts) => {
+        logs.push(parts.join(" "));
+    });
+    const serve = async (cold = false) => {
+        const messages = source();
+        markServedShapeRepair(messages[2].info, [{ index: 0, text: "restored text" }]);
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        let tagged = normalized ? tagMessages(sessionId, messages.slice(0, 2), tagger, db) : null;
+        const targets = tagged?.targets ?? new Map();
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                targets,
+                tagger,
+                resolvedProviderID: "anthropic",
+                resolvedModelID: "claude-opus-5-5",
+                opencode1: true,
+                activeThinkingTurn: true,
+                thinkingBindingRecoveryEnabledForModel: true,
+                readLastServedMessages: () => previous,
+                normalizeRecoveryTail: () => {
+                    normalized = true;
+                    tagged = tagMessages(sessionId, messages.slice(0, 2), tagger, db);
+                    for (const [tag, target] of tagged.targets) targets.set(tag, target);
+                },
+                ...(cold
+                    ? {
+                          m0M1: {
+                              historyBudgetTokens: 98_000,
+                              hardSignals: {
+                                  systemHash: "system",
+                                  modelKey: "anthropic/claude-opus-5-5",
+                                  cacheExpired: true,
+                                  lastResponseTime: 0,
+                              },
+                          },
+                      }
+                    : {}),
+            }),
+        );
+        previous = structuredClone(messages);
+        return { messages, result };
+    };
+    try {
+        const repaired = await serve();
+        expect(repaired.result.prefixMutationPermitted).toBe(true);
+        expect(repaired.result.bustedThisPass).toBe(true);
+        expect(normalized).toBe(false);
+        expect(projection).toHaveBeenLastCalledWith(expect.objectContaining({ rebuilding: false }));
+        expect(repaired.messages.slice(0, 2)).toEqual(source().slice(0, 2));
+        expect(
+            logs.some(
+                (line) =>
+                    line.includes("rewrite permission:") &&
+                    line.includes("served_shape_repair=true") &&
+                    line.includes("signed_prefix_release=true") &&
+                    line.includes("recovery_head_changed=false"),
+            ),
+        ).toBe(true);
+        const deferred = await serve();
+        expect(deferred.result.prefixMutationPermitted).toBe(false);
+        expect(deferred.result.bustedThisPass).toBe(false);
+        expect(JSON.stringify(deferred.messages)).toBe(JSON.stringify(repaired.messages));
+        const cold = await serve(true);
+        expect(normalized).toBe(false);
+        expect(cold.messages.slice(0, 2)).toEqual(source().slice(0, 2));
+        const replay = await serve();
+        expect(replay.result.prefixMutationPermitted).toBe(false);
+        expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(cold.messages));
+    } finally {
+        log.mockRestore();
+        projection.mockRestore();
+    }
 });
 
 for (const host of ["opencode", "opencode2"] as const) {

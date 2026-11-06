@@ -827,7 +827,7 @@ for (const host of HOSTS) {
 
     it(`${host}: after a restart and a new real user the replayed result stays untagged until a bust strips`, async () => {
         const sessionId = `rr729-lkg-restart-user-flush-${host}`;
-        const s = session(host, sessionId);
+        const s = session(host, sessionId, { memory: true });
         s.user("long task");
         await s.pass();
         s.step(1, 2_400);
@@ -846,11 +846,28 @@ for (const host of HOSTS) {
         s.step(4, 200);
         const deferred = await s.pass();
         expect(toolHeads(deferred.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
-        // A user flush may rewrite the prefix: call-2 is tagged and every signed
-        // block in front of the change is stripped; the record is cleared.
+        // The cached memory/history messages are byte-identical on this flush.
+        // Adding a tag would also change the older reply's text, invalidating
+        // cached history that the provider could otherwise reuse.
+        const headBefore = getOrCreateSessionMeta(s.db, sessionId);
+        const headBytesBefore = [
+            headBefore.cachedM0Bytes?.toString(),
+            headBefore.cachedM1Bytes?.toString(),
+        ];
         s.flush();
         s.step(5, 200);
+        const conversationOnly = await s.pass();
+        const headAfter = getOrCreateSessionMeta(s.db, sessionId);
+        expect([headAfter.cachedM0Bytes?.toString(), headAfter.cachedM1Bytes?.toString()]).toEqual(
+            headBytesBefore,
+        );
+        expect(toolHeads(conversationOnly.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
+        expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
+        // A real memory-head change already rewrites the whole conversation, so
+        // recovery tags can land on it and the untagged record can be cleared.
+        s.editMemory("Remember the user's preferred verification command.");
         const flushed = await s.pass();
+        expect(s.cachedM0()).not.toBe(headBytesBefore[0]);
         expect(toolHeads(flushed.messages ?? [])[1]?.startsWith("§")).toBe(true);
         expect(readPersistedLkgUntaggedInputIds(s.db, sessionId)).toEqual([]);
         s.step(6, 200);

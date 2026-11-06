@@ -3,6 +3,12 @@ import { isSentinel, makeSentinel } from "./sentinel";
 import type { MessageLike } from "./tag-messages";
 
 const STRUCTURAL_PART_TYPES = new Set(["meta", "step-start", "step-finish", "reasoning"]);
+const structuralSentinels = new WeakSet<object>();
+
+/** Distinguish our placeholders from empty text supplied by the host. */
+export function isStructuralNoiseSentinel(part: unknown): boolean {
+    return isRecord(part) && structuralSentinels.has(part);
+}
 
 function isStructuralNoisePart(part: unknown): boolean {
     if (!isRecord(part) || typeof part.type !== "string") {
@@ -22,9 +28,10 @@ function isStructuralNoisePart(part: unknown): boolean {
 
 /**
  * Replace structural/cleared parts with empty-text sentinels instead of removing
- * them. Preserves message.parts length between passes so Anthropic prompt-cache
- * prefixes stay byte-stable while OpenCode filters the empty text parts before
- * the wire.
+ * them. Preserves message.parts length so source part indices stay stable
+ * while later mutations run. Final projection can omit
+ * these placeholders beside signed thinking: OpenCode turns empty text there
+ * into a space instead of filtering it out.
  *
  * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is true.
  * Non-Anthropic adapters can forward empty text parts as real wire content.
@@ -45,6 +52,9 @@ export function stripStructuralNoise(messages: MessageLike[]): number {
             if (isSentinel(part)) continue;
             if (!isStructuralNoisePart(part)) continue;
             message.parts[i] = makeSentinel(part);
+            if (isRecord(part) && part.type !== "reasoning") {
+                structuralSentinels.add(message.parts[i] as object);
+            }
             strippedParts++;
         }
     }

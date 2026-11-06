@@ -25,6 +25,7 @@ export interface ReplayStateV3 {
     blocked?: boolean;
     upgrade?: { admissionID: string; mode: "bounded" | "host-checkpoint" | "source-repair" };
     withoutRecentContext?: boolean;
+    retiredInstructionThrough?: number;
 }
 export class ControlMetadataUnavailable extends Error {}
 export interface AdmissionV3 {
@@ -58,7 +59,14 @@ const digest = (value: unknown): value is string =>
 export function validReplayState(value: unknown): value is ReplayStateV3 {
     if (
         !object(value) ||
-        !keys(value, ["floor", "controls", "blocked", "upgrade", "withoutRecentContext"])
+        !keys(value, [
+            "floor",
+            "controls",
+            "blocked",
+            "upgrade",
+            "withoutRecentContext",
+            "retiredInstructionThrough",
+        ])
     )
         return false;
     const floor = value.floor;
@@ -81,6 +89,9 @@ export function validReplayState(value: unknown): value is ReplayStateV3 {
         (value.blocked === undefined || typeof value.blocked === "boolean") &&
         (value.withoutRecentContext === undefined ||
             typeof value.withoutRecentContext === "boolean") &&
+        (value.retiredInstructionThrough === undefined ||
+            (Number.isSafeInteger(value.retiredInstructionThrough) &&
+                (value.retiredInstructionThrough as number) >= 0)) &&
         (upgrade === undefined ||
             (object(upgrade) &&
                 keys(upgrade, ["admissionID", "mode"]) &&
