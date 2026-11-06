@@ -1100,7 +1100,7 @@ impl<P: Provider> Runner<P> {
             if let Some(index) = state
                 .reminders
                 .iter()
-                .position(|reminder| reminder.modes.first() == Some(&Mode::ToolResult))
+                .position(|reminder| reminder.mode() == Some(&Mode::ToolResult))
             {
                 let reminder = state.reminders.remove(index);
                 let (text, template) = reminder.text(&state.config.templates, &state.transcript);
@@ -1127,11 +1127,10 @@ impl<P: Provider> Runner<P> {
     async fn deliver_steers(&mut self) {
         let delivered = {
             let mut state = self.host.lock();
-            let (steers, rest): (Vec<_>, Vec<_>) =
-                state.reminders.drain(..).partition(|reminder| {
-                    reminder.modes.contains(&Mode::Steer)
-                        && !reminder.modes.contains(&Mode::ToolResult)
-                });
+            let (steers, rest): (Vec<_>, Vec<_>) = state
+                .reminders
+                .drain(..)
+                .partition(|reminder| reminder.mode() == Some(&Mode::Steer));
             state.reminders = rest;
             let now = state.now;
             for reminder in &steers {
@@ -1422,6 +1421,15 @@ struct Reminder {
 }
 
 impl Reminder {
+    /// The mode this runner delivers the reminder in: the first one listed
+    /// that it can use. Like a runner whose models take no turn-scoped
+    /// system notes, it skips `turn_system` and uses the next mode listed.
+    fn mode(&self) -> Option<&Mode> {
+        self.modes
+            .iter()
+            .find(|mode| matches!(mode, Mode::ToolResult | Mode::Steer))
+    }
+
     /// The text as delivered now, and the template it came from. A template
     /// renders each `part_tag` slot as the number the transcript gives that
     /// part.

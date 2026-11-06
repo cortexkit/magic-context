@@ -166,13 +166,17 @@ pub fn plan_sender() -> PlanSender {
     PlanSender::new("magic-context").with_templates(templates())
 }
 
-/// How ck-mc sends a template: the ceiling reminder and the `ctx_keep`
-/// request as a steer, every other reminder with the next tool result.
-pub fn delivery(template_id: &str) -> Mode {
+/// How ck-mc sends a template, in order of preference; the runner takes the
+/// first mode it can use at that boundary. A turn-scoped system message comes
+/// first wherever the model accepts one. Otherwise the ceiling reminder and
+/// the `ctx_keep` request arrive as a steer, and every other reminder rides
+/// the next tool result, so a routine reminder never reaches the model as a
+/// user message.
+pub fn delivery(template_id: &str) -> Vec<Mode> {
     if template_id == KEEP_TEMPLATE || template_id.starts_with("mc.ctx_reduce.ceiling.") {
-        Mode::Steer
+        vec![Mode::TurnSystem, Mode::Steer]
     } else {
-        Mode::ToolResult
+        vec![Mode::TurnSystem, Mode::ToolResult]
     }
 }
 
@@ -185,7 +189,7 @@ pub fn template_catalog() -> Vec<Value> {
             json!({
                 "id": template.id,
                 "digest": template_digest(template),
-                "delivery": [delivery(&template.id)],
+                "delivery": delivery(&template.id),
             })
         })
         .collect()

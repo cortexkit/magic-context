@@ -575,7 +575,12 @@ fn role_describe_lists_every_reminder_template_with_digest_and_delivery() {
         } else {
             "tool_result"
         };
-        assert_eq!(entry["delivery"], json!([expected]), "{}", template.id);
+        assert_eq!(
+            entry["delivery"],
+            json!(["turn_system", expected]),
+            "{}",
+            template.id
+        );
     }
 }
 

@@ -14,7 +14,7 @@ use cortexkit_role_compaction::view::{
     AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
     MAX_VIEW_BYTES,
 };
-use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode, TemplateUse};
+use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::Value;
 
@@ -1564,14 +1564,10 @@ impl Session {
         let turns = self.pruned_turns + crate::nudges::person_turns(self.index.entries());
         let reminders = self.nudges.decide(&measurement, rebuilt, turns, cut_moved);
         let sends = [
-            (
-                reminders.tool_result,
-                crate::nudges::REMINDER_KIND,
-                Mode::ToolResult,
-            ),
-            (reminders.ceiling, crate::nudges::CEILING_KIND, Mode::Steer),
+            (reminders.tool_result, crate::nudges::REMINDER_KIND),
+            (reminders.ceiling, crate::nudges::CEILING_KIND),
         ];
-        for (template, kind, mode) in sends {
+        for (template, kind) in sends {
             let Some(template) = template else {
                 continue;
             };
@@ -1581,7 +1577,7 @@ impl Session {
             let Some(send_id) = self.next_reminder_id(kind) else {
                 continue;
             };
-            let request = reminder(send_id, template, kind, mode);
+            let request = reminder(send_id, template, kind);
             if let Err(error) = client.send(&self.key, request).await {
                 tracing::warn!(
                     "ck-mc: session {}: session.send failed: {error:?}",
@@ -1659,7 +1655,6 @@ impl Session {
             send_id,
             crate::nudges::keep_request(usage, freed),
             KEEP_KIND,
-            Mode::Steer,
         );
         match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
@@ -3692,14 +3687,14 @@ fn list(tags: &[u64]) -> String {
 
 pub use crate::nudges::KEEP_KIND;
 
-/// A reminder as a plan template send (compaction contract SR1), delivered in `mode`
-/// only (`delivery_order`), so a routine reminder rides the next tool result
-/// and never starts a turn of its own. A queued reminder of the same `kind` is
-/// replaced by a newer one.
-fn reminder(send_id: String, template: TemplateUse, kind: &str, mode: Mode) -> SendRequest {
+/// A reminder as a plan template send (compaction contract SR1), delivered in
+/// the modes [`crate::nudges::delivery`] lists for its template, so a routine
+/// reminder never starts a turn of its own. A queued reminder of the same
+/// `kind` is replaced by a newer one.
+fn reminder(send_id: String, template: TemplateUse, kind: &str) -> SendRequest {
     SendRequest::template(
         send_id,
-        &DeliveryOrder::new(vec![mode])
+        &DeliveryOrder::new(crate::nudges::delivery(&template.id))
             .with_dedupe_key(kind)
             .with_template(template),
     )
