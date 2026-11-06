@@ -1923,6 +1923,22 @@ export function createTransform(deps: TransformDeps) {
             held: activeThinkingPrefixHold,
             activeAnthropicThinkingTurn: activeThinkingTurn,
             compactionOff,
+            contextLimit: thresholdContextLimit,
+            lastInputTokens: contextUsageEarly.inputTokens,
+            // The last measured request ended at the newest assistant message:
+            // that message's output and everything after it are new.
+            newTailTokens: () => {
+                let start = entryOrderForThinkingFit.length;
+                while (start > 0 && entryOrderForThinkingFit[start - 1]?.info.role !== "assistant")
+                    start -= 1;
+                if (start > 0) start -= 1;
+                let tokens = 0;
+                for (const message of entryOrderForThinkingFit.slice(start)) {
+                    const estimate = estimateMessageTokens(message, true);
+                    tokens += estimate.conversation + estimate.toolCall;
+                }
+                return tokens;
+            },
         });
         const prefixHoldLogKey = signedThinkingHold
             ? `${currentTurnId}:${signedThinkingHold.reason}:${signedThinkingHold.heavyStepsBack ?? "none"}`

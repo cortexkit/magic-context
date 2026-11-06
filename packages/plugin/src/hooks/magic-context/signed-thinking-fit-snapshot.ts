@@ -2,6 +2,12 @@ import { sessionLog } from "../../shared/logger";
 import { cloneKeepingCoveredInstructionMarks } from "./host-served-rows";
 
 /**
+ * The largest growth of a request in one step that the copy does not cover.
+ * See takeSignedThinkingFitSnapshot.
+ */
+export const SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS = 250_000;
+
+/**
  * The input the signed-thinking fit retry restarts a pass from.
  *
  * A held signed-thinking turn keeps every signed block, so it cannot reclaim
@@ -19,6 +25,14 @@ import { cloneKeepingCoveredInstructionMarks } from "./host-served-rows";
  * the transform keeps the array's entry order (a list of the same message
  * objects) and copies from it once the hold is known. The copy is identical to
  * one taken when the pass started.
+ *
+ * The retry is needed only when one step takes the request over the window.
+ * When the last measured input, plus the estimated size of the messages that
+ * request did not include, is more than SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS
+ * below the window, no observed step grows that much, so the copy is not made
+ * and a held pass that still overflows is refused (see the final fit check).
+ * A held pass is always inside an assistant tool loop, so new user content
+ * cannot arrive in it. An unknown limit or input keeps the copy.
  */
 export function takeSignedThinkingFitSnapshot<T extends { info: object }>(args: {
     sessionId: string;
@@ -29,9 +43,29 @@ export function takeSignedThinkingFitSnapshot<T extends { info: object }>(args: 
     /** Whether the active turn carries Anthropic signed thinking. */
     activeAnthropicThinkingTurn: boolean;
     compactionOff: boolean;
+    /** The context limit for this pass, when known. */
+    contextLimit?: number;
+    /** The input tokens of the last measured request, when known. */
+    lastInputTokens?: number;
+    /**
+     * The estimated tokens of the messages the last measured request did not
+     * include. Called only for a held pass with a known limit and input.
+     */
+    newTailTokens?: () => number;
 }): T[] | null {
     let snapshot: T[] | null = null;
-    if (args.held && !args.compactionOff) {
+    const room =
+        args.contextLimit !== undefined &&
+        args.contextLimit > 0 &&
+        args.lastInputTokens !== undefined &&
+        args.lastInputTokens > 0
+            ? args.contextLimit - args.lastInputTokens
+            : undefined;
+    const farFromWindow = () =>
+        room !== undefined &&
+        room > SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS &&
+        room - (args.newTailTokens?.() ?? 0) > SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS;
+    if (args.held && !args.compactionOff && !farFromWindow()) {
         try {
             snapshot = cloneKeepingCoveredInstructionMarks(args.entryOrder as T[]);
         } catch (error) {

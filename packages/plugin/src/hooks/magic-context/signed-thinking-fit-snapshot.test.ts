@@ -20,10 +20,15 @@ import {
     clearCtxReduceAvailability,
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
+import * as eventResolvers from "./event-resolvers";
 import * as hostServedRows from "./host-served-rows";
 import * as injection from "./inject-compartments";
 import { closeReadOnlySessionDb } from "./read-session-db";
-import { observeSignedThinkingFitSnapshotForTests } from "./signed-thinking-fit-snapshot";
+import {
+    observeSignedThinkingFitSnapshotForTests,
+    SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS,
+    takeSignedThinkingFitSnapshot,
+} from "./signed-thinking-fit-snapshot";
 import type { MessageLike } from "./tag-messages";
 import { createTransform } from "./transform";
 
@@ -330,3 +335,86 @@ it("a held over-window pass with no copy of its input is refused, logged once, a
         s.cleanup();
     }
 }, 30_000);
+
+it("a held pass far below the window takes no copy; near the window or with unknown usage it does", () => {
+    const clones = spyOn(hostServedRows, "cloneKeepingCoveredInstructionMarks");
+    const entryOrder = [{ info: { role: "user" } }];
+    const take = (contextLimit?: number, lastInputTokens?: number) =>
+        takeSignedThinkingFitSnapshot({
+            sessionId: "headroom",
+            entryOrder,
+            held: true,
+            activeAnthropicThinkingTurn: true,
+            compactionOff: false,
+            contextLimit,
+            lastInputTokens,
+        });
+    try {
+        expect(take(1_000_000, 400_000)).toBeNull();
+        expect(take(1_000_000, 1_000_000 - SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS - 1)).toBeNull();
+        expect(clones).toHaveBeenCalledTimes(0);
+        expect(take(1_000_000, 1_000_000 - SIGNED_FIT_SNAPSHOT_HEADROOM_TOKENS)).not.toBeNull();
+        expect(take(872_000, 700_000)).not.toBeNull();
+        expect(take(16_000, 3_200)).not.toBeNull();
+        expect(take(undefined, 400_000)).not.toBeNull();
+        expect(take(1_000_000, 0)).not.toBeNull();
+        expect(take(1_000_000, undefined)).not.toBeNull();
+        expect(clones).toHaveBeenCalledTimes(6);
+    } finally {
+        clones.mockRestore();
+    }
+});
+
+it("the transform passes the window and the last input, so a held pass far below a large window takes no copy", async () => {
+    const s = session("headroom-wiring", { providerID: "anthropic", modelID: "claude-opus-5-5" });
+    const limit = spyOn(eventResolvers, "resolveTrustedContextLimit").mockReturnValue(1_000_000);
+    const clones = spyOn(hostServedRows, "cloneKeepingCoveredInstructionMarks");
+    const held: boolean[] = [];
+    observeSignedThinkingFitSnapshotForTests((observation) => held.push(observation.held));
+    try {
+        const rows: MessageLike[] = [s.user()];
+        resolveCtxReduceAvailabilityFromMessages(s.sessionId, rows as never);
+        for (let pass = 0; pass < 4; pass++) {
+            rows.push(s.step({ heavy: true, output: `Result ${pass}` }));
+            s.setUsage(40);
+            await s.transform({}, { messages: structuredClone(rows) });
+        }
+        expect(held.filter(Boolean).length).toBeGreaterThan(0);
+        expect(clones).toHaveBeenCalledTimes(0);
+    } finally {
+        clones.mockRestore();
+        limit.mockRestore();
+        s.cleanup();
+    }
+}, 30_000);
+
+it("a large tail the last measured request did not include keeps the copy far from the window", () => {
+    const clones = spyOn(hostServedRows, "cloneKeepingCoveredInstructionMarks");
+    const entryOrder = [{ info: { role: "user" } }];
+    let tailCalls = 0;
+    const take = (held: boolean, tail: number) =>
+        takeSignedThinkingFitSnapshot({
+            sessionId: "tail",
+            entryOrder,
+            held,
+            activeAnthropicThinkingTurn: true,
+            compactionOff: false,
+            contextLimit: 1_000_000,
+            lastInputTokens: 400_000,
+            newTailTokens: () => {
+                tailCalls += 1;
+                return tail;
+            },
+        });
+    try {
+        expect(take(true, 10_000)).toBeNull();
+        expect(clones).toHaveBeenCalledTimes(0);
+        expect(take(true, 360_000)).not.toBeNull();
+        expect(clones).toHaveBeenCalledTimes(1);
+        tailCalls = 0;
+        expect(take(false, 360_000)).toBeNull();
+        expect(tailCalls).toBe(0);
+    } finally {
+        clones.mockRestore();
+    }
+});
