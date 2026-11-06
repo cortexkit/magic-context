@@ -17,6 +17,7 @@ import {
 	signalPiPendingMaterialization,
 } from "./context-handler";
 import {
+	cancelPiAbandonedPendingDrops,
 	piDropBranchIds,
 	reconcilePiDropBranches,
 	trackPiDropLeaf,
@@ -81,6 +82,26 @@ it("preserves ancestor and legacy drops, restores native inputs, and rolls back 
 		);
 		expect(reconcilePiDropBranches(db, session, null, true)).toBe(0);
 		expect(getPendingOps(db, session)).toHaveLength(1);
+		expect(cancelPiAbandonedPendingDrops(db, session, null)).toBe(0);
+		expect(() =>
+			db
+				.transaction(() => {
+					expect(
+						cancelPiAbandonedPendingDrops(db, session, new Set(["root"])),
+					).toBe(1);
+					throw new Error("cancel rollback");
+				})
+				.immediate(),
+		).toThrow("cancel rollback");
+		expect(getPendingOps(db, session)).toHaveLength(1);
+		expect(cancelPiAbandonedPendingDrops(db, session, new Set(["root"]))).toBe(
+			1,
+		);
+		expect(getPendingOps(db, session)).toEqual([]);
+		expect(
+			getTagsBySession(db, session).find((tag) => tag.tagNumber === 2)?.status,
+		).toBe("dropped");
+		expect(getNativeToolInputs(db, session)?.has("call")).toBe(true);
 		expect(reconcilePiDropBranches(db, session, new Set(["root"]), true)).toBe(
 			1,
 		);
@@ -138,6 +159,10 @@ it("carries drop provenance into a Pi or OMP fork without modifying the parent",
 		expect(result?.kind).toBe("migrated");
 		expect(getPendingOps(db, "child")).toHaveLength(1);
 		expect(
+			cancelPiAbandonedPendingDrops(db, "child", piDropBranchIds(entries)),
+		).toBe(1);
+		expect(getPendingOps(db, "child")).toEqual([]);
+		expect(
 			reconcilePiDropBranches(db, "child", piDropBranchIds(entries), false),
 		).toBe(0);
 		expect(
@@ -159,7 +184,7 @@ it("carries drop provenance into a Pi or OMP fork without modifying the parent",
 	}
 });
 
-it("restores off-branch drops and discards queued drops only on an existing rebuild", async () => {
+it("cancels off-branch queued drops immediately and restores applied drops only on an existing rebuild", async () => {
 	const db = createTestDb();
 	const session = "branch-drops";
 	const fake = createFakePi();
@@ -231,7 +256,7 @@ it("restores off-branch drops and discards queued drops only on an existing rebu
 				(tag) => tag.tagNumber === tool.tagNumber,
 			)?.status,
 		).toBe("dropped");
-		expect(getPendingOps(db, session)).toHaveLength(1);
+		expect(getPendingOps(db, session)).toEqual([]);
 		signalPiPendingMaterialization(session, "user_flush");
 		const rebuilt = await pass();
 		expect(rebuilt).toContain("ORIGINAL_TOOL_OUTPUT");

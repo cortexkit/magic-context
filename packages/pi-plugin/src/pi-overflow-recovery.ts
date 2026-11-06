@@ -67,6 +67,19 @@ export function estimatePiOverflowRecoveryInputTokens(
 	for (const value of messages) {
 		if (!value || typeof value !== "object") return;
 		const message = value as { role?: string; content?: unknown };
+		if (message.role === "system") {
+			// The host envelope already counts the effective prompt and tool deltas.
+			// Validate protocol rows without charging their content a second time.
+			if (typeof message.content === "string") continue;
+			if (
+				!Array.isArray(message.content) ||
+				!message.content.every(
+					(part) => part?.type === "text" && typeof part.text === "string",
+				)
+			)
+				return;
+			continue;
+		}
 		if (
 			!["user", "assistant", "toolResult", "custom"].includes(
 				message.role ?? "",

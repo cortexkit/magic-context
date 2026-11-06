@@ -326,6 +326,7 @@ import {
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import {
+	cancelPiAbandonedPendingDrops,
 	piDropBranchIds,
 	reconcilePiDropBranches,
 	trackPiDropLeaf,
@@ -8974,6 +8975,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.sessionId,
 		dropBranchIds ? ([...dropBranchIds].at(-1) ?? null) : null,
 	);
+	cancelPiAbandonedPendingDrops(args.db, args.sessionId, dropBranchIds);
 	const thinkingRecovery = prepareLatestThinkingRecovery({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -9686,22 +9688,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
 	let publishedWorkDrainAllowed = isCacheBustingPass;
 	stripUnheldSignedTurnOnBust();
-	if (
-		reconcilePiDropBranches(
-			args.db,
-			args.sessionId,
-			dropBranchIds,
-			isCacheBustingPass && !protectedSignedPrefix,
-		)
-	) {
-		args.tagger.cleanup(args.sessionId);
-		args.tagger.initFromDb(args.sessionId, args.db);
-		nativeRemovalInputs = getNativeReplayState(
-			args.db,
-			args.sessionId,
-		).toolInputs;
-		recordFirstApplicationWireEdit(true);
-	}
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
@@ -10131,110 +10117,114 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// crash between the two leaves the tags legacy until the next HARD fold.
 	// Either way the next served request already carries the fold's new cached
 	// prefix, so it is a cache bust regardless of the tool bytes.
-	const tLegacyToolConversion = performance.now();
-	if (foldBustsServedPrefixThisPass) {
-		const savedRemovalInputs = nativeRemovalInputs;
-		try {
-			// Marker writes share the conversion transaction. Publish their in-memory
-			// view only with that commit, not with a nested savepoint that may roll back.
-			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
-			let converted = 0;
-			args.db
-				.transaction(() =>
-					removalBatch((flush) => {
-						converted = convertLegacyToolSkeletons(
-							args.db,
-							args.sessionId,
-							targets,
-							{
-								prepareRemovals: (rows) =>
-									preparePiToolRemovalChecks({
-										db: args.db,
-										rows,
-										targets,
-										messages: args.messages,
-										prepare: transcript.prepareToolRemovalMeasurements,
-									}),
-								// A full drop whose arc removal is recorded was removed, not
-								// served as a marker. Keep it full even when this pass's model
-								// must keep tool pairs, so passes that can remove it still do
-								// and the placeholder strip never sees its call come back.
-								// Unreadable removal records keep every full drop as it is.
-								keepFullDrop: (callId) =>
-									nativeRemovalInputs === undefined ||
-									(callId !== null &&
-										authorizePiToolRemoval({
+	// Delay both conversion paths until branch reconciliation has restored any
+	// abandoned drops; their target methods can change the outgoing tool pairs.
+	const applyExistingToolConversions = () => {
+		const tLegacyToolConversion = performance.now();
+		if (foldBustsServedPrefixThisPass) {
+			const savedRemovalInputs = nativeRemovalInputs;
+			try {
+				// Marker writes share the conversion transaction. Publish their in-memory
+				// view only with that commit, not with a nested savepoint that may roll back.
+				nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+				let converted = 0;
+				args.db
+					.transaction(() =>
+						removalBatch((flush) => {
+							converted = convertLegacyToolSkeletons(
+								args.db,
+								args.sessionId,
+								targets,
+								{
+									prepareRemovals: (rows) =>
+										preparePiToolRemovalChecks({
 											db: args.db,
-											sessionId: args.sessionId,
-											callId,
-											saved: nativeRemovalInputs,
-											canApply: false,
-										}) === true),
-							},
-						).size;
-						flush();
-					}),
-				)
-				.immediate();
-			if (converted > 0) {
+											rows,
+											targets,
+											messages: args.messages,
+											prepare: transcript.prepareToolRemovalMeasurements,
+										}),
+									// A full drop with a recorded tool-pair removal was removed, not
+									// served as a marker. Keep it full even when this pass's model
+									// must keep tool pairs, so passes that can remove it still do
+									// and the placeholder strip never sees its call come back.
+									// Unreadable removal records keep every full drop as it is.
+									keepFullDrop: (callId) =>
+										nativeRemovalInputs === undefined ||
+										(callId !== null &&
+											authorizePiToolRemoval({
+												db: args.db,
+												sessionId: args.sessionId,
+												callId,
+												saved: nativeRemovalInputs,
+												canApply: false,
+											}) === true),
+								},
+							).size;
+							flush();
+						}),
+					)
+					.immediate();
+				if (converted > 0) {
+					sessionLog(
+						args.sessionId,
+						`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+					);
+				}
+			} catch (error) {
+				nativeRemovalInputs = savedRemovalInputs;
 				sessionLog(
 					args.sessionId,
-					`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+					`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-		} catch (error) {
-			nativeRemovalInputs = savedRemovalInputs;
-			sessionLog(
-				args.sessionId,
-				`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
-			);
 		}
-	}
 
-	logTransformTiming(
-		args.sessionId,
-		"convertLegacyToolSkeletons",
-		tLegacyToolConversion,
-	);
-	if (
-		args.sessionMeta.isSubagent &&
-		isCacheBustingPass &&
-		!protectedSignedPrefix &&
-		!args.compactionOff
-	) {
-		const savedRemovalInputs = nativeRemovalInputs;
-		try {
-			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
-			const converted = args.db
-				.transaction(() =>
-					removalBatch((flush) => {
-						const conversions = prepareAgedToolSkeletonConversions(
-							args.db,
-							args.sessionId,
-							newTargets,
-							{
-								prepareRemovals: (rows) =>
-									preparePiToolRemovalChecks({
-										db: args.db,
-										rows,
-										targets: newTargets,
-										messages: args.messages,
-										prepare: transcript.prepareToolRemovalMeasurements,
-									}),
-							},
-						);
-						conversions.persist(args.db);
-						flush();
-						return conversions.converted.size;
-					}),
-				)
-				.immediate();
-			if (converted > 0) recordFirstApplicationWireEdit(true);
-		} catch (error) {
-			nativeRemovalInputs = savedRemovalInputs;
-			throw error;
+		logTransformTiming(
+			args.sessionId,
+			"convertLegacyToolSkeletons",
+			tLegacyToolConversion,
+		);
+		if (
+			args.sessionMeta.isSubagent &&
+			isCacheBustingPass &&
+			!protectedSignedPrefix &&
+			!args.compactionOff
+		) {
+			const savedRemovalInputs = nativeRemovalInputs;
+			try {
+				nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+				const converted = args.db
+					.transaction(() =>
+						removalBatch((flush) => {
+							const conversions = prepareAgedToolSkeletonConversions(
+								args.db,
+								args.sessionId,
+								newTargets,
+								{
+									prepareRemovals: (rows) =>
+										preparePiToolRemovalChecks({
+											db: args.db,
+											rows,
+											targets: newTargets,
+											messages: args.messages,
+											prepare: transcript.prepareToolRemovalMeasurements,
+										}),
+								},
+							);
+							conversions.persist(args.db);
+							flush();
+							return conversions.converted.size;
+						}),
+					)
+					.immediate();
+				if (converted > 0) recordFirstApplicationWireEdit(true);
+			} catch (error) {
+				nativeRemovalInputs = savedRemovalInputs;
+				throw error;
+			}
 		}
-	}
+	};
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the
@@ -10296,45 +10286,46 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
 			firstRenderBust);
-	const pendingOps = shouldReadPendingOps
-		? getPendingOps(args.db, args.sessionId)
-		: [];
-	const tReclaimDistance = performance.now();
-	const reclaimDistance = isCacheBustingPass
-		? toolReclaimDistanceEntries(mutationView, targets)
-		: [];
-	logTransformTiming(
-		args.sessionId,
-		"toolReclaimDistanceEntries",
-		tReclaimDistance,
-	);
-	const protectedToolTags = protectedToolTagNumbers(
-		getActiveTagsBySession(args.db, args.sessionId),
-		args.protectedTools,
-	);
-	for (const number of identityAdoption.protectedTagNumbers)
-		protectedToolTags.add(number);
-	const protectionWindowForPass = getProtectionWindowForSession(
-		args.db,
-		args.sessionId,
-		protectionFloorResolution.floor,
-	);
-	const protectedTagNumbersForPass = usesTokenProtection
-		? protectionWindowForPass.protectedTagNumbers
-		: newestActiveTagNumbersByCount(
-				getActiveTagsBySession(args.db, args.sessionId),
-				args.protectedTags,
-			);
-	const pendingOperationTags =
-		pendingOps.length > 0
-			? getTagsForPendingOperations(
-					args.db,
-					args.sessionId,
-					pendingOps.map((operation) => operation.tagId),
-					usesTokenProtection ? 0 : args.protectedTags,
-					RECENT_TOOL_SKELETON_WINDOW,
-				)
+	const readPendingDropState = () => {
+		const pendingOps = shouldReadPendingOps
+			? getPendingOps(args.db, args.sessionId)
 			: [];
+		const protectedToolTags = protectedToolTagNumbers(
+			getActiveTagsBySession(args.db, args.sessionId),
+			args.protectedTools,
+		);
+		for (const number of identityAdoption.protectedTagNumbers)
+			protectedToolTags.add(number);
+		const protectionWindowForPass = getProtectionWindowForSession(
+			args.db,
+			args.sessionId,
+			protectionFloorResolution.floor,
+		);
+		const protectedTagNumbersForPass = usesTokenProtection
+			? protectionWindowForPass.protectedTagNumbers
+			: newestActiveTagNumbersByCount(
+					getActiveTagsBySession(args.db, args.sessionId),
+					args.protectedTags,
+				);
+		const pendingOperationTags =
+			pendingOps.length > 0
+				? getTagsForPendingOperations(
+						args.db,
+						args.sessionId,
+						pendingOps.map((operation) => operation.tagId),
+						usesTokenProtection ? 0 : args.protectedTags,
+						RECENT_TOOL_SKELETON_WINDOW,
+					)
+				: [];
+		return {
+			pendingOps,
+			protectedToolTags,
+			protectionWindowForPass,
+			protectedTagNumbersForPass,
+			pendingOperationTags,
+		};
+	};
+	const executeReclaimSnapshot = readPendingDropState();
 	if (!args.sessionMeta.isSubagent && args.schedulerDecision === "execute") {
 		args.evaluateHistorianBeforeReclaim?.({
 			activeTags: getActiveTagsBySession(args.db, args.sessionId),
@@ -10361,12 +10352,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		reclaimableTokens: estimateExecuteReclaimTokens({
 			db: args.db,
 			sessionId: args.sessionId,
-			pendingOps,
-			tags: pendingOperationTags,
+			pendingOps: executeReclaimSnapshot.pendingOps,
+			tags: executeReclaimSnapshot.pendingOperationTags,
 			targets: newTargets,
 			protectedTagIds: new Set([
-				...protectedTagNumbersForPass,
-				...protectedToolTags,
+				...executeReclaimSnapshot.protectedTagNumbersForPass,
+				...executeReclaimSnapshot.protectedToolTags,
 			]),
 			probePreparation: (targets) => {
 				const saved = nativeRemovalInputs;
@@ -10408,6 +10399,42 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		stripUnheldSignedTurnOnBust();
 		applyTemporalOnRide();
 	}
+	// Branch restoration rides the final permission, including late execute and
+	// signed-prefix rebuilds. Refresh the drain's tag and protection snapshots to
+	// include restored content; abandoned queued drops were cancelled before pricing.
+	if (
+		reconcilePiDropBranches(
+			args.db,
+			args.sessionId,
+			dropBranchIds,
+			isCacheBustingPass && !protectedSignedPrefix,
+		)
+	) {
+		args.tagger.cleanup(args.sessionId);
+		args.tagger.initFromDb(args.sessionId, args.db);
+		nativeRemovalInputs = getNativeReplayState(
+			args.db,
+			args.sessionId,
+		).toolInputs;
+		recordFirstApplicationWireEdit(true);
+	}
+	applyExistingToolConversions();
+	const {
+		pendingOps,
+		protectedToolTags,
+		protectionWindowForPass,
+		protectedTagNumbersForPass,
+		pendingOperationTags,
+	} = readPendingDropState();
+	const tReclaimDistance = performance.now();
+	const reclaimDistance = isCacheBustingPass
+		? toolReclaimDistanceEntries(mutationView, targets)
+		: [];
+	logTransformTiming(
+		args.sessionId,
+		"toolReclaimDistanceEntries",
+		tReclaimDistance,
+	);
 
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
