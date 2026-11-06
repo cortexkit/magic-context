@@ -2,8 +2,9 @@
 //!
 //! Discovery and number conversion run without a write lock. Before changing
 //! session rows, the complete plan is staged in metadata in small transactions.
-//! Each application transaction consumes one batch and advances its cursor
-//! atomically. A retry reads the saved targets, never partially converted rows.
+//! Each application transaction consumes consecutive plan units and advances
+//! its cursor atomically. A retry reads saved targets, never partially converted
+//! rows. Commit groups grow by measured write time and yield between locks.
 
 use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
 
+mod checkpoints;
 mod fts;
 pub(crate) use fts::ordinal_update;
 
@@ -210,25 +212,50 @@ impl Plan {
         mut record: Value,
     ) -> Result<(), String> {
         let batches = self.batches.into_inner();
+        let total = batches.len();
         record["state"] = "staging".into();
         record["batches"] = batches.len().into();
         record["next"] = 0.into();
         // An incomplete staging pass has changed no session rows and can be
         // rebuilt. Publish 'applying' only after every batch is durable.
-        transaction(conn, "stage/start", |tx| save(tx, key, &record))?;
-        for (index, batch) in batches.into_iter().enumerate() {
-            let body = serde_json::to_string(&batch).map_err(|e| e.to_string())?;
-            transaction(conn, "stage/batch", |tx| {
-                tx.execute(
-                    "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES (?1,?2)",
-                    params![batch_key(key, index), body],
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(())
+        let mut writer = checkpoints::Writer::new(conn)?;
+        writer.transaction("stage/start", |tx| save(tx, key, &record))?;
+        let mut source = batches.into_iter().enumerate();
+        let mut pending = std::collections::VecDeque::new();
+        let mut staged = 0;
+        while staged < total {
+            let limit = writer.limit("stage/batch");
+            while pending.len() < limit {
+                let Some((index, batch)) = source.next() else {
+                    break;
+                };
+                pending.push_back((
+                    index,
+                    serde_json::to_string(&batch).map_err(|e| e.to_string())?,
+                ));
+            }
+            staged += writer.grouped("stage/batch", |tx| {
+                let started = std::time::Instant::now();
+                let mut count = 0;
+                while count < limit && (count == 0 || started.elapsed() < checkpoints::WRITE_WINDOW)
+                {
+                    let Some((index, body)) = pending.pop_front() else {
+                        break;
+                    };
+                    tx.execute(
+                        "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES (?1,?2)",
+                        params![batch_key(key, index), body],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+                Ok(count)
             })?;
         }
         record["state"] = "applying".into();
-        transaction(conn, "stage/ready", |tx| save(tx, key, &record))?;
+        writer.transaction("stage/ready", |tx| save(tx, key, &record))?;
+        writer.finish()?;
+        drop(writer);
         resume(conn, key)?;
         Ok(())
     }
@@ -282,85 +309,115 @@ pub(crate) fn resume(conn: &mut Connection, key: &str) -> Result<bool, String> {
     // A retry may follow a global schema migration. Saved absolute ordinals
     // are still valid, but their physical FTS update path must be revalidated.
     let ordinal_update = fts::ordinal_update(conn).map_err(|e| e.to_string())?;
+    let mut writer = checkpoints::Writer::new(conn)?;
+    let mut pending = std::collections::VecDeque::<(usize, Batch)>::new();
+    let mut loaded = next;
     while next < total {
-        let body: String = conn
-            .query_row(
-                "SELECT value FROM schema_migrations_meta WHERE key=?1",
-                params![batch_key(key, next)],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        let batch: Batch = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        if pending.is_empty() {
+            pending.push_back((loaded, read_batch(&writer, key, loaded)?));
+            loaded += 1;
+        }
+        let phase = pending.front().unwrap().1.phase.clone();
+        let limit = writer.limit(&phase);
+        while loaded < total && pending.len() < limit && pending.back().unwrap().1.phase == phase {
+            pending.push_back((loaded, read_batch(&writer, key, loaded)?));
+            loaded += 1;
+        }
         let expected = progress.clone();
-        progress["next"] = (next + 1).into();
-        transaction(conn, &batch.phase, |tx| {
+        let completed = writer.grouped(&phase, |tx| {
             if record(tx, key)?.as_ref() != Some(&expected) {
                 return Err("move_in_progress: another mover advanced the session; retry".into());
             }
-            for mut write in batch.writes {
-                if fts::is_ordinal_update(&write.sql) {
-                    write.sql = ordinal_update.into();
+            let started = std::time::Instant::now();
+            let mut count = 0;
+            while count < limit
+                && pending
+                    .front()
+                    .is_some_and(|(_, batch)| batch.phase == phase)
+                && (count == 0 || started.elapsed() < checkpoints::WRITE_WINDOW)
+            {
+                let (index, batch) = pending.pop_front().unwrap();
+                for mut write in batch.writes {
+                    if fts::is_ordinal_update(&write.sql) {
+                        write.sql = ordinal_update.into();
+                    }
+                    let args = write.args.into_iter().map(|value| match value {
+                        Value::Null => rusqlite::types::Value::Null,
+                        Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+                        Value::String(s) => rusqlite::types::Value::Text(s),
+                        _ => unreachable!("plan values are text, integer or null"),
+                    });
+                    tx.prepare_cached(&write.sql)
+                        .and_then(|mut s| s.execute(params_from_iter(args)))
+                        .map_err(|e| e.to_string())?;
                 }
-                let args = write.args.into_iter().map(|value| match value {
-                    Value::Null => rusqlite::types::Value::Null,
-                    Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
-                    Value::String(s) => rusqlite::types::Value::Text(s),
-                    _ => unreachable!("plan values are text, integer or null"),
-                });
-                tx.prepare_cached(&write.sql)
-                    .and_then(|mut s| s.execute(params_from_iter(args)))
-                    .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "DELETE FROM schema_migrations_meta WHERE key=?1",
+                    params![batch_key(key, index)],
+                )
+                .map_err(|e| e.to_string())?;
+                count += 1;
             }
+            progress["next"] = (next + count).into();
             save(tx, key, &progress)?;
-            tx.execute(
-                "DELETE FROM schema_migrations_meta WHERE key=?1",
-                params![batch_key(key, next)],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
+            Ok(count)
         })?;
-        next += 1;
+        next += completed;
     }
     progress["state"] = "done".into();
-    transaction(conn, "finish", |tx| save(tx, key, &progress))?;
+    writer.transaction("finish", |tx| save(tx, key, &progress))?;
+    writer.finish()?;
     Ok(true)
 }
 
-/// Automatic WAL checkpoints can turn a tiny commit into a whole-store I/O
-/// operation. Leave checkpointing to SQLite's other connections, outside this
-/// writer's critical section, and restore the caller's connection policy.
+fn read_batch(conn: &Connection, key: &str, index: usize) -> Result<Batch, String> {
+    let body: String = conn
+        .query_row(
+            "SELECT value FROM schema_migrations_meta WHERE key=?1",
+            params![batch_key(key, index)],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// Time only the transaction, not a bulk writer's subsequent PASSIVE checkpoint.
+/// Bulk stages own checkpointing between batches, rather than transferring their
+/// WAL backlog to a host's automatic checkpoint on its next commit. The final
+/// marker telling the standalone plugin the session has moved, and other
+/// standalone writes, retain their automatic checkpoint policy.
 pub(crate) fn transaction<T>(
     conn: &mut Connection,
     phase: &str,
     write: impl FnOnce(&Connection) -> Result<T, String>,
 ) -> Result<T, String> {
-    let checkpoint: i64 = conn
-        .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+    transaction_measured(conn, phase, write).map(|(value, _)| value)
+}
+
+fn transaction_measured<T>(
+    conn: &mut Connection,
+    phase: &str,
+    write: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<(T, std::time::Duration), String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    conn.pragma_update(None, "wal_autocheckpoint", 0)
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
-        #[cfg(test)]
-        let measure = crate::move_in::tests::Measure::new(phase);
-        let result = match write(&tx) {
-            Ok(value) => tx.commit().map(|()| value).map_err(|e| e.to_string()),
-            Err(error) => {
-                tx.rollback().map_err(|e| e.to_string())?;
-                Err(error)
-            }
-        };
-        #[cfg(test)]
-        drop(measure);
-        let result = result?;
-        #[cfg(test)]
-        crate::move_in::tests::after_commit(phase)?;
-        Ok(result)
-    })();
-    conn.pragma_update(None, "wal_autocheckpoint", checkpoint)
-        .map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    #[cfg(test)]
+    let measure = crate::move_in::tests::Measure::new(phase);
+    let result = match write(&tx) {
+        Ok(value) => tx.commit().map(|()| value).map_err(|e| e.to_string()),
+        Err(error) => {
+            tx.rollback().map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    };
+    let held = started.elapsed();
+    #[cfg(test)]
+    drop(measure);
+    let result = result?;
+    #[cfg(test)]
+    crate::move_in::tests::after_commit(phase)?;
     let _ = phase;
-    result
+    Ok((result, held))
 }
