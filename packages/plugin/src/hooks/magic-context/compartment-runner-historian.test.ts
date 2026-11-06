@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { getSubagentInvocations } from "../../features/magic-context/storage-subagent-invocations";
+import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import type { PluginContext } from "../../plugin/types";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { recordPromptSessionError } from "../../shared/prompt-async-transport";
@@ -13,9 +14,89 @@ import {
     runValidatedHistorianPass,
 } from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
+import { clearSidebarObservations } from "./sidebar-observations";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+
+test("N1 primary rejected twice then fallback publishes; only a clean primary resets the counters", async () => {
+    const directory = createTestTempDirFromPath(join(tmpdir(), "mc-sidebar-historian-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    let attempt = 0;
+    let clean = false;
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: false, harness: "opencode2" },
+        open: async () => ({ id: `sidebar-child-${++attempt}` }),
+        attempt: async () => {},
+        collect: async () => ({
+            text:
+                clean || attempt % 3 === 0
+                    ? '<output><compartment start="1" end="1" title="History"><p1>Keep this.</p1></compartment></output>'
+                    : "not usable compartments",
+            reasoning: null,
+            lengthCapped: false,
+            providerId: "actual",
+            modelId: clean ? "primary" : attempt % 3 === 0 ? "fallback" : "primary",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }),
+        close: async () => {},
+    };
+    const run = () =>
+        runValidatedHistorianPass({
+            client: undefined,
+            hiddenCompletionExecutor: executor,
+            db,
+            parentSessionId: "sidebar-historian",
+            sessionDirectory: directory,
+            prompt: "Messages 1-1:\n1: U: Keep this.",
+            chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "m1" }] },
+            priorCompartments: [],
+            sequenceOffset: 0,
+            dumpLabelBase: "sidebar",
+            model: "configured/primary",
+            fallbackModels: ["configured/fallback"],
+        });
+    for (const runs of [1, 2]) {
+        const result = await run();
+        expect(result.ok).toBe(true);
+        result.finishSidebarRun?.(true);
+        const snapshot = buildSidebarSnapshot(db, "sidebar-historian", process.cwd());
+        expect(snapshot.historianRun).toMatchObject({
+            outcome: "fallback",
+            model: "actual/fallback",
+            fallback: true,
+            primaryRejections: 2,
+            primaryAttempts: 2,
+            sinceLastClean: {
+                primaryRejections: runs * 2,
+                primaryAttempts: runs * 2,
+                fallbackRuns: runs,
+            },
+        });
+        expect(snapshot.historianRun?.finishedAt).toBeGreaterThan(0);
+    }
+    clean = true;
+    const result = await run();
+    result.finishSidebarRun?.(true);
+    expect(buildSidebarSnapshot(db, "sidebar-historian", process.cwd()).historianRun).toMatchObject(
+        {
+            outcome: "ok",
+            model: "actual/primary",
+            fallback: false,
+            primaryRejections: 0,
+            primaryAttempts: 1,
+            sinceLastClean: { primaryRejections: 0, primaryAttempts: 0, fallbackRuns: 0 },
+        },
+    );
+    const deletedRun = await run();
+    clearSidebarObservations("sidebar-historian");
+    deletedRun.finishSidebarRun?.(true);
+    expect(
+        buildSidebarSnapshot(db, "sidebar-historian", process.cwd()).historianRun,
+    ).toBeUndefined();
+});
 
 afterEach(() => {
     clearModelsDevCache();
@@ -39,6 +120,49 @@ test("missing v2 hidden executor names the historian or dream entry point", () =
     expect(resolveHiddenCompletionExecutor(executor, undefined, db, "/tmp", "historian")).toBe(
         executor,
     );
+});
+
+test("N1 recognizes a configured fallback selected inside the host transport", async () => {
+    const directory = createTestTempDirFromPath(join(tmpdir(), "mc-sidebar-host-fallback-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: false, harness: "opencode2" },
+        open: async () => ({ id: "host-fallback" }),
+        attempt: async () => {},
+        close: async () => {},
+        collect: async () => ({
+            text: '<output><compartment start="1" end="1" title="History"><p1>Keep this.</p1></compartment></output>',
+            reasoning: null,
+            lengthCapped: false,
+            providerId: "actual",
+            modelId: "fallback",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }),
+    };
+    const result = await runValidatedHistorianPass({
+        client: undefined,
+        hiddenCompletionExecutor: executor,
+        db,
+        parentSessionId: "host-fallback-parent",
+        sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: Keep this.",
+        chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "m1" }] },
+        priorCompartments: [],
+        sequenceOffset: 0,
+        dumpLabelBase: "host-fallback",
+        fallbackModels: ["actual/fallback"],
+    });
+    result.finishSidebarRun?.(true);
+    expect(
+        buildSidebarSnapshot(db, "host-fallback-parent", process.cwd()).historianRun,
+    ).toMatchObject({
+        outcome: "fallback",
+        fallback: true,
+        model: "actual/fallback",
+        sinceLastClean: { fallbackRuns: 1 },
+    });
 });
 
 test("historian ledger distinguishes empty, reasoning-only, length-capped and valid output", async () => {

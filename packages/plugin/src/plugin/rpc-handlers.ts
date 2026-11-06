@@ -4,7 +4,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { closeSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { COMPACTION_ENABLED_PATH, isCompactionEnabled } from "../config/agent-disable";
@@ -38,6 +38,7 @@ import {
     resolveProjectIdentityForSession,
     shouldSkipHomeProjectMemory,
 } from "../features/magic-context/memory/project-identity";
+import { countNewMemoriesForM1Union } from "../features/magic-context/memory/storage-memory";
 import { getMessageIndexQueueHeapStats } from "../features/magic-context/message-index-async";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
@@ -67,7 +68,13 @@ import {
     readSessionWorkMetricsCarry,
     setSessionWorkMetricsCarry,
 } from "../features/magic-context/work-metrics-carry-storage";
+import {
+    expandWorkspaceIdentitySetWithAliases,
+    resolveWorkspaceIdentitySet,
+    resolveWorkspaceShareCategories,
+} from "../features/magic-context/workspaces";
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
+import { getProactiveCompartmentTriggerPercentage } from "../hooks/magic-context/compartment-trigger";
 import {
     type EmbedHistoryDeps,
     pauseEmbedHistoryDrain,
@@ -86,7 +93,6 @@ import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers"
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { getLkgSlotHeapStats } from "../hooks/magic-context/lkg-slot";
 import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
-
 import {
     findLastAssistantModelFromOpenCodeDb,
     openCodeDbExists,
@@ -95,6 +101,7 @@ import {
 import { getTokenizerNativeMemoryStats } from "../hooks/magic-context/read-session-formatting";
 import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
+import { sidebarObservations } from "../hooks/magic-context/sidebar-observations";
 import {
     calibrateBuckets,
     resolveModelCalibration,
@@ -445,13 +452,18 @@ export function buildSidebarSnapshot(
         }
 
         let pendingOpsCount = 0;
+        let queuedDropTokens = 0;
         try {
             const pendingRow = db
-                .prepare<[string], { count: number }>(
-                    "SELECT COUNT(*) as count FROM pending_ops WHERE session_id = ?",
+                .prepare<[string], { count: number; tokens: number }>(
+                    `SELECT COUNT(*) AS count,
+                        COALESCE(SUM(CASE WHEN p.operation = 'drop' THEN t.token_count ELSE 0 END), 0) AS tokens
+                     FROM pending_ops p LEFT JOIN tags t ON t.id = p.tag_id AND t.session_id = p.session_id
+                     WHERE p.session_id = ?`,
                 )
                 .get(sessionId);
             pendingOpsCount = pendingRow?.count ?? 0;
+            queuedDropTokens = pendingRow?.tokens ?? 0;
         } catch {
             // pending_ops table may not exist
         }
@@ -688,6 +700,39 @@ export function buildSidebarSnapshot(
             calibration,
         });
 
+        const cachedM0MaterializedAt =
+            typeof meta?.cached_m0_materialized_at === "number"
+                ? meta.cached_m0_materialized_at
+                : null;
+        const summariesSinceCache =
+            db
+                .prepare<[string, number], { count: number }>(
+                    "SELECT COUNT(*) AS count FROM compartments WHERE session_id = ? AND sequence > ?",
+                )
+                .get(sessionId, Number(meta?.cached_m0_max_compartment_seq ?? -1))?.count ?? 0;
+        let memoriesSinceCache = 0;
+        if (projectIdentity) {
+            const identitySet = resolveWorkspaceIdentitySet(db, projectIdentity);
+            const workspaced = identitySet.identities.length > 1;
+            const expanded = workspaced
+                ? expandWorkspaceIdentitySetWithAliases(db, identitySet.identities)
+                : null;
+            const identities = expanded?.expandedIdentities ?? identitySet.identities;
+            const ownIdentities = expanded
+                ? identities.filter(
+                      (id) => expanded.canonicalIdentityByStoredPath.get(id) === projectIdentity,
+                  )
+                : [projectIdentity];
+            memoriesSinceCache = countNewMemoriesForM1Union(
+                db,
+                identities,
+                Number(meta?.cached_m0_max_memory_id ?? 0),
+                Date.now(),
+                ownIdentities,
+                workspaced ? resolveWorkspaceShareCategories(db, projectIdentity) : null,
+            );
+        }
+        const liveFailure = currentPluginConfigReader(directory)?.lastFailure();
         const fresh: SidebarSnapshot = {
             sessionId,
             usagePercentage: effectiveUsagePercentage,
@@ -701,6 +746,15 @@ export function buildSidebarSnapshot(
             memoryCount,
             memoryBlockCount,
             pendingOpsCount,
+            queuedDropTokens,
+            ...(config?.transform_mode === "rust" ? {} : sidebarObservations(sessionId)),
+            proactiveFloor: getProactiveCompartmentTriggerPercentage(executeThreshold),
+            cachedM0MaterializedAt,
+            summariesSinceCache,
+            memoriesSinceCache,
+            configReloadFailure: liveFailure
+                ? { path: liveFailure.path, message: liveFailure.message }
+                : undefined,
             historianRunning: moduleStatus?.wrapup_active === true || compartmentInProgress,
             compartmentInProgress: moduleStatus?.wrapup_active === true || compartmentInProgress,
             sessionNoteCount,

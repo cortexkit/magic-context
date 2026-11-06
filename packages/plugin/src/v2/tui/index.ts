@@ -20,15 +20,12 @@ import {
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
+import { createRefreshScheduler, type RefreshClock } from "../../tui/data/refresh-scheduler";
 import { directoryForSession } from "../../tui/data/session-directory";
 import { eventSessionID } from "./events";
 import { mountV1Sidebar, sessionDirectory, type V1SidebarMount } from "./sidebar-mount";
 import { mountV1StatusDialog, type V1StatusDialogMount } from "./status-dialog-mount";
 import type { V2SidebarState, V2TuiContext } from "./types";
-
-const SIDEBAR_REFRESH_MS = 1_000;
-const inflight = new Set<string>();
-const refreshedAt = new Map<string, number>();
 
 function compactTokens(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -167,7 +164,11 @@ function currentSessionID(context: V2TuiContext): string | null {
 
 type JsxFactory = (type: string, props: Record<string, unknown>) => unknown;
 
-export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Promise<() => void> {
+export async function setupWithJsx(
+    context: V2TuiContext,
+    jsx: JsxFactory,
+    clock?: RefreshClock,
+): Promise<() => void> {
     const directory = context.location?.directory ?? context.data.location.default().directory;
     // The server command registry is the single /ctx-* registration for OpenCode 2.
     // This TUI handles its notifications; a keymap slash layer would duplicate the
@@ -183,21 +184,35 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
     const directoryOf = (sessionID: string): string =>
         directoryForSession(sessionDirectory(context, sessionID), directory);
 
-    const refresh = async (sessionID: string, force = false): Promise<void> => {
-        if (!sessionID || inflight.has(sessionID)) return;
-        const now = Date.now();
-        if (!force && now - (refreshedAt.get(sessionID) ?? 0) < SIDEBAR_REFRESH_MS) return;
-        refreshedAt.set(sessionID, now);
-        inflight.add(sessionID);
-        try {
-            const snapshot = await loadSidebarSnapshot(sessionID, directoryOf(sessionID));
+    let sidebarSessionID = currentSessionID(context);
+    const scheduler = createRefreshScheduler<SidebarSnapshot | null>({
+        clock,
+        read: async () =>
+            sidebarSessionID
+                ? loadSidebarSnapshot(sidebarSessionID, directoryOf(sidebarSessionID), {
+                      throwOnFailure: true,
+                  })
+                : null,
+        onSnapshot: (snapshot) => {
+            if (!snapshot) return;
             updateSidebar((draft) => {
-                draft.snapshots[sessionID] = snapshot;
+                draft.snapshots[snapshot.sessionId] = snapshot;
             });
             context.renderer.requestRender();
-        } finally {
-            inflight.delete(sessionID);
-        }
+        },
+        isRunning: (snapshot) =>
+            Boolean(
+                snapshot?.historianRunning ||
+                    snapshot?.dreamerProgress ||
+                    snapshot?.recompProgress?.phase === "recomp" ||
+                    snapshot?.recompProgress?.phase === "migration",
+            ),
+    });
+    const refresh = (sessionID: string): void => {
+        if (sidebarSessionID !== sessionID) {
+            sidebarSessionID = sessionID;
+            scheduler.reset();
+        } else scheduler.refresh();
     };
 
     const showStatus = async (target = currentSessionID(context)) => {
@@ -258,7 +273,10 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 : "Recomp request failed",
             variant: requested ? "info" : "error",
         });
-        if (requested) void refresh(target, true);
+        if (requested) {
+            if (mountedSidebar) mountedSidebar.refresh();
+            else refresh(target);
+        }
         return requested;
     };
 
@@ -285,10 +303,14 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                     // the rest of this TUI session and say so once.
                     mountedSidebar = null;
                     mounted.dispose();
+                    scheduler.refresh();
                     log("[magic-context] v2 sidebar component failed; using text", error);
                 }
             }
-            void refresh(input.sessionID);
+            if (sidebarSessionID !== input.sessionID) {
+                sidebarSessionID = input.sessionID;
+                scheduler.reset();
+            }
             return jsx("text", { children: sidebarText(sidebar.snapshots[input.sessionID]) });
         },
     });
@@ -299,8 +321,9 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
     const stopListening = context.data.listen(({ details }) => {
         if (mountedSidebar) return;
         const sessionID = eventSessionID(details);
-        if (sessionID) void refresh(sessionID, true);
+        if (sessionID && sessionID === sidebarSessionID) scheduler.event();
     });
+    if (!mountedSidebar && sidebarSessionID) scheduler.refresh();
 
     const handleNotification = async (notification: SocketNotification): Promise<boolean> => {
         const target = notification.sessionId ?? currentSessionID(context);
@@ -328,7 +351,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         if (notification.payload.action === "show-recomp-dialog") return showRecomp(target);
         if (notification.payload.action === "refresh-sidebar" && target) {
             if (mountedSidebar) mountedSidebar.refresh();
-            else await refresh(target, true);
+            else refresh(target);
             log(`[magic-context] sidebar refresh requested for session ${target}`);
             return true;
         }
@@ -361,8 +384,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         stopListening();
         stopNotificationSocket();
         closeRpc();
-        inflight.clear();
-        refreshedAt.clear();
+        scheduler.dispose();
     };
 }
 

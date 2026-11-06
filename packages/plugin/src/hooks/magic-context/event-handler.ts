@@ -98,6 +98,7 @@ import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 import { type NotificationParams, sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute } from "./sentinel";
 import { dropServedRecord } from "./served-check";
+import { clearSidebarObservations } from "./sidebar-observations";
 import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
@@ -1284,6 +1285,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
+            clearSidebarObservations(sessionId);
             dropSlot(sessionId, "session.deleted");
             dropServedRecord(sessionId, "session_deleted");
             clearLkgMeasuredRequest(sessionId);
