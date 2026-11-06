@@ -186,12 +186,13 @@ async function scenario(converted: boolean) {
             const restored = reader
                 .history(sessionID)
                 .flatMap((row) => restoreRow(row, { providerID: "openai", id: "mock-model" }));
-            expect(
-                restored
-                    .flatMap((message) => message.content)
-                    .find((part) => part.id === calls[0] && part.type === "tool-result")
-                    ?.resultType,
-            ).toBe("error");
+            // The restored failed call is already in the host's finished
+            // `{ type, value }` shape; OpenCode 2.2 rejects the `resultType` input form.
+            const restoredError = restored
+                .flatMap((message) => message.content)
+                .find((part) => part.id === calls[0] && part.type === "tool-result");
+            expect((restoredError?.result as { type?: string } | undefined)?.type).toBe("error");
+            expect(restoredError && "resultType" in restoredError).toBe(false);
         } finally {
             reader.close();
         }
