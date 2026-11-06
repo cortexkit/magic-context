@@ -143,15 +143,6 @@ const ENTRIES: &[Entry] = &[
         reason: None,
     },
     Entry {
-        entry_id: "magic-context/module-store",
-        class: Class::Portable,
-        mechanism: Mechanism::WholeDb,
-        path: "store.db",
-        writer_interaction: Some(WriterInteraction::BackupApiLive),
-        exclude_tables: None,
-        reason: None,
-    },
-    Entry {
         entry_id: "magic-context/mode3-store",
         class: Class::Portable,
         mechanism: Mechanism::WholeDb,
@@ -216,6 +207,15 @@ const ENTRIES: &[Entry] = &[
         "model-context-limits-omp.json",
     ),
     // ── Excluded: written or read by released code, deliberately not backed up
+    // The store of the module this one replaced. Nothing writes it any more, and
+    // the file may already be deleted; listing it as excluded keeps Engram from
+    // reporting a portable source as missing. The entry ID is unchanged because
+    // Engram keys restore state by entry ID, so its older backups stay restorable.
+    excluded(
+        "magic-context/module-store",
+        "store.db",
+        "retired store of the earlier Magic Context module; no writer since the move to mode3.db",
+    ),
     excluded(
         "magic-context/github-token",
         "github-token",
@@ -405,24 +405,24 @@ mod tests {
     }
 
     #[test]
-    fn catalog_declares_store_db_and_identity_pins_as_portable() {
+    fn catalog_declares_mode3_db_and_identity_pins_as_portable() {
         let entries = entries();
+        // The retired store keeps its entry ID, so its older backups stay
+        // restorable, but is no longer backed up.
         let store = entries
             .iter()
             .find(|entry| entry["path"] == "store.db")
-            .expect("store.db must be declared");
+            .expect("store.db must stay declared, as excluded");
         assert_eq!(store["entry_id"], "magic-context/module-store");
-        assert_eq!(store["class"], "portable");
-        assert_eq!(store["mechanism"], "whole-db");
-        assert_eq!(store["writer_interaction"], "backup-api-live");
+        assert_eq!(store["class"], "excluded");
         let mode3 = entries
             .iter()
             .find(|entry| entry["path"] == "mode3.db")
             .expect("mode3.db must be declared");
         assert_eq!(mode3["entry_id"], "magic-context/mode3-store");
-        assert_eq!(mode3["class"], store["class"]);
-        assert_eq!(mode3["mechanism"], store["mechanism"]);
-        assert_eq!(mode3["writer_interaction"], store["writer_interaction"]);
+        assert_eq!(mode3["class"], "portable");
+        assert_eq!(mode3["mechanism"], "whole-db");
+        assert_eq!(mode3["writer_interaction"], "backup-api-live");
         let identities = entries
             .iter()
             .find(|entry| entry["path"] == PROJECT_IDENTITIES_DIR)

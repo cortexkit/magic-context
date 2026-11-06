@@ -14,13 +14,6 @@
       ]
     },
     {
-      "entry_id": "magic-context/module-store",
-      "class": "portable",
-      "mechanism": "whole-db",
-      "path": "store.db",
-      "writer_interaction": "backup-api-live"
-    },
-    {
       "entry_id": "magic-context/mode3-store",
       "class": "portable",
       "mechanism": "whole-db",
@@ -104,6 +97,13 @@
       "class": "rebuild",
       "mechanism": "filetree",
       "path": "model-context-limits-omp.json"
+    },
+    {
+      "entry_id": "magic-context/module-store",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "store.db",
+      "reason": "retired store of the earlier Magic Context module; no writer since the move to mode3.db"
     },
     {
       "entry_id": "magic-context/github-token",
