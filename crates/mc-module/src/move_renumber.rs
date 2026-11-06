@@ -68,7 +68,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cortexkit_role_compaction::read::Cursor;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -426,7 +426,9 @@ impl Numbering {
             )
             .optional()
             .map_err(|error| error.to_string())?;
-        if let Some(done) = done {
+        if let Some(done) = done.filter(|text| {
+            serde_json::from_str::<Value>(text).is_ok_and(|record| record["state"] != "staging")
+        }) {
             let record: Value = serde_json::from_str(&done).unwrap_or(Value::Null);
             if record["checksum"].as_str() != Some(self.checksum.as_str()) {
                 return Err(format!(
@@ -741,45 +743,33 @@ pub fn record_key(harness: &str, session: &str) -> String {
     format!("mode3_renumber:{harness}:{session}")
 }
 
-/// Rewrite every number Magic Context stored for `session` to the runner's
-/// numbering, in one transaction with its record. Does nothing when the
-/// record of this same numbering is already there.
+/// Rewrite stored numbers using a durable plan of absolute targets. All
+/// validation precedes staging; each small write batch commits with its cursor.
+/// The checksum rejects a different transcript even during an interrupted move.
 pub fn renumber(
     conn: &mut Connection,
     harness: &str,
     session: &str,
     numbering: &Numbering,
 ) -> Result<(), String> {
-    #[cfg(test)]
-    let _measure = crate::move_in::tests::Measure::new("renumber");
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
     let key = record_key(harness, session);
-    let done: Option<String> = tx
-        .query_row(
-            "SELECT value FROM schema_migrations_meta WHERE key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    if let Some(done) = done {
-        let same = serde_json::from_str::<Value>(&done)
-            .ok()
-            .and_then(|record| record["checksum"].as_str().map(str::to_owned))
-            .is_some_and(|checksum| checksum == numbering.checksum);
-        return if same {
-            Ok(())
-        } else {
-            Err(format!(
+    if let Some(done) = crate::move_batches::record(conn, &key)? {
+        if done["checksum"].as_str() != Some(numbering.checksum.as_str()) {
+            return Err(format!(
                 "renumber_conflict: {session}'s numbers were already converted from a different transcript"
-            ))
-        };
+            ));
+        }
+        if crate::move_batches::resume(conn, &key)? {
+            return Ok(());
+        }
     }
+    let plan = crate::move_batches::Plan::default();
+    let stats = std::cell::RefCell::new(serde_json::json!({}));
     if !numbering.is_identity() {
         Rewrite {
-            tx: &tx,
+            conn,
+            plan: &plan,
+            stats: &stats,
             harness,
             session,
             numbering,
@@ -787,19 +777,10 @@ pub fn renumber(
         .all()
         .map_err(|error| error.0)?;
     }
-    tx.execute(
-        "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
-        params![
-            key,
-            serde_json::json!({
-                "checksum": numbering.checksum,
-                "alignment_warnings": numbering.alignment_warnings,
-            })
-            .to_string()
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())
+    let mut record = stats.into_inner();
+    record["checksum"] = numbering.checksum.clone().into();
+    record["alignment_warnings"] = serde_json::json!(numbering.alignment_warnings);
+    plan.stage(conn, &key, record)
 }
 
 struct Failure(String);
@@ -813,7 +794,9 @@ impl From<rusqlite::Error> for Failure {
 type Step = Result<(), Failure>;
 
 struct Rewrite<'a> {
-    tx: &'a rusqlite::Transaction<'a>,
+    conn: &'a Connection,
+    plan: &'a crate::move_batches::Plan,
+    stats: &'a std::cell::RefCell<Value>,
     harness: &'a str,
     session: &'a str,
     numbering: &'a Numbering,
@@ -863,10 +846,9 @@ impl Rewrite<'_> {
     /// Summary ranges, after checking that each summary's stored message ids
     /// name the messages the transcript has at its numbers.
     fn summaries(&self) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new("renumber/compartments");
+        self.plan.phase("renumber/compartments");
         let rows: Vec<(i64, i64, i64, i64, String, String)> = self
-            .tx
+            .conn
             .prepare(
                 "SELECT id, sequence, start_message, end_message, start_message_id, end_message_id
                  FROM compartments WHERE session_id = ?1 AND harness = ?2",
@@ -902,7 +884,7 @@ impl Rewrite<'_> {
                 .numbering
                 .range(start, end)
                 .ok_or_else(|| self.unmapped(&format!("summary {sequence}"), start, end))?;
-            self.tx.execute(
+            self.plan.execute(
                 "UPDATE compartments SET start_message = ?1, end_message = ?2 WHERE id = ?3",
                 params![first, last, id],
             )?;
@@ -913,10 +895,9 @@ impl Rewrite<'_> {
     /// The `start`..`end` range columns of `table`'s rows matching `filter`
     /// (whose `?1` is the session and `?2`, if used, the harness).
     fn ranges(&self, table: &str, start: &str, end: &str, filter: &str) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new(&format!("renumber/{table}"));
+        self.plan.phase(&format!("renumber/{table}"));
         let select = format!("SELECT id, {start}, {end} FROM {table} WHERE {filter}");
-        let mut statement = self.tx.prepare(&select)?;
+        let mut statement = self.conn.prepare(&select)?;
         let bound = if filter.contains("?2") {
             statement.query_map(params![self.session, self.harness], range_row)
         } else {
@@ -938,12 +919,14 @@ impl Rewrite<'_> {
         // land a row on a range another row hasn't left yet, so every moving
         // row first parks on a range no ordinal reaches.
         let update = format!("UPDATE {table} SET {start} = ?1, {end} = ?2 WHERE id = ?3");
+        self.plan.phase(&format!("renumber/{table}/park"));
         for (id, _, _) in &moves {
             let parked = PARKED_ORDINAL + id;
-            self.tx.execute(&update, params![parked, parked, id])?;
+            self.plan.execute(&update, params![parked, parked, id])?;
         }
+        self.plan.phase(&format!("renumber/{table}/place"));
         for (id, first, last) in moves {
-            self.tx.execute(&update, params![first, last, id])?;
+            self.plan.execute(&update, params![first, last, id])?;
         }
         Ok(())
     }
@@ -951,10 +934,9 @@ impl Rewrite<'_> {
     /// The source ranges inside `table`'s `source_candidate_provenance`
     /// lists that belong to this session (and harness, where recorded).
     fn provenance(&self, table: &str, has_harness: bool) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new(&format!("renumber/{table}"));
+        self.plan.phase(&format!("renumber/{table}"));
         let rows: Vec<(i64, String)> = self
-            .tx
+            .conn
             .prepare(&format!(
                 "SELECT id, source_candidate_provenance FROM {table}
                  WHERE source_candidate_provenance LIKE '%' || ?1 || '%'"
@@ -991,7 +973,7 @@ impl Rewrite<'_> {
                 changed = true;
             }
             if changed {
-                self.tx.execute(
+                self.plan.execute(
                     &format!("UPDATE {table} SET source_candidate_provenance = ?1 WHERE id = ?2"),
                     params![list.to_string(), id],
                 )?;
@@ -1003,28 +985,30 @@ impl Rewrite<'_> {
     /// Per-message depth rows, keyed by number: each moves to its message's
     /// entry; a marker row's has nothing to describe and goes.
     fn compression_depth(&self) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new("renumber/compression_depth");
-        let rows: Vec<(i64, i64)> = self
-            .tx
+        self.plan.phase("renumber/compression_depth/delete");
+        let rows: Vec<(i64, i64, i64)> = self
+            .conn
             .prepare(
-                "SELECT message_ordinal, depth FROM compression_depth
+                "SELECT rowid, message_ordinal, depth FROM compression_depth
                  WHERE session_id = ?1 AND harness = ?2",
             )?
             .query_map(params![self.session, self.harness], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?
             .collect::<Result<_, _>>()?;
-        self.tx.execute(
-            "DELETE FROM compression_depth WHERE session_id = ?1 AND harness = ?2",
-            params![self.session, self.harness],
-        )?;
-        for (ordinal, depth) in rows {
+        for (id, _, _) in &rows {
+            self.plan.execute(
+                "DELETE FROM compression_depth WHERE rowid = ?1",
+                params![id],
+            )?;
+        }
+        self.plan.phase("renumber/compression_depth/insert");
+        for (_, ordinal, depth) in rows {
             let Some(numbered) = self.numbering.at(ordinal) else {
                 return Err(self.unmapped("a compression depth", ordinal, ordinal));
             };
             if let Some(entry) = numbered.entry {
-                self.tx.execute(
+                self.plan.execute(
                     "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![self.session, entry as i64, depth, self.harness],
@@ -1037,10 +1021,9 @@ impl Rewrite<'_> {
     /// Positions in the session: note anchors and the search indexer's
     /// progress.
     fn positions(&self) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new("renumber/positions");
+        self.plan.phase("renumber/notes");
         let notes: Vec<(i64, i64)> = self
-            .tx
+            .conn
             .prepare(
                 "SELECT id, anchor_ordinal FROM notes
                  WHERE session_id = ?1 AND harness = ?2 AND anchor_ordinal IS NOT NULL",
@@ -1050,13 +1033,13 @@ impl Rewrite<'_> {
             })?
             .collect::<Result<_, _>>()?;
         for (id, anchor) in notes {
-            self.tx.execute(
+            self.plan.execute(
                 "UPDATE notes SET anchor_ordinal = ?1 WHERE id = ?2",
                 params![self.numbering.position(anchor), id],
             )?;
         }
         let progress: Option<(i64, i64)> = self
-            .tx
+            .conn
             .query_row(
                 "SELECT last_indexed_ordinal, dirty_floor_ordinal FROM message_history_index
                  WHERE session_id = ?1",
@@ -1065,7 +1048,8 @@ impl Rewrite<'_> {
             )
             .optional()?;
         if let Some((last, dirty)) = progress {
-            self.tx.execute(
+            self.plan.phase("renumber/message_history_index");
+            self.plan.execute(
                 "UPDATE message_history_index SET last_indexed_ordinal = ?1, dirty_floor_ordinal = ?2
                  WHERE session_id = ?3",
                 params![
@@ -1083,40 +1067,51 @@ impl Rewrite<'_> {
     /// the active path go. Ids remain authoritative even when a source row's
     /// ordinal is stale or a missing Pi message's slot was only estimated.
     fn search_index(&self) -> Step {
-        #[cfg(test)]
-        let _measure = crate::move_in::tests::Measure::new("renumber/search_index");
+        self.plan.phase("renumber/message_history_source");
         let sources: Vec<String> = self
-            .tx
+            .conn
             .prepare(
                 "SELECT message_id FROM message_history_source WHERE session_id = ?1 AND harness = ?2",
             )?
             .query_map(params![self.session, self.harness], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
+        self.stats.borrow_mut()["source_rows"] = sources
+            .iter()
+            .filter(|mid| self.numbering.entry_of(mid).flatten().is_some())
+            .count()
+            .into();
         for mid in sources {
             match self.numbering.entry_of(&mid).flatten() {
-                Some(entry) => self.tx.execute(
+                Some(entry) => self.plan.execute(
                     "UPDATE message_history_source SET message_ordinal = ?1
                      WHERE session_id = ?2 AND message_id = ?3",
                     params![entry as i64, self.session, mid],
                 )?,
-                None => self.tx.execute(
+                None => self.plan.execute(
                     "DELETE FROM message_history_source WHERE session_id = ?1 AND message_id = ?2",
                     params![self.session, mid],
                 )?,
             };
         }
-        let rows: Vec<(i64, String)> = self
-            .tx
-            .prepare("SELECT rowid, message_id FROM message_history_fts WHERE session_id = ?1")?
-            .query_map(params![self.session], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<Result<_, _>>()?;
+        self.plan.phase("renumber/message_history_fts");
+        let rows = crate::move_batches::message_rows(self.conn, self.session)?;
+        let ordinal_update = crate::move_batches::ordinal_update(self.conn)?;
+        self.stats.borrow_mut()["search_rows"] = rows
+            .iter()
+            .filter(|(_, mid)| self.numbering.entry_of(mid).flatten().is_some())
+            .count()
+            .into();
         for (rowid, mid) in rows {
             match self.numbering.entry_of(&mid).flatten() {
-                Some(entry) => self.tx.execute(
-                    "UPDATE message_history_fts SET message_ordinal = ?1 WHERE rowid = ?2",
+                Some(entry) => self.plan.execute(
+                    // The validated UNINDEXED content-column path avoids
+                    // reindexing unchanged tokens on every small commit.
+                    // No token count or ranking depends on this metadata;
+                    // a different FTS layout uses its public UPDATE instead.
+                    ordinal_update,
                     params![entry as i64, rowid],
                 )?,
-                None => self.tx.execute(
+                None => self.plan.execute(
                     "DELETE FROM message_history_fts WHERE rowid = ?1",
                     params![rowid],
                 )?,
@@ -1124,26 +1119,34 @@ impl Rewrite<'_> {
         }
         // The rowid map points each message number at its search row; it
         // follows the rows it points at.
-        let mapped: Vec<(i64, Option<i64>, Option<i64>)> = self
-            .tx
+        self.plan.phase("renumber/message_fts_rowid_map/delete");
+        let mapped: Vec<(i64, i64, Option<i64>, Option<String>)> = self
+            .conn
             .prepare(
-                "SELECT m.fts_rowid, m.message_time_ms, f.message_ordinal
+                "SELECT m.rowid, m.fts_rowid, m.message_time_ms, f.message_id
                  FROM message_fts_rowid_map m
                  LEFT JOIN message_history_fts f ON f.rowid = m.fts_rowid
                  WHERE m.session_id = ?1",
             )?
             .query_map(params![self.session], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<Result<_, _>>()?;
-        self.tx.execute(
-            "DELETE FROM message_fts_rowid_map WHERE session_id = ?1",
-            params![self.session],
-        )?;
+        for (id, _, _, _) in &mapped {
+            self.plan.execute(
+                "DELETE FROM message_fts_rowid_map WHERE rowid = ?1",
+                params![id],
+            )?;
+        }
+        self.plan.phase("renumber/message_fts_rowid_map/insert");
         let mut kept = HashSet::new();
-        for (rowid, time, ordinal) in mapped {
+        for (_, rowid, time, mid) in mapped {
+            let ordinal = mid
+                .as_deref()
+                .and_then(|mid| self.numbering.entry_of(mid).flatten())
+                .map(|n| n as i64);
             if let Some(ordinal) = ordinal.filter(|ordinal| kept.insert(*ordinal)) {
-                self.tx.execute(
+                self.plan.execute(
                     "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![self.session, ordinal, rowid, time],
@@ -1152,12 +1155,13 @@ impl Rewrite<'_> {
         }
         // Messages the indexer skipped as too large, recorded by message id.
         let skips: Vec<(String, String)> = self
-            .tx
+            .conn
             .prepare(
                 "SELECT key, value FROM schema_migrations_meta WHERE key LIKE 'message_index_skip:%'",
             )?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
+        self.plan.phase("renumber/message_index_skip");
         for (key, value) in skips {
             let Some(Ok(Value::Array(names))) = key
                 .strip_prefix("message_index_skip:")
@@ -1178,14 +1182,14 @@ impl Rewrite<'_> {
             match (entry, serde_json::from_str::<Value>(&value)) {
                 (Some(entry), Ok(mut record)) if record.get("ordinal").is_some() => {
                     record["ordinal"] = (entry as i64).into();
-                    self.tx.execute(
+                    self.plan.execute(
                         "UPDATE schema_migrations_meta SET value = ?1 WHERE key = ?2",
                         params![record.to_string(), key],
                     )?;
                 }
                 (Some(_), _) => {}
                 (None, _) => {
-                    self.tx.execute(
+                    self.plan.execute(
                         "DELETE FROM schema_migrations_meta WHERE key = ?1",
                         params![key],
                     )?;

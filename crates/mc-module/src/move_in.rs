@@ -29,14 +29,15 @@
 //! index) is keyed by harness and host session id, so the moved session
 //! finds it where it is: nothing is copied.
 //!
-//! The move runs with ck-mc and the session's host stopped, so nothing else
-//! writes either store meanwhile.
+//! The source host and indexers must be stopped, or the target session held:
+//! no writer may change that session until the fence is committed. Other
+//! sessions may keep writing to the shared context.db between move batches.
 
 use cortexkit_role_compaction::read::{Cursor, SessionRef};
 use cortexkit_role_compaction::rules::ProviderRules;
 use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
 use cortexkit_role_compaction::view::View;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -305,17 +306,17 @@ pub fn move_in(
         "moved_at": request.now,
     });
     db.with_connection(|conn| {
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
-        for fence in &fences {
-            tx.execute(
-                "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
-                params![fence, record.to_string()],
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        tx.commit().map_err(|error| error.to_string())
+        verify_source_unchanged(conn, &key.session, source, &key.harness)?;
+        crate::move_batches::transaction(conn, "fence", |tx| {
+            for fence in &fences {
+                tx.execute(
+                    "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, ?2)",
+                    params![fence, record.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
     })?;
     Ok(Moved {
         view,
@@ -324,66 +325,97 @@ pub fn move_in(
     })
 }
 
-/// Move every row `context.db` holds for `session` under harness `from` to
-/// harness `to`, in one transaction: every table with both a `session_id`
-/// and a `harness` column, found from the schema, so a table added later is
-/// covered too. Refuses (`harness_conflict`), changing nothing, when a table
-/// already holds rows for the session under both harnesses. A retry after
-/// the rows moved finds none under `from` and changes nothing.
+/// Move every session/harness table, including schema-discovered virtual
+/// tables. A mixed source/destination table is a conflict unless a durable
+/// plan proves that the split belongs to an interrupted move.
 fn rekey(conn: &mut Connection, session: &str, from: &str, to: &str) -> Result<(), String> {
-    #[cfg(test)]
-    let _measure = tests::Measure::new("rekey");
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    let tables: Vec<String> = {
-        let mut statement = tx
-            .prepare(
-                "SELECT m.name FROM sqlite_master m
-                  WHERE m.type = 'table'
-                    AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'session_id')
-                    AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'harness')
-                  ORDER BY m.name",
-            )
-            .map_err(|error| error.to_string())?;
-        let names = statement
-            .query_map([], |row| row.get(0))
-            .map_err(|error| error.to_string())?
-            .collect::<Result<_, _>>()
-            .map_err(|error| error.to_string())?;
-        names
-    };
-    let count = |table: &str, harness: &str| -> Result<i64, String> {
-        tx.query_row(
-            &format!("SELECT count(*) FROM \"{table}\" WHERE session_id = ?1 AND harness = ?2"),
-            params![session, harness],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())
-    };
-    let mut moving = Vec::new();
-    for table in &tables {
-        let (old, new) = (count(table, from)?, count(table, to)?);
-        if old > 0 && new > 0 {
+    let key = format!("mode3_rekey:{session}");
+    if let Some(record) = crate::move_batches::record(conn, &key)? {
+        if record["from"] != from || record["to"] != to {
+            return Err(format!(
+                "harness_conflict: {session} already has a move from {} to {}",
+                record["from"], record["to"]
+            ));
+        }
+    }
+    if crate::move_batches::resume(conn, &key)? {
+        return Ok(());
+    }
+    let plan = crate::move_batches::Plan::default();
+    for table in crate::move_batches::session_tables(conn)? {
+        let rows = crate::move_batches::harness_rows(conn, &table, session)?;
+        let old = rows.iter().any(|(_, h)| h == from);
+        let new = rows.iter().any(|(_, h)| h == to);
+        if old && new {
             return Err(format!(
                 "harness_conflict: {table} holds rows for {session} under both {from} and {to}"
             ));
         }
-        if old > 0 {
-            moving.push(table);
+        plan.phase(&format!("rekey/{table}"));
+        let sql = format!(
+            "UPDATE {} SET harness=?1 WHERE rowid=?2",
+            crate::move_batches::quoted(&table)
+        );
+        for (id, harness) in rows {
+            if harness == from {
+                plan.execute(&sql, params![to, id])
+                    .map_err(|e| e.to_string())?;
+            }
         }
     }
-    for table in moving {
-        #[cfg(test)]
-        let _measure = tests::Measure::new(&format!("rekey/{table}"));
-        tx.execute(
-            &format!("UPDATE \"{table}\" SET harness = ?3 WHERE session_id = ?1 AND harness = ?2"),
-            params![session, from, to],
-        )
-        .map_err(|error| error.to_string())?;
+    plan.stage(conn, &key, serde_json::json!({"from":from,"to":to}))
+}
+
+fn verify_source_unchanged(
+    conn: &Connection,
+    session: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    if from != to {
+        for table in crate::move_batches::session_tables(conn)? {
+            let remaining = crate::move_batches::harness_rows(conn, &table, session)?
+                .into_iter()
+                .filter(|(_, h)| h == from)
+                .count();
+            if remaining > 0 {
+                return Err(source_changed(session, &table, remaining));
+            }
+        }
     }
-    tx.commit().map_err(|error| error.to_string())
+    if let Some(progress) =
+        crate::move_batches::record(conn, &crate::move_renumber::record_key(from, session))?
+    {
+        if let Some(expected) = progress["source_rows"].as_u64() {
+            let found: u64 = conn.query_row("SELECT count(*) FROM message_history_source WHERE session_id=?1 AND harness IN (?2,?3)", params![session,from,to],|row| row.get(0)).map_err(|e| e.to_string())?;
+            if found != expected {
+                return Err(source_changed(
+                    session,
+                    "message_history_source",
+                    found.abs_diff(expected) as usize,
+                ));
+            }
+        }
+        if let Some(expected) = progress["search_rows"].as_u64() {
+            let found = crate::move_batches::message_rows(conn, session)
+                .map_err(|e| e.to_string())?
+                .len() as u64;
+            if found != expected {
+                return Err(source_changed(
+                    session,
+                    "message_history_fts",
+                    found.abs_diff(expected) as usize,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_changed(session: &str, table: &str, rows: usize) -> String {
+    format!("move_source_changed: {session}: {rows} rows appeared or changed in {table}; stop the source host and its indexers or hold the session before rerunning move-in")
 }
 
 #[cfg(test)]
+#[path = "move_in/lock_tests.rs"]
 pub(crate) mod tests;

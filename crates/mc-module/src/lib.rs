@@ -64,6 +64,7 @@ pub(crate) mod memory_sync;
 pub mod memory_tool;
 pub mod memory_writes;
 pub mod module;
+mod move_batches;
 pub mod move_in;
 pub mod move_renumber;
 pub mod mural;
