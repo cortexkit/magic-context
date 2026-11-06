@@ -277,9 +277,13 @@ function recallSidebarSnapshot(sessionId: string, fallback: SidebarSnapshot): Si
 export async function loadSidebarSnapshot(
     sessionId: string,
     directory: string,
+    options?: { throwOnFailure?: boolean },
 ): Promise<SidebarSnapshot> {
     const empty: SidebarSnapshot = { ...EMPTY_SNAPSHOT, sessionId };
-    if (!rpcClient) return recallSidebarSnapshot(sessionId, empty);
+    if (!rpcClient) {
+        if (options?.throwOnFailure) throw new Error("RPC client is not initialized");
+        return recallSidebarSnapshot(sessionId, empty);
+    }
     try {
         const result = await callSessionRpc<SidebarSnapshot>(
             directory,
@@ -291,6 +295,8 @@ export async function loadSidebarSnapshot(
             },
         );
         if ((result as unknown as Record<string, unknown>).error) {
+            if (options?.throwOnFailure)
+                throw new Error(String((result as unknown as Record<string, unknown>).error));
             // Snapshot-build errors are explicit failure envelopes, equivalent to
             // a transport failure: retain the last known-good client snapshot.
             return recallSidebarSnapshot(sessionId, empty);
@@ -309,7 +315,8 @@ export async function loadSidebarSnapshot(
         // owned exclusively by the server side.
         rememberSidebarSnapshot(result);
         return result;
-    } catch {
+    } catch (error) {
+        if (options?.throwOnFailure) throw error;
         return recallSidebarSnapshot(sessionId, empty);
     }
 }
