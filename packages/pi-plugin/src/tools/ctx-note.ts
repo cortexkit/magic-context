@@ -95,7 +95,7 @@ const ParamsSchema = Type.Object(
 			}),
 		),
 		note_ids: Type.Array(
-			Type.Number({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 			{
 				maxItems: 50,
 				description:
@@ -127,12 +127,21 @@ const ParamsSchema = Type.Object(
 
 type CtxNoteParams = Static<typeof ParamsSchema>;
 
-/** 在宿主转换参数前拒绝非字符串正文，避免转换改变原始含义。 */
-function rejectInvalidContent(args: unknown): void {
+/** Reject invalid raw arguments before host coercion. */
+function rejectInvalidNoteArguments(args: unknown): void {
 	if (args === null || typeof args !== "object") return;
 	const record = args as Record<string, unknown>;
 	if (record.content !== undefined && typeof record.content !== "string") {
 		throw new Error("Error: 'content' must be a string.");
+	}
+	if (
+		record.note_ids !== undefined &&
+		(!Array.isArray(record.note_ids) ||
+			record.note_ids.some(
+				(id) => typeof id !== "number" || !Number.isSafeInteger(id) || id < 1,
+			))
+	) {
+		throw new Error("Error: 'note_ids' must be an array of positive note IDs.");
 	}
 }
 
@@ -285,7 +294,7 @@ export function createCtxNoteTool(
 			: withoutSmartNoteText(CTX_NOTE_DESCRIPTION),
 		parameters,
 		prepareArguments(args) {
-			rejectInvalidContent(args);
+			rejectInvalidNoteArguments(args);
 			return args as Static<typeof ParamsSchema>;
 		},
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {

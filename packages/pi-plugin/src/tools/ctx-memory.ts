@@ -129,7 +129,7 @@ const ParamsShape = {
 				"Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
 		},
 	),
-	ids: Type.Array(Type.Number({ minimum: 1 }), {
+	ids: Type.Array(Type.Number(), {
 		description:
 			"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
 	}),
@@ -184,14 +184,20 @@ const DreamerParamsSchema = Type.Object(
 
 type CtxMemoryParams = Static<typeof DreamerParamsSchema>;
 
-/** 在宿主转换参数前拒绝非字符串正文及非数组编号，避免转换改变原始含义。 */
+/** Reject invalid raw arguments before host coercion. */
 function rejectInvalidMemoryArguments(args: unknown): void {
 	if (args === null || typeof args !== "object") return;
 	const record = args as Record<string, unknown>;
 	if (record.content !== undefined && typeof record.content !== "string") {
 		throw new Error("Error: 'content' must be a string.");
 	}
-	if (record.ids !== undefined && !Array.isArray(record.ids)) {
+	if (
+		record.ids !== undefined &&
+		(!Array.isArray(record.ids) ||
+			record.ids.some(
+				(id) => typeof id !== "number" || !Number.isSafeInteger(id) || id < 1,
+			))
+	) {
 		throw new Error("Error: 'ids' must be an array of positive memory IDs.");
 	}
 }

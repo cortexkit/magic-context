@@ -2109,7 +2109,7 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
-		it("正文拒绝非字符串，缺失及字符串保持原样", () => {
+		it("rejects non-string content and preserves omitted or string content", () => {
 			const db = createTestDb();
 			try {
 				const tool = createCtxMemoryTool({ db });
@@ -2131,7 +2131,7 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
-		it("小数编号不能修改已有记忆", async () => {
+		it("rejects invalid raw IDs before conversion without changing memories or mutations", async () => {
 			for (const allowDreamerActions of [false, true]) {
 				const db = createTestDb();
 				try {
@@ -2141,6 +2141,8 @@ describe("createCtxMemoryTool", () => {
 						embeddingEnabled: false,
 						allowDreamerActions,
 					});
+					const prepareArguments = tool.prepareArguments;
+					if (!prepareArguments) throw new Error("prepareArguments is missing");
 					const ctx = fakeContext("ses-fraction-memory") as never;
 					const signal = new AbortController().signal;
 					for (const content of ["原有记忆一", "原有记忆二"]) {
@@ -2158,38 +2160,40 @@ describe("createCtxMemoryTool", () => {
 					const mutations = db
 						.prepare("SELECT * FROM memory_mutation_log ORDER BY id")
 						.all();
-					for (const action of ["get", "update", "archive", "merge"] as const) {
-						for (const id of [1.5, "1.5"]) {
+					for (const action of [
+						"write",
+						"get",
+						"update",
+						"archive",
+						"merge",
+					] as const) {
+						for (const ids of [
+							null,
+							"3",
+							[null],
+							["3"],
+							[1.5],
+							["1.5"],
+							[0],
+							[-3],
+							[1e20],
+							[Number.MAX_SAFE_INTEGER + 1],
+						]) {
 							const raw = {
 								action,
 								category: "PROJECT_RULES",
 								content: "修改内容",
-								ids: action === "merge" ? [id, 2] : [id],
+								ids,
 							};
-							const prepared = tool.prepareArguments?.(raw) ?? raw;
-							const converted = (
-								typeof id === "number"
-									? Value.Convert(tool.parameters, prepared)
-									: prepared
-							) as {
-								action: typeof action;
-								category: string;
-								content: string;
-								ids: number[];
-							};
-							expect(converted.ids[0]).toBe(id);
-							expect(Value.Check(tool.parameters, converted)).toBe(
-								typeof id === "number",
+							let converted = false;
+							expect(() => {
+								const prepared = prepareArguments(raw);
+								converted = true;
+								Value.Convert(tool.parameters, prepared);
+							}).toThrow(
+								"Error: 'ids' must be an array of positive memory IDs.",
 							);
-							const result = await tool.execute(
-								"fraction",
-								converted,
-								signal,
-								undefined,
-								ctx,
-							);
-							expect(result.isError).toBe(true);
-							expect(result.content[0]?.text).toContain("integer");
+							expect(converted).toBe(false);
 							expect([getMemoryById(db, 1), getMemoryById(db, 2)]).toEqual(
 								before,
 							);
@@ -2200,35 +2204,62 @@ describe("createCtxMemoryTool", () => {
 							).toEqual(mutations);
 						}
 					}
-					const write = await tool.execute(
-						"write-filler",
-						{
+					for (const ids of [[], [1], [Number.MAX_SAFE_INTEGER], undefined]) {
+						const args = {
 							action: "write",
 							category: "PROJECT_RULES",
-							content: "无关编号",
-							ids: [1.5],
-						},
+							content: "null",
+							ids,
+						};
+						expect(prepareArguments(args)).toBe(args);
+					}
+					const missing = {
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "null",
+					};
+					expect(prepareArguments(missing)).toBe(missing);
+					const get = await tool.execute(
+						"get-valid",
+						prepareArguments({
+							action: "get",
+							category: "PROJECT_RULES",
+							content: "",
+							ids: [1],
+						}),
+						signal,
+						undefined,
+						ctx,
+					);
+					expect(get.isError).not.toBe(true);
+					const write = await tool.execute(
+						"write-null",
+						prepareArguments({ ...missing, ids: [] }),
 						signal,
 						undefined,
 						ctx,
 					);
 					expect(write.isError).not.toBe(true);
+					expect(getMemoryById(db, 3)?.content).toBe("null");
 				} finally {
 					closeQuietly(db);
 				}
 			}
 		});
 
-		it("rejects memory id 0 at the provider-schema level", () => {
+		it("keeps the provider schema unchanged for memory IDs", () => {
 			const db = createTestDb();
 			try {
 				const tool = createCtxMemoryTool({ db });
+				const prepareArguments = tool.prepareArguments;
+				if (!prepareArguments) throw new Error("prepareArguments is missing");
 				const base = {
 					action: "get",
 					category: "PROJECT_RULES",
 					content: "",
 				};
-				expect(Value.Check(tool.parameters, { ...base, ids: [0] })).toBe(false);
+				expect(Value.Check(tool.parameters, { ...base, ids: [0] })).toBe(true);
+				expect(() => prepareArguments({ ...base, ids: [0] })).toThrow();
 				expect(Value.Check(tool.parameters, { ...base, ids: [1] })).toBe(true);
 				expect(Value.Check(tool.parameters, { ...base, ids: [] })).toBe(true);
 				expect(
