@@ -5,7 +5,7 @@
     "": {},
     "packages/cli": {
       "name": "@cortexkit/magic-context",
-      "version": "0.49.20",
+      "version": "0.49.35",
       "bin": {
         "magic-context": "dist/index.js",
       },
@@ -77,7 +77,7 @@
     },
     "packages/pi-plugin": {
       "name": "@cortexkit/pi-magic-context",
-      "version": "0.49.20",
+      "version": "0.49.35",
       "dependencies": {
         "@cortexkit/subc-client": "0.11.1",
         "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
@@ -133,8 +133,9 @@
     },
     "packages/plugin": {
       "name": "@cortexkit/opencode-magic-context",
-      "version": "0.49.20",
+      "version": "0.49.35",
       "dependencies": {
+        "@cortexkit/common-auth": "^0.38.0",
         "@cortexkit/subc-client": "0.11.1",
         "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
         "@opencode-ai/plugin": "^1.17.11",
@@ -435,6 +436,8 @@
 
     "@cortexkit/claustrum-client": ["@cortexkit/claustrum-client@0.5.0", "", { "dependencies": { "@cortexkit/subc-client": "^0.16.0" } }, "sha512-+mRG/h3YZufrEs1p12W+Y+NSnWIUiBcpppMTgFA5tAQ7t8WIWoMEmn0Mf7Cp8251SKChW8dN3xOZqEM7N6gyAg=="],
 
+    "@cortexkit/common-auth": ["@cortexkit/common-auth@0.38.0", "", { "dependencies": { "@cortexkit/private-files": "^0.2.2", "jsonc-parser": "^3.3.1" }, "peerDependencies": { "@cortexkit/claustrum-client": ">=0.6.2", "@cortexkit/subc-client": "^0.16.0 || ^0.22.0", "@opencode/plugin": ">=2.0.21", "@opentui/core": ">=0.4.5", "@opentui/solid": ">=0.4.5", "solid-js": ">=1.9.12 <2" }, "optionalPeers": ["@cortexkit/claustrum-client", "@cortexkit/subc-client", "@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js"] }, "sha512-YDXtwuuj/gz4h/bPO+UAVItjo3ZMYw9DhccEf4DWAk8dr+Rk/uo/cVUeTRbC4xXE7FXTeBr1HaRnyG7drZIg3w=="],
+
     "@cortexkit/magic-context": ["@cortexkit/magic-context@workspace:packages/cli"],
 
     "@cortexkit/magic-context-dashboard": ["@cortexkit/magic-context-dashboard@workspace:packages/dashboard"],
@@ -444,6 +447,8 @@
     "@cortexkit/opencode-magic-context-e2e": ["@cortexkit/opencode-magic-context-e2e@workspace:packages/e2e-tests"],
 
     "@cortexkit/pi-magic-context": ["@cortexkit/pi-magic-context@workspace:packages/pi-plugin"],
+
+    "@cortexkit/private-files": ["@cortexkit/private-files@0.2.2", "", {}, "sha512-BdRxi4mzPkTUiZxKTlQV/RsESk5f34+sLk0qQLv1QlBQdkq2zw8yc0b3dm1qmZ5RfeChiBKEGgL6Qw31RCSaeA=="],
 
     "@cortexkit/retina-local-fs": ["@cortexkit/retina-local-fs@workspace:packages/retina-local-fs"],
 
