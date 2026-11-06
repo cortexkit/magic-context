@@ -1198,11 +1198,11 @@ export class NativeFoldReplay {
                     replay = { ...replay, blocked: false };
                     const replayAfter = replay.floor.after;
                     const replayStart = replay.floor.kind === "start";
+                    const baseline = this.servedBaseline(draft);
                     captured = native.filter((message) => {
                         if (effortPart(message)) return false;
                         const id = nativeRowID(message);
                         if (HEAD_IDS.some((head) => head === id)) return false;
-                        const baseline = this.servedBaseline(draft);
                         if (!id)
                             return !(
                                 baseline &&

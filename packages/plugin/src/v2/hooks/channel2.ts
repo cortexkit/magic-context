@@ -11,6 +11,11 @@ import {
     currentReclaimableToolOutputCount,
     evaluateChannel2,
 } from "../../hooks/magic-context/ctx-reduce-nudge";
+import {
+    admittedSynthetic,
+    clearSyntheticAdmissions,
+    forgetSyntheticAdmission,
+} from "./synthetic-admission";
 import type { V2Context } from "./types";
 
 // These are candidates, not admission decisions. Storage still authenticates every
@@ -33,6 +38,20 @@ export function syntheticCandidates(
 
 export function clearSyntheticCandidates(context: Pick<V2Context, "storage">): void {
     pendingCandidates.delete(context.storage);
+    clearSyntheticAdmissions(context.storage);
+}
+
+export function observeSyntheticAdmissionEvent(
+    context: Pick<V2Context, "storage">,
+    event: { type?: string; data?: { sessionID?: string } },
+): void {
+    const sessionID = event.data?.sessionID;
+    if (
+        !sessionID ||
+        !(event.type === "session.deleted" || event.type?.startsWith("session.revert."))
+    )
+        return;
+    forgetSyntheticAdmission(context.storage, sessionID);
 }
 
 /** Record the admitted identity before sending; recognition never relies on its prefix. */
@@ -42,6 +61,7 @@ export async function deliverSynthetic(
     text: string,
 ): Promise<string> {
     const id = `msg_${randomBytes(12).toString("hex")}`;
+    forgetSyntheticAdmission(context.storage, sessionID);
     await context.storage.set(`synthetic/${sessionID}/${id}`, { id });
     let candidates = pendingCandidates.get(context.storage);
     if (!candidates) {
@@ -58,8 +78,7 @@ export async function isAdmittedSynthetic(
     sessionID: string,
     id: string,
 ): Promise<boolean> {
-    const record = await context.storage.get(`synthetic/${sessionID}/${id}`);
-    return record !== null && typeof record === "object" && "id" in record && record.id === id;
+    return admittedSynthetic(context.storage, sessionID, id);
 }
 
 export async function deliverPendingChannel2(
