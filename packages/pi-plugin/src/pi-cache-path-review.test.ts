@@ -131,13 +131,14 @@ function fixture(
 	};
 }
 
-it("rewind cancellation shares the late execute-reclaim rebuild permission", async () => {
+it("rewind cancellation cannot fund a rebuild but restoration rides live execute reclaim", async () => {
 	const f = fixture("review-late-rebuild", [
 		userMessage("initial request", 1),
 		assistantToolCall("call", "read", {}, 2),
 		toolResultMessage("call", "ORIGINAL_REWOUND_OUTPUT", 3),
 		assistantMessage("large answer ".repeat(4000), 4),
-		userMessage("abandoned branch", 5),
+		assistantMessage("live answer ".repeat(4000), 5),
+		userMessage("abandoned branch", 6),
 	]);
 	const passes: boolean[] = [];
 	const restore = __test.setPipelineResultObserverForTests((id, result) => {
@@ -151,23 +152,53 @@ it("rewind cancellation shares the late execute-reclaim rebuild permission", asy
 		const text = getTagsBySession(f.db, f.session).find(
 			(tag) => tag.messageId === "entry-3:p0",
 		)!;
+		const liveText = getTagsBySession(f.db, f.session).find(
+			(tag) => tag.messageId === "entry-4:p0",
+		)!;
 		expect(text).toBeDefined();
+		expect(liveText).toBeDefined();
 		await f.recordReductionLeaf();
 		updateTagStatus(f.db, f.session, tool.tagNumber, "dropped");
 		queuePendingOp(f.db, f.session, text.tagNumber, "drop");
 		await f.pass();
-		f.rewind(4);
+		f.rewind(5);
+		const previous = await f.pass();
 		passes.length = 0;
-		const rebuilt = await f.pass(70_000, 70);
-		expect(passes).toEqual([true]);
+		const deferred = await f.pass(70_000, 70);
+		expect(passes).toEqual([false]);
 		expect(getPendingOps(f.db, f.session)).toEqual([]);
 		const statuses = getTagsBySession(f.db, f.session);
 		expect({
 			oldDrop: statuses.find((tag) => tag.tagNumber === tool.tagNumber)?.status,
 			abandonedQueue: statuses.find((tag) => tag.tagNumber === text.tagNumber)
 				?.status,
-		}).toEqual({ oldDrop: "active", abandonedQueue: "active" });
+		}).toEqual({ oldDrop: "dropped", abandonedQueue: "active" });
+		expect(JSON.stringify(deferred)).toBe(JSON.stringify(previous));
+		expect(JSON.stringify(deferred)).not.toContain("ORIGINAL_REWOUND_OUTPUT");
+		await f.recordReductionLeaf();
+		queuePendingOp(f.db, f.session, liveText.tagNumber, "drop");
+		passes.length = 0;
+		const rebuilt = await f.pass(70_000, 70);
+		expect(passes).toEqual([true]);
+		expect(getPendingOps(f.db, f.session)).toEqual([]);
+		const rebuiltStatuses = getTagsBySession(f.db, f.session);
+		expect({
+			oldDrop: rebuiltStatuses.find((tag) => tag.tagNumber === tool.tagNumber)
+				?.status,
+			abandonedQueue: rebuiltStatuses.find(
+				(tag) => tag.tagNumber === text.tagNumber,
+			)?.status,
+			liveQueue: rebuiltStatuses.find(
+				(tag) => tag.tagNumber === liveText.tagNumber,
+			)?.status,
+		}).toEqual({
+			oldDrop: "active",
+			abandonedQueue: "active",
+			liveQueue: "dropped",
+		});
 		expect(JSON.stringify(rebuilt)).toContain("ORIGINAL_REWOUND_OUTPUT");
+		expect(JSON.stringify(rebuilt)).toContain("large answer ".repeat(100));
+		expect(JSON.stringify(rebuilt)).not.toContain("live answer ".repeat(100));
 	} finally {
 		restore();
 		f.close();
@@ -197,7 +228,7 @@ it("provider-overflow recovery sends a fitting request with a supported system e
 	}
 });
 
-it("a deferred rewind replays its prefix and leaves off-branch operations untouched across restart", async () => {
+it("a deferred rewind cancels abandoned operations but replays its prefix across restart", async () => {
 	const f = fixture("review-rewind-replay", [
 		userMessage("initial request", 1),
 		assistantToolCall("call", "read", {}, 2),
@@ -220,7 +251,7 @@ it("a deferred rewind replays its prefix and leaves off-branch operations untouc
 			dropped.messages.slice(0, deferred.messages.length),
 		);
 		expect(JSON.stringify(await f.pass())).toBe(JSON.stringify(deferred));
-		expect(getPendingOps(f.db, f.session)).toHaveLength(1);
+		expect(getPendingOps(f.db, f.session)).toEqual([]);
 		f.restart();
 		signalPiPendingMaterialization(f.session, "user_flush");
 		const restored = await f.pass();

@@ -117,7 +117,39 @@ export function piDropBranchIds(
 	return ids;
 }
 
-/** Never grants a rebuild: restoration must ride an independently authorized rewrite. */
+/**
+ * Cancel abandoned queued drops on every pass before estimating reclaim: they
+ * have changed no served bytes, whereas restoring applied drops needs a rebuild.
+ * Returning to the abandoned branch loses a cancelled mark; the old code also
+ * cancelled it at the next rebuild, and the model can mark the content again.
+ */
+export function cancelPiAbandonedPendingDrops(
+	db: Database,
+	sessionId: string,
+	ids: ReadonlySet<string> | null,
+): number {
+	if (!ids) return 0;
+	return db
+		.transaction(() => {
+			const document = state(db, sessionId);
+			const saved = journal(document[KEY]);
+			const offPending = Object.entries(saved.pending).filter(
+				([, leaf]) => !ids.has(leaf),
+			);
+			if (!offPending.length) return 0;
+			for (const [tag] of offPending) {
+				db.prepare(
+					"DELETE FROM pending_ops WHERE session_id = ? AND tag_id = ?",
+				).run(sessionId, Number(tag));
+				delete saved.pending[tag];
+			}
+			save(db, sessionId, document, saved);
+			return offPending.length;
+		})
+		.immediate();
+}
+
+/** Never grants a rebuild: applied-drop restoration must ride an authorized rewrite. */
 export function reconcilePiDropBranches(
 	db: Database,
 	sessionId: string,
@@ -132,10 +164,7 @@ export function reconcilePiDropBranches(
 			const offBranch = Object.entries(saved.drops).filter(
 				([, leaf]) => !ids.has(leaf),
 			);
-			const offPending = Object.entries(saved.pending).filter(
-				([, leaf]) => !ids.has(leaf),
-			);
-			if (!offBranch.length && !offPending.length) return 0;
+			if (!offBranch.length) return 0;
 			const native = getNativeReplayState(db, sessionId);
 			let restored = 0;
 			for (const [tag] of offBranch) {
@@ -151,12 +180,6 @@ export function reconcilePiDropBranches(
 					if (row.type === "tool") native.toolInputs.delete(row.message_id);
 				}
 				delete saved.drops[tag];
-			}
-			for (const [tag] of offPending) {
-				db.prepare(
-					"DELETE FROM pending_ops WHERE session_id = ? AND tag_id = ?",
-				).run(sessionId, Number(tag));
-				delete saved.pending[tag];
 			}
 			if (
 				restored &&

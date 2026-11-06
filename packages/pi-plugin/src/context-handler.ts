@@ -322,6 +322,7 @@ import {
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import {
+	cancelPiAbandonedPendingDrops,
 	piDropBranchIds,
 	reconcilePiDropBranches,
 	trackPiDropLeaf,
@@ -8960,6 +8961,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.sessionId,
 		dropBranchIds ? ([...dropBranchIds].at(-1) ?? null) : null,
 	);
+	cancelPiAbandonedPendingDrops(args.db, args.sessionId, dropBranchIds);
 	const thinkingRecovery = prepareLatestThinkingRecovery({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -10384,8 +10386,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		applyTemporalOnRide();
 	}
 	// Branch restoration rides the final permission, including late execute and
-	// signed-prefix rebuilds. Reload the drain snapshot after cancelling abandoned
-	// operations so an earlier read cannot apply them after their rows are deleted.
+	// signed-prefix rebuilds. Refresh the drain's tag and protection snapshots to
+	// include restored content; abandoned queued drops were cancelled before pricing.
 	if (
 		reconcilePiDropBranches(
 			args.db,
