@@ -38,6 +38,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     #[cfg(unix)]
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+    if std::env::args().nth(1).as_deref() == Some("rekey-runner") {
+        return rekey_runner();
+    }
     // Read and close the inherited pipe carrying the daemon's launch nonce before
     // initialization can spawn helpers that would inherit the pipe too.
     let _ = subc_client_rs::launch_nonce();
@@ -111,6 +114,19 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
         &request,
     )?;
     println!("{}", serde_json::to_string(&moved)?);
+    Ok(())
+}
+
+fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{}", mc_module::rekey::HELP);
+        return Ok(());
+    }
+    let request = mc_module::rekey::Request::parse(args)?;
+    let context = context_db_path();
+    let summary = mc_module::rekey::rekey_runner(&store_path(&context), &context, &request)?;
+    println!("{}", serde_json::to_string(&summary)?);
     Ok(())
 }
 

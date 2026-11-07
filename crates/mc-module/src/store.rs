@@ -105,14 +105,50 @@ pub struct Store {
     #[cfg(test)]
     decision_writes: std::sync::atomic::AtomicU64,
     connection: Mutex<Connection>,
+    // Keep the offline-command interlock until after SQLite closes. The lock
+    // lives on a sidecar so it never interferes with SQLite's database locks.
+    _lease: std::fs::File,
     pub(crate) path: PathBuf,
 }
 
 /// The newest mode3.db schema this build can read and write.
 pub const SCHEMA_VERSION: u32 = 5;
 
+pub(crate) fn lock_store(path: &Path, exclusive: bool) -> Result<std::fs::File, String> {
+    let canonical = if path.exists() {
+        path.canonicalize()
+    } else {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()
+            .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+    }
+    .map_err(|error| format!("store_lock: {}: {error}", path.display()))?;
+    let mut name = canonical.into_os_string();
+    name.push(".lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(PathBuf::from(name))
+        .map_err(|error| format!("store_lock: {}: {error}", path.display()))?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    result.map_err(|error| format!("store_in_use: {}: {error}", path.display()))?;
+    Ok(file)
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
+        let lease = lock_store(path, false)?;
         let connection =
             Connection::open(path).map_err(|error| format!("store {}: {error}", path.display()))?;
         let version: u32 = connection
@@ -209,6 +245,7 @@ impl Store {
             #[cfg(test)]
             decision_writes: std::sync::atomic::AtomicU64::new(0),
             connection: Mutex::new(connection),
+            _lease: lease,
             path: path.to_owned(),
         })
     }
