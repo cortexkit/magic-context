@@ -84,10 +84,43 @@ test("dists publish before independent checks without removing preflight gates",
 });
 
 test("native producers start without waiting for unrelated preflight checks", () => {
-    for (const id of ["rust-clippy", "rust-lib-archive", "rust-mc-module-integration", "rust-workspace-crates"]) {
+    for (const id of ["rust-clippy", "rust-lib-archive", "rust-mc-module-integration", "rust-workspace-crates", "rust-dashboard"]) {
         expect(workflow.jobs[id]!.needs).toBeUndefined();
         expect(workflow.jobs["ci-summary"]!.needs).toContain(id);
     }
+});
+
+test("dashboard Rust backend runs locked tests with Linux dependencies and sibling fixtures", async () => {
+    const job = workflow.jobs["rust-dashboard"]!;
+    expect(job).toBeDefined();
+    expect(job.if).toBeUndefined();
+    expect(job.steps[0]!.uses).toBe("actions/checkout@v5");
+    expect(job.steps.some((step) => step.uses === "oven-sh/setup-bun@v2")).toBe(true);
+    expect(job.steps.some((step) => step.uses === "dtolnay/rust-toolchain@stable")).toBe(true);
+    const install = job.steps.findIndex((step) => step.run?.trim() === "bun install --frozen-lockfile");
+    const native = job.steps.findIndex((step) => step.run?.startsWith("bash scripts/ci/rust-dashboard-install-linux-dependencies.sh"));
+    const tests = job.steps.findIndex((step) => step.run?.startsWith("bash scripts/ci/rust-dashboard-test.sh"));
+    expect(install).toBeGreaterThan(-1);
+    expect(native).toBeGreaterThan(-1);
+    expect(tests).toBeGreaterThan(Math.max(install, native));
+    expect(job.steps[tests]!.run).toContain("cargo test --manifest-path packages/dashboard/src-tauri/Cargo.toml --locked");
+    expect(job.steps[tests]!.if).toBeUndefined();
+
+    const packages = (job.steps[native]!.run!.match(/sudo apt-get install -y ([^\n]+)/)?.[1] ?? "").split(/\s+/).sort();
+    expect(packages).toEqual(["libappindicator3-dev", "librsvg2-dev", "libwebkit2gtk-4.1-dev", "patchelf"]);
+    const dashboardRelease = await Bun.file(resolve(root, ".github/workflows/dashboard-release.yml")).text();
+    const releasePackages = dashboardRelease.match(/sudo apt-get install -y ([^\n]+)/)![1]!.split(/\s+/).filter((name) => name !== "xdg-utils").sort();
+    expect(packages).toEqual(releasePackages);
+
+    const cache = job.steps.find((step) => step.uses === "actions/cache@v4")!;
+    expect(cache).toBeDefined();
+    expect(job.steps.indexOf(cache)).toBeLessThan(tests);
+    expect(cache.with!.key).toContain("hashFiles('packages/dashboard/src-tauri/Cargo.lock')");
+    expect(cache.with!.path!.trim().split(/\n\s*/)).toEqual(["~/.cargo/registry", "~/.cargo/git", "packages/dashboard/src-tauri/target"]);
+    expect(workflow.jobs["ci-summary"]!.needs).toContain("rust-dashboard");
+    expect(workflow.jobs["rust-crates"]!.needs).toContain("rust-dashboard");
+    const manifest = await Bun.file(resolve(root, "packages/e2e-tests/mode-manifest.json")).json();
+    expect(manifest.header).toContain("rust-dashboard");
 });
 
 test("registry SDK graph has no retired git workspace patches", async () => {

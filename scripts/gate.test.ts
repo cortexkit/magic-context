@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readlink, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
     area,
@@ -84,6 +84,7 @@ test("local full expands CI's matrices, including both slow modes and every Rust
         full.filter((lane) => lane.id === "e2e-host-opencode2").map((lane) => lane.matrix.version),
     ).toEqual(["2.0.22", "2.1.0", "2.0.22", "2.1.0"]);
     expect(full.some((lane) => lane.id === "rust-raw-replay-review")).toBe(false);
+    expect(full.filter((lane) => lane.id === "rust-dashboard")).toHaveLength(1);
     for (const id of ["unit-plugin", "unit-pi-plugin", "rust-mc-module-integration"])
         expect(workflow.jobs[id].steps.some((step) => step.uses?.includes("oracle"))).toBe(false);
 });
@@ -159,6 +160,13 @@ test("local standalone baselines use private Git objects without changing the CI
     );
     expect(localStepCommand("Other step", "echo unchanged")).toBe("echo unchanged");
     expect(() => localStepCommand(fetch?.name, "git fetch changed")).toThrow("Unsupported");
+});
+
+test("local dashboard Rust tests use a writable copy without changing the CI command", () => {
+    const command = "bash scripts/ci/rust-dashboard-test.sh";
+    expect(localStepCommand("Test dashboard Rust backend", command)).toBe(
+        `GATE_DASHBOARD_WRITABLE_COPY=1 ${command}`,
+    );
 });
 
 test("workflow job timeouts are shared across commands instead of resetting per step", () => {
@@ -250,6 +258,8 @@ test("split full parts partition the CI graph and only the four Docker lanes are
         expect(["unit", "native", "host"]).toContain(area(lane.id));
     expect(area("rust-lib-archive")).toBe("native");
     expect(area("rust-mc-module-integration")).toBe("native");
+    expect(area("rust-dashboard")).toBe("native");
+    expect(resources("rust-dashboard")).toEqual({ cpu: 4, lock: "dashboard-cargo-build" });
     expect(area("e2e-host-opencode2")).toBe("host");
     expect(area("slow-unit")).toBe("unit");
     expect(area("check-dashboard")).toBe("unit");
@@ -274,6 +284,62 @@ async function scratch<T>(body: (path: string) => Promise<T>): Promise<T> {
     } finally {
         await rm(path, { recursive: true, force: true });
     }
+}
+
+for (const mode of ["ci", "local"]) {
+    test(`dashboard ${mode} wrapper preserves Cargo arguments, schemas and exit status`, async () =>
+        scratch(async (path) => {
+            const schema = "packages/dashboard/src-tauri/gen/schemas/test.json";
+            await mkdir(join(path, "packages/dashboard/src-tauri/gen/schemas"), {
+                recursive: true,
+            });
+            await mkdir(join(path, "packages/plugin"));
+            await mkdir(join(path, "node_modules"));
+            await Bun.write(join(path, schema), "original");
+            const cargo = join(path, "cargo");
+            await Bun.write(
+                cargo,
+                `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$PWD" "$*" > "$CAPTURE"
+printf regenerated > "${schema}"
+exit "$CARGO_EXIT"
+`,
+            );
+            expect(Bun.spawnSync(["chmod", "+x", cargo]).exitCode).toBe(0);
+            const child = Bun.spawn(["bash", join(root, "scripts/ci/rust-dashboard-test.sh")], {
+                cwd: path,
+                env: {
+                    ...process.env,
+                    PATH: `${path}:${process.env.PATH}`,
+                    CAPTURE: join(path, "capture"),
+                    CARGO_EXIT: mode === "ci" ? "7" : "0",
+                    GATE_DASHBOARD_WRITABLE_COPY: mode === "local" ? "1" : "0",
+                },
+                stdout: "pipe",
+                stderr: "pipe",
+            });
+            expect(await child.exited).toBe(mode === "ci" ? 7 : 0);
+            expect(await new Response(child.stderr).text()).toBe("");
+            const [cwd, args] = (await Bun.file(join(path, "capture")).text()).trim().split("\n");
+            expect(args).toBe(
+                "test --manifest-path packages/dashboard/src-tauri/Cargo.toml --locked --no-fail-fast",
+            );
+            expect(await Bun.file(join(path, schema)).text()).toBe(
+                mode === "local" ? "original" : "regenerated",
+            );
+            if (mode === "ci") expect(cwd).toBe(path);
+            else {
+                expect(cwd!.startsWith(join(path, "target/scratch/dashboard-tests."))).toBe(true);
+                expect(await Bun.file(join(cwd!, schema)).text()).toBe("regenerated");
+                for (const link of [
+                    "packages/plugin",
+                    "node_modules",
+                    "packages/dashboard/src-tauri/target",
+                ])
+                    expect(await readlink(join(cwd!, link))).toBe(join(path, link));
+            }
+        }));
 }
 
 test("independent preflight checks continue after a failure and return nonzero", async () =>
