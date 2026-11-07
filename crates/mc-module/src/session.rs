@@ -3401,7 +3401,7 @@ impl Session {
     /// Whether `refusal` names a signed part in an entry newer than any the
     /// index held when view `version` was built. A part ck-mc cannot place
     /// counts as new: every entry the view knew stays indexed until a
-    /// confirmed view moves the cut.
+    /// confirmed view changes which entries the index holds.
     fn new_signed_part(&self, version: u64, refusal: &ViewRefusal) -> Option<TranscriptRefusal> {
         let ViewRefusal::Rule(RuleBreak::SignedPartInvalid { mid, .. }) = refusal else {
             return None;
