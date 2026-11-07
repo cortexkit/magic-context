@@ -30,7 +30,12 @@
     },
     "files": [
         "dist",
-        "README.md"
+        "README.md",
+        "CONFIGURATION.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "docs",
+        "assets"
     ],
     "scripts": {
         "build": "bun ../../scripts/check-bun.mjs && bun build src/index.ts --outfile dist/index.js --target node --format esm --external node:sqlite",
