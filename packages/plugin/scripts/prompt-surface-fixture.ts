@@ -15,7 +15,10 @@ import { ACTIVE_TOOL_IDS } from "../src/shared/prompt-surface-runtime";
 import { enabledCatalogGuidance } from "./catalog-guidance.fixture";
 
 export const RATIFIED_FULL_MUTABLE_PROSE_CEILING = 3750;
-export const RATIFIED_LIGHT_MUTABLE_PROSE_CEILING = 1917;
+// The light ceiling started as half the full baseline (1917). Ufuk raised it to
+// 2100 on 2026-11-07, when the rule for `<system-reminder>` text took the light
+// guidance to 1952 tokens; he accepts a light surface of 2000-2100 tokens.
+export const RATIFIED_LIGHT_MUTABLE_PROSE_CEILING = 2100;
 
 interface BudgetFixture {
     status?: string;
@@ -135,10 +138,7 @@ export function validateBudgetFixture(options: {
             `primary full mutable-prose total ${baseline} exceeds ratified ceiling ${RATIFIED_FULL_MUTABLE_PROSE_CEILING}`,
         );
     }
-    if (
-        fixture.policy?.fraction !== 0.5 ||
-        fixture.integerLightCeiling !== RATIFIED_LIGHT_MUTABLE_PROSE_CEILING
-    ) {
+    if (fixture.integerLightCeiling !== RATIFIED_LIGHT_MUTABLE_PROSE_CEILING) {
         errors.push(
             `integer light ceiling must remain the ratified literal ${RATIFIED_LIGHT_MUTABLE_PROSE_CEILING}; fixture=${fixture.integerLightCeiling}`,
         );

@@ -3,8 +3,7 @@
   "revision": "s2-r1",
   "status": "PENDING-RATIFICATION",
   "policy": {
-    "expression": "floor(0.50 * mutableProseBaseline)",
-    "fraction": 0.5,
+    "expression": "ratified literal: first floor(0.50 * mutableProseBaseline) = 1917, raised by Ufuk to 2100 on 2026-11-07",
     "ceilingFirst": true
   },
   "tokenizer": {
@@ -38,40 +37,40 @@
   "fullMeasurements": {
     "guidance": {
       "primary-full-reduce-memory-on": {
-        "chars": 5974,
-        "tokens": 1398
+        "chars": 6270,
+        "tokens": 1460
       },
       "primary-full-reduce-memory-off": {
-        "chars": 5637,
-        "tokens": 1318
+        "chars": 5933,
+        "tokens": 1380
       },
       "primary-full-no-reduce-memory-on": {
-        "chars": 4199,
-        "tokens": 976
+        "chars": 4458,
+        "tokens": 1028
       },
       "primary-full-no-reduce-memory-off": {
-        "chars": 3862,
-        "tokens": 896
+        "chars": 4121,
+        "tokens": 948
       },
       "primary-full-reduce-dreamer-off": {
-        "chars": 5826,
-        "tokens": 1368
+        "chars": 6122,
+        "tokens": 1430
       },
       "primary-full-reduce-temporal-off": {
-        "chars": 5812,
-        "tokens": 1354
+        "chars": 6108,
+        "tokens": 1416
       },
       "primary-full-reduce-caveman-on": {
-        "chars": 6589,
-        "tokens": 1524
+        "chars": 6885,
+        "tokens": 1586
       },
       "primary-full-reduce-language-on": {
-        "chars": 6174,
-        "tokens": 1444
+        "chars": 6470,
+        "tokens": 1506
       },
       "subagent-reduce": {
-        "chars": 2227,
-        "tokens": 552
+        "chars": 2523,
+        "tokens": 614
       }
     },
     "toolDescriptions": {
@@ -119,10 +118,10 @@
       },
       "totalTokens": 830
     },
-    "builtInProviderVisibleTotal": 3925
+    "builtInProviderVisibleTotal": 3987
   },
-  "mutableProseBaseline": 3095,
-  "integerLightCeiling": 1917,
+  "mutableProseBaseline": 3157,
+  "integerLightCeiling": 2100,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",
     "One built-in full top-level description for every active ctx_* tool above.",
