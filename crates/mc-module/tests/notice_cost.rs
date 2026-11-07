@@ -367,8 +367,11 @@ impl Fixture {
         let view = if moved {
             drop(store);
             drop(db);
+            // The first view cuts through the message before the newest, which
+            // stays shown; with no move list, the request names it.
             let request = json!({"session":key,"preset":"head","project":null,"model":model(),
-                "context_window":WINDOW,"output_reserve":RESERVE,"rules":rules(),"newest":newest,"now":1});
+                "context_window":WINDOW,"output_reserve":RESERVE,"rules":rules(),"newest":newest,
+                "before_newest":entries[cut - 2].mid,"now":1});
             let import_wall = Instant::now();
             let import_child_cpu = child_cpu_us();
             println!(

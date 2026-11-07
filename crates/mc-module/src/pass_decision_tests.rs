@@ -178,6 +178,26 @@ fn evaluate(row: &Row, table: &Table) -> Value {
             .find(|entry| entry.role == Role::Assistant)
             .unwrap();
         session.queued.insert((entry.mid.clone(), "p".into()));
+        // The message the request ends on keeps its parts, so a drop of it
+        // would wait. When that is the only assistant message, a newer
+        // message makes its drop eligible.
+        if entries.last().is_some_and(|last| last.mid == entry.mid) {
+            let ordinal = entries.len() as u64 + 1;
+            let mut part = Part::new(
+                "p",
+                PartBody::Text {
+                    text: "next".into(),
+                },
+            );
+            part.tag = Some(ordinal);
+            session.index.extend([Entry::new(
+                ordinal,
+                format!("m{ordinal}"),
+                Role::User,
+                ordinal,
+                vec![part],
+            )]);
+        }
         let ride = RideRequest::new(
             vec![RideCause::CacheExpired],
             1_000,

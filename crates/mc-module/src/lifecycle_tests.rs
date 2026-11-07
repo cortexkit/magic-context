@@ -886,6 +886,47 @@ async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A summary that reaches the newest message with parts doesn't cut it, even
+/// when messages with no parts follow it (a step the runner has opened but
+/// not filled): the request ends on that message, so the cut stops one
+/// before. Measured from the very last message, the cut went through it and
+/// every history view was refused.
+#[tokio::test]
+async fn lifecycle_the_cut_stops_before_the_message_the_request_ends_on() {
+    let (mut session, _, _, _, settings) = fixture();
+    let dir = scratch("cut-final-turn");
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness)
+             VALUES ('s1', 1, 1, 4, 'a', 'd', 'all of it', 'all of it', 'all of it', 1, 'mock');",
+        )
+        .map_err(|e| e.to_string())
+    })
+    .unwrap();
+    session.db = Some(Arc::new(db));
+    session.features.summarizer = true;
+    session.load_summaries();
+    let empty =
+        |ordinal: u64, mid: &str| Entry::new(ordinal, mid, Role::Assistant, ordinal, vec![]);
+    session.index.extend(vec![
+        text(1, "a"),
+        text(2, "b"),
+        text(3, "c"),
+        text(4, "d"),
+        empty(5, "e"),
+        empty(6, "f"),
+    ]);
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.expect("a history view");
+    let cut = view.edits.iter().find_map(|edit| match &edit.op {
+        EditOp::Cut { through } => Some(through.clone()),
+        _ => None,
+    });
+    assert_eq!(cut.as_deref(), Some("c"), "{view:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Two old outputs outside the protected tail, both picked by the age sweep.
 fn two_old_outputs(session: &mut Session) {
     let tool_part = |id: &str, tag: u64, output_bytes: u64| -> Part {

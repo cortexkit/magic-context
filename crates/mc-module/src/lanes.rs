@@ -292,11 +292,23 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
         // A sealed part (signed or encrypted) can be dropped but never
         // replaced (compaction contract PR5): it goes whole, or not at all.
         let sealed = !part.seal.is_none();
+        // The message the request ends on keeps at least one part (compaction
+        // contract rule PR6), or the request would end on an older message.
+        // With a tool call, its last call staying is enough, and the tool
+        // branch below keeps it. Without one, none of its parts is dropped
+        // while it is the end; a text part may still become its placeholder.
+        // A queued drop of such a part waits for a newer message.
+        let final_turn_without_call = Some(entry.mid.as_str()) == newest_mid
+            && !entry
+                .parts
+                .iter()
+                .any(|candidate| matches!(candidate.body, PartBody::Tool(_)));
         match &part.body {
             PartBody::Text { .. } if sealed => match (part.tag, shape) {
                 // Stripping an injection keeps the rest of the text, which
                 // only a replacement could do.
                 (Some(_), Shape::StripInjection) | (None, _) => continue,
+                (Some(_), _) if final_turn_without_call => continue,
                 (Some(_), _) => ops.push(drop()),
             },
             PartBody::Text { text } => match (part.tag, shape) {
@@ -308,6 +320,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 (Some(tag), _) => ops.push(replace("text", json!(placeholder(tag)))),
                 (None, _) => continue,
             },
+            PartBody::Reasoning { .. } if final_turn_without_call => continue,
             PartBody::Reasoning { .. } => ops.push(drop()),
             PartBody::Tool(tool) => {
                 if !is_finished(&tool.status)
@@ -357,7 +370,11 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             }
             // A file or a known opaque part goes only when a lane wants it
             // gone whole (`ctx_keep`); an opaque part can only be dropped.
-            PartBody::File(_) | PartBody::Opaque(_) if shape == Shape::Whole => ops.push(drop()),
+            PartBody::File(_) | PartBody::Opaque(_)
+                if shape == Shape::Whole && !final_turn_without_call =>
+            {
+                ops.push(drop())
+            }
             // Other files, opaque parts and kinds ck-mc doesn't know: no lane
             // here edits them.
             _ => continue,
@@ -1728,6 +1745,55 @@ mod tests {
     /// Entries with no parts after the last call, such as a step the runner
     /// opened before asking for a view, don't move the end of the request:
     /// that call still stays a call, even in a lane that drops whole.
+    /// The message the request ends on, when it has no tool call, keeps all
+    /// its parts: dropping its last one would end the request on an older
+    /// message. Its drop waits until a newer message arrives.
+    #[test]
+    fn the_message_the_request_ends_on_keeps_a_part_until_a_newer_one_arrives() {
+        let thought = || {
+            part(
+                "r",
+                Some(2),
+                Seal::None,
+                PartBody::Reasoning {
+                    text: Some("thinking".into()),
+                    text_bytes: Some(8),
+                },
+            )
+        };
+        let user = |ordinal: u64| {
+            entry(
+                ordinal,
+                Role::User,
+                vec![part(
+                    "t",
+                    Some(ordinal * 10),
+                    Seal::None,
+                    PartBody::Text { text: "Go.".into() },
+                )],
+            )
+        };
+        let mut index = Index::default();
+        index.extend([user(1), entry(2, Role::Assistant, vec![thought()])]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let request = [(key("m2", "r"), Shape::Requested)];
+        let (ops, covered) = drop_ops(&context(&index, &edited, &none), &request);
+        assert!(ops.is_empty(), "{ops:?}");
+        assert!(covered.is_empty(), "the drop must wait, not be forgotten");
+
+        index.extend([user(3)]);
+        let (ops, covered) = drop_ops(&context(&index, &edited, &none), &request);
+        assert_eq!(
+            ops,
+            [EditOp::Drop {
+                mid: "m2".into(),
+                part: Some("r".into())
+            }]
+        );
+        assert_eq!(covered, [key("m2", "r")]);
+    }
+
     #[test]
     fn empty_entries_after_the_last_call_keep_it_a_call() {
         // A large input, so the call isn't kept as a small recent one either.

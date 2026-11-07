@@ -2251,13 +2251,20 @@ impl Session {
                 })
             });
             let Some(running) = running else {
-                // The newest message is never cut, so the request always
-                // ends with a message the runner shows as it is (broca
-                // refuses such a cut by name). Summaries normally end before
-                // it anyway; a session moved in fully summarized is the
-                // exception, until a newer message arrives.
-                if end + 1 == entries.len() {
-                    let before = end.checked_sub(1)?;
+                // The message the request ends on is never cut, so the
+                // request always ends with a message the runner shows as it
+                // is (compaction contract rule PR6; runners refuse such a
+                // view). That is the newest message that has parts: one with
+                // none, such as a tool-results message whose results ride
+                // inside the calls, renders nothing. Summaries normally end
+                // before it anyway; a session moved in fully summarized is
+                // the exception, until a newer message arrives.
+                let last = entries
+                    .iter()
+                    .rposition(|entry| !entry.parts.is_empty())
+                    .unwrap_or(entries.len() - 1);
+                if end >= last {
+                    let before = last.checked_sub(1)?;
                     return Some((entries[before].ordinal, entries[before].mid.clone()));
                 }
                 return Some((entries[end].ordinal, through));
@@ -2991,6 +2998,27 @@ impl Session {
                 None
             }
         }
+    }
+
+    /// Tests only: the next view with `ops` added, without ck-mc's checks.
+    /// For fixtures that need a view's effect on what ck-mc records, not its
+    /// validity: the pinned app-read samples show a dropped part in the
+    /// newest message, which [`Session::seal`] now refuses, and their bytes
+    /// must not change.
+    #[cfg(test)]
+    pub(crate) fn seal_unchecked(&mut self, ops: Vec<EditOp>) -> View {
+        let version = self.version + 1;
+        self.version = version;
+        let mut edits = self
+            .latest
+            .as_ref()
+            .map(|view| view.edits.clone())
+            .unwrap_or_default();
+        edits.extend(
+            ops.into_iter()
+                .map(|op| cortexkit_role_compaction::view::Edit::new(version, op)),
+        );
+        View::seal(version, edits)
     }
 
     /// Whether `view` is over the size limit (compaction contract V5). Views name edits, never

@@ -551,12 +551,20 @@ async fn an_idle_gap_past_the_cache_lifetime_rides_before_the_next_request() {
 #[tokio::test]
 async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
     let mut runner = start(config(Kind::OpenAi, free(), 100_000)).await;
+    // The second call is dropped once a third follows it: the call that ends
+    // the request must stay, so the plan would refuse dropping the newest.
     *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
-        (tools.len() == 2).then(|| vec![drop_edit(1, &tools[1])])
+        (tools.len() == 3).then(|| vec![drop_edit(1, &tools[1])])
     }));
     runner
-        .play(&[user("start"), work(10, 1_000), work(10, 1_000), answer()])
+        .play(&[
+            user("start"),
+            work(10, 1_000),
+            work(10, 1_000),
+            work(10, 1_000),
+            answer(),
+        ])
         .await;
     assert_eq!(runner.host().applied_version(), Some(1));
     runner

@@ -162,13 +162,26 @@ impl ValidationCache {
             .max();
         // Planning renders every untouched part and hashes its cloned body,
         // even though this provider discards the plan. Structural validation
-        // only needs named targets/anchors and the entire cut prefix (running
-        // calls there veto a cut). All edits remain, preserving duplicate-ID
-        // and cross-edit checks. Provider signed-part rules still see the full
-        // transcript below, independently of this structural projection.
+        // only needs named targets/anchors, the entire cut prefix (running
+        // calls there veto a cut), and the entry the request ends on: the
+        // check that a view never removes the request's final turn looks for
+        // the newest entry with parts, so a projection without it would
+        // judge some earlier entry to be the end. All edits remain,
+        // preserving duplicate-ID and cross-edit checks. Provider signed-part
+        // rules still see the full transcript below, independently of this
+        // structural projection.
+        let final_turn = entries
+            .iter()
+            .rev()
+            .find(|e| !e.parts.is_empty())
+            .map(|e| e.ordinal);
         let touched: Vec<_> = entries
             .iter()
-            .filter(|e| targets.contains(e.mid.as_str()) || cut.is_some_and(|cut| e.ordinal <= cut))
+            .filter(|e| {
+                targets.contains(e.mid.as_str())
+                    || cut.is_some_and(|cut| e.ordinal <= cut)
+                    || Some(e.ordinal) == final_turn
+            })
             .cloned()
             .collect();
         {
@@ -448,6 +461,20 @@ mod tests {
         )
         .with_seal(Seal::Encrypted);
         let entry = Entry::new(1, "m1", Role::Assistant, 0, vec![reasoning.clone()]);
+        // A later message, so dropping m1's only part leaves the request a
+        // turn to end on.
+        let later = Entry::new(
+            2,
+            "m2",
+            Role::User,
+            0,
+            vec![Part::new(
+                "t",
+                PartBody::Text {
+                    text: "next".into(),
+                },
+            )],
+        );
         let rules = ProviderRules::new(SignedParts::None, EditCost::Suffix);
         // A sealed part can be dropped but never replaced.
         let replace = EditOp::Replace {
@@ -471,9 +498,82 @@ mod tests {
             part: Some("r1".into()),
         };
         assert!(matches!(
-            next_view(None, &[entry], vec![drop], &rules, 1, |_| false),
+            next_view(None, &[entry, later], vec![drop], &rules, 1, |_| false),
             Ok(Some(_))
         ));
+    }
+
+    fn text_entry(ordinal: u64, role: Role) -> Entry {
+        Entry::new(
+            ordinal,
+            format!("m{ordinal}"),
+            role,
+            0,
+            vec![Part::new(
+                "t",
+                PartBody::Text {
+                    text: format!("message {ordinal}"),
+                },
+            )],
+        )
+    }
+
+    /// The view check plans only the entries a view names, the cut prefix,
+    /// and the entry the request ends on. Without that last one, a cut far
+    /// from the end looked like a cut through the final turn, and every
+    /// history view was refused.
+    #[test]
+    fn the_bounded_check_judges_the_final_turn_by_the_whole_transcript() {
+        let rules = ProviderRules::new(SignedParts::None, EditCost::Suffix);
+        let mut entries: Vec<Entry> = (1..=6)
+            .map(|n| {
+                text_entry(
+                    n,
+                    if n % 2 == 1 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                )
+            })
+            .collect();
+        // A message with no parts after the end, as a step the runner has
+        // opened but not filled.
+        entries.push(Entry::new(7, "m7", Role::Assistant, 0, vec![]));
+        let cut = |through: &str| EditOp::Cut {
+            through: through.into(),
+        };
+        let mut cache = ValidationCache::default();
+        let early = next_view_cached(
+            None,
+            &entries,
+            vec![cut("m2")],
+            &rules,
+            1,
+            |_| false,
+            &mut cache,
+        );
+        assert!(matches!(early, Ok(Some(_))), "{early:?}");
+        // A cut through the newest message with parts is still refused, even
+        // with the empty message after it.
+        let through_end = next_view_cached(
+            None,
+            &entries,
+            vec![cut("m6")],
+            &rules,
+            1,
+            |_| false,
+            &mut cache,
+        );
+        assert!(
+            matches!(
+                through_end,
+                Err(ViewRefusal::Rule(
+                    cortexkit_role_compaction::rules::RuleBreak::FinalTurnRemoved { .. }
+                ))
+            ),
+            "{through_end:?}"
+        );
     }
     #[test]
     fn cached_insert_checks_match_full_apply_on_valid_and_invalid_views() {

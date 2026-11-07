@@ -173,6 +173,20 @@ mod tests {
                 )],
             ),
             Entry::new(2, "m2", Role::Assistant, 2, vec![part]),
+            // A later message, so m2 isn't the one the request ends on and
+            // may lose its only part.
+            Entry::new(
+                3,
+                "m3",
+                Role::User,
+                3,
+                vec![Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "next".into(),
+                    },
+                )],
+            ),
         ]);
         let key = ("m2".into(), "p".into());
         session.queued.insert(key.clone());
@@ -290,15 +304,13 @@ mod tests {
             session.queued.insert(("m2".into(), "p".into()));
             session.app.stamps.insert(("m2".into(), "p".into()), 123);
             session.conditions.last_prompt_tokens = Some(80);
-            let view = session
-                .seal(
-                    vec![EditOp::Drop {
-                        mid: "m3".into(),
-                        part: Some("p".into()),
-                    }],
-                    &[],
-                )
-                .unwrap();
+            // ck-mc would no longer drop the only part of the newest message,
+            // but these samples are pinned byte for byte by the apps and only
+            // show how a dropped part reads, so the view skips ck-mc's checks.
+            let view = session.seal_unchecked(vec![EditOp::Drop {
+                mid: "m3".into(),
+                part: Some("p".into()),
+            }]);
             session.accept(view.clone());
             session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
             session.app_decisions[0]["at_ms"] = json!(40);
@@ -336,7 +348,8 @@ mod tests {
             let (m1, next, _) = crate::summary::head::delta(&baseline, &inputs);
             let ops = crate::summary::head::head_ops(&next.m0, &m1, None);
             session.next_baseline = Some(next.into());
-            let view = session.seal(ops, &[]).unwrap();
+            // It carries the drop above, so it skips the checks too.
+            let view = session.seal_unchecked(ops);
             session.accept(view.clone());
             session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
             session.app_decisions[1]["at_ms"] = json!(40);
