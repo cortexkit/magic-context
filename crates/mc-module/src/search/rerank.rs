@@ -560,8 +560,10 @@ pub fn scores(reply: Value, pinned: &Pinned, count: usize) -> Result<Vec<f64>, S
 }
 
 /// Score `texts` on a hosted reranker. TEI endpoints take `{query, texts}`
-/// and answer a list; others take `{model, query, documents, top_n}` and
-/// answer `{results}`. Every document must come back scored exactly once.
+/// and answer a list; others take `{model, query, documents}` and answer
+/// their rows under `results` (Cohere, Jina, OpenRouter) or `data` (Voyage).
+/// No `top_n` is sent: the others score every document without it, and
+/// Voyage refuses it. Every document must come back scored exactly once.
 pub async fn remote_scores(
     remote: &Remote,
     query: &str,
@@ -580,7 +582,7 @@ pub async fn remote_scores(
     let body = if tei {
         json!({"query": query, "texts": texts})
     } else {
-        json!({"model": remote.model, "query": query, "documents": texts, "top_n": texts.len()})
+        json!({"model": remote.model, "query": query, "documents": texts})
     };
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -614,7 +616,13 @@ pub async fn remote_scores(
         .await
         .map_err(|_| skipped("invalid_reply"))?;
     let raw: Value = serde_json::from_slice(&bytes).map_err(|_| skipped("invalid_reply"))?;
-    let rows = if tei { &raw } else { &raw["results"] };
+    let rows = if tei {
+        &raw
+    } else if raw["results"].is_null() {
+        &raw["data"]
+    } else {
+        &raw["results"]
+    };
     let rows = rows.as_array().ok_or_else(|| skipped("invalid_reply"))?;
     if rows.len() != texts.len() {
         return Err(skipped("invalid_reply"));
@@ -834,6 +842,81 @@ mod tests {
             skipped_line("secret detail"),
             "Reranking skipped: remote_error"
         );
+    }
+
+    /// A `/rerank` endpoint shaped like Voyage's: it refuses a request that
+    /// carries `top_n` with 400, and answers its rows under `data`.
+    async fn voyage_endpoint() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body = loop {
+                    let read = socket.read(&mut chunk).await.unwrap_or(0);
+                    if read == 0 {
+                        break None;
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    let Some(end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + length {
+                        break Some(text[end + 4..].to_owned());
+                    }
+                };
+                let Some(body) = body else { continue };
+                let request: Value = serde_json::from_str(&body).unwrap();
+                let (status, reply) = if request.get("top_n").is_some() {
+                    (
+                        "400 Bad Request",
+                        json!({"detail": "Argument 'top_n' is not supported"}),
+                    )
+                } else {
+                    let rows: Vec<_> = (0..request["documents"].as_array().map_or(0, Vec::len))
+                        .rev()
+                        .map(|index| json!({"relevance_score": index as f64, "index": index}))
+                        .collect();
+                    (
+                        "200 OK",
+                        json!({"object": "list", "data": rows, "model": "rerank-3-lite"}),
+                    )
+                };
+                let reply = reply.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_voyage_endpoint_scores_without_top_n_and_answers_under_data() {
+        let remote = Remote {
+            endpoint: Some(voyage_endpoint().await),
+            model: Some("rerank-3-lite".into()),
+            api_key: None,
+            timeout_ms: 5_000,
+            top_n: POOL,
+        };
+        let texts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let scores = remote_scores(&remote, "q", &texts).await.unwrap();
+        assert_eq!(scores, [0.0, 1.0, 2.0]);
     }
 }
 
