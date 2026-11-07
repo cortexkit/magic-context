@@ -18,7 +18,7 @@ packages/
   docs/           documentation site (docs.cortexkit.io/magic-context), deployed by hand
   e2e-tests/      end-to-end suites against real OpenCode 1, OpenCode 2, Pi, OMP and Rust stacks
   retina-local-fs/ local file and git checks for smart-note conditions
-scripts/          release, version sync, diagnostics (cache-bust analysis, context dumps)
+scripts/          release, version sync, CI gates, diagnostics (context dumps; cache-bust analysis is in packages/plugin/scripts/)
 docs/             public documentation (internal references: ignored .cortexkit/internal-docs/)
 ```
 
@@ -33,7 +33,7 @@ docs/             public documentation (internal references: ignored .cortexkit/
 - `config/`: schema (`schema/magic-context.ts`), loader, profiles, project trust boundary.
 - `shared/`: small utilities used by several subsystems, including the logger and the SQLite backend selector.
 - `tui/`: OpenCode sidebar and dialogs, shipped as source through the `./tui` export.
-- `agents/`: hidden agent names and prompt helpers.
+- `agents/`: hidden agent names, prompt helpers and their host registrations.
 
 ## Other packages
 
@@ -47,10 +47,10 @@ docs/             public documentation (internal references: ignored .cortexkit/
 - **Transform behaviour:** `src/hooks/magic-context/`, wired through `hook.ts`. Mirror it in `packages/pi-plugin/src/` and, if the Rust module runs it, in `crates/mc-module/src/`.
 - **A service:** `src/features/magic-context/<area>/`.
 - **An agent tool:** `src/tools/<name>/`, registered in `src/plugin/tool-registry.ts`, with the Pi and Rust facades.
-- **A slash command:** defined in `src/features/builtin-commands/commands.ts`, handled in `src/hooks/magic-context/command-handler.ts`.
+- **A slash command:** defined in `src/shared/builtin-commands.ts`, handled in `src/hooks/magic-context/command-handler.ts` (OpenCode 1) and registered with OpenCode 2 in `src/v2/hooks/commands.ts`; Pi's commands are in `packages/pi-plugin/src/commands/`.
 - **An RPC endpoint:** handler in `src/plugin/rpc-handlers.ts`, types in `src/shared/rpc-types.ts`, consumed from `src/tui/data/`.
 - **A migration:** a new entry in `migrations.ts`, `LATEST_SUPPORTED_VERSION` bumped in `storage-db.ts`, the fresh schema and `ensureColumn()` updated, a `migrations-v<N>.test.ts`, and session-scoped tables added to `SESSION_SCOPED_TABLES`.
-- **A hidden agent:** its name in `src/agents/`, its prompt next to the owning feature, registration in `src/index.ts`.
+- **A hidden agent:** its name in `src/agents/`, its prompt next to the owning feature, registration in `src/agents/hidden-agent-registrations.ts` (which `src/index.ts` calls).
 - **A CLI command:** `packages/cli/src/commands/`, wired from `packages/cli/src/index.ts`.
 - **Shared utilities:** `src/shared/`, only when at least two subsystems use them.
 
