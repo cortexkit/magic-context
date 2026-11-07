@@ -79,6 +79,7 @@ pub mod preset;
 pub mod project_docs;
 pub mod reads;
 pub mod reduce;
+pub mod rekey;
 pub mod route;
 pub mod routing;
 pub mod search;
