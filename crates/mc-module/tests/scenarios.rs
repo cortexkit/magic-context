@@ -85,6 +85,8 @@ struct HostClient {
     child_started: Arc<tokio::sync::Notify>,
     /// Optional per-notice observations; a tool step delivers more than one notice.
     notice_log: Arc<Mutex<Option<Vec<NoticeTrace>>>>,
+    runner_capabilities: Arc<mc_module::runner_capabilities::RunnerCapabilities>,
+    describe: Arc<Mutex<Option<Result<Value, String>>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -175,6 +177,22 @@ fn read_wrapped<T: serde::Serialize, A: serde::de::DeserializeOwned>(
 }
 
 impl RunnerClient for HostClient {
+    fn runner_setup(&self, runner: &str) {
+        self.runner_capabilities.forget(runner);
+    }
+
+    async fn child_cache_policy(&self, child: &Child) -> bool {
+        self.runner_capabilities
+            .cache_policy(&child.session.runner, 1, async {
+                self.describe
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| Ok(json!({"capabilities": ["cache_policy"]})))
+                    .map_err(ClientError::new)
+            })
+            .await
+    }
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
         let pause = self.pause_reads.lock().unwrap().clone();
         if let Some(pause) = pause {
@@ -1719,6 +1737,71 @@ fn one_pass() -> Settings {
     }
 }
 
+async fn cache_summary(
+    describe: Option<Result<Value, String>>,
+) -> Vec<mc_mock_runner::child::ChildRun> {
+    let client = HostClient::default();
+    *client.describe.lock().unwrap() = describe;
+    let mut runner = start_with_client(
+        client,
+        config("head", Kind::OpenAi, free()),
+        one_pass(),
+        None,
+        false,
+        |_| {},
+    )
+    .await;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let runs = runner.host().child_runs();
+    assert!(!runs.is_empty(), "the summary must still run");
+    assert!(runs[0].prompt.contains("<new_messages>"));
+    runs
+}
+
+#[tokio::test]
+async fn one_pass_children_request_no_explicit_cache() {
+    let runs = cache_summary(None).await;
+    let mut children = std::collections::HashSet::new();
+    for run in runs {
+        let request = serde_json::to_value(&run.request).unwrap();
+        if children.insert(run.child.clone()) {
+            assert_eq!(request["cache"], json!({"ttl": "none", "keep_warm": "off"}));
+            assert_eq!(
+                serde_json::to_value(&run.settings.cache).unwrap(),
+                request["cache"]
+            );
+        } else {
+            assert!(request.get("cache").is_none(), "{request}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_older_runner_gets_no_cache_member() {
+    for run in cache_summary(Some(Ok(json!({"capabilities": ["other_feature"]})))).await {
+        assert!(serde_json::to_value(&run.request)
+            .unwrap()
+            .get("cache")
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_failed_describe_does_not_stop_the_summary_or_send_cache() {
+    for run in cache_summary(Some(Err("role.describe refused".into()))).await {
+        assert!(serde_json::to_value(&run.request)
+            .unwrap()
+            .get("cache")
+            .is_none());
+    }
+}
+
 #[tokio::test]
 async fn facts_a_summary_finds_become_project_memories_with_it() {
     let dir = scratch("facts");
@@ -1887,6 +1970,19 @@ async fn the_two_pass_historian_reconciles_its_facts_with_memory_in_a_second_tur
         .expect("a second turn");
     assert_eq!(second.child, first.child);
     assert_eq!(second.settings.system, first.settings.system);
+    let mut children = std::collections::HashSet::new();
+    for run in &runs {
+        let request = serde_json::to_value(&run.request).unwrap();
+        if children.insert(&run.child) {
+            assert_eq!(
+                request["cache"],
+                json!({"ttl": "short", "keep_warm": "off"})
+            );
+        } else {
+            assert!(request.get("cache").is_none(), "{request}");
+        }
+    }
+    assert!(second.request.cache.is_none());
     let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
     let facts: Vec<(String, String, Option<String>)> = conn
         .prepare("SELECT content, state || ':' || COALESCE(reason, ''), mapping_json FROM memory_pending_facts ORDER BY id")

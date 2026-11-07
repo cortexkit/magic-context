@@ -206,6 +206,7 @@ impl Carrier {
             deadline: tokio::time::Instant::now() + TIMEOUT,
             // Turn one created the child.
             continuation: true,
+            cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         };
         let mut usage: Option<StepUsage> = None;
         run::send_and_wait(

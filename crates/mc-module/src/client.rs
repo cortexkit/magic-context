@@ -69,6 +69,13 @@ impl std::fmt::Display for ClientError {
 /// Each call concerns one session: the transport sends it on a route bound to
 /// that session, so the request itself never names it.
 pub trait RunnerClient: Send + Sync + 'static {
+    /// Setup can signal a runner restart without a consumer reconnect.
+    fn runner_setup(&self, _runner: &str) {}
+    /// Whether the runner on this scoped child route accepts cache requests.
+    /// An unknown or unavailable declaration leaves the runner's defaults in use.
+    fn child_cache_policy(&self, _child: &Child) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
     /// `session.read`.
     fn read(
         &self,

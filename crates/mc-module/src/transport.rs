@@ -166,6 +166,7 @@ pub struct SubcRunnerClient {
     consumer: OnceCell<SubcConsumer>,
     /// The scopes ck-mc's summarizer children run under.
     child_scopes: Arc<ChildScopes>,
+    runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
 }
 
 impl SubcRunnerClient {
@@ -174,6 +175,7 @@ impl SubcRunnerClient {
             connection_file,
             consumer: OnceCell::new(),
             child_scopes,
+            runner_capabilities: Default::default(),
         }
     }
 
@@ -368,6 +370,24 @@ impl crate::routing::Router for SubcRunnerClient {
 }
 
 impl RunnerClient for SubcRunnerClient {
+    fn runner_setup(&self, runner: &str) {
+        self.runner_capabilities.forget(runner);
+    }
+
+    async fn child_cache_policy(&self, child: &Child) -> bool {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .cache_policy(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
+            .await
+    }
+
     async fn read(
         &self,
         session: &SessionRef,

@@ -30,6 +30,8 @@ pub struct RunSettings {
     pub stop_when: StopWhen,
     #[serde(default)]
     pub route_decision_id: Option<String>,
+    #[serde(default)]
+    pub cache: Option<cortexkit_role_llm_runner::cache::Cache>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -98,6 +100,16 @@ impl Runs {
         if let Some(run_id) = self.by_send_id.get(&key) {
             return Ok(run_id.clone());
         }
+        if let Some(cache) = &request.cache {
+            if request.plan.is_some() || self.runs.iter().any(|run| run.child == child) {
+                return Err((
+                    "cache",
+                    "cache is only accepted on a planless creating send".into(),
+                ));
+            }
+            cortexkit_role_llm_runner::cache::check_send(cache)
+                .map_err(|error| ("cache", error.message))?;
+        }
         if request.runner_params.contains_key("tools")
             && self.runs.iter().any(|run| run.child == child)
         {
@@ -111,6 +123,7 @@ impl Runs {
                 .map_err(|error| ("runner_params", error.to_string()))?;
         settings.child = child.to_owned();
         settings.route_decision_id = request.route_decision_id.clone();
+        settings.cache = request.cache.clone();
         let prompt = request.prompt_text().to_owned();
         let run_id = format!("run-{}", self.runs.len() + 1);
         let reply = responder(&settings, &prompt);
