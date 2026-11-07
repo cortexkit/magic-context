@@ -704,7 +704,16 @@ impl Session {
             .events
             .iter()
             .filter_map(|event| match event {
-                Event::ViewRefused { version, .. } => Some(*version),
+                Event::ViewRefused { version, refusal } => {
+                    // A runner can take a view and refuse it later, at the
+                    // step it would first serve it. The reason is the only
+                    // record of why the view's work was undone.
+                    tracing::warn!(
+                        "ck-mc: session {}: runner refused view {version} at a step boundary: {refusal:?}",
+                        self.key.session
+                    );
+                    Some(*version)
+                }
                 _ => None,
             })
             .collect();
