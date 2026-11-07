@@ -1,7 +1,7 @@
 use super::*;
 use cortexkit_role_compaction::part::{Part, PartBody};
 use cortexkit_role_compaction::read::{Entry, Head, ReadPage, Role};
-use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
 use cortexkit_role_compaction::setup::ModelRef;
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer};
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
@@ -988,6 +988,264 @@ async fn lifecycle_a_refusal_naming_a_part_sets_aside_only_that_part() {
         !session.failed_parts.contains(&("old".into(), "p2".into())),
         "a part the refusal did not name was set aside"
     );
+}
+
+/// Automatic and requested drops share a view, but only the refused work
+/// should be set aside. Three newer tool calls keep the old outputs outside
+/// the protected tail, so every old output remains eligible for dropping.
+fn refusal_fixture() -> (Session, Client, Settings) {
+    let (mut session, client, _, _, settings) = fixture();
+    two_old_outputs(&mut session);
+    let mut entries = session.index.entries().to_vec();
+    entries[1]
+        .parts
+        .extend([output_part("queued-a", 4), output_part("queued-b", 5)]);
+    for (part, tag) in entries[3].parts.iter_mut().zip(6..=8) {
+        part.tag = Some(tag);
+    }
+    session.index = Index::starting_at(1);
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    session.queued = queued_refusal_parts();
+    (session, client, settings)
+}
+
+fn queued_refusal_parts() -> BTreeSet<lanes::PartKey> {
+    [
+        ("old".into(), "queued-a".into()),
+        ("old".into(), "queued-b".into()),
+    ]
+    .into()
+}
+
+fn assert_carries_queued_drops(view: &View) {
+    for (_, expected) in queued_refusal_parts() {
+        assert!(
+            view.edits.iter().any(|edit| matches!(
+                &edit.op,
+                EditOp::Replace { mid, part, field, .. }
+                    if mid == "old" && part == &expected && field == "output"
+            )),
+            "view {} did not carry queued drop {expected}: {:?}",
+            view.version,
+            view.edits
+        );
+    }
+}
+
+async fn refuse_at_boundary(
+    session: &mut Session,
+    client: &Client,
+    settings: &Settings,
+    seq: u64,
+    refusal: ViewRefusal,
+) {
+    let version = session.latest.as_ref().unwrap().version;
+    let newest = client.entries.lock().unwrap().last().map(cursor);
+    let mut request = notice(session, seq, newest);
+    request.events.push(Event::ViewRefused { version, refusal });
+    session.notice(client, settings, request).await;
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_part_refusals_preserve_other_queued_drops() {
+    let (mut session, client, settings) = refusal_fixture();
+    for (seq, culprit) in [(1, "p"), (2, "p2")] {
+        let (view, _) = session.build(&settings, None, false, None);
+        let view = view.expect("old outputs remain eligible");
+        assert_carries_queued_drops(&view);
+        session.publish(&client, view).await;
+        refuse_at_boundary(
+            &mut session,
+            &client,
+            &settings,
+            seq,
+            ViewRefusal::StalePart {
+                mid: "old".into(),
+                part: culprit.into(),
+            },
+        )
+        .await;
+        assert_eq!(session.queued, queued_refusal_parts());
+        assert!(session.refused_once.is_empty());
+        let expected: BTreeSet<_> = if seq == 1 { vec!["p"] } else { vec!["p", "p2"] }
+            .into_iter()
+            .map(|part| ("old".into(), part.into()))
+            .collect();
+        assert_eq!(session.failed_parts, expected);
+    }
+    let (view, _) = session.build(&settings, None, false, None);
+    assert_carries_queued_drops(&view.expect("requested drops still queued"));
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_part_refusals_forget_only_the_repeated_culprit() {
+    let (mut session, client, settings) = refusal_fixture();
+    for seq in 1..=2 {
+        let (view, _) = session.build(&settings, None, false, None);
+        session.publish(&client, view.unwrap()).await;
+        refuse_at_boundary(
+            &mut session,
+            &client,
+            &settings,
+            seq,
+            ViewRefusal::StalePart {
+                mid: "old".into(),
+                part: "queued-a".into(),
+            },
+        )
+        .await;
+        assert!(session.failed_parts.is_empty());
+        assert!(session.queued.contains(&("old".into(), "queued-b".into())));
+        assert!(!session
+            .refused_once
+            .contains(&("old".into(), "queued-b".into())));
+    }
+    assert!(!session.queued.contains(&("old".into(), "queued-a".into())));
+}
+
+fn final_turn_refusal() -> ViewRefusal {
+    ViewRefusal::Rule(RuleBreak::FinalTurnRemoved { index: 0 })
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_final_turn_refusal_retries_after_transcript_growth() {
+    let (mut session, client, settings) = refusal_fixture();
+    let (view, _) = session.build(&settings, None, false, None);
+    session.publish(&client, view.unwrap()).await;
+    client.entries.lock().unwrap().push(text(5, "grown"));
+    refuse_at_boundary(&mut session, &client, &settings, 1, final_turn_refusal()).await;
+    assert_eq!(session.queued, queued_refusal_parts());
+    assert!(session.failed_parts.is_empty());
+    assert!(session.refused_once.is_empty());
+    assert_eq!(session.index.cursor().unwrap().mid, "grown");
+    let (view, _) = session.build(&settings, None, false, None);
+    assert_carries_queued_drops(&view.expect("retry uses the newer transcript"));
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_final_turn_refusal_bounds_the_immediate_retry() {
+    let (mut session, client, settings) = refusal_fixture();
+    for seq in 1..=2 {
+        let (view, _) = session.build(&settings, None, false, None);
+        let view = view.expect("the first boundary refusal allows a retry");
+        assert_carries_queued_drops(&view);
+        session.publish(&client, view).await;
+        if seq == 2 {
+            // An accepted retry can outlive ck-mc. Its rollback snapshot must
+            // retain the bound without requiring a new store column.
+            let durable =
+                serde_json::from_slice(&serde_json::to_vec(&session.durable()).unwrap()).unwrap();
+            session = fixture().0;
+            session.restore(durable);
+        }
+        refuse_at_boundary(&mut session, &client, &settings, seq, final_turn_refusal()).await;
+        assert_eq!(session.queued, queued_refusal_parts());
+        if seq == 1 {
+            assert!(session.failed_parts.is_empty());
+            assert!(session.refused_once.is_empty());
+        }
+    }
+    assert_eq!(session.refused_once, queued_refusal_parts());
+    assert_eq!(
+        session.failed_parts,
+        [("old".into(), "p".into()), ("old".into(), "p2".into())].into()
+    );
+    let (view, _) = session.build(&settings, None, false, None);
+    session.publish(&client, view.unwrap()).await;
+    refuse_at_boundary(&mut session, &client, &settings, 3, final_turn_refusal()).await;
+    assert!(
+        session.queued.is_empty(),
+        "the usual second-strike guard applies"
+    );
+    assert!(session.build(&settings, None, false, None).0.is_none());
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_unknown_message_has_its_own_bounded_retry() {
+    let (mut session, client, settings) = refusal_fixture();
+    for (seq, refusal) in [
+        (1, final_turn_refusal()),
+        (
+            2,
+            ViewRefusal::UnknownMessage {
+                mid: "reverted".into(),
+            },
+        ),
+        (
+            3,
+            ViewRefusal::UnknownMessage {
+                mid: "reverted".into(),
+            },
+        ),
+    ] {
+        let (view, _) = session.build(&settings, None, false, None);
+        session.publish(&client, view.unwrap()).await;
+        refuse_at_boundary(&mut session, &client, &settings, seq, refusal).await;
+        assert_eq!(session.queued, queued_refusal_parts());
+        if seq < 3 {
+            assert!(session.failed_parts.is_empty());
+            assert!(session.refused_once.is_empty());
+        }
+    }
+    assert_eq!(session.refused_once, queued_refusal_parts());
+    assert_eq!(session.failed_parts.len(), 2);
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_applied_or_other_refusals_reset_the_retry_bound() {
+    for reset in ["applied", "notice", "direct"] {
+        let (mut session, client, settings) = refusal_fixture();
+        // Empty views isolate outcome tracking from drop penalties: only the
+        // final view below carries the requested and automatic work.
+        session.publish(&client, View::seal(1, vec![])).await;
+        refuse_at_boundary(&mut session, &client, &settings, 1, final_turn_refusal()).await;
+        let second = View::seal(2, vec![]);
+        if reset == "direct" {
+            *client.refuse.lock().unwrap() = true;
+        }
+        session.publish(&client, second.clone()).await;
+        match reset {
+            "applied" => session.settle_unconfirmed(
+                Some(&AppliedView::new(second.version, second.checksum)),
+                &[],
+            ),
+            "notice" => {
+                refuse_at_boundary(&mut session, &client, &settings, 2, ViewRefusal::BadSince)
+                    .await;
+            }
+            "direct" => *client.refuse.lock().unwrap() = false,
+            _ => unreachable!(),
+        }
+        let (view, _) = session.build(&settings, None, false, None);
+        let view = view.expect("requested drops were not in the empty views");
+        assert_carries_queued_drops(&view);
+        session.publish(&client, view).await;
+        refuse_at_boundary(&mut session, &client, &settings, 3, final_turn_refusal()).await;
+        assert_eq!(session.queued, queued_refusal_parts(), "after {reset}");
+        assert!(session.failed_parts.is_empty(), "after {reset}");
+        assert!(session.refused_once.is_empty(), "after {reset}");
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_direct_refusals_keep_the_existing_guard() {
+    for refusal in [ViewRefusal::BadSince, final_turn_refusal()] {
+        let (mut session, client, settings) = refusal_fixture();
+        *client.refuse.lock().unwrap() = true;
+        *client.refusal.lock().unwrap() = Some(refusal);
+        for _ in 0..2 {
+            let (view, _) = session.build(&settings, None, false, None);
+            session.publish(&client, view.unwrap()).await;
+        }
+        assert!(session.queued.is_empty());
+        assert!(session.refused_once.is_empty());
+        assert_eq!(
+            session.failed_parts,
+            [("old".into(), "p".into()), ("old".into(), "p2".into())].into()
+        );
+        assert!(session.build(&settings, None, false, None).0.is_none());
+    }
 }
 
 /// A refused view puts the age-sweep bookmark back where it was, with

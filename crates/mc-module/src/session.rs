@@ -9,6 +9,7 @@ use cortexkit_role_compaction::notice::{Conditions, Event, NoticeRequest};
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
 use cortexkit_role_compaction::ride::{RideCause, RideRequest};
+use cortexkit_role_compaction::rules::RuleBreak;
 use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
     AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
@@ -157,6 +158,10 @@ pub struct Session {
     /// carrying one forgets it, so a drop the runner keeps refusing cannot
     /// make every later pass build a view it refuses.
     refused_once: BTreeSet<lanes::PartKey>,
+    /// A runner may refuse an accepted view when the transcript moves before
+    /// it serves it. Allow one rebuild, but guard against the same reason on
+    /// the very next built version so a faulty view cannot loop every pass.
+    transcript_retry: Option<(TranscriptRefusal, u64)>,
     /// A revert removed summaries the head shows. The next notice rebuilds
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
@@ -231,6 +236,8 @@ struct Before {
     latest: Option<View>,
     queued: BTreeSet<lanes::PartKey>,
     refused_once: BTreeSet<lanes::PartKey>,
+    #[serde(default)]
+    transcript_retry: Option<(TranscriptRefusal, u64)>,
     emergency_latched: bool,
     baseline: Option<Arc<Baseline>>,
     fold_due: bool,
@@ -243,6 +250,22 @@ struct Before {
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TranscriptRefusal {
+    FinalTurnRemoved,
+    UnknownMessage,
+}
+
+impl TranscriptRefusal {
+    fn of(refusal: &ViewRefusal) -> Option<Self> {
+        match refusal {
+            ViewRefusal::Rule(RuleBreak::FinalTurnRemoved { .. }) => Some(Self::FinalTurnRemoved),
+            ViewRefusal::UnknownMessage { .. } => Some(Self::UnknownMessage),
+            _ => None,
+        }
+    }
 }
 
 /// Admission for a notice, before any lane selects work or publishes a view.
@@ -325,6 +348,7 @@ impl Session {
             next_caveman: None,
             next_covered: Vec::new(),
             refused_once: BTreeSet::new(),
+            transcript_retry: None,
             summarizing: false,
             fold_due: false,
             head_stale: false,
@@ -507,6 +531,12 @@ impl Session {
         self.floor_lifted_for = durable.floor_lifted_for;
         self.floor_pending_for = durable.floor_pending_for;
         self.unconfirmed = durable.unconfirmed;
+        // Like refused_once, the retry guard survives in an unconfirmed
+        // view's rollback snapshot, not in a separate store column.
+        self.transcript_retry = self
+            .unconfirmed
+            .last()
+            .and_then(|pending| pending.before.transcript_retry);
         self.summary_unshown = durable.summary_unshown;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
@@ -700,7 +730,7 @@ impl Session {
         self.warn_if_prompt_size_missing(&notice.entries);
         // What the runner says about the views it took comes first: a
         // rollback restores the state before the events below change it.
-        let refused: Vec<u64> = notice
+        let refused: Vec<_> = notice
             .events
             .iter()
             .filter_map(|event| match event {
@@ -712,7 +742,7 @@ impl Session {
                         "ck-mc: session {}: runner refused view {version} at a step boundary: {refusal:?}",
                         self.key.session
                     );
-                    Some(*version)
+                    Some((*version, refusal.clone()))
                 }
                 _ => None,
             })
@@ -3109,6 +3139,7 @@ impl Session {
                     _ => false,
                 };
                 self.roll_back(view.version, !stale, refusal_part(&refusal));
+                self.reset_transcript_retry();
             }
             // An answer the contract may add later leaves the outcome
             // unknown (compaction contract W1.5): the view is not sent again,
@@ -3147,7 +3178,7 @@ impl Session {
             }
             Ok(ApplyViewAnswer::Refused {
                 refusal: ViewRefusal::StaleVersion { latest, .. },
-            }) if latest == view.version => {}
+            }) if latest == view.version => self.reset_transcript_retry(),
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 tracing::warn!(
                     "ck-mc: session {}: runner refused view {} offered again: {refusal:?}",
@@ -3155,6 +3186,7 @@ impl Session {
                     view.version
                 );
                 self.roll_back(oldest, true, None);
+                self.reset_transcript_retry();
             }
             Ok(other) => {
                 tracing::info!(
@@ -3195,9 +3227,13 @@ impl Session {
     }
 
     /// The runner did not take a view: its queued drops stay queued for the
-    /// next one, except those a refused view already carried once.
-    fn keep_refused_drops(&mut self) {
+    /// next one, except those blamed by a refused view already once. When a
+    /// refusal names a culprit, the other drops did not cause the failure.
+    fn keep_refused_drops(&mut self, culprit: Option<&lanes::PartKey>) {
         for part in std::mem::take(&mut self.next_covered) {
+            if culprit.is_some_and(|culprit| *culprit != part) {
+                continue;
+            }
             if !self.queued.contains(&part) {
                 continue;
             }
@@ -3235,6 +3271,7 @@ impl Session {
             latest: self.latest.clone(),
             queued: self.queued.clone(),
             refused_once: self.refused_once.clone(),
+            transcript_retry: self.transcript_retry,
             emergency_latched: self.emergency_latched,
             baseline: self.baseline.clone(),
             fold_due: self.fold_due,
@@ -3274,7 +3311,11 @@ impl Session {
     /// Settle the unconfirmed views against what the runner reports: each
     /// one it applies (or a later one it applies) is confirmed, and one it
     /// refused is rolled back with every view built on it.
-    fn settle_unconfirmed(&mut self, applied: Option<&AppliedView>, refused: &[u64]) {
+    fn settle_unconfirmed(
+        &mut self,
+        applied: Option<&AppliedView>,
+        refused: &[(u64, ViewRefusal)],
+    ) {
         if let Some(applied) = applied {
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
@@ -3302,6 +3343,7 @@ impl Session {
                     self.app_view_status(version, "applied");
                 }
                 self.unconfirmed.drain(..=at);
+                self.reset_transcript_retry();
                 self.app_prune_stamps(stamp_keys);
                 if let Some(first) = self.unconfirmed.first() {
                     self.app_projection
@@ -3310,22 +3352,42 @@ impl Session {
                 }
             }
         }
-        if let Some(version) = refused
+        if let Some((version, refusal)) = refused
             .iter()
-            .filter(|version| {
+            .filter(|(version, _)| {
                 self.unconfirmed
                     .iter()
-                    .any(|pending| pending.view.version == **version)
+                    .any(|pending| pending.view.version == *version)
             })
-            .min()
+            .min_by_key(|(version, _)| *version)
         {
-            self.roll_back(*version, true, None);
+            let moved = TranscriptRefusal::of(refusal);
+            let guard = moved.is_none_or(|kind| self.transcript_retry == Some((kind, *version)));
+            // FinalTurnRemoved depends on the newest entry; UnknownMessage
+            // can follow a revert. Neither blames a drop when an accepted
+            // view first loses that race. Only its immediate retry pays the
+            // usual refusal penalty if the same reason repeats.
+            self.roll_back(*version, guard, refusal_part(refusal));
+            // Retrying skips drop penalties, not the refusal status shown
+            // in the apps' view history.
+            self.app_view_status(*version, "refused");
+            self.reset_transcript_retry();
+            self.transcript_retry = moved.map(|kind| (kind, self.version + 1));
+        }
+    }
+
+    fn reset_transcript_retry(&mut self) {
+        self.transcript_retry = None;
+        // A later rollback must not resurrect a guard reset by an applied
+        // view or a different refusal.
+        for pending in &mut self.unconfirmed {
+            pending.before.transcript_retry = None;
         }
     }
 
     /// Put back what accepting the view `version`, and every view built on
     /// it, changed. Its queued drops are queued again, except one that a
-    /// refused view already carried once: a drop the runner keeps refusing
+    /// refused view already blamed once: a drop the runner keeps refusing
     /// must not make every later pass build a view it refuses.
     fn roll_back(&mut self, version: u64, refused: bool, culprit: Option<lanes::PartKey>) {
         if let Some(record) = self
@@ -3364,6 +3426,7 @@ impl Session {
         self.latest = before.latest;
         self.queued = before.queued;
         self.refused_once = before.refused_once;
+        self.transcript_retry = before.transcript_retry;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;
         if before.pending_keep.is_some() {
@@ -3388,12 +3451,8 @@ impl Session {
             // A refusal that names the part at fault sets aside only that
             // part; one that names none sets aside every automatic part the
             // view carried, so the same view is not built again.
-            let at_fault: Vec<lanes::PartKey> = match culprit {
-                Some(part) => covered
-                    .iter()
-                    .filter(|key| **key == part)
-                    .cloned()
-                    .collect(),
+            let at_fault: Vec<lanes::PartKey> = match &culprit {
+                Some(part) => covered.iter().filter(|key| *key == part).cloned().collect(),
                 None => covered.clone(),
             };
             self.failed_parts.extend(
@@ -3402,7 +3461,7 @@ impl Session {
                     .filter(|part| !self.queued.contains(part)),
             );
             self.next_covered = covered;
-            self.keep_refused_drops();
+            self.keep_refused_drops(culprit.as_ref());
         }
     }
 
@@ -3439,6 +3498,7 @@ impl Session {
                 // The runner's view now stands for itself.
                 self.unconfirmed.clear();
                 if let Some(view) = &answer.view {
+                    self.reset_transcript_retry();
                     self.version = self.version.max(view.version);
                     self.apply_cut(view);
                 }
@@ -3855,6 +3915,9 @@ mod summary_weight_tests {
 
 /// The part a runner's view refusal names as at fault, if it names one.
 fn refusal_part(refusal: &ViewRefusal) -> Option<lanes::PartKey> {
+    // SignedPartInvalid names the signed part these edits would invalidate,
+    // not a dropped part. Excluding it from later drops would not repair the
+    // offending view, so the refusal cannot single out one dropped culprit.
     match refusal {
         ViewRefusal::UnknownPart { mid, part }
         | ViewRefusal::StalePart { mid, part }
