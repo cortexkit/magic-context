@@ -35,6 +35,54 @@ export function keywordRelevance(query: string, content: string): number {
     return (0.8 * needles.filter((term) => words.has(term)).length) / needles.length;
 }
 
+const CJK_RUN = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+$/u;
+const CJK_RUN_SPLIT = /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+)/u;
+
+function hintTerms(text: string): string[] {
+    return [
+        ...new Set(
+            terms(text)
+                .flatMap((term) => term.split(CJK_RUN_SPLIT))
+                .filter((term) => term.length > 0 && !QUERY_STOP_WORDS.has(term)),
+        ),
+    ];
+}
+
+function characterBigrams(run: string): string[] {
+    const characters = [...run];
+    return characters.length === 1
+        ? characters
+        : characters.slice(1).map((character, index) => characters[index] + character);
+}
+
+/** Match unspaced clauses for hints without changing retrieval or snippet scoring. */
+export function hintKeywordRelevance(query: string, content: string): number {
+    const needles = hintTerms(query);
+    if (needles.length === 0) return 0;
+    const words = new Set(hintTerms(cleanSearchText(content)));
+    const runs = [...words].filter((word) => CJK_RUN.test(word));
+    const bigrams = new Set(runs.flatMap(characterBigrams));
+    let matched = 0;
+    for (const needle of needles) {
+        if (!CJK_RUN.test(needle)) {
+            matched += Number(words.has(needle));
+            continue;
+        }
+        const grams = characterBigrams(needle);
+        if ([...needle].length === 1) {
+            matched += Number(runs.some((run) => run.includes(needle)));
+            continue;
+        }
+        // Count each clause as one term so filler bigrams across word boundaries
+        // do not dilute it; require half coverage so shared function words alone do not pass.
+        matched += Math.min(
+            1,
+            grams.filter((gram) => bigrams.has(gram)).length / Math.ceil(grams.length / 2),
+        );
+    }
+    return (0.8 * matched) / needles.length;
+}
+
 /** Pick the densest matching passage before compression can discard the matched words. */
 export function matchedSearchSnippet(content: string, query: string, cap = 220): string {
     const text = cleanSearchText(content);
