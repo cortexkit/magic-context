@@ -356,6 +356,9 @@ jobs:
     name: Rust (module release gates)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Tests run the repository's code; they need to read it, nothing more.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
