@@ -21,9 +21,10 @@ use tokio::sync::oneshot;
 pub const ROLE: (&str, &str) = ("mc-context-read", "v1");
 pub const OPS: [&str; 2] = ["context.memories", "context.summaries"];
 
-/// How long a caller should wait before asking again for a held head whose
-/// project ck-mc hasn't learned yet. A head sets up again on its next step
-/// after a ck-mc restart, so this is usually shorter.
+/// How long a caller should wait before asking again about a session whose
+/// state ck-mc keeps in mode3.db but whose project it hasn't learned since
+/// starting. Such a session sends a new Setup on its next step after a ck-mc
+/// restart, so the wait is usually shorter.
 const PROJECT_PENDING_RETRY_MS: u64 = 30_000;
 
 type Reply = Result<Value, Refusal>;
@@ -259,9 +260,9 @@ impl Reader {
             drop(statement);
             store_tx.rollback().map_err(|_| unavailable())?;
         }
-        // A head ck-mc holds learns its project only from its Setup route, so
-        // after a restart, until that head's next Setup, its project is unknown
-        // rather than absent. An empty list would read as final, and a caller
+        // A session whose state ck-mc keeps in mode3.db learns its project only
+        // from its Setup route, so after a restart, until that session's next
+        // Setup, its project is unknown rather than absent. An empty list would read as final, and a caller
         // could cache a pack with no memories, so this answers "try later".
         if purpose == Some("bias") && held && project.is_none() {
             return Err(Refusal::new(
