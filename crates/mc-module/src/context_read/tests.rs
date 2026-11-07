@@ -303,7 +303,7 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
     let key = SessionRef::new("runner", "opencode2", "held");
     let store = Store::open(&fixture._dir.path().join("mode3.db")).unwrap();
     let setup = SetupRequest::new(
-        "worker",
+        crate::catalog::Preset::Worker.as_str(),
         ModelRef::new("anthropic", "claude-opus-5-5"),
         100000,
         1000,
