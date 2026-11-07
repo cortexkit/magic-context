@@ -1228,21 +1228,31 @@ export class NativeFoldReplay {
                     const replayAfter = replay.floor.after;
                     const replayStart = replay.floor.kind === "start";
                     const baseline = this.servedBaseline(draft);
+                    // Tool results have no row id; records() binds them to the last
+                    // non-tool carrier. Keep that carrier and its results together,
+                    // and omit leading results that have no owner in this input.
+                    let ownerKept = false;
                     captured = native.filter((message) => {
                         if (effortPart(message)) return false;
                         const id = nativeRowID(message);
                         if (HEAD_IDS.some((head) => head === id)) return false;
+                        if (!id && message.role === "tool") return ownerKept;
+                        let keep: boolean;
                         if (!id)
-                            return !(
+                            keep = !(
                                 baseline &&
                                 message.role === "user" &&
                                 message.content.some(
                                     (part) => part.type === "text" && part.text === baseline,
                                 )
                             );
-                        if (replayStart) return true;
-                        const seq = reader.sequenceForId(draft.sessionID, id);
-                        return seq === undefined || seq > replayAfter;
+                        else if (replayStart) keep = true;
+                        else {
+                            const seq = reader.sequenceForId(draft.sessionID, id);
+                            keep = seq === undefined || seq > replayAfter;
+                        }
+                        if (message.role !== "tool") ownerKept = keep;
+                        return keep;
                     });
                 }
                 let rows = this.records(draft.sessionID, captured, reader, replay?.floor.after);
