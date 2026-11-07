@@ -4539,6 +4539,73 @@ describe("Pi dreamer prompt-token budget", () => {
 		return { child, run, spawnImpl };
 	}
 
+	// A dreamer child runs Pi in RPC mode, where a missing key fails the
+	// `prompt` command itself: the runner reports `model_failed` with Pi's
+	// message in `error` and nothing on stderr.
+	async function promptRefused(error: string, children: number) {
+		const kids = Array.from({ length: children }, () => createMockChild());
+		const { runner, spawnImpl } = runnerWith(kids, {
+			invocation,
+			subagentExtensions: ["subagent-entry.js"],
+		});
+		const run = runner.run({
+			...baseOptions,
+			model: "openai/gpt-5.5",
+			agent: "dreamer-memory-mapper",
+			tokenBudget: 100,
+		});
+		for (
+			let i = 0;
+			i < 100 && !kids[0]?.stdinText.includes("dreamer-initial");
+			i++
+		)
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		kids[0]?.writeStdoutLine({
+			type: "response",
+			command: "prompt",
+			success: false,
+			error,
+		});
+		return { kids, run, spawnImpl };
+	}
+
+	it("retries the canonical provider when the RPC prompt fails for a missing key", async () => {
+		const { kids, run, spawnImpl } = await promptRefused(
+			"No API key found for openai-codex.",
+			2,
+		);
+		for (let i = 0; i < 100 && spawnImpl.mock.calls.length < 2; i++)
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		kids[1]?.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				usage: { input: 1 },
+				stopReason: "stop",
+				content: [{ type: "text", text: "direct API success" }],
+			},
+		});
+		kids[1]?.emitClose();
+		expect(await run).toMatchObject({ ok: true });
+		expect(spawnImpl).toHaveBeenCalledTimes(2);
+		expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
+			expect.arrayContaining(["--model", "openai-codex/gpt-5.5"]),
+		);
+		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
+			expect.arrayContaining(["--model", "openai/gpt-5.5"]),
+		);
+	});
+
+	it("does not retry the canonical provider when the RPC prompt fails otherwise", async () => {
+		const { run, spawnImpl } = await promptRefused("model overloaded", 1);
+		expect(await run).toMatchObject({
+			ok: false,
+			reason: "model_failed",
+			error: "model overloaded",
+		});
+		expect(spawnImpl).toHaveBeenCalledTimes(1);
+	});
+
 	it("finalizes the mapper before its step cap and retains a partial manifest below token budget", async () => {
 		const { child, run } = await started(3_000_000);
 		for (let step = 1; step <= 58; step++)

@@ -2668,14 +2668,17 @@ function isProviderCredentialFailure(
 	result: SubagentRunResult,
 	attempt: ProviderModelAttempt,
 ): result is FailedRunResult {
-	return (
-		attempt.translated &&
-		!result.ok &&
-		result.reason === "non_zero_exit" &&
-		getResultStderr(result).includes(
-			`No API key found for ${attempt.attemptedProvider}`,
-		)
-	);
+	if (!attempt.translated || result.ok) return false;
+	const missingKey = `No API key found for ${attempt.attemptedProvider}`;
+	// Pi reports a missing key in one of two ways: a one-shot child exits
+	// non-zero with the message on stderr, and an RPC-mode child (the dreamer)
+	// refuses its `prompt` command, which the runner reports as `model_failed`
+	// with the message in `error`.
+	if (result.reason === "non_zero_exit")
+		return getResultStderr(result).includes(missingKey);
+	if (result.reason === "model_failed")
+		return (result.error ?? "").includes(missingKey);
+	return false;
 }
 
 /**
