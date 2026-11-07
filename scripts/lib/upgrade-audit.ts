@@ -3,7 +3,6 @@ import { realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { movedPayloadDifference, type PayloadProof } from "./upgrade-payloads";
-import { rootExpiryDifference, type OpenInterval, type RootExpiryProof } from "./upgrade-roots";
 
 export const quote = (name: string): string =>
 	`"${name.replaceAll('"', '""')}"`;
@@ -27,6 +26,8 @@ export function snapshotRoot(path: string): string {
 	for (const forbidden of [
 		join(homedir(), ".local/share/cortexkit/magic-context"),
 		join(homedir(), ".local/share/opencode"),
+		join(homedir(), ".config/opencode"),
+		join(homedir(), ".config/cortexkit"),
 	]) {
 		if (requested === forbidden || requested.startsWith(`${forbidden}/`)) {
 			throw new Error(`Refusing live storage root: ${requested}`);
@@ -36,15 +37,18 @@ export function snapshotRoot(path: string): string {
 	for (const forbidden of [
 		join(homedir(), ".local/share/cortexkit/magic-context"),
 		join(homedir(), ".local/share/opencode"),
+		join(homedir(), ".config/opencode"),
+		join(homedir(), ".config/cortexkit"),
 	]) {
 		if (root === forbidden || root.startsWith(`${forbidden}/`))
 			throw new Error(`Refusing live storage root: ${root}`);
 	}
 	if (!statSync(root).isDirectory())
 		throw new Error(
-			"--snapshot requires a directory containing the store pair",
+			"--snapshot requires an offline context.db directory",
 		);
-	for (const name of ["context.db", "store.db"]) {
+	for (const name of ["context.db"]) {
+		if (statSync(join(root, `${name}-wal`), { throwIfNoEntry: false })) throw new Error("Snapshot must be an offline context.db without WAL sidecars");
 		const file = realpathSync(join(root, name));
 		if (file !== join(root, name))
 			throw new Error(`Snapshot database must not be a symlink: ${name}`);
@@ -55,9 +59,7 @@ export function snapshotRoot(path: string): string {
 export function version(path: string): number {
 	const db = new Database(path, { readonly: true });
 	try {
-		const sql = path.endsWith("context.db")
-			? "SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000"
-			: "SELECT MAX(version) AS v FROM cortexkit_schema_version WHERE namespace='mc_cache'";
+		const sql = "SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000";
 		return Number((db.query(sql).get() as { v: number }).v);
 	} finally {
 		db.close();
@@ -103,8 +105,7 @@ export function firstDifference(
 	before: string,
 	after: string,
 	onlyTables?: readonly string[],
-	proofs?: { payloads: PayloadProof[]; tables: { name: string; rows: number; sha256: string }[]; rootExpiry?: RootExpiryProof },
-	opener?: OpenInterval,
+	proofs?: { payloads: PayloadProof[]; tables: { name: string; rows: number; sha256: string }[] },
 ): string | null {
 	const db = new Database(after, { readonly: true });
 	try {
@@ -152,20 +153,9 @@ export function firstDifference(
 			}
 			const columns = oldColumns.filter((c) => newColumns.has(c.name)).map((c) => quote(c.name)).join(",");
 			// Ledger advancement is expected, but old context migration identities must survive.
-			let filter =
-				name === "schema_migrations"
-					? " WHERE version IN (SELECT version FROM baseline.schema_migrations)"
-					: name === "cortexkit_schema_version"
-						? " WHERE namespace <> 'mc_cache'"
-						: "";
-			if (name === "mc_transform_session_roots" && opener) {
-				const { difference, proof } = rootExpiryDifference(db, opener);
-				if (proofs) proofs.rootExpiry = proof;
-				if (difference) return difference;
-				// Compare every byte and rowid of retained roots; policy-approved deletions
-				// are the only rows excluded from the ordinary bidirectional content check.
-				filter = " WHERE rowid IN (SELECT rowid FROM main.mc_transform_session_roots)";
-			}
+			const filter = name === "schema_migrations"
+                ? " WHERE version IN (SELECT version FROM baseline.schema_migrations)"
+                : "";
 			const fields =
 				table.wr || table.type === "virtual"
 					? columns
@@ -258,4 +248,19 @@ export function compareServedBodies(
 				b.subarray(Math.max(0, offset - 60), offset + 180).toString(),
 		}];
 	}));
+}
+
+/** Exact DDL digest is diagnostic; structural compatibility is checked separately. */
+export function schemaDigest(path: string): string {
+    const db = new Database(path, { readonly: true });
+    try {
+        const rows = db
+            .query(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+            )
+            .all();
+        return new Bun.CryptoHasher("sha256").update(JSON.stringify(rows)).digest("hex");
+    } finally {
+        db.close();
+    }
 }
