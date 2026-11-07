@@ -247,22 +247,19 @@ async function remoteScores(
                     "Content-Type": "application/json",
                     ...(config.api_key ? { Authorization: `Bearer ${config.api_key}` } : {}),
                 },
+                // No `top_n`: Cohere, Jina and OpenRouter return every document
+                // without it, and Voyage refuses it (its equivalent is `top_k`).
                 body: JSON.stringify(
-                    tei
-                        ? { query, texts: documents }
-                        : {
-                              model: config.model,
-                              query,
-                              documents,
-                              top_n: documents.length,
-                          },
+                    tei ? { query, texts: documents } : { model: config.model, query, documents },
                 ),
                 signal: controller.signal,
                 redirect: "error",
             });
             if (!response.ok) throw new RerankFailure(`http_${response.status}`);
             const body = await response.json();
-            const rows = tei ? body : (body as { results?: unknown } | null)?.results;
+            // Cohere-style servers answer `results`; Voyage answers `data`.
+            const reply = body as { results?: unknown; data?: unknown } | null;
+            const rows = tei ? body : (reply?.results ?? reply?.data);
             if (!Array.isArray(rows) || rows.length !== documents.length)
                 throw new RerankFailure("invalid_reply");
             const scores = new Array<number>(documents.length);

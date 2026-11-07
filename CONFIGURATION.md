@@ -754,7 +754,7 @@ Configure hosted scoring in **user config**, beside `embedding` (the providers a
 
 `provider` accepts `synapse` (default), `remote`, or `off`. Remote mode requires `endpoint` and `model`; `api_key` is an optional Bearer token and supports the same user-level `{env:NAME}` / `{file:path}` expansion as embedding keys. Project config may only set `"rerank": {"provider": "off"}`. Project endpoint, model, credentials and limits are dropped with a warning, and no project variable tokens expand. Restart the host after changing this block.
 
-The client posts to `<endpoint>/rerank` with `{model, query, documents, top_n}` and reads `results: [{index, relevance_score}]`, compatible with Cohere, Voyage, OpenRouter and Jina-style services. Use a `tei+` base URL (for example `tei+http://localhost:8080`) for Hugging Face TEI's `{query, texts}` request and `[{index, score}]` response.
+The client posts to `<endpoint>/rerank` with `{model, query, documents}` and reads `[{index, relevance_score}]` rows from `results` (Cohere, OpenRouter and Jina-style services) or `data` (Voyage). Use a `tei+` base URL (for example `tei+http://localhost:8080`) for Hugging Face TEI's `{query, texts}` request and `[{index, score}]` response.
 
 `timeout_ms` defaults to 1500 and is clamped to 50–15000; the tool's abort signal also cancels the call. `top_n` (1–20, default 20) caps the existing fused candidate pool; requests ask for every submitted document's score. Batches larger than 20 are refused rather than split. Each location/title/body document is UTF-8-safe truncated to 1024 bytes to bound disclosure and latency. Missing, duplicate, out-of-range or non-finite scores reject the entire reply. Results sort descending with stable ties.
 

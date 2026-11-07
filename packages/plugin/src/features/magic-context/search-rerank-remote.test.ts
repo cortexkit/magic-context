@@ -73,10 +73,10 @@ for (const tei of [false, true])
                 expect(new URL(req.url).pathname).toBe("/rerank");
                 expect(req.method).toBe("POST");
                 expect(req.headers.get("Authorization")).toBe(`Bearer ${KEY}`);
+                // No `top_n`: Voyage refuses it, and the others score every
+                // document without it.
                 expect(await req.json()).toEqual(
-                    tei
-                        ? { query, texts }
-                        : { model: "reranker", query, documents: texts, top_n: 3 },
+                    tei ? { query, texts } : { model: "reranker", query, documents: texts },
                 );
                 const rows = [
                     { index: 2, score: 5 },
@@ -270,15 +270,40 @@ test("automatic search and literal queries never make hosted calls", async () =>
     expect(calls).toBe(0);
 });
 
+test("a Voyage-style reply under data reranks like results", async () => {
+    const config = remote(async (req) => {
+        const body = (await req.json()) as Record<string, unknown>;
+        // Voyage answers 400 to any request carrying top_n.
+        if ("top_n" in body) return new Response("top_n is not supported", { status: 400 });
+        return Response.json({
+            object: "list",
+            data: [
+                { relevance_score: 5, index: 2 },
+                { relevance_score: -1, index: 0 },
+                { relevance_score: 5, index: 1 },
+            ],
+            model: "reranker",
+            usage: { total_tokens: 0 },
+        });
+    }, false);
+    const session = await prepareReranker("git:test", "s", undefined, null, config);
+    expect(session).not.toBeNull();
+    expect(await rerankSearchResults(session!, query, baseline, pool, texts, 3)).toEqual([
+        pool[1],
+        pool[2],
+        pool[0],
+    ]);
+});
+
 test("top_n bounds the shared fused candidate pool and failure keeps baseline bytes", async () => {
     let calls = 0;
     let synapseCalls = 0;
     const config = remote(
         async (req) => {
             calls++;
-            const body = (await req.json()) as { documents: string[]; top_n: number };
+            const body = (await req.json()) as { documents: string[]; top_n?: number };
             expect(body.documents).toHaveLength(4);
-            expect(body.top_n).toBe(4);
+            expect(body.top_n).toBeUndefined();
             return new Response(KEY, { status: 503 });
         },
         false,
