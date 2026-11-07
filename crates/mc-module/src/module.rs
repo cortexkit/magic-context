@@ -197,6 +197,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub fn setup(&self, route: Route, request: SetupRequest) -> Result<SetupAnswer, ModuleError> {
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
+        self.inner.client.runner_setup(&route.session.runner);
         if let Some(project) = &route.project {
             self.inner
                 .session_projects

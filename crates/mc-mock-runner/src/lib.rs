@@ -34,3 +34,6 @@ pub mod transcript;
 
 #[cfg(test)]
 mod runner_tests;
+
+#[cfg(test)]
+mod child_tests;
