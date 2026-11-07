@@ -38,7 +38,7 @@ import {
 } from "./features/magic-context/storage-db";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
-import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
+import { createAutoUpdateCheckerHook, resolveNpmRegistry } from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
@@ -881,7 +881,14 @@ const server: Plugin = async (ctx) => {
                 },
             },
             autoUpdateChecker: createAutoUpdateCheckerHook(ctx, {
+                // auto_update: false skips the checker entirely — no npm
+                // request, matching the host updater's disable behavior.
+                enabled: pluginConfig.auto_update !== false,
                 autoUpdate: pluginConfig.auto_update !== false,
+                // Installs honor the operator's configured registry (the
+                // spawned package manager reads the .npmrc chain); the check
+                // resolves the same registry instead of hardcoding npmjs.
+                npmRegistryUrl: resolveNpmRegistry(ctx.directory),
                 signal: autoUpdateAbort.signal,
                 // Multi-project plugin reloads coordinate via this on-disk
                 // timestamp so npm gets hit at most once per check window
