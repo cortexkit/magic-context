@@ -752,10 +752,12 @@ function loadWindowDumpSnapshots(
         if (snapshot) context.unshift(snapshot);
     }
     const selected = [...context, ...loaded];
-    // Each request can consume one scheduler decision, which later requests must not
-    // reuse. Validate earlier bodies within the decision-join TTL, recording only
-    // request times so selected requests cannot borrow those decisions. Older requests
-    // cannot consume a decision still eligible here; corrupt bodies must not reserve one.
+    // Each request is joined to at most one transform-pass decision from Magic
+    // Context's log (execute or defer), and a later request may not take a decision
+    // an earlier one already took. So bodies before the window but within the cache
+    // TTL of it are read only for their request times: those times claim their
+    // decisions first without adding the requests to the result. Older requests can't
+    // claim a decision this window could use, and an unreadable body claims none.
     const cutoff = selected.reduce((earliest, snapshot) => Math.min(earliest, snapshot.requestTimestampMs), Infinity) - DEFAULT_CACHE_TTL_MS;
     for (const entry of indexed.slice(0, before)) {
         if (Date.parse(entry.createdAt) < cutoff) continue;
