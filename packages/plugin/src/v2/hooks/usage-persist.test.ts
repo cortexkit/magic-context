@@ -65,6 +65,48 @@ async function configure272kWindow(): Promise<void> {
 }
 
 describe("persistV2UsageReading", () => {
+    it("keeps pressure and the map entry for a server-fallback reply but moves completion time", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-fallback-usage-");
+        const db = openDatabase();
+        const sessionID = "v2-fallback-usage";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const draftModel = { providerID: "anthropic", id: "claude-opus-5-5" };
+        const persist = (input: number, completed: number, marked: boolean) => {
+            const reading = resolveUsageReading({
+                draftModel,
+                tokens: { input },
+                completed,
+                finish: "stop",
+                content: marked
+                    ? [
+                          {
+                              type: "reasoning",
+                              text: " ",
+                              native: {
+                                  signature: "cortexkit-server-fallback-v1:primary|fallback",
+                              },
+                          },
+                      ]
+                    : [{ type: "reasoning", native: { signature: "real-signature" } }],
+                limitFor: () => 872_000,
+            })!;
+            persistV2UsageReading({ db, sessionID, draftModel, reading, contextUsageMap });
+        };
+        persist(507_000, 1000, false);
+        const previous = getOrCreateSessionMeta(db, sessionID);
+        const entry = contextUsageMap.get(sessionID);
+        persist(963_300, 2000, true);
+        expect(getOrCreateSessionMeta(db, sessionID)).toEqual({
+            ...previous,
+            lastResponseTime: 2000,
+        });
+        expect(contextUsageMap.get(sessionID)).toBe(entry);
+        persist(510_000, 3000, false);
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(510_000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(510_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3000);
+    });
+
     it("dates provider usage by completion when the store is read after a fold", () => {
         process.env.XDG_DATA_HOME = makeTempDir("v2-usage-age-");
         const db = openDatabase();

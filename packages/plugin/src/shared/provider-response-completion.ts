@@ -1,3 +1,19 @@
+import { isRecord } from "./record-type-guard";
+
+export function hasServerFallbackUsage(content: unknown): boolean {
+    return (
+        Array.isArray(content) &&
+        content.some(
+            (part) =>
+                isRecord(part) &&
+                part.type === "reasoning" &&
+                isRecord(part.native) &&
+                typeof part.native.signature === "string" &&
+                part.native.signature.startsWith("cortexkit-server-fallback-v1:"),
+        )
+    );
+}
+
 /** Failure markers take precedence over a completion timestamp or token usage. */
 export function providerResponseFailed(input: { finish?: unknown; error?: unknown }): boolean {
     if (input.error !== undefined && input.error !== null && input.error !== "") return true;

@@ -1,4 +1,7 @@
-import { isSuccessfulProviderCompletion } from "../../shared/provider-response-completion";
+import {
+    hasServerFallbackUsage,
+    isSuccessfulProviderCompletion,
+} from "../../shared/provider-response-completion";
 
 export interface UsageReadingInput {
     rowModel?: { providerID?: unknown; id?: unknown };
@@ -11,6 +14,7 @@ export interface UsageReadingInput {
     completed?: number;
     finish?: string;
     error?: unknown;
+    content?: unknown;
     /** Resolve the output-reserved usable window for a model. */
     limitFor: (providerID: string, modelID: string) => number;
 }
@@ -23,6 +27,7 @@ export interface UsageReading {
     admissionLimit: number;
     /** Absent when a legacy row carries no model metadata. */
     modelKey?: string;
+    serverFallback?: boolean;
     completed?: number;
     finish?: string;
     error?: unknown;
@@ -80,5 +85,6 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
             : {}),
         ...(input.finish !== undefined ? { finish: input.finish } : {}),
         ...(input.error !== undefined ? { error: input.error } : {}),
+        ...(hasServerFallbackUsage(input.content) ? { serverFallback: true } : {}),
     };
 }
