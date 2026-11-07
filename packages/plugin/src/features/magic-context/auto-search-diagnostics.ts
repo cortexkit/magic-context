@@ -1,5 +1,16 @@
-import { cleanSearchText, keywordRelevance } from "../../shared/search-text";
-import type { UnifiedSearchResult } from "./search";
+import { cleanSearchText, hintKeywordRelevance } from "../../shared/search-text";
+import type { MemorySearchResult, UnifiedSearchResult } from "./search";
+
+const memoryHintContent = new WeakMap<MemorySearchResult, string>();
+
+/** Keep full memory text in a side map for hint scoring so tools still receive only the preview. */
+export function withMemoryHintContent(
+    result: MemorySearchResult,
+    fullContent: string,
+): MemorySearchResult {
+    memoryHintContent.set(result, fullContent);
+    return result;
+}
 
 export type AutoSearchLane = "memory" | "messages" | "summaries" | "git";
 export type ChunkPoolPeek =
@@ -33,16 +44,18 @@ export function createAutoSearchDiagnostics(threshold: number): AutoSearchDiagno
 
 /** The unboosted relevance used by the automatic-hint threshold. */
 export function autoSearchRelevance(query: string, result: UnifiedSearchResult): number {
-    if (
-        cleanSearchText(result.source === "compartment" ? result.title : result.content).length ===
-        0
-    )
-        return 0;
+    const content =
+        result.source === "memory"
+            ? (memoryHintContent.get(result) ?? result.content)
+            : result.source === "compartment"
+              ? result.title
+              : result.content;
+    if (cleanSearchText(content).length === 0) return 0;
     return result.source === "message" ||
         ("matchType" in result &&
             result.source !== "compartment" &&
             result.matchType !== "semantic")
-        ? keywordRelevance(query, result.content)
+        ? hintKeywordRelevance(query, content)
         : result.score;
 }
 
