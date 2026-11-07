@@ -166,11 +166,10 @@ async function captureAfterSummary(native: "full" | "tail", toolBeforeFloor: boo
     f.rows[1] = { ...f.rows[1]!, type: "assistant" };
     f.rows[4] = { ...f.rows[4]!, type: "assistant" };
     const summary = "summary covering messages 1 through 4";
-    f.db
-        .prepare(
-            "UPDATE session_meta SET cached_m0_bytes=?,cached_m0_last_baseline_end_message_id='u4' WHERE session_id='s'",
-        )
-        .run(Buffer.from(summary));
+    patchSessionMeta(f.db, "s", {
+        cached_m0_bytes: Buffer.from(summary),
+        cached_m0_last_baseline_end_message_id: "u4",
+    });
     const before = [
         message("u1"),
         assistantWithTool("u2"),
