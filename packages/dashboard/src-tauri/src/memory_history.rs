@@ -1039,6 +1039,7 @@ impl HistoryTransaction<'_> {
 /// memory_placement rows stay unchanged, and no new-memory operation is queued
 /// for cross-device synchronization.
 pub fn local_write(conn: &mut Connection, request: &Value, now: i64) -> Result<Value, String> {
+    crate::db_capabilities::require_history(conn, true)?;
     let request = validate_write_request(
         if request.get("decisionKey").is_some() {
             "memory.restore"
@@ -1063,6 +1064,7 @@ pub fn preview(
     writer: MemoryWriter,
 ) -> Result<Value, String> {
     let request = json!({"projectPath":project,"decisionKey":key,"operationId":"preview","expectedRevisions":[]});
+    crate::db_capabilities::require_history(conn, true)?;
     let plan = plan(conn, &request, now, writer, false)?;
     let decision = match plan.decision {
         Some(decision) => Some(decision),
@@ -1089,6 +1091,7 @@ pub fn preview(
 }
 
 pub fn history(conn: &Connection, request: &HistoryRequest) -> Result<Value, String> {
+    crate::db_capabilities::require_history(conn, false)?;
     if request.project_path.is_empty()
         || request.memory_id.is_some_and(|id| {
             snapshot(conn, id)

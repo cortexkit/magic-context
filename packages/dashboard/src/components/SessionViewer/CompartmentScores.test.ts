@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { scoreLabel, scoresPending } from "./compartment-scores";
+import { scoreCompatibilityNotice, scoreLabel, scoresPending } from "./compartment-scores";
 
 describe("compartment score visibility", () => {
+  test("older stores explain original-score fallback without claiming rescoring is available", () => {
+    expect(scoreCompatibilityNotice(undefined)).toBeNull();
+    expect(scoreCompatibilityNotice({ compartmentScores: true })).toBeNull();
+    expect(scoreCompatibilityNotice({ compartmentScores: false })).toBe(
+      "Compartment rescoring needs Magic Context 0.50 or later. Showing original scores.",
+    );
+  });
   test("original rows retain the single-score display", () => {
     expect(scoreLabel({ importance: 73 })).toBeNull();
     expect(scoresPending({ importance: 73 })).toBe(false);

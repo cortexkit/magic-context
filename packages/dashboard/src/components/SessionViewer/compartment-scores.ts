@@ -23,3 +23,10 @@ export function scoresPending(row: ScoreRow): boolean {
         row.effective_importance !== row.rust_applied_importance))
   );
 }
+export function scoreCompatibilityNotice(
+  capabilities: { compartmentScores: boolean } | undefined,
+): string | null {
+  return capabilities && !capabilities.compartmentScores
+    ? "Compartment rescoring needs Magic Context 0.50 or later. Showing original scores."
+    : null;
+}

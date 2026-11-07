@@ -706,6 +706,7 @@ pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     // WAL mode is inherited from the plugin's read-write connection — no need to set it here.
     // busy_timeout is connection-local and safe on read-only connections.
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    crate::db_capabilities::get(&conn)?;
     Ok(conn)
 }
 
@@ -769,6 +770,7 @@ pub fn open_readwrite(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     // This opener has no module client, so a marker-less store cannot be classified as
     // regressed here. The later module handshake performs the authoritative reconciliation.
     ensure_context_store_uuid(&conn)?;
+    crate::db_capabilities::get(&conn)?;
     Ok(conn)
 }
 
@@ -5814,13 +5816,7 @@ fn query_memories(
     // the schema lifecycle). A new dashboard against a pre-v44 plugin DB lacks the
     // classify columns — select literal defaults instead so the viewer degrades
     // rather than erroring. Mapper indices 21/22/23 stay stable either way.
-    let revision_select = if conn
-        .prepare("PRAGMA table_info(memories)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|name| name == "revision")
-    {
+    let revision_select = if crate::db_capabilities::get(conn)?.memory_revision {
         "m.revision"
     } else {
         "1 AS revision"
@@ -7830,7 +7826,11 @@ pub fn get_compartments(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<Compartment>, rusqlite::Error> {
-    let rust_watermark = compartment_scores::rust_watermark(conn, session_id)?;
+    let rust_watermark = if crate::db_capabilities::get(conn)?.compartment_scores {
+        compartment_scores::rust_watermark(conn, session_id)?
+    } else {
+        None
+    };
     let tx = conn.unchecked_transaction()?;
     let scores = compartment_scores::read(&tx, session_id, rust_watermark)?;
     // v2 tiered compartments: read the paraphrase tiers (p1–p4), the

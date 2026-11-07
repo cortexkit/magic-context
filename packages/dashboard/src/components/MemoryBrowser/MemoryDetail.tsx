@@ -3,12 +3,14 @@ import { formatTimestamp, getMemoryHistory } from "../../lib/api";
 import type { Memory, MemoryHistoryDecision } from "../../lib/types";
 import FilterSelect from "../shared/FilterSelect";
 import { SHARE_CATEGORY_OPTIONS } from "../WorkspacesPanel/workspace-staging";
+import { MEMORY_HISTORY_REQUIREMENT } from "./database-features";
 import EditNotice from "./EditNotice";
 import MemoryHistoryTimeline from "./MemoryHistoryTimeline";
 import { decisionView, type EditOutcome, HISTORY_PAGE_SIZE } from "./memory-history";
 
 interface Props {
   memory: Memory;
+  historyAvailable: boolean;
   /** Bumped by the parent after an undo so the history tab reloads. */
   historyReload: number;
   onClose: () => void;
@@ -126,17 +128,22 @@ export default function MemoryDetail(props: Props) {
           >
             Details
           </button>
-          <button
-            type="button"
-            class="tab-pill"
-            classList={{ active: tab() === "history" }}
-            onClick={() => setTab("history")}
-          >
-            History
-          </button>
+          <Show when={props.historyAvailable}>
+            <button
+              type="button"
+              class="tab-pill"
+              classList={{ active: tab() === "history" }}
+              onClick={() => setTab("history")}
+            >
+              History
+            </button>
+          </Show>
         </div>
+        <Show when={!props.historyAvailable}>
+          <p class="history-intro">{MEMORY_HISTORY_REQUIREMENT}</p>
+        </Show>
 
-        <Show when={tab() === "history"}>
+        <Show when={tab() === "history" && props.historyAvailable}>
           <MemoryHistoryTimeline
             load={loadHistory}
             reloadToken={`${props.memory.id}:${props.historyReload}`}

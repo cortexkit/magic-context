@@ -4,6 +4,9 @@ use magic_context_dashboard_lib::db;
 use magic_context_dashboard_lib::workspaces;
 use rusqlite::{params, Connection};
 
+#[path = "support/context_db.rs"]
+mod schema_fixture;
+
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -508,7 +511,11 @@ fn display_name_unique_within_workspace() {
 #[test]
 fn memory_status_restore_widens_epoch_fan_out() {
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("context.db");
+    schema_fixture::create_test_context_db(&path);
+    let mut conn = Connection::open(path).unwrap();
+    workspaces::clear_workspace_schema_ready_cache_for_tests();
     seed_epoch(&conn, "git:a", 5);
     seed_epoch(&conn, "git:b", 7);
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
@@ -523,11 +530,6 @@ fn memory_status_restore_widens_epoch_fan_out() {
     .unwrap();
     let mid = conn.last_insert_rowid();
 
-    conn.execute_batch("ALTER TABLE memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE memories ADD COLUMN importance INTEGER DEFAULT 50; ALTER TABLE memories ADD COLUMN scope TEXT DEFAULT 'project'; ALTER TABLE memories ADD COLUMN shareable INTEGER DEFAULT 0; ALTER TABLE memories ADD COLUMN classified_at INTEGER;
-        CREATE TABLE memory_history(id INTEGER PRIMARY KEY AUTOINCREMENT,memory_id INTEGER NOT NULL,revision INTEGER NOT NULL,previous_text TEXT NOT NULL,after_text TEXT,before_json TEXT,after_json TEXT,applied_at INTEGER NOT NULL,reason TEXT NOT NULL,evidence_json TEXT NOT NULL,source_ids_json TEXT NOT NULL,decision_key TEXT NOT NULL,UNIQUE(memory_id,revision));
-        CREATE TABLE memory_journal(id INTEGER PRIMARY KEY AUTOINCREMENT,project_path TEXT NOT NULL,decision_key TEXT NOT NULL UNIQUE,operation TEXT NOT NULL,receipt_json TEXT NOT NULL,applied_at INTEGER NOT NULL,before_json TEXT,after_json TEXT);
-        CREATE TABLE memory_decision_receipts(decision_key TEXT PRIMARY KEY,project_path TEXT NOT NULL,fact_id INTEGER,receipt_json TEXT NOT NULL,resolved_at INTEGER NOT NULL);
-        CREATE TABLE memory_successor_links(source_id INTEGER NOT NULL,successor_id INTEGER NOT NULL,decision_key TEXT NOT NULL,PRIMARY KEY(source_id,successor_id));").unwrap();
     let request = serde_json::json!({ "projectPath":"git:a", "operationId":"workspace-unarchive", "expectedRevisions":[{"memoryId":mid,"revision":1}], "changes":[{"memoryId":mid,"status":"active"}] });
     let receipt = db::update_memory_status(&mut conn, &request).expect("restore");
     assert_eq!(receipt["state"], "applied");

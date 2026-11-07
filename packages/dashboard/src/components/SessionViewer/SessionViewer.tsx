@@ -15,6 +15,7 @@ import {
   dismissNote,
   formatDateTime,
   formatRelativeTime,
+  getDatabaseCapabilities,
   getProjects,
   getSessionDetail,
   getSessionMessages,
@@ -28,6 +29,7 @@ import {
 } from "../../lib/api";
 import { LoadMoreTrigger } from "../../lib/load-more";
 import { CompartmentScores, scoreLabel } from "./CompartmentScores";
+import { scoreCompatibilityNotice } from "./compartment-scores";
 import {
   formatHistorianDuration,
   formatHistorianProviderModel,
@@ -215,6 +217,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
   // and Cache events both load lazily when the user activates their tab.
   const [activeTab, setActiveTab] = createSignal<ActiveTab>("compartments");
   const [expandedCompartment, setExpandedCompartment] = createSignal<number | null>(null);
+  const [databaseCapabilities] = createResource(getDatabaseCapabilities);
   // Per-compartment selected render tier for the expanded v2 tier viewer
   // ("p1" verbose → "p4" anchor-only). Defaults to p1 (full content).
   const [compartmentTier, setCompartmentTier] = createSignal<Record<number, TierKey>>({});
@@ -1167,6 +1170,9 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
 
           {/* Compartments tab */}
           <Show when={activeTab() === "compartments"}>
+            <Show when={scoreCompatibilityNotice(databaseCapabilities())}>
+              {(notice) => <p class="history-intro">{notice()}</p>}
+            </Show>
             <Show
               when={!sessionDetail.loading}
               fallback={<div class="empty-state">Loading...</div>}
