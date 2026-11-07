@@ -562,12 +562,17 @@ export function isCompactionMarkerIntentAbsent(
 }
 
 /** Serialize recovery and intent staging with host writers, without changing host rows. */
-export function withCompactionMarkerPublicationLock<T>(operation: () => T): T {
-    return runMarkerWriteTransaction(
-        getWritableOpenCodeDb(),
-        "compaction-marker-replace",
-        operation,
-    );
+export function withCompactionMarkerPublicationLock<T>(operation: () => T, sessionId: string): T {
+    const db = getWritableOpenCodeDb();
+    const snapshot = prepareMarkerReplacementSnapshot(db, sessionId);
+    return runMarkerWriteTransaction(db, "compaction-marker-replace", () => {
+        if (snapshot) activeMarkerReplacementSnapshots.set(db, snapshot);
+        try {
+            return operation();
+        } finally {
+            activeMarkerReplacementSnapshots.delete(db);
+        }
+    });
 }
 
 export type MarkerPublicationInspection =
@@ -964,6 +969,128 @@ export type CompactionMarkerReplacementOutcome =
 
 class MarkerCandidateUnavailableError extends Error {}
 
+interface MarkerReplacementSnapshot {
+    sessionId: string;
+    basis: MarkerCandidateBasis;
+    partIds: string[];
+    messageIds: string[];
+    highestPartId: string;
+    highestMessageId: string;
+    references: MarkerTailReference[];
+}
+
+const activeMarkerReplacementSnapshots = new WeakMap<Database, MarkerReplacementSnapshot>();
+
+interface MarkerTailReference {
+    id: string;
+    direct: unknown;
+    nested: unknown;
+}
+
+const MARKER_TAIL_REFERENCE_COLUMNS = `id,
+    CASE WHEN data LIKE '%tail_start_id%' THEN json_extract(data, '$.tail_start_id') END AS direct,
+    CASE WHEN data LIKE '%tail_start_id%' THEN json_extract(data, '$.compaction.tail_start_id') END AS nested`;
+
+function prepareMarkerReplacementSnapshot(
+    db: Database,
+    sessionId: string,
+): MarkerReplacementSnapshot | undefined {
+    // Never turn a caller's existing writer transaction into a session-wide read.
+    if (db.inTransaction) return undefined;
+    db.exec("BEGIN");
+    try {
+        // Certification and discovery must describe the same read snapshot.
+        const basis = readMarkerCandidateBasis(db, sessionId);
+        if (!basis) return undefined;
+        const highestId = (table: "part" | "message") =>
+            (
+                db.prepare(`SELECT id FROM ${table} ORDER BY id DESC LIMIT 1`).get() as
+                    | { id: string }
+                    | undefined
+            )?.id ?? "";
+        // OpenCode v1.19.5 packages/schema/src/v1/session.ts:195-201 puts
+        // tail_start_id on compaction parts only. Keep message-level references
+        // for compatibility with stores carrying message-level compaction metadata.
+        // Substring filters avoid parsing ordinary tool/text payloads as JSON.
+        const parts = db
+            .prepare(
+                `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM part WHERE session_id = ?
+                 AND data LIKE '%compaction%' AND json_valid(data)
+                 AND json_extract(data, '$.type') = 'compaction'`,
+            )
+            .all(sessionId) as MarkerTailReference[];
+        const messages = db
+            .prepare(
+                `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM message WHERE session_id = ?
+                 AND (data LIKE '%compaction%' OR data LIKE '%tail_start_id%')
+                 AND json_valid(data)
+                 AND (json_type(data, '$.compaction') IS NOT NULL
+                      OR json_type(data, '$.tail_start_id') IS NOT NULL)`,
+            )
+            .all(sessionId) as MarkerTailReference[];
+        return {
+            sessionId,
+            basis,
+            partIds: parts.map((row) => row.id),
+            messageIds: messages.map((row) => row.id),
+            highestPartId: highestId("part"),
+            highestMessageId: highestId("message"),
+            references: [...parts, ...messages],
+        };
+    } finally {
+        db.exec("ROLLBACK");
+    }
+}
+
+function markerRowsAreReferenced(
+    db: Database,
+    snapshot: MarkerReplacementSnapshot,
+    existing: CompactionMarkerState,
+): boolean {
+    const deleted = new Set([
+        existing.summaryMessageId,
+        existing.summaryPartId,
+        existing.compactionPartId,
+    ]);
+    const referencesDeleted = (row: MarkerTailReference) =>
+        !deleted.has(row.id) &&
+        [row.direct, row.nested].some((id) => typeof id === "string" && deleted.has(id));
+    if (snapshot.references.some(referencesDeleted))
+        throw new Error(
+            "a surviving tail_start_id references a recorded marker row; marker unchanged",
+        );
+    // A native compaction may add tail_start_id to an existing part after its
+    // summary finishes (OpenCode v1.19.5 packages/opencode/src/session/compaction.ts:461-465). Re-read
+    // those rare rows by primary key, including compactions with no tail yet.
+    // New compaction parts and summary messages use generated ascending IDs
+    // (compaction.ts:394,559-583; session/session.ts:707-728 for forks;
+    // id/id.ts:51-69). Only the new-ID suffix needs discovery under the lock.
+    // The writer lock blocks every session on the server: never scan its old
+    // ordinary messages or parts here. +session_id keeps the primary-key range
+    // instead of choosing the session index and filtering all historical rows.
+    for (const [table, ids, highestId] of [
+        ["part", snapshot.partIds, snapshot.highestPartId],
+        ["message", snapshot.messageIds, snapshot.highestMessageId],
+    ] as const) {
+        const byId = db.prepare(
+            `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM ${table} WHERE id = ? AND session_id = ?`,
+        );
+        for (const id of ids) {
+            const row = byId.get(id, snapshot.sessionId) as MarkerTailReference | undefined;
+            if (row && referencesDeleted(row)) return true;
+        }
+        const newRows = db
+            .prepare(
+                `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM ${table} WHERE id > ? AND +session_id = ?
+                 AND data LIKE '%tail_start_id%' AND json_valid(data)
+                 AND ${table === "part" ? "json_extract(data, '$.type') = 'compaction'" : "(json_type(data, '$.tail_start_id') IS NOT NULL OR json_type(data, '$.compaction.tail_start_id') IS NOT NULL)"}`,
+            )
+            .all(highestId, snapshot.sessionId) as MarkerTailReference[];
+        if (newRows.some(referencesDeleted)) return true;
+    }
+    return false;
+}
+
 export function replaceCompactionMarker(
     existing: CompactionMarkerState | null,
     args: InjectCompactionMarkerArgs,
@@ -975,13 +1102,16 @@ export function replaceCompactionMarker(
     try {
         const db = getWritableOpenCodeDb();
         connection = db;
-        const basis = readMarkerCandidateBasis(db, args.sessionId);
-        if (!basis) {
+        const snapshot =
+            activeMarkerReplacementSnapshots.get(db) ??
+            prepareMarkerReplacementSnapshot(db, args.sessionId);
+        if (!snapshot || snapshot.sessionId !== args.sessionId) {
             return {
                 kind: "deferred",
                 error: new Error("marker candidate preparation pending; marker unchanged"),
             };
         }
+        const { basis } = snapshot;
         const marker = runMarkerWriteTransaction(db, "compaction-marker-replace", () => {
             entered = true;
             if (!isMarkerCandidateBasisCurrent(db, basis))
@@ -989,32 +1119,8 @@ export function replaceCompactionMarker(
                     "host store changed after marker candidate preparation; marker unchanged",
                 );
             if (existing) {
-                // Native compaction can retain any of these rows as its tail boundary.
-                // Refuse under the writer lock rather than leave a dangling reference.
-                const referenced = db
-                    .prepare(
-                        `WITH deleted(id) AS (VALUES (?), (?), (?)), surviving(data) AS (
-                            SELECT data FROM part WHERE session_id = ?
-                              AND id NOT IN (SELECT id FROM deleted)
-                              AND json_extract(data, '$.type') = 'compaction'
-                            UNION ALL
-                            SELECT data FROM message WHERE session_id = ?
-                              AND id NOT IN (SELECT id FROM deleted)
-                        )
-                        SELECT 1 FROM surviving
-                        WHERE json_extract(data, '$.tail_start_id') IN (SELECT id FROM deleted)
-                           OR json_extract(data, '$.compaction.tail_start_id') IN (SELECT id FROM deleted)
-                        LIMIT 1`,
-                    )
-                    .get(
-                        existing.summaryMessageId,
-                        existing.summaryPartId,
-                        existing.compactionPartId,
-                        args.sessionId,
-                        args.sessionId,
-                    );
-                if (referenced)
-                    throw new Error(
+                if (markerRowsAreReferenced(db, snapshot, existing))
+                    throw new MarkerCandidateUnavailableError(
                         "a surviving tail_start_id references a recorded marker row; marker unchanged",
                     );
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);

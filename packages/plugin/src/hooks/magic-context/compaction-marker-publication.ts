@@ -231,6 +231,7 @@ export function publishRecoverableCompactionMarker(
                     cut = replacement.kind === "uncertain" ? "uncertain" : "definitely-no-cut";
                 return replacement;
             },
+            sessionId,
         );
         if (result.kind === "committed") {
             // The outer host transaction has committed. If this write fails, its
