@@ -745,10 +745,12 @@ it("independent differential retains base content across the admitted-thinking-s
         );
     expect(summaries).toHaveLength(seeds.length * (s02 ? 3 : 9));
     if (!s02 && passes === 80 && !process.env.REVIEW_OUT) {
-        // Signed digests use the fixture's baseCommit with only its referencePatch
-        // guard applied. The impossible-fixed-floor guard preserves tool results
-        // instead of dropping them when no amount of reclaim can fit the turn.
-        // Unsigned digests remain the original byte-for-byte baseline.
+        // Signed digests retain the fixture's fixed-floor guard: preserve tool
+        // results when no amount of reclaim can fit the turn. Both OpenCode
+        // fixtures also include the author-based <system-reminder> guidance:
+        // a notice wrapper does not grant authority to quoted text. Only that
+        // system wording changed; all message parts, including thinking and empty
+        // companions, and every Pi byte remain at their prior baseline.
         // Collect every row before asserting, so one run reports each drifted key.
         const actual: Record<string, string | undefined> = {};
         const expected: Record<string, string | undefined> = {};
