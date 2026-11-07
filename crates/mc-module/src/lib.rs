@@ -48,6 +48,7 @@ pub mod client;
 pub mod config;
 pub mod content_language;
 pub mod context_db;
+pub mod context_read;
 pub mod count;
 pub mod decay;
 pub mod embedding;

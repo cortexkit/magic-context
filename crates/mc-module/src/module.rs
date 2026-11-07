@@ -73,12 +73,13 @@ impl<C> Clone for Module<C> {
 
 struct Inner<C> {
     app_read: crate::app_read::AppRead,
+    context_read: crate::context_read::ContextRead,
     client: Arc<C>,
     search: Option<crate::search::background::Background>,
     /// Where each session's settings come from. They are resolved again for
     /// every job, so a configuration edit applies from the session's next
     /// pass.
-    config: Config,
+    config: Arc<Config>,
     /// Where summaries are stored. Without it they live only in memory, which
     /// only tests want.
     db: Option<Arc<ContextDb>>,
@@ -89,7 +90,7 @@ struct Inner<C> {
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
     /// Each session's project, from its Setup route's scope.
-    session_projects: Mutex<HashMap<SessionRef, crate::route::Project>>,
+    session_projects: Arc<Mutex<HashMap<SessionRef, crate::route::Project>>>,
     /// Projects with recent activity: folder and the last Setup or notice
     /// time, keyed by project id. Upkeep runs for these.
     active_projects: Mutex<HashMap<String, (String, i64)>>,
@@ -132,6 +133,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         db: Option<ContextDb>,
         store: Option<Store>,
     ) -> Self {
+        let config = Arc::new(config.into());
+        let session_projects = Arc::new(Mutex::new(HashMap::new()));
+        let context_read = crate::context_read::ContextRead::new(
+            db.as_ref().map(|d| d.path.clone()),
+            store.as_ref().map(|s| s.path.clone()),
+            config.clone(),
+            session_projects.clone(),
+        );
         let app_read = crate::app_read::AppRead::new(
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
@@ -143,15 +152,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         Self {
             inner: Arc::new(Inner {
                 app_read,
+                context_read,
                 client,
                 search,
-                config: config.into(),
+                config,
                 db: db.map(Arc::new),
                 store: store.map(Arc::new),
                 workers: Mutex::new(HashMap::new()),
                 set_up: Mutex::new(HashSet::new()),
                 summaries_running: Mutex::new(0),
-                session_projects: Mutex::new(HashMap::new()),
+                session_projects,
                 active_projects: Mutex::new(HashMap::new()),
             }),
         }
@@ -160,6 +170,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// App requests read an independent projection, never a session job.
     pub fn app_read(&self) -> &crate::app_read::AppRead {
         &self.inner.app_read
+    }
+
+    /// Context reads use a separate read-only worker so they cannot delay session work.
+    pub fn context_read(&self) -> &crate::context_read::ContextRead {
+        &self.inner.context_read
     }
 
     /// Wait for eventual message search indexing, outside the session worker.
