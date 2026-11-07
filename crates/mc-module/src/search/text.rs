@@ -219,6 +219,75 @@ pub fn keyword_relevance(query: &str, content: &str) -> f64 {
     0.8 * needles.iter().filter(|term| words.contains(*term)).count() as f64 / needles.len() as f64
 }
 
+fn cjk_run() -> &'static Regex {
+    static CELL: OnceLock<Regex> = OnceLock::new();
+    regex(
+        &CELL,
+        r"^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+$",
+    )
+}
+
+fn hint_terms(text: &str) -> Vec<String> {
+    static CELL: OnceLock<Regex> = OnceLock::new();
+    let runs = regex(
+        &CELL,
+        r"[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+|[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+",
+    );
+    let mut seen = HashSet::new();
+    terms(text)
+        .iter()
+        .flat_map(|term| runs.find_iter(term).map(|found| found.as_str().to_owned()))
+        .filter(|term| !stop_words().contains(term.as_str()))
+        .filter(|term| seen.insert(term.clone()))
+        .collect()
+}
+
+fn character_bigrams(run: &str) -> Vec<String> {
+    let characters: Vec<char> = run.chars().collect();
+    if characters.len() == 1 {
+        vec![run.to_owned()]
+    } else {
+        characters
+            .windows(2)
+            .map(|pair| pair.iter().collect())
+            .collect()
+    }
+}
+
+/// Match unspaced clauses for hints without changing retrieval or snippet scoring.
+pub fn hint_keyword_relevance(query: &str, content: &str) -> f64 {
+    let needles = hint_terms(query);
+    if needles.is_empty() {
+        return 0.0;
+    }
+    let words: HashSet<String> = hint_terms(&clean_search_text(content))
+        .into_iter()
+        .collect();
+    let runs: Vec<&String> = words
+        .iter()
+        .filter(|word| cjk_run().is_match(word))
+        .collect();
+    let bigrams: HashSet<String> = runs.iter().flat_map(|run| character_bigrams(run)).collect();
+    let mut matched = 0.0;
+    for needle in &needles {
+        if !cjk_run().is_match(needle) {
+            matched += f64::from(words.contains(needle));
+            continue;
+        }
+        if needle.chars().count() == 1 {
+            matched += f64::from(runs.iter().any(|run| run.contains(needle)));
+            continue;
+        }
+        let grams = character_bigrams(needle);
+        // Count each clause as one term so filler bigrams across word boundaries
+        // do not dilute it; require half coverage so shared function words alone do not pass.
+        matched += (grams.iter().filter(|gram| bigrams.contains(*gram)).count() as f64
+            / grams.len().div_ceil(2) as f64)
+            .min(1.0);
+    }
+    0.8 * matched / needles.len() as f64
+}
+
 /// The UTF-16 slice `[start, end)` of `units`, as text.
 fn utf16_slice(units: &[u16], start: usize, end: usize) -> String {
     let start = start.min(units.len());
@@ -356,6 +425,52 @@ pub fn contains_probe_verbatim(text: &str, probes: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_scoring_preserves_space_separated_keyword_scores() {
+        for (query, content, expected) in [
+            ("explain historian cache wiring", "cache icons", 0.2),
+            (
+                "historian cache wiring",
+                "historian cache wiring details",
+                0.8000000000000002,
+            ),
+            (
+                "please explain cache wiring to me",
+                "cache wiring",
+                0.5333333333333333,
+            ),
+            ("CACHE cache cache_timeout", "cache_timeout", 0.4),
+            ("how are you", "how are you", 0.0),
+            ("historian cache", "<task>historian cache</task>", 0.0),
+            ("résumé über prüfen", "über prüfen", 0.5333333333333333),
+            ("память кеш", "кеш", 0.4),
+            ("ذاكرة تخزين", "تخزين", 0.4),
+        ] {
+            assert_eq!(keyword_relevance(query, content), expected, "{query}");
+            assert_eq!(hint_keyword_relevance(query, content), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn only_hint_scoring_splits_unspaced_cjk_runs_into_character_bigrams() {
+        assert_eq!(
+            keyword_relevance("MC_Maze 残差怎样汇总？", "MC_Maze 残差按种子汇总。"),
+            0.4
+        );
+        for (query, content, expected) in [
+            ("残差", "残留", 0.0),
+            ("差", "残差", 0.8),
+            ("𠮷野家", "𠮷野川", 0.8),
+            ("かながき", "かながきです", 0.8),
+            ("カタカナ", "カタカナです", 0.8),
+            ("프로젝트캐시", "프로젝트의캐시", 0.8),
+            ("cache残差", "cache残差按种子汇总", 0.8),
+            ("差", "<task>残差</task> unrelated", 0.0),
+        ] {
+            assert_eq!(hint_keyword_relevance(query, content), expected, "{query}");
+        }
+    }
 
     #[test]
     fn nested_and_unclosed_blocks_are_removed() {

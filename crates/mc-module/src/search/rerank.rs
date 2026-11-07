@@ -692,6 +692,7 @@ mod tests {
             source_name: None,
             category: "ARCHITECTURE".into(),
             content: format!("memory {id}"),
+            hint_content: format!("memory {id}"),
             score: 0.5,
             match_type: "fts",
         })
