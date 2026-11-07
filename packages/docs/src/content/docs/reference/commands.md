@@ -3,7 +3,7 @@ title: Commands
 description: Slash commands to inspect Magic Context, flush queues, rebuild or wrap up history, and run dreamer.
 ---
 
-You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-wrapup`, `ctx-dream`, and `ctx-embed` (type them with a leading `/`).
+You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-rescore`, `ctx-wrapup`, `ctx-dream`, and `ctx-embed` (type them with a leading `/`).
 
 ## Is something stuck?
 
@@ -56,9 +56,27 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 - **OpenCode Desktop:** **Double-tap** — warning first, same command within **60 seconds** confirms. Partial recomp previews the snapped range.
 - **Pi:** Same double-tap confirmation; recomp runs **in the background** with `/ctx-recomp` progress messages. Partial ranges work on the command line.
 
+## /ctx-rescore
+
+**What it does.** Re-scores the importance of stored history summaries with the historian model. Importance decides which summaries keep their detail as history ages, and summaries written before October's historian scoring fix can carry scores that make the wrong ones fade first. Only scores change: summary text, memories and compaction settings stay as they are.
+
+| Argument | Meaning |
+| --- | --- |
+| (none) | Preview this session: how many summaries would be re-scored and how many model calls it takes. Nothing is sent. |
+| `--project` | Preview every session in this project. |
+| `confirm <snapshot-id>` | Start the job a preview described. |
+| `status` | Show the project's rescore jobs. |
+| `pause` / `resume` / `cancel` | Control the running job. |
+| `undo <job-id> [base]` | Undo a job's new scores. |
+| `undo <compartment-id> <revision-id or base>` | Pick one summary's score revision. |
+
+**When to use it.** On long-running projects whose older history decays in a way that loses what mattered.
+
+**What you'll see.** A preview with a snapshot id, then job status messages. New scores take effect at the next natural history rebuild, never on their own, so rescoring doesn't rewrite the cached prompt.
+
 ## /ctx-wrapup
 
-**What it does.** Runs the historian forward over older live history now. By default it keeps the newest **20 messages** raw (counting every message: yours, the assistant's, and tool results) and wraps everything older into compartments; pass a positive integer to keep a different number, e.g. `/ctx-wrapup 40`. The cut never splits an in-flight tool exchange and prefers to land on one of your messages, so the actual kept count can be slightly higher.
+**What it does.** Runs the historian forward over older live history now. By default it keeps the newest **20 messages** raw (counting every message: yours, the assistant's, and tool results) and wraps everything older into compartments; pass a number to keep a different count, e.g. `/ctx-wrapup 40`, or `0` to summarize the whole session and keep nothing raw. The cut never splits an in-flight tool exchange and prefers to land on one of your messages, so the actual kept count can be slightly higher.
 
 **When to use it.** Before switching from a large-context model to a smaller one, or when a long session has grown and you want to compact it on purpose instead of waiting for pressure triggers. A model switch already creates the cache-busting pass that materializes queued wrapup compartments, so you do **not** need `/ctx-flush` before switching models.
 
