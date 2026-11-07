@@ -283,4 +283,4 @@ fn rekey_with_check(
 }
 
 #[cfg(test)]
-mod tests;
+mod rekey_tests;

@@ -179,7 +179,12 @@ fn rekey_cli_refuses_another_process_with_an_open_store() {
         String::from_utf8_lossy(&output.stderr)
     );
     drop(holder);
-    assert!(run(root.path(), &[]).status.success());
+    let output = run(root.path(), &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

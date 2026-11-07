@@ -26,7 +26,20 @@ fn store_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
 pub(super) fn refuse_open_store(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        scan_proc(&store_paths(path)?)
+        let paths = store_paths(path)?;
+        // A process of our own user can refuse /proc reads for a moment, for
+        // example while it runs execve. Such a refusal is retried a few
+        // times; one that persists still refuses the re-key.
+        let mut attempt = 0;
+        loop {
+            match scan_proc(&paths) {
+                Err(error) if error.starts_with(DENIED) && attempt < 4 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                result => return result,
+            }
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -59,10 +72,24 @@ pub(super) fn refuse_open_store(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+const DENIED: &str = "process_check_failed: permission denied";
+
+#[cfg(target_os = "linux")]
 fn scan_proc(paths: &[PathBuf]) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let fail = |path: &Path, error: std::io::Error| {
-        format!("process_check_failed: {}: {error}", path.display())
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            format!("{DENIED}: {}: {error}", path.display())
+        } else {
+            format!("process_check_failed: {}: {error}", path.display())
+        }
+    };
+    // A process can exit, or close a descriptor, while the scan walks /proc.
+    // What has gone holds nothing open, so its entries are skipped, not
+    // treated as a failed check.
+    let gone = |error: &std::io::Error| {
+        // 3 is ESRCH: the process has exited.
+        error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(3)
     };
     let own_uid = std::fs::metadata("/proc/self")
         .map_err(|error| fail(Path::new("/proc/self"), error))?
@@ -81,12 +108,15 @@ fn scan_proc(paths: &[PathBuf]) -> Result<(), String> {
             continue;
         }
         let path = process.path();
-        let owner = std::fs::metadata(&path)
-            .map_err(|error| fail(&path, error))?
-            .uid();
+        let owner = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.uid(),
+            Err(error) if gone(&error) => continue,
+            Err(error) => return Err(fail(&path, error)),
+        };
         let fd_path = path.join("fd");
         let descriptors = match std::fs::read_dir(&fd_path) {
             Ok(descriptors) => descriptors,
+            Err(error) if gone(&error) => continue,
             Err(error)
                 if error.kind() == std::io::ErrorKind::PermissionDenied && owner != own_uid =>
             {
@@ -95,9 +125,14 @@ fn scan_proc(paths: &[PathBuf]) -> Result<(), String> {
             Err(error) => return Err(fail(&fd_path, error)),
         };
         for descriptor in descriptors {
-            let descriptor = descriptor.map_err(|error| fail(&fd_path, error))?.path();
+            let descriptor = match descriptor {
+                Ok(descriptor) => descriptor.path(),
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(fail(&fd_path, error)),
+            };
             let target = match std::fs::read_link(&descriptor) {
                 Ok(target) => target,
+                Err(error) if gone(&error) => continue,
                 Err(error)
                     if error.kind() == std::io::ErrorKind::PermissionDenied && owner != own_uid =>
                 {
