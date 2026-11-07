@@ -286,6 +286,25 @@ mod tests {
                     tool.tokens =
                         Some(cortexkit_role_compaction::tokens::PartTokens::tool(12, 700));
                     entry.parts.push(tool);
+                    entry.parts.extend([
+                        Part::new(
+                            "reasoning-a",
+                            PartBody::Reasoning {
+                                text: None,
+                                text_bytes: Some(4),
+                            },
+                        ),
+                        Part::new(
+                            "reasoning-b",
+                            PartBody::Reasoning {
+                                text: None,
+                                text_bytes: Some(8),
+                            },
+                        ),
+                    ]);
+                    entry.reasoning_tokens = Some(
+                        cortexkit_role_compaction::tokens::ReasoningTokens::new(1_001, true),
+                    );
                 }
                 if ordinal == 3 {
                     let mut usage = StepUsage::default();
@@ -938,5 +957,9 @@ mod tests {
 
     mod perf_tests {
         include!("perf_tests.rs");
+    }
+
+    mod reasoning_tests {
+        include!("reasoning_tests.rs");
     }
 }

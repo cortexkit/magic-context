@@ -434,8 +434,30 @@ fn samples_v5_remain_pinned() {
     }
 }
 
+#[test]
+fn samples_v6_remain_pinned() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v6");
+    let sums = std::fs::read_to_string(root.join("SHA256SUMS")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(sums.as_bytes())),
+        "cf68a48f72b966b83fa61cd08f2584d94b836619ec7b2e068d56cca1bd011abf"
+    );
+    for line in sums.lines() {
+        let (hash, name) = line.split_once("  ").unwrap();
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(root.join(name)).unwrap())
+            ),
+            hash,
+            "changed v6 sample {name}"
+        );
+    }
+}
+
 #[tokio::test]
-async fn samples_v6() {
+async fn samples_v7() {
     let (_dir, conn) = search_db();
     let mut replica = replica(Some(conn));
     replica.snapshots.clear();
@@ -473,7 +495,7 @@ async fn samples_v6() {
         ),
     ];
     let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v6");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v7");
     let regenerate = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES").is_some();
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {

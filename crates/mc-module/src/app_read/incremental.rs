@@ -22,9 +22,11 @@ struct Cached {
     digest: String,
     at_ms: u64,
     parts: Vec<PartInfo>,
+    reasoning_measure: (u64, &'static str),
     row: Option<Arc<Message>>,
     raw: u64,
     tool: u64,
+    reasoning: u64,
     stamps: usize,
 }
 #[derive(Clone)]
@@ -58,6 +60,7 @@ pub(crate) struct Projection {
     stamped: BTreeMap<u64, usize>,
     raw: u64,
     tool: u64,
+    reasoning: u64,
     queued: usize,
     pub(crate) dirty: BTreeSet<String>,
     pub(crate) summaries_dirty: bool,
@@ -102,6 +105,7 @@ impl Default for Projection {
             stamped: BTreeMap::new(),
             raw: 0,
             tool: 0,
+            reasoning: 0,
             queued: 0,
             dirty: BTreeSet::new(),
             summaries_dirty: true,
@@ -159,6 +163,7 @@ impl Projection {
         if let Some(old) = self.live.remove(&ordinal) {
             self.raw -= old.raw;
             self.tool -= old.tool;
+            self.reasoning -= old.reasoning;
             if !self.summarized(ordinal) {
                 self.queued -= old.stamps;
             }
@@ -227,6 +232,7 @@ impl Session {
             p.stamped.clear();
             p.raw = 0;
             p.tool = 0;
+            p.reasoning = 0;
             p.queued = 0;
             p.identity = identity;
         }
@@ -255,35 +261,54 @@ impl Session {
                 p.remove(ordinal);
             }
             p.positions.insert(entry.mid.clone(), ordinal);
+            let reasoning: Vec<_> = entry
+                .parts
+                .iter()
+                .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
+                .collect();
+            let measure = lanes::reasoning_measure(entry, &reasoning);
             let row = p.live.entry(ordinal).or_insert_with(|| Cached {
                 mid: entry.mid.clone(),
                 digest: String::new(),
                 at_ms: entry.written_at,
                 parts: Vec::new(),
+                reasoning_measure: (0, "estimate"),
                 row: None,
                 raw: 0,
                 tool: 0,
+                reasoning: 0,
                 stamps: 0,
             });
             if model_changed
                 || row.row.is_none()
                 || row.digest != entry.digest
+                || row.reasoning_measure != measure
                 || row
                     .parts
                     .iter()
                     .zip(&entry.parts)
                     .any(|(old, new)| old.runner_tokens != new.tokens)
             {
+                let mut weights = reasoning_weights(&reasoning, measure.0).into_iter();
                 row.parts = entry
                     .parts
                     .iter()
                     .map(|part| {
-                        let (item_tokens, source) = item_tokens(part, counter);
+                        let (item_tokens, source) =
+                            if matches!(part.body, PartBody::Reasoning { .. }) {
+                                (weights.next().expect("reasoning part weight"), measure.1)
+                            } else {
+                                item_tokens(part, counter)
+                            };
                         PartInfo {
                             id: part.id.clone(),
                             kind: kind(&part.body),
                             tag: part.tag,
-                            tokens: crate::tokens::part(part),
+                            tokens: if matches!(part.body, PartBody::Reasoning { .. }) {
+                                item_tokens
+                            } else {
+                                crate::tokens::part(part)
+                            },
                             item_tokens,
                             source,
                             runner_tokens: part.tokens,
@@ -301,6 +326,7 @@ impl Session {
                     })
                     .collect();
                 row.digest = entry.digest.clone();
+                row.reasoning_measure = measure;
                 p.dirty.insert(entry.mid.clone());
             }
             row.at_ms = entry.written_at;
@@ -474,10 +500,11 @@ impl Session {
             let cached = p.live.get_mut(&ordinal).expect("live position");
             p.raw -= cached.raw;
             p.tool -= cached.tool;
+            p.reasoning -= cached.reasoning;
             if !summarized {
                 p.queued -= cached.stamps;
             }
-            let (message, raw, tool, stamps) = message(
+            let (message, raw, tool, reasoning, stamps) = message(
                 self,
                 cached,
                 ordinal,
@@ -488,9 +515,11 @@ impl Session {
             );
             cached.raw = raw;
             cached.tool = tool;
+            cached.reasoning = reasoning;
             cached.stamps = stamps;
             p.raw += raw;
             p.tool += tool;
+            p.reasoning += reasoning;
             if !summarized {
                 p.queued += stamps;
             }
@@ -536,6 +565,7 @@ impl Session {
             PartTokens::estimate("history_summaries", p.head[3]),
             PartTokens::estimate("history_raw", p.raw),
             PartTokens::estimate("tool_calls_results", p.tool),
+            PartTokens::estimate("reasoning", p.reasoning),
             PartTokens::estimate("last_user_message", 0),
         ];
         // The window the apps scale to is the usable one, as the standalone
@@ -782,11 +812,12 @@ fn message(
     messages: &BTreeSet<String>,
     replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
-) -> (Message, u64, u64, usize) {
+) -> (Message, u64, u64, u64, usize) {
     let mut stamped = Vec::new();
     let mut gone = Vec::new();
     let mut raw = 0;
     let mut tool = 0;
+    let mut reasoning = 0;
     let mut tagged = 0;
     let mut items = Vec::with_capacity(cached.parts.len());
     let before = session
@@ -800,15 +831,16 @@ fn message(
         let removed = cut || messages.contains(&cached.mid) || dropped.contains(&key);
         let queued =
             session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
-        let (tokens, source) = if cut || messages.contains(&cached.mid) {
-            (0, "counted")
-        } else if let Some(replacement) = replacements.get(&key) {
-            (replacement.tokens, "counted")
-        } else if removed {
-            (0, "counted")
-        } else {
-            (part.item_tokens, part.source)
-        };
+        let (tokens, source) =
+            if cut || messages.contains(&cached.mid) || (removed && part.kind == "reasoning") {
+                (0, "counted")
+            } else if let Some(replacement) = replacements.get(&key) {
+                (replacement.tokens, "counted")
+            } else if removed {
+                (0, "counted")
+            } else {
+                (part.item_tokens, part.source)
+            };
         let mut item = json!({"part_ref":{"part_key":part.id},"kind":part.kind,"tokens":tokens,"source":source,"state":if removed {"dropped"} else if queued {"stamped"} else {"live"}});
         if let Some(tool) = &part.tool {
             item["tool"] = json!(tool);
@@ -827,6 +859,8 @@ fn message(
         } else if !removed {
             if part.kind == "tool" {
                 tool += part.tokens;
+            } else if part.kind == "reasoning" {
+                reasoning += tokens;
             } else {
                 raw += part.tokens;
             }
@@ -846,9 +880,41 @@ fn message(
         },
         raw,
         tool,
+        reasoning,
         stamps,
     )
 }
+
+fn reasoning_weights(reasoning: &[&cortexkit_role_compaction::part::Part], cost: u64) -> Vec<u64> {
+    let sizes: Vec<u128> = reasoning
+        .iter()
+        .map(|part| match &part.body {
+            PartBody::Reasoning { text_bytes, .. } => text_bytes.unwrap_or(0) as u128,
+            _ => 0,
+        })
+        .collect();
+    let total: u128 = sizes.iter().sum();
+    let mut remaining = cost;
+    sizes
+        .iter()
+        .enumerate()
+        .map(|(at, size)| {
+            // Visible sizes apportion the entry's replay cost, not just the
+            // exposed text. Opaque-only entries split evenly; the last part
+            // takes all rounding remainder so the shares always sum exactly.
+            let share = if at + 1 == sizes.len() {
+                remaining
+            } else {
+                (cost as u128 * size)
+                    .checked_div(total)
+                    .map_or_else(|| cost / sizes.len() as u64, |share| share as u64)
+            };
+            remaining -= share;
+            share
+        })
+        .collect()
+}
+
 fn item_tokens(
     part: &cortexkit_role_compaction::part::Part,
     counter: crate::count::Counter,

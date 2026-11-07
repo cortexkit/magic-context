@@ -629,12 +629,19 @@ pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
 /// the visible text, else a fixed estimate for reasoning that has no visible
 /// text. A runner count of zero stands: reasoning the provider doesn't send
 /// again costs nothing.
-fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
-    entry
-        .reasoning_tokens
-        .map(|counted| counted.count)
-        .or_else(|| generated_cost(entry))
-        .unwrap_or_else(|| visible_cost(reasoning))
+pub(crate) fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
+    reasoning_measure(entry, reasoning).0
+}
+
+/// Keep app attribution and clearing on the same replay-cost precedence.
+pub(crate) fn reasoning_measure(entry: &Entry, reasoning: &[&Part]) -> (u64, &'static str) {
+    if let Some(counted) = entry.reasoning_tokens {
+        (counted.count, "runner")
+    } else if let Some(reported) = generated_cost(entry) {
+        (reported, "reported")
+    } else {
+        (visible_cost(reasoning), "estimate")
+    }
 }
 
 /// The step's reported reasoning count, when the provider gave a non-zero one.
@@ -1591,6 +1598,36 @@ mod tests {
             1_800, false,
         ));
         assert_eq!(reasoning_cost(&step, &parts), 1_800);
+    }
+
+    #[test]
+    fn reasoning_replay_measure_preserves_all_fallbacks() {
+        let mut step = entry(1, Role::Assistant, vec![reasoning("r1", 400)]);
+        let check = |step: &Entry, cost, source| {
+            let parts = step.parts.iter().collect::<Vec<_>>();
+            assert_eq!(reasoning_cost(step, &parts), cost);
+            assert_eq!(reasoning_measure(step, &parts), (cost, source));
+        };
+        check(&step, 100, "estimate");
+        step.usage = Some(
+            cortexkit_role_compaction::read::StepUsage::default().with_reasoning_tokens(2_000),
+        );
+        check(&step, 2_000, "reported");
+        step.reasoning_tokens = Some(cortexkit_role_compaction::tokens::ReasoningTokens::new(
+            1_800, false,
+        ));
+        check(&step, 1_800, "runner");
+        step.reasoning_tokens = Some(cortexkit_role_compaction::tokens::ReasoningTokens::new(
+            0, true,
+        ));
+        check(&step, 0, "runner");
+        step.reasoning_tokens = None;
+        step.usage = Some(cortexkit_role_compaction::read::StepUsage::default());
+        step.parts[0] = reasoning("r1", 0);
+        step.parts[0].seal = Seal::Encrypted;
+        check(&step, 1_000, "estimate");
+        step.parts[0].seal = Seal::None;
+        check(&step, 0, "estimate");
     }
 
     /// An exempt step whose reasoning is already gone (here the steps of the
