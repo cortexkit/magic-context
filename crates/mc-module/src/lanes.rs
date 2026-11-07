@@ -253,7 +253,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
         .into_iter()
         .collect();
     let protected = protected_tool_parts(index, context.protected_tools);
-    let newest_mid = index.entries().last().map(|entry| entry.mid.as_str());
+    let newest_mid = transcript_end_mid(index);
     let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
     let mut shapes: BTreeMap<&PartKey, Shape> = BTreeMap::new();
     for (key, shape) in parts {
@@ -367,10 +367,25 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     (ops, covered)
 }
 
+/// The entry the request ends on: the newest entry that has parts. An entry
+/// with no parts renders no message, and the transcript may end with several:
+/// a step the runner has opened but not yet filled, or a dead step. Measured
+/// from the very last entry instead, the call whose result really ends the
+/// request loses its protection, and dropping it whole leaves the request
+/// ending on an assistant message, which providers refuse.
+fn transcript_end_mid(index: &Index) -> Option<&str> {
+    index
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| !entry.parts.is_empty())
+        .map(|entry| entry.mid.as_str())
+}
+
 /// Whether a tool part's result ends the transcript: the last tool part of
-/// the newest entry. Removing that call whole would end the request on its
-/// message without the result, so it stays a call; earlier calls of the same
-/// message may go whole.
+/// the entry the request ends on ([`transcript_end_mid`]). Removing that call
+/// whole would end the request on its message without the result, so it
+/// stays a call; earlier calls of the same message may go whole.
 fn ends_transcript(entry: &Entry, part: &Part, newest_mid: Option<&str>) -> bool {
     Some(entry.mid.as_str()) == newest_mid
         && entry
@@ -389,11 +404,7 @@ pub fn reclaimable_tokens(context: &Context, entry: &Entry, part: &Part) -> u64 
     let PartBody::Tool(tool) = &part.body else {
         return tokens::part(part);
     };
-    let newest_mid = context
-        .index
-        .entries()
-        .last()
-        .map(|entry| entry.mid.as_str());
+    let newest_mid = transcript_end_mid(context.index);
     let small_recent = part.tag.is_some_and(|tag| {
         context
             .index
@@ -1712,6 +1723,43 @@ mod tests {
             mid: "m1".into(),
             part: Some("p3".into())
         }));
+    }
+
+    /// Entries with no parts after the last call, such as a step the runner
+    /// opened before asking for a view, don't move the end of the request:
+    /// that call still stays a call, even in a lane that drops whole.
+    #[test]
+    fn empty_entries_after_the_last_call_keep_it_a_call() {
+        // A large input, so the call isn't kept as a small recent one either.
+        let mut call = read(2, 4_000);
+        if let PartBody::Tool(tool) = &mut call.body {
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)});
+        }
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![call]),
+            entry(2, Role::Assistant, vec![]),
+            entry(3, Role::Assistant, vec![]),
+        ]);
+        assert_eq!(index.entries().len(), 3, "the empty entries are held");
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        for shape in [Shape::Default, Shape::Whole] {
+            let (ops, _) = drop_ops(&context, &[(key("m1", "p2"), shape)]);
+            assert!(
+                !ops.contains(&EditOp::Drop {
+                    mid: "m1".into(),
+                    part: Some("p2".into())
+                }),
+                "{shape:?} dropped the call that ends the request"
+            );
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, EditOp::Replace { field, .. } if field == "output")),
+                "{shape:?} should replace the call's output instead"
+            );
+        }
     }
 
     /// Values the contract may add later are carried unchanged (compaction contract W1.5): a tool
