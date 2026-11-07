@@ -13,6 +13,9 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 	// it does not select a different primary-request transform. It also passes
 	// the moved-session check to the shared hook gate and the RPC guard, which
 	// refuse only sessions moved to mode 3; every other session is unchanged.
+	// It registers a separate two-pass historian agent with its own system
+	// prompt, because OpenCode 1 sends the prompt registered for the agent a
+	// request names; one-pass historian runs keep the prompt they had.
 	for (const [path, expected] of Object.entries(pins)) {
 		let bytes = readFileSync(resolve(root, path), "utf8");
 		if (path === "packages/plugin/src/index.ts") {
