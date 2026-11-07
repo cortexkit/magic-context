@@ -154,19 +154,26 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn("required slow lane", run.stderr)
                 self.assert_no_publish()
 
-    def test_tag_workflow_always_requires_rust_build_and_shards(self):
+    def test_tag_workflow_always_requires_shipped_module_gates(self):
         workflow = (SCRIPTS.parent / ".github/workflows/release.yml").read_text()
         self.assertNotIn("RELEASE_SKIP_RUST_E2E", workflow)
-        for name in ("e2e-rust-hermetic-build", "e2e-rust-hermetic", "publish-npm", "publish-npm-pi", "publish-npm-cli"):
+        for name in ("rust-module", "publish-npm", "publish-npm-pi", "publish-npm-cli"):
             block = re.search(r"^  " + name + r":\n(.*?)(?=^  [\w-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL)
             self.assertIsNotNone(block, name)
             assert block is not None
-            if name.startswith("e2e-"):
+            if name == "rust-module":
                 self.assertNotRegex(block.group(1), r"(?m)^    if:")
+                for command in (
+                    "cargo test --locked -p mc-module --lib --no-fail-fast",
+                    "bash scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh",
+                    "bash scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh",
+                    "bash scripts/wire-gate.sh",
+                ):
+                    self.assertIn(command, block.group(1))
             else:
                 condition = block.group(1).split("    if: >-\n", 1)[1].split("    steps:", 1)[0]
-                self.assertIn("needs.e2e-rust-hermetic-build.result == 'success'", condition)
-                self.assertIn("needs.e2e-rust-hermetic.result == 'success'", condition)
+                self.assertIn("needs.rust-module.result == 'success'", condition)
+                self.assertIn("rust-module", block.group(1).split("    needs:", 1)[1].splitlines()[0])
                 self.assertNotIn("||", condition)
 
     def test_green_exact_sha_skips_all_local_gates_but_builds_and_checks_artifacts(self):

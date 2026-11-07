@@ -84,14 +84,21 @@ test("dists publish before independent checks without removing preflight gates",
 });
 
 test("native producers start without waiting for unrelated preflight checks", () => {
-    for (const id of ["rust-clippy", "rust-lib-archive", "e2e-rust-hermetic-build"]) {
+    for (const id of ["rust-clippy", "rust-lib-archive", "rust-mc-module-integration", "rust-workspace-crates"]) {
         expect(workflow.jobs[id]!.needs).toBeUndefined();
         expect(workflow.jobs["ci-summary"]!.needs).toContain(id);
     }
 });
 
+test("registry SDK graph has no retired git workspace patches", async () => {
+    const manifest = await Bun.file(resolve(root, "Cargo.toml")).text();
+    const lock = await Bun.file(resolve(root, "Cargo.lock")).text();
+    expect(manifest).not.toContain('[patch."https://github.com/cortexkit/subconscious"]');
+    expect(lock).not.toContain("[[patch.unused]]");
+});
+
 test("artifact consumers start setup immediately and gate tests on artifacts", () => {
-    for (const id of ["unit-plugin", "unit-pi-plugin", "check-plugin-compat", "e2e-opencode", "e2e-opencode2", "e2e-pi", "e2e-omp", "e2e-host-opencode", "e2e-host-opencode2", "e2e-host-pi", "e2e-host-omp", "rust-mc-module-integration", "rust-workspace-crates", "rust-mc-module-lib", "rust-mc-module-parity", "e2e-rust-hermetic"]) {
+    for (const id of ["unit-plugin", "unit-pi-plugin", "check-plugin-compat", "e2e-opencode", "e2e-opencode2", "e2e-pi", "e2e-omp", "e2e-host-opencode", "e2e-host-opencode2", "e2e-host-pi", "e2e-host-omp", "rust-mc-module-lib"]) {
         const job = workflow.jobs[id]!;
         expect(job.needs).toBeUndefined();
         expect(job.steps[0]!.uses).toBe("actions/checkout@v5");
@@ -108,7 +115,7 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
 });
 
 test("same-run artifact downloads retry transient failures and guard consumers", () => {
-    const ciConsumers = ["rust-mc-module-lib", "rust-mc-module-parity", "e2e-rust-hermetic"];
+    const ciConsumers = ["rust-mc-module-lib"];
     const actualCiConsumers = Object.entries(workflow.jobs)
         .filter(([, job]) => job.steps.some((step) => step.run?.includes("scripts/download-ci-artifact.py") && /--artifact-(?:id|name)/.test(step.run)))
         .map(([id]) => id)
@@ -118,18 +125,13 @@ test("same-run artifact downloads retry transient failures and guard consumers",
     const actualReleaseConsumers = Object.entries(releaseWorkflow.jobs)
         .filter(([, job]) => job.steps.some((step) => step.run?.includes("scripts/download-ci-artifact.py")))
         .map(([id]) => id);
-    expect(actualReleaseConsumers).toEqual(["e2e-rust-hermetic"]);
+    expect(actualReleaseConsumers).toEqual([]);
     const actualRetryConsumers = allWorkflowDocuments.flatMap(({ file, workflow: current }) =>
         Object.entries(current.jobs)
             .filter(([, job]) => (job.steps ?? []).some((step) => step.run?.includes("scripts/download-ci-artifact.py") && /--artifact-(?:id|name)/.test(step.run)))
             .map(([id]) => `${file}:${id}`),
     ).sort();
-    expect(actualRetryConsumers).toEqual([
-        "ci.yml:e2e-rust-hermetic",
-        "ci.yml:rust-mc-module-lib",
-        "ci.yml:rust-mc-module-parity",
-        "release.yml:e2e-rust-hermetic",
-    ]);
+    expect(actualRetryConsumers).toEqual(["ci.yml:rust-mc-module-lib"]);
     for (const { workflow: current } of allWorkflowDocuments) {
         expect(Object.values(current.jobs).flatMap((job) => job.steps ?? []).filter((step) => step.uses?.startsWith("actions/download-artifact@"))).toEqual([]);
     }
@@ -145,16 +147,6 @@ test("same-run artifact downloads retry transient failures and guard consumers",
         expect(guardIndex).toBeLessThan(testIndex);
     }
 
-    const releaseJob = releaseWorkflow.jobs["e2e-rust-hermetic"]!;
-    const releaseDownloadIndex = releaseJob.steps.findIndex((step) => step.run?.includes("scripts/download-ci-artifact.py"));
-    const releaseDownload = releaseJob.steps[releaseDownloadIndex]!;
-    const releaseGuardIndex = releaseJob.steps.findIndex((step) => step.run?.includes("artifact not downloaded"));
-    const releaseTestIndex = releaseJob.steps.findIndex((step) => step.run?.includes("run-rust-hermetic-e2e.sh"));
-    expect(releaseDownload.run).toContain("--artifact-name rust-hermetic-binaries");
-    expect(releaseDownload.env!.GH_TOKEN).toBe("${{ github.token }}");
-    expect(releaseJob.permissions!.actions).toBe("read");
-    expect(releaseGuardIndex).toBeGreaterThan(releaseDownloadIndex);
-    expect(releaseGuardIndex).toBeLessThan(releaseTestIndex);
 });
 
 test("artifact waits allow runner queue time without extending the producer runtime", () => {
@@ -184,7 +176,7 @@ test("cache oracle and separate OC2 regressions run exactly once even after a su
 test("Rust archive consumers preserve all lib partitions and remaining target kinds", () => {
     const lib = workflow.jobs["rust-mc-module-lib"]!;
     expect(lib.strategy).toEqual({ "fail-fast": false, matrix: { shard: [1, 2, 3, 4] } });
-    for (const id of ["rust-mc-module-lib", "rust-mc-module-parity"]) {
+    for (const id of ["rust-mc-module-lib"]) {
         const job = workflow.jobs[id]!;
         const wait = job.steps.find((step) => step.uses === "./.github/actions/wait-ci-artifact")!;
         expect(wait.with!.producer).toBe(workflow.jobs["rust-lib-archive"]!.name);
@@ -218,51 +210,22 @@ test("unit matrices preserve both modes, package wrappers and Pi assertion isola
     expect(pi).toContain("MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/pi-plugin test --parallel=1 --timeout=60000");
 });
 
-test("Bun oracle consumers restore one same-attempt Rust test binary before running tests", async () => {
-    const producer = workflow.jobs["rust-lib-archive"]!;
-    const build = producer.steps.find((step) => step.name === "Package conformance oracle test binary")!;
-    expect(build.run).toContain("cargo test --locked -p mc-module --lib --profile ci-test --no-run --no-fail-fast --message-format=json");
-    expect(build.run).toContain('cp "$binary" ci-conformance-oracle/mc-module-lib-test');
-    expect(build.run).toContain('printf \'%s\\n\' "$GITHUB_SHA" > ci-conformance-oracle/commit.txt');
-    expect(build.run).toContain("sha256sum ci-conformance-oracle/mc-module-lib-test");
-    const uploads = Object.values(workflow.jobs).flatMap((job) => job.steps).filter(
-        (step) => step.uses === "actions/upload-artifact@v4" && step.with?.name === "conformance-oracle-${{ github.sha }}-${{ github.run_attempt }}",
-    );
-    expect(uploads).toHaveLength(1);
-    expect(uploads[0]!.with!.path).toBe("ci-conformance-oracle/");
-    expect(uploads[0]!.with!["if-no-files-found"]).toBe("error");
-    for (const id of ["unit-plugin", "unit-pi-plugin", "rust-mc-module-integration"]) {
-        const job = workflow.jobs[id]!;
-        const restores = job.steps.filter((step) => step.uses === "./.github/actions/restore-conformance-oracle");
-        expect(restores).toHaveLength(1);
-        const restore = job.steps.indexOf(restores[0]!);
-        expect(job["timeout-minutes"]).toBe(90);
-        for (const [index, step] of job.steps.entries()) {
-            if (step.run && /bun (test |run --cwd .*? test\b)/.test(step.run)) expect(index).toBeGreaterThan(restore);
-            expect(step.run ?? "").not.toMatch(/cargo test .*--lib/);
-        }
+test("TS units run independently of the removed Rust transform oracle", () => {
+    for (const id of ["unit-plugin", "unit-pi-plugin"]) {
+        const steps = workflow.jobs[id]!.steps;
+        expect(steps.some((step) => step.uses === "./.github/actions/restore-ci-dists")).toBe(true);
+        expect(steps.some((step) => step.uses?.includes("oracle"))).toBe(false);
+        expect(steps.map((step) => step.run ?? "").join("\n")).not.toContain("cargo ");
     }
-    const integration = workflow.jobs["rust-mc-module-integration"]!.steps.find(
-        (step) => step.name === "Run system-prompt-delivery integration test",
-    )!;
-    expect(integration.run).toContain('MC_SYSTEM_DELIVERY_FIXTURE_BINARY="$MC_CONFORMANCE_ORACLE_BINARY"');
-    const actionText = await Bun.file(resolve(root, ".github/actions/restore-conformance-oracle/action.yml")).text();
-    const action = Bun.YAML.parse(actionText) as { runs: { steps: Step[] } };
-    const wait = action.runs.steps.find((step) => step.uses === "./.github/actions/wait-ci-artifact")!;
-    expect(wait.with!.artifact).toBe("conformance-oracle-${{ github.sha }}");
-    expect(wait.with!.producer).toBe(producer.name);
-    expect(Number(wait.with!["timeout-minutes"])).toBe(producer["timeout-minutes"]!);
-    const download = action.runs.steps.find((step) => step.uses === "actions/download-artifact@v4")!;
-    expect(download.with!["artifact-ids"]).toBe("${{ steps.oracle.outputs.artifact-id }}");
-    expect(actionText).toContain('test "$(cat ci-conformance-oracle/commit.txt)" = "$GITHUB_SHA"');
-    expect(actionText).toContain("sha256sum --check ci-conformance-oracle/oracle.sha256");
-    expect(actionText).toContain('test -x "$binary"');
-    expect(actionText).toContain('echo "MC_CONFORMANCE_ORACLE_BINARY=$binary" >> "$GITHUB_ENV"');
+    const producer = workflow.jobs["rust-lib-archive"]!;
+    expect(producer.steps.filter((step) => step.uses === "actions/upload-artifact@v4").map((step) => step.with!.name)).toEqual([
+        "rust-lib-${{ github.sha }}-${{ github.run_attempt }}",
+    ]);
 });
 
 test("standalone differential jobs fetch the shared pinned base before tests", () => {
     expect(differentialBase).toMatch(/^[0-9a-f]{40}$/);
-    for (const id of ["unit-plugin", "rust-mc-module-integration"]) {
+    for (const id of ["unit-plugin"]) {
         const steps = workflow.jobs[id]!.steps;
         const fetch = steps.findIndex((step) => step.name === "Fetch pinned standalone differential base");
         expect(fetch).toBeGreaterThan(0);
@@ -274,19 +237,34 @@ test("standalone differential jobs fetch the shared pinned base before tests", (
     }
 });
 
-test("remaining Rust crates retain Bun migration oracles and hermetic archives retain executable variants", () => {
-    const remaining = workflow.jobs["rust-workspace-crates"]!.steps;
-    expect(remaining.some((step) => step.uses === "oven-sh/setup-bun@v2")).toBe(true);
-    expect(remaining.some((step) => step.run === "bun install --frozen-lockfile")).toBe(true);
-    const hermetic = workflow.jobs["e2e-rust-hermetic"]!;
-    const wait = hermetic.steps.find((step) => step.uses === "./.github/actions/wait-ci-artifact")!;
-    expect(Number(wait.with!["timeout-minutes"])).toBe(workflow.jobs["e2e-rust-hermetic-build"]!["timeout-minutes"]!);
-    expect(hermetic["timeout-minutes"]).toBe(180);
-    const setup = hermetic.steps.findIndex((step) => step.name === "Install pinned OpenCode");
-    expect(setup).toBeLessThan(hermetic.steps.indexOf(wait));
-    const unpack = hermetic.steps.find((step) => step.name === "Restore executable and auxiliary binaries")!.run!;
-    expect(unpack).toContain("ckdev-mc-e2e ckdev-mc-e2e-drive-fault ckdev-subc");
-    expect(unpack).toContain('test -x "packages/e2e-tests/.cache/prebuilt/$binary"');
+test("CI and release cover the shipped module, scenarios, mock runner and real daemon wire", async () => {
+    const integrationScript = "scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh";
+    const remainingScript = "scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh";
+    expect(workflow.jobs["rust-mc-module-integration"]!.steps.some((step) => step.run?.includes(integrationScript))).toBe(true);
+    expect(workflow.jobs["rust-mc-module-integration"]!.steps.some((step) => step.run === "bash scripts/wire-gate.sh")).toBe(true);
+    expect(workflow.jobs["rust-workspace-crates"]!.steps.some((step) => step.run?.includes(remainingScript))).toBe(true);
+    expect(await Bun.file(resolve(root, remainingScript)).text()).toContain("cargo test --locked --workspace --exclude mc-module --no-fail-fast");
+    const wire = await Bun.file(resolve(root, "scripts/wire-gate.sh")).text();
+    expect(wire).toContain("cargo build --locked -p mc-mock-runner --bin ck-mock-runner");
+    expect(wire).toContain("--test wire --no-fail-fast -- --ignored");
+    expect(wire).toContain("--skip rehearsal_a_head_on_a_real_store");
+    const release = releaseWorkflow.jobs["rust-module"]!;
+    const commands = release.steps.map((step) => step.run ?? "").join("\n");
+    expect(commands).toContain("cargo test --locked -p mc-module --lib --no-fail-fast");
+    expect(commands).toContain(integrationScript);
+    expect(commands).toContain(remainingScript);
+    expect(commands).toContain("bash scripts/wire-gate.sh");
+    expect(commands).toContain("scripts/ci/rust-clippy-clippy-including-integration-targets.sh");
+    for (const id of ["publish-npm", "publish-npm-pi", "publish-npm-cli"]) {
+        expect(releaseWorkflow.jobs[id]!.needs).toContain("rust-module");
+        expect(releaseWorkflow.jobs[id]!.if).toContain("needs.rust-module.result == 'success'");
+    }
+    for (const document of [workflow, releaseWorkflow]) {
+        for (const id of ["e2e-rust-hermetic-build", "e2e-rust-hermetic", "rust-mc-module-parity"]) {
+            expect(document.jobs[id]).toBeUndefined();
+            for (const job of Object.values(document.jobs)) expect(job.needs ?? []).not.toContain(id);
+        }
+    }
 });
 
 test("raw replay review stays retired with the TypeScript full-array Rust transform", async () => {

@@ -24,10 +24,6 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # The long randomized async-lane differential (300 sessions over all four
-  # message formats, against the full-recompute oracle) runs in its own job;
-  # the lib shards cover the rest of the library.
-  MC_PARITY_FILTER: 'test(=providers::async_provider::differential_tests::resident_matches_the_full_recompute_oracle_over_many_sessions)'
 
 # Pipeline shape on every push to master/main:
 #
@@ -36,9 +32,8 @@ env:
 #        ├─ unit suites and packaging smokes
 #        ├─ Docker install smokes (independent of unit/host results)
 #        ├─ host behavior (OC1: four whole-file shards; OC2: two)
-#   Rust clippy and lib archive → lib partitions + parity start immediately.
-#   Rust integration/doctests/remaining crates consume dists.
-#   Hermetic build → shards runs independently of preflight checks.
+#   Rust clippy and lib archive → lib partitions start immediately.
+#   Rust integration/scenarios/wire/doctests and remaining crates run independently.
 #   ci-summary always checks every required leg, including cancelled/skipped jobs.
 #
 # Two e2e layers cover different concerns:
@@ -50,17 +45,9 @@ env:
 #     Catches cache-stability + correctness regressions that the smoke layer cannot see.
 #
 # Docker e2e was previously in a separate workflow (e2e-docker.yml). Folding it here means
-# every master/main push exercises all unit, Docker and host proofs. The
-# Rust jobs run on every push and scheduled run. Pushes use Cargo.lock-pinned crates;
-# the scheduled hermetic build additionally probes the subconscious default branch:
-#
-#   rust-crates          legacy-named aggregate for clippy, lib/parity, integration,
-#                        binary, doctest and remaining-workspace targets
-#   e2e-rust-hermetic-build → e2e-rust-hermetic (9 shards)
-#
-# The mc-module integration tests always build ck-subc from its Cargo.lock revision.
-# Hermetic push builds use that same revision; the nightly build intentionally builds
-# subconscious default-branch HEAD and reports it as drift in the job summary.
+# every master/main push exercises all unit, Docker and host proofs.
+# Rust jobs run on every push and scheduled run against Cargo.lock. The wire
+# gate installs its own revision-pinned daemon into a throwaway test environment.
 
 jobs:
   preflight:
@@ -222,7 +209,6 @@ jobs:
         run: bun install --frozen-lockfile
 
       - uses: ./.github/actions/restore-ci-dists
-      - uses: ./.github/actions/restore-conformance-oracle
       - name: Run whole-file plugin shard
         env:
           UNIT_MODE: ${{ matrix.mode }}
@@ -271,7 +257,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - uses: ./.github/actions/restore-ci-dists
-      - uses: ./.github/actions/restore-conformance-oracle
       - name: Run whole-file Pi shard
         env:
           UNIT_MODE: ${{ matrix.mode }}
@@ -595,64 +580,21 @@ jobs:
         run: bash scripts/ci/e2e-host-omp-run-host-e2e-suite-omp-tests-from-mode-manifest.sh
   rust-mc-module-integration:
     name: Rust (mc-module integration)
-    # mc-module integration tests build ck-subc from the locked source revision.
-    # Published commons and subconscious crates resolve from this repository's
-    # Cargo.lock, so there is no commons checkout or floating crate source here.
-    #
-    # Keep daemon tests under libtest: its process-local build locks must not be
-    # multiplied by nextest's process-per-test execution model.
+    # The new module's integration targets include scenarios; its ignored wire
+    # tests run separately against the pinned daemon and mock runner.
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      MC_TEST_SUBCONSCIOUS_SOURCE: ${{ github.workspace }}/.siblings/subconscious
-    permissions:
-      contents: read
-      actions: read
     steps:
       - uses: actions/checkout@v5
-
-      - name: Fetch pinned standalone differential base
-        run: git fetch --no-tags --depth=1 origin "$(grep -v '^#' .github/standalone-differential-base)"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      # The hostless-store integration test provisions context.db through the CLI.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install CLI dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Resolve Cargo.lock crate pins
-        id: cargo-pins
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/cargo-lock-pins.py --self-test
-          pins="$(python3 scripts/cargo-lock-pins.py)"
-          printf '%s\n' "$pins" >> "$GITHUB_OUTPUT"
-          locked_crates="$(printf '%s\n' "$pins" | sed -n 's/^locked_crates=//p')"
-          echo "Cargo.lock pins: $locked_crates" >> "$GITHUB_STEP_SUMMARY"
-
-      # real_daemon.rs builds ck-subc and checks its launch-nonce history; this
-      # exact locked checkout is therefore needed only by this integration-test job.
-      - name: Check out locked subconscious source for daemon integration tests
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/subconscious
-          path: .siblings/subconscious
-          ref: ${{ steps.cargo-pins.outputs.subc_revision }}
-          fetch-depth: 0
-
-      - uses: ./.github/actions/restore-ci-dists
-      - uses: ./.github/actions/restore-conformance-oracle
-      - name: Run system-prompt-delivery integration test
-        run: bash scripts/ci/rust-mc-module-integration-run-system-prompt-delivery-integration-test.sh
       - name: Test mc-module (integration, binary and doctest targets)
         run: bash scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh
+      - name: Test module wire protocol with daemon and mock runner
+        run: bash scripts/wire-gate.sh
+
   rust-clippy:
     name: Rust (clippy)
     runs-on: ubuntu-latest
@@ -672,12 +614,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install workspace dependencies for migration-oracle tests
-        run: bun install --frozen-lockfile
-      - uses: ./.github/actions/restore-ci-dists
       - name: Test the remaining workspace crates
         run: bash scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh
 
@@ -693,47 +629,6 @@ jobs:
           tool: cargo-nextest@0.9.138
       - name: Compile the complete lib once and prove inventory equality
         run: bash scripts/ci/rust-lib-archive-compile-the-complete-lib-once-and-prove-inventory-equality.sh
-      - name: Package conformance oracle test binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifacts="$RUNNER_TEMP/mc-module-lib-test-artifacts.json"
-          cargo test --locked -p mc-module --lib --profile ci-test --no-run --no-fail-fast --message-format=json > "$artifacts"
-          binary="$(python3 - "$artifacts" <<'PY'
-          import json
-          import sys
-
-          matches = []
-          with open(sys.argv[1]) as messages:
-              for line in messages:
-                  message = json.loads(line)
-                  target = message.get("target", {})
-                  profile = message.get("profile", {})
-                  if (
-                      message.get("reason") == "compiler-artifact"
-                      and target.get("name") == "mc_module"
-                      and "lib" in target.get("kind", [])
-                      and profile.get("test")
-                      and message.get("executable")
-                  ):
-                      matches.append(message["executable"])
-
-          if len(matches) != 1:
-              raise SystemExit(f"expected one mc-module lib test binary, found {len(matches)}")
-          print(matches[0])
-          PY
-          )"
-          test -x "$binary"
-          mkdir -p ci-conformance-oracle
-          cp "$binary" ci-conformance-oracle/mc-module-lib-test
-          printf '%s\n' "$GITHUB_SHA" > ci-conformance-oracle/commit.txt
-          sha256sum ci-conformance-oracle/mc-module-lib-test > ci-conformance-oracle/oracle.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: conformance-oracle-${{ github.sha }}-${{ github.run_attempt }}
-          path: ci-conformance-oracle/
-          if-no-files-found: error
-          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: rust-lib-${{ github.sha }}-${{ github.run_attempt }}
@@ -789,56 +684,11 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
 
-  rust-mc-module-parity:
-    name: Rust (mc-module parity differential)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.138
-      - uses: ./.github/actions/wait-ci-artifact
-        id: archive
-        with:
-          artifact: rust-lib-${{ github.sha }}
-          producer: Rust (mc-module lib archive)
-          timeout-minutes: "45"
-      - name: Download lib archive (retry transient failures and verify digest)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_ID: ${{ steps.archive.outputs.artifact-id }}
-        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path ci-rust-lib
-      - name: Verify archive provenance
-        run: |
-          if [[ ! -f ci-rust-lib/parity-names.txt || ! -f ci-rust-lib/archive.tar.zst || ! -f ci-rust-lib/archive.sha256 || ! -f ci-rust-lib/commit.txt || ! -f ci-rust-lib/rustc.txt ]]; then
-            echo "::error::artifact not downloaded: missing Rust parity archive files" >&2
-            exit 1
-          fi
-          test "$(cat ci-rust-lib/commit.txt)" = "$GITHUB_SHA"
-          sha256sum --check ci-rust-lib/archive.sha256
-          rustc -vV | diff - ci-rust-lib/rustc.txt
-      - name: Run parity groups from the shared lib archive
-        # The differential is #[ignore]d for local runs, so it is selected with
-        # --run-ignored. Selecting no tests means MC_PARITY_FILTER no longer
-        # matches its name and must fail this job.
-        run: bash scripts/ci/rust-mc-module-lib-run-lib-partition.sh parity
-      - name: Check every selected parity test executed
-        if: ${{ !cancelled() }}
-        run: bash scripts/ci/rust-mc-module-lib-check-every-selected-test-executed.sh parity
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: rust-parity-results
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: error
-
   rust-crates:
     name: Rust (crates)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates]
+    needs: [preflight, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -849,174 +699,16 @@ jobs:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: bun packages/e2e-tests/scripts/check-ci-results.ts rust-crates
 
-  e2e-rust-hermetic-build:
-    name: E2E (Rust hermetic build)
-    # Cargo.lock pins the published crate versions and both git dependency revisions.
-    # On schedule the daemon checkout below intentionally switches to upstream HEAD.
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Resolve Cargo.lock crate pins
-        id: cargo-pins
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/cargo-lock-pins.py --self-test
-          pins="$(python3 scripts/cargo-lock-pins.py)"
-          printf '%s\n' "$pins" >> "$GITHUB_OUTPUT"
-          locked_crates="$(printf '%s\n' "$pins" | sed -n 's/^locked_crates=//p')"
-          echo "Cargo.lock pins: $locked_crates" >> "$GITHUB_STEP_SUMMARY"
-
-      # Cargo can resolve subc-core as a library dependency but does not build its
-      # ck-subc binary target. Pushes use the root lockfile revision; only the scheduled
-      # run deliberately checks the subconscious default branch for upstream drift.
-      - name: Check out Cargo.lock-pinned subconscious source for ck-subc
-        if: ${{ github.event_name != 'schedule' }}
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/subconscious
-          path: .siblings/subconscious
-          ref: ${{ steps.cargo-pins.outputs.subc_revision }}
-
-      - name: Check out subconscious default branch for scheduled drift
-        if: ${{ github.event_name == 'schedule' }}
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/subconscious
-          path: .siblings/subconscious
-
-      - name: Record ck-subc source revision
-        id: daemon-source
-        shell: bash
-        run: |
-          set -euo pipefail
-          sha="$(git -C "$GITHUB_WORKSPACE/.siblings/subconscious" rev-parse HEAD)"
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
-            summary="ck-subc source drift: subconscious default-branch HEAD $sha"
-          else
-            summary="ck-subc source pinned by Cargo.lock: $sha"
-          fi
-          echo "$summary"
-          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Derive hermetic Cargo cache key
-        id: cargo-cache-key
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Key on the resolved Cargo graph plus the exact daemon source, including
-          # nightly HEAD, so pinned and drift builds never reuse one another's cache.
-          lock_digest="$(sha256sum Cargo.lock | awk '{print $1}')"
-          source_sha="${{ steps.daemon-source.outputs.sha }}"
-          digest="$(printf '%s\n%s\n' "$lock_digest" "$source_sha" | sha256sum | awk '{print $1}')"
-          echo "key=rust-hermetic-${RUNNER_OS}-${RUNNER_ARCH}-${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore ck-subc and ckdev-mc-e2e Cargo target cache
-        uses: actions/cache@v4
-        with:
-          path: packages/e2e-tests/.cache/rust-e2e-cargo-target
-          key: ${{ steps.cargo-cache-key.outputs.key }}
-
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build hermetic binary pair (including fault-injection variant)
-        shell: bash
-        run: bash scripts/ci/e2e-rust-hermetic-build-build-hermetic-binary-pair-including-fault-injection-variant.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rust-hermetic-binaries-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/rust-hermetic-binaries.tar.gz
-            ${{ runner.temp }}/rust-hermetic-binaries.sha256
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 1
-
-  e2e-rust-hermetic:
-    name: E2E (Rust hermetic ${{ matrix.shard }}/9)
-    runs-on: ubuntu-latest
-    # Artifact waits allow 30 minutes of queue time beyond the producer timeout; tests retain their own timeouts.
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-      - name: Verify pinned OpenCode 2 default
-        # The Rust manifest also includes OC2 cases, which need a real OpenCode 2 host
-        # at the default general-availability release.
-        # Verify cached lifecycle output or install the same exact host as the matrix lane.
-        run: bash scripts/ci/prepare-default-opencode2.sh
-      - name: Install pinned OpenCode
-        run: bash scripts/ci/e2e-rust-hermetic-install-pinned-opencode.sh
-      - uses: ./.github/actions/restore-ci-dists
-      - uses: ./.github/actions/wait-ci-artifact
-        id: binaries
-        with:
-          artifact: rust-hermetic-binaries-${{ github.sha }}
-          producer: E2E (Rust hermetic build)
-          timeout-minutes: "120"
-      - name: Download hermetic binaries (retry transient failures and verify digest)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_ID: ${{ steps.binaries.outputs.artifact-id }}
-        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path "$RUNNER_TEMP/hermetic-artifact"
-      - name: Restore executable and auxiliary binaries
-        run: |
-          if [[ ! -f "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.tar.gz" || ! -f "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.sha256" ]]; then
-            echo "::error::artifact not downloaded: missing hermetic binaries archive or checksum" >&2
-            exit 1
-          fi
-          (cd "$RUNNER_TEMP/hermetic-artifact" && sha256sum --check rust-hermetic-binaries.sha256)
-          mkdir -p packages/e2e-tests/.cache/prebuilt
-          tar -xzf "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.tar.gz" -C packages/e2e-tests/.cache/prebuilt
-          test "$(cat packages/e2e-tests/.cache/prebuilt/commit.txt)" = "$GITHUB_SHA"
-          for binary in ckdev-mc-e2e ckdev-mc-e2e-drive-fault ckdev-subc; do
-            test -x "packages/e2e-tests/.cache/prebuilt/$binary"
-          done
-      - name: Run manifest shard
-        env:
-          MC_E2E_SHARD: ${{ matrix.shard }}/9
-          MC_E2E_CK_MC_PREBUILT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e
-          MC_E2E_CK_MC_DRIVE_FAULT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault
-          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
-        run: bash scripts/ci/e2e-rust-hermetic-run-manifest-shard.sh
-
-  # Rust (raw replay review) is retired. Its only witnesses were the plugin
-  # review tests rust-cache-review, rust-cache-r2 and rust-cache-restart, which
-  # drove the TypeScript full-array Rust transform (rust-mode-transform.ts). That
-  # transform and those tests were deleted when transform_mode stopped selecting
-  # the full-array route, so the job could only fail with "matched 0 tests". The
-  # bridge and conformance gates are the module proof now, as for the retired
-  # Rust hermetic e2e lane (mode-manifest.json rust_lane: "retired").
+  # Rust coverage exercises the shipped ck-mc module through lib partitions,
+  # integration scenarios, the mock runner and the real daemon wire protocol.
+  # Rust (raw replay review) is retired. It exercised a TypeScript adapter that
+  # sent complete conversations to the old module, which is no longer built.
 
   ci-summary:
     name: CI (required)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, slow-unit, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic]
+    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, slow-unit, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates, rust-crates]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
