@@ -14,6 +14,61 @@ const settle = async () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
 };
 
+test("manual host fold completes after the first summary covers tool calls", async () => {
+    const f = await oc2ContextFixture(9870, {
+        area: "host-fold-patch",
+        instructions: false,
+        temporal: false,
+        cacheTtl: "never",
+    });
+    try {
+        const owner = f.rows[1]!;
+        const call = {
+            type: "tool-call" as const,
+            id: "read-before-floor",
+            name: "read",
+            input: {},
+        };
+        f.raw
+            .prepare(
+                "UPDATE session_message SET data=json_set(data,'$.content',json(?)) WHERE id=?",
+            )
+            .run(JSON.stringify([call]), owner.id);
+        f.compartment(4);
+        const before = await f.pass((draft) => {
+            const index = draft.messages.findIndex((message) => message.id === owner.id);
+            draft.messages[index]!.content = [call];
+            draft.messages.splice(index + 1, 0, {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: call.id,
+                        name: call.name,
+                        result: { type: "text", value: "covered tool output" },
+                    },
+                ],
+            });
+        });
+        expect(before.logs.filter((line) => line.includes("capture unavailable"))).toEqual([]);
+        expect(before.draft.messages.some((message) => message.id === owner.id)).toBe(false);
+        const cut = await f.nativeFold(3, 0, "", "manual");
+        const stored = f.raw.prepare("SELECT data FROM session_message WHERE id=?").get(cut) as {
+            data: string;
+        };
+        expect(JSON.parse(stored.data).status).toBe("completed");
+        expect(hasFoldSummary(JSON.parse(stored.data).summary)).toBe(true);
+        const after = await f.pass();
+        expect(after.bytes).toBe(before.bytes);
+        expect((await f.pass()).bytes).toBe(after.bytes);
+        await f.restart();
+        expect((await f.pass()).bytes).toBe(after.bytes);
+        expect(f.sessionLogs().some((line) => line.includes("compaction-fold cause="))).toBe(false);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
 test("required host checkpoints answer without empty history and preserve raw replay", async () => {
     expect(hasFoldSummary(undefined)).toBe(false);
     expect(hasFoldSummary("<session-history> \n</session-history>")).toBe(false);
