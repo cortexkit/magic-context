@@ -1161,6 +1161,42 @@ async fn lifecycle_boundary_final_turn_refusal_bounds_the_immediate_retry() {
     assert!(session.build(&settings, None, false, None).0.is_none());
 }
 
+fn signed_refusal(mid: &str) -> ViewRefusal {
+    ViewRefusal::Rule(RuleBreak::SignedPartInvalid {
+        mid: mid.into(),
+        part: "0".into(),
+    })
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_signed_part_in_a_newer_entry_keeps_queued_drops_on_every_retry() {
+    let (mut session, client, settings) = refusal_fixture();
+    for seq in 1..=3u64 {
+        let (view, _) = session.build(&settings, None, false, None);
+        let view = view.expect("queued drops stay eligible");
+        assert_carries_queued_drops(&view);
+        session.publish(&client, view).await;
+        // The reply in flight while ck-mc built the view lands after it,
+        // with signed thinking the view's earlier edits invalidate.
+        let mid = format!("reply-{seq}");
+        client.entries.lock().unwrap().push(text(4 + seq, &mid));
+        refuse_at_boundary(&mut session, &client, &settings, seq, signed_refusal(&mid)).await;
+        assert_eq!(session.queued, queued_refusal_parts(), "refusal {seq}");
+        assert!(session.failed_parts.is_empty(), "refusal {seq}");
+        assert!(session.refused_once.is_empty(), "refusal {seq}");
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_boundary_signed_part_the_view_knew_keeps_the_usual_guard() {
+    let (mut session, client, settings) = refusal_fixture();
+    let (view, _) = session.build(&settings, None, false, None);
+    session.publish(&client, view.unwrap()).await;
+    refuse_at_boundary(&mut session, &client, &settings, 1, signed_refusal("old")).await;
+    assert_eq!(session.refused_once, queued_refusal_parts());
+    assert!(!session.failed_parts.is_empty());
+}
+
 #[tokio::test]
 async fn lifecycle_boundary_unknown_message_has_its_own_bounded_retry() {
     let (mut session, client, settings) = refusal_fixture();

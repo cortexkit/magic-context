@@ -225,6 +225,11 @@ pub struct Unconfirmed {
     /// The queued drops the view carried.
     covered: Vec<lanes::PartKey>,
     before: Before,
+    /// The ordinal of the newest entry the index held when the view was
+    /// built. A refusal naming a part beyond it names an entry the view
+    /// could not have known.
+    #[serde(default)]
+    built_through: Option<u64>,
 }
 
 /// The state a view's acceptance replaced.
@@ -256,6 +261,13 @@ struct Before {
 enum TranscriptRefusal {
     FinalTurnRemoved,
     UnknownMessage,
+    /// A signed part in an entry the index did not hold when the view was
+    /// built. With a signed-thinking model in a tool loop, a request is in
+    /// flight while ck-mc builds a view; its reply arrives with signed
+    /// thinking that the view's earlier edits invalidate, and the view could
+    /// not name it. That refusal is the race's, never a drop's, so it is not
+    /// bounded like the others: every retry names a newer entry.
+    NewSignedPart,
 }
 
 impl TranscriptRefusal {
@@ -3287,6 +3299,7 @@ impl Session {
             view: view.clone(),
             covered: covered.clone(),
             before,
+            built_through: self.index.cursor().map(|cursor| cursor.ordinal),
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
@@ -3361,18 +3374,46 @@ impl Session {
             })
             .min_by_key(|(version, _)| *version)
         {
-            let moved = TranscriptRefusal::of(refusal);
-            let guard = moved.is_none_or(|kind| self.transcript_retry == Some((kind, *version)));
+            let moved =
+                TranscriptRefusal::of(refusal).or_else(|| self.new_signed_part(*version, refusal));
             // FinalTurnRemoved depends on the newest entry; UnknownMessage
             // can follow a revert. Neither blames a drop when an accepted
             // view first loses that race. Only its immediate retry pays the
-            // usual refusal penalty if the same reason repeats.
+            // usual refusal penalty if the same reason repeats. A new signed
+            // part never pays it: the part did not exist when ck-mc built
+            // the view, so no repeat can be ck-mc's own fault.
+            let guard = match moved {
+                None => true,
+                Some(TranscriptRefusal::NewSignedPart) => false,
+                Some(kind) => self.transcript_retry == Some((kind, *version)),
+            };
             self.roll_back(*version, guard, refusal_part(refusal));
             // Retrying skips drop penalties, not the refusal status shown
             // in the apps' view history.
             self.app_view_status(*version, "refused");
             self.reset_transcript_retry();
-            self.transcript_retry = moved.map(|kind| (kind, self.version + 1));
+            self.transcript_retry = moved
+                .filter(|kind| *kind != TranscriptRefusal::NewSignedPart)
+                .map(|kind| (kind, self.version + 1));
+        }
+    }
+
+    /// Whether `refusal` names a signed part in an entry newer than any the
+    /// index held when view `version` was built. A part ck-mc cannot place
+    /// counts as new: every entry the view knew stays indexed until a
+    /// confirmed view moves the cut.
+    fn new_signed_part(&self, version: u64, refusal: &ViewRefusal) -> Option<TranscriptRefusal> {
+        let ViewRefusal::Rule(RuleBreak::SignedPartInvalid { mid, .. }) = refusal else {
+            return None;
+        };
+        let through = self
+            .unconfirmed
+            .iter()
+            .find(|pending| pending.view.version == version)?
+            .built_through?;
+        match self.index.ordinal_of(mid) {
+            Some(ordinal) if ordinal <= through => None,
+            _ => Some(TranscriptRefusal::NewSignedPart),
         }
     }
 

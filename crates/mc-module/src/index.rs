@@ -144,6 +144,11 @@ impl Index {
         &self.entries
     }
 
+    /// The ordinal of the held entry `mid`, if the index holds it.
+    pub fn ordinal_of(&self, mid: &str) -> Option<u64> {
+        self.positions.get(mid).copied()
+    }
+
     /// Share the held window with asynchronous readers without copying its
     /// entries. Later mutations copy only if a reader still holds a snapshot.
     pub(crate) fn snapshot(&self) -> Arc<Vec<Entry>> {
