@@ -21,6 +21,11 @@ use tokio::sync::oneshot;
 pub const ROLE: (&str, &str) = ("mc-context-read", "v1");
 pub const OPS: [&str; 2] = ["context.memories", "context.summaries"];
 
+/// How long a caller should wait before asking again for a held head whose
+/// project ck-mc hasn't learned yet. A head sets up again on its next step
+/// after a ck-mc restart, so this is usually shorter.
+const PROJECT_PENDING_RETRY_MS: u64 = 30_000;
+
 type Reply = Result<Value, Refusal>;
 type Command = (Vec<u8>, oneshot::Sender<Reply>);
 type Projects = Arc<Mutex<HashMap<SessionRef, Project>>>;
@@ -222,6 +227,7 @@ impl Reader {
                 id,
             })
         });
+        let mut held = false;
         let (mut model, mut usable): (Option<String>, u64) = tx.query_row(
             "SELECT COALESCE(NULLIF(last_observed_model_key,''),NULLIF(cached_m0_model_key,'')), MAX(0, CASE WHEN detected_context_limit > 0 THEN detected_context_limit ELSE last_usage_context_limit END) FROM session_meta WHERE harness=?1 AND session_id=?2",
             params![harness, session], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -249,8 +255,20 @@ impl Reader {
                 ));
                 usable = crate::pass::usable_window(&conditions);
             }
+            held = !rows.is_empty();
             drop(statement);
             store_tx.rollback().map_err(|_| unavailable())?;
+        }
+        // A head ck-mc holds learns its project only from its Setup route, so
+        // after a restart, until that head's next Setup, its project is unknown
+        // rather than absent. An empty list would read as final, and a caller
+        // could cache a pack with no memories, so this answers "try later".
+        if purpose == Some("bias") && held && project.is_none() {
+            return Err(Refusal::new(
+                "project_pending",
+                "The session's project is not known yet; retry later.",
+                Some(json!({"class": "transient", "retry_after_ms": PROJECT_PENDING_RETRY_MS})),
+            ));
         }
         let mut snapshot = Snapshot {
             project,

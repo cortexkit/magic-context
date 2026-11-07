@@ -335,6 +335,25 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
         Some(db),
         Some(store),
     );
+    // Held in mode3.db but not set up since this module started: its project
+    // is unknown, so memories answer "try later" rather than an empty list.
+    let mut p = params();
+    p["session"] = json!({"harness":"opencode2","session":"held"});
+    let pending = module
+        .context_read()
+        .read(&request("context.memories", p.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(pending.code, "project_pending");
+    assert_eq!(pending.detail.as_ref().unwrap()["class"], "transient");
+    // Summaries need no project and answer at once.
+    let mut summaries = p.clone();
+    summaries.as_object_mut().unwrap().remove("purpose");
+    assert!(module
+        .context_read()
+        .read(&request("context.summaries", summaries))
+        .await
+        .is_ok());
     module
         .setup(
             crate::route::Route {
@@ -349,8 +368,6 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
             setup,
         )
         .unwrap();
-    let mut p = params();
-    p["session"] = json!({"harness":"opencode2","session":"held"});
     let answer = module
         .context_read()
         .read(&request("context.memories", p.clone()))
