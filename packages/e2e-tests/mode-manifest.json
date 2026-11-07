@@ -1,7 +1,7 @@
 {
     "schema": 1,
     "rust_lane": "retired",
-    "header": "CI push workflows run the manifest-derived TypeScript suites. The Rust hermetic lane is retired (rust_lane: \"retired\"): transform_mode no longer selects the full-array Rust transform, so no entry has a rust invocation and scripts/run-rust-hermetic-e2e.sh exits 0 with no files selected. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
+    "header": "CI push workflows run the manifest-derived TypeScript suites. The Rust hermetic lane is retired (rust_lane: \"retired\"): transform_mode no longer selects the full-array Rust transform, so no entry has a rust invocation and scripts/run-rust-hermetic-e2e.sh exits 0 with no files selected. The independent rust-dashboard CI job tests the dashboard backend and its database schema compatibility using packages/dashboard/src-tauri/Cargo.lock; it does not revive the retired transform lane. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
             "path": "tests/opencode2/overflow-terminal-errors.test.ts",

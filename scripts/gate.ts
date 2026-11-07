@@ -248,6 +248,7 @@ export async function preflightGroups(
 
 export function resources(id: string): { cpu: number; lock: string } {
     if (id === "rust-mc-module-lib") return { cpu: 4, lock: "nextest-junit" };
+    if (id === "rust-dashboard") return { cpu: 4, lock: "dashboard-cargo-build" };
     if (id.startsWith("rust-")) return { cpu: 8, lock: "cargo-build" };
     if (id.startsWith("e2e-host-opencode2")) return { cpu: 2, lock: "oc2-install" };
     if (id.startsWith("unit-") || id === "slow-unit" || id === "check-plugin-compat")
@@ -273,6 +274,8 @@ export function writesWorkspace(command: string, id: string): boolean {
 }
 
 export function localStepCommand(name: string | undefined, command: string): string {
+    if (command === "bash scripts/ci/rust-dashboard-test.sh")
+        return `GATE_DASHBOARD_WRITABLE_COPY=1 ${command}`;
     if (name !== "Fetch pinned standalone differential base") return command;
     if (
         command !==

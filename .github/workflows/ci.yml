@@ -617,6 +617,31 @@ jobs:
       - name: Test the remaining workspace crates
         run: bash scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh
 
+  rust-dashboard:
+    name: Rust (dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/dashboard/src-tauri/target
+          key: ${{ runner.os }}-dashboard-cargo-${{ hashFiles('packages/dashboard/src-tauri/Cargo.lock') }}
+      - name: Install dashboard Linux dependencies
+        run: bash scripts/ci/rust-dashboard-install-linux-dependencies.sh
+      # Backend tests create schema fixtures through the sibling TypeScript packages.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Test dashboard Rust backend
+        run: bash scripts/ci/rust-dashboard-test.sh
+
   rust-lib-archive:
     name: Rust (mc-module lib archive)
     runs-on: ubuntu-latest
@@ -688,7 +713,7 @@ jobs:
     name: Rust (crates)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates]
+    needs: [preflight, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates, rust-dashboard]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -708,7 +733,7 @@ jobs:
     name: CI (required)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, slow-unit, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates, rust-crates]
+    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, slow-unit, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-integration, rust-workspace-crates, rust-dashboard, rust-crates]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
