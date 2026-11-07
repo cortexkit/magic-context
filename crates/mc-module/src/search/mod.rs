@@ -17,6 +17,9 @@ pub mod rerank;
 pub mod sources;
 pub mod text;
 
+#[cfg(test)]
+mod hint_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
@@ -463,6 +466,7 @@ fn memories_by_id(
             source_name: memory.source_name.clone(),
             category: memory.category.clone(),
             content: text::preview(&memory.content),
+            hint_content: memory.content.clone(),
             score: 1.0 - rank as f64 * 0.01,
             match_type: "fts",
         }));
@@ -974,7 +978,7 @@ pub fn auto_hits(conn: &Connection, scope: &Scope, prompt: &str) -> Vec<(Hit, f6
 
 fn hint_relevance(hit: &Hit, prompt: &str) -> f64 {
     let (content, by_words) = match hit {
-        Hit::Memory(hit) => (hit.content.as_str(), hit.match_type != "semantic"),
+        Hit::Memory(hit) => (hit.hint_content.as_str(), hit.match_type != "semantic"),
         Hit::Message(hit) => (hit.content.as_str(), true),
         Hit::Chunk(hit) => (hit.title.as_str(), false),
         Hit::Commit(hit) => (hit.content.as_str(), hit.match_type != "semantic"),
@@ -984,7 +988,7 @@ fn hint_relevance(hit: &Hit, prompt: &str) -> f64 {
     if text::clean_search_text(content).is_empty() {
         0.0
     } else if by_words {
-        text::keyword_relevance(prompt, content)
+        text::hint_keyword_relevance(prompt, content)
     } else {
         hit.score()
     }

@@ -126,6 +126,8 @@ pub struct MemoryHit {
     pub source_name: Option<String>,
     pub category: String,
     pub content: String,
+    /// Keep full text internal for hint scoring; tool replies use only `content`.
+    pub(super) hint_content: String,
     pub score: f64,
     pub match_type: &'static str,
 }
@@ -334,6 +336,7 @@ pub fn search_memories(
                         source_name: memory.source_name.clone(),
                         category: memory.category.clone(),
                         content: preview(&memory.content),
+                        hint_content: memory.content.clone(),
                         score,
                         match_type,
                     })
@@ -364,6 +367,7 @@ pub fn search_memories(
             source_name: memory.source_name.clone(),
             category: memory.category.clone(),
             content: preview(&memory.content),
+            hint_content: memory.content.clone(),
             score,
             match_type,
         });
