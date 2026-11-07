@@ -435,18 +435,41 @@ fn crash_resume_at_every_transaction_boundary() {
         let (db, _) = fixture(&dir.path().join("context.db"), n, 200);
         drop(db);
         CRASH_AFTER.with_borrow_mut(|crash| *crash = Some(boundary));
-        let error = run(dir.path(), &request(n)).unwrap_err();
-        assert_eq!(
-            error, "simulated process exit after commit",
-            "boundary {boundary}"
-        );
+        let first = run(dir.path(), &request(n));
         CRASH_AFTER.with_borrow_mut(|crash| *crash = None);
-        // Opening both stores anew discards every in-memory plan and cursor.
-        let resumed = run(dir.path(), &request(n));
-        if boundary + 1 == boundaries {
-            assert!(resumed.unwrap_err().starts_with("session_already_moved:"));
-        } else {
-            resumed.unwrap_or_else(|e| panic!("boundary {boundary}: {e}"));
+        // How many write transactions a move takes depends on timing: batches
+        // are sized by how long a write holds the lock, and checkpoints run
+        // as the WAL grows. So this run may finish before it reaches
+        // `boundary`, and a crash may land on its last commit at any index.
+        if let Err(error) = first {
+            assert_eq!(
+                error, "simulated process exit after commit",
+                "boundary {boundary}"
+            );
+            // The last commit writes the move fence. A crash after it leaves
+            // the session moved, and resuming refuses by name; after any
+            // earlier commit, resuming finishes the move. Opening both
+            // stores anew discards every in-memory plan and cursor.
+            let request = request(n);
+            let fence = super::fence_key(&request.session.harness, &request.session.session);
+            let fenced: bool = Connection::open(dir.path().join("context.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) > 0 FROM schema_migrations_meta WHERE key = ?1",
+                    [&fence],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let resumed = run(dir.path(), &request);
+            if fenced {
+                let error = resumed.unwrap_err();
+                assert!(
+                    error.starts_with("session_already_moved:"),
+                    "boundary {boundary}: {error}"
+                );
+            } else {
+                resumed.unwrap_or_else(|e| panic!("boundary {boundary}: {e}"));
+            }
         }
         assert_eq!(
             snapshot(&dir.path().join("context.db")),
