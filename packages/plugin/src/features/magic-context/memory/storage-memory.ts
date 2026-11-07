@@ -943,6 +943,31 @@ export function getMaxMemoryIdForProjects(
     return typeof row?.max_id === "number" ? row.max_id : 0;
 }
 
+export function countNewMemoriesForM1Union(
+    db: Database,
+    projectPaths: readonly string[],
+    afterId: number,
+    expiryCutoff: number,
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
+): number {
+    const identities = uniqueValues(projectPaths);
+    if (identities.length === 0) return 0;
+    const sharingFilter = buildWorkspaceMemorySqlFilter({
+        identities,
+        ownIdentities,
+        shareCategories,
+        includeClassificationFields: hasMemoryShareableColumn(db) && hasMemoryScopeColumn(db),
+    });
+    const row = db
+        .prepare(`SELECT COUNT(*) AS count FROM memories
+        WHERE project_path IN (${sqlPlaceholders(identities)}) AND id > ?
+          AND status IN ('active', 'permanent')
+          AND (expires_at IS NULL OR expires_at > ?)${sharingFilter.clause}`)
+        .get(...identities, afterId, expiryCutoff, ...sharingFilter.params) as { count: number };
+    return row.count;
+}
+
 export function readNewMemoriesForM1Union(
     db: Database,
     projectPaths: readonly string[],

@@ -40,6 +40,7 @@ import {
 } from "../../features/magic-context/storage";
 import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
+import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -1591,6 +1592,7 @@ describe("runCompartmentAgent", () => {
 
         const meta = getOrCreateSessionMeta(db, "ses-1");
         expect(meta.compartmentInProgress).toBe(false);
+        expect(buildSidebarSnapshot(db, "ses-1", process.cwd()).historianRun?.outcome).toBe("ok");
         const compartments = getCompartments(db, "ses-1");
         expect(compartments).toHaveLength(1);
         expect(compartments[0]?.startMessageId).toBe("m-1");
@@ -1941,6 +1943,12 @@ describe("runCompartmentAgent", () => {
         ).toEqual([]);
         expect(loadProtectedTailMeta(db, "ses-fact-insert-rollback").priorBoundaryOrdinal).toBe(1);
         expect(onPublished).not.toHaveBeenCalled();
+        expect(
+            buildSidebarSnapshot(db, "ses-fact-insert-rollback", process.cwd()).historianRun,
+        ).toMatchObject({
+            outcome: "failed",
+            model: null,
+        });
         expect(
             db
                 .prepare(

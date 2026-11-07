@@ -69,6 +69,7 @@ import {
     producerPromptFailureReason,
 } from "./producer-window-guard";
 import { estimateTokens } from "./read-session-formatting";
+import { beginSidebarHistorianRun } from "./sidebar-observations";
 
 // Intentionally kept: historian validation failure dumps are preserved for
 // debugging. They land in the project-local historian dir
@@ -316,6 +317,8 @@ export function createV1HiddenCompletionExecutor(
             return {
                 messages,
                 text,
+                providerId: typeof info.providerID === "string" ? info.providerID : undefined,
+                modelId: typeof info.modelID === "string" ? info.modelID : undefined,
                 reasoning: text ? null : extractLatestHistorianReasoning(messages),
                 lengthCapped: hasLengthCappedOutput(messages),
                 usage: sumTokensFromChildMessages(messages),
@@ -355,47 +358,94 @@ export function historianReasoningBudgetDiagnostic(
     return `historian ran out of output budget while reasoning (length-capped at ${outputTokens} tokens, no text${tokens ? `; ${formatRunTokenLog(tokens)}` : ""}) — set historian.maxTokens or route historian.model to a low-reasoning lane/variant`;
 }
 
-export async function runValidatedHistorianPass(args: {
-    client: PluginContext["client"] | undefined;
-    hiddenCompletionExecutor?: HiddenCompletionExecutor;
-    db: Database;
-    parentSessionId: string;
-    sessionDirectory: string;
-    prompt: string;
-    /** Use `write` to retain message-block cache markers for a later conversational turn. */
-    cacheTail?: import("../../shared/historian-cache").HistorianCacheTail;
-    chunk: HistorianValidationChunk;
-    priorCompartments: StoredCompartmentRange[];
-    sequenceOffset: number;
-    dumpLabelBase: string;
-    timeoutMs?: number;
-    maxOutputTokens?: number;
-    /** Active OpenCode historian entry, including its outbound request variant. */
-    model?: ModelInput;
-    fallbackModelId?: string;
-    /**
-     * Resolved historian fallback chain ("provider/modelID" entries). When the
-     * primary historian model fails (auth, model-not-found, transient network),
-     * each fallback is tried in order. The active session model is eligible
-     * only when no historian primary was configured.
-     */
-    fallbackModels?: readonly ModelInput[];
-    callbacks?: HistorianProgressCallbacks;
-    /** When true, run a second editor pass after successful historian output
-     *  to clean low-signal U: lines and cross-compartment duplicates. If editor
-     *  validation fails, falls back to the draft (first-pass) result. */
-    twoPass?: boolean;
-    subagentKind?: SubagentKind;
-    agentId?: string;
-    language?: string;
-}): Promise<ValidatedHistorianPassResult> {
+export async function runValidatedHistorianPass(
+    args: Parameters<typeof runValidatedHistorianPassImpl>[0],
+): Promise<ValidatedHistorianPassResult> {
+    const attempts = { primaryAttempts: 0, primaryRejections: 0 };
+    const finishObservation = beginSidebarHistorianRun(args.parentSessionId);
+    const primaryModel = toModelEntry(args.model)?.model ?? null;
+    const result = await runValidatedHistorianPassImpl(args, attempts).catch((error: unknown) => {
+        finishObservation({
+            ...attempts,
+            primaryModel,
+            outcome: "failed",
+            model: null,
+            fallback: false,
+        });
+        throw error;
+    });
+    const usedFallback =
+        result.usedFallback === true ||
+        (result.producingModel !== primaryModel &&
+            (args.fallbackModels ?? []).some(
+                (candidate) => toModelEntry(candidate)?.model === result.producingModel,
+            ));
+    let finished = false;
+    const finishSidebarRun = (published: boolean) => {
+        if (finished) return;
+        finished = true;
+        finishObservation({
+            ...attempts,
+            primaryModel,
+            outcome: published && result.ok ? (usedFallback ? "fallback" : "ok") : "failed",
+            model: published && result.ok ? (result.producingModel ?? null) : null,
+            fallback: published && result.ok && usedFallback,
+        });
+    };
+    if (!result.ok) finishSidebarRun(false);
+    return { ...result, finishSidebarRun };
+}
+
+async function runValidatedHistorianPassImpl(
+    args: {
+        client: PluginContext["client"] | undefined;
+        hiddenCompletionExecutor?: HiddenCompletionExecutor;
+        db: Database;
+        parentSessionId: string;
+        sessionDirectory: string;
+        prompt: string;
+        /** Use `write` to retain message-block cache markers for a later conversational turn. */
+        cacheTail?: import("../../shared/historian-cache").HistorianCacheTail;
+        chunk: HistorianValidationChunk;
+        priorCompartments: StoredCompartmentRange[];
+        sequenceOffset: number;
+        dumpLabelBase: string;
+        timeoutMs?: number;
+        maxOutputTokens?: number;
+        /** Active OpenCode historian entry, including its outbound request variant. */
+        model?: ModelInput;
+        fallbackModelId?: string;
+        /**
+         * Resolved historian fallback chain ("provider/modelID" entries). When the
+         * primary historian model fails (auth, model-not-found, transient network),
+         * each fallback is tried in order. The active session model is eligible
+         * only when no historian primary was configured.
+         */
+        fallbackModels?: readonly ModelInput[];
+        callbacks?: HistorianProgressCallbacks;
+        /** When true, run a second editor pass after successful historian output
+         *  to clean low-signal U: lines and cross-compartment duplicates. If editor
+         *  validation fails, falls back to the draft (first-pass) result. */
+        twoPass?: boolean;
+        subagentKind?: SubagentKind;
+        agentId?: string;
+        language?: string;
+    },
+    attempts: { primaryAttempts: number; primaryRejections: number },
+): Promise<ValidatedHistorianPassResult> {
+    const primaryModel = toModelEntry(args.model)?.model ?? null;
+    attempts.primaryAttempts += 1;
     const firstRun = await runHistorianPrompt({
         ...args,
         dumpLabel: `${args.dumpLabelBase}-initial`,
         modelOverride: args.model,
         agentId: args.agentId,
     });
+    const firstRunSwitchedModel =
+        primaryModel !== null && (firstRun.producingModel ?? primaryModel) !== primaryModel;
+    if (firstRunSwitchedModel) attempts.primaryRejections += 1;
     if (!firstRun.ok || !firstRun.result) {
+        if (!firstRunSwitchedModel) attempts.primaryRejections += 1;
         if (firstRun.refusal?.terminal)
             return {
                 ok: false,
@@ -426,12 +476,18 @@ export async function runValidatedHistorianPass(args: {
                   draftValidation: firstValidation,
                   draftDumpPath: firstRun.dumpPath,
                   draftInvocationId: firstRun.invocationId ?? null,
+                  draftProducingModel: firstRun.producingModel,
               })
-            : { ...firstValidation, invocationId: firstRun.invocationId ?? null };
+            : {
+                  ...firstValidation,
+                  invocationId: firstRun.invocationId ?? null,
+                  producingModel: firstRun.producingModel,
+              };
         cleanupHistorianDump(args.parentSessionId, firstRun.dumpPath);
         return finalResult;
     }
 
+    if (!firstRunSwitchedModel) attempts.primaryRejections += 1;
     await args.callbacks?.onRepairRetry?.(firstValidation.error ?? "invalid compartment output");
     const repairPrompt = buildHistorianRepairPrompt(
         args.prompt,
@@ -439,6 +495,7 @@ export async function runValidatedHistorianPass(args: {
         firstValidation.error ?? "invalid compartment output",
         args.language,
     );
+    attempts.primaryAttempts += 1;
     const repairRun = await runHistorianPrompt({
         ...args,
         prompt: repairPrompt,
@@ -446,7 +503,11 @@ export async function runValidatedHistorianPass(args: {
         modelOverride: args.model,
         agentId: args.agentId,
     });
+    const repairRunSwitchedModel =
+        primaryModel !== null && (repairRun.producingModel ?? primaryModel) !== primaryModel;
+    if (repairRunSwitchedModel) attempts.primaryRejections += 1;
     if (!repairRun.ok || !repairRun.result) {
+        if (!repairRunSwitchedModel) attempts.primaryRejections += 1;
         if (repairRun.refusal?.terminal)
             return {
                 ok: false,
@@ -477,14 +538,20 @@ export async function runValidatedHistorianPass(args: {
                   draftValidation: repairValidation,
                   draftDumpPath: repairRun.dumpPath,
                   draftInvocationId: repairRun.invocationId ?? null,
+                  draftProducingModel: repairRun.producingModel,
               })
-            : { ...repairValidation, invocationId: repairRun.invocationId ?? null };
+            : {
+                  ...repairValidation,
+                  invocationId: repairRun.invocationId ?? null,
+                  producingModel: repairRun.producingModel,
+              };
         // Keep firstRun.dumpPath (initial failure) for debugging.
         // Only cleanup the successful repair run's dump.
         cleanupHistorianDump(args.parentSessionId, repairRun.dumpPath);
         return finalResult;
     }
 
+    if (!repairRunSwitchedModel) attempts.primaryRejections += 1;
     return runFallbackHistorianPass({
         ...args,
         prompt: repairPrompt,
@@ -531,6 +598,7 @@ async function runEditorPassOrFallback(args: {
     draftValidation: ValidatedHistorianPassResult;
     draftDumpPath?: string;
     draftInvocationId?: number | null;
+    draftProducingModel?: string | null;
     model?: ModelInput;
 }): Promise<ValidatedHistorianPassResult> {
     shared.sessionLog(args.parentSessionId, "historian two-pass: running editor on draft");
@@ -555,7 +623,11 @@ async function runEditorPassOrFallback(args: {
             error: editorRun.error,
         });
         // Editor failed → keep the validated draft; FK links to the draft run.
-        return { ...args.draftValidation, invocationId: args.draftInvocationId ?? null };
+        return {
+            ...args.draftValidation,
+            invocationId: args.draftInvocationId ?? null,
+            producingModel: args.draftProducingModel,
+        };
     }
 
     const editorValidation = validateHistorianOutput(
@@ -572,12 +644,20 @@ async function runEditorPassOrFallback(args: {
             { error: editorValidation.error },
         );
         // Editor output was bad — keep editor dump for debugging.
-        return { ...args.draftValidation, invocationId: args.draftInvocationId ?? null };
+        return {
+            ...args.draftValidation,
+            invocationId: args.draftInvocationId ?? null,
+            producingModel: args.draftProducingModel,
+        };
     }
 
     cleanupHistorianDump(args.parentSessionId, editorRun.dumpPath);
     shared.sessionLog(args.parentSessionId, "historian two-pass: editor accepted");
-    return { ...editorValidation, invocationId: editorRun.invocationId ?? null };
+    return {
+        ...editorValidation,
+        invocationId: editorRun.invocationId ?? null,
+        producingModel: editorRun.producingModel,
+    };
 }
 
 async function runHistorianPrompt(args: {
@@ -888,7 +968,19 @@ async function runHistorianPrompt(args: {
             dumpLabel ?? "historian-response",
             result,
         );
-        return { ok: true, result, dumpPath, invocationId: invocationId ?? undefined };
+        return {
+            ok: true,
+            result,
+            dumpPath,
+            invocationId: invocationId ?? undefined,
+            producingModel:
+                completion.providerId && completion.modelId
+                    ? `${completion.providerId}/${completion.modelId}`
+                    : (completion.attemptedModel ??
+                      handle.attemptedModel ??
+                      toModelEntry(modelOverride)?.model ??
+                      null),
+        };
     } catch (modelError: unknown) {
         const desc = describeError(modelError);
         shared.sessionLog(
@@ -1042,7 +1134,12 @@ async function runFallbackHistorianPass(args: {
             // Only cleanup the successful run's dump. Prior failed dumps
             // (args.dumpPaths + earlier chain attempts) are kept for debugging.
             cleanupHistorianDump(args.parentSessionId, fallbackRun.dumpPath);
-            return { ...fallbackValidation, invocationId: fallbackRun.invocationId ?? null };
+            return {
+                ...fallbackValidation,
+                invocationId: fallbackRun.invocationId ?? null,
+                producingModel: fallbackRun.producingModel,
+                usedFallback: true,
+            };
         }
         lastError = fallbackValidation.error ?? lastError;
         lastFailureReason = fallbackValidation.error ?? "parse_failed";

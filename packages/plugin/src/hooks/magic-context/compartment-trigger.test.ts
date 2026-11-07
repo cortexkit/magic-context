@@ -17,6 +17,7 @@ import {
     queuePendingOp,
 } from "../../features/magic-context/storage";
 import type { SessionMeta } from "../../features/magic-context/types";
+import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -108,6 +109,7 @@ it("does not fire at 88.3% for a tiny capped head even when later eligible histo
                 expect(result.shouldFire).toBe(false);
             }
             expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+            expect(buildSidebarSnapshot(db, sessionId, process.cwd()).waitingMessages).toBe(1);
         });
     } finally {
         if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
