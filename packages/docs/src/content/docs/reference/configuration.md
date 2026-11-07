@@ -190,7 +190,7 @@ Hosted reranking sends retrieved text to a user-chosen service. Put this block i
 }
 ```
 
-The client posts to `<endpoint>/rerank` with `{model, query, documents, top_n}` and reads `results: [{index, relevance_score}]` (Cohere, Voyage, OpenRouter and Jina-compatible). Prefix the base URL with `tei+` for Hugging Face TEI: `{query, texts}` in and `[{index, score}]` out. API keys are sent as Bearer tokens; user-level `{env:NAME}` and `{file:path}` expansion follows the embedding configuration rules.
+The client posts to `<endpoint>/rerank` with `{model, query, documents}` and reads `[{index, relevance_score}]` rows from `results` (Cohere, OpenRouter and Jina) or `data` (Voyage). Prefix the base URL with `tei+` for Hugging Face TEI: `{query, texts}` in and `[{index, score}]` out. API keys are sent as Bearer tokens; user-level `{env:NAME}` and `{file:path}` expansion follows the embedding configuration rules.
 
 Each document uses the existing location/title/body recipe, truncated at a UTF-8 character boundary to 1024 bytes. At most 20 documents are allowed per request; larger batches are refused, never split. `top_n` caps the fused candidate pool, and the wire request asks for all submitted scores. Scores must cover each document index exactly once and be finite; ties retain candidate order. Any failure preserves the original unreranked order, adds one short skip reason to the tool result, and never falls back to Synapse while remote is configured.
 

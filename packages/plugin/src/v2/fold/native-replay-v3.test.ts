@@ -32,6 +32,23 @@ const context = (messages: V2Message[]): SessionContext => ({
     options: {},
     messages,
 });
+const assistantWithTool = (id: string): V2Message => ({
+    id,
+    role: "assistant",
+    content: [{ type: "tool-call", id: `call-${id}`, name: "read", input: {} }],
+    metadata: {},
+});
+const toolResult = (id: string): V2Message => ({
+    role: "tool",
+    content: [
+        {
+            type: "tool-result",
+            id: `call-${id}`,
+            name: "read",
+            result: { type: "text", value: "ok" },
+        },
+    ],
+});
 function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
     const db = new Database(":memory:");
     initializeDatabase(db);
@@ -142,6 +159,146 @@ function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
         return completed;
     };
     return { db, rows, reader, loads, kv, storage, logs, cache, replay, make, begin, finish };
+}
+
+async function captureAfterSummary(native: "full" | "tail", toolBeforeFloor: boolean) {
+    const f = fixture(6);
+    f.rows[1] = { ...f.rows[1]!, type: "assistant" };
+    f.rows[4] = { ...f.rows[4]!, type: "assistant" };
+    const summary = "summary covering messages 1 through 4";
+    f.db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_bytes=?,cached_m0_last_baseline_end_message_id='u4' WHERE session_id='s'",
+        )
+        .run(Buffer.from(summary));
+    const before = [
+        message("u1"),
+        assistantWithTool("u2"),
+        ...(toolBeforeFloor ? [toolResult("u2")] : []),
+        message("u3"),
+        message("u4"),
+    ];
+    const tail = [assistantWithTool("u5"), toolResult("u5"), message("u6")];
+    const input = native === "full" ? [...before, ...tail] : tail;
+    await f.replay.capture(context([message(HEAD_IDS[0], summary), ...input]), input, {
+        id: "u4",
+        summary,
+    });
+    return f.logs.filter((line) => line.includes("capture unavailable"));
+}
+test("v3 capture keeps working when a tool result precedes the summary floor", async () => {
+    expect(await captureAfterSummary("full", true)).toEqual([]);
+    expect(await captureAfterSummary("full", false)).toEqual([]);
+    expect(await captureAfterSummary("tail", true)).toEqual([]);
+});
+
+test("v3 capture drops a covered tool group across an id-less system below the floor", async () => {
+    const f = fixture(3);
+    f.rows[0] = { ...f.rows[0]!, type: "assistant" };
+    f.rows[1] = { ...f.rows[1]!, type: "system", data: { text: "stored instructions" } };
+    const summary = "summary through the stored instructions";
+    const native: V2Message[] = [
+        assistantWithTool("u1"),
+        { role: "system", content: [{ type: "text", text: "stored instructions" }] },
+        toolResult("u1"),
+        message("u3"),
+    ];
+
+    await f.replay.capture(context([message(HEAD_IDS[0], summary), ...native]), native, {
+        id: "u2",
+        summary,
+    });
+
+    expect(f.logs.filter((line) => line.includes("capture unavailable"))).toEqual([]);
+    expect(f.cache.rows("s", -1, Infinity).map((row) => row.id)).toEqual(["u3"]);
+});
+
+test("v3 capture keeps a retained tool result across an id-less baseline user message", async () => {
+    const f = fixture(2);
+    f.rows[0] = { ...f.rows[0]!, type: "assistant" };
+    const summary = "served baseline";
+    const assistant = assistantWithTool("u1");
+    const result = toolResult("u1");
+    const native: V2Message[] = [
+        assistant,
+        { role: "user", content: [{ type: "text", text: summary }] },
+        result,
+        message("u2"),
+    ];
+
+    await f.replay.capture(context([message(HEAD_IDS[0], summary), ...native]), native);
+
+    expect(f.logs).toEqual([]);
+    const rows = f.cache.rows("s", -1, Infinity);
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2"]);
+    expect(rows.flatMap((row) => JSON.parse(row.data) as V2Message[])).toEqual([
+        assistant,
+        result,
+        message("u2"),
+    ]);
+});
+
+for (const floor of ["summary", "start"] as const) {
+    for (const missingSequence of [false, true]) {
+        test(`v3 ${floor} capture keeps tool groups intact with missing sequence=${missingSequence}`, async () => {
+            const f = fixture(3);
+            f.rows[0] = { ...f.rows[0]!, type: "assistant" };
+            f.rows[1] = { ...f.rows[1]!, type: "assistant" };
+            const summary = "served baseline";
+            const group = (id: string): V2Message[] => {
+                const assistant = assistantWithTool(id);
+                assistant.content.push(...assistantWithTool(`${id}-second`).content);
+                return [assistant, toolResult(id), toolResult(`${id}-second`)];
+            };
+            const first = group("u1");
+            const second = group("u2");
+            const effort: V2Message = {
+                role: "system",
+                content: [{ type: "effort", effort: "low", previous: "high" }],
+            };
+            const skipped = [effort, ...HEAD_IDS.map((id) => message(id, summary))];
+            const native = [
+                toolResult("orphan"),
+                ...skipped,
+                toolResult("after-controls"),
+                { role: "user", content: [{ type: "text", text: summary }] } as V2Message,
+                toolResult("after-baseline"),
+                first[0]!,
+                ...skipped,
+                ...first.slice(1),
+                second[0]!,
+                ...skipped,
+                ...second.slice(1),
+                message("u3"),
+            ];
+            const served = context([message(HEAD_IDS[0], summary), ...native]);
+            const before = JSON.stringify(served);
+            const sequenceForId = f.reader.sequenceForId.bind(f.reader);
+            const sequence = spyOn(f.reader, "sequenceForId").mockImplementation((sid, id) =>
+                missingSequence && id === "u2" ? undefined : sequenceForId(sid, id),
+            );
+            try {
+                await f.replay.capture(
+                    served,
+                    native,
+                    floor === "summary" ? { id: "u1", summary } : undefined,
+                );
+                expect(f.logs).toEqual([]);
+                expect(JSON.stringify(served)).toBe(before);
+                const rows = f.cache.rows("s", -1, Infinity);
+                expect(rows.map((row) => row.id)).toEqual(
+                    floor === "summary" ? ["u2", "u3"] : ["u1", "u2", "u3"],
+                );
+                expect(rows.flatMap((row) => JSON.parse(row.data) as V2Message[])).toEqual([
+                    ...(floor === "summary" ? [] : first),
+                    ...second,
+                    message("u3"),
+                ]);
+            } finally {
+                sequence.mockRestore();
+            }
+        });
+    }
 }
 
 test("v3 capture reads the served baseline a constant number of times and preserves replay bytes", async () => {

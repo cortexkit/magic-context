@@ -616,12 +616,15 @@ echo "  ✓ Released $TAG — CI publish completed"
 # (2026-09-13: @cortexkit/pi-magic-context@0.42.2). The publish job's exit
 # status therefore proves nothing about installability; the packument is the
 # only signal that tells the truth. Poll it for each package before calling the
-# release shipped.
+# release shipped. Since November 2026 npm keeps some publishes "being
+# processed" for 15 to 35 minutes before they appear, then publishes them
+# normally, so each package gets up to an hour; only a version still missing
+# after that is treated as lost.
 echo "  → Verifying registry visibility for $VERSION..."
 MISSING=""
 for pkg in @cortexkit/opencode-magic-context @cortexkit/pi-magic-context @cortexkit/magic-context; do
     seen=""
-    for attempt in $(seq 1 20); do
+    for attempt in $(seq 1 120); do
         if curl -fsS "https://registry.npmjs.org/${pkg/\//%2F}" -H 'Cache-Control: no-cache' 2>/dev/null \
             | grep -q "\"$VERSION\":\"[0-9]"; then
             seen=1; break
@@ -631,7 +634,7 @@ for pkg in @cortexkit/opencode-magic-context @cortexkit/pi-magic-context @cortex
     if [ -n "$seen" ]; then
         echo "    ✓ $pkg@$VERSION visible on the registry"
     else
-        echo "    ✗ $pkg@$VERSION NOT visible after 10 minutes (publish acknowledged but staged?)" >&2
+        echo "    ✗ $pkg@$VERSION NOT visible after 60 minutes (publish acknowledged but staged?)" >&2
         MISSING="$MISSING $pkg"
     fi
 done

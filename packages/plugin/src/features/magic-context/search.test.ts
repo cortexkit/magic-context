@@ -28,7 +28,12 @@ import {
     _resetProjectEmbeddingRegistryForTests,
     registerProjectEmbedding,
 } from "./project-embedding-registry";
-import { parseIdShapedQuery, type UnifiedSearchOptions, unifiedSearch } from "./search";
+import {
+    formatSearchResults,
+    parseIdShapedQuery,
+    type UnifiedSearchOptions,
+    unifiedSearch,
+} from "./search";
 import { initializeDatabase } from "./storage-db";
 import { addNote, dismissNote, updateNote } from "./storage-notes";
 import { createPrimer } from "./storage-primers";
@@ -119,6 +124,56 @@ describe("unifiedSearch", () => {
 
     afterEach(() => {
         closeQuietly(db);
+    });
+
+    it.each([false, true])("memory hint scores use full text (%s)", async (embeddingEnabled) => {
+        const snapshot = registerEmbeddingProject(db, "/repo/hint-preview");
+        const fullContent = `${"unrelated ".repeat(40)}historian cache wiring`;
+        const memory = insertMemory(db, {
+            projectPath: "/repo/hint-preview",
+            category: "WORKFLOW_RULES",
+            content: fullContent,
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), snapshot.modelId);
+        queryEmbedding = new Float32Array([1, 0]);
+        const options: UnifiedSearchOptions = {
+            sources: ["memory"],
+            embeddingEnabled,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            memoryEnabled: true,
+            gitCommitsEnabled: false,
+            countRetrievals: false,
+            measurementDisabled: true,
+        };
+        const explicit = await unifiedSearch(
+            db,
+            "session-1",
+            "/repo/hint-preview",
+            "historian cache wiring",
+            options,
+        );
+        const hints = await unifiedSearch(
+            db,
+            "session-1",
+            "/repo/hint-preview",
+            "historian cache wiring",
+            { ...options, autoHint: true },
+        );
+        expect(explicit).toHaveLength(1);
+        expect(hints).toHaveLength(1);
+        expect(explicit[0]).toMatchObject({
+            source: "memory",
+            memoryId: memory.id,
+            matchType: embeddingEnabled ? "hybrid" : "fts",
+        });
+        expect(explicit[0].content.length).toBe(220);
+        expect(explicit[0].content).not.toContain("historian");
+        const { relevanceScore, ...hintDisplay } = hints[0];
+        expect(relevanceScore).toBe(0.8000000000000002);
+        expect(hintDisplay).toEqual(explicit[0]);
+        expect(JSON.stringify(explicit)).not.toContain("historian");
+        expect(formatSearchResults("query", explicit, "session-1")).not.toContain("historian");
     });
 
     it("returns promoted Primers through explicit recall search", async () => {

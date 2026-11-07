@@ -1105,8 +1105,30 @@ export class NativeFoldReplay {
         sessionID: string,
         native: readonly V2Message[],
         reader: V2StoreReader,
-        after?: number,
+        selection?: { floor: ReplayFloor; baseline?: string },
     ): Omit<NativeRowRecord, "revision">[] {
+        const after = selection?.floor.after;
+        const candidates = native.flatMap((message) => {
+            if (!selection) return [{ message, covered: false }];
+            const id = nativeRowID(message);
+            if (
+                effortPart(message) ||
+                HEAD_IDS.some((head) => head === id) ||
+                (!id &&
+                    selection.baseline &&
+                    message.role === "user" &&
+                    message.content.some(
+                        (part) => part.type === "text" && part.text === selection.baseline,
+                    ))
+            )
+                return [];
+            const seq =
+                id && selection.floor.kind !== "start"
+                    ? reader.sequenceForId(sessionID, id)
+                    : undefined;
+            return [{ message, covered: seq !== undefined && seq <= selection.floor.after }];
+        });
+        native = candidates.filter(({ covered }) => !covered).map(({ message }) => message);
         const through = reader.latestSequence(sessionID);
         const retained = this.stampMRU;
         let metadata = this.metadata.get(sessionID);
@@ -1164,7 +1186,15 @@ export class NativeFoldReplay {
         const leadingIDs = new Map(leading.map((message, i) => [message, leadingRows[i]?.id]));
         let cursor = -1;
         let owner: string | undefined;
-        for (const message of native) {
+        // Apply the summary boundary while binding source rows so id-less tool
+        // results use the same owner. Skipped synthetic history and unmatched
+        // systems cannot replace it; dropping an assistant already summarized
+        // must also drop its results.
+        for (const { message, covered } of candidates) {
+            if (covered) {
+                if (message.role !== "tool") owner = undefined;
+                continue;
+            }
             let id = nativeRowID(message);
             if (this.options.protocol === 3 && !id && message.role === "system") {
                 const text = message.content
@@ -1189,7 +1219,10 @@ export class NativeFoldReplay {
                     if (!id) continue;
                 } else id = metadata.find((row) => row.type === "system" && row.seq > cursor)?.id;
             }
-            if (!id && message.role === "tool") id = owner;
+            if (!id && message.role === "tool") {
+                id = owner;
+                if (selection && !id) continue;
+            }
             const row = id ? byID.get(id) : undefined;
             if (!row)
                 throw new NativeReplayUnavailable("Native carrier has no source row coordinate");
@@ -1216,7 +1249,6 @@ export class NativeFoldReplay {
             rememberHostMedia(native);
             const reader = this.openReader(draft.sessionID);
             try {
-                let captured = native;
                 if (this.options.protocol === 3) {
                     replay = await this.floorState(draft.sessionID, reader, boundary, draft);
                     if (!replay)
@@ -1225,27 +1257,13 @@ export class NativeFoldReplay {
                     // repeated text, against source records before capturing controls.
                     // controls must use those source identities, not a text match.
                     replay = { ...replay, blocked: false };
-                    const replayAfter = replay.floor.after;
-                    const replayStart = replay.floor.kind === "start";
-                    const baseline = this.servedBaseline(draft);
-                    captured = native.filter((message) => {
-                        if (effortPart(message)) return false;
-                        const id = nativeRowID(message);
-                        if (HEAD_IDS.some((head) => head === id)) return false;
-                        if (!id)
-                            return !(
-                                baseline &&
-                                message.role === "user" &&
-                                message.content.some(
-                                    (part) => part.type === "text" && part.text === baseline,
-                                )
-                            );
-                        if (replayStart) return true;
-                        const seq = reader.sequenceForId(draft.sessionID, id);
-                        return seq === undefined || seq > replayAfter;
-                    });
                 }
-                let rows = this.records(draft.sessionID, captured, reader, replay?.floor.after);
+                let rows = replay
+                    ? this.records(draft.sessionID, native, reader, {
+                          floor: replay.floor,
+                          baseline: this.servedBaseline(draft),
+                      })
+                    : this.records(draft.sessionID, native, reader);
                 if (replay) {
                     const identities = new Map<string, string[]>();
                     for (const row of rows.filter((row) => row.type === "system")) {

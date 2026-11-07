@@ -707,6 +707,66 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
         : snapshots;
 }
 
+/** Index small metadata first; normalize only the window and its comparison context. */
+function loadWindowDumpSnapshots(
+    args: Args,
+    options: OpenCodeCacheBustAnalysisOptions,
+    precedingRequestTimestampsMs: number[],
+): Snapshot[] {
+    const indexed: { candidate: DumpCandidate; file: string; createdAt: string; sequence: number }[] = [];
+    for (const candidate of discoverDumpCandidates(args).filter((entry) => entry.session === options.sessionId)) {
+        for (const file of readdirSync(candidate.source.dir)) {
+            if (!file.endsWith(".meta.json")) continue;
+            const name = parseDumpFilename(file);
+            if (name && name.session !== options.sessionId) continue;
+            try {
+                const meta = JSON.parse(readFileSync(join(candidate.source.dir, file), "utf8")) as Json;
+                if (!name && String(meta.session ?? "") !== options.sessionId) continue;
+                const createdAt = name?.createdAt ?? String(meta.createdAt ?? "");
+                const timestamp = Date.parse(createdAt);
+                if (!Number.isFinite(timestamp) || timestamp > (options.untilInclusiveMs ?? Infinity)) continue;
+                indexed.push({ candidate, file, createdAt, sequence: name?.sequence ?? (finiteNumber(meta.step) ? meta.step : 0) });
+            } catch {
+                // Incomplete metadata cannot produce a request snapshot.
+            }
+        }
+    }
+    indexed.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.sequence - right.sequence || left.file.localeCompare(right.file));
+    const inWindow = (entry: typeof indexed[number]) => options.scanCursor
+        ? `${String(Date.parse(entry.createdAt)).padStart(16, "0")}:${String(entry.sequence).padStart(8, "0")}:${entry.file}:${entry.candidate.source.provider}` > options.scanCursor
+        : Date.parse(entry.createdAt) > (options.sinceExclusiveMs ?? -Infinity);
+    const first = indexed.findIndex(inWindow);
+    if (first < 0) return [];
+    const load = (entry: typeof indexed[number]) => loadCandidateSnapshots(entry.candidate, args, [entry.file])[0];
+    const loadedEntries = indexed.slice(first).flatMap((entry) => {
+        const snapshot = load(entry);
+        return snapshot ? [{ entry, snapshot }] : [];
+    });
+    if (!loadedEntries.some(({ entry }) => inWindow(entry))) return [];
+    const loaded = loadedEntries.map(({ snapshot }) => snapshot);
+    const context: Snapshot[] = [];
+    let before = first;
+    while (before > 0 && (context.length < 2 || options.sinceExclusiveMs === undefined)) {
+        before -= 1;
+        const snapshot = load(indexed[before]);
+        if (snapshot) context.unshift(snapshot);
+    }
+    const selected = [...context, ...loaded];
+    // Each request is joined to at most one transform-pass decision from Magic
+    // Context's log (execute or defer), and a later request may not take a decision
+    // an earlier one already took. So bodies before the window but within the cache
+    // TTL of it are read only for their request times: those times claim their
+    // decisions first without adding the requests to the result. Older requests can't
+    // claim a decision this window could use, and an unreadable body claims none.
+    const cutoff = selected.reduce((earliest, snapshot) => Math.min(earliest, snapshot.requestTimestampMs), Infinity) - DEFAULT_CACHE_TTL_MS;
+    for (const entry of indexed.slice(0, before)) {
+        if (Date.parse(entry.createdAt) < cutoff) continue;
+        const snapshot = load(entry);
+        if (snapshot) precedingRequestTimestampsMs.push(snapshot.requestTimestampMs);
+    }
+    return selected;
+}
+
 function loadSnapshotSelection(opts: Args): SnapshotSelection {
     const candidates = discoverDumpCandidates(opts);
     const selected = candidates[0];
@@ -830,7 +890,9 @@ export function analyzeOpenCodeCacheBustSession(
     let scanBounded = false;
     const precedingRequestTimestampsMs: number[] = [];
     const snapshots = options.scanDeadlineMs === undefined
-        ? discoverDumpCandidates(args)
+        ? options.sinceExclusiveMs !== undefined || options.untilInclusiveMs !== undefined || options.scanCursor !== undefined
+            ? loadWindowDumpSnapshots(args, options, precedingRequestTimestampsMs)
+            : discoverDumpCandidates(args)
             .filter((candidate) => candidate.session === options.sessionId)
             .flatMap((candidate) => loadCandidateSnapshots(candidate, args))
         : (() => {
