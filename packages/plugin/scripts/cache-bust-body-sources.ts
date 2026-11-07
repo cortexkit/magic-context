@@ -452,26 +452,56 @@ export function resolvePiBodiesDirectory(
     return existsSync(candidate) ? candidate : undefined;
 }
 
-export function loadPiBodySnapshots(directory: string | undefined): Map<number, PiBodySnapshot> {
-    const snapshots = new Map<number, PiBodySnapshot>();
-    if (!directory || !existsSync(directory)) return snapshots;
+export interface PiBodySnapshotFile {
+    sequence: number;
+    path: string;
+    writtenAtMs: number;
+    /** Directory order breaks timestamp ties and preserves duplicate-sequence overwrites. */
+    order: number;
+}
+
+export function listPiBodySnapshotFiles(directory: string | undefined): PiBodySnapshotFile[] {
+    const files: PiBodySnapshotFile[] = [];
+    if (!directory || !existsSync(directory)) return files;
     for (const file of readdirSync(directory)) {
         const match = /^(\d+)-req\.json$/.exec(file);
         if (!match) continue;
         const path = join(directory, file);
         try {
-            const body = JSON.parse(readFileSync(path, "utf8")) as Json;
-            snapshots.set(Number.parseInt(match[1], 10), {
+            files.push({
                 sequence: Number.parseInt(match[1], 10),
                 path,
                 writtenAtMs: statSync(path).mtimeMs,
-                wireModel:
-                    typeof body.model === "string" && body.model.length > 0 ? body.model : undefined,
-                messages: normalizeRequestBody(body, "openai").messages,
+                order: files.length,
             });
         } catch {
-            // A partial diagnostic write must not hide the other complete bodies.
+            // A removed diagnostic must not hide the other captures.
         }
+    }
+    return files;
+}
+
+export function loadPiBodySnapshot(file: PiBodySnapshotFile): PiBodySnapshot | undefined {
+    try {
+        const body = JSON.parse(readFileSync(file.path, "utf8")) as Json;
+        return {
+            sequence: file.sequence,
+            path: file.path,
+            writtenAtMs: file.writtenAtMs,
+            wireModel: typeof body.model === "string" && body.model.length > 0 ? body.model : undefined,
+            messages: normalizeRequestBody(body, "openai").messages,
+        };
+    } catch {
+        // A partial diagnostic write must not hide the other complete bodies.
+        return undefined;
+    }
+}
+
+export function loadPiBodySnapshots(directory: string | undefined): Map<number, PiBodySnapshot> {
+    const snapshots = new Map<number, PiBodySnapshot>();
+    for (const file of listPiBodySnapshotFiles(directory)) {
+        const body = loadPiBodySnapshot(file);
+        if (body) snapshots.set(body.sequence, body);
     }
     return snapshots;
 }

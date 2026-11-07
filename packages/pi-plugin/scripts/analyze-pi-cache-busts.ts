@@ -54,8 +54,11 @@ import {
 import {
 	clippedBodyPairVersions,
 	describeBodyPair,
+	listPiBodySnapshotFiles,
+	loadPiBodySnapshot,
 	loadPiBodySnapshots,
 	type PiBodySnapshot,
+	type PiBodySnapshotFile,
 	resolvePiBodiesDirectory,
 } from "../../plugin/scripts/cache-bust-body-sources";
 import { loadSessionDecisions } from "../../plugin/scripts/cache-bust-sentinel";
@@ -677,6 +680,123 @@ export function joinPassBodies(
 	return { byPass, join: byPass.size > 0 ? "file_number" : "none" };
 }
 
+/** Keep the full join's global fallback rule without retaining unrelated payloads. */
+function loadWindowPassBodies(
+	ledgers: readonly PiServedArrayDigestRecord[],
+	directory: string | undefined,
+	required: ReadonlySet<string>,
+): ReturnType<typeof joinPassBodies> {
+	const byPass = new Map<string, PiBodySnapshot>();
+	if (required.size === 0) return { byPass, join: "none" };
+	const ordered = [...ledgers].sort(
+		(left, right) => Date.parse(left.pass_ts) - Date.parse(right.pass_ts),
+	);
+	const windows = ordered.map((pass, index) => ({
+		pass,
+		start: Date.parse(pass.pass_ts) - BODY_WRITE_LEAD_MS,
+		end: Math.min(
+			Date.parse(pass.pass_ts) + BODY_WRITE_LAG_MS,
+			ordered[index + 1]
+				? Date.parse(ordered[index + 1].pass_ts) - BODY_WRITE_LEAD_MS
+				: Infinity,
+		),
+	}));
+	const needed = windows.filter(({ pass }) => required.has(passBodyKey(pass)));
+	const inside = (
+		file: PiBodySnapshotFile | PiBodySnapshot,
+		window: (typeof windows)[number],
+	) => file.writtenAtMs >= window.start && file.writtenAtMs < window.end;
+	const groups = new Map<number, PiBodySnapshotFile[]>();
+	for (const file of listPiBodySnapshotFiles(directory)) {
+		const group = groups.get(file.sequence) ?? [];
+		group.push(file);
+		groups.set(file.sequence, group);
+	}
+	const resolved = new Map<number, PiBodySnapshotFile | null>();
+	const resolve = (sequence: number): PiBodySnapshot | undefined => {
+		const known = resolved.get(sequence);
+		if (known === null) return undefined;
+		if (known) return loadPiBodySnapshot(known);
+		let body: PiBodySnapshot | undefined;
+		let last: PiBodySnapshotFile | undefined;
+		let firstOrder: number | undefined;
+		for (const file of groups.get(sequence) ?? []) {
+			const parsed = loadPiBodySnapshot(file);
+			if (!parsed) continue;
+			firstOrder ??= file.order;
+			last = file;
+			body = parsed;
+		}
+		resolved.set(sequence, last ? { ...last, order: firstOrder! } : null);
+		return body;
+	};
+	// Alternate zero-padding can give one numeric sequence multiple files. Preserve
+	// the last valid overwrite and the first valid insertion's timestamp tie order.
+	for (const [sequence, files] of groups) {
+		if (
+			files.length > 1 &&
+			files.some((file) => needed.some((window) => inside(file, window)))
+		)
+			resolve(sequence);
+	}
+	const candidates = [...groups]
+		.flatMap(([sequence, files]) => {
+			const file = resolved.has(sequence)
+				? resolved.get(sequence)
+				: files.length === 1
+					? files[0]
+					: undefined;
+			return file ? [file] : [];
+		})
+		.sort(
+			(left, right) =>
+				left.writtenAtMs - right.writtenAtMs || left.order - right.order,
+		);
+	for (const window of needed) {
+		for (const file of candidates) {
+			if (!inside(file, window)) continue;
+			const body = resolve(file.sequence);
+			if (!body) continue;
+			byPass.set(passBodyKey(window.pass), body);
+			break;
+		}
+	}
+	if (byPass.size > 0) return { byPass, join: "write_time" };
+	// A valid match anywhere disables sequence fallback everywhere. Probe from the
+	// requested window outward and discard each payload immediately. In the worst case
+	// every time-eligible sequence group (including its duplicate filenames) is read;
+	// corrupt captures cannot decide the mode. Stop at the first valid time match.
+	const start = needed[0]?.start ?? 0;
+	const end = needed.at(-1)?.end ?? start;
+	const distance = (file: PiBodySnapshotFile) =>
+		Math.max(start - file.writtenAtMs, file.writtenAtMs - end, 0);
+	const fitsAnyWindow = (file: PiBodySnapshotFile): boolean => {
+		let low = 0;
+		let high = windows.length;
+		while (low < high) {
+			const middle = Math.floor((low + high) / 2);
+			if (windows[middle].start <= file.writtenAtMs) low = middle + 1;
+			else high = middle;
+		}
+		return low > 0 && inside(file, windows[low - 1]);
+	};
+	const probes = [...groups].sort(
+		(left, right) =>
+			Math.min(...left[1].map(distance)) - Math.min(...right[1].map(distance)),
+	);
+	for (const [sequence, files] of probes) {
+		if (!files.some(fitsAnyWindow)) continue;
+		if (!resolved.has(sequence)) resolve(sequence);
+		const file = resolved.get(sequence);
+		if (file && fitsAnyWindow(file)) return { byPass, join: "write_time" };
+	}
+	for (const { pass } of needed) {
+		const body = resolve(pass.sequence);
+		if (body) byPass.set(passBodyKey(pass), body);
+	}
+	return { byPass, join: byPass.size > 0 ? "file_number" : "none" };
+}
+
 function isUsageMissing(pass: JoinedPass): boolean {
 	return pass.usage.cacheRead === 0 && pass.usage.input === 0;
 }
@@ -992,10 +1112,6 @@ export async function analyzePiCacheBustSession(
 		selected.path,
 		options.bodiesDir,
 	);
-	const bodies = joinPassBodies(
-		ledgers,
-		loadPiBodySnapshots(bodiesDirectory),
-	).byPass;
 	const decisions =
 		options.decisions ??
 		loadPiCacheBustDecisions(selected.sessionId, ledgerDir, options.db);
@@ -1020,6 +1136,15 @@ export async function analyzePiCacheBustSession(
 						? 0
 						: Math.max(0, firstNewIndex - 2),
 				);
+	const bodies = loadWindowPassBodies(
+		ledgers,
+		bodiesDirectory,
+		new Set(
+			analysisJoined
+				.filter((pass) => !isUsageMissing(pass))
+				.map((pass) => passBodyKey(pass.ledger)),
+		),
+	).byPass;
 	const rows = analyzeJoinedPasses(analysisJoined, {
 		bodies,
 		decisions,
@@ -1255,6 +1380,7 @@ export const __test = {
 	discoverPiSessionFiles,
 	joinPasses,
 	loadLedger,
+	loadWindowPassBodies,
 	loadPiCacheBustDecisions,
 	nearestPiPassDecision,
 	parseArgs,
