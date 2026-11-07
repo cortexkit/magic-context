@@ -991,12 +991,15 @@ function lkgEntryBytes(id: string, fields: readonly LkgContentField[]): number {
  * only new or changed messages, and compares the rest at memory speed.
  *
  * Retention is per session. A session keeps entries in message order up to
- * its share of the total budget (the total divided by the number of sessions
- * retained, never more than the per-session cap); when a session joins,
- * sessions above the new share are trimmed rather than dropped. Two large
- * sessions served alternately therefore both keep their entries, instead of
- * evicting each other on every pass, and the total never exceeds its ceiling.
- * Messages beyond a session's share are hashed on every pass.
+ * its share of the total budget, never more than the per-session cap. Shares
+ * follow need: a session that needs less than an even split keeps all it
+ * needs, and the rest of the budget is split evenly among the larger sessions.
+ * Many small child sessions therefore do not cut a long session down to an
+ * even split it cannot use. When a session is served, sessions above their
+ * new share are trimmed rather than dropped. Two large sessions served
+ * alternately therefore both keep their entries, instead of evicting each
+ * other on every pass, and the total never exceeds its ceiling. Messages
+ * beyond a session's share are hashed on every pass.
  */
 export class LkgEntryDigestCache {
     private readonly sessions = new Map<string, LkgEntrySession>();
@@ -1015,15 +1018,15 @@ export class LkgEntryDigestCache {
         messages: readonly MessageLike[],
     ): { digests: (string | null)[]; stats: LkgEntryDigestStats } {
         const prior = this.sessions.get(sessionId);
-        const sessionCount = this.sessions.size + (prior ? 0 : 1);
-        const share = Math.min(
-            this.limits.sessionMaxBytes,
-            Math.floor(this.limits.totalMaxBytes / Math.min(sessionCount, this.limits.maxSessions)),
-        );
-        const retained = new Map<string, LkgEntryCacheEntry>();
+        // No share can exceed this, so entries past it are counted as need but
+        // not held until the share is known.
+        const candidateCap = Math.min(this.limits.sessionMaxBytes, this.limits.totalMaxBytes);
+        const candidates: Array<[string, LkgEntryCacheEntry]> = [];
+        const seen = new Set<string>();
         const digests: (string | null)[] = [];
         let reused = 0;
-        let size = 0;
+        let demand = 0;
+        let candidateBytes = 0;
         for (const message of messages) {
             const rawId = message.info?.id;
             const id = typeof rawId === "string" ? rawId : "";
@@ -1049,19 +1052,56 @@ export class LkgEntryDigestCache {
                 }
             }
             digests.push(entry?.digest ?? null);
-            if (!entry || retained.has(id) || size + entry.bytes > share) continue;
+            if (!entry || seen.has(id)) continue;
+            seen.add(id);
+            demand += entry.bytes;
+            if (candidateBytes + entry.bytes > candidateCap) continue;
+            candidates.push([id, entry]);
+            candidateBytes += entry.bytes;
+        }
+        const shares = this.shares(sessionId, demand);
+        const share = shares.get(sessionId) ?? 0;
+        const retained = new Map<string, LkgEntryCacheEntry>();
+        let size = 0;
+        for (const [id, entry] of candidates) {
+            if (size + entry.bytes > share) continue;
             retained.set(id, entry);
             size += entry.bytes;
         }
-        this.store(sessionId, retained, size, share);
+        this.store(sessionId, retained, size, shares);
         return { digests, stats: { reused, retained: retained.size, retainedBytes: size } };
+    }
+
+    /**
+     * Byte shares for a pass of `sessionId`, which needs `demand` bytes. Needs
+     * are taken in increasing order: each session gets the smaller of its need,
+     * the per-session cap, and an even split of what is left. Another session's
+     * need is its retained bytes; its share grows when it is next served. The
+     * oldest sessions that the session limit evicts get no share.
+     */
+    private shares(sessionId: string, demand: number): Map<string, number> {
+        const others = [...this.sessions].filter(([id]) => id !== sessionId);
+        const kept = others.slice(Math.max(0, others.length - (this.limits.maxSessions - 1)));
+        const needs: Array<[string, number]> = kept.map(([id, session]) => [id, session.bytes]);
+        needs.push([sessionId, demand]);
+        needs.sort((a, b) => a[1] - b[1]);
+        const shares = new Map<string, number>();
+        let remaining = this.limits.totalMaxBytes;
+        let left = needs.length;
+        for (const [id, need] of needs) {
+            const share = Math.min(need, this.limits.sessionMaxBytes, Math.floor(remaining / left));
+            shares.set(id, share);
+            remaining -= share;
+            left -= 1;
+        }
+        return shares;
     }
 
     private store(
         sessionId: string,
         entries: Map<string, LkgEntryCacheEntry>,
         bytes: number,
-        share: number,
+        shares: ReadonlyMap<string, number>,
     ): void {
         const prior = this.sessions.get(sessionId);
         if (prior) {
@@ -1075,9 +1115,10 @@ export class LkgEntryDigestCache {
             this.totalBytes -= oldest[1].bytes;
             this.sessions.delete(oldest[0]);
         }
-        // Sessions retained when there were fewer of them may hold more than
-        // the share now; keep the leading entries that fit.
-        for (const other of this.sessions.values()) {
+        // Sessions retained under other needs may hold more than their share
+        // now; keep the leading entries that fit.
+        for (const [otherId, other] of this.sessions) {
+            const share = shares.get(otherId) ?? 0;
             if (other.bytes <= share) continue;
             let kept = 0;
             for (const [id, entry] of other.entries) {
@@ -1116,13 +1157,16 @@ export class LkgEntryDigestCache {
 
 /**
  * Ceiling for the cache {@link noteEntry} and the transform's entry projection
- * share. One session may use up to half of it, so two large sessions served
- * alternately both stay resident; a 64 MiB total used to make two sessions of
- * over 32 MiB evict each other on every pass.
+ * share. One session may use up to a quarter of it, so several large sessions
+ * served alternately all stay resident; a 64 MiB total used to make two
+ * sessions of over 32 MiB evict each other on every pass. Long sessions of
+ * 12,000 to 17,000 messages retain about 110 to 130 MiB each, and a busy
+ * service also serves many small child sessions, so the session limit is
+ * higher than the number of long sessions.
  */
-export const LKG_ENTRY_CACHE_TOTAL_BYTES = 256 * 1024 * 1024;
-export const LKG_ENTRY_CACHE_SESSION_BYTES = 128 * 1024 * 1024;
-const LKG_ENTRY_CACHE_MAX_SESSIONS = 16;
+export const LKG_ENTRY_CACHE_TOTAL_BYTES = 768 * 1024 * 1024;
+export const LKG_ENTRY_CACHE_SESSION_BYTES = 192 * 1024 * 1024;
+const LKG_ENTRY_CACHE_MAX_SESSIONS = 64;
 
 export const sharedLkgEntryDigests = new LkgEntryDigestCache({
     sessionMaxBytes: LKG_ENTRY_CACHE_SESSION_BYTES,

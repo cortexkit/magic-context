@@ -6,6 +6,20 @@ interface IdleWindow {
     timer?: ReturnType<typeof setTimeout>;
 }
 
+function idleWindowMs(cacheTtl: string): number {
+    try {
+        return parseCacheTtl(cacheTtl);
+    } catch {
+        // Use five minutes when a persisted cache lifetime is invalid.
+        return 5 * 60 * 1000;
+    }
+}
+
+/** False when the cache lifetime never expires, so an idle host fold can never arm. */
+export function idleFoldCanArm(cacheTtl: string): boolean {
+    return Number.isFinite(idleWindowMs(cacheTtl));
+}
+
 /** Schedule a host-side fold only after the served request's frozen cache TTL expires. */
 export class HostFoldIdle {
     private readonly windows = new Map<string, IdleWindow>();
@@ -24,13 +38,7 @@ export class HostFoldIdle {
 
     idle(sessionID: string, cacheTtl: string, lastResponseTime: number): void {
         this.active(sessionID);
-        let ttl: number;
-        try {
-            ttl = parseCacheTtl(cacheTtl);
-        } catch {
-            // Use five minutes when a persisted cache lifetime is invalid.
-            ttl = 5 * 60 * 1000;
-        }
+        const ttl = idleWindowMs(cacheTtl);
         if (!Number.isFinite(ttl) || lastResponseTime <= 0) return;
         const attempted = this.attempted.get(sessionID);
         if (attempted?.cacheTtl === cacheTtl && attempted.lastResponseTime === lastResponseTime)

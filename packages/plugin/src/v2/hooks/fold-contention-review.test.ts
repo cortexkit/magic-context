@@ -32,7 +32,9 @@ test("re-review: a busy fold capture after successful transform never interrupts
         historian: { disable: true },
         dreamer: { disable: true },
         memory: { enabled: false },
-        cache_ttl: "never",
+        // An expiring lifetime keeps the native capture on this path; a
+        // "never" lifetime skips the capture because no idle fold can arm.
+        cache_ttl: "5m",
         subc: { connection_file: join(dir, "run", "subc-connection.json") },
     });
     let duties: Awaited<ReturnType<typeof registerContext>>;

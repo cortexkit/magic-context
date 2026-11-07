@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { HostFoldIdle } from "./idle";
+import { HostFoldIdle, idleFoldCanArm } from "./idle";
 
 function fixture() {
     let now = 10_000;
@@ -99,4 +99,14 @@ test("settlement and cancellation cannot re-arm an attempted response window", a
     f.idle.idle("s", "100", 10_101);
     f.advance(101);
     expect(f.calls).toHaveLength(2);
+});
+
+test("only a cache lifetime that never expires rules out an idle host fold", () => {
+    expect(idleFoldCanArm("never")).toBe(false);
+    expect(idleFoldCanArm(" Never ")).toBe(false);
+    expect(idleFoldCanArm("5m")).toBe(true);
+    expect(idleFoldCanArm("58m")).toBe(true);
+    expect(idleFoldCanArm("300000")).toBe(true);
+    // An invalid persisted lifetime falls back to five minutes, as idle() does.
+    expect(idleFoldCanArm("not-a-ttl")).toBe(true);
 });

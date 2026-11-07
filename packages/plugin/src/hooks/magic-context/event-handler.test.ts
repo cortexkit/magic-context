@@ -83,6 +83,7 @@ type ContextUsageCacheEntry = {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    sourceMessageId?: string;
 };
 
 const tempDirs: string[] = [];
@@ -796,7 +797,7 @@ describe("createEventHandler", () => {
         expect(internalChildSessions.has("ses-root2")).toBe(false);
     });
 
-    it("tracks assistant token usage and updates lastResponseTime", async () => {
+    it("records the assistant source id with token usage and updates lastResponseTime", async () => {
         useTempDataHome("context-event-message-updated-");
         const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
         const handler = createEventHandler(createDeps(contextUsageMap));
@@ -810,6 +811,7 @@ describe("createEventHandler", () => {
                         role: "assistant",
                         finish: "stop",
                         sessionID: "ses-usage",
+                        id: "asst-measured",
                         tokens: {
                             input: 120_000,
                             output: 900,
@@ -826,6 +828,7 @@ describe("createEventHandler", () => {
         expect(usageEntry?.usage.inputTokens).toBe(135_000);
         expect(usageEntry?.usage.percentage).toBeCloseTo(expectedPercentage, 5);
         expect(usageEntry?.hasUsageTokens).toBe(true);
+        expect(usageEntry?.sourceMessageId).toBe("asst-measured");
         expect(usageEntry?.lastResponseTime).toBeGreaterThanOrEqual(before);
         expect(
             getOrCreateSessionMeta(openDatabase(), "ses-usage").lastResponseTime,

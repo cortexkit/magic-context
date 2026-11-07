@@ -198,7 +198,7 @@ import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
-import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
+import { takeSignedThinkingFitSnapshot, unmeasuredTailStart } from "./signed-thinking-fit-snapshot";
 import { decideSignedThinkingHold, type SignedThinkingHoldDecision } from "./signed-thinking-hold";
 import {
     replayClearedReasoning,
@@ -496,6 +496,7 @@ export interface TransformDeps {
             updatedAt: number;
             lastResponseTime?: number;
             hasUsageTokens?: boolean;
+            sourceMessageId?: string;
         }
     >;
     db: ContextDatabase;
@@ -1923,6 +1924,21 @@ export function createTransform(deps: TransformDeps) {
             held: activeThinkingPrefixHold,
             activeAnthropicThinkingTurn: activeThinkingTurn,
             compactionOff,
+            contextLimit: thresholdContextLimit,
+            lastInputTokens: contextUsageEarly.inputTokens,
+            newTailTokens: () => {
+                let tokens = 0;
+                for (const message of entryOrderForThinkingFit.slice(
+                    unmeasuredTailStart(
+                        entryOrderForThinkingFit,
+                        deps.contextUsageMap.get(sessionId)?.sourceMessageId,
+                    ),
+                )) {
+                    const estimate = estimateMessageTokens(message, true);
+                    tokens += estimate.conversation + estimate.toolCall;
+                }
+                return tokens;
+            },
         });
         const prefixHoldLogKey = signedThinkingHold
             ? `${currentTurnId}:${signedThinkingHold.reason}:${signedThinkingHold.heavyStepsBack ?? "none"}`

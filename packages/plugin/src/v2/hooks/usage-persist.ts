@@ -14,6 +14,7 @@ import { type UsageReading, usageReadingMatchesDraft } from "./usage-reading";
 export interface PersistV2UsageReadingArgs {
     db: ContextDatabase;
     sessionID: string;
+    sourceMessageId?: string;
     draftModel: { providerID: string; id: string };
     reading: UsageReading;
     contextUsageMap: TransformDeps["contextUsageMap"];
@@ -89,6 +90,7 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         args.contextUsageMap.set(sessionID, {
             usage: { inputTokens: reading.inputTokens, percentage },
             hasUsageTokens: true,
+            sourceMessageId: args.sourceMessageId,
             // The reply can be loaded after a later history publication. Date
             // its usage by completion, not this pass's delayed read from the store.
             updatedAt: reading.completed || Date.now(),

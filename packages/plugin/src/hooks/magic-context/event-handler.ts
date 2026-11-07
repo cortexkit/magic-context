@@ -111,6 +111,7 @@ interface ContextUsageEntry {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    sourceMessageId?: string;
 }
 
 interface MessageRemovedCleanupResult {
@@ -988,6 +989,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             updatedAt: now,
                             lastResponseTime: now,
                             hasUsageTokens: true,
+                            sourceMessageId: info.messageID,
                         };
                         deps.contextUsageMap.set(info.sessionID, entry);
 
