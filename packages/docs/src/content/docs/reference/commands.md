@@ -58,7 +58,7 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 
 ## /ctx-rescore
 
-**What it does.** Re-scores the importance of stored history summaries with the historian model. Importance decides which summaries keep their detail as history ages, and summaries written before October's historian scoring fix can carry scores that make the wrong ones fade first. Only scores change: summary text, memories and compaction settings stay as they are.
+**What it does.** Re-scores the importance of stored history summaries with the historian model. Importance decides which summaries keep their detail as history ages. Before a historian fix in October, summaries tended to get nearly the same importance score, so aging history couldn't tell important stretches from routine ones. Only scores change: summary text, memories and compaction settings stay as they are.
 
 | Argument | Meaning |
 | --- | --- |
