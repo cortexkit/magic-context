@@ -191,6 +191,52 @@ test("v3 capture keeps working when a tool result precedes the summary floor", a
     expect(await captureAfterSummary("tail", true)).toEqual([]);
 });
 
+test("v3 capture drops a covered tool group across an id-less system below the floor", async () => {
+    const f = fixture(3);
+    f.rows[0] = { ...f.rows[0]!, type: "assistant" };
+    f.rows[1] = { ...f.rows[1]!, type: "system", data: { text: "stored instructions" } };
+    const summary = "summary through the stored instructions";
+    const native: V2Message[] = [
+        assistantWithTool("u1"),
+        { role: "system", content: [{ type: "text", text: "stored instructions" }] },
+        toolResult("u1"),
+        message("u3"),
+    ];
+
+    await f.replay.capture(context([message(HEAD_IDS[0], summary), ...native]), native, {
+        id: "u2",
+        summary,
+    });
+
+    expect(f.logs.filter((line) => line.includes("capture unavailable"))).toEqual([]);
+    expect(f.cache.rows("s", -1, Infinity).map((row) => row.id)).toEqual(["u3"]);
+});
+
+test("v3 capture keeps a retained tool result across an id-less baseline user message", async () => {
+    const f = fixture(2);
+    f.rows[0] = { ...f.rows[0]!, type: "assistant" };
+    const summary = "served baseline";
+    const assistant = assistantWithTool("u1");
+    const result = toolResult("u1");
+    const native: V2Message[] = [
+        assistant,
+        { role: "user", content: [{ type: "text", text: summary }] },
+        result,
+        message("u2"),
+    ];
+
+    await f.replay.capture(context([message(HEAD_IDS[0], summary), ...native]), native);
+
+    expect(f.logs).toEqual([]);
+    const rows = f.cache.rows("s", -1, Infinity);
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2"]);
+    expect(rows.flatMap((row) => JSON.parse(row.data) as V2Message[])).toEqual([
+        assistant,
+        result,
+        message("u2"),
+    ]);
+});
+
 for (const floor of ["summary", "start"] as const) {
     for (const missingSequence of [false, true]) {
         test(`v3 ${floor} capture keeps tool groups intact with missing sequence=${missingSequence}`, async () => {
