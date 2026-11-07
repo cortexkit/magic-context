@@ -64,7 +64,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import {
-	AUTO_SEARCH_TIMEOUT_MS,
 	clearAutoSearchTimeoutForSession,
 	persistAutoSearchSkip,
 	wasAutoSearchSkipped,
@@ -74,6 +73,10 @@ import {
 	buildAutoSearchHint,
 	selectAutoSearchResults,
 } from "@magic-context/core/hooks/magic-context/auto-search-hint";
+import {
+	logDisabledAutoSearch,
+	observeAutoSearch,
+} from "@magic-context/core/hooks/magic-context/auto-search-observation";
 import {
 	AutoSearchBusyError,
 	coalesceAutoSearchTurn,
@@ -86,7 +89,7 @@ import {
 import type { CavemanWordRules } from "@magic-context/core/hooks/magic-context/caveman";
 import { hasMeaningfulUserText } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
-import { log, sessionLog } from "@magic-context/core/shared/logger";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
 /**
@@ -302,7 +305,6 @@ export async function runAutoSearchHintForPi(args: {
 					return `test-entry-${index}:${typeof timestamp === "number" ? timestamp : "no-ts"}`;
 				})
 			: args.entryIds;
-	if (!options.enabled) return messages;
 	const strictResolutionFailed = entryIds === null;
 	const effectiveEntryIds = strictResolutionFailed
 		? messages.map((message) => {
@@ -319,6 +321,17 @@ export async function runAutoSearchHintForPi(args: {
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;
+	if (!options.enabled) {
+		if (found.index === messages.length - 1)
+			logDisabledAutoSearch(
+				db,
+				sessionId,
+				userMsgId,
+				options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD,
+				startedAt,
+			);
+		return messages;
+	}
 	await wait(
 		coalesceAutoSearchTurn(
 			db,
@@ -378,6 +391,11 @@ export async function runAutoSearchHintForPi(args: {
 				// commits or history embeddings under; never search the blank key.
 				if (!isUsableProjectIdentity(projectPath)) return messages;
 
+				const observation = observeAutoSearch(
+					sessionId,
+					options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD,
+					startedAt,
+				);
 				const snapshot = getProjectEmbeddingSnapshot(projectPath);
 				if (!snapshot) {
 					queueAutoSearchRegistration(
@@ -386,6 +404,7 @@ export async function runAutoSearchHintForPi(args: {
 						args.ensureProjectRegistered,
 					);
 					void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
+					observation.finish("no-candidates", "unregistered");
 					return messages;
 				}
 
@@ -406,25 +425,35 @@ export async function runAutoSearchHintForPi(args: {
 					args.passGuard?.assert();
 					if (outcome === null) {
 						void persistAutoSearchSkip(db, sessionId, userMsgId);
+						observation.finish("timeout");
 						return;
 					}
-					if (!outcome.ok) return;
+					if (!outcome.ok) {
+						observation.finish("error", outcome.kind);
+						return;
+					}
 					if (
 						outcome.kind === "already-present" &&
 						outcome.decision.decision === "hint"
 					) {
 						appendHintToUserMessage(userMsg, outcome.decision.text);
 					}
+					observation.finish(
+						outcome.decision.decision === "hint"
+							? "attached"
+							: reason === "below-threshold"
+								? "below-threshold"
+								: reason === "error"
+									? "error"
+									: "no-candidates",
+						reason,
+					);
 				};
 
 				// Check raw text before stripping because stripping removes the
 				// augmentation tags that tell us a hint was already attached.
 				const rawPartsText = collectUserPromptParts(userMsg);
 				if (hasStackedAugmentation(rawPartsText)) {
-					sessionLog(
-						sessionId,
-						"auto-search: skipping — user message already carries augmentation/hint",
-					);
 					await writeNoHintAndReconcile("stacked");
 					return messages;
 				}
@@ -452,6 +481,7 @@ export async function runAutoSearchHintForPi(args: {
 								: true;
 							const gitCommitsEnabled = snapshot?.gitCommitEnabled ?? false;
 							const searchOptions: UnifiedSearchOptions = {
+								autoSearchDiagnostics: observation.diagnostics,
 								limit: 10,
 								maxMessageOrdinal: Math.max(
 									0,
@@ -496,18 +526,12 @@ export async function runAutoSearchHintForPi(args: {
 					if (error instanceof AutoSearchBusyError) {
 						// An earlier search of this session is still running. Serve this
 						// turn without a hint and freeze that decision, as a timeout does.
-						sessionLog(
-							sessionId,
-							"auto-search: an earlier search of this session is still running, skipping hint for this turn",
-						);
+						observation.finish("timeout", "worker-busy");
 						void persistAutoSearchSkip(db, sessionId, userMsgId);
 						return messages;
 					}
 					// This pass serves the user message without a hint. Freeze that decision
 					// before returning so a recovered search cannot rewrite cached bytes.
-					log(
-						`[auto-search] unified search failed for session ${sessionId} (no-hint frozen for this turn): ${error instanceof Error ? error.message : String(error)}`,
-					);
 					await writeNoHintAndReconcile("error");
 					return messages;
 				}
@@ -518,10 +542,7 @@ export async function runAutoSearchHintForPi(args: {
 					if (results === null) {
 						// The request was served without a hint; retries of this turn must
 						// keep those bytes rather than append a late search result.
-						sessionLog(
-							sessionId,
-							`auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
-						);
+						observation.finish("timeout");
 						void persistAutoSearchSkip(db, sessionId, userMsgId);
 						return messages;
 					}
@@ -535,10 +556,6 @@ export async function runAutoSearchHintForPi(args: {
 						options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
 					results = selectAutoSearchResults(results, scoreThreshold);
 					if (results.length === 0) {
-						sessionLog(
-							sessionId,
-							`auto-search: no fragment meets relevance threshold ${scoreThreshold}`,
-						);
 						await writeNoHintAndReconcile("below-threshold");
 						return messages;
 					}
@@ -568,15 +585,18 @@ export async function runAutoSearchHintForPi(args: {
 					args.passGuard?.assert();
 					if (outcome === null) {
 						void persistAutoSearchSkip(db, sessionId, userMsgId);
+						observation.finish("timeout");
 						return messages;
 					}
-					if (!outcome.ok) return messages;
+					if (!outcome.ok) {
+						observation.finish("error", outcome.kind);
+						return messages;
+					}
 					if (outcome.decision.decision === "hint") {
 						appendHintToUserMessage(userMsg, outcome.decision.text);
 					}
-					sessionLog(
-						sessionId,
-						`auto-search: attached hint to ${userMsgId} (${results.length} fragments, top relevance ${(results[0].relevanceScore ?? results[0].score).toFixed(3)})`,
+					observation.finish(
+						outcome.decision.decision === "hint" ? "attached" : "no-candidates",
 					);
 
 					return messages;

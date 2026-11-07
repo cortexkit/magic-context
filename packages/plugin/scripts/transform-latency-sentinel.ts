@@ -11,6 +11,7 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { parseAgentDeliverReply } from "./cache-bust-sentinel";
+import { parseStepRender } from "./step-render-log";
 
 const HOUR = 3_600_000;
 const WINDOW = 10 * 60_000;
@@ -65,8 +66,18 @@ const hourKey = (at: number) => new Date(Math.floor(at / HOUR) * HOUR).toISOStri
 
 function parse(line: string): { sessionId: string; at: number; pass?: Pass; kind?: Kind; detail?: string; decline?: string; busy?: keyof BusyCounts; hold?: { site: string; ms: number } } | null {
     const at = Date.parse(line.match(/(?:\[)?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z)/)?.[1] ?? "");
-    const sessionId = line.match(/\[magic-context\]\[([^\]]+)\]/)?.[1] ?? line.match(/\bsession=(ses_[\w-]+)/)?.[1];
     if (!Number.isFinite(at)) return null;
+    // Sessions hosted by Thalamus's runners (thalamus-harness, thalamus-pi) run
+    // Magic Context in the ck-mc subc module instead of this plugin. The runner
+    // logs one `step render` line per model request: elapsed_ms is the whole
+    // request hook, and wait_ms is the part spent waiting for the runner's step
+    // answer, including any wait on the ck-mc module. That wait plays the part of
+    // a Rust pass's module time, so the same thresholds apply, including the
+    // alert when module time keeps rising across 20 passes. Pi session ids are
+    // UUIDs, so this match takes any session token.
+    const step = parseStepRender(line);
+    if (step) return { sessionId: step.sessionId, at, pass: { at, elapsed: step.elapsed, module: step.wait } };
+    const sessionId = line.match(/\[magic-context\]\[([^\]]+)\]/)?.[1] ?? line.match(/\bsession=(ses_[\w-]+)/)?.[1];
     const hold = line.match(/\[magic-context\] slow write transaction: site=(\S+) held=([\d.]+)ms(?:\s|$)/);
     if (hold && Number.isFinite(Number(hold[2]))) return { sessionId: UNKNOWN_SESSION, at, hold: { site: hold[1]!, ms: Number(hold[2]) } };
     if (/\[magic-context\] storage-busy refusal stage=\S+/.test(line)) return { sessionId: sessionId ?? UNKNOWN_SESSION, at, busy: "refusals" };
@@ -322,7 +333,7 @@ if (import.meta.main) {
         );
         const args = process.argv.slice(2);
         const values = new Map<string, string>();
-        const flags = new Set(["--opencode-log", "--pi-log", "--module-log", "--db", "--peer-db", "--state-file", "--connection-file", "--since", "--until"]);
+        const flags = new Set(["--opencode-log", "--pi-log", "--module-log", "--harness-log", "--pi-runner-log", "--db", "--peer-db", "--state-file", "--connection-file", "--since", "--until"]);
         for (let i = 0; i < args.length; i++) {
             if (args[i] === "--once" || args[i] === "--send" || args[i] === "--replay" || args[i] === "--summary") continue;
             if (!flags.has(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`invalid argument: ${args[i]}`);
@@ -334,7 +345,10 @@ if (import.meta.main) {
         const date = new Date().toISOString().slice(0, 10);
         const opencodeLog = values.get("--opencode-log") ?? join(tmpdir(), "opencode/magic-context/magic-context.log");
         const options: LatencyOptions = {
-            files: [args.includes("--summary") ? `${opencodeLog}.1` : "", opencodeLog, values.get("--pi-log") ?? join(tmpdir(), "pi/magic-context/magic-context.log"), values.get("--module-log") ?? join(homedir(), `.local/share/cortexkit/magic-context/logs/magic-context.${date}.log`)],
+            files: [args.includes("--summary") ? `${opencodeLog}.1` : "", opencodeLog, values.get("--pi-log") ?? join(tmpdir(), "pi/magic-context/magic-context.log"), values.get("--module-log") ?? join(homedir(), `.local/share/cortexkit/magic-context/logs/magic-context.${date}.log`),
+                // Thalamus's runner logs, whose `step render` times stand in for the plugin's transform times.
+                values.get("--harness-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-harness/logs/thalamus-harness.${date}.log`),
+                values.get("--pi-runner-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-pi/logs/thalamus-pi.${date}.log`)],
             db: values.get("--db") ?? join(storage, "context.db"), peerDb: values.get("--peer-db") ?? join(getDataDir(), "cortexkit/prefrontal-core/store.db"), stateFile: values.get("--state-file") ?? join(storage, "transform-latency-sentinel-state.json"),
             connectionFile: values.get("--connection-file") ?? join(getDataDir(), "cortexkit/run/subc-connection.json"), send: args.includes("--send"), replay, summary: args.includes("--summary"),
             since: values.has("--since") ? Date.parse(values.get("--since")!) : undefined, until: values.has("--until") ? Date.parse(values.get("--until")!) : undefined,

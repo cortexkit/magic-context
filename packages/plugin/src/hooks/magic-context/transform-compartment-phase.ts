@@ -576,7 +576,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 // The background run will publish when done, and the next pass picks it up.
                 sessionLog(
                     args.sessionId,
-                    "transform: proceeding after 95% timeout — historian still running in background",
+                    "transform: historian join timed out — reclaim and final fit checks continue; historian keeps running in the background",
                 );
             }
         }

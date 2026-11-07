@@ -9,19 +9,28 @@
 // endpoint and model through the user config tier. Per-test XDG_DATA_HOME or XDG_CONFIG_HOME
 // fixtures may replace this root, while MAGIC_CONTEXT_STORAGE_DIR can never
 // escape test isolation. Do not remove.
-import { afterAll } from "bun:test";
+import { afterAll, afterEach } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { __setPiHarnessKindForTesting } from "./src/pi-harness-kind";
 import { __setLocalEmbeddingPoolingTestFallback } from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
+import { resetReusableWorkersForTests } from "@magic-context/core/shared/reusable-worker";
 import {
 	createTestTempDir,
 	installTestTempDirCleanup,
 	sweepStaleTestTempDirs,
 } from "@magic-context/core/shared/test-temp-dir";
 
+// Pooled threads and idle timers must not outlive the test that created them.
+afterEach(resetReusableWorkersForTests);
+
 sweepStaleTestTempDirs();
-installTestTempDirCleanup(afterAll);
+installTestTempDirCleanup((cleanup) =>
+	afterAll(async () => {
+		await resetReusableWorkersForTests();
+		cleanup();
+	}),
+);
 const { dir: isolatedDataHome } = createTestTempDir("mc-pi-test-xdg-");
 
 // Bulletproof DB guard (see @magic-context/core resolveDatabasePath): never

@@ -16,6 +16,7 @@ import {
     updateSessionMetaCollection,
 } from "./storage-session-collections";
 import { foldShrunkPartTags, type ShrunkPartMessage } from "./storage-tags";
+import { rewriteMessageLabels } from "./store-generation-rebase-labels";
 
 /**
  * Which projection of the OpenCode store a session's saved coordinates were
@@ -287,6 +288,12 @@ interface CompartmentCoordinateRow {
     start_message_id: string | null;
     end_message_id: string | null;
     rebase_status: string | null;
+    title: string;
+    content: string;
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
 }
 
 function isCompartmentCoordinateRow(row: unknown): row is CompartmentCoordinateRow {
@@ -312,6 +319,8 @@ interface PlannedCompartment {
     end: number;
     status: "ok" | "unresolved";
     previousStatus: "ok" | "unresolved";
+    source: CompartmentCoordinateRow;
+    known: KnownEnds;
 }
 
 interface NoteCoordinateRow {
@@ -406,7 +415,8 @@ function readCompartmentRows(
 ): CompartmentCoordinateRow[] {
     return db
         .prepare(
-            `SELECT id, sequence, start_message, end_message, start_message_id, end_message_id, rebase_status
+            `SELECT id, sequence, start_message, end_message, start_message_id, end_message_id, rebase_status,
+                    title, content, p1, p2, p3, p4
              FROM ${table} WHERE session_id = ? ORDER BY sequence ASC`,
         )
         .all(sessionId)
@@ -487,6 +497,8 @@ function recoverFromNeighbours(
             sequence: row.sequence,
             previousStart: row.start_message,
             previousEnd: row.end_message,
+            source: row,
+            known: own,
             previousStatus:
                 row.rebase_status === "unresolved" ? ("unresolved" as const) : ("ok" as const),
         };
@@ -941,6 +953,7 @@ function* rebaseSteps(
         return emptyOutcome("stamped", generation, impliedGeneration);
     }
 
+    let labelsLeftUnchanged = 0;
     db.exec("BEGIN IMMEDIATE");
     // True once the transaction has been closed here, by COMMIT or by the
     // deliberate ROLLBACK below; the finally block rolls back anything else.
@@ -991,15 +1004,45 @@ function* rebaseSteps(
 
         const updateCompartment = {
             compartments: db.prepare(
-                "UPDATE compartments SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?",
+                "UPDATE compartments SET start_message = ?, end_message = ?, rebase_status = ?, title = ?, content = ?, p1 = ?, p2 = ?, p3 = ?, p4 = ? WHERE id = ?",
             ),
             recomp_compartments: db.prepare(
-                "UPDATE recomp_compartments SET start_message = ?, end_message = ?, rebase_status = ? WHERE id = ?",
+                "UPDATE recomp_compartments SET start_message = ?, end_message = ?, rebase_status = ?, title = ?, content = ?, p1 = ?, p2 = ?, p3 = ?, p4 = ? WHERE id = ?",
             ),
         };
         for (const plan of [...compartmentPlans, ...recompPlans]) {
+            const delta = plan.start - plan.previousStart;
+            const uniform =
+                plan.status === "ok" && !plan.derived && delta === plan.end - plan.previousEnd;
+            const resolveLabel = (ordinal: number): number | undefined => {
+                // Endpoints have stable identities even when the interior's
+                // projection changed non-uniformly. Never infer an interior delta
+                // from only one surviving endpoint.
+                if (ordinal === plan.previousStart && plan.known.start !== undefined)
+                    return plan.known.start;
+                if (ordinal === plan.previousEnd && plan.known.end !== undefined)
+                    return plan.known.end;
+                if (uniform && ordinal >= plan.previousStart && ordinal <= plan.previousEnd)
+                    return ordinal + delta;
+                return undefined;
+            };
+            const textValues = (["title", "content", "p1", "p2", "p3", "p4"] as const).map(
+                (field) => {
+                    const value = plan.source[field];
+                    if (value === null) return null;
+                    const rewritten = rewriteMessageLabels(value, resolveLabel);
+                    labelsLeftUnchanged += rewritten.unchanged;
+                    return rewritten.text;
+                },
+            );
             if (!compartmentPlanChanges(plan)) continue;
-            updateCompartment[plan.table].run(plan.start, plan.end, plan.status, plan.id);
+            updateCompartment[plan.table].run(
+                plan.start,
+                plan.end,
+                plan.status,
+                ...textValues,
+                plan.id,
+            );
             const rebased = plan.status === "ok" ? 1 : 0;
             const unresolved = plan.status === "unresolved" ? 1 : 0;
             if (plan.table === "compartments") {
@@ -1118,7 +1161,10 @@ function* rebaseSteps(
 
     // One line per rebased session, written unconditionally to magic-context.log
     // so a migration drill can be read back from the log alone.
-    sessionLog(sessionId, formatRebaseLogLine(outcome, performance.now() - startedAt));
+    sessionLog(
+        sessionId,
+        `${formatRebaseLogLine(outcome, performance.now() - startedAt)} labels_left_unchanged=${labelsLeftUnchanged}`,
+    );
     return outcome;
 }
 

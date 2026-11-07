@@ -225,6 +225,108 @@ function ensureSession(sessionId: string, harness = "opencode"): void {
     );
 }
 
+test("issue 774: a delta-four rebase shifts summary labels with the coordinates", () => {
+    ensureSession("ses_labels");
+    insertCompartment("ses_labels", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: id(5),
+        endMessageId: id(7),
+    });
+    const text =
+        "[1] U: review; [2-3] A: done. Keep 128.68 s, [01], [0], [-1], [1.2], [1 - 2], [3-2], [[1]], item[1], [1](url), [1][ref], [1-1].";
+    db.prepare(
+        "UPDATE compartments SET title = ?, content = ?, p1 = ?, p2 = ?, p3 = ?, p4 = ? WHERE session_id = ?",
+    ).run("Work [1-3]", text, text, "[2]", "[3]", null, "ses_labels");
+    db.prepare("UPDATE session_meta SET coordinate_generation = 'v1' WHERE session_id = ?").run(
+        "ses_labels",
+    );
+    db.exec(`INSERT INTO recomp_compartments
+        (session_id, sequence, start_message, end_message, start_message_id, end_message_id,
+         title, content, p1, p2, p3, p4, pass_number, created_at)
+        SELECT session_id, sequence, start_message, end_message, start_message_id, end_message_id,
+               title, content, p1, p2, p3, p4, 1, 1000 FROM compartments WHERE session_id = 'ses_labels'`);
+    const outcome = runRebase("ses_labels", "v2", numberedProjection(10));
+    expect(outcome.status).toBe("rebased");
+    const moved = compartmentOf("ses_labels", 1);
+    expect([moved.startMessage, moved.endMessage]).toEqual([5, 7]);
+    const expected =
+        "[5] U: review; [6-7] A: done. Keep 128.68 s, [01], [0], [-1], [1.2], [1 - 2], [3-2], [[1]], item[1], [1](url), [1][ref], [1-1].";
+    expect(moved).toMatchObject({
+        title: "Work [5-7]",
+        content: expected,
+        p1: expected,
+        p2: "[6]",
+        p3: "[7]",
+        p4: null,
+    });
+    expect(
+        db
+            .prepare(
+                "SELECT start_message, end_message, content, p1, p2, p3, p4 FROM recomp_compartments WHERE session_id = ?",
+            )
+            .get("ses_labels"),
+    ).toEqual({
+        start_message: 5,
+        end_message: 7,
+        content: expected,
+        p1: expected,
+        p2: "[6]",
+        p3: "[7]",
+        p4: null,
+    });
+    runRebase("ses_labels", "v2", numberedProjection(10));
+    expect(compartmentOf("ses_labels", 1).content).toBe(expected);
+    runRebase(
+        "ses_labels",
+        "v1",
+        numberedProjection(10)
+            .map((message) => ({ ...message, ordinal: message.ordinal - 4 }))
+            .filter((message) => message.ordinal > 0),
+    );
+    expect(compartmentOf("ses_labels", 1)).toMatchObject({
+        startMessage: 1,
+        endMessage: 3,
+        content: text,
+    });
+});
+
+test("issue 774: non-uniform rebases map endpoint labels by identity without guessing interior labels", () => {
+    ensureSession("ses_nonuniform");
+    insertCompartment("ses_nonuniform", {
+        sequence: 1,
+        start: 1,
+        end: 4,
+        startMessageId: id(1),
+        endMessageId: id(5),
+    });
+    db.prepare("UPDATE compartments SET content = '[1] [2] [4] [1-4]' WHERE session_id = ?").run(
+        "ses_nonuniform",
+    );
+    db.prepare("UPDATE session_meta SET coordinate_generation = 'v1' WHERE session_id = ?").run(
+        "ses_nonuniform",
+    );
+    runRebase("ses_nonuniform", "v2", numberedProjection(10));
+    expect(compartmentOf("ses_nonuniform", 1).content).toBe("[1] [2] [5] [1-5]");
+});
+
+test("issue 774: rebasing leaves summary text without labels or hashes unchanged", () => {
+    ensureSession("ses_plain");
+    insertCompartment("ses_plain", {
+        sequence: 1,
+        start: 1,
+        end: 3,
+        startMessageId: id(5),
+        endMessageId: id(7),
+    });
+    db.prepare("UPDATE session_meta SET coordinate_generation = 'v1' WHERE session_id = ?").run(
+        "ses_plain",
+    );
+    runRebase("ses_plain", "v2", numberedProjection(10));
+    expect(compartmentOf("ses_plain", 1).content).toBe("summary text");
+});
+
 /** A persisted replay slot whose prefix embeds the session's current ranges. */
 function seedLkgSlot(sessionId: string): void {
     expect(

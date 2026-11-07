@@ -5,8 +5,43 @@ import { describe, expect, it } from "bun:test";
 import type { RawMessage } from "./read-session-raw";
 import {
     buildTrueRawTokenIndex,
+    estimateTrueRawMessageTokens,
     invalidateTrueRawTokenCache,
 } from "./read-session-true-raw-tokens";
+
+describe("inline file images without MIME metadata", () => {
+    for (const payload of [
+        { data: `/9j/${"a".repeat(222_708)}` },
+        { data: `iVBORw0KGgo${"a".repeat(222_708)}` },
+        { data: `R0lGOD${"a".repeat(222_708)}` },
+        { url: `data:image/jpeg;base64,/9j/${"a".repeat(222_708)}` },
+        { data: `data:image/png;base64,iVBORw0KGgo${"a".repeat(222_708)}` },
+    ]) {
+        it(`prices ${Object.keys(payload)[0]} image payloads as media rather than prose (${Object.values(payload)[0].slice(0, 12)})`, () => {
+            const raw = estimateTrueRawMessageTokens(
+                { id: "image", ordinal: 1, role: "user", parts: [{ type: "file", ...payload }] },
+                { providerShapeVersion: "opencode-v1" },
+            );
+            expect(raw.image).toBe(1024);
+            expect(raw.other).toBe(0);
+            expect(raw.total).toBe(1024);
+        });
+    }
+
+    it("does not turn ordinary file content into an image", () => {
+        const raw = estimateTrueRawMessageTokens(
+            {
+                id: "file",
+                ordinal: 1,
+                role: "user",
+                parts: [{ type: "file", text: "plain text file" }],
+            },
+            { providerShapeVersion: "opencode-v1" },
+        );
+        expect(raw.image).toBe(0);
+        expect(raw.text).toBeGreaterThan(0);
+    });
+});
 
 describe("true raw token indexes with continued ordinals", () => {
     it("maps token queries relative to the first absolute ordinal", () => {

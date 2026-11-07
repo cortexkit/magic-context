@@ -50,6 +50,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
+	addMergedReasoningStrippedIds,
 	DRAIN_WINDOW_MS,
 	getEmergencyInputSample,
 	getMergedReasoningStrippedIds,
@@ -57,6 +58,7 @@ import {
 	recordDetectedContextLimit,
 	recordOverflowDetected,
 	setPersistedNoteNudgeTriggerMessageId,
+	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
@@ -135,7 +137,7 @@ import { createCtxReduceTool } from "./tools/ctx-reduce";
 import { createPiTranscript } from "./transcript-pi";
 
 describe("pi auto-search served decisions", () => {
-	function setup(label: string) {
+	function setup(label: string, enabled = true) {
 		const fixture = createAutoSearchReplayFixture("pi", label);
 		const snapshot = spyOn(
 			embeddingModule,
@@ -149,7 +151,7 @@ describe("pi auto-search served decisions", () => {
 			db: fixture.db,
 			protectedTags: 0,
 			injection: { injectionBudgetTokens: 8000, injectDocs: false },
-			autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+			autoSearch: { enabled, scoreThreshold: 0.6, minPromptChars: 12 },
 		});
 		const handler = fake.handlers.get("context");
 		if (!handler) throw new Error("context handler was not registered");
@@ -186,6 +188,27 @@ describe("pi auto-search served decisions", () => {
 			},
 		};
 	}
+
+	it("full host processor logs a disabled auto-search turn without searching", async () => {
+		const fixture = setup("disabled-logging", false);
+		const log = spyOn(loggerModule, "sessionLog");
+		try {
+			const first = await fixture.invoke("disabled");
+			expect(await fixture.invoke("disabled")).toBe(first);
+			expect(fixture.search).not.toHaveBeenCalled();
+			expect(
+				log.mock.calls.filter(([, line]) =>
+					line.includes("auto-search: decision outcome=disabled"),
+				),
+			).toHaveLength(1);
+			expect(getAutoSearchHintDecisions(fixture.db, fixture.sessionId)).toEqual(
+				[],
+			);
+		} finally {
+			log.mockRestore();
+			fixture.close();
+		}
+	});
 
 	it("full host processor cannot retry a served search exception", async () => {
 		const fixture = setup("host-exception");
@@ -2787,6 +2810,133 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 			} finally {
 				restoreHistorian?.();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
+
+	for (const [isSubagent, thinking] of [
+		[true, false],
+		[true, true],
+		[false, false],
+	] as const) {
+		it(`issue 643 retires old skeletons only on subagent rebuilds (subagent=${isSubagent}, thinking=${thinking})`, async () => {
+			const db = createTestDb();
+			const sessionId = `skeleton-retirement-${isSubagent}-${thinking}`;
+			try {
+				getOrCreateSessionMeta(db, sessionId);
+				updateSessionMeta(db, sessionId, {
+					isSubagent,
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+				});
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					heuristics: { keepReasoningTokens: 100000 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				let passTokens = 20000;
+				const ctx = {
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: passTokens,
+						percent: passTokens / 1000,
+						contextWindow: 100000,
+					}),
+				};
+				const source = [
+					userMessage("work", 1),
+					...Array.from({ length: 60 }, (_, i) => [
+						{
+							role: "assistant",
+							timestamp: 2 + i * 2,
+							content: [
+								...(thinking && i === 0
+									? [
+											{
+												type: "thinking",
+												thinking: "signed thought",
+												thinkingSignature: "signature",
+											},
+										]
+									: []),
+								{
+									type: "toolCall",
+									id: `call-${i}`,
+									name: "bash",
+									arguments: { command: `echo ${i}` },
+								},
+							],
+						},
+						{
+							role: "toolResult",
+							toolCallId: `call-${i}`,
+							toolName: "bash",
+							timestamp: 3 + i * 2,
+							content: [{ type: "text", text: `output ${i}` }],
+						},
+					]).flat(),
+					userMessage("continue", 200),
+				];
+				const pass = () =>
+					handler(
+						{ messages: structuredClone(source) as never[] },
+						ctx as never,
+					);
+				await pass();
+				const tags = getTagsBySession(db, sessionId).filter(
+					(tag) => tag.type === "tool",
+				);
+				expect(tags).toHaveLength(60);
+				for (const tag of tags) {
+					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+					updateTagDropMode(db, sessionId, tag.tagNumber, "skeleton_real");
+				}
+				if (thinking) {
+					expect(tags[0].toolOwnerMessageId).toBeTruthy();
+					addMergedReasoningStrippedIds(db, sessionId, [
+						thinkingBindingRecoveryFrozenId(tags[0].toolOwnerMessageId!),
+					]);
+				}
+				const modes = () =>
+					getTagsBySession(db, sessionId)
+						.filter((tag) => tag.type === "tool")
+						.map((tag) => tag.dropMode);
+				await pass();
+				expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+				passTokens = 70000;
+				if (!isSubagent) signalPiPendingMaterialization(sessionId);
+				const rebuilt = (await pass()).messages;
+				expect(modes()).toEqual(
+					isSubagent
+						? [...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]
+						: Array(60).fill("skeleton_real"),
+				);
+				if (isSubagent) {
+					const calls = (
+						rebuilt as Array<{
+							content?: Array<{ type?: string; id?: string }>;
+						}>
+					)
+						.flatMap((message) =>
+							Array.isArray(message.content) ? message.content : [],
+						)
+						.filter((part) => part.type === "toolCall");
+					expect(calls.map((part) => part.id)).toEqual(
+						Array.from({ length: 20 }, (_, i) => `call-${i + 40}`),
+					);
+					passTokens = 20000;
+					expect(JSON.stringify((await pass()).messages)).toBe(
+						JSON.stringify(rebuilt),
+					);
+				}
+			} finally {
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);
 			}
@@ -9021,6 +9171,110 @@ describe("Pi proactive strip of invalidated thinking", () => {
 		).filter?.((part) => part.type === "thinking").length ?? 0;
 	const sha256 = (value: unknown) =>
 		createHash("sha256").update(JSON.stringify(value)).digest("hex");
+	it("issue 643 REVIEW skeleton retirement strips later signed thinking on the same rebuild", async () => {
+		const db = createTestDb();
+		const sessionId = "pi-retirement-before-signed-thinking";
+		const fake = createFakePi();
+		try {
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				isSubagent: true,
+				piStableIdScheme: 1,
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+			});
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+				heuristics: { keepReasoningTokens: 100000 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] }>;
+			const source: Record<string, unknown>[] = [userMessage("work", 1)];
+			const entryIds = ["start"];
+			for (let i = 0; i < 21; i++) {
+				source.push(
+					assistantToolCall(
+						`call-${i}`,
+						"bash",
+						{ command: `echo ${i}` },
+						2 + i * 2,
+					),
+					toolResultMessage(`call-${i}`, `output ${i}`, 3 + i * 2),
+				);
+				entryIds.push(`assistant-${i}`, `result-${i}`);
+			}
+			source.push(userMessage("explain the results", 50));
+			entryIds.push("explain");
+			const pass = async (percent: number) => {
+				const messages = structuredClone(source);
+				return (
+					await handler({ messages: messages as never[] }, {
+						...fakeContext(
+							sessionId,
+							process.cwd(),
+							entryIds,
+							messages as never,
+						),
+						model: {
+							provider: "anthropic",
+							id: "claude-opus-5-5",
+							contextWindow: 100000,
+						},
+						getContextUsage: () => ({
+							tokens: percent * 1000,
+							percent,
+							contextWindow: 100000,
+						}),
+					} as never)
+				).messages;
+			};
+			await pass(20);
+			const dropped = getTagsBySession(db, sessionId).find(
+				(tag) => tag.type === "tool" && tag.messageId === "call-0",
+			);
+			if (!dropped) throw new Error("missing first tool tag");
+			// Reconstruct a recent dropped call: keep its invocation and replace
+			// only the result with a placeholder.
+			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
+			updateTagDropMode(db, sessionId, dropped.tagNumber, "skeleton_real");
+			await pass(20);
+			// The later signature covers every preceding byte, including the kept
+			// invocation and placeholder result; removing either invalidates it.
+			source.push(
+				opusAssistant("later signed thought", "explanation", 51),
+				userMessage("continue", 52),
+			);
+			entryIds.push("later-thinking", "continue");
+			const baseline = await pass(20);
+			expect(
+				baseline.reduce((sum, message) => sum + thinkingIn(message), 0),
+			).toBe(1);
+			const rebuilt = await pass(70);
+			expect(
+				getTagsBySession(db, sessionId).find(
+					(tag) => tag.tagNumber === dropped.tagNumber,
+				)?.dropMode,
+			).toBe("full");
+			expect(JSON.stringify(rebuilt)).not.toContain('"id":"call-0"');
+			expect(JSON.stringify(rebuilt)).not.toContain('"toolCallId":"call-0"');
+			// Removing the earlier call/result invalidates the later signature.
+			expect(
+				rebuilt.reduce((sum, message) => sum + thinkingIn(message), 0),
+			).toBe(0);
+			expect(
+				getMergedReasoningStrippedIds(db, sessionId).has(
+					thinkingBindingRecoveryFrozenId("later-thinking"),
+				),
+			).toBe(true);
+			expect(JSON.stringify(await pass(20))).toBe(JSON.stringify(rebuilt));
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
 	for (const [lane, isSubagent, executePercent, name] of [
 		[
 			"image",
@@ -9669,7 +9923,9 @@ it("unknown-limit overflow floors pressure after the raw-branch guard discards a
 	};
 	try {
 		recordOverflowDetected(db, sessionId, undefined, "mock/mock");
-		await handler({ messages: messages as never[] }, ctx as never);
+		await expect(
+			handler({ messages: messages as never[] }, ctx as never),
+		).rejects.toThrow("unknown-usage");
 		expect(
 			lines.some((line) =>
 				line.includes("overflow recovery flag set — bumping percentage to 95%"),
@@ -9737,6 +9993,121 @@ it("headless proven overflow joins its background historian before refusing", as
 	} finally {
 		await awaitInFlightHistorians(sessionId);
 		run.mockRestore();
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("invalidates pre-publication pressure through repeated Pi turns without discarding fresh pressure", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-stale-published-pressure";
+	const fake = createFakePi();
+	const logger = await import("@magic-context/core/shared/logger");
+	const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
+	const clock = spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+	const originalTimer = globalThis.setTimeout;
+	// Exercise the real budget rejection without spending the production 21s
+	// waiting for a fake historian that only the test can finish.
+	const timers = spyOn(globalThis, "setTimeout").mockImplementation(((
+		...args: Parameters<typeof setTimeout>
+	) => {
+		if (typeof args[1] === "number" && args[1] > 19_000 && args[1] <= 21_000)
+			args[1] = 5;
+		return originalTimer(...args);
+	}) as typeof setTimeout);
+	let finish!: () => void;
+	const slow = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	let restoreHistorian: (() => void) | undefined;
+	try {
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const attempt = async () => {
+			const messages = [
+				userMessage("Continue", 1),
+				assistantMessage("Earlier work", 2),
+			];
+			try {
+				await handler({ messages: messages as never[] }, {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						["entry-1", "entry-2"],
+						messages,
+					),
+					getContextUsage: () => ({
+						tokens: 97_000,
+						percent: 97,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				return "provider";
+			} catch (error) {
+				expect(error).toMatchObject({ name: "PiDegradedPassError" });
+				expect(String(error)).toContain("stage=emergency historian");
+				expect(String(error)).toContain("This request was not sent.");
+				return "refused";
+			}
+		};
+		await attempt();
+		clock.mockReturnValue(Date.now() + 100);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			cacheTtl: "59m",
+			lastInputTokens: 97_000,
+			lastContextPercentage: 97,
+		});
+		restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(
+			sessionId,
+			slow,
+		);
+		expect(await attempt()).toBe("refused");
+		clock.mockReturnValue(Date.now() + 100);
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 1,
+				startMessageId: "entry-1",
+				endMessageId: "entry-1",
+				title: "Earlier work",
+				content: "Earlier work was summarized.",
+			},
+		]);
+		finish();
+		// Keep another slow background run present, so stale pressure would
+		// enter the blocking join even after the publication has landed.
+		restoreHistorian();
+		restoreHistorian = contextHandlerInternals.setInFlightHistorianForTests(
+			sessionId,
+			new Promise(() => {}),
+		);
+		const turns = [await attempt(), await attempt(), await attempt()];
+		console.log(`Pi post-publication turns: ${turns.join(", ")}`);
+		expect(turns).toEqual(["provider", "provider", "provider"]);
+		expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(0);
+		expect(
+			log.mock.calls.some(([, line]) =>
+				String(line).includes("refused turn recovery"),
+			),
+		).toBe(true);
+		clock.mockReturnValue(Date.now() + 100);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			lastInputTokens: 97_000,
+			lastContextPercentage: 97,
+		});
+		expect(await attempt()).toBe("refused");
+	} finally {
+		finish();
+		restoreHistorian?.();
+		timers.mockRestore();
+		clock.mockRestore();
+		log.mockRestore();
 		clearContextHandlerSession(sessionId);
 		closeQuietly(db);
 	}

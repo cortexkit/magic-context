@@ -36,8 +36,6 @@ test("re-review: a busy fold capture after successful transform never interrupts
         subc: { connection_file: join(dir, "run", "subc-connection.json") },
     });
     let duties: Awaited<ReturnType<typeof registerContext>>;
-    const oldFlag = process.env.MC_OC2_INVISIBLE_FOLD;
-    process.env.MC_OC2_INVISIBLE_FOLD = "1";
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
@@ -113,8 +111,6 @@ test("re-review: a busy fold capture after successful transform never interrupts
         load.mockRestore();
         gate.mockRestore();
         path.mockRestore();
-        if (oldFlag === undefined) delete process.env.MC_OC2_INVISIBLE_FOLD;
-        else process.env.MC_OC2_INVISIBLE_FOLD = oldFlag;
         blocker.close();
         source.close();
         closeDatabase();

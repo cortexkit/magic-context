@@ -874,6 +874,35 @@ export async function createV2HiddenCompletionExecutor(
             const budgetStopped = new Promise<never>((_resolve, reject) => {
                 budgetReject = reject;
             });
+            const chargeBudgetRows = (rows: StoreRow<"assistant">[]) => {
+                if (!budget) return;
+                for (const row of rows) {
+                    if (row.seq <= usageSeq) continue;
+                    // The host fills usage into the existing row at step end. Keep
+                    // rereading an unfinished row instead of consuming its sequence.
+                    if (!row.data.finish) break;
+                    usageSeq = row.seq;
+                    const tokens = row.data.tokens;
+                    const decision = budget.charge(
+                        Math.max(0, tokens?.input ?? 0),
+                        Math.max(0, tokens?.cache?.read ?? 0),
+                        Math.max(0, tokens?.cache?.write ?? 0),
+                        row.data.finish === "stop" &&
+                            !(row.data.content ?? []).some((part) => part.type === "tool-call"),
+                        false,
+                    );
+                    const onBudgetUpdate = run.identity.metadata?.onBudgetUpdate;
+                    if (typeof onBudgetUpdate === "function")
+                        onBudgetUpdate({ ...budget.snapshot(), sessionId: run.child.id });
+                    if (decision !== "continue") {
+                        attempt.budgetExceeded = new DreamTokenBudgetExceeded(
+                            run.child.id,
+                            budget.snapshot().spent,
+                        );
+                        return attempt.budgetExceeded;
+                    }
+                }
+            };
             if (budget) {
                 budgetPoll = inRootAsyncContext(() =>
                     setInterval(() => {
@@ -887,40 +916,16 @@ export async function createV2HiddenCompletionExecutor(
                                         return latest ? [latest] : [];
                                     })(),
                             );
-                            for (const row of fresh) {
-                                if (row.seq <= usageSeq) continue;
-                                usageSeq = row.seq;
-                                const tokens = row.data.tokens;
-                                const decision = budget.charge(
-                                    Math.max(0, tokens?.input ?? 0),
-                                    Math.max(0, tokens?.cache?.read ?? 0),
-                                    Math.max(0, tokens?.cache?.write ?? 0),
-                                    row.data.finish === "stop" &&
-                                        !(row.data.content ?? []).some(
-                                            (part) => part.type === "tool-call",
-                                        ),
-                                    false,
+                            const exceeded = chargeBudgetRows(fresh);
+                            if (exceeded) {
+                                if (budgetPoll) clearInterval(budgetPoll);
+                                // This host exposes context shaping but no pre-tool execution
+                                // hook for hidden children. Stop at the soft threshold instead
+                                // of allowing another investigation call to execute.
+                                void interruptAndRetire(run, "token-budget").finally(() =>
+                                    budgetReject(exceeded),
                                 );
-                                const onBudgetUpdate = run.identity.metadata?.onBudgetUpdate;
-                                if (typeof onBudgetUpdate === "function")
-                                    onBudgetUpdate({
-                                        ...budget.snapshot(),
-                                        sessionId: run.child.id,
-                                    });
-                                if (decision !== "continue") {
-                                    if (budgetPoll) clearInterval(budgetPoll);
-                                    // This host exposes context shaping but no pre-tool execution
-                                    // hook for hidden children. Stop at the soft threshold instead
-                                    // of allowing another investigation call to execute.
-                                    attempt.budgetExceeded = new DreamTokenBudgetExceeded(
-                                        run.child.id,
-                                        budget.snapshot().spent,
-                                    );
-                                    void interruptAndRetire(run, "token-budget").finally(() =>
-                                        budgetReject(attempt.budgetExceeded as Error),
-                                    );
-                                    return;
-                                }
+                                return;
                             }
                         } catch (error) {
                             if (budgetPoll) clearInterval(budgetPoll);
@@ -1054,6 +1059,13 @@ export async function createV2HiddenCompletionExecutor(
                     options.openReader,
                     (reader) => reader.assistantSince?.(run.child.id, baseline) ?? [row],
                 ).filter((step) => step.seq > baseline && step.seq <= row.seq);
+                // Short runs can settle before the first poll; also collect the final
+                // step of longer runs without charging previously polled steps twice.
+                const exceeded = chargeBudgetRows(steps);
+                if (exceeded) {
+                    await interruptAndRetire(run, "token-budget");
+                    throw exceeded;
+                }
                 const reportedUsage = steps.some(
                     (step) =>
                         tokenNumber(step.data.tokens?.input) !== undefined ||

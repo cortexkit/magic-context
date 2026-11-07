@@ -32,6 +32,13 @@ version locally, install its CLI separately and set both
 `MC_E2E_OPENCODE2_VERSION=2.1.0`. The version assertions still require an exact
 match; changing only the binary override will not bypass them.
 
+For an unpinned 2.2.x compatibility proof, install its CLI and the same exact
+`@opencode/ai` version under a private throwaway root. Set
+`MC_E2E_OPENCODE2_AI_ROOT` to that install root alongside the CLI/version
+overrides. The runner refuses a mismatched or missing schema version and bundles
+the matching schema validator; it never disables validation or substitutes 2.1's
+schema. This does not change the repository's dependency or CI version pins.
+
 Each fixture bundles an independent validator for OpenCode's LLM message schema, with the dependency tree
 matching its CLI generation: `@opencode/ai` for 2.0.x, `@opencode/ai-2-1` for
 2.1.0. Bundling prevents foreign Effect imports into the host runtime. The

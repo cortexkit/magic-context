@@ -50,6 +50,10 @@ import {
 } from "../../features/magic-context/mural/resolve-mural";
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
+    describeRequestToolDefinitionChange,
+    needsRequestToolIdentityAdoption,
+} from "../../features/magic-context/request-tool-definitions";
+import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
@@ -102,10 +106,12 @@ import {
     encodeCachedM0UpgradeIdentity,
     MEMORY_RENDER_FORMAT_EPOCH,
     readCachedM0MemoryIds,
+    readCachedM0ToolDefinitionsHash,
     renderBudgetIdentityChanged,
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
     withCachedM0MemoryIds,
+    withCachedM0ToolDefinitionsHash,
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
@@ -792,12 +798,11 @@ export function prepareCompartmentInjection(
     } else {
         // Degraded: the natural boundary message is not in the visible window.
         const degradedCount = noteDegradedRebuild(sessionId);
-        // Layer A (#263): on the FIRST degraded detection of an episode, run the
-        // fork-orphan marker hygiene pass. If a foreign marker outranks ours this
-        // removes it, so the next pass's window stops at our marker and we
-        // recover. Gated to the degraded trigger so steady state pays nothing.
-        if (degradedCount === 1) {
-            reconcileForkOrphanedCompactionMarkers(db, sessionId);
+        // Remove fork-orphan markers only on a pass already rebuilding.
+        // A cold defer must neither change host rows nor consume the opportunity
+        // for a later rebuilding pass to repair the degraded window.
+        if (isCacheBusting) {
+            reconcileForkOrphanedCompactionMarkers(db, sessionId, isCacheBusting);
         }
 
         let reAnchored = false;
@@ -980,10 +985,11 @@ export interface M0SnapshotMarkers {
     memoryRenderEpoch: string | null;
     // HARD-bust markers are captured from runtime signals at the injectM0M1
     // call site (NOT a pure DB read), so readCurrentM0SnapshotMarkers takes
-    // them as inputs. The tool-set hash is retained for attribution only: its
-    // process-global scope makes it deliberately ineligible to trigger a fold.
+    // them as inputs. The names-only tool-set hash is attribution; the optional
+    // name/description identity comes only from OpenCode 2's context hook.
     systemHash: string;
     toolSetHash: string;
+    toolDefinitionsHash?: string | null;
     modelKey: string;
     projectIdentity?: string | null;
     /** Hash of the image identity folded into this m0 baseline. */
@@ -998,13 +1004,15 @@ export interface M0SnapshotMarkers {
  * Runtime cache-eviction signals threaded into the materialization decision.
  * These are NOT derived from durable DB state like the content markers — they
  * come from the current flight (system-prompt hash, tool-set fingerprint,
- * provider/model key) plus the TTL idle window. Tool-set changes are observed
- * for attribution only; they never request a materialization.
+ * provider/model key) plus the TTL idle window. Only the session context's
+ * name/description identity can trigger a tool change; the names-only hash is attribution.
  */
 export interface M0HardSignals {
     systemHash: string;
     /** Empty or absent means the provider tool set is not observable this pass. */
     toolSetHash?: string;
+    /** OpenCode 2 only: sorted names/descriptions observed by this session's context hook. */
+    toolDefinitionsHash?: string;
     modelKey: string;
     /** True when the provider cache TTL has elapsed since lastResponseTime. */
     cacheExpired: boolean;
@@ -1158,6 +1166,7 @@ export interface MaterializeDecision {
      */
     m0ToolSetHashPrev?: string | null;
     m0ToolSetHashNew?: string | null;
+    toolDefinitionsChange?: ReturnType<typeof describeRequestToolDefinitionChange>;
 }
 
 export interface MaterializeM0Result {
@@ -1747,6 +1756,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
             memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
             systemHash: hard.systemHash,
             toolSetHash: hard.toolSetHash ?? "",
+            toolDefinitionsHash: hard.toolDefinitionsHash ?? null,
             modelKey: piModelRefToCanonical(hard.modelKey),
             projectIdentity: args.projectPath ?? null,
             muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
@@ -1773,6 +1783,7 @@ function refreshVolatileMarkerInputs(
         materializedAt: Date.now(),
         systemHash: hard.systemHash,
         toolSetHash: hard.toolSetHash ?? "",
+        toolDefinitionsHash: hard.toolDefinitionsHash ?? null,
         modelKey: hard.modelKey,
         projectIdentity: args.projectPath ?? null,
         muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
@@ -1865,6 +1876,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: state.cachedM0SystemHash ?? "",
         toolSetHash: state.cachedM0ToolSetHash ?? "",
+        toolDefinitionsHash: readCachedM0ToolDefinitionsHash(state.cachedM0UpgradeState),
         modelKey: state.cachedM0ModelKey ?? "",
         projectIdentity: state.cachedM0ProjectIdentity ?? null,
         muralHash: state.cachedM0MuralHash ?? null,
@@ -1999,8 +2011,47 @@ export function mustMaterialize(args: {
             systemHashNew: hard.systemHash,
         };
     }
-    // Tool-set changes are deliberately not HARD-fold triggers: this signal is
-    // process-global, so folding on it would manufacture unrelated session busts.
+    const liveDefinitionsHash = hard.toolDefinitionsHash;
+    if (liveDefinitionsHash) {
+        const cachedDefinitionsHash = readCachedM0ToolDefinitionsHash(
+            args.state.cachedM0UpgradeState,
+        );
+        if (
+            !cachedDefinitionsHash ||
+            needsRequestToolIdentityAdoption(cachedDefinitionsHash, liveDefinitionsHash)
+        ) {
+            // Upgraded baselines cannot tell us what tools they served. Seed the
+            // comparison without rebuilding or changing a single served byte.
+            const previousIdentity = args.state.cachedM0UpgradeState;
+            const adoptedIdentity = withCachedM0ToolDefinitionsHash(
+                previousIdentity,
+                liveDefinitionsHash,
+            );
+            const adopted = args.db
+                .prepare(
+                    `INSERT INTO session_render_cache (session_id, cache_key, value)
+                     SELECT session_id, 'cached_m0_upgrade_state', ? FROM session_meta
+                     WHERE session_id = ? AND ${sessionRenderCacheValueSql("cached_m0_upgrade_state")} IS ?
+                     ON CONFLICT(session_id, cache_key) DO UPDATE SET value = excluded.value
+                     WHERE value IS ?`,
+                )
+                .run(adoptedIdentity, args.sessionId, previousIdentity, previousIdentity);
+            // A concurrent fold owns its whole snapshot. Never overwrite its
+            // renderer/budget/selection markers with an older adoption read.
+            if (adopted.changes > 0) args.state.cachedM0UpgradeState = adoptedIdentity;
+        } else if (cachedDefinitionsHash !== liveDefinitionsHash) {
+            return {
+                value: true,
+                reason: "tool_definitions",
+                toolDefinitionsChange: describeRequestToolDefinitionChange(
+                    cachedDefinitionsHash,
+                    liveDefinitionsHash,
+                ),
+            };
+        }
+    }
+    // The names-only hash can be process-global on OpenCode 1. It remains
+    // attribution only so unrelated sessions cannot trigger each other.
     // Preserve the actual operands from this decision site for a later query.
     const liveToolSetHash = hard.toolSetHash ?? "";
     const toolSetHashComparison =
@@ -2521,16 +2572,19 @@ function applyMarkersToState(
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0ScoreSelectionWatermark = markers.scoreSelectionWatermark ?? 0;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
-    state.cachedM0UpgradeState = withCachedM0MemoryIds(
-        encodeCachedM0UpgradeIdentity(
-            markers.upgradeState,
-            markers.compartmentRenderEpoch,
-            markers.muralEnabled,
-            markers.renderBudgetIdentity,
-            markers.memoryRenderEpoch,
-            markers.renderedBudgets ?? null,
+    state.cachedM0UpgradeState = withCachedM0ToolDefinitionsHash(
+        withCachedM0MemoryIds(
+            encodeCachedM0UpgradeIdentity(
+                markers.upgradeState,
+                markers.compartmentRenderEpoch,
+                markers.muralEnabled,
+                markers.renderBudgetIdentity,
+                markers.memoryRenderEpoch,
+                markers.renderedBudgets ?? null,
+            ),
+            renderedM0Ids,
         ),
-        renderedM0Ids,
+        markers.toolDefinitionsHash ?? null,
     );
     // Runtime markers must be mirrored into flat state because the next
     // mustMaterialize pass reads cachedM0SystemHash/ToolSetHash/ModelKey directly
@@ -2805,16 +2859,19 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     options.beforePhase3ForTest?.();
 
     const steps = new WriteTransactionSteps();
-    const upgradeIdentity = withCachedM0MemoryIds(
-        encodeCachedM0UpgradeIdentity(
-            snapshotMarkers.upgradeState,
-            snapshotMarkers.compartmentRenderEpoch,
-            snapshotMarkers.muralEnabled,
-            snapshotMarkers.renderBudgetIdentity,
-            snapshotMarkers.memoryRenderEpoch,
-            snapshotMarkers.renderedBudgets ?? null,
+    const upgradeIdentity = withCachedM0ToolDefinitionsHash(
+        withCachedM0MemoryIds(
+            encodeCachedM0UpgradeIdentity(
+                snapshotMarkers.upgradeState,
+                snapshotMarkers.compartmentRenderEpoch,
+                snapshotMarkers.muralEnabled,
+                snapshotMarkers.renderBudgetIdentity,
+                snapshotMarkers.memoryRenderEpoch,
+                snapshotMarkers.renderedBudgets ?? null,
+            ),
+            renderedMemoryIds,
         ),
-        renderedMemoryIds,
+        snapshotMarkers.toolDefinitionsHash ?? null,
     );
     const baselineEndMessageId = lastCompartmentBoundaryId(compartments);
     steps.mark("pre_metadata");
@@ -2868,6 +2925,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // so carry the captured values and exclude them from the stale check.
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
+            toolDefinitionsHash: snapshotMarkers.toolDefinitionsHash,
             modelKey: snapshotMarkers.modelKey,
             projectIdentity: projectPath ?? null,
             muralEnabled: snapshotMarkers.muralEnabled,
@@ -3795,6 +3853,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: row.cached_m0_system_hash ?? "",
         toolSetHash: row.cached_m0_tool_set_hash ?? "",
+        toolDefinitionsHash: readCachedM0ToolDefinitionsHash(row.cached_m0_upgrade_state),
         modelKey: row.cached_m0_model_key ?? "",
         projectIdentity: row.cached_m0_project_identity ?? null,
         muralHash: row.cached_m0_mural_hash ?? null,
@@ -3853,13 +3912,16 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0ScoreSelectionWatermark = markers.scoreSelectionWatermark ?? 0;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
-    state.cachedM0UpgradeState = encodeCachedM0UpgradeIdentity(
-        markers.upgradeState,
-        markers.compartmentRenderEpoch,
-        markers.muralEnabled,
-        markers.renderBudgetIdentity,
-        markers.memoryRenderEpoch,
-        markers.renderedBudgets ?? null,
+    state.cachedM0UpgradeState = withCachedM0ToolDefinitionsHash(
+        encodeCachedM0UpgradeIdentity(
+            markers.upgradeState,
+            markers.compartmentRenderEpoch,
+            markers.muralEnabled,
+            markers.renderBudgetIdentity,
+            markers.memoryRenderEpoch,
+            markers.renderedBudgets ?? null,
+        ),
+        markers.toolDefinitionsHash ?? null,
     );
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;

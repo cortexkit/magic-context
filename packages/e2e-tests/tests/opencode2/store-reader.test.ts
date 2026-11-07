@@ -4,6 +4,13 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	evaluateTaskGate,
+	getDreamTaskBacklog,
+} from "../../../plugin/src/features/magic-context/dreamer/task-gates";
+import { runMigrations } from "../../../plugin/src/features/magic-context/migrations";
+import { initializeDatabase } from "../../../plugin/src/features/magic-context/storage-db";
+import { Database as ContextDatabase } from "../../../plugin/src/shared/sqlite";
+import {
 	getRawSessionTagKeysThrough,
 	readSessionChunk,
 	setBoundedRawMessageProvider,
@@ -24,6 +31,55 @@ import {
 import rows from "../../src/opencode2-runner/host-rows.json";
 import golden from "../../src/opencode2-runner/reader-s4-golden.json";
 import { isolation } from "../../src/opencode2-runner/spawn";
+import { cleanupE2ETempDir } from "../../src/temp-dir";
+
+test("OpenCode 2 runner scopes retrospective probes to its root sessions", () => {
+	const fixture = isolation();
+	const db = new ContextDatabase(":memory:");
+	try {
+		initializeDatabase(db);
+		runMigrations(db);
+		const project = "git:opencode2-retrospective-gate";
+		for (const [session, harness, subagent, activity] of [
+			["root", "opencode2", 0, 100],
+			["second-root", "opencode2", 0, 100],
+			["child", "opencode2", 1, 900],
+			["other-opencode", "opencode", 0, 900],
+			["other-pi", "pi", 0, 900],
+			["other-omp", "omp", 0, 900],
+		] as const) {
+			db.prepare(
+				"INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
+			).run(session, harness, project, activity);
+			db.prepare(
+				"INSERT INTO session_meta (session_id, harness, is_subagent) VALUES (?, ?, ?)",
+			).run(session, harness, subagent);
+			db.prepare(
+				"INSERT INTO message_history_index (session_id, harness, last_indexed_ordinal, updated_at) VALUES (?, ?, 1, ?)",
+			).run(session, harness, activity);
+		}
+		for (const watermark of [null, 0, 100]) {
+			const pending = watermark === 100 ? 0 : 2;
+			expect(
+				getDreamTaskBacklog(db, project, "retrospective", {
+					retrospectiveWatermarkMs: watermark,
+				}),
+			).toEqual({ pending, total: pending });
+			expect(
+				evaluateTaskGate("retrospective", {
+					db,
+					projectIdentity: project,
+					lastRunAt: null,
+					retrospectiveWatermarkMs: watermark,
+					promotionThreshold: 3,
+				}),
+			).toBe(pending > 0);
+		}
+	} finally {
+		db.close();
+		cleanupE2ETempDir(fixture.root);
+	}
+});
 
 // R16's owner ruling removes invalid characters; the audit's older source replaced them with '-'.
 // OPENCODE_DB is source rule AND observed honoured by the GA CLI real-host placement test.

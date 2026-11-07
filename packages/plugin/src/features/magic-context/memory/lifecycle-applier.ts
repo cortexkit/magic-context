@@ -1,5 +1,6 @@
 import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
+import { recordVerificationVerdict } from "../dreamer/verify-state";
 import { queueMemoryMutation } from "../storage-memory-mutation-log";
 import {
     recordAgentFragment,
@@ -43,6 +44,7 @@ import {
     supersededMemory,
     updateMemoryContent,
     updateMemorySeenCount,
+    updateMemoryVerification,
 } from "./storage-memory";
 import { saveEmbeddingIfHashMatches } from "./storage-memory-embeddings";
 import { recordMemoryVerifications } from "./storage-memory-verifications";
@@ -103,6 +105,7 @@ export interface MemoryVerificationRequest {
     content?: string;
     reason?: string;
     refusalReason?: string;
+    skipFingerprint?: string | null;
 }
 
 /** Apply code-check results and authorized automated corrections under one revision-bound transaction. */
@@ -204,7 +207,7 @@ export function applyMemoryVerification(
             ).run(result, JSON.stringify(request.files), request.checkedCommit, memory.id);
             if (result === "refused")
                 return record("decided_pending", refusalReason ?? "refused", result);
-            if (result === "confirmed" || (result === "updated" && request.files.length > 0)) {
+            if (result === "confirmed") {
                 recordMemoryVerifications(db, memory.id, request.files, request.checkedAt);
                 let metadata: Record<string, unknown> = {};
                 try {
@@ -225,6 +228,32 @@ export function applyMemoryVerification(
                     }),
                     memory.id,
                 );
+            }
+            if (request.sourceCommitMatches) {
+                const verdict =
+                    result === "confirmed"
+                        ? "verified"
+                        : result === "updated" ||
+                            (result === "unmapped" && request.kind === "update")
+                          ? "update"
+                          : result === "archived"
+                            ? "archive"
+                            : result === "skipped"
+                              ? "skip"
+                              : null;
+                if (verdict) {
+                    if (verdict === "update" || verdict === "skip")
+                        updateMemoryVerification(db, memory.id, "unverified");
+                    else if (verdict === "archive")
+                        updateMemoryVerification(db, memory.id, "stale");
+                    recordVerificationVerdict(
+                        db,
+                        getMemoryById(db, memory.id)!,
+                        verdict,
+                        request.checkedAt,
+                        request.skipFingerprint,
+                    );
+                }
             }
             if (mutation && !refusalReason) {
                 const mutationKey = `${request.key}:mutation`;

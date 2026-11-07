@@ -827,7 +827,7 @@ for (const host of HOSTS) {
 
     it(`${host}: after a restart and a new real user the replayed result stays untagged until a bust strips`, async () => {
         const sessionId = `rr729-lkg-restart-user-flush-${host}`;
-        const s = session(host, sessionId);
+        const s = session(host, sessionId, { memory: true });
         s.user("long task");
         await s.pass();
         s.step(1, 2_400);
@@ -846,11 +846,35 @@ for (const host of HOSTS) {
         s.step(4, 200);
         const deferred = await s.pass();
         expect(toolHeads(deferred.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
-        // A user flush may rewrite the prefix: call-2 is tagged and every signed
-        // block in front of the change is stripped; the record is cleared.
+        // The cached memory/history messages are byte-identical on this flush.
+        // Adding a tag would also change the older reply's text, invalidating
+        // cached history that the provider could otherwise reuse.
+        const headBefore = getOrCreateSessionMeta(s.db, sessionId);
+        const headBytesBefore = [
+            headBefore.cachedM0Bytes?.toString(),
+            headBefore.cachedM1Bytes?.toString(),
+        ];
         s.flush();
         s.step(5, 200);
+        const conversationOnly = await s.pass();
+        const headAfter = getOrCreateSessionMeta(s.db, sessionId);
+        expect([headAfter.cachedM0Bytes?.toString(), headAfter.cachedM1Bytes?.toString()]).toEqual(
+            headBytesBefore,
+        );
+        expect(toolHeads(conversationOnly.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
+        expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
+        // A project memory insert waits for a natural fold. It cannot authorize
+        // tagging an earlier recovered reply while the history head is frozen.
+        s.editMemory("Remember the user's preferred verification command.");
+        const waitingForFold = await s.pass();
+        expect(s.cachedM0()).toBe(headBytesBefore[0]);
+        expect(toolHeads(waitingForFold.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
+        expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
+        // Idle expiry really rebuilds the earlier prefix, admitting both the new
+        // memory and the recovery tags on that same pass.
+        s.idle();
         const flushed = await s.pass();
+        expect(s.cachedM0()).not.toBe(headBytesBefore[0]);
         expect(toolHeads(flushed.messages ?? [])[1]?.startsWith("§")).toBe(true);
         expect(readPersistedLkgUntaggedInputIds(s.db, sessionId)).toEqual([]);
         s.step(6, 200);

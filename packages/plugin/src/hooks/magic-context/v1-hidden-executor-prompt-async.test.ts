@@ -14,6 +14,7 @@ import { shapeV1HiddenMessage } from "../../shared/hidden-zen-read";
 import {
     type PromptArgs,
     promptSyncWithModelSuggestionRetry,
+    promptSyncWithValidatedOutputRetry,
 } from "../../shared/model-suggestion-retry";
 import { recordPromptSessionError } from "../../shared/prompt-async-transport";
 import { Database } from "../../shared/sqlite";
@@ -60,19 +61,22 @@ function host() {
         return { data: undefined };
     });
     const prompt = mock(async () => ({}));
+    const status = mock(async () => ({ data: {} }));
     return {
         client: {
             session: {
                 create: async () => ({ data: { id: "ses-child" } }),
                 promptAsync,
                 prompt,
-                status: async () => ({ data: {} }),
+                status,
                 messages: async () => ({ data: [...messages] }),
                 delete: async () => ({}),
             },
         } as never,
         promptAsync,
         prompt,
+        status,
+        messages,
     };
 }
 
@@ -209,6 +213,70 @@ describe("OpenCode 1 hidden executor transport", () => {
 
             expect(h.promptAsync).toHaveBeenCalledTimes(1);
             expect(h.prompt).not.toHaveBeenCalled();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("a dreamer fallback reuses the child without inheriting the failed model's error", async () => {
+        const db = freshDb();
+        try {
+            const h = host();
+            const executor = createV1HiddenCompletionExecutor(h.client, db, "/repo");
+            const handle = await executor.open(run("dreamer-task"));
+            const attempted: string[] = [];
+            h.promptAsync.mockImplementation(async (...args: unknown[]) => {
+                const model = (args[0] as PromptArgs).body.model!;
+                attempted.push(`${model.providerID}/${model.modelID}`);
+                const primary = model.modelID === "free-model";
+                h.status.mockImplementation(async () => ({
+                    data: primary ? { "ses-child": { type: "retry" } } : {},
+                }));
+                h.messages.push({
+                    info: {
+                        id: `msg-${attempted.length}`,
+                        role: "assistant",
+                        time: { created: attempted.length, ...(primary ? {} : { completed: 3 }) },
+                        ...(primary
+                            ? {
+                                  error: {
+                                      name: "APIError",
+                                      data: {
+                                          statusCode: 429,
+                                          message: "Free usage limit reached",
+                                      },
+                                  },
+                              }
+                            : { finish: "stop" }),
+                    },
+                    parts: primary ? [] : [{ type: "text", text: "<classify/>" }],
+                });
+                return { data: undefined };
+            });
+            const result = await promptSyncWithValidatedOutputRetry(
+                h.client,
+                {
+                    ...request,
+                    body: {
+                        ...request.body,
+                        model: { providerID: "opencode", modelID: "free-model" },
+                    },
+                },
+                {
+                    transport: Object.assign((args: PromptArgs) => executor.attempt(handle, args), {
+                        childSessionId: handle.childSessionId,
+                    }),
+                    timeoutMs: 10_000,
+                    fallbackModels: ["provider/fallback"],
+                    fetchOutput: () => executor.collect(handle, 50),
+                    validateOutput: (completion) => {
+                        if (!completion.text) throw new Error("empty output");
+                        return completion.text;
+                    },
+                },
+            );
+            expect(result.validated).toBe("<classify/>");
+            expect(attempted).toEqual(["opencode/free-model", "provider/fallback"]);
         } finally {
             closeQuietly(db);
         }
@@ -350,6 +418,7 @@ describe("OpenCode 1 historian under a host request timer", () => {
             // loop does not send the prompt into this child a second time.
             await executor.attempt(handle, request);
             expect(h.promptAsync).toHaveBeenCalledTimes(1);
+            await expect(executor.collect(handle, 50)).rejects.toThrow("overloaded");
         } finally {
             h.stop();
             closeQuietly(db);

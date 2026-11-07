@@ -53,6 +53,7 @@ import {
 } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import {
 	clearSessionTracking,
+	scheduleClearAndReindex,
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
@@ -165,6 +166,7 @@ import {
 	convertLegacyToolSkeletons,
 	foldBustsServedPrefix,
 	foldInvalidatesThinking,
+	prepareAgedToolSkeletonConversions,
 	prepareFlushedToolRemovals,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
@@ -299,6 +301,10 @@ import {
 	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import {
+	recordUsageRefusal,
+	shouldResetRefusedUsage,
+} from "@magic-context/core/hooks/magic-context/transform-context-state";
+import {
 	logTransformElapsed as logStageElapsed,
 	withTransformTimingSummary,
 } from "@magic-context/core/hooks/magic-context/transform-stage-logger";
@@ -353,6 +359,12 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
+import {
+	cancelPiAbandonedPendingDrops,
+	piDropBranchIds,
+	reconcilePiDropBranches,
+	trackPiDropLeaf,
+} from "./drop-branches-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
@@ -393,6 +405,7 @@ import {
 	preparePiToolRemovalMeasurements,
 	withPiToolRemovalBatch,
 } from "./native-replay-state-pi";
+import { applyNativeResponseTagReplayPi } from "./native-replay-tags-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
 	projectPiReplayDrops,
@@ -458,6 +471,11 @@ import {
 	resolvePiOrdinalAlignment,
 	resolvePiOrdinalAlignmentForContext,
 } from "./pi-ordinal-alignment";
+import {
+	piRecoveryFitCalibration,
+	piRecoveryToolImageTokens,
+	resolvePiOverflowRecoveryUsage,
+} from "./pi-overflow-recovery";
 import {
 	clearPiLiveUsageClassification,
 	formatPiPressureForLog,
@@ -703,6 +721,7 @@ function logPiLkgRecovery(sessionId: string, message: string): void {
 }
 
 export const __test = {
+	convertLocatedPiUserEntry,
 	stripMcOwnedPiCompactionSummary,
 	readPiFallbackFingerprintHeaders,
 	setBeforePipelineForTests(fn: (() => Promise<void>) | undefined) {
@@ -1322,7 +1341,9 @@ function convertLocatedPiUserEntry(
 			).find((message) => message.id === messageId);
 			return converted ? { ...converted, ordinal: rawOrdinal } : null;
 		}
-		pendingToolStart = -1;
+		// System and other non-chat rows take an ordinal above, but only a user
+		// or assistant row consumes the buffered tool results in the raw converter.
+		if (role === "user" || role === "assistant") pendingToolStart = -1;
 	}
 	return null;
 }
@@ -4278,12 +4299,17 @@ function adoptPiFallbackTags(
 interface PiHistorianStateSnapshot {
 	detectedContextLimit: number;
 	needsEmergencyRecovery: boolean;
+	emergencyRecoveryOrigin:
+		| "provider_overflow"
+		| "proactive_model_shrink"
+		| null;
 	historianFailureCount: number;
 }
 
 const EMPTY_PI_HISTORIAN_STATE_SNAPSHOT: PiHistorianStateSnapshot = {
 	detectedContextLimit: 0,
 	needsEmergencyRecovery: false,
+	emergencyRecoveryOrigin: null,
 	historianFailureCount: 0,
 };
 
@@ -4293,7 +4319,7 @@ function loadPiHistorianStateSnapshot(
 ): PiHistorianStateSnapshot {
 	const row = db
 		.prepare(
-			`SELECT detected_context_limit, needs_emergency_recovery,
+			`SELECT detected_context_limit, needs_emergency_recovery, emergency_recovery_origin,
 			        historian_failure_count
 			   FROM session_meta
 			  WHERE session_id = ?`,
@@ -4302,6 +4328,7 @@ function loadPiHistorianStateSnapshot(
 		| {
 				detected_context_limit?: unknown;
 				needs_emergency_recovery?: unknown;
+				emergency_recovery_origin?: unknown;
 				historian_failure_count?: unknown;
 		  }
 		| undefined;
@@ -4314,6 +4341,11 @@ function loadPiHistorianStateSnapshot(
 		needsEmergencyRecovery:
 			typeof row?.needs_emergency_recovery === "number" &&
 			row.needs_emergency_recovery > 0,
+		emergencyRecoveryOrigin:
+			row?.emergency_recovery_origin === "provider_overflow" ||
+			row?.emergency_recovery_origin === "proactive_model_shrink"
+				? row.emergency_recovery_origin
+				: null,
 		historianFailureCount:
 			typeof row?.historian_failure_count === "number" &&
 			row.historian_failure_count >= 0
@@ -4385,6 +4417,48 @@ export function registerPiContextHandler(
 		}
 		return s;
 	};
+
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "ctx_reduce") return;
+		const sessionId = resolveSessionId(ctx);
+		if (sessionId)
+			trackPiDropLeaf(
+				baseOptions.db,
+				sessionId,
+				ctx.sessionManager.getLeafId(),
+			);
+	});
+	pi.on("session_tree", (event, ctx) => {
+		if (event.oldLeafId === event.newLeafId) return;
+		const sessionId = resolveSessionId(ctx);
+		if (!sessionId) return;
+		// Pi and Oh My Pi emit session_tree after committing the new leaf. Read
+		// that branch in the background instead of data captured by the previous turn.
+		let entries: readonly unknown[] = [];
+		let offset = 0;
+		scheduleClearAndReindex(baseOptions.db, sessionId, {
+			prepare: async () => {
+				if (resolveSessionId(ctx) !== sessionId) return false;
+				entries = ctx.sessionManager.getBranch();
+				const alignment = resolvePiOrdinalAlignment(
+					baseOptions.db,
+					sessionId,
+					entries,
+				);
+				offset = alignment.offset;
+				return !isPiOrdinalAlignmentUnanchored(alignment);
+			},
+			getCount: () => countPiRawMessages(entries, offset),
+			readPage: (_session, after, limit, watermark) =>
+				convertEntriesToRawMessagePage(
+					entries,
+					after,
+					limit,
+					watermark,
+					offset,
+				),
+		});
+	});
 
 	pi.on("thinking_level_select", async (event, ctx) => {
 		if (event.previousLevel === event.level) return;
@@ -5080,6 +5154,11 @@ export function registerPiContextHandler(
 			}
 			// Model change invalidates the safe-token baseline + alert state too
 			// (new model, new limits), so it clears all four pressure fields.
+			const usageResetAfterRefusal = shouldResetRefusedUsage(
+				options.db,
+				sessionId,
+				sessionMetaForUsage,
+			);
 			const usageReset = {
 				lastContextPercentage: 0,
 				lastInputTokens: 0,
@@ -5116,12 +5195,12 @@ export function registerPiContextHandler(
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
 			} else if (
-				isFirstContextPassForSession &&
+				(isFirstContextPassForSession || usageResetAfterRefusal) &&
 				sessionMetaForUsage.lastContextPercentage > 0
 			) {
-				// First pass after restart (same model): clear ONLY the two stale
-				// pressure fields. Gate on lastContextPercentage>0 (matches OpenCode
-				// transform.ts first-pass). historian-failure state and the
+				// A restart, or history landed after a refused turn, invalidates only
+				// the pressure fields, not permission to rebuild the cached prefix.
+				// As on OpenCode, historian-failure state and the
 				// reasoning watermark MUST be preserved — restart recovery uses the
 				// failure backoff, and clearing the reasoning watermark would
 				// resurface previously cleared reasoning (a cache bust + larger
@@ -5131,7 +5210,7 @@ export function registerPiContextHandler(
 				// too — only lastContextPercentage/lastInputTokens are cleared).
 				sessionLog(
 					sessionId,
-					`transform: first pass reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+					`transform: ${isFirstContextPassForSession ? "first pass" : "refused turn recovery"} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
 				updateSessionMeta(options.db, sessionId, {
 					lastContextPercentage: 0,
@@ -5155,7 +5234,9 @@ export function registerPiContextHandler(
 				usagePercentage = sessionMetaForUsage.lastContextPercentage;
 				usageInputTokens = sessionMetaForUsage.lastInputTokens;
 				usedPersistedUsage = true;
-			} else {
+			} else if (!usageResetAfterRefusal) {
+				// Pi's live figure still includes the old provider reading until a
+				// reply arrives, so it cannot undo a history-driven reset.
 				usagePercentage =
 					typeof piUsage?.percent === "number" ? piUsage.percent : 0;
 				usageInputTokens =
@@ -5296,6 +5377,7 @@ export function registerPiContextHandler(
 			let fallbackInputTokens: number | undefined;
 			const suspectReading = Math.max(usageInputTokens, piUsage?.tokens ?? 0);
 			if (
+				usageResetAfterRefusal ||
 				suspectReading > providerInputLimit ||
 				piProviderUsageWasRejected(sessionId)
 			) {
@@ -5341,7 +5423,7 @@ export function registerPiContextHandler(
 					persistedFromLive: !usedPersistedUsage,
 					persistedPercentage: usagePercentage,
 					persistedInputTokens: usageInputTokens,
-					liveInputTokens: piUsage?.tokens,
+					liveInputTokens: usageResetAfterRefusal ? undefined : piUsage?.tokens,
 					usableContextLimit: usageContextLimit,
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;
@@ -5716,6 +5798,10 @@ export function registerPiContextHandler(
 				);
 			}
 			const pipelineArgs: RunPipelineArgs = {
+				providerOverflowRecovery:
+					emergencyRecoveryArmed &&
+					historianStateForPass.emergencyRecoveryOrigin === "provider_overflow",
+				dropBranchEntries: branchEntries ?? undefined,
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
 				assertCurrentPass,
@@ -6173,6 +6259,26 @@ export function registerPiContextHandler(
 					});
 				}
 			}
+			if (
+				options.autoSearch &&
+				!options.autoSearch.enabled &&
+				!options.compactionOff &&
+				result.prefixMutationAllowed
+			) {
+				await runAutoSearchHintForPi({
+					sessionId,
+					db: options.db,
+					messages: outputMessages,
+					entryIds: strictEntryIds,
+					entryIdByRef: result.postCommitEntryIdByRef,
+					options: {
+						enabled: false,
+						scoreThreshold: options.autoSearch.scoreThreshold,
+						minPromptChars: options.autoSearch.minPromptChars,
+						projectPath: projectIdentity,
+					},
+				});
+			}
 			logTransformTiming(sessionId, "autoSearch", tAutoSearch);
 
 			// Synthetic todowrite injection — Pi parity with OpenCode's
@@ -6320,176 +6426,181 @@ export function registerPiContextHandler(
 					result.syntheticLeadingCount = prefix.length;
 			}
 
-			// Walk Pi's final rendered entry stream once to calculate both nudge-channel
-			// totals. A cache-busting pass replaces the saved baseline; a deferred pass
-			// keeps it and adds only newly appended content and protection-boundary moves.
-			const tChannelAccounting = performance.now();
-			try {
-				const sessionMetaForCh1 = sessionMeta;
-				if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
-					const { tags, protectedTagNumbers, pendingDropTagNumbers } =
-						result.channelBaselineSnapshot;
-					const stableId = (message: unknown): string | undefined =>
-						message && typeof message === "object"
-							? result.postCommitEntryIdByRef.get(message)
-							: undefined;
-					const hygieneCalibration = sessionDecisionCalibration(
-						options.db,
-						sessionId,
-					);
-					const hygieneUnitsVersion = transitionSessionHygieneUnits(
-						options.db,
-						sessionId,
-						result.bustedThisPass,
-						hygieneCalibration,
-					);
-					const previousBaseline = getPiChannel1Baseline(sessionId);
-					const baseline = refreshPiTailHygieneBaseline({
-						messages: outputMessages,
-						providerApi: ctx.model?.api,
-						tags,
-						tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
-						protectedTagNumbers,
-						protectedTools: options.protectedTools,
-						pendingDropTagNumbers,
-						stableId,
-						// Only active rows can be protected; the active projection gives
-						// the same numbers without sorting every historical tag.
-						protectedToolTags: protectedToolTagNumbers(
-							result.channelBaselineSnapshot.activeTags,
-							options.protectedTools,
-						),
-						syntheticLeadingCount: result.syntheticLeadingCount,
-						cacheBusting: result.bustedThisPass,
-						previous: previousBaseline,
-						calibration:
-							hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
-								? hygieneCalibration
-								: undefined,
-						hygieneUnitsVersion,
-					});
-					const effective = effectivePiTailHygiene(baseline);
-					// One line per invalidation event, not one per pass: the baseline
-					// only carries a mismatch on the pass that re-measured because of it.
-					if (baseline.lastPrefixMismatch) {
-						sessionLog(
+			// Only the request that survives recovery may publish nudge baselines or metrics.
+			const publishFinalRequestAccounting = () => {
+				// Walk Pi's final rendered entry stream once to calculate both nudge-channel
+				// totals. A cache-busting pass replaces the saved baseline; a deferred pass
+				// keeps it and adds newly appended content and changes in which tags are protected.
+				const tChannelAccounting = performance.now();
+				try {
+					const sessionMetaForCh1 = sessionMeta;
+					if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
+						const { tags, protectedTagNumbers, pendingDropTagNumbers } =
+							result.channelBaselineSnapshot;
+						const stableId = (message: unknown): string | undefined =>
+							message && typeof message === "object"
+								? result.postCommitEntryIdByRef.get(message)
+								: undefined;
+						const hygieneCalibration = sessionDecisionCalibration(
+							options.db,
 							sessionId,
-							formatTailHygienePrefixMismatch(
-								baseline.lastPrefixMismatch,
-								baseline.baselineGeneration,
-							),
 						);
-					}
-					const durableGrace =
-						baseline.evaluable && !baseline.generationInvalidated
-							? captureChannel1PostReduceGraceBaseline(
-									options.db,
-									sessionId,
-									effective.u,
-								)
-							: getChannel1NudgeState(options.db, sessionId);
-					baseline.channel1PostReduceGrace =
-						durableGrace.postReduceGracePending ||
-						durableGrace.postReduceGraceBaselineU !== undefined
-							? {
-									pending: durableGrace.postReduceGracePending === true,
-									baselineU: durableGrace.postReduceGraceBaselineU,
-									preReduceLevel:
-										durableGrace.postReduceGracePreLevel ?? durableGrace.level,
-								}
-							: undefined;
-					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
-						options.db,
-						sessionId,
-						protectedTagNumbers,
-					);
-					const channelState = {
-						...baseline,
-						usableWindow: usageContextLimit ?? 0,
-						realUserTurnCount: baseline.realUserTurnCount,
-						reducedSinceRefresh: false,
-						agentDropsAppliedThisPass: result.agentDropsAppliedThisPass,
-						oldestReclaimableToolTags,
-					};
-					setPiChannel1Baseline(sessionId, channelState);
-
-					const channel2Evaluation = evaluateChannel2(channelState);
-					if (channel2Evaluation.evaluable) {
-						try {
-							rearmChannel2AfterMeasuredCollapse({
-								db: options.db,
-								sessionId,
-								baseline: channelState,
-								rebuilding: result.bustedThisPass,
-								previous: previousBaseline,
-							});
-						} catch (error) {
-							sessionLog(
-								sessionId,
-								`pi channel2 U-collapse reset failed: ${error instanceof Error ? error.message : String(error)}`,
-							);
-						}
-						if (channel2Evaluation.shouldTrigger) {
-							casChannel2NudgeState(options.db, sessionId, "", "pending");
-						} else {
-							casChannel2NudgeState(options.db, sessionId, "pending", "");
-						}
-					}
-
-					assertTailHygieneLastWriter = () =>
-						assertPiTailHygieneContentUnchanged({
+						const hygieneUnitsVersion = transitionSessionHygieneUnits(
+							options.db,
+							sessionId,
+							result.bustedThisPass,
+							hygieneCalibration,
+						);
+						const previousBaseline = getPiChannel1Baseline(sessionId);
+						const baseline = refreshPiTailHygieneBaseline({
 							messages: outputMessages,
+							providerApi: ctx.model?.api,
 							tags,
+							tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
 							protectedTagNumbers,
+							protectedTools: options.protectedTools,
 							pendingDropTagNumbers,
 							stableId,
+							// Only active rows can be protected; the active projection gives
+							// the same numbers without sorting every historical tag.
+							protectedToolTags: protectedToolTagNumbers(
+								result.channelBaselineSnapshot.activeTags,
+								options.protectedTools,
+							),
 							syntheticLeadingCount: result.syntheticLeadingCount,
-							expectedSignature: baseline.contentSignature,
+							cacheBusting: result.bustedThisPass,
+							previous: previousBaseline,
+							calibration:
+								hygieneUnitsVersion >= HYGIENE_PROVIDER_UNITS_VERSION
+									? hygieneCalibration
+									: undefined,
+							hygieneUnitsVersion,
 						});
-				} else {
-					clearPiChannel1State(sessionId);
-				}
-			} catch (err) {
-				const stale = getPiChannel1Baseline(sessionId);
-				if (stale) {
-					stale.evaluable = false;
-					stale.generationInvalidated = true;
-				}
-				sessionLog(
-					sessionId,
-					`channel1 baseline / channel2 trigger failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-			logTransformTiming(
-				sessionId,
-				"channelNudgeAccounting",
-				tChannelAccounting,
-			);
+						const effective = effectivePiTailHygiene(baseline);
+						// One line per invalidation event, not one per pass: the baseline
+						// only carries a mismatch on the pass that re-measured because of it.
+						if (baseline.lastPrefixMismatch) {
+							sessionLog(
+								sessionId,
+								formatTailHygienePrefixMismatch(
+									baseline.lastPrefixMismatch,
+									baseline.baselineGeneration,
+								),
+							);
+						}
+						const durableGrace =
+							baseline.evaluable && !baseline.generationInvalidated
+								? captureChannel1PostReduceGraceBaseline(
+										options.db,
+										sessionId,
+										effective.u,
+									)
+								: getChannel1NudgeState(options.db, sessionId);
+						baseline.channel1PostReduceGrace =
+							durableGrace.postReduceGracePending ||
+							durableGrace.postReduceGraceBaselineU !== undefined
+								? {
+										pending: durableGrace.postReduceGracePending === true,
+										baselineU: durableGrace.postReduceGraceBaselineU,
+										preReduceLevel:
+											durableGrace.postReduceGracePreLevel ??
+											durableGrace.level,
+									}
+								: undefined;
+						const oldestReclaimableToolTags =
+							getOldestActiveUnprotectedToolTags(
+								options.db,
+								sessionId,
+								protectedTagNumbers,
+							);
+						const channelState = {
+							...baseline,
+							usableWindow: usageContextLimit ?? 0,
+							realUserTurnCount: baseline.realUserTurnCount,
+							reducedSinceRefresh: false,
+							agentDropsAppliedThisPass: result.agentDropsAppliedThisPass,
+							oldestReclaimableToolTags,
+						};
+						setPiChannel1Baseline(sessionId, channelState);
 
-			// Work-metrics update runs on EVERY transform pass (not just
-			// execute passes). The Pi compute helper is pure-read on
-			// outputMessages; setSessionWorkMetrics is a pure write to
-			// session_meta (no tag state, no message[0] mutation, no
-			// cache-busting). Gating on executedWorkThisPass would mean
-			// sessions sitting below execute threshold never see populated
-			// values, making Pi's status surface permanently zero.
-			const tWorkMetrics = performance.now();
-			budget.stage = "bookkeeping";
-			try {
-				const metrics = computePiWorkMetrics(outputMessages as unknown[]);
-				setSessionWorkMetrics(
-					options.db,
+						const channel2Evaluation = evaluateChannel2(channelState);
+						if (channel2Evaluation.evaluable) {
+							try {
+								rearmChannel2AfterMeasuredCollapse({
+									db: options.db,
+									sessionId,
+									baseline: channelState,
+									rebuilding: result.bustedThisPass,
+									previous: previousBaseline,
+								});
+							} catch (error) {
+								sessionLog(
+									sessionId,
+									`pi channel2 U-collapse reset failed: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							}
+							if (channel2Evaluation.shouldTrigger) {
+								casChannel2NudgeState(options.db, sessionId, "", "pending");
+							} else {
+								casChannel2NudgeState(options.db, sessionId, "pending", "");
+							}
+						}
+
+						assertTailHygieneLastWriter = () =>
+							assertPiTailHygieneContentUnchanged({
+								messages: outputMessages,
+								tags,
+								protectedTagNumbers,
+								pendingDropTagNumbers,
+								stableId,
+								syntheticLeadingCount: result.syntheticLeadingCount,
+								expectedSignature: baseline.contentSignature,
+							});
+					} else {
+						clearPiChannel1State(sessionId);
+					}
+				} catch (err) {
+					const stale = getPiChannel1Baseline(sessionId);
+					if (stale) {
+						stale.evaluable = false;
+						stale.generationInvalidated = true;
+					}
+					sessionLog(
+						sessionId,
+						`channel1 baseline / channel2 trigger failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+				logTransformTiming(
 					sessionId,
-					metrics.newWorkTokens,
-					metrics.totalInputTokens,
+					"channelNudgeAccounting",
+					tChannelAccounting,
 				);
-			} catch (err) {
-				sessionLog(
-					sessionId,
-					`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-			logTransformTiming(sessionId, "workMetrics", tWorkMetrics);
+
+				// Work-metrics update runs on EVERY transform pass (not just
+				// execute passes). The Pi compute helper is pure-read on
+				// outputMessages; setSessionWorkMetrics is a pure write to
+				// session_meta (no tag state, no message[0] mutation, no
+				// cache-busting). Gating on executedWorkThisPass would mean
+				// sessions sitting below execute threshold never see populated
+				// values, making Pi's status surface permanently zero.
+				const tWorkMetrics = performance.now();
+				budget.stage = "bookkeeping";
+				try {
+					const metrics = computePiWorkMetrics(outputMessages as unknown[]);
+					setSessionWorkMetrics(
+						options.db,
+						sessionId,
+						metrics.newWorkTokens,
+						metrics.totalInputTokens,
+					);
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+				logTransformTiming(sessionId, "workMetrics", tWorkMetrics);
+			};
 
 			const tStableIdSchemePersist = performance.now();
 			if (stableIdSchemeCutover && !options.compactionOff) {
@@ -6685,6 +6796,35 @@ export function registerPiContextHandler(
 					);
 				if (getHarness() === "pi") {
 					const fitCase = classifyPiOutgoingFit(estimate, outgoingFitLimit);
+					// Only an already-permitted rebuild may price recovery from the
+					// rendered request. Pi's original message list still contains tool outputs removed
+					// from previous outgoing requests. The provider's last successful
+					// input-token reading also predates the rejected request.
+					const recoverUnknownUsage =
+						usageInputTokens <= 0 &&
+						result.prefixBustPermitted &&
+						emergencyRecoveryArmed &&
+						historianStateForPass.emergencyRecoveryOrigin ===
+							"provider_overflow";
+					let unknownUsageRecovered = false;
+					const recoveryUsage = resolvePiOverflowRecoveryUsage({
+						usage: pipelineArgs.contextUsage,
+						pricedPass: result.prefixBustPermitted,
+						providerOverflow: recoverUnknownUsage,
+						messages: outputMessages,
+						envelope,
+						usableHardLimit: outgoingFitLimit,
+					});
+					if (
+						recoverUnknownUsage &&
+						(!(recoveryUsage.inputTokens > 0) ||
+							!((emergencyCeilingTokens ?? 0) > 0) ||
+							!Number.isFinite(outgoingFitLimit) ||
+							!((outgoingFitLimit ?? 0) > 0))
+					)
+						throw contextRefusalError(
+							"Provider overflow recovery has unknown-usage: a complete outgoing request estimate and context limit are required before retrying",
+						);
 					const currentUpperCursor = () =>
 						piUpperReclaimCursor({
 							sessionId,
@@ -6696,7 +6836,7 @@ export function registerPiContextHandler(
 							input: inputForFitReclaim ?? event.messages,
 						});
 					const upperCursor =
-						fitCase === "upper-estimate-pressure"
+						fitCase === "upper-estimate-pressure" && !recoverUnknownUsage
 							? currentUpperCursor()
 							: undefined;
 					if (fitCase === "over-window-proof") {
@@ -6714,6 +6854,7 @@ export function registerPiContextHandler(
 						forceMaterialization ||
 						isEmergency;
 					const reclaimHeld =
+						!recoverUnknownUsage &&
 						fitCase === "upper-estimate-pressure" &&
 						(result.strictThinkingKept ||
 							!upperPassEligible ||
@@ -6732,7 +6873,7 @@ export function registerPiContextHandler(
 						// Never copy an already-rendered prefix to retry its injection.
 						requestPiFitReclaimInput(sessionId);
 					if (
-						fitCase !== "fits-or-unknown" &&
+						(fitCase !== "fits-or-unknown" || recoverUnknownUsage) &&
 						!reclaimHeld &&
 						!fitReclaimedThisPass &&
 						!inputForFitReclaim
@@ -6742,7 +6883,7 @@ export function registerPiContextHandler(
 							branchEntries,
 						);
 					if (
-						fitCase !== "fits-or-unknown" &&
+						(fitCase !== "fits-or-unknown" || recoverUnknownUsage) &&
 						!reclaimHeld &&
 						!fitReclaimedThisPass &&
 						inputForFitReclaim
@@ -6752,6 +6893,7 @@ export function registerPiContextHandler(
 							: undefined;
 						if (!upperCursor || reservation) {
 							let reclaimCompleted = false;
+							const recoveryRetryStart = performance.now();
 							try {
 								sessionLog(
 									sessionId,
@@ -6817,7 +6959,9 @@ export function registerPiContextHandler(
 										schedulerDecision: "execute",
 										schedulerDeferReason: null,
 										forceMaterialization: true,
-										upperEstimateOnly: fitCase === "upper-estimate-pressure",
+										upperEstimateOnly:
+											!recoverUnknownUsage &&
+											fitCase === "upper-estimate-pressure",
 										forceSignedRebuildForFit: fitCase === "over-window-proof",
 										isCacheBusting:
 											historyRefreshSessions.has(sessionId) ||
@@ -6830,14 +6974,19 @@ export function registerPiContextHandler(
 													sessionMeta: freshMeta,
 												})
 											: undefined,
-										contextUsage: {
-											percentage: usagePercentage,
-											inputTokens: usageInputTokens,
-										},
+										contextUsage: recoverUnknownUsage
+											? recoveryUsage
+											: pipelineArgs.contextUsage,
 									}),
 								);
 								outputMessages = result.messages as PiAgentMessage[];
 								observePipelineResultForTests(sessionId, result);
+								unknownUsageRecovered = recoverUnknownUsage;
+								if (recoverUnknownUsage)
+									sessionLog(
+										sessionId,
+										`overflow unknown-usage recovery: inputTokens=${recoveryUsage.inputTokens} retryMs=${(performance.now() - recoveryRetryStart).toFixed(1)}`,
+									);
 								// Reclaim replaces the postprocessed output with a pristine-input
 								// rebuild. Restore the todo pair before stripping and measuring it.
 								injectTodo();
@@ -6882,6 +7031,10 @@ export function registerPiContextHandler(
 							}
 						}
 					}
+					if (recoverUnknownUsage && !unknownUsageRecovered)
+						throw contextRefusalError(
+							"Provider overflow recovery has unknown-usage: a pristine request is required for emergency reclaim",
+						);
 				}
 				const refusal = outgoingContextRefusal(
 					estimate,
@@ -6952,6 +7105,7 @@ export function registerPiContextHandler(
 					clearPiChannel1State(sessionId);
 				}
 			} else finishPrefix(false);
+			publishFinalRequestAccounting();
 			let serializedOutput: PiLkgSerializedOutput | undefined;
 			let numbersCommitted = false;
 			budget.stage = "LKG/served publication";
@@ -7458,6 +7612,8 @@ export function registerPiContextHandler(
 		onRefusal: (ctx, budget, message, isCurrent) => {
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) return;
+			// The guarded hook calls this only for an actual unsent turn, not an LKG replay.
+			if (!budget.sideTurn) recordUsageRefusal(baseOptions.db, sessionId);
 			withoutSqliteTransformPass(() =>
 				setImmediate(() => {
 					if (!isCurrent()) return;
@@ -8515,6 +8671,8 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	providerOverflowRecovery?: boolean;
+	dropBranchEntries?: readonly unknown[];
 	evaluateHistorianBeforeReclaim?: (
 		result: Pick<
 			RunPipelineResult,
@@ -9590,6 +9748,16 @@ function runSynchronousPipeline(
 					).value,
 				)
 			: Number.MAX_SAFE_INTEGER;
+	const dropBranchEntries = args.dropBranchEntries;
+	const dropBranchIds = dropBranchEntries
+		? piDropBranchIds(dropBranchEntries)
+		: null;
+	trackPiDropLeaf(
+		args.db,
+		args.sessionId,
+		dropBranchIds ? ([...dropBranchIds].at(-1) ?? null) : null,
+	);
+	cancelPiAbandonedPendingDrops(args.db, args.sessionId, dropBranchIds);
 	const thinkingRecovery = prepareLatestThinkingRecovery({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -10815,9 +10983,18 @@ function runSynchronousPipeline(
 	const tTag = performance.now();
 	// Part getters build fresh proxy objects. Reuse one view for tagging and
 	// safety coordinates; its proxies still read/write the working messages.
+	const strippedSubagentThinking =
+		args.sessionMeta.isSubagent &&
+		(!thinkingRecovery.restore || rewritingSignedPrefix)
+			? frozenBindingEntryIds(args.db, args.sessionId)
+			: new Set<string>();
 	const mutationView = transcript.messages.map((message) => ({
 		...message,
 		parts: message.parts,
+		// Persisted thinking removals release subagent arcs even when tagging sees raw thinking.
+		requiresToolArcSkeleton: strippedSubagentThinking.has(message.info.id ?? "")
+			? false
+			: message.requiresToolArcSkeleton,
 	}));
 	const prefixTexts = new Map<unknown, string | undefined>();
 	if (
@@ -11260,76 +11437,116 @@ function runSynchronousPipeline(
 	// crash between the two leaves the tags legacy until the next HARD fold.
 	// Either way the next served request already carries the fold's new cached
 	// prefix, so it is a cache bust regardless of the tool bytes.
-	const tLegacyToolConversion = performance.now();
-	if (foldBustsServedPrefixThisPass) {
-		const savedRemovalInputs = nativeRemovalInputs;
-		try {
-			// Marker writes share the conversion transaction. Publish their in-memory
-			// view only with that commit, not with a nested savepoint that may roll back.
-			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
-			let converted = 0;
-			pair(
-				() =>
-					args.db
-						.transaction(() =>
-							removalBatch((flush) => {
-								converted = convertLegacyToolSkeletons(
-									args.db,
-									args.sessionId,
-									targets,
-									{
-										prepareRemovals: (rows) =>
-											preparePiToolRemovalChecks({
-												db: args.db,
-												rows,
-												targets,
-												messages: args.messages,
-												prepare: transcript.prepareToolRemovalMeasurements,
-											}),
-										// NATIVE_TOOL_REMOVAL_MARKER records removal of both the call
-										// and its result, rather than replacement with a text marker.
-										// Preserve that full-removal mode across model switches. If
-										// nativeRemovalInputs could not be read, retain every existing
-										// full-removal decision instead of guessing a new representation.
-										keepFullDrop: (callId) =>
-											nativeRemovalInputs === undefined ||
-											(callId !== null &&
-												authorizePiToolRemoval({
+	// Restore abandoned branch drops before converting the surviving tool pairs.
+	const applyExistingToolConversions = () => {
+		const tLegacyToolConversion = performance.now();
+		if (foldBustsServedPrefixThisPass) {
+			const savedRemovalInputs = nativeRemovalInputs;
+			try {
+				// Marker writes share the conversion transaction. Publish their in-memory
+				// view only with that commit, not with a nested savepoint that may roll back.
+				nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+				let converted = 0;
+				pair(
+					() =>
+						args.db
+							.transaction(() =>
+								removalBatch((flush) => {
+									converted = convertLegacyToolSkeletons(
+										args.db,
+										args.sessionId,
+										targets,
+										{
+											prepareRemovals: (rows) =>
+												preparePiToolRemovalChecks({
 													db: args.db,
-													sessionId: args.sessionId,
-													callId,
-													saved: nativeRemovalInputs,
-													canApply: false,
-												}) === true),
-									},
-								).size;
-								flush();
-							}),
-						)
-						.immediate(),
-				() => converted > 0,
-			);
-			if (converted > 0) {
+													rows,
+													targets,
+													messages: args.messages,
+													prepare: transcript.prepareToolRemovalMeasurements,
+												}),
+											// NATIVE_TOOL_REMOVAL_MARKER records removal of both the call
+											// and its result, rather than replacement with a text marker.
+											// Preserve that full-removal mode across model switches. If
+											// nativeRemovalInputs could not be read, retain every existing
+											// full-removal decision instead of guessing a new representation.
+											keepFullDrop: (callId) =>
+												nativeRemovalInputs === undefined ||
+												(callId !== null &&
+													authorizePiToolRemoval({
+														db: args.db,
+														sessionId: args.sessionId,
+														callId,
+														saved: nativeRemovalInputs,
+														canApply: false,
+													}) === true),
+										},
+									).size;
+									flush();
+								}),
+							)
+							.immediate(),
+					() => converted > 0,
+				);
+				if (converted > 0) {
+					sessionLog(
+						args.sessionId,
+						`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+					);
+				}
+			} catch (error) {
+				nativeRemovalInputs = savedRemovalInputs;
+				if (error instanceof PiCompanionFailure) throw error;
 				sessionLog(
 					args.sessionId,
-					`pi HARD fold converted ${converted} legacy dropped-tool skeleton(s) to real-or-absent`,
+					`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-		} catch (error) {
-			nativeRemovalInputs = savedRemovalInputs;
-			if (error instanceof PiCompanionFailure) throw error;
-			sessionLog(
-				args.sessionId,
-				`pi legacy dropped-tool skeleton conversion failed (kept legacy bytes): ${error instanceof Error ? error.message : String(error)}`,
-			);
 		}
-	}
 
-	logTransformTiming(
-		args.sessionId,
-		"convertLegacyToolSkeletons",
-		tLegacyToolConversion,
-	);
+		logTransformTiming(
+			args.sessionId,
+			"convertLegacyToolSkeletons",
+			tLegacyToolConversion,
+		);
+		if (
+			args.sessionMeta.isSubagent &&
+			isCacheBustingPass &&
+			!protectedSignedPrefix &&
+			!args.compactionOff
+		) {
+			const savedRemovalInputs = nativeRemovalInputs;
+			try {
+				nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+				const converted = applyToolRemovalGroup(
+					() => {
+						const conversions = prepareAgedToolSkeletonConversions(
+							args.db,
+							args.sessionId,
+							newTargets,
+							{
+								prepareRemovals: (rows) =>
+									preparePiToolRemovalChecks({
+										db: args.db,
+										rows,
+										targets: newTargets,
+										messages: args.messages,
+										prepare: transcript.prepareToolRemovalMeasurements,
+									}),
+							},
+						);
+						conversions.persist(args.db);
+						return conversions.converted.size;
+					},
+					(count) => count > 0,
+				);
+				if (converted > 0) recordFirstApplicationWireEdit(true);
+			} catch (error) {
+				nativeRemovalInputs = savedRemovalInputs;
+				throw error;
+			}
+		}
+	};
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the
@@ -11391,59 +11608,64 @@ function runSynchronousPipeline(
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
 			firstRenderBust);
-	const pendingOps = shouldReadPendingOps
-		? getPendingOps(args.db, args.sessionId)
-		: [];
+	const readPendingDropState = () => {
+		const pendingOps = shouldReadPendingOps
+			? getPendingOps(args.db, args.sessionId)
+			: [];
+		const protectedToolTags = protectedToolTagNumbers(
+			getActiveTagsBySession(args.db, args.sessionId),
+			args.protectedTools,
+		);
+		for (const number of identityAdoption.protectedTagNumbers)
+			protectedToolTags.add(number);
+		const protectionWindowForPass = getProtectionWindowForSession(
+			args.db,
+			args.sessionId,
+			protectionFloorResolution.floor,
+		);
+		const protectedTagNumbersForPass = usesTokenProtection
+			? protectionWindowForPass.protectedTagNumbers
+			: newestActiveTagNumbersByCount(
+					getActiveTagsBySession(args.db, args.sessionId),
+					args.protectedTags,
+				);
+		const pendingOperationTags =
+			pendingOps.length > 0
+				? getTagsForPendingOperations(
+						args.db,
+						args.sessionId,
+						pendingOps.map((operation) => operation.tagId),
+						usesTokenProtection ? 0 : args.protectedTags,
+						RECENT_TOOL_SKELETON_WINDOW,
+					)
+				: [];
+		return {
+			pendingOps,
+			protectedToolTags,
+			protectionWindowForPass,
+			protectedTagNumbersForPass,
+			pendingOperationTags,
+		};
+	};
+	const executeReclaimSnapshot = readPendingDropState();
 	if (
 		rideSignals.explicitFlush &&
-		pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
+		executeReclaimSnapshot.pendingOps.some(
+			(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
+		)
 	)
 		parkedTriggers?.holdMaterialization(heldMaterializationReason);
 	if (
 		holdEnabled &&
 		args.schedulerDecision === "execute" &&
 		!emergencyDropEligible &&
-		pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
+		executeReclaimSnapshot.pendingOps.some(
+			(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
+		)
 	) {
 		signalPiPendingMaterialization(args.sessionId);
 		parkedTriggers?.holdMaterialization(heldMaterializationReason);
 	}
-	const tReclaimDistance = performance.now();
-	const reclaimDistance = isCacheBustingPass
-		? toolReclaimDistanceEntries(mutationView, targets)
-		: [];
-	logTransformTiming(
-		args.sessionId,
-		"toolReclaimDistanceEntries",
-		tReclaimDistance,
-	);
-	const protectedToolTags = protectedToolTagNumbers(
-		getActiveTagsBySession(args.db, args.sessionId),
-		args.protectedTools,
-	);
-	for (const number of identityAdoption.protectedTagNumbers)
-		protectedToolTags.add(number);
-	const protectionWindowForPass = getProtectionWindowForSession(
-		args.db,
-		args.sessionId,
-		protectionFloorResolution.floor,
-	);
-	const protectedTagNumbersForPass = usesTokenProtection
-		? protectionWindowForPass.protectedTagNumbers
-		: newestActiveTagNumbersByCount(
-				getActiveTagsBySession(args.db, args.sessionId),
-				args.protectedTags,
-			);
-	const pendingOperationTags =
-		pendingOps.length > 0
-			? getTagsForPendingOperations(
-					args.db,
-					args.sessionId,
-					pendingOps.map((operation) => operation.tagId),
-					usesTokenProtection ? 0 : args.protectedTags,
-					RECENT_TOOL_SKELETON_WINDOW,
-				)
-			: [];
 	if (!args.sessionMeta.isSubagent && args.schedulerDecision === "execute") {
 		args.evaluateHistorianBeforeReclaim?.({
 			activeTags: getActiveTagsBySession(args.db, args.sessionId),
@@ -11470,12 +11692,12 @@ function runSynchronousPipeline(
 		reclaimableTokens: estimateExecuteReclaimTokens({
 			db: args.db,
 			sessionId: args.sessionId,
-			pendingOps,
-			tags: pendingOperationTags,
+			pendingOps: executeReclaimSnapshot.pendingOps,
+			tags: executeReclaimSnapshot.pendingOperationTags,
 			targets: newTargets,
 			protectedTagIds: new Set([
-				...protectedTagNumbersForPass,
-				...protectedToolTags,
+				...executeReclaimSnapshot.protectedTagNumbersForPass,
+				...executeReclaimSnapshot.protectedToolTags,
 			]),
 			probePreparation: (targets) => {
 				const saved = nativeRemovalInputs;
@@ -11517,6 +11739,46 @@ function runSynchronousPipeline(
 		stripUnheldSignedTurnOnBust();
 		applyTemporalOnRide();
 	}
+	// Branch restoration rides the final permission, including late execute and
+	// signed-prefix rebuilds. Refresh the drain's tag and protection snapshots to
+	// include restored content; abandoned queued drops were cancelled before pricing.
+	if (
+		pair(
+			() =>
+				reconcilePiDropBranches(
+					args.db,
+					args.sessionId,
+					dropBranchIds,
+					isCacheBustingPass && !protectedSignedPrefix,
+				),
+			(restored) => restored > 0,
+		)
+	) {
+		args.tagger.cleanup(args.sessionId);
+		args.tagger.initFromDb(args.sessionId, args.db);
+		nativeRemovalInputs = getNativeReplayState(
+			args.db,
+			args.sessionId,
+		).toolInputs;
+		recordFirstApplicationWireEdit(true);
+	}
+	applyExistingToolConversions();
+	const {
+		pendingOps,
+		protectedToolTags,
+		protectionWindowForPass,
+		protectedTagNumbersForPass,
+		pendingOperationTags,
+	} = readPendingDropState();
+	const tReclaimDistance = performance.now();
+	const reclaimDistance = isCacheBustingPass
+		? toolReclaimDistanceEntries(mutationView, targets)
+		: [];
+	logTransformTiming(
+		args.sessionId,
+		"toolReclaimDistanceEntries",
+		tReclaimDistance,
+	);
 
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
@@ -11840,6 +12102,11 @@ function runSynchronousPipeline(
 	if (shouldRunHeuristics && args.heuristics) {
 		try {
 			const tHeuristic = performance.now();
+			const providerOverflow = args.providerOverflowRecovery === true;
+			const recoveryCalibration = sessionDecisionCalibration(
+				args.db,
+				args.sessionId,
+			);
 			const independentMutationBeforeHeuristics =
 				pendingOpsDidMutate ||
 				systemPrefixChangedThisPass ||
@@ -11905,6 +12172,12 @@ function runSynchronousPipeline(
 											ceilingTokens: args.emergencyCeilingTokens,
 											usagePercentage: args.contextUsage.percentage,
 											passAlreadyPriced: independentMutationBeforeHeuristics,
+											serializedImageTokens: providerOverflow
+												? piRecoveryToolImageTokens(workingMessages)
+												: undefined,
+											fitCalibration: providerOverflow
+												? piRecoveryFitCalibration(recoveryCalibration)
+												: undefined,
 										}
 									: undefined,
 							caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
@@ -12439,6 +12712,15 @@ function runSynchronousPipeline(
 	const tTranscriptCommit = performance.now();
 	transcript.commit();
 	logTransformTiming(args.sessionId, "transcriptCommit", tTranscriptCommit);
+	if (
+		applyNativeResponseTagReplayPi({
+			db: args.db,
+			sessionId: args.sessionId,
+			messages: args.messages,
+			canApply: isCacheBustingPass,
+		}) > 0
+	)
+		recordFirstApplicationWireEdit(true);
 
 	// Legacy drop/watermark state does not authorize first native activation.
 	// Use committed canonical inputs, then publish only persisted native decisions.

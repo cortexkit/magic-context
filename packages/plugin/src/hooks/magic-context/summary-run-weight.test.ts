@@ -162,6 +162,51 @@ test("meaningful history still counts full tool output at the 6000-token thresho
     }
 });
 
+test("tiny rows before an oversized inline image do not pin the meaningful head", () => {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "inline-image-summary-head";
+    const messages: RawMessage[] = [
+        ...[1, 2, 3].map((ordinal) => ({
+            id: `m${ordinal}`,
+            ordinal,
+            role: "assistant" as const,
+            parts: [{ type: "text", text: "quote" }],
+        })),
+        {
+            id: "m4",
+            ordinal: 4,
+            role: "user",
+            parts: [{ type: "file", data: `/9j/${"a".repeat(222_708)}` }],
+        },
+        {
+            id: "m5",
+            ordinal: 5,
+            role: "assistant",
+            parts: [tool("large", "result ".repeat(20_000))],
+        },
+        { id: "m6", ordinal: 6, role: "assistant", parts: [tool("tail", "tail ".repeat(8_000))] },
+    ];
+    markProtectedTailPolicyV3Seeded(db, sessionId, 1);
+    try {
+        withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 100_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 64, inputTokens: 64_000 },
+            });
+            expect(snapshot.eligibleEndOrdinal).toBe(6);
+            expect(snapshot.summaryRemovedEligibleTokens).toBeLessThan(100);
+            expect(snapshot.trueRawEligibleTokens).toBeGreaterThan(6_000);
+            expect(snapshot.oversizeAtomicUnit).toBe(false);
+        });
+    } finally {
+        db.close();
+    }
+});
 test("stored and live summary weights apply separate ratios and exclude reasoning and media", () => {
     const db = new Database(":memory:");
     initializeDatabase(db);

@@ -1,6 +1,5 @@
 import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { MockProvider } from "../../src/mock-provider/server";
@@ -28,12 +27,28 @@ const thinking = (step: number, heavy = false) => ({
 });
 type WireMessage = { role: string; content: Array<{ type: string }> };
 
+const isScenarioRequest = (body: Record<string, unknown>) =>
+	bytes(body.messages).includes(MARKER) &&
+	(body.tools as Array<{ name: string }> | undefined)?.some(
+		(tool) => tool.name === "shell",
+	);
+// The background summarizer quotes the marker in a separate session. Sharing
+// the parent's scope would compare unrelated signed-thinking histories.
+const thinkingScope = (body: Record<string, unknown>) =>
+	isScenarioRequest(body) ? MARKER : undefined;
+
+test("OC2 signed reclaim oracle excludes historian requests from the parent scope", () => {
+	const messages = [{ role: "user", content: [{ type: "text", text: MARKER }] }];
+	expect(thinkingScope({ messages, tools: [{ name: "shell" }] })).toBe(MARKER);
+	expect(thinkingScope({ messages, tools: [] })).toBeUndefined();
+	expect(thinkingScope({ messages, tools: [{ name: "ctx_search" }] })).toBeUndefined();
+});
+
 async function runSignedReclaimScenario(held: boolean) {
 	const fixture = isolation();
 	const mock = new MockProvider();
 	const provider = await mock.start({
-		thinkingScope: (body) =>
-			bytes(body.messages).includes(MARKER) ? MARKER : undefined,
+		thinkingScope,
 	});
 	const host = await spawnOpencode2({
 		existingIsolation: fixture,
@@ -75,23 +90,20 @@ async function runSignedReclaimScenario(held: boolean) {
 		expect(databases.every((path) => path.startsWith(host.root + "/"))).toBe(
 			true,
 		);
-		for (const name of ["a", "b", "c"])
-			writeFileSync(
-				join(host.cwd, `${name}.txt`),
+		// Test thinking preservation and queued-drop reclaim without background
+		// summarization. Its cap counts tool inputs, not outputs; large write
+		// inputs leave only a tiny, ineligible history fragment before the cap.
+		const spentCommands = ["a", "b", "c"].map((name) => {
+			const content =
 				`SPENT-${name}\n` +
-					Array.from(
-						{ length: 2000 },
-						(_, n) => `${n * 7919}:${n * 3571}!`,
-					).join(" "),
-			);
+				Array.from(
+					{ length: 2000 },
+					(_, n) => `${n * 7919}:${n * 3571}!`,
+				).join(" ");
+			return `cat > ${name}.txt <<'SPENT_EOF'\n${content}\nSPENT_EOF\ncat ${name}.txt`;
+		});
 		mock.addMatcher((body) => {
-			if (
-				!bytes(body.messages).includes(MARKER) ||
-				!(body.tools as Array<{ name: string }> | undefined)?.some(
-					(tool) => tool.name === "shell",
-				)
-			)
-				return null;
+			if (!isScenarioRequest(body)) return null;
 			step++;
 			wire.push(structuredClone(body.messages as WireMessage[]));
 			const usage = {
@@ -111,8 +123,8 @@ async function runSignedReclaimScenario(held: boolean) {
 			});
 			if (step <= 3)
 				return tool("shell", {
-					command: `cat ${["a", "b", "c"][step - 1]}.txt`,
-					description: "Read spent output",
+					command: spentCommands[step - 1],
+					description: "Write and read spent output",
 				});
 			if (step === 6) {
 				const tags = db

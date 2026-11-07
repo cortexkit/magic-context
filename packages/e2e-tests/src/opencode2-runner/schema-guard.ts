@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	awaitPluginActivation,
@@ -20,9 +20,10 @@ export async function requireSchemaGuard(
 	);
 }
 
-export function schemaGeneration(version: string): "2.0" | "2.1" {
+export function schemaGeneration(version: string, externalVersion?: string): "2.0" | "2.1" | "2.2" {
 	if (/^opencode v2\.0\.\d+$/.test(version)) return "2.0";
 	if (version === "opencode v2.1.0") return "2.1";
+	if (/^opencode v2\.2\.\d+$/.test(version) && version === `opencode v${externalVersion}`) return "2.2";
 	throw new Error(`No e2e LLM schema bundle for ${version}`);
 }
 
@@ -38,8 +39,13 @@ export async function prepareSchemaGuard(
 	const probe = spawnSync(cli, ["--version"], { encoding: "utf8", env });
 	if (probe.status !== 0)
 		throw new Error(`Cannot select LLM schema: ${probe.stderr}`);
-	const generation = schemaGeneration(probe.stdout.trim());
-	let bundle = bundles.get(generation);
+	// An unpinned compatibility CLI must bring its exact schema dependency, not
+	// silently reuse the older pinned schema dependency or skip schema validation.
+	const externalRoot = process.env.MC_E2E_OPENCODE2_AI_ROOT;
+	const externalVersion = externalRoot ? JSON.parse(readFileSync(join(externalRoot, "node_modules/@opencode/ai/package.json"), "utf8")).version as string : undefined;
+	const generation = schemaGeneration(probe.stdout.trim(), externalVersion);
+	const bundleKey = `${probe.stdout.trim()}:${externalRoot ?? "pinned"}`;
+	let bundle = bundles.get(bundleKey);
 	if (!bundle) {
 		bundle = (async () => {
 			const module = generation === "2.1" ? "@opencode/ai-2-1" : "@opencode/ai";
@@ -52,7 +58,9 @@ export async function prepareSchemaGuard(
 						setup(build) {
 							build.onResolve({ filter: /^@opencode\/ai\// }, ({ path }) => ({
 								path: Bun.resolveSync(
-									path.replace("@opencode/ai", module),
+									generation === "2.2" && externalRoot
+										? join(externalRoot, "node_modules/@opencode/ai/dist", `${path.slice("@opencode/ai/".length)}.js`)
+										: path.replace("@opencode/ai", module),
 									import.meta.dir,
 								),
 							}));
@@ -64,7 +72,7 @@ export async function prepareSchemaGuard(
 				throw new AggregateError(result.logs, "LLM schema bundle failed");
 			return result.outputs[0]!.text();
 		})();
-		bundles.set(generation, bundle);
+		bundles.set(bundleKey, bundle);
 	}
 	const directory = join(root, "schema-guard");
 	mkdirSync(directory, { recursive: true });

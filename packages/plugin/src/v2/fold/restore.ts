@@ -254,13 +254,16 @@ export function restoreRow(
             providerMetadata: (part.executed === true ? sameProvider : reuse)
                 ? metadata(native)
                 : undefined,
+            // A finished tool-result part, in the shape `ToolResultPart.make` returns:
+            // `{ type, value }`. `{ result, resultType }` is make's input, and
+            // OpenCode 2.2's request schema rejects it, failing every request that
+            // carries a restored failed call.
             result:
                 state.status === "error"
-                    ? { error: state.error, content: toolContent }
+                    ? { type: "error", value: { error: state.error, content: toolContent } }
                     : single?.type === "text"
                       ? { type: "text", value: single.text }
                       : { type: "content", value: toolContent },
-            ...(state.status === "error" ? { resultType: "error" } : {}),
         };
         if (part.executed === true) content.push(result);
         else results.push({ role: "tool", content: [result] });

@@ -17,7 +17,7 @@ type Message = {
         finish?: string;
         error?: unknown;
     };
-    parts: Array<{ type: string; text?: string }>;
+    parts: Array<{ type: string; text?: string; error?: unknown }>;
 };
 
 /**
@@ -163,6 +163,42 @@ describe("promptAsyncAndWaitForIdle", () => {
                 startGraceMs: 20,
             }),
         ).rejects.toThrow("did not start a run");
+    });
+
+    test("ignores provider errors and retry parts from before the current send", async () => {
+        const host = asyncHost({
+            plan: ["busy", "settle"],
+            initialMessages: [
+                {
+                    info: {
+                        id: "old-error",
+                        role: "assistant",
+                        time: { created: 0 },
+                        error: { name: "APIError" },
+                    },
+                    parts: [{ type: "retry", error: { name: "APIError" } }],
+                },
+            ],
+        });
+        await promptAsyncAndWaitForIdle(host.client, request(), { pollIntervalMs: 1 });
+        expect(host.polls()).toBe(2);
+        expect(host.abort).not.toHaveBeenCalled();
+    });
+
+    test("accepts a successfully settled assistant that retains an earlier retry part", async () => {
+        const host = asyncHost({ plan: ["settle"] });
+        const read = host.list.getMockImplementation()!;
+        host.list.mockImplementation(async () => {
+            const result = await read();
+            const last = result.data.at(-1);
+            if (last?.info.finish === "stop") {
+                last.parts.push({ type: "retry", error: { name: "APIError" } });
+            }
+            return result;
+        });
+        await promptAsyncAndWaitForIdle(host.client, request(), { pollIntervalMs: 1 });
+        expect(host.polls()).toBe(1);
+        expect(host.abort).not.toHaveBeenCalled();
     });
 
     test("surfaces a rejected prompt_async request", async () => {
@@ -653,9 +689,11 @@ describe("prompt_async transport and the first-output deadline", () => {
      * busy forever; "partial" streams a text part and then stays busy; "answer"
      * settles with a final assistant message on the next poll.
      */
-    function modelHost(behaviours: Record<string, "dead" | "partial" | "answer">) {
+    function modelHost(
+        behaviours: Record<string, "dead" | "partial" | "answer" | "error" | "retry">,
+    ) {
         const messages: Message[] = [];
-        let current: "dead" | "partial" | "answer" | null = null;
+        let current: "dead" | "partial" | "answer" | "error" | "retry" | null = null;
         const sent: string[] = [];
         const promptAsync = mock(
             async (request: { body: { model?: { providerID: string; modelID: string } } }) => {
@@ -684,6 +722,16 @@ describe("prompt_async transport and the first-output deadline", () => {
             return { data: true };
         });
         const status = mock(async () => {
+            if (current === "error" || current === "retry") {
+                const last = messages.at(-1)!;
+                const error = {
+                    name: "APIError",
+                    data: { statusCode: 429, message: "Free usage limit reached" },
+                };
+                if (current === "error") last.info.error = error;
+                else last.parts = [{ type: "retry", error }];
+                return { data: { "ses-child": { type: current === "retry" ? "retry" : "busy" } } };
+            }
             if (current === "dead" || current === "partial")
                 return { data: { "ses-child": { type: "busy" } } };
             if (current === "answer") {
@@ -751,4 +799,17 @@ describe("prompt_async transport and the first-output deadline", () => {
         await expect(runChain(host, 200, 40)).rejects.toThrow("prompt timed out after 200ms");
         expect(host.sent).toEqual(["opencode/free-model"]);
     });
+
+    for (const failure of ["error", "retry"] as const) {
+        test(`a recorded provider ${failure} stops the host retry loop and immediately tries the fallback`, async () => {
+            const host = modelHost({ "opencode/free-model": failure });
+            const startedAt = Date.now();
+            const result = await runChain(host, 5_000, 5_000);
+            expect(result.attempt.label).toBe("anthropic/claude-sonnet-5-5");
+            expect(host.sent).toEqual(["opencode/free-model", "anthropic/claude-sonnet-5-5"]);
+            expect(host.abort).toHaveBeenCalledTimes(1);
+            expect(host.abort).toHaveBeenCalledWith({ path: { id: "ses-child" } });
+            expect(Date.now() - startedAt).toBeLessThan(2_000);
+        });
+    }
 });

@@ -185,6 +185,27 @@ const DreamerParamsSchema = Type.Object(
 
 type CtxMemoryParams = Static<typeof DreamerParamsSchema>;
 
+/** Reject invalid raw arguments before host coercion. */
+function rejectInvalidMemoryArguments(args: unknown): void {
+	if (args === null || typeof args !== "object") return;
+	const record = args as Record<string, unknown>;
+	if (record.content !== undefined && typeof record.content !== "string") {
+		throw new Error("Error: 'content' must be a string.");
+	}
+	if (record.reason !== undefined && typeof record.reason !== "string") {
+		throw new Error("Error: 'reason' must be a string.");
+	}
+	if (
+		record.ids !== undefined &&
+		(!Array.isArray(record.ids) ||
+			record.ids.some(
+				(id) => typeof id !== "number" || !Number.isSafeInteger(id) || id < 1,
+			))
+	) {
+		throw new Error("Error: 'ids' must be an array of positive memory IDs.");
+	}
+}
+
 function ok(text: string) {
 	return { content: [{ type: "text" as const, text }], details: undefined };
 }
@@ -389,6 +410,12 @@ export function createCtxMemoryTool(
 		label: "Magic Context: Memory",
 		description: CTX_MEMORY_DESCRIPTION,
 		parameters: dreamerAllowed ? DreamerParamsSchema : PrimaryParamsSchema,
+		prepareArguments(args) {
+			rejectInvalidMemoryArguments(args);
+			return args as Static<
+				typeof PrimaryParamsSchema | typeof DreamerParamsSchema
+			>;
+		},
 		async execute(
 			_toolCallId,
 			params: CtxMemoryParams,

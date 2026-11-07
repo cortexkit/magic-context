@@ -4,6 +4,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites. The Rust hermetic lane is retired (rust_lane: \"retired\"): transform_mode no longer selects the full-array Rust transform, so no entry has a rust invocation and scripts/run-rust-hermetic-e2e.sh exits 0 with no files selected. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/opencode2/overflow-terminal-errors.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 HTTP and streaming OpenAI overflow errors arm recovery through the HTTP and terminal-event carriers; isolated host PID lsof guards all stores.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/pi-child-tool-boundary.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -2295,6 +2303,14 @@
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
             "rationale": "Real OpenCode 2 thinking loop past the execute threshold: the prefix before kept signed thinking stays byte-identical through the loop, and queued work lands in one rebuild on the next user turn",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/tool-definition-cache-loss.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Session request tool definitions change the provider prefix: one HARD fold drains held drops, an upgraded baseline adopts without folding, subsequent prefixes replay identically, and a second session stays isolated",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
         },

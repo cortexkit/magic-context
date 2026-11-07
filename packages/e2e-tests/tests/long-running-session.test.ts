@@ -664,7 +664,19 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             expect(h.mock.requests().length).toBe(beforeFold);
             const foldedMarker = await send(sessionId, "surface the native checkpoint", "phase 6 native fold");
             const body = JSON.stringify((await mainRequestForMarker(foldedMarker)).body);
-            expect(body).toContain("<conversation-checkpoint>");
+            // Master 7a1f10ae10 made native replay the default; 9bb5d46b7f
+            // refreshes manual folds from the summary floor, without a second
+            // checkpoint carrier. The old base wrapper began at serialized-string
+            // offset 14043 (title at 14256); OpenCode 2's native-replay
+            // protocol 3 serves the title in the refreshed history head.
+            const providerBody = JSON.parse(body) as {
+                messages?: Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
+            };
+            const history = (providerBody.messages ?? [])
+                .flatMap((message) => typeof message.content === "string" ? [message.content] : (message.content ?? []).map((part) => part.type === "text" ? part.text ?? "" : ""))
+                .find((text) => text.includes("<session-history") && text.includes("Long OpenCode e2e chunk"));
+            expect(history).toBeDefined();
+            expect(body).not.toContain("<conversation-checkpoint>");
             expect(body).toContain("Long OpenCode e2e chunk");
         } else {
         emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: ACTIVE_TODOS });

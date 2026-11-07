@@ -41,6 +41,8 @@ const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
         "reads base compartments, score selections and the committed watermark for a non-persisted render; never writes",
     "packages/plugin/src/hooks/magic-context/lkg-served-marker.ts#checkLkgDurability":
         "reads the served marker and durable slot id in one snapshot; never hydrates, repairs or writes",
+    "packages/plugin/src/v2/store-reader.ts#withOrdinalSequences":
+        "pins data_version, ordinal seq anchors and the requested lookup to one snapshot on a read-only OpenCode 2 connection; never writes",
     "packages/plugin/src/v2/store-reader.ts#window":
         "reads the latest compaction and the rows after it as one consistent snapshot of the OpenCode 2 store; never writes",
     "packages/pi-plugin/src/inject-compartments-pi.ts#readFrozenM0InputsPi":
@@ -53,6 +55,8 @@ const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
         "reads runner state, entries, ids and views in one coherent cold-path snapshot; never repairs or writes",
     "packages/plugin/src/hooks/magic-context/legacy-ck-tag-import.ts#readLegacyCkTagSnapshot":
         "reads one session's ck-mc tags, queued drops and applied reductions from store.db as one snapshot over a read-only connection; never writes",
+    "packages/plugin/src/hooks/magic-context/compaction-marker-manager.ts#reconcileForkOrphanedCompactionMarkers":
+        "reads publication intent and finalized ownership as one context.db snapshot while host-order probes use the already-open host connection; never writes context.db",
 };
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");

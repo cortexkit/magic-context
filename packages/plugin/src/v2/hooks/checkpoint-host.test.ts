@@ -66,7 +66,39 @@ test.skipIf(!cli)(
             post = join(root, "post"),
             mc = join(root, "plugin");
         for (const path of [pre, post, mc]) mkdirSync(path);
-        writeFileSync(join(mc, "server.js"), `export {default} from ${JSON.stringify(plugin)};`);
+        const legacySeed = join(root, "legacy-seed.json");
+        const legacyAck = join(root, "legacy-seeded.json");
+        const producer = join(root, "legacy-producer.ts");
+        writeFileSync(
+            producer,
+            `import {FoldOwner} from ${JSON.stringify(resolve(import.meta.dir, "../fold/owner.ts"))};
+export async function seedLegacy(storage,args){
+ const remove=key=>storage.remove?storage.remove(key):storage.set(key,null);
+ await remove('fold/v1/'+args.sessionID);
+ for(const prefix of ['native-fold/v2/','native-fold/v3/','native-fold-state/v3/'])await remove(prefix+encodeURIComponent(args.sessionID));
+ const owner=new FoldOwner(storage);
+ await owner.supply({sessionID:args.sessionID,watermark:args.cutSeq-1,materialize:()=>args.summary});
+ await owner.observe({sessionID:args.sessionID,cutSeq:args.cutSeq,summary:args.summary,rendered:args.rendered,onHard:()=>{throw new Error('legacy fixture diverged')}});
+ return owner.read(args.sessionID);
+}`,
+        );
+        const seedBundle = await Bun.build({ entrypoints: [producer], target: "bun" });
+        expect(seedBundle.success).toBe(true);
+        writeFileSync(join(mc, "legacy-producer.js"), await seedBundle.outputs[0]!.text());
+        writeFileSync(
+            join(mc, "server.js"),
+            `import builtin from ${JSON.stringify(plugin)};
+import {existsSync,readFileSync,writeFileSync,unlinkSync} from 'node:fs';
+import {seedLegacy} from './legacy-producer.js';
+export default {...builtin,async setup(ctx){
+ if(existsSync(${JSON.stringify(legacySeed)})){
+  const state=await seedLegacy(ctx.storage,JSON.parse(readFileSync(${JSON.stringify(legacySeed)},'utf8')));
+  writeFileSync(${JSON.stringify(legacyAck)},JSON.stringify(state));
+  unlinkSync(${JSON.stringify(legacySeed)});
+ }
+ return builtin.setup(ctx);
+}};`,
+        );
         for (const [path, label] of [
             [pre, "before"],
             [post, "after"],
@@ -277,9 +309,9 @@ test.skipIf(!cli)(
             const db = new Database(hostDB);
             const cut = db
                 .query(
-                    "SELECT id,data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
+                    "SELECT id,seq,data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
                 )
-                .get(sid) as { id: string; data: string };
+                .get(sid) as { id: string; seq: number; data: string };
             const data = JSON.parse(cut.data);
             expect(data.status).toBe("completed");
             expect(Object.hasOwn(data.metadata ?? {}, "keepID")).toBe(false);
@@ -337,22 +369,26 @@ test.skipIf(!cli)(
             expect(JSON.stringify(legacy)).toContain("<recent-context>");
             expect(estimateTokens(JSON.stringify(legacy))).toBeGreaterThan(21000);
             await stop();
-            const seed = new Database(hostDB);
-            const fold = seed
-                .query("SELECT key,value FROM kv WHERE key LIKE ?")
-                .get(`%fold/v1/${sid}`) as { key: string; value: string };
-            const state = JSON.parse(fold.value);
-            state.rendered = legacy;
-            state.renderedSha = sha(legacy);
-            state.renderedSummary = data.summary;
-            delete state.withoutRecentContext;
-            delete state.rejectedSha;
-            seed.query("UPDATE kv SET value=? WHERE key=?").run(JSON.stringify(state), fold.key);
-            seed.close();
+            // The fixture plugin uses the host's actual namespaced storage and
+            // the real legacy producer before the upgraded adapter starts.
+            writeFileSync(
+                legacySeed,
+                JSON.stringify({
+                    sessionID: sid,
+                    cutSeq: cut.seq,
+                    summary: data.summary,
+                    rendered: legacy,
+                }),
+            );
             const before = rows(sid).map((row) => ({ id: row.id, sha: sha(row) }));
             configure(21000);
             enforceWindow = true;
             await start();
+            const seeded = JSON.parse(readFileSync(legacyAck, "utf8"));
+            expect(seeded.cutSeq).toBe(cut.seq);
+            expect(seeded.rendered).toEqual(legacy);
+            expect(seeded.renderedSha).toBe(sha(legacy));
+            expect(seeded.withoutRecentContext).toBeUndefined();
             const upgraded = await turn("first-upgrade");
             expect(upgraded).toHaveLength(1);
             expect(upgraded[0]!.rawBody).not.toContain("<recent-context>");

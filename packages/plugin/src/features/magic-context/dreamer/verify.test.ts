@@ -20,7 +20,7 @@ import {
     saveEmbedding,
 } from "../memory";
 import { applyMemoryVerification } from "../memory/lifecycle-applier";
-import { getMemoryById } from "../memory/storage-memory";
+import { getMemoryById, updateMemoryVerification } from "../memory/storage-memory";
 import {
     getMemoryVerifications,
     recordMemoryVerifications,
@@ -33,6 +33,7 @@ import { acquireLease } from "./lease";
 import { DreamerProviderOutputFailureError } from "./provider-output-failure";
 import { RECORDED_GEMINI_QUOTA_NOTICE } from "./provider-output-failure.test-support";
 import { getTaskScheduleState, seedTaskScheduleState } from "./storage-task-schedule";
+import { getDreamTaskBacklog } from "./task-gates";
 import {
     applyVerifyManifest,
     computeVerifyBatchSliceMs,
@@ -41,6 +42,7 @@ import {
     VERIFY_BATCH_FLOOR_MS,
     type VerifyArgs,
 } from "./verify";
+import { partitionVerifyScope } from "./verify-gate";
 
 const tempDirs: string[] = [];
 
@@ -1121,6 +1123,122 @@ describe("runVerify disposition", () => {
 });
 
 describe("applyVerifyManifest", () => {
+    test("skip-only manifests bank the file snapshot and reopen only after mapped evidence changes", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:verify-skip";
+            const dir = gitProject();
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "This machine has an external credential helper.",
+                metadataJson: JSON.stringify({ retained: "metadata" }),
+            });
+            recordMemoryVerifications(db, memory.id, ["src/old.ts"], 0);
+            const args = verifyArgs(db, dir, projectIdentity);
+            const scope = (forceBroad = false) =>
+                partitionVerifyScope({
+                    db,
+                    projectIdentity,
+                    projectDirectory: dir,
+                    forceBroad,
+                });
+            const skip = async () => {
+                const gate = await scope();
+                expect(gate.inScopeIds).toEqual([memory.id]);
+                const result = await applyVerifyManifest(
+                    args,
+                    gate.inScope,
+                    `<verify><skip id="${memory.id}" reason="not provable from repository files"/></verify>`,
+                );
+                expect(result).toEqual({
+                    verified: 0,
+                    updated: 0,
+                    archived: 0,
+                    skipped: 1,
+                    refused: 0,
+                });
+                expect((await scope()).inScopeIds).toEqual([]);
+                expect((await scope(true)).inScopeIds).toEqual([]);
+            };
+            await skip();
+            const saved = getMemoryById(db, memory.id)!;
+            expect(saved.verificationStatus).toBe("unverified");
+            expect(saved.verifiedAt).toBeNull();
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.verifiedAt).toBe(0);
+            expect(JSON.parse(saved.metadataJson!)).toMatchObject({
+                retained: "metadata",
+                dreamerVerifyVerdict: "skip",
+                dreamerVerifySkip: { contentHash: memory.normalizedHash },
+            });
+            expect(getDreamTaskBacklog(db, projectIdentity, "verify")).toEqual({
+                pending: 0,
+                total: 1,
+            });
+            expect(getDreamTaskBacklog(db, projectIdentity, "verify-broad")).toEqual({
+                pending: 0,
+                total: 1,
+            });
+            writeFileSync(path.join(dir, "src/old.ts"), "export const oldValue = 3;");
+            await skip(); // the same dirty tree must not cause another prompt
+            rmSync(path.join(dir, "src/old.ts"));
+            await skip(); // nor an already-recorded deletion
+            writeFileSync(path.join(dir, "src/old.ts"), "export const oldValue = 4;");
+            await skip();
+            recordMemoryVerifications(db, memory.id, ["src/new.ts"], 0);
+            await skip();
+            db.prepare("UPDATE memories SET content = ?, normalized_hash = ? WHERE id = ?").run(
+                "A changed claim about the machine.",
+                "changed-claim",
+                memory.id,
+            );
+            expect((await scope()).inScopeIds).toEqual([memory.id]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("persists row-level verification status and the verdict for verify, update and archive", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:verify-status";
+            const dir = gitProject();
+            const memories = ["Verified claim.", "Original claim.", "Contradicted claim."].map(
+                (content) =>
+                    insertMemory(db, {
+                        projectPath: projectIdentity,
+                        category: "ARCHITECTURE",
+                        content,
+                    }),
+            );
+            const [verified, updated, archived] = memories;
+            updateMemoryVerification(db, updated!.id, "verified");
+            for (const memory of memories)
+                recordMemoryVerifications(db, memory.id, ["src/old.ts"], 0);
+            const gate = await partitionVerifyScope({ db, projectIdentity, projectDirectory: dir });
+            await applyVerifyManifest(
+                verifyArgs(db, dir, projectIdentity),
+                gate.inScope,
+                `<verify><verified id="${verified!.id}" files="src/old.ts"/><update id="${updated!.id}" files="src/new.ts">Corrected claim.</update><archive id="${archived!.id}" reason="contradicted by source"/></verify>`,
+            );
+            for (const [memory, status, verdict] of [
+                [verified!, "verified", "verified"],
+                [updated!, "unverified", "update"],
+                [archived!, "stale", "archive"],
+            ] as const) {
+                const saved = getMemoryById(db, memory.id)!;
+                expect(saved.verificationStatus).toBe(status);
+                expect(JSON.parse(saved.metadataJson!).dreamerVerifyVerdict).toBe(verdict);
+            }
+            expect(getMemoryById(db, verified!.id)?.verifiedAt).toBeGreaterThan(0);
+            expect(
+                JSON.parse(getMemoryById(db, verified!.id)!.metadataJson!).dreamerVerifiedCommit,
+            ).toMatch(/^[a-f0-9]{40}$/);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("treats an absent batch id as silence rather than verify or archive", async () => {
         const db = freshDb();
         try {
@@ -1479,7 +1597,7 @@ describe("applyVerifyManifest", () => {
         }
     });
 
-    test("content corrections replace file mappings and clear stale embedding cache", async () => {
+    test("content corrections invalidate file mappings and clear stale embedding cache", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:test";
@@ -1515,9 +1633,13 @@ describe("applyVerifyManifest", () => {
                 refused: 0,
             });
             expect(getMemoryById(db, memory.id)?.content).toBe("New value lives in src/new.ts.");
-            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
-                "src/new.ts",
-            ]);
+            // The rewritten text's evidence has not been checked yet. Keep the
+            // reported files as an outcome, not as a fresh confirmation.
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)).toBeUndefined();
+            expect(getMemoryById(db, memory.id)?.verificationStatus).toBe("unverified");
+            expect(
+                db.prepare("SELECT verify_files_json FROM memories WHERE id=?").get(memory.id),
+            ).toEqual({ verify_files_json: JSON.stringify(["src/new.ts"]) });
             expect(loadAllEmbeddings(db, projectIdentity, "model-a").has(memory.id)).toBe(false);
             expect(peekProjectEmbeddings(projectIdentity, "model-a")?.has(memory.id)).toBe(false);
             expect(

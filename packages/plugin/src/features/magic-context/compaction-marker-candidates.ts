@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { registerExitAbort } from "../../shared/exit-abort-registry";
 import { log } from "../../shared/logger";
+import { reuseWorker } from "../../shared/reusable-worker";
 import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
+import { createWorkerShutdown } from "../../shared/worker-shutdown";
 
 interface MarkerFrontier {
     rowid: number;
@@ -215,7 +217,9 @@ function runCandidateWorker(
                 return;
             }
             workers.delete(worker);
-            const stopped = worker.terminate();
+            const stopped = snapshot
+                ? createWorkerShutdown(worker, "marker-candidates", 1_000).close()
+                : worker.terminate();
             worker.unref();
             void stopped.then(
                 () => resolve(snapshot),
@@ -231,8 +235,10 @@ function runCandidateWorker(
             timer.unref?.();
         };
         try {
-            worker = inRootAsyncContext(
-                () => new Worker(entry, { workerData: { path, sessionId } }),
+            worker = inRootAsyncContext(() =>
+                options.entry
+                    ? new Worker(entry, { workerData: { path, sessionId } })
+                    : reuseWorker(entry, { workerData: { path, sessionId } }),
             );
             workers.add(worker);
             worker.unref();

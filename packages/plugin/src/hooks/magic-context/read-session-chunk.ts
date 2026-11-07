@@ -9,6 +9,7 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 import { askAnswerLines } from "./ask-answer-notice";
+import { rawCommitHashes } from "./compartment-commit-hashes";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 import {
@@ -112,6 +113,11 @@ let activeRawMessageCache: Map<string, RawMessageCacheEntry> | null = null;
 // array length".
 let activeAbsoluteCountCache: Map<string, number> | null = null;
 
+export interface RawMessageWorkerSource {
+    kind: "opencode2";
+    path: string;
+}
+
 /**
  * Per-session source override for raw message reading.
  *
@@ -134,6 +140,8 @@ let activeAbsoluteCountCache: Map<string, number> | null = null;
  * scope.
  */
 export interface RawMessageProvider {
+    /** Workers use only this explicitly supplied read-only source, never database discovery. */
+    workerSource?: RawMessageWorkerSource;
     readMessages(): RawMessage[];
     readMessagePage?: (
         afterOrdinal: number,
@@ -156,6 +164,11 @@ export interface RawMessageProvider {
     readMessageOrderById?: (messageId: string) => number | null;
     readMessageIdOrdinals?: () => Map<string, number>;
     readMessageIdOrdinalsForRange?: (fromOrdinal: number, toOrdinal: number) => Map<string, number>;
+    /** The provider owns scheduling: persistent-store scans must run off the serving thread. */
+    readMessageIdOrdinalsForRangeOffThread?: (
+        fromOrdinal: number,
+        toOrdinal: number,
+    ) => Promise<Map<string, number>>;
     readMessageOrdinalPage?: (
         after: RawMessageOrdinalAnchor | null,
         limit: number,
@@ -177,6 +190,7 @@ export interface RawMessageProvider {
  * the all-history conversion read is intentionally absent from this interface.
  */
 export interface BoundedRawMessageProvider {
+    workerSource?: RawMessageWorkerSource;
     readMessagePage(
         afterOrdinal: number,
         limit: number,
@@ -212,6 +226,17 @@ export function resolveHostServedBoundaryId(sessionId: string, messageId: string
 /** Whether this session has an explicit non-OpenCode raw-history source. */
 export function hasRawMessageProvider(sessionId: string): boolean {
     return sessionProviders.has(sessionId);
+}
+
+export function rawMessageWorkerSource(sessionId: string): RawMessageWorkerSource | undefined {
+    return sessionProviders.get(sessionId)?.provider.workerSource;
+}
+
+export function rawMessageOffThreadRangeReader(
+    sessionId: string,
+): RawMessageProvider["readMessageIdOrdinalsForRangeOffThread"] {
+    const provider = sessionProviders.get(sessionId)?.provider;
+    return provider?.readMessageIdOrdinalsForRangeOffThread?.bind(provider);
 }
 
 /**
@@ -1488,7 +1513,13 @@ export function readSessionChunk(
         }
         if (msg.ordinal < startOrdinal) continue;
 
-        const meta = { ordinal: msg.ordinal, messageId: msg.id };
+        const commitHashes = rawCommitHashes(msg.parts);
+        const meta: SessionChunkLine = {
+            ordinal: msg.ordinal,
+            messageId: msg.id,
+        };
+        // Provenance belongs to validation, not the serialized chunk or prompt.
+        Object.defineProperty(meta, "commitHashes", { value: commitHashes });
         if (isHostUnservedRow(msg)) markHostUnservedRow(meta);
 
         // Host instructions are prompt material, not user decisions. Keep their

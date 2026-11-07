@@ -1112,6 +1112,52 @@ describe("createTransform", () => {
             b.messages.findIndex((m) => m.info.id === "msg_0bedb7d8f001FvFOQdZoGqywkr") + 1,
         );
     });
+    it("logs incomplete final-wire part metadata once in each transform pass", async () => {
+        useTempDataHome("context-transform-incomplete-wire-");
+        const sessionId = "ses-incomplete-wire";
+        const log = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => "defer" },
+            contextUsageMap: new Map(),
+            db: openDatabase(),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+            channel1StateBySession: new Map(),
+        });
+        const messages = [
+            {
+                info: { id: "wire-message", role: "user", sessionID: sessionId },
+                parts: [{ type: "audio", id: "wire-part", data: "SECRET AUDIO CONTENT" }],
+            },
+        ] as unknown as TestMessage[];
+        try {
+            for (let pass = 1; pass <= 2; pass++) {
+                await transform({}, { messages: structuredClone(messages) });
+                const lines = log.mock.calls.filter(
+                    (call) =>
+                        call[0] === sessionId &&
+                        String(call[1]).startsWith(
+                            "transform: final-wire untrusted incompleteParts=",
+                        ),
+                );
+                expect(lines).toHaveLength(pass);
+                const text = String(lines[pass - 1]?.[1]);
+                expect(text).toContain('"messageId":"wire-message"');
+                expect(text).toContain('"partId":"wire-part"');
+                expect(text).toContain('"type":"audio"');
+                expect(text).toContain('"missingFields":["supported type"]');
+                expect(text).not.toContain("SECRET");
+            }
+        } finally {
+            log.mockRestore();
+        }
+    });
+
     it("logs stable nudge verdicts and tag-floor fallback only once across TypeScript passes", async () => {
         useTempDataHome("context-transform-nudge-observability-");
         const sessionId = "ses-nudge-observability";

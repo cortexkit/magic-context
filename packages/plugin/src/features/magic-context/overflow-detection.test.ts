@@ -136,6 +136,84 @@ describe("overflow-detection / detectOverflow", () => {
         });
     });
 
+    test("detects LiteLLM HTTP 400 overflow and separates input from the combined limit", () => {
+        const message =
+            "litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - The input (626827 tokens) is longer than the model's context length (262144 tokens).\n" +
+            "Set 'context_window_fallback' - https://docs.litellm.ai/docs/routing#fallbacks. Received Model Group=qwen3.8-flash-next\n" +
+            "Available Model Group Fallbacks=None";
+        expect(detectOverflow({ status: 400, message })).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: 626827,
+            reportedLimit: 262144,
+            reportedLimitProvenance: "combined",
+        });
+    });
+
+    test("detects LiteLLM overflow class and input-length wording independently", () => {
+        expect(
+            detectOverflow("litellm.ContextWindowExceededError: request rejected"),
+        ).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: undefined,
+            reportedLimit: undefined,
+        });
+        expect(
+            detectOverflow(
+                "The input (626827 tokens) is longer than the model's context length (262144 tokens).",
+            ),
+        ).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: 626827,
+            reportedLimit: 262144,
+            reportedLimitProvenance: "combined",
+        });
+    });
+
+    test.each([
+        1_260_773, 1_260_808,
+    ])("extracts DeepSeek rejected input %d without counting completion tokens", (input) => {
+        const message =
+            "This model's maximum context length is 1048576 tokens.\n" +
+            `However, you requested ${input + 131072} tokens\n` +
+            `(${input} in the messages, 131072 in the completion).\n` +
+            "Please reduce the length of the messages or completion.";
+        expect(detectOverflow(message)).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: input,
+            reportedLimit: 1048576,
+            reportedLimitProvenance: "combined",
+        });
+        expect(parseReportedInputTokens(message)).toBe(input);
+    });
+
+    test.each([
+        "litellm.BadRequestError: Invalid API key",
+        "litellm.ContextWindowExceededErrorHandler: failed to configure fallback",
+        "litellm.NotContextWindowExceededError: upstream unavailable",
+        "The input (626827 tokens) could not be sent: connection reset",
+        "Invalid API key; model's context length (262144 tokens)",
+        "The input (626827 tokens) is longer than the configured log limit (262144 tokens)",
+        "BadRequestError: expected an image in the messages, not text in the completion",
+        "BadRequestError: invalid schema (1260773 in the messages, 131072 in the completion)",
+    ])("does not classify ordinary provider errors as overflow: %s", (message) => {
+        expect(detectOverflow({ status: 400, message })).toEqual({ isOverflow: false });
+    });
+
+    test("does not extract LiteLLM counts from ordinary errors or incomplete DeepSeek fields", () => {
+        expect(
+            parseReportedLimit("Invalid API key; model's context length (262144 tokens)"),
+        ).toBeUndefined();
+        expect(
+            parseReportedInputTokens(
+                "The input (626827 tokens) could not be sent: connection reset",
+            ),
+        ).toBeUndefined();
+        expect(parseReportedInputTokens("131072 in the completion")).toBeUndefined();
+        expect(
+            parseReportedInputTokens("1260773 in the messages field is invalid"),
+        ).toBeUndefined();
+    });
+
     test("returns matchedPattern for diagnostics", () => {
         const detection = detectOverflow("prompt is too long: 210000 > 200000");
         expect(detection.isOverflow).toBe(true);
