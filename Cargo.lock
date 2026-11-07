@@ -233,9 +233,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-compaction"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47a3e7356c7766337e4fff0c6f6a39c4df2e332f460d269f4fcbe4bd130bd821"
+checksum = "c8e91efe9ff603c34b48d0b7ec2fbe43c1072db1d525f1f6c0cf04385a4ddc73"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -245,9 +245,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner"
-version = "0.8.9"
+version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "080fc1f5e67a6e4b3c7585c40f563ecb65890dc79078100481ac9d492e8a65c7"
+checksum = "5a4a9ef8827246174daa8b851afae8b57e09c6f8d29abedd756b6b1aad49c385"
 dependencies = [
  "cortexkit-rich-ui-syntax",
  "cortexkit-role-tool-provider 0.15.0",
