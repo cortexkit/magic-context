@@ -129,6 +129,14 @@ fn parse_lsof(
         .map_err(|error| format!("process_check_failed: invalid lsof output: {error}; {detail}"))?;
     let mut pids = std::collections::BTreeSet::new();
     for line in stdout.lines().filter(|line| !line.is_empty()) {
+        // `-F p` still prints an `f<fd>` line for each open file under its
+        // process line; the pid lines alone say who has the store open.
+        if line
+            .strip_prefix('f')
+            .is_some_and(|fd| !fd.is_empty() && fd.chars().all(|c| c.is_ascii_alphanumeric()))
+        {
+            continue;
+        }
         let pid = line
             .strip_prefix('p')
             .and_then(|pid| pid.parse::<u32>().ok())
@@ -147,7 +155,10 @@ fn parse_lsof(
     let target_warning = paths
         .iter()
         .any(|path| detail.contains(path.to_string_lossy().as_ref()));
-    if target_warning || !(status == Some(0) || (status == Some(1) && stdout.is_empty())) {
+    // lsof exits 1 whenever any named file is open by no process, which is
+    // the normal case here (an absent -wal, or every file but our own lock),
+    // so 0 and 1 both mean it ran; the pid lines above decide the answer.
+    if target_warning || !matches!(status, Some(0) | Some(1)) {
         return Err(format!(
             "process_check_failed: lsof exit {status:?}: {detail}"
         ));
@@ -166,13 +177,19 @@ mod tests {
         assert!(parse_lsof(Some(1), b"", b"", &paths, 10).is_ok());
         assert!(parse_lsof(Some(1), b"", warning, &paths, 10).is_ok());
         assert!(parse_lsof(Some(0), b"p10\n", warning, &paths, 10).is_ok());
+        // Real macOS output: our own lock file, with its fd line.
+        assert!(parse_lsof(Some(0), b"p10\nf3\n", b"", &paths, 10).is_ok());
+        assert!(parse_lsof(Some(1), b"p10\nf3\n", b"", &paths, 10).is_ok());
+        assert!(parse_lsof(Some(0), b"p20\nf7\nfcwd\n", b"", &paths, 10)
+            .unwrap_err()
+            .starts_with("store_in_use"));
         let error = parse_lsof(Some(0), b"p10\np20\n", warning, &paths, 10).unwrap_err();
         assert!(error.starts_with("store_in_use"));
         assert!(error.contains("unrelated/lower"));
         for (status, stdout, stderr) in [
             (Some(2), b"".as_slice(), warning.as_slice()),
             (None, b"".as_slice(), b"".as_slice()),
-            (Some(1), b"p10\n".as_slice(), b"".as_slice()),
+            (Some(3), b"p10\n".as_slice(), b"".as_slice()),
             (Some(0), b"garbled\n".as_slice(), b"".as_slice()),
             (
                 Some(1),
