@@ -335,6 +335,15 @@ impl ContextDb {
         session: &str,
     ) -> Result<Vec<StoredCompartment>, String> {
         let connection = self.lock();
+        Self::read_compartments(&connection, harness, session)
+    }
+
+    /// Read stored summaries on the caller's connection and transaction.
+    pub(crate) fn read_compartments(
+        connection: &Connection,
+        harness: &str,
+        session: &str,
+    ) -> Result<Vec<StoredCompartment>, String> {
         let mut statement = connection
             .prepare_cached(
                 "SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''),

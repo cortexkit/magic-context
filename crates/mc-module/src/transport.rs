@@ -77,6 +77,15 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 sub_supervises: false,
             },
             ProviderRole::InternalService {
+                service_id: crate::context_read::ROLE.0.into(),
+                transport: subc_protocol::manifest::InternalTransport::Bulk,
+                agent_facing: false,
+                operations: crate::context_read::OPS
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            },
+            ProviderRole::InternalService {
                 service_id: crate::app_read::ROLE.0.into(),
                 transport: subc_protocol::manifest::InternalTransport::Bulk,
                 agent_facing: false,
@@ -117,6 +126,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
             provides: vec![
                 COMPACTION_PROVIDES.to_owned(),
                 "mc-app-read/v1".to_owned(),
+                "mc-context-read/v1".to_owned(),
                 // Core finds tool providers and step-transform providers in
                 // the daemon's module catalog by these claims, before it calls
                 // `role.describe`. Without them core composes Magic Context
@@ -558,6 +568,7 @@ pub struct Handler {
     /// Every bound route, by channel: what the daemon said about it at bind.
     bound: Mutex<HashMap<u16, Bound>>,
     app_bound: Mutex<HashMap<u16, AppCaller>>,
+    context_bound: Mutex<std::collections::HashSet<u16>>,
 }
 
 #[derive(Clone, Debug)]
@@ -597,6 +608,27 @@ const MANAGEMENT_APP_METHODS: &[&str] = &[
     "context.search",
     "context.watch",
 ];
+
+fn context_admission(request: &RouteBindRequest) -> Result<(), Refusal> {
+    let target = matches!(&request.target,
+        RouteTarget::InternalService { module_id, service_id }
+        if module_id == crate::MODULE_ID && service_id == crate::context_read::ROLE.0);
+    let principal = matches!(&request.principal,
+        Some(Principal::Reserved { module_id }) if module_id == "colliculus");
+    let version = request.role_versions.as_ref().is_none_or(|roles| {
+        roles.len() == 1
+            && roles.get(crate::context_read::ROLE.0).map(String::as_str)
+                == Some(crate::context_read::ROLE.1)
+    });
+    if !target || !principal || !version || request.scope.is_some() {
+        return Err(Refusal::new(
+            "not_permitted",
+            "Context reads require an attested colliculus service route.",
+            None,
+        ));
+    }
+    Ok(())
+}
 
 fn app_admission(request: &RouteBindRequest) -> Result<AppCaller, Refusal> {
     let refused = || {
@@ -685,6 +717,7 @@ impl Handler {
             module,
             bound: Mutex::default(),
             app_bound: Mutex::default(),
+            context_bound: Mutex::default(),
         }
     }
 
@@ -1055,6 +1088,27 @@ impl ModuleHandler for Handler {
             .lock()
             .expect("app routes")
             .remove(&request.handle.channel);
+        self.context_bound
+            .lock()
+            .expect("context routes")
+            .remove(&request.handle.channel);
+        if matches!(&request.target, RouteTarget::InternalService { service_id, .. } if service_id == crate::context_read::ROLE.0)
+            || request
+                .role_versions
+                .as_ref()
+                .is_some_and(|roles| roles.contains_key(crate::context_read::ROLE.0))
+        {
+            return match context_admission(request) {
+                Ok(()) => {
+                    self.context_bound
+                        .lock()
+                        .expect("context routes")
+                        .insert(request.handle.channel);
+                    BindDecision::accept()
+                }
+                Err(error) => BindDecision::reject(error.code, error.message),
+            };
+        }
         if matches!(
             &request.target,
             RouteTarget::InternalService { .. } | RouteTarget::ManagementSurface { .. }
@@ -1169,13 +1223,24 @@ impl ModuleHandler for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        let context = self
+            .context_bound
+            .lock()
+            .expect("context routes")
+            .contains(&ctx.route_handle().channel);
         let caller = self
             .app_bound
             .lock()
             .expect("app routes")
             .get(&ctx.route_handle().channel)
             .cloned();
-        let result = if let Some(caller) = caller {
+        let result = if context {
+            self.module
+                .context_read()
+                .read(&body)
+                .await
+                .map(|value| HandlerOutcome::Response(crate::app_read::result_bytes(value)))
+        } else if let Some(caller) = caller {
             self.app(&ctx, &body, caller).await
         } else {
             self.dispatch(ctx.route_handle().channel, &body)
