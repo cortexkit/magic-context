@@ -9,6 +9,7 @@ const HARNESS: &str = "opencode";
 /// entries are 1, 2, 3, -, -, 4, 5.
 fn transcript() -> Vec<HostMessage> {
     let row = |mid: &str, entry: Option<u64>, finished_summary: bool| HostMessage {
+        source_entry: None,
         mid: mid.into(),
         entry,
         finished_summary,
@@ -265,6 +266,7 @@ fn a_retried_move_does_not_shift_the_numbers_twice() {
     other.insert(
         0,
         HostMessage {
+            source_entry: None,
             mid: "u0".into(),
             entry: None,
             finished_summary: false,
@@ -332,6 +334,7 @@ fn rows_the_runner_left_out_after_the_newest_entry_map_to_it() {
     let mut rows = transcript();
     for mid in ["dead8", "dead9"] {
         rows.push(HostMessage {
+            source_entry: None,
             mid: mid.into(),
             entry: None,
             finished_summary: false,
@@ -361,6 +364,7 @@ fn a_transcript_without_compactions_changes_no_number() {
     let plain = vec![
         HostMessage {
             mid: "u1".into(),
+            source_entry: None,
             entry: Some(1),
             finished_summary: false,
             added: false,
@@ -368,6 +372,7 @@ fn a_transcript_without_compactions_changes_no_number() {
         },
         HostMessage {
             mid: "a2".into(),
+            source_entry: None,
             entry: Some(2),
             finished_summary: false,
             added: false,
@@ -392,6 +397,7 @@ fn a_transcript_without_compactions_changes_no_number() {
 /// row), 6 (a7), 7 (the notice).
 fn converted() -> Vec<HostMessage> {
     let row = |mid: &str, entry: Option<u64>, finished_summary: bool, added: bool| HostMessage {
+        source_entry: None,
         mid: mid.into(),
         entry,
         finished_summary,
@@ -461,6 +467,7 @@ fn an_added_row_cannot_be_a_finished_summary() {
 fn pi_branch() -> Vec<HostMessage> {
     let row =
         |mid: &str, entry: Option<u64>, kind: &str, role: Option<&str>, call: bool| HostMessage {
+            source_entry: None,
             mid: mid.into(),
             entry,
             finished_summary: false,

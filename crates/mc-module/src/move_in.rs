@@ -1,5 +1,7 @@
-//! Moving a session that ran under the standalone Magic Context plugin
-//! (OpenCode or Pi without a runner) to mode 3.
+//! Moving a standalone-plugin session or an existing runner session to a
+//! runner. Existing runner coordinates, partial summaries and session-id
+//! changes are handled by `runner`; the protocol below is the standalone
+//! OpenCode/Pi plugin path.
 //!
 //! Only a fully summarized session moves: before the move it runs
 //! `/ctx-wrapup 0`, so its summaries reach its newest message. The move then
@@ -47,6 +49,8 @@ use crate::route::{Project, Route};
 use crate::session::Session;
 use crate::store::Store;
 
+mod runner;
+
 /// What the runner's move tool knows about the session. `ck-mc move-in`
 /// reads it as JSON on standard input.
 #[derive(Debug, serde::Deserialize)]
@@ -67,7 +71,9 @@ pub struct MoveRequest {
     /// active branch, root to leaf, with its kind. Needed when the standalone
     /// plugin's numbering differs from the runner's (an OpenCode compaction,
     /// any Pi tool result); without it the stored numbers must already be the
-    /// runner's.
+    /// runner's. Runner-to-runner moves require source_entry on every row.
+    /// Added destination rows follow their owning row with added=true and a
+    /// null source_entry; they belong to that row's summary range and cut.
     #[serde(default)]
     pub messages: Option<Vec<crate::move_renumber::HostMessage>>,
     /// The harness the standalone plugin kept the session under, when it
@@ -77,6 +83,16 @@ pub struct MoveRequest {
     /// to the runner's harness (see [`rekey`]). Absent: the same harness.
     #[serde(default)]
     pub source_harness: Option<String>,
+    /// The session id under which the source stored its rows.
+    #[serde(default)]
+    pub source_session: Option<String>,
+    /// Stored coordinates are source-runner ordinals, not plugin numbers.
+    #[serde(default)]
+    pub source_runner_entries: bool,
+    /// Highest tag exported by the source runner, including tags never stored
+    /// by the standalone plugin.
+    #[serde(default)]
+    pub tag_floor: Option<u64>,
     /// The id of the runner's entry before the newest one, which the first
     /// view's cut goes through. Needed only without `messages`, which name it.
     #[serde(default)]
@@ -88,12 +104,16 @@ pub struct MoveRequest {
 pub struct Moved {
     /// The first view, to store as the session's current view.
     pub view: View,
-    /// The standalone plugin's highest tag number for the session, to write
-    /// as the marker's checkpoint.
+    /// The maximum of the stored plugin tags and the exported runner tag
+    /// floor, to write as the marker's checkpoint.
     pub tag_checkpoint: u64,
     /// Pi summaries whose missing-message slots could not be located exactly.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Source-runner state stays available for rollback; part ids and cached
+    /// views cannot be reused by the destination runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state_kept: Option<bool>,
 }
 
 /// The runner's entry before the newest one, which the first view's cut goes
@@ -161,6 +181,18 @@ pub fn move_in(
     config: &Config,
     request: &MoveRequest,
 ) -> Result<Moved, String> {
+    if request.source_runner_entries {
+        return runner::move_in(db, store, config, request);
+    }
+    if request
+        .source_session
+        .as_deref()
+        .is_some_and(|source| source != request.session.session)
+    {
+        return Err(
+            "invalid_request: source_session may differ only with source_runner_entries".into(),
+        );
+    }
     let key = &request.session;
     let features = preset::features(&request.preset)
         .ok_or_else(|| format!("unknown preset `{}`", request.preset))?;
@@ -281,15 +313,17 @@ pub fn move_in(
     );
     let cut = cut_before_newest(request)?;
     let view = session.first_view_after_move(&settings, cut)?;
-    let tag_checkpoint: u64 = db.with_connection(|conn| {
-        conn.query_row(
+    let tag_checkpoint: u64 = db
+        .with_connection(|conn| {
+            conn.query_row(
             "SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1 AND harness = ?2",
             params![key.session, key.harness],
             |row| row.get::<_, i64>(0),
         )
         .map(|max| max.max(0) as u64)
         .map_err(|error| error.to_string())
-    })?;
+        })?
+        .max(request.tag_floor.unwrap_or(0));
     store
         .save(key, &session.durable())
         .map_err(|error| format!("state_save_failed: {error}"))?;
@@ -322,6 +356,7 @@ pub fn move_in(
         view,
         tag_checkpoint,
         warnings,
+        source_state_kept: None,
     })
 }
 
