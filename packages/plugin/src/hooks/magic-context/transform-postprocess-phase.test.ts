@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { convertToModelMessages, type UIMessage } from "ai";
 import todoRideGolden from "../../../test-fixtures/runtime/todo-ride-only.json";
 import {
     clearSessionMetaFixtureFault,
@@ -23,6 +24,7 @@ import {
     getProtectionWindowForSession,
 } from "../../features/magic-context/protection-window";
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
+import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import {
     addNote,
     addProcessedImageStrippedIds,
@@ -66,6 +68,7 @@ import {
     setPersistedCompactionMarkerState,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
+    thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import * as reasoningStorage from "../../features/magic-context/storage-reasoning-removal";
 import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
@@ -92,6 +95,7 @@ import * as autoSearchRunner from "./auto-search-runner";
 import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
 import * as searchModule from "./auto-search-worker-client";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
+import { withCachedM0ToolDefinitionsHash } from "./compartment-render-epoch";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
@@ -436,6 +440,156 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
 
+describe("issue 643 subagent skeleton retirement", () => {
+    function fixture(thinking = false, databasePath = ":memory:") {
+        db = new Database(databasePath);
+        initializeDatabase(db);
+        const sessionId = "subagent-skeleton-retirement";
+        const source: MessageLike[] = [
+            { info: { id: "start", role: "user" }, parts: [{ type: "text", text: "work" }] },
+            ...Array.from(
+                { length: 60 },
+                (_, i) =>
+                    ({
+                        info: { id: `assistant-${i}`, role: "assistant" },
+                        parts: [
+                            ...(thinking && i === 0
+                                ? [
+                                      {
+                                          type: "reasoning",
+                                          text: "signed thought",
+                                          signature: "signature",
+                                      },
+                                  ]
+                                : []),
+                            {
+                                type: "tool",
+                                tool: "bash",
+                                callID: `call-${i}`,
+                                state: {
+                                    status: "completed",
+                                    input: {
+                                        command: Array.from(
+                                            { length: 60 },
+                                            (_, n) => `file-${i}-${n}`,
+                                        ).join(" "),
+                                    },
+                                    output: `output ${i} ${"word ".repeat(5000)}`,
+                                },
+                            },
+                        ],
+                    }) as MessageLike,
+            ),
+            { info: { id: "tail", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        ];
+        const tagger = createTagger();
+        tagMessages(sessionId, cloneMessages(source), tagger, db);
+        const tools = getTagsBySession(db, sessionId).filter((tag) => tag.type === "tool");
+        // These calls were dropped while each was recent on an earlier request.
+        for (const tag of tools) {
+            updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+            updateTagDropMode(db, sessionId, tag.tagNumber, "skeleton_real");
+        }
+        const serve = async (execute: boolean, primary = false) => {
+            const messages = cloneMessages(source);
+            const replayTagger = createTagger();
+            replayTagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, replayTagger, db);
+            applyFlushedStatuses(sessionId, db, tagged.targets);
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    ...tagged,
+                    tagger: replayTagger,
+                    tags: getTagsBySession(db, sessionId),
+                    fullFeatureMode: primary,
+                    schedulerDecision: execute ? "execute" : "defer",
+                    resolvedProviderID: "anthropic",
+                    resolvedModelID: "claude-opus-5-5",
+                    thinkingBindingRecoveryEnabledForModel: thinking,
+                    // Exercise a real rebuild permission even in the primary control.
+                    historyRebuiltThisPass: execute && primary,
+                }),
+            );
+            return { messages, result };
+        };
+        const modes = () =>
+            getTagsBySession(db, sessionId)
+                .filter((tag) => tag.type === "tool")
+                .map((tag) => tag.dropMode);
+        return { sessionId, source, serve, modes, tools };
+    }
+
+    it("converts the 40 older skeletons on subagent execute and defers byte-identically", async () => {
+        const { source, serve, modes } = fixture();
+        const held = await serve(false);
+        expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+        const priced = await serve(true);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        const calls = priced.messages
+            .flatMap((message) => message.parts)
+            .filter((part) => part.type === "tool");
+        expect(calls).toHaveLength(20);
+        expect(calls.map((part) => (part as { callID: string }).callID)).toEqual(
+            Array.from({ length: 20 }, (_, i) => `call-${i + 40}`),
+        );
+        const deferred = await serve(false);
+        expect(JSON.stringify(deferred.messages)).toBe(JSON.stringify(priced.messages));
+        const tokens = (messages: MessageLike[]) =>
+            messages.reduce((sum, message) => {
+                const estimate = estimateMessageTokens(message);
+                return sum + estimate.toolCall + estimate.conversation;
+            }, 0);
+        const raw = tokens(source);
+        const before = tokens(held.messages);
+        const after = tokens(priced.messages);
+        console.log(
+            `issue 643 long subagent fixture: raw=${raw}, skeletons=${before}, retired=${after} estimated tokens`,
+        );
+        expect(raw).toBeGreaterThan(280000);
+        expect(raw).toBeLessThan(330000);
+        expect(after).toBeLessThan(before / 2);
+    });
+
+    it("releases a thinking-held skeleton only after a persisted strip and a rebuild", async () => {
+        const { sessionId, serve, modes } = fixture(true);
+        await serve(true);
+        expect(modes()[0]).toBe("skeleton_real");
+        addMergedReasoningStrippedIds(db, sessionId, [
+            thinkingBindingRecoveryFrozenId("assistant-0"),
+        ]);
+        await serve(false);
+        expect(modes()[0]).toBe("skeleton_real");
+        const rebuilt = await serve(true);
+        expect(modes()[0]).toBe("full");
+        expect(JSON.stringify(rebuilt.messages)).not.toContain("signed thought");
+        expect(JSON.stringify((await serve(false)).messages)).toBe(
+            JSON.stringify(rebuilt.messages),
+        );
+    });
+
+    it("keeps primary skeletons unchanged even on a rebuilding pass", async () => {
+        const { serve, modes } = fixture();
+        const before = await serve(false, true);
+        const rebuilt = await serve(true, true);
+        expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+        expect(JSON.stringify(rebuilt.messages)).toBe(JSON.stringify(before.messages));
+    });
+
+    it("replays retired arcs byte-identically after reopening the database", async () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "issue-643-restart-"));
+        tempDirs.push(dir);
+        const path = join(dir, "context.db");
+        const { serve, modes } = fixture(false, path);
+        const rebuilt = await serve(true);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        db.close();
+        db = new Database(path);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        const replayed = await serve(false);
+        expect(JSON.stringify(replayed.messages)).toBe(JSON.stringify(rebuilt.messages));
+    });
+});
+
 it("repairs previously served tag-emptied history through one shared rebuild, then defers identically", async () => {
     const db = new Database(":memory:");
     initializeDatabase(db);
@@ -471,6 +625,277 @@ it("repairs previously served tag-emptied history through one shared rebuild, th
     db.close();
 });
 
+it("cache thread: projects only generated structural sentinels after tagging and freezes defer bytes", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const sessionId = "signed-structural-projection";
+    const history: MessageLike = {
+        info: { id: "history", role: "user" },
+        parts: [{ type: "text", text: "work" }],
+    };
+    const source = (): MessageLike[] => [
+        structuredClone(history),
+        {
+            info: { id: "signed", role: "assistant" },
+            parts: [
+                { type: "step-start", snapshot: "snapshot" },
+                {
+                    type: "reasoning",
+                    text: "thinking",
+                    metadata: { anthropic: { signature: "sig" } },
+                },
+                // Native empty text is not ours to remove: OpenCode uses it to
+                // preserve positions when its SDK splits and regroups steps.
+                { type: "text", text: "" },
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "call",
+                    state: {
+                        status: "completed",
+                        input: { filePath: "file.ts" },
+                        output: "result",
+                    },
+                },
+                { type: "step-finish", reason: "tool-calls" },
+            ],
+        },
+    ];
+    let previous = [structuredClone(history)];
+    const { prepareStructuralSentinelChoices } = await import("./project-structural-sentinels");
+    prepareStructuralSentinelChoices({ db, sessionId, messages: [structuredClone(history)] });
+    const serve = async () => {
+        const messages = source();
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        const signed = messages[1].parts[1];
+        const tool = messages[1].parts[3];
+        const tagRows = getTagsBySession(db, sessionId);
+        const toolTag = tagRows.find((tag) => tag.type === "tool");
+        expect(toolTag).toBeDefined();
+        expect(tagged.targets.get(toolTag!.tagNumber)?.readInput?.()).toEqual({
+            filePath: "file.ts",
+        });
+        expect(stripStructuralNoise(messages)).toBe(2);
+        // Projection must not shift the coordinates while tag targets are in use.
+        expect(messages[1].parts[1]).toBe(signed);
+        expect(messages[1].parts[3]).toBe(tool);
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...tagged,
+                tagger,
+                tags: tagRows,
+                resolvedProviderID: "anthropic",
+                opencode1: true,
+                resolvedModelID: "claude-opus-5-5",
+                activeThinkingTurn: true,
+                activeThinkingPrefixHold: true,
+                thinkingBindingRecoveryEnabledForModel: true,
+                readLastServedMessages: () => previous,
+            }),
+        );
+        expect(result.prefixMutationPermitted).toBe(false);
+        expect(result.bustedThisPass).toBe(false);
+        expect(messages[1].parts).toEqual([signed, { type: "text", text: "" }, tool]);
+        expect((messages[1].parts[0] as { metadata: unknown }).metadata).toEqual({
+            anthropic: { signature: "sig" },
+        });
+        expect(JSON.stringify(tool)).toContain(`§${toolTag!.tagNumber}§`);
+        return messages;
+    };
+    const first = await serve();
+    previous = structuredClone(first);
+    expect(JSON.stringify(await serve())).toBe(JSON.stringify(first));
+
+    // This is the UI-message shape OpenCode 1.19.4 passes to ai@6.0.168.
+    // Its native leading step-start must be a no-op, and only the native empty
+    // text (not our removed placeholders) may become a space beside thinking.
+    const hostParts = (parts: unknown[]): UIMessage["parts"] =>
+        parts.flatMap<unknown>((value) => {
+            const part = value as {
+                type: string;
+                text?: string;
+                metadata?: UIMessage["metadata"];
+                state?: { input: unknown; output: unknown };
+            };
+            if (part.type === "step-start") return [{ type: "step-start" }];
+            if (part.type === "reasoning")
+                return [{ type: "reasoning", text: part.text, providerMetadata: part.metadata }];
+            if (part.type === "text")
+                return [{ type: "text", text: part.text === "" ? " " : part.text }];
+            if (part.type === "tool")
+                return [
+                    {
+                        type: "tool-read",
+                        toolCallId: "call",
+                        state: "output-available",
+                        input: part.state?.input,
+                        output: part.state?.output,
+                    },
+                ];
+            return [];
+        }) as UIMessage["parts"];
+    const convert = (parts: unknown[]) =>
+        convertToModelMessages([
+            {
+                id: "signed",
+                role: "assistant",
+                parts: hostParts(parts),
+            },
+        ]);
+    const converted = await convert(first[1].parts);
+    expect(converted).toEqual(await convert([{ type: "step-start" }, ...first[1].parts]));
+    expect(converted.map((message) => message.role)).toEqual(["assistant", "tool"]);
+    expect(converted[0].content).toEqual([
+        {
+            type: "reasoning",
+            text: "thinking",
+            providerOptions: { anthropic: { signature: "sig" } },
+        },
+        { type: "text", text: " " },
+        { type: "tool-call", toolCallId: "call", toolName: "read", input: { filePath: "file.ts" } },
+    ]);
+
+    // Removing the omission ledger models an upgrade of already served history:
+    // its old empty slots cannot disappear on an otherwise identical warm pass.
+    const { updateReplayDocument } = await import(
+        "../../features/magic-context/storage-replay-document"
+    );
+    updateReplayDocument(db, sessionId, (document) => {
+        delete document.structuralSentinelOmissions;
+        delete document.structuralSentinelUpgrade;
+        return true;
+    });
+    const legacy = source();
+    const legacyTagger = createTagger();
+    legacyTagger.initFromDb(sessionId, db);
+    const tagged = tagMessages(sessionId, legacy, legacyTagger, db);
+    stripStructuralNoise(legacy);
+    previous = structuredClone(legacy);
+    const result = await runPostTransformPhase(
+        basePostTransformArgs(db, sessionId, legacy, {
+            ...tagged,
+            tagger: legacyTagger,
+            tags: getTagsBySession(db, sessionId),
+            resolvedProviderID: "anthropic",
+            opencode1: true,
+            readLastServedMessages: () => previous,
+        }),
+    );
+    expect(result.prefixMutationPermitted).toBe(false);
+    expect(JSON.stringify(legacy)).toBe(JSON.stringify(previous));
+    expect(legacy[1].parts[0]).toEqual({ type: "text", text: "" });
+});
+
+it("cache thread: a signed served-shape repair cannot retag an earlier recovery tail", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const { markServedShapeRepair } = await import("./served-shape-repair");
+    const sessionId = "bounded-recovery-tags";
+    const projectionModule = await import("./project-structural-sentinels");
+    const projection = spyOn(projectionModule, "projectStructuralSentinels");
+    const source = (): MessageLike[] => [
+        {
+            info: { id: "recovered-a", role: "user" },
+            parts: [{ type: "text", text: "untagged a" }],
+        },
+        {
+            info: { id: "recovered-b", role: "assistant" },
+            parts: [{ type: "text", text: "untagged b" }],
+        },
+        {
+            info: { id: "repair", role: "assistant" },
+            parts: [
+                { type: "text", text: "" },
+                {
+                    type: "reasoning",
+                    text: "signed thought",
+                    metadata: { anthropic: { signature: "sig" } },
+                },
+            ],
+        },
+    ];
+    let previous = source();
+    let normalized = false;
+    const logs: string[] = [];
+    const log = spyOn(loggerModule, "sessionLog").mockImplementation((_session, ...parts) => {
+        logs.push(parts.join(" "));
+    });
+    const serve = async (cold = false) => {
+        const messages = source();
+        markServedShapeRepair(messages[2].info, [{ index: 0, text: "restored text" }]);
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        let tagged = normalized ? tagMessages(sessionId, messages.slice(0, 2), tagger, db) : null;
+        const targets = tagged?.targets ?? new Map();
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                targets,
+                tagger,
+                resolvedProviderID: "anthropic",
+                resolvedModelID: "claude-opus-5-5",
+                opencode1: true,
+                activeThinkingTurn: true,
+                thinkingBindingRecoveryEnabledForModel: true,
+                readLastServedMessages: () => previous,
+                normalizeRecoveryTail: () => {
+                    normalized = true;
+                    tagged = tagMessages(sessionId, messages.slice(0, 2), tagger, db);
+                    for (const [tag, target] of tagged.targets) targets.set(tag, target);
+                },
+                ...(cold
+                    ? {
+                          m0M1: {
+                              historyBudgetTokens: 98_000,
+                              hardSignals: {
+                                  systemHash: "system",
+                                  modelKey: "anthropic/claude-opus-5-5",
+                                  cacheExpired: true,
+                                  lastResponseTime: 0,
+                              },
+                          },
+                      }
+                    : {}),
+            }),
+        );
+        previous = structuredClone(messages);
+        return { messages, result };
+    };
+    try {
+        const repaired = await serve();
+        expect(repaired.result.prefixMutationPermitted).toBe(true);
+        expect(repaired.result.bustedThisPass).toBe(true);
+        expect(normalized).toBe(false);
+        expect(projection).toHaveBeenLastCalledWith(expect.objectContaining({ rebuilding: false }));
+        expect(repaired.messages.slice(0, 2)).toEqual(source().slice(0, 2));
+        expect(
+            logs.some(
+                (line) =>
+                    line.includes("rewrite permission:") &&
+                    line.includes("served_shape_repair=true") &&
+                    line.includes("signed_prefix_release=true") &&
+                    line.includes("recovery_head_changed=false"),
+            ),
+        ).toBe(true);
+        const deferred = await serve();
+        expect(deferred.result.prefixMutationPermitted).toBe(false);
+        expect(deferred.result.bustedThisPass).toBe(false);
+        expect(JSON.stringify(deferred.messages)).toBe(JSON.stringify(repaired.messages));
+        const cold = await serve(true);
+        expect(normalized).toBe(false);
+        expect(cold.messages.slice(0, 2)).toEqual(source().slice(0, 2));
+        const replay = await serve();
+        expect(replay.result.prefixMutationPermitted).toBe(false);
+        expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(cold.messages));
+    } finally {
+        log.mockRestore();
+        projection.mockRestore();
+    }
+});
+
 for (const host of ["opencode", "opencode2"] as const) {
     describe(`${host} auto-search served decisions`, () => {
         function setup(label: string) {
@@ -482,7 +907,7 @@ for (const host of ["opencode", "opencode2"] as const) {
             return {
                 ...fixture,
                 search,
-                async invoke(id: string, busting = false) {
+                async invoke(id: string, busting = false, enabled = true) {
                     const user = {
                         info: { id, role: "user" },
                         parts: [{ type: "text", text: replayPrompt }],
@@ -491,7 +916,7 @@ for (const host of ["opencode", "opencode2"] as const) {
                         currentTurnId: id,
                         schedulerDecision: busting ? "execute" : "defer",
                         projectPath: fixture.projectPath,
-                        autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+                        autoSearch: { enabled, scoreThreshold: 0.6, minPromptChars: 12 },
                         m0M1: fixture.renderOptions(
                             busting ? "anthropic/other" : "anthropic/claude",
                         ),
@@ -506,6 +931,28 @@ for (const host of ["opencode", "opencode2"] as const) {
                 },
             };
         }
+
+        it("full host processor logs a disabled auto-search turn without searching", async () => {
+            const fixture = setup("disabled-logging");
+            const log = spyOn(loggerModule, "sessionLog");
+            try {
+                const first = await fixture.invoke("disabled", false, false);
+                const replay = await fixture.invoke("disabled", false, false);
+                expect(replay.userBytes).toBe(first.userBytes);
+                expect(fixture.search).not.toHaveBeenCalled();
+                expect(
+                    log.mock.calls.filter(([, line]) =>
+                        line.includes("auto-search: decision outcome=disabled"),
+                    ),
+                ).toHaveLength(1);
+                expect(
+                    replayStorage.getAutoSearchHintDecisions(fixture.db, fixture.sessionId),
+                ).toEqual([]);
+            } finally {
+                log.mockRestore();
+                fixture.close();
+            }
+        });
 
         it("full host processor cannot retry a served search exception", async () => {
             const fixture = setup("host-exception");
@@ -3291,7 +3738,14 @@ describe("deferred compaction marker advance representation", () => {
             sessionId,
             1_001,
             1_001,
-            JSON.stringify({ role: "assistant", summary: true, finish: "stop" }),
+            JSON.stringify({
+                role: "assistant",
+                parentID: "old-boundary",
+                summary: true,
+                finish: "stop",
+                providerID: "magic-context",
+                modelID: "magic-context",
+            }),
         );
         opencodeDb
             .prepare(
@@ -5056,6 +5510,73 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         });
     }
 
+    it("independent tool witness: force band drains held drops once, and a same-turn tool removal folds once more", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "independent-tool-force";
+        materializeBaseline(sessionId);
+        const identity = (temporary: boolean) =>
+            v2ToolDefinitionsHash({
+                read: { description: "Read a file", input: {} },
+                ...(temporary ? { temporary: { description: "A temporary tool", input: {} } } : {}),
+            });
+        updateSessionMeta(db, sessionId, {
+            cachedM0UpgradeState: withCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState,
+                identity(false),
+            ),
+        });
+        insertTag(db, sessionId, "drop-call", "tool", 1000, 1, 0, "bash", 0, "drop-owner");
+        padRecentToolSkeletonWindow(sessionId, 1);
+        queuePendingOp(db, sessionId, 1, "drop");
+        registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+        // Normalized payload storage elides identical bytes, not the fold's
+        // completion marker. Count folds rather than redundant payload writes.
+        db.exec(`CREATE TEMP TABLE force_head_writes (n INTEGER);
+            CREATE TEMP TRIGGER count_force_head AFTER UPDATE OF cached_m0_materialized_at ON session_meta
+            BEGIN INSERT INTO force_head_writes VALUES (1); END`);
+        const run = async (percentage: number, temporary = true) => {
+            const message = makeToolMessage("drop-owner");
+            const messages = [message];
+            const targets = new Map([[1, makeDropTarget(message)]]);
+            applyFlushedStatuses(sessionId, db, targets, getTagsBySession(db, sessionId));
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    targets,
+                    canRunCompartments: true,
+                    schedulerDecision: "defer",
+                    currentTurnId: "one-user-turn",
+                    contextUsage: { percentage, inputTokens: 110_000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: { ...BASE_HARD, toolDefinitionsHash: identity(temporary) },
+                    },
+                }),
+            );
+            return { result, wire: JSON.stringify(messages) };
+        };
+        const folded = await run(86);
+        expect(folded.result.materialized).toBe(true);
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+            "dropped",
+        );
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 1 });
+        const replay = await run(40);
+        expect(replay.result.materialized).toBe(false);
+        expect(replay.wire).toBe(folded.wire);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 1 });
+        const removed = await run(40, false);
+        expect(removed.result.materialized).toBe(true);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 2 });
+        const stable = await run(40, false);
+        expect(stable.result.materialized).toBe(false);
+        expect(stable.wire).toBe(removed.wire);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 2 });
+    });
+
     it("consumes an OpenCode flush on a hard fold and replays the next defer byte-identically", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
@@ -6091,7 +6612,10 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains queued pending ops on an m[0] HARD-fold pass EVEN WHILE the historian runs", async () => {
+    it.each([
+        "model_change",
+        "tool_definitions",
+    ])("%s drains pending ops and cleanup on a HARD fold EVEN WHILE the historian runs", async (reason) => {
         // The double-bust fix: a HARD fold (e.g. system-prompt change) re-caches
         // m[0] this pass, so the prefix is busting regardless. If the historian is
         // mid-run, the compartmentRunning veto USED to block the drain → it spilled
@@ -6102,6 +6626,12 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         initializeDatabase(db);
         const sessionId = "ses-hardfold-drain-while-historian";
         materializeBaseline(sessionId);
+        updateSessionMeta(db, sessionId, {
+            cachedM0UpgradeState: withCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState,
+                "tools-before",
+            ),
+        });
 
         const message = makeToolMessage("tool-1");
         insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
@@ -6110,6 +6640,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
 
         // Historian in progress for this session (never resolves during the test).
         registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+        const cleanup = spyOn(heuristicCleanup, "applyHeuristicCleanup");
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [message], {
@@ -6124,7 +6655,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     historyBudgetTokens: 98_000,
                     hardSignals: {
                         ...BASE_HARD,
-                        modelKey: "anthropic/sonnet", // ← the HARD trigger
+                        ...(reason === "model_change"
+                            ? { modelKey: "anthropic/sonnet" }
+                            : { toolDefinitionsHash: "tools-after" }),
                     },
                 },
             }),
@@ -6135,6 +6668,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
             "dropped",
         );
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(cleanup).toHaveBeenCalled();
+        cleanup.mockRestore();
     });
 
     it.each([

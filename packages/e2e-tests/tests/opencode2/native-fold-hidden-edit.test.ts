@@ -7,7 +7,6 @@ import { isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from
 
 test("a hidden row edited in place expires cold fold provenance and rebuilds once through the shared gate", async () => {
     const fixture = isolation();
-    fixture.env.MC_OC2_INVISIBLE_FOLD = "1";
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const options = { existingIsolation: fixture, compactionAuto: false, modelContextLimit: 100000, modelOutputLimit: 1024,
         magicContextConfig: { cache_ttl: "never", protected_tokens: 4000, historian: { disable: true }, dreamer: { disable: true }, memory: { enabled: false } } };

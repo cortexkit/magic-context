@@ -6,7 +6,9 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
+import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { nativeFoldCache } from "../fold/memory-cache";
@@ -15,9 +17,11 @@ import {
     isLocalCheckpoint,
     NativeFoldReplay,
 } from "../fold/native-replay";
+import { FoldOwner } from "../fold/owner";
 import type { StoreRow } from "../store-reader";
 import * as readerModule from "../store-reader";
 import { registerContext } from "./context";
+import { adaptPayload } from "./payload";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context, V2Message } from "./types";
 
@@ -35,7 +39,7 @@ const cut = (extra = {}): StoreRow<"compaction"> => ({
     data: { status: "completed", summary: "summary", ...extra },
 });
 
-async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
+async function fixture(checkpoint: StoreRow<"compaction">) {
     const parent = join(tmpdir(), "magic-context", "oc21b");
     mkdirSync(parent, { recursive: true });
     const dir = createTestTempDirFromPath(join(parent, "checkpoint-unit-"));
@@ -61,8 +65,6 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
         cache_ttl: "never",
         subc: { connection_file: join(dir, "run", "subc-connection.json") },
     });
-    const old = process.env.MC_OC2_INVISIBLE_FOLD;
-    process.env.MC_OC2_INVISIBLE_FOLD = invisible ? "1" : "0";
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
@@ -76,18 +78,22 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
     const restore = spyOn(NativeFoldReplay.prototype, "restore");
     const interrupt = mock(async () => ({ interrupted: true }));
     let hook: (draft: SessionContext) => Promise<void>;
+    let compaction: (draft: SessionContext) => Promise<void>;
+    let servedDraft: SessionContext | undefined;
     const storage = new Map<string, unknown>();
+    const hostStorage = {
+        get: async (key: string) => storage.get(key),
+        set: async (key: string, value: unknown) => {
+            storage.set(key, value);
+        },
+    };
+    const legacyOwner = new FoldOwner(hostStorage);
     resetLkgSlotsForTest();
     const duties = await registerContext({
         location: { directory: dir },
         agent: { transform: async () => {}, reload: async () => {} },
         model: { list: () => [] },
-        storage: {
-            get: async (key: string) => storage.get(key),
-            set: async (key: string, value: unknown) => {
-                storage.set(key, value);
-            },
-        },
+        storage: hostStorage,
         event: { subscribe: async function* () {} },
         tool: { hook: async () => {} },
         session: {
@@ -97,6 +103,7 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
             interrupt,
             hook: async (name: string, callback: typeof hook) => {
                 if (name === "context") hook = callback;
+                if (name === "compaction") compaction = callback;
             },
             get: async () => ({ location: { directory: dir } }),
         },
@@ -107,6 +114,68 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
         restore,
         interrupt,
         reader: () => new readerModule.V2StoreReader(join(dir, "opencode.db")),
+        async seedLegacy(row = checkpoint, recent?: string) {
+            source
+                .prepare("UPDATE session_message SET data=? WHERE id=?")
+                .run(JSON.stringify({ ...row.data, status: "running" }), row.id);
+            const unavailable = spyOn(NativeFoldReplay.prototype, "supply").mockResolvedValue(
+                false,
+            );
+            const draft: SessionContext = {
+                sessionID: "s",
+                model,
+                agent: "build",
+                system: [],
+                tools: {},
+                options: {},
+                messages: [],
+            };
+            try {
+                // Exercise the registered legacy fallback writer, including its
+                // materialization and serialization, rather than inventing KV bytes.
+                await compaction(draft);
+            } finally {
+                unavailable.mockRestore();
+            }
+            if (!draft.result) throw new Error("legacy compaction did not supply a summary");
+            row.data = {
+                ...row.data,
+                status: "completed",
+                summary: draft.result.summary,
+                ...(recent === undefined ? {} : { recent }),
+            };
+            source
+                .prepare("UPDATE session_message SET data=? WHERE id=?")
+                .run(JSON.stringify(row.data), row.id);
+            const rendered: V2Message = {
+                id: row.id,
+                role: "user",
+                metadata: row.data.metadata,
+                content: [
+                    {
+                        type: "text",
+                        text: `<conversation-checkpoint>\n<summary>\n${draft.result.summary}\n</summary>${recent === undefined ? "" : `\n<recent-context>${recent}</recent-context>`}\n</conversation-checkpoint>`,
+                    },
+                ],
+            };
+            await legacyOwner.observe({
+                sessionID: "s",
+                cutSeq: row.seq,
+                summary: draft.result.summary,
+                rendered,
+                onHard: (reason) => {
+                    throw new Error(`legacy writer seed diverged: ${reason}`);
+                },
+            });
+            return rendered;
+        },
+        async legacyBytes() {
+            return JSON.stringify(await legacyOwner.read("s"));
+        },
+        currentDraft() {
+            if (!servedDraft) throw new Error("no context request has been served");
+            return servedDraft;
+        },
         async run(messages: V2Message[], target = model) {
             const draft: SessionContext = {
                 sessionID: "s",
@@ -118,6 +187,7 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
                 messages,
             };
             await hook(draft);
+            servedDraft = draft;
             return draft.messages;
         },
         async close() {
@@ -126,8 +196,6 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
             load.mockRestore();
             gate.mockRestore();
             path.mockRestore();
-            if (old === undefined) delete process.env.MC_OC2_INVISIBLE_FOLD;
-            else process.env.MC_OC2_INVISIBLE_FOLD = old;
             source.close();
             closeDatabase();
             resetLkgSlotsForTest();
@@ -141,7 +209,7 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
     for (const data of [{ providerContext: { messages: [] } }, { native: { messages: [] } }]) {
         const checkpoint = cut(data);
         expect(isLocalCheckpoint(checkpoint)).toBe(false);
-        const f = await fixture(checkpoint, true);
+        const f = await fixture(checkpoint);
         try {
             for (const target of [
                 model,
@@ -161,7 +229,7 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
             await f.close();
         }
     }
-    const f = await fixture(cut(), true);
+    const f = await fixture(cut());
     try {
         const cache = nativeFoldCache(f.db);
         const checkpoint = cut();
@@ -251,19 +319,16 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
 
 test("keepID and legacy recent checkpoints restore missing rows before the host-kept tail exactly once", async () => {
     for (const metadata of [{ keepID: "u3" }, { recent: "u3 and a4" }]) {
-        const f = await fixture(cut({ metadata }), false);
+        const f = await fixture(cut({ metadata }));
         try {
-            const messages = await f.run([
-                {
-                    id: "cut",
-                    role: "user",
-                    content: [{ type: "text", text: "<summary>\nsummary\n</summary>" }],
-                    metadata,
-                },
+            const incoming = await f.seedLegacy();
+            const input = [
+                incoming,
                 user("u3"),
                 { id: "a4", role: "assistant", content: [{ type: "text", text: "a4" }] },
                 user("tail"),
-            ]);
+            ];
+            const messages = await f.run(structuredClone(input));
             expect(
                 messages
                     .map((m) => m.id)
@@ -271,8 +336,93 @@ test("keepID and legacy recent checkpoints restore missing rows before the host-
             ).toEqual(["cut", "u1", "a2", "u3", "a4", "tail"]);
             expect(messages.find((m) => m.id === "cut")?.metadata).toEqual(metadata);
             expect(f.interrupt).not.toHaveBeenCalled();
+            const served = JSON.stringify(messages);
+            const persisted = await f.legacyBytes();
+            for (let pass = 0; pass < 2; pass++) {
+                expect(JSON.stringify(await f.run(structuredClone(input)))).toBe(served);
+                expect(await f.legacyBytes()).toBe(persisted);
+            }
         } finally {
             await f.close();
         }
+    }
+}, 60_000);
+
+function requestEstimate(draft: SessionContext): number {
+    const toolDefinitionTokens = Object.values(draft.tools).reduce(
+        (sum, tool) =>
+            sum + estimateTokens(tool.description) + estimateTokens(JSON.stringify(tool.input)),
+        0,
+    );
+    return estimateFinalWireInputTokens({
+        messages: adaptPayload(draft, new Set()).messages,
+        toolDefinitionTokens,
+        systemPromptTokens: estimateTokens(JSON.stringify(draft.system)),
+        providerID: draft.model.providerID,
+        modelID: draft.model.id,
+        agentName: draft.agent,
+    }).tokens;
+}
+
+const oversizedRecent = "raw1 raw2 raw3 raw4 ".repeat(100_000);
+const unknownCheckpoint = (): V2Message => ({
+    id: "cut",
+    role: "user",
+    content: [
+        {
+            type: "text",
+            text: `<conversation-checkpoint>\n<summary>\nsummary\n</summary>\n<recent-context>${oversizedRecent}</recent-context>\n</conversation-checkpoint>`,
+        },
+    ],
+});
+
+test("a nonmatching legacy record stays unchanged and cannot adopt an oversized current wrapper", async () => {
+    const f = await fixture(cut());
+    try {
+        // Reverting removes a newer host checkpoint, but its plugin KV record
+        // can remain. Produce that record through the real legacy writer first.
+        const previous = { ...cut(), id: "old-cut", seq: 99 };
+        f.source
+            .prepare("INSERT INTO session_message VALUES (?, 's', 'compaction', ?, 100, 100, ?)")
+            .run(previous.id, previous.seq, JSON.stringify(previous.data));
+        await f.seedLegacy(previous, oversizedRecent);
+        f.source.prepare("DELETE FROM session_message WHERE id=?").run(previous.id);
+        const persisted = await f.legacyBytes();
+        expect(estimateTokens(oversizedRecent)).toBeGreaterThan(model.limit.context);
+        for (let pass = 0; pass < 3; pass++) {
+            const messages = await f.run([unknownCheckpoint(), user("tail")]);
+            expect(
+                messages.some((message) => message.id === "cut" || message.id === "old-cut"),
+            ).toBe(false);
+            expect(JSON.stringify(messages)).not.toContain("<recent-context>");
+            expect(await f.legacyBytes()).toBe(persisted);
+            expect(requestEstimate(f.currentDraft())).toBeLessThan(model.limit.context);
+            expect(Buffer.byteLength(JSON.stringify(f.currentDraft()))).toBeLessThan(50_000);
+        }
+        expect(f.interrupt).not.toHaveBeenCalled();
+    } finally {
+        await f.close();
+    }
+}, 60_000);
+
+test("a fresh unadmitted checkpoint does not adopt recent-context on the default path", async () => {
+    const f = await fixture(cut());
+    try {
+        expect(await f.legacyBytes()).toBeUndefined();
+        expect(estimateTokens(oversizedRecent)).toBeGreaterThan(model.limit.context);
+        const messages = await f.run([unknownCheckpoint(), user("tail")]);
+        expect(
+            messages
+                .filter((message) => ["u1", "a2", "u3", "a4", "tail"].includes(message.id!))
+                .map((message) => message.id),
+        ).toEqual(["u1", "a2", "u3", "a4", "tail"]);
+        expect(messages.some((message) => message.id === "cut")).toBe(false);
+        expect(JSON.stringify(messages)).not.toContain("<recent-context>");
+        expect(await f.legacyBytes()).toBeUndefined();
+        expect(requestEstimate(f.currentDraft())).toBeLessThan(model.limit.context);
+        expect(Buffer.byteLength(JSON.stringify(f.currentDraft()))).toBeLessThan(50_000);
+        expect(f.interrupt).not.toHaveBeenCalled();
+    } finally {
+        await f.close();
     }
 }, 60_000);

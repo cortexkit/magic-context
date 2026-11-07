@@ -24,6 +24,7 @@ import { isolateStoreDirectories } from "./store-directories";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 import { OpenCode } from "@opencode/client";
+import { setHarness } from "../../../plugin/src/shared/harness";
 import { prepareSchemaGuard, requireSchemaGuard } from "./schema-guard";
 import {
 	awaitPluginActivation,
@@ -101,6 +102,10 @@ export interface OpenCode2Isolation {
 }
 
 export function isolation(): OpenCode2Isolation {
+	// The retrospective gate counts only the selected host's root sessions.
+	// Match the OpenCode 2 host for in-process database probes, but do not select
+	// a host when importing utilities that OpenCode 1 tests also use.
+	setHarness("opencode2");
 	const root = createE2ETempDir("mc-opencode2-");
 	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH,
@@ -329,6 +334,7 @@ export interface OpenCode2SpawnOptions {
 
 /** Event-driven, bounded startup; no readiness polling. CLI contract: AFT playbook:54-64. */
 export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
+	setHarness("opencode2");
 	const providerID = options.providerID ?? "openai";
 	const fixture = options.existingIsolation ?? isolation();
 	fixture.env.MAGIC_CONTEXT_LOG_SYNC = "1";

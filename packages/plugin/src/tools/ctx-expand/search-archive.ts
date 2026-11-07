@@ -3,11 +3,14 @@ import type { ContextDatabase } from "../../features/magic-context/storage";
 import { runSessionWarmupWorker } from "../../hooks/magic-context/raw-ordinal-warmup";
 import {
     hasRawMessageProvider,
+    rawMessageOffThreadRangeReader,
+    rawMessageWorkerSource,
     readRawSessionMessageIdOrdinalsForRange,
 } from "../../hooks/magic-context/read-session-chunk";
 import { openCodeDbExists, withReadOnlySessionDb } from "../../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { getSqliteDatabasePath } from "../../shared/sqlite";
+import { readV2ArchiveOffThread } from "./v2-archive-reader";
 
 interface ArchiveRow {
     ordinal: number;
@@ -97,10 +100,52 @@ export async function renderSearchArchiveOffThread(
     archiveOnly = false,
 ): Promise<string | null> {
     const path = getSqliteDatabasePath(db);
-    // Private in-memory stores cannot be reopened by a worker. A registered
-    // provider supplies raw IDs; otherwise the worker uses the explicit OpenCode path.
-    if (!path) return renderSearchArchive(db, sessionId, start, end, tokenBudget, archiveOnly);
     const provider = hasRawMessageProvider(sessionId);
+    const source = rawMessageWorkerSource(sessionId);
+    const offThreadReader = rawMessageOffThreadRangeReader(sessionId);
+    let rawIds: Map<string, number> | undefined;
+    if (!archiveOnly && !source && offThreadReader) {
+        try {
+            rawIds = await offThreadReader(start, end);
+        } catch (error) {
+            throw new Error(`Search archive worker unavailable: ${String(error)}`);
+        }
+    }
+    // Private in-memory archives cannot be reopened. Their archive rows are cheap
+    // to read here, but a provider's raw store must still never be scanned here.
+    if (!path) {
+        return renderSearchArchive(
+            db,
+            sessionId,
+            start,
+            end,
+            tokenBudget,
+            archiveOnly,
+            rawIds
+                ? () => rawIds
+                : provider
+                  ? () => {
+                        throw new Error(
+                            "Search archive worker unavailable: private archive has no off-thread source",
+                        );
+                    }
+                  : undefined,
+        );
+    }
+    if (!archiveOnly && source) {
+        return readV2ArchiveOffThread(path, source.path, sessionId, {
+            kind: "archive",
+            start,
+            end,
+            tokenBudget,
+            archiveOnly,
+        });
+    }
+    if (!archiveOnly && provider && !rawIds) {
+        throw new Error(
+            "Search archive worker unavailable: raw-message provider has no off-thread source",
+        );
+    }
     const rawPath =
         !archiveOnly && !provider && openCodeDbExists()
             ? withReadOnlySessionDb(getSqliteDatabasePath)
@@ -115,10 +160,7 @@ export async function renderSearchArchiveOffThread(
                 tokenBudget,
                 archiveOnly,
                 rawPath,
-                rawIds:
-                    !archiveOnly && provider
-                        ? [...readRawSessionMessageIdOrdinalsForRange(sessionId, start, end)]
-                        : undefined,
+                rawIds: rawIds ? [...rawIds] : undefined,
             },
         },
         {},

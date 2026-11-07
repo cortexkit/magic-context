@@ -16,8 +16,8 @@ Existing host-imposed differences also include [native fold ownership](../../PAR
 
 | Difference | Imposed or chosen | Evidence |
 | --- | --- | --- |
-| Publication does not write a v1 pending marker; the host creates the compaction row | Host-imposed | GA `SessionCompaction.result` returns a summary, not a chosen sequence cut; `Context.session` has no `compact` method. See the [fold-ownership surface](../../PARITY.md#2-fold-ownership). The deferred-marker scenario requires a real published compartment and a completed native row with no additional provider call. |
-| Native auto-compaction is not treated as a conflicting second summarizer | Chosen integration on the imposed hook carrier | The adapter answers the host's compaction hook locally. The conflict scenario explicitly requests a real native fold, requires zero competing model calls, and observes the checkpoint on the subsequent wire request. |
+| Publication does not write a v1 pending marker; the host creates the compaction row | Host-imposed | The compaction hook returns a summary rather than choosing the final stored sequence. `Context.session.compact` can request a queued checkpoint, but the host assigns its cut. See [fold ownership](../../docs/architecture/opencode-2.md#fold-ownership). The deferred-marker scenario requires a persisted historian summary (a compartment) and a completed native row with no additional provider call. |
+| Native auto-compaction is not treated as a conflicting second summarizer | Chosen integration through the host's compaction hook | The adapter answers the host's compaction hook locally. The conflict scenario explicitly requests a real native fold, requires zero competing model calls, validates its durable admission, and keeps the summary heads and system prompt unchanged without a checkpoint wrapper on the provider wire. |
 
 ## Known gaps on OpenCode 2
 

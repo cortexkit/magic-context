@@ -1,23 +1,44 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { piThinkingManifest, toolDescriptionManifest } from "./config-manifests";
 
-const target = resolve(import.meta.dir, "../src/generated");
-mkdirSync(target, { recursive: true });
+const root = resolve(import.meta.dir, "..");
+const target = resolve(root, "src/generated");
+// Run Biome through its JavaScript launcher with Bun's own timeout. The GNU `timeout`
+// command and the extensionless `.bin/biome` shim don't exist on Windows runners.
 const biome = require.resolve("@biomejs/biome/bin/biome");
-for (const [name, value] of Object.entries({ "tool-descriptions": toolDescriptionManifest(), "pi-thinking-levels": await piThinkingManifest() })) {
+
+/** Format one manifest exactly as Biome formats the checked-in file at `path`. */
+function formatted(path: string, raw: string): string {
+  const name = relative(root, path);
+  const result = Bun.spawnSync(
+    [process.execPath, biome, "format", `--stdin-file-path=${name}`],
+    {
+      cwd: root,
+      stdin: Buffer.from(raw),
+      stdout: "pipe",
+      stderr: "inherit",
+      timeout: 30_000,
+      windowsHide: true,
+    },
+  );
+  if (result.exitCode !== 0) throw new Error(`Could not format generated manifest ${name}`);
+  return result.stdout.toString();
+}
+
+mkdirSync(target, { recursive: true });
+for (const [name, value] of Object.entries({
+  "tool-descriptions": toolDescriptionManifest(),
+  "pi-thinking-levels": await piThinkingManifest(),
+})) {
   const path = resolve(target, `${name}.json`);
-  // Format before comparison so an unchanged read-only source snapshot needs no write.
-  const format = Bun.spawnSync([process.execPath, biome, "format", "--stdin-file-path", path], {
-    cwd: resolve(import.meta.dir, ".."),
-    stdin: Buffer.from(`${JSON.stringify(value, null, 2)}\n`),
-    stdout: "pipe",
-    stderr: "inherit",
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  if (format.exitCode !== 0) throw new Error("Could not format generated config manifests");
-  const rendered = new TextDecoder().decode(format.stdout);
-  if (!existsSync(path) || readFileSync(path, "utf8") !== rendered) writeFileSync(path, rendered);
-  console.log(`Generated ${name}: ${Object.keys(value).length} entries`);
+  const next = formatted(path, `${JSON.stringify(value, null, 2)}\n`);
+  const current = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  // These manifests are checked in. Rewrite one only when its content changed:
+  // remote build servers run gates on checkouts whose tracked files are
+  // read-only, and an unchanged manifest must not fail the build there.
+  if (current !== next) writeFileSync(path, next);
+  console.log(
+    `${current === next ? "Up to date" : "Generated"} ${name}: ${Object.keys(value).length} entries`,
+  );
 }

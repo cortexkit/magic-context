@@ -175,7 +175,13 @@ function looksImageLike(part: Record<string, unknown>): boolean {
         mediaType.startsWith("image/") ||
         part.image_url !== undefined ||
         part.imageUrl !== undefined ||
-        part.image !== undefined
+        part.image !== undefined ||
+        // Some hosts omit MIME metadata on inline file parts. Keep their
+        // encoded payload out of the full-size prose estimate as well as caps.
+        (type.includes("file") &&
+            ((typeof part.url === "string" && part.url.startsWith("data:image/")) ||
+                (typeof part.data === "string" &&
+                    /^(?:data:image\/|\/9j\/|iVBORw0KGgo|R0lGOD)/.test(part.data))))
     );
 }
 

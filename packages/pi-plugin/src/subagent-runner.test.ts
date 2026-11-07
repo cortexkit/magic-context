@@ -367,6 +367,61 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
+	it("uses Node for a bundled Pi CLI in an Electron extension host", () => {
+		const fixture = writePiCliFixture("dist/bundle/cli.js");
+		try {
+			const invocation = __test.resolvePiInvocation({
+				execPath: "/ide/code/code",
+				argv1: "/ide/code/extensionHostProcess.js",
+				resolvePackageJson: () => join(fixture.packageRoot, "package.json"),
+			});
+			expect(invocation).toEqual({
+				command: "node",
+				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "pi",
+			});
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to PATH Pi instead of launching an Electron editor", () => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: "/ide/code/code",
+			argv1: "/ide/code/extensionHostProcess.js",
+			platform: "linux",
+			resolvePackageJson: () => null,
+		});
+		expect(invocation.command).toBe("pi");
+		expect(invocation.prefixArgs).toEqual([]);
+	});
+
+	it.each([
+		"pi",
+		"omp",
+	] as const)("keeps a packaged %s executable", (harness) => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: `/standalone/${harness}`,
+			argv1: "/$bunfs/root/cli.js",
+			resolvePackageJson: () => null,
+		});
+		expect(invocation).toEqual({
+			command: `/standalone/${harness}`,
+			prefixArgs: [],
+			targetHarness: harness,
+		});
+	});
+
+	it("keeps a renamed Bun-compiled Pi executable with a virtual entry", () => {
+		const invocation = __test.resolvePiInvocation({
+			execPath: "/standalone/custom-agent",
+			argv1: "/$bunfs/root/cli.js",
+			resolvePackageJson: () => null,
+		});
+		expect(invocation.command).toBe("/standalone/custom-agent");
+		expect(invocation.prefixArgs).toEqual([]);
+	});
+
 	it("resolves a bin-shim symlink to the package-declared Pi CLI", () => {
 		const fixture = writePiCliFixture("dist/bundle/cli.js", true);
 		try {

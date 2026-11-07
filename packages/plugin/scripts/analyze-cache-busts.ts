@@ -48,7 +48,10 @@
  *   --since <time>   created at/after ISO time or duration ago (for example 30m)
  *   --until <time>   created at/before ISO time or duration ago
  *   --limit <N>      only the last N requests in range
- *   --cache-ttl <d>  idle time after which the provider prefix is expired (default 5m)
+ *   --cache-ttl <d>  cache lifetime (default 1h for runners, 5m for legacy dumps)
+ *   --source <kind> auto (default), dumps (OC1/Broca), oc2, or pi
+ *   --dump-dir <p>  override the runner's dump directory
+ *   --runner-data-dir <p> override the CortexKit data root (for offline fixtures)
  *   --show-diff      print before/after snippet of the first-diverging segment
  *   --all-busts      list every diverging segment, not just the first
  *   --all-rows       also print STABLE and UNMETERED rows
@@ -79,10 +82,12 @@ import {
 } from "./cache-bust-body-sources";
 
 import { withSchedulerLogFallback } from "./cache-bust-scheduler-log";
+import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
+import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
 
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
-type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED";
+type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
 type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED";
 
 interface Segment extends NormalizedMessage {
@@ -109,6 +114,10 @@ interface Args {
     allRows: boolean;
     help: boolean;
     mcLogPath?: string;
+    source: "auto" | "dumps" | "oc2" | "pi";
+    runnerDataDir: string;
+    dumpDir?: string;
+    excludeKeepWarm?: boolean;
 }
 
 interface MeterUsage {
@@ -143,6 +152,9 @@ interface Snapshot {
     /** Meter the usage was read with; undefined when the wire family has no meter here. */
     meter?: BodyProvider;
     meterForced?: boolean;
+    /** The runner meter remains usable when its rolling dump window has no body. */
+    runnerRequest?: RunnerRequest;
+    bytesMissing?: boolean;
 }
 
 /**
@@ -200,6 +212,9 @@ export interface AnalysisRow {
     rewrittenTokens?: number;
     divergenceClass?: CacheBustDivergenceClass;
     decision?: CacheBustDecisionAttribution;
+    runnerDecisions?: RunnerDecision[];
+    renderedView?: number | null;
+    viewJoin?: "time" | "unmatched";
 }
 
 export interface OpenCodeCacheBustAnalysisOptions {
@@ -249,6 +264,9 @@ function parseArgs(argv: string[]): Args {
         "--limit",
         "--meter",
         "--cache-ttl",
+        "--source",
+        "--runner-data-dir",
+        "--dump-dir",
     ]);
     let positionalSession = "";
     for (let index = 0; index < args.length; index += 1) {
@@ -288,6 +306,8 @@ function parseArgs(argv: string[]): Args {
     if (meterRaw !== undefined && !(meterRaw in METER_RULES)) {
         throw new Error(`Invalid --meter ${meterRaw}; expected anthropic, openai, or gemini`);
     }
+    const source = getOpt("--source") ?? (singleDir ? "dumps" : "auto");
+    if (!["auto", "dumps", "oc2", "pi"].includes(source)) throw new Error(`Invalid --source ${source}`);
     return {
         sessionPrefix: getOpt("--session") ?? positionalSession,
         mcLogPath: getOpt("--mc-log"),
@@ -301,6 +321,9 @@ function parseArgs(argv: string[]): Args {
         allBusts: args.includes("--all-busts"),
         allRows: args.includes("--all-rows"),
         help: args.includes("--help") || args.includes("-h"),
+        source: source as Args["source"],
+        runnerDataDir: getOpt("--runner-data-dir") ?? DEFAULT_RUNNER_DATA_DIR,
+        dumpDir: getOpt("--dump-dir"),
     };
 }
 
@@ -324,10 +347,10 @@ function parseDumpFilename(file: string): {
     session: string;
 } | null {
     const timestamp = /(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z/.exec(file);
-    const session = /(?:^|-)(ses_[A-Za-z0-9]+)(?=-|\.meta\.json$)/.exec(file);
+    const session = /(?:^|-)(ses_[A-Za-z0-9]+|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?=-|\.meta\.json$)/i.exec(file);
     if (!timestamp || !session) return null;
     const rest = file.slice(timestamp.index + timestamp[0].length);
-    const sequence = /-(\d+)(?=-ses_)/.exec(rest);
+    const sequence = /^-(\d+)-/.exec(rest);
     return {
         createdAt: `${timestamp[1]}:${timestamp[2]}:${timestamp[3]}.${timestamp[4]}Z`,
         sequence: sequence ? Number.parseInt(sequence[1], 10) : 0,
@@ -613,6 +636,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
     for (const metaFile of selectedFiles ?? readdirSync(candidate.source.dir).filter((file) =>
         file.endsWith(".meta.json"),
     )) {
+        if (opts.excludeKeepWarm && metaFile.includes("prewarm-cachekeep")) continue;
         const dumpName = parseDumpFilename(metaFile);
         if (dumpName && dumpName.session !== candidate.session) continue;
         let meta: Json;
@@ -697,6 +721,48 @@ function loadSnapshots(opts: Args): Snapshot[] {
     return loadSnapshotSelection(opts).snapshots;
 }
 
+function runnerSnapshots(runner: RunnerSession, dumps: readonly Snapshot[], forcedMeter?: BodyProvider): Snapshot[] {
+    const unused = new Set(dumps);
+    return runner.requests.map((request): Snapshot => {
+        // Dump timestamps and meter creation times are separate clocks. Never
+        // reuse one body for two steps or match across a long request gap.
+        const dump = [...unused].filter((item) => Math.abs(item.requestTimestampMs - request.at) <= 60_000 &&
+            !runner.requests.some((other) => Math.abs(item.requestTimestampMs - other.at) < Math.abs(item.requestTimestampMs - request.at)))
+            .sort((a, b) => Math.abs(a.requestTimestampMs - request.at) - Math.abs(b.requestTimestampMs - request.at))[0];
+        if (dump) unused.delete(dump);
+        const meter = forcedMeter ?? runnerMeter(request);
+        const reading = request.usage;
+        const createdAt = new Date(request.at).toISOString();
+        return {
+            ...(dump ?? { file: request.id, bodyPath: "", bodyBytes: 0, messagesCount: 0, segments: [], sourceDir: "" }),
+            session: runner.session, createdAt, orderCreatedAt: createdAt,
+            requestTimestampMs: request.at, sequence: request.sequence,
+            provider: meter ?? dump?.provider ?? "anthropic", meter,
+            ...(forcedMeter ? { meterForced: true } : {}),
+            wireModel: request.model, runnerRequest: request, bytesMissing: !dump,
+            usage: reading && meter ? {
+                cacheRead: reading.cacheRead, cacheCreation: reading.cacheWrite, input: reading.input,
+                output: reading.output, total: reading.input + reading.cacheRead + reading.cacheWrite,
+                source: `${runner.kind} meter`, provider: meter, rule: METER_RULES[meter],
+            } : undefined,
+        };
+    });
+}
+
+function keepWarmTouches(sources: readonly DumpSource[], session: string): { at: number; file: string }[] {
+    return sources.flatMap((source) => !existsSync(source.dir) ? [] : readdirSync(source.dir).flatMap((file) => {
+        if (!file.includes("prewarm-cachekeep") || !file.endsWith(".meta.json")) return [];
+        const parsed = parseDumpFilename(file);
+        const path = join(source.dir, file);
+        try {
+            const meta = JSON.parse(readFileSync(path, "utf8")) as Json;
+            if ((parsed?.session ?? meta.session) !== session) return [];
+            const at = Date.parse(parsed?.createdAt ?? String(meta.createdAt));
+            return Number.isFinite(at) ? [{ at, file: path }] : [];
+        } catch { return []; }
+    }));
+}
+
 function shellQuote(value: string): string {
     return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -751,6 +817,8 @@ export function analyzeOpenCodeCacheBustSession(
     const args: Args = {
         sessionPrefix: options.sessionId,
         sources,
+        source: "dumps",
+        runnerDataDir: DEFAULT_RUNNER_DATA_DIR,
         showDiff: false,
         allBusts: false,
         allRows: true,
@@ -838,6 +906,10 @@ export function analyzeOpenCodeCacheBustSession(
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
             if (!Number.isFinite(timestampMs) || !inWindow(row.current)) return [];
+        // This sentinel API reads dump pairs only, not runner meter-only rows.
+        if (row.verdict === "EXPIRED" || row.verdict === "VIEW" || row.verdict === "UNEXPLAINED (no bytes)") {
+            throw new Error("Runner-only verdict in OpenCode dump analysis");
+        }
         const segment =
             row.divergenceIndex < 0
                 ? undefined
@@ -918,7 +990,7 @@ function isTailShrink(previous: Snapshot, current: Snapshot, divergenceIndex: nu
             !previousPart ||
             currentPart.type !== previousPart.type ||
             currentPart.length > previousPart.length ||
-            !previousPart.textPrefix.startsWith(currentPart.textPrefix)
+            !previousPart.comparePrefix.startsWith(currentPart.comparePrefix)
         ) {
             return false;
         }
@@ -977,9 +1049,10 @@ function bustsReusablePrefix(
 export function analyzeSnapshots(
     snaps: readonly Snapshot[],
     decisionsAndMarkers: readonly CacheBustDecisionAttribution[] = [],
-    options: { cacheTtlMs?: number; precedingRequestTimestampsMs?: readonly number[] } = {},
+    options: { cacheTtlMs?: number; precedingRequestTimestampsMs?: readonly number[]; runnerEvidence?: RunnerEvidence; cacheTouches?: readonly number[] } = {},
 ): AnalysisRow[] {
-    const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    const cacheTtlMs = options.cacheTtlMs ?? (snaps[0]?.runnerRequest ? 3_600_000 : DEFAULT_CACHE_TTL_MS);
+    const renders = joinRequestsToViews(snaps.map((snapshot) => snapshot.requestTimestampMs), options.runnerEvidence?.renders ?? []);
     // When the reusable prefix was last read in full or written; see
     // refreshesCachedPrefix for which requests move it.
     let prefixRefreshedAtMs: number | undefined;
@@ -1021,6 +1094,16 @@ export function analyzeSnapshots(
     const rows: AnalysisRow[] = [];
     for (let index = 0; index < snaps.length; index += 1) {
         const current = snaps[index];
+        const render = renders[index];
+        const joinedAt = render?.at ?? current.requestTimestampMs;
+        const previousAt = renders[index - 1]?.at ?? snaps[index - 1]?.requestTimestampMs ?? joinedAt;
+        const runnerDecisions = options.runnerEvidence
+            ? runnerDecisionsBetween(options.runnerEvidence, previousAt, joinedAt, render?.view)
+            : undefined;
+        const runnerFields = current.runnerRequest ? {
+            runnerDecisions: runnerDecisions?.all, renderedView: render?.view,
+            viewJoin: render ? "time" as const : "unmatched" as const,
+        } : {};
         // BASE, STABLE, and unmetered requests claim passes too, not just busts.
         const decision = joinDecision(current.requestTimestampMs);
         if (isUsageMissing(current)) {
@@ -1028,7 +1111,7 @@ export function analyzeSnapshots(
             const divergenceIndex = previous
                 ? firstDivergence(previous.segments, current.segments)
                 : -1;
-            const byteVerdict = previous
+            const byteVerdict = previous && !previous.bytesMissing && !current.bytesMissing
                 ? bustsReusablePrefix(previous, current, divergenceIndex)
                     ? "BUST"
                     : "STABLE"
@@ -1041,11 +1124,12 @@ export function analyzeSnapshots(
                 verdict: "UNMETERED",
                 meterVsBytes: "UNMETERED",
                 divergenceClass: "usage_missing",
+                ...runnerFields,
             });
             continue;
         }
         if (!previousMetered) {
-            rows.push({ current, divergenceIndex: -1, verdict: "BASE", decision });
+            rows.push({ current, divergenceIndex: -1, verdict: "BASE", decision, ...runnerFields });
             previousMetered = current;
             previousMeteredDecision = decision;
             prefixRefreshedAtMs = current.requestTimestampMs;
@@ -1100,6 +1184,7 @@ export function analyzeSnapshots(
         // while cacheRead remains at the same floor.
         const rebust: boolean =
             previousShortRead && current.usage.cacheRead <= previous.usage.cacheRead;
+        const noBytes = current.bytesMissing || previous.bytesMissing;
         const shortRead: boolean = rebust || comparableRead < meterFloor;
         previousShortRead = shortRead;
         const reading = {
@@ -1107,15 +1192,47 @@ export function analyzeSnapshots(
             write: current.usage.cacheCreation ?? 0,
             input: current.usage.input,
         };
+        const lastTouch = options.cacheTouches?.filter((at) => at <= current.requestTimestampMs).reduce((latest, at) => Math.max(latest, at), -Infinity);
+        if (lastTouch !== undefined && lastTouch > (prefixRefreshedAtMs ?? -Infinity)) prefixRefreshedAtMs = lastTouch;
+        const previousRequestAt = snaps[index - 1]?.requestTimestampMs ?? previous.requestTimestampMs;
+        const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
+        // Once a runner's cache has expired, changing bytes cannot incur an
+        // additional cache miss. Preserve the diff as evidence, not a bust.
+        if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
+            rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
+                ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
+                comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
+                divergenceClass: "idle_cache_expiry", ...runnerFields });
+            previousMetered = current;
+            previousMeteredDecision = decision;
+            latencyReference = undefined;
+            previousBustDivergenceIndex = undefined;
+            if (refreshesCachedPrefix(reading, { shortRead, explicitBreakpoints })) prefixRefreshedAtMs = current.requestTimestampMs;
+            continue;
+        }
+        if (noBytes) {
+            // Without both wire bodies, identical empty segment arrays prove
+            // nothing. Only elapsed cache lifetime or logged view changes can
+            // explain a short read; never call it provider latency or a BUST.
+            const idleGapMs = runnerGapMs;
+            const verdict: MeterVerdict = !shortRead ? "STABLE"
+                : runnerDecisions?.changes.length ? "VIEW" : "UNEXPLAINED (no bytes)";
+            rows.push({ current, previous, divergenceIndex: -1, verdict, shortRead, meterFloor,
+                comparableRead, epsilon, prevTotal, idleGapMs, ...runnerFields });
+            previousMetered = current;
+            previousMeteredDecision = decision;
+            latencyReference = undefined;
+            continue;
+        }
         const idleGapMs =
-            current.requestTimestampMs - (prefixRefreshedAtMs ?? previous.requestTimestampMs);
+            current.runnerRequest ? runnerGapMs : current.requestTimestampMs - (prefixRefreshedAtMs ?? previous.requestTimestampMs);
         const idleCacheExpiry =
             shortRead &&
-            isIdleCacheExpiry(
+            (current.runnerRequest ? runnerGapMs > cacheTtlMs : isIdleCacheExpiry(
                 current.requestTimestampMs,
                 prefixRefreshedAtMs ?? previous.requestTimestampMs,
                 cacheTtlMs,
-            );
+            ));
         const missingBreakpointAfterRead = isMissingBreakpointAfterRead(reading, {
             shortRead,
             explicitBreakpoints,
@@ -1233,6 +1350,7 @@ export function analyzeSnapshots(
             rewrittenTokens,
             divergenceClass,
             decision: attributionDecision,
+            ...runnerFields,
         });
     }
     return rows;
@@ -1249,8 +1367,9 @@ function fmtTime(iso: string): string {
     return `${mm}-${dd} ${hh}:${mi}:${ss} UTC`;
 }
 
+/** The printable form of a segment: reasoning content redacted, never the raw canonical. */
 function segmentText(snapshot: Snapshot, index: number): string | undefined {
-    return index < 0 ? undefined : snapshot.segments[index]?.canonical;
+    return index < 0 ? undefined : snapshot.segments[index]?.display;
 }
 
 function clippedDiff(text: string, start: number, end: number): string {
@@ -1300,12 +1419,21 @@ function meterCell(row: AnalysisRow): string {
     const floorBasis = isImplicitPrefixCache(row.current.usage?.provider ?? row.current.provider)
         ? `prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()}`
         : `prev read+write-${row.epsilon?.toLocaleString()}; prevTotal=${row.prevTotal?.toLocaleString()}`;
-    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (${floorBasis})${reference}${rewritten}${wireModel}`;
+    const gap = row.current.runnerRequest && row.shortRead && row.idleGapMs !== undefined
+        ? `; gap=${(row.idleGapMs / 60_000).toFixed(1)}m` : "";
+    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (${floorBasis})${reference}${rewritten}${wireModel}${gap}`;
 }
 
 const HELP = `usage: bun scripts/analyze-cache-busts.ts --session <prefix> [options]
 
-Sources (both searched by default):
+Sources (runner meters are auto-detected by exact session id):
+  OC2:       thalamus-harness/opencode2-server/data/opencode/opencode.db (read-only WAL).
+  Pi:        thalamus-pi/hosted-heads/*.json resolves the Pi session UUID to JSONL.
+  Runners:   ck-mc daily logs plus step_render logs; nearest-time request/view join.
+             OC2 dumps: thalamus-harness/opencode2-server/tmp/opencode-anthropic-auth-dumps.
+             Pi dumps: thalamus-pi/anthropic-auth-dumps. Bodies are read in place.
+             Without both bodies: EXPIRED, VIEW, or UNEXPLAINED (no bytes).
+             Keep-warm sends touch the cache but are never steps or byte baselines.
   Anthropic: <tmp>/opencode-anthropic-auth-dumps (OPENCODE_ANTHROPIC_AUTH_DUMP_DIR)
              system + messages[] bodies; explicit read/write cache meters.
   OpenAI:    <tmp>/opencode-openai-auth-dumps (OPENCODE_OPENAI_AUTH_DUMP_DIR)
@@ -1322,7 +1450,10 @@ a named reason (meter_missing / wire_family_unsupported) and exit 2 instead of
 printing a clean result.
 
 Options:
-  --mc-log <path>       scheduler log fallback (default: MAGIC_CONTEXT_LOG_PATH or harness log)
+  --source <kind>       auto (default), dumps (OC1/Broca), oc2, or pi
+  --runner-data-dir <p> CortexKit data root (default: ~/.local/share/cortexkit)
+  --dump-dir <path>     override the runner dump directory
+  --mc-log <path>       override ck-mc daily logs, or legacy scheduler log fallback
   --dir <path>          inspect one explicit directory (legacy override)
   --anthropic-dir <p>   override the Anthropic source
   --openai-dir <path>   override the OpenAI source
@@ -1330,7 +1461,7 @@ Options:
   --since/--until <t>   ISO timestamp or duration ago (for example 2h)
   --limit <N>           keep the last N requests in range
   --cache-ttl <dur>     idle time after which the provider prefix counts as
-                        expired (default 5m; for example 1h)
+                         expired (default 1h for runners, 5m for legacy dumps)
   --show-diff           print both versions of the first-diverging message
   --all-busts           list every diverging message
   --all-rows            also print STABLE and UNMETERED rows`;
@@ -1345,11 +1476,42 @@ function main(): void {
         console.error(HELP);
         process.exit(1);
     }
-    const selection = loadSnapshotSelection(opts);
-    const snaps = selection.snapshots;
+    const runner = opts.source === "dumps" ? undefined : loadRunnerSession(
+        opts.runnerDataDir, opts.sessionPrefix, opts.source === "auto" ? undefined : opts.source,
+    );
+    if (!runner && (opts.source === "oc2" || opts.source === "pi")) {
+        throw new Error(`No ${opts.source} runner meter found for session ${opts.sessionPrefix} under ${opts.runnerDataDir}`);
+    }
+    if (runner) opts.sources = [
+        { provider: "anthropic", dir: opts.dumpDir ?? runnerDumpDirectory(opts.runnerDataDir, runner.kind), label: `${runner.kind} anthropic-auth` },
+        ...opts.sources,
+    ];
+    else if (opts.dumpDir) opts.sources = [{ provider: "anthropic", dir: opts.dumpDir, label: "explicit --dump-dir" }];
+    const dumpOptions = runner ? { ...opts, since: undefined, until: undefined, limit: undefined, excludeKeepWarm: true } : opts;
+    const selection: SnapshotSelection = runner ? { snapshots: [], candidates: [] } : loadSnapshotSelection(dumpOptions);
+    const dumps = runner ? discoverDumpCandidates(dumpOptions)
+        .filter((candidate) => candidate.session === runner.session)
+        .flatMap((candidate) => loadCandidateSnapshots(candidate, dumpOptions)) : selection.snapshots;
+    const allSnaps = runner ? runnerSnapshots(runner, dumps, opts.meter) : dumps;
+    const since = runner ? resolveTimeBound(opts.since) : undefined;
+    const until = runner ? resolveTimeBound(opts.until) : undefined;
+    const evidence = runner ? loadRunnerEvidence(opts.runnerDataDir, runner, opts.mcLogPath, {
+        sinceMs: since ? Date.parse(since) : undefined, untilMs: until ? Date.parse(until) : undefined,
+    }) : undefined;
+    const touches = runner ? keepWarmTouches(opts.sources, runner.session) : [];
+    let rows = analyzeSnapshots(
+        allSnaps,
+        runner ? [] : withSchedulerLogFallback([], allSnaps[0]?.session ?? opts.sessionPrefix, opts.mcLogPath),
+        { cacheTtlMs: opts.cacheTtl ? parseCacheTtl(opts.cacheTtl) : undefined, runnerEvidence: evidence, cacheTouches: touches.map((touch) => touch.at) },
+    );
+    if (runner) {
+        rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
+        if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
+    }
+    const snaps = rows.map((row) => row.current);
     if (snaps.length === 0) {
         const searched = opts.sources.map((source) => source.dir).join(", ");
-        console.error(`No dumps found for session prefix "${opts.sessionPrefix}" in ${searched}`);
+        console.error(`No ${runner ? "runner requests in range" : "dumps"} found for session prefix "${opts.sessionPrefix}" in ${searched}`);
         process.exit(1);
     }
     if (selection.candidates.length > 1) {
@@ -1364,11 +1526,6 @@ function main(): void {
         );
         console.log("");
     }
-    const rows = analyzeSnapshots(
-        snaps,
-        withSchedulerLogFallback([], snaps[0].session, opts.mcLogPath),
-        { cacheTtlMs: parseCacheTtl(opts.cacheTtl) },
-    );
     const provider = snaps[0].provider;
     const meterKind = snaps[0].meter ?? provider;
     const meterRule =
@@ -1383,10 +1540,13 @@ function main(): void {
     // header byte for byte; the extra lines describe a choice those dumps never had.
     const describeMeterChoice = wireFamilies.length > 0 || opts.meter !== undefined;
     console.log(`Session:  ${snaps[0].session}`);
+    if (runner) console.log(`Source: ${runner.kind}; files read: ${[...runner.files, ...(evidence?.files ?? []), ...touches.map((touch) => touch.file)].join(", ")}; dump directories: ${opts.sources.map((source) => source.dir).join(", ")}`);
+    if (runner) console.log(`Runner: ${runner.requests.length} metered step(s); ${touches.length} keep-warm cache touch(es), never steps or byte baselines. Request/view join: nearest time within 60s, once per render. Cache lifetime: ${opts.cacheTtl ?? "1h"}.`);
+    if (runner) console.log(`Models: ${[...new Set(snaps.map((snapshot) => `${snapshot.runnerRequest?.provider}/${snapshot.runnerRequest?.model}${snapshot.runnerRequest?.variant ? ` (variant=${snapshot.runnerRequest.variant})` : ""}`))].join(", ")}`);
     console.log(
         wireFamilies.length > 0
             ? `Provider: ${provider} (from wire_family; searched as ${selection.selected?.source.label})`
-            : `Provider: ${provider} (${selection.selected?.source.label})`,
+            : `Provider: ${provider} (${runner ? `${runner.kind} meter` : selection.selected?.source.label})`,
     );
     if (describeMeterChoice) {
         console.log(
@@ -1396,7 +1556,8 @@ function main(): void {
             `Meter:    ${meterKinds.map((kind) => (kind === "none" ? "none (wire family has no meter)" : `${kind} (${METER_FIELDS[kind]})`)).join(", ")}${opts.meter ? " (forced by --meter)" : ""}`,
         );
     }
-    console.log(`Dumps:    ${snaps.length}  (dir: ${snaps[0].sourceDir})`);
+    console.log(`Dumps:    ${snaps.filter((snapshot) => !snapshot.bytesMissing).length}  (dir: ${snaps.find((snapshot) => snapshot.sourceDir)?.sourceDir ?? "none; bytes unavailable"})`);
+    if (runner) console.log(`Bytes read in place: ${dumps.map((dump) => dump.bodyPath).join(", ") || "none"}`);
     console.log("");
     console.log("Dashboard times are local (UTC+2); table times are UTC.");
     const shortRule =
@@ -1419,6 +1580,13 @@ function main(): void {
     let latencyCount = 0;
     let unmeteredBustCount = 0;
     for (const row of rows) {
+        if (row.current.runnerRequest && (row.current.bytesMissing || row.previous?.bytesMissing)) {
+            if (opts.allRows || !["BASE", "STABLE"].includes(row.verdict)) {
+                console.log(`${fmtTime(row.current.createdAt)} | ${row.verdict} | read=${row.current.usage?.cacheRead ?? "unavailable"} write=${row.current.usage?.cacheCreation ?? "unavailable"} input=${row.current.usage?.input ?? "unavailable"} floor=${row.meterFloor ?? "—"} gap=${row.idleGapMs === undefined ? "—" : `${(row.idleGapMs / 60_000).toFixed(1)}m`} | bytes unavailable | view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
+                for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
+            }
+            continue;
+        }
         if (row.verdict === "BASE") {
             if (opts.allRows) {
                 console.log(
@@ -1431,6 +1599,7 @@ function main(): void {
             opts.allRows ||
             row.verdict === "BUST" ||
             row.verdict === "LATENCY" ||
+            row.verdict === "EXPIRED" ||
             (row.verdict === "UNMETERED" && row.byteVerdict === "BUST");
         if (!shouldPrint) continue;
         if (row.verdict === "BUST") bustCount += 1;
@@ -1449,7 +1618,7 @@ function main(): void {
         const index = row.divergenceIndex;
         const segment =
             index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
-        const attribution = segment
+        const attribution = row.verdict === "EXPIRED" ? "(expired cache)" : segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
             : `(identical; bytes ${row.byteVerdict})`;
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
@@ -1461,8 +1630,15 @@ function main(): void {
         console.log(
             `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
         );
+        if (row.verdict === "EXPIRED" && segment) {
+            console.log(`          └─ bytes also changed at ${segment.id}`);
+        }
         if (row.divergenceClass) {
             console.log(`          └─ divergence-class: ${row.divergenceClass}`);
+        }
+        if (runner) {
+            console.log(`          └─ view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
+            for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
         }
 
         if (
@@ -1508,6 +1684,8 @@ function main(): void {
                 `${bustCount} metered bust(s) across ${coverage.metered} metered request(s).`,
             );
         }
+    } else if (runner && rows.some((row) => row.current.bytesMissing || row.previous?.bytesMissing)) {
+        console.log(`No-bytes short reads: ${["EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"].map((verdict) => `${verdict}=${rows.filter((row) => row.verdict === verdict).length}`).join(", ")}. Byte-attributed metered busts: ${bustCount}.`);
     } else if (bustCount === 0) {
         console.log(`No metered busts across ${snaps.length} request(s).`);
     } else {
@@ -1523,7 +1701,7 @@ function main(): void {
     const expiryCount = rows.filter((row) => row.divergenceClass === "idle_cache_expiry").length;
     if (expiryCount > 0) {
         console.log(
-            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? "5m"} after the prefix was last read in full or written (idle_cache_expiry; --cache-ttl changes the window).`,
+            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? (runner ? "1h" : "5m")} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
         );
     }
     if (unmeteredBustCount > 0) {
@@ -1585,6 +1763,8 @@ export const __test = {
     parseArgs,
     parseDumpFilename,
     resolveTimeBound,
+    runnerSnapshots,
+    keepWarmTouches,
 };
 
 if (import.meta.main) main();

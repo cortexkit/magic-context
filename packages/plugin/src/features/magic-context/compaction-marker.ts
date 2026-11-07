@@ -496,7 +496,7 @@ export function getOpenCodeMessageById(
 
 // ── Marker State ─────────────────────────────────────────────────
 
-interface CompactionMarkerState {
+export interface CompactionMarkerState {
     /** The user message ID that has the compaction part */
     boundaryMessageId: string;
     /** The summary assistant message ID we injected */
@@ -521,6 +521,195 @@ export interface InjectCompactionMarkerArgs {
     directory: string;
     /** Boundary resolved before removing the old marker (prevents null-boundary cache busts). */
     resolvedBoundary?: BoundaryUserMessage;
+}
+
+/** The intent and the host writer must use exactly the same deterministic IDs. */
+export function planCompactionMarker(
+    args: InjectCompactionMarkerArgs,
+    boundary: BoundaryUserMessage,
+): CompactionMarkerState {
+    const identity = `${args.sessionId}\0${args.endMessageId}`;
+    return {
+        boundaryMessageId: boundary.id,
+        summaryMessageId: generateMessageId(
+            boundary.timeCreated + 1,
+            1n,
+            `${identity}\0summary-message`,
+        ),
+        compactionPartId: generatePartId(boundary.timeCreated, 1n, `${identity}\0compaction-part`),
+        summaryPartId: generatePartId(boundary.timeCreated + 1, 2n, `${identity}\0summary-part`),
+    };
+}
+
+/** Caller holds the host writer lock. Retirement requires a vanished target
+ * and no surviving marker-owned rows, including partial remnants. */
+export function isCompactionMarkerIntentAbsent(
+    marker: CompactionMarkerState,
+    targetEndMessageId: string | null,
+): boolean {
+    if (!targetEndMessageId) return false;
+    const db = getWritableOpenCodeDb();
+    // IDs are global. A conflicting row in another session also prevents retirement.
+    return !db
+        .prepare(`SELECT 1 FROM message WHERE id IN (?, ?)
+        UNION ALL SELECT 1 FROM part WHERE id IN (?, ?) LIMIT 1`)
+        .get(
+            targetEndMessageId,
+            marker.summaryMessageId,
+            marker.compactionPartId,
+            marker.summaryPartId,
+        );
+}
+
+/** Serialize recovery and intent staging with host writers, without changing host rows. */
+export function withCompactionMarkerPublicationLock<T>(operation: () => T): T {
+    return runMarkerWriteTransaction(
+        getWritableOpenCodeDb(),
+        "compaction-marker-replace",
+        operation,
+    );
+}
+
+export type MarkerPublicationInspection =
+    | { kind: "deferred" }
+    | { kind: "ambiguous" }
+    | {
+          kind: "verified";
+          marker: CompactionMarkerState | null;
+          markerAtTarget: CompactionMarkerState | null;
+      };
+
+/** Inspect summary IDs discovered off-thread and rechecked against the host store.
+ * Native markers are not ours to adopt. Unrecorded owned pairs must be complete
+ * and covered by the rebuilding target; an older orphan need not make the cut ambiguous. */
+export function inspectCompactionMarkerPublication(
+    sessionId: string,
+    recognized: readonly CompactionMarkerState[],
+    summaryText: string,
+    targetBoundaryMessageId: string,
+    preferred: CompactionMarkerState | null,
+): MarkerPublicationInspection {
+    const db = getWritableOpenCodeDb();
+    const basis = readMarkerCandidateBasis(db, sessionId);
+    if (!basis) return { kind: "deferred" };
+    const pairs: Array<{
+        summaryId: string;
+        boundaryId: string;
+        partId: string | null;
+        compactionData: string | null;
+    }> = [];
+    for (const id of basis.ids) {
+        const rows = db
+            .prepare(
+                `SELECT m.id AS summaryId, p.message_id AS boundaryId, p.id AS partId,
+                        p.data AS compactionData
+              FROM message m LEFT JOIN part p ON p.message_id = json_extract(m.data, '$.parentID')
+                AND +p.session_id = m.session_id
+                AND json_extract(p.data, '$.type') = 'compaction'
+               WHERE m.id = ? AND m.session_id = ? AND json_extract(m.data, '$.summary') = 1
+                 AND json_extract(m.data, '$.providerID') = 'magic-context'`,
+            )
+            .all(id, sessionId) as typeof pairs;
+        // Keep owned summaries with a missing compaction part visible to validation.
+        const canonical = rows.filter((row) =>
+            isMcCanonicalCompactionPartData(JSON.parse(row.compactionData ?? "null")),
+        );
+        if (rows.length > 0 && canonical.length === 0) return { kind: "ambiguous" };
+        pairs.push(...canonical);
+    }
+    const verified: Array<CompactionMarkerState & { timeCreated: number }> = [];
+    for (const pair of pairs) {
+        if (pair.partId === null) return { kind: "ambiguous" };
+        // Several summaries sharing one boundary/part cannot be paired uniquely.
+        if (verified.some((marker) => marker.boundaryMessageId === pair.boundaryId))
+            return { kind: "ambiguous" };
+        const row = db
+            .prepare(
+                `SELECT c.data AS compactionData, t.id AS summaryPartId,
+                    m.time_created AS timeCreated FROM message m
+         JOIN message b ON b.id = ? AND b.session_id = m.session_id
+         JOIN part c ON c.id = ? AND c.message_id = b.id AND c.session_id = m.session_id
+         JOIN part t ON t.message_id = m.id AND t.session_id = m.session_id
+         WHERE m.id = ? AND m.session_id = ?
+           AND json_extract(b.data, '$.role') = 'user'
+           AND json_extract(m.data, '$.role') = 'assistant'
+           AND json_extract(m.data, '$.parentID') = b.id
+           AND json_extract(m.data, '$.summary') = 1
+           AND json_extract(m.data, '$.finish') = 'stop'
+           AND json_extract(m.data, '$.error') IS NULL
+           AND json_extract(m.data, '$.providerID') = 'magic-context'
+           AND json_extract(m.data, '$.modelID') = 'magic-context'
+           AND json_extract(t.data, '$.type') = 'text' AND json_extract(t.data, '$.text') = ?
+           AND (SELECT COUNT(*) FROM part p WHERE p.message_id = m.id AND +p.session_id = m.session_id) = 1`,
+            )
+            .get(pair.boundaryId, pair.partId, pair.summaryId, sessionId, summaryText) as
+            | { compactionData: string; summaryPartId: string; timeCreated: number }
+            | undefined;
+        const order = compareOpenCodeMessagesByCanonicalOrder(
+            sessionId,
+            pair.boundaryId,
+            targetBoundaryMessageId,
+        );
+        // A recorded cut can be repaired backwards by the existing publication
+        // protocol. An orphan has no such target provenance and must be covered.
+        const isRecorded =
+            preferred &&
+            preferred.summaryMessageId === pair.summaryId &&
+            preferred.boundaryMessageId === pair.boundaryId &&
+            preferred.compactionPartId === pair.partId &&
+            preferred.summaryPartId === row?.summaryPartId;
+        if (
+            !row ||
+            !isMcCanonicalCompactionPartData(JSON.parse(row.compactionData)) ||
+            findBoundaryUserMessage(sessionId, pair.boundaryId)?.id !== pair.boundaryId ||
+            order === null ||
+            (order > 0 && !isRecorded)
+        )
+            return { kind: "ambiguous" };
+        verified.push({
+            boundaryMessageId: pair.boundaryId,
+            summaryMessageId: pair.summaryId,
+            compactionPartId: pair.partId,
+            summaryPartId: row.summaryPartId,
+            timeCreated: row.timeCreated,
+        });
+    }
+    const matches = (left: CompactionMarkerState, right: CompactionMarkerState): boolean =>
+        left.summaryMessageId === right.summaryMessageId &&
+        left.boundaryMessageId === right.boundaryMessageId &&
+        left.compactionPartId === right.compactionPartId &&
+        left.summaryPartId === right.summaryPartId;
+    // Filtering out native pairs must not hide a partial or foreign row occupying
+    // an ID we intended to write, or corruption of our recorded/pending marker.
+    for (const marker of recognized) {
+        if (verified.some((item) => matches(item, marker))) continue;
+        if (
+            db
+                .prepare(`SELECT 1 FROM message WHERE id = ?
+            UNION ALL SELECT 1 FROM part WHERE id IN (?, ?) LIMIT 1`)
+                .get(marker.summaryMessageId, marker.compactionPartId, marker.summaryPartId)
+        )
+            return { kind: "ambiguous" };
+    }
+    verified.sort(
+        (left, right) =>
+            right.timeCreated - left.timeCreated ||
+            (left.summaryMessageId < right.summaryMessageId ? 1 : -1),
+    );
+    const state = (marker: (typeof verified)[number] | undefined): CompactionMarkerState | null => {
+        if (!marker) return null;
+        const { timeCreated: _, ...ids } = marker;
+        return ids;
+    };
+    return {
+        kind: "verified",
+        marker: state(
+            (preferred && verified.find((item) => matches(item, preferred))) || verified[0],
+        ),
+        markerAtTarget: state(
+            verified.find((item) => item.boundaryMessageId === targetBoundaryMessageId),
+        ),
+    };
 }
 
 export const LEGACY_MARKER_LINEAGE_SQL = `SELECT m.id
@@ -627,14 +816,8 @@ export function buildCompactionMarkerRows(
     boundary: BoundaryUserMessage,
 ) {
     const boundaryTime = boundary.timeCreated;
-    const markerIdentity = `${args.sessionId}\0${args.endMessageId}`;
-    const summaryMsgId = generateMessageId(
-        boundaryTime + 1,
-        1n,
-        `${markerIdentity}\0summary-message`,
-    );
-    const compactionPartId = generatePartId(boundaryTime, 1n, `${markerIdentity}\0compaction-part`);
-    const summaryPartId = generatePartId(boundaryTime + 1, 2n, `${markerIdentity}\0summary-part`);
+    const marker = planCompactionMarker(args, boundary);
+    const { summaryMessageId: summaryMsgId, compactionPartId, summaryPartId } = marker;
     const summaryMsgData = JSON.stringify({
         role: "assistant",
         parentID: boundary.id,
@@ -650,12 +833,7 @@ export function buildCompactionMarkerRows(
         time: { created: boundaryTime + 1, completed: boundaryTime + 1 },
     });
     return {
-        marker: {
-            boundaryMessageId: boundary.id,
-            summaryMessageId: summaryMsgId,
-            compactionPartId,
-            summaryPartId,
-        },
+        marker,
         summaryMsgData,
         message: {
             id: summaryMsgId,
@@ -686,6 +864,7 @@ export function buildCompactionMarkerRows(
 function injectCompactionMarkerFromBasis(
     args: InjectCompactionMarkerArgs,
     validatedBasis?: MarkerCandidateBasis,
+    preserveExistingLineages = false,
 ): CompactionMarkerState | null {
     // Verify OpenCode's schema still matches what our INSERTs expect BEFORE we
     // try to write. If OpenCode shipped a breaking schema change, bail cleanly
@@ -724,16 +903,18 @@ function injectCompactionMarkerFromBasis(
                 throw new Error(
                     "host store changed after marker candidate preparation; marker unchanged",
                 );
-            // A committed insert can outlive a failed context-state write. Remove
-            // any stale lineage in the transaction that writes the canonical rows.
-            removeLegacyMarkerLineageRows(db, {
-                sessionId: args.sessionId,
-                boundaryMessageId: boundary.id,
-                candidateIds: basis.ids,
-                summaryText: args.summaryText,
-                summaryMessageId: summaryMsgId,
-                compactionPartId,
-            });
+            // Direct injection repairs stale same-boundary rows. Recoverable
+            // publication has already verified every owned pair and must retain
+            // unrecorded rows rather than silently sweeping them here.
+            if (!preserveExistingLineages)
+                removeLegacyMarkerLineageRows(db, {
+                    sessionId: args.sessionId,
+                    boundaryMessageId: boundary.id,
+                    candidateIds: basis.ids,
+                    summaryText: args.summaryText,
+                    summaryMessageId: summaryMsgId,
+                    compactionPartId,
+                });
 
             // Deterministic IDs make this transaction an upsert on retry. Rewriting
             // the exact canonical row also repairs a partial or stale prior write.
@@ -821,6 +1002,7 @@ class MarkerCandidateUnavailableError extends Error {}
 export function replaceCompactionMarker(
     existing: CompactionMarkerState | null,
     args: InjectCompactionMarkerArgs,
+    preserveExistingLineages = false,
 ): CompactionMarkerReplacementOutcome {
     let connection: Database | undefined;
     let entered = false;
@@ -842,11 +1024,43 @@ export function replaceCompactionMarker(
                     "host store changed after marker candidate preparation; marker unchanged",
                 );
             if (existing) {
+                // Native compaction can retain any of these rows as its tail boundary.
+                // Refuse under the writer lock rather than leave a dangling reference.
+                const referenced = db
+                    .prepare(
+                        `WITH deleted(id) AS (VALUES (?), (?), (?)), surviving(data) AS (
+                            SELECT data FROM part WHERE session_id = ?
+                              AND id NOT IN (SELECT id FROM deleted)
+                              AND json_extract(data, '$.type') = 'compaction'
+                            UNION ALL
+                            SELECT data FROM message WHERE session_id = ?
+                              AND id NOT IN (SELECT id FROM deleted)
+                        )
+                        SELECT 1 FROM surviving
+                        WHERE json_extract(data, '$.tail_start_id') IN (SELECT id FROM deleted)
+                           OR json_extract(data, '$.compaction.tail_start_id') IN (SELECT id FROM deleted)
+                        LIMIT 1`,
+                    )
+                    .get(
+                        existing.summaryMessageId,
+                        existing.summaryPartId,
+                        existing.compactionPartId,
+                        args.sessionId,
+                        args.sessionId,
+                    );
+                if (referenced)
+                    throw new Error(
+                        "a surviving tail_start_id references a recorded marker row; marker unchanged",
+                    );
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);
                 db.prepare("DELETE FROM message WHERE id = ?").run(existing.summaryMessageId);
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.compactionPartId);
             }
-            const replacement = injectCompactionMarkerFromBasis(args, basis);
+            const replacement = injectCompactionMarkerFromBasis(
+                args,
+                basis,
+                preserveExistingLineages,
+            );
             if (!replacement) {
                 throw new Error(
                     `failed to inject replacement marker at ordinal ${args.endOrdinal}`,
@@ -983,18 +1197,19 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
  * never deleted even if it happened to share the boundary (defensive — a
  * foreign boundary newer than ours should always differ).
  *
- * Returns false (without throwing) when the DELETE transaction fails, e.g.
- * SQLITE_BUSY. The hygiene caller reports failure, but its transform trigger
- * only runs once per degraded episode, so a later-pass retry is not guaranteed.
+ * The optional ownership guard runs under the host writer lock, before any DELETE.
+ * Returns false (without throwing) when the transaction fails, e.g. SQLITE_BUSY.
  */
 export function removeForeignCompactionMarker(
     sessionId: string,
     marker: SessionCompactionMarkerRows,
     protectedSummaryMessageId: string | null,
+    shouldRemove?: () => boolean,
 ): boolean {
     try {
         const db = getWritableOpenCodeDb("removal");
         runMarkerRemovalTransaction(db, () => {
+            if (shouldRemove && !shouldRemove()) return;
             const deletePartsOfMessage = db.prepare(
                 "DELETE FROM part WHERE +session_id = ? AND message_id = ?",
             );

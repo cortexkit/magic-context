@@ -12,6 +12,7 @@ interface Attempt {
     id: string;
     before: number;
     started: number;
+    capture: boolean;
 }
 
 /** Process-local queue admissions. Only the claimant in this plugin instance can
@@ -27,6 +28,7 @@ export class HostFoldPolicy {
             storage: NativeFoldCache;
             openReader(): V2StoreReader;
             canReplay(sessionID: string, reader: V2StoreReader): Promise<boolean>;
+            canFold?(sessionID: string, reader: V2StoreReader): Promise<boolean>;
             threshold: number;
             log(sessionID: string, line: string): void;
             now?: () => number;
@@ -35,12 +37,13 @@ export class HostFoldPolicy {
     private owned(sessionID: string, cut: StoreRow<"compaction">, id: string): boolean {
         return cut.id === id && isAdmittedLocalCheckpoint(this.deps.storage, sessionID, cut);
     }
-    async idle(sessionID: string): Promise<void> {
+    async idle(sessionID: string, eligible: () => boolean = () => true): Promise<void> {
         const { storage, session, threshold } = this.deps;
         if (
             !Number.isSafeInteger(threshold) ||
             threshold <= 0 ||
             typeof session.compact !== "function" ||
+            !eligible() ||
             this.active.has(sessionID)
         )
             return;
@@ -84,7 +87,9 @@ export class HostFoldPolicy {
                 }
                 const after = cut?.seq ?? -1;
                 const before = reader.storedRowsAfter(sessionID, after);
-                if (before < threshold || !(await this.deps.canReplay(sessionID, reader))) return;
+                if (before < threshold) return;
+                if (this.deps.canFold && !(await this.deps.canFold(sessionID, reader))) return;
+                const capture = await this.deps.canReplay(sessionID, reader);
                 const retry =
                     old?.after === after
                         ? old.attempt +
@@ -103,6 +108,7 @@ export class HostFoldPolicy {
                     attempt: retry,
                     id,
                     started: now(),
+                    capture,
                 };
                 claimed = await storage.claim(
                     sessionID,
@@ -114,6 +120,12 @@ export class HostFoldPolicy {
                 if (!claimed) return;
             } finally {
                 reader.close();
+            }
+            // Eligibility can change while replay validation or the claim yields:
+            // a newly started turn must get another full idle lifetime.
+            if (!eligible()) {
+                await storage.finish(sessionID, attempt.id, this.owner, "coalesced", now());
+                return;
             }
             const admitted = (await session.compact({
                 sessionID,
@@ -141,7 +153,7 @@ export class HostFoldPolicy {
                 if (await storage.finish(sessionID, attempt.id, this.owner, "completed", now()))
                     this.deps.log(
                         sessionID,
-                        `v2 host fold: rows_before=${attempt.before} rows_after=${after} duration_ms=${now() - attempt.started} reason=row_threshold id=${cut.id} status=completed`,
+                        `v2 host fold: rows_before=${attempt.before} rows_after=${after} duration_ms=${now() - attempt.started} reason=row_threshold id=${cut.id} capture=${attempt.capture ? "present" : "absent"} status=completed`,
                     );
             } finally {
                 settled.close();

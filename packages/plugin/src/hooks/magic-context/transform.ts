@@ -117,6 +117,7 @@ import {
 } from "./event-resolvers";
 import { maintainExecuteFloorMark } from "./execute-reclaim";
 import { omitIncompleteFileTokenTotals } from "./file-token-coverage";
+import { createFinalWireIncompleteLogger } from "./final-wire-completeness";
 import {
     createFinalWireUsageTracker,
     describeFinalWireTail,
@@ -186,6 +187,7 @@ import {
     hasPendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";
+import { prepareStructuralSentinelChoices } from "./project-structural-sentinels";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -203,6 +205,7 @@ import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
 } from "./reasoning-budget";
+import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
@@ -227,9 +230,11 @@ import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform
 import {
     contextUsagePassSnapshot,
     loadContextUsage,
+    recordUsageRefusal,
     resolveSchedulerDecision,
     resolveUnknownUsageFromWireEstimate,
     savedProviderReadingForPass,
+    shouldResetRefusedUsage,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -644,6 +649,7 @@ export interface TransformDeps {
      * telemetry only: a change is recorded but never asks m[0] to fold.
      */
     getToolSetHash?: (sessionId: string) => string;
+    getToolDefinitionsHash?: (sessionId: string) => string | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
@@ -967,6 +973,13 @@ export function createTransform(deps: TransformDeps) {
             if (deps.compactionOff === true) return;
             throw degradedPassError(site, error);
         };
+
+        const structuralSentinelUpgradeFailed =
+            deps.storeGeneration === "v1" &&
+            !deps.compactionOff &&
+            deps.transformMode !== "rust" &&
+            prepareStructuralSentinelChoices({ db, sessionId, messages })
+                .structuralSentinelUpgrade === undefined;
 
         // Runs before anything reads a saved coordinate. Every ordinal this
         // session stored is a position in the message list some host served; if
@@ -1490,21 +1503,34 @@ export function createTransform(deps: TransformDeps) {
         const isFirstTransformPassForSession = !loadedSessions.has(sessionId);
         loadedSessions.add(sessionId);
 
-        // First-pass reset MUST run BEFORE loadContextUsage so threshold checks
-        // (95% blocking, 80% emergency nudge) don't fire on stale data from a
-        // different model, reverted message, or previous session state.
+        // A refused turn cannot refresh provider usage. Reset only after new
+        // history lands after that refusal; a healthy session keeps its reading.
+        // Publishing a summary does not itself allow rewriting the cached prefix.
         // `persistedUsageBeforeResets` (captured above, before the model-change
         // clear too) holds the pre-reset usage that restart recovery and
         // protected-tail boundary sizing rely on.
         const earlyStateSnapshot = loadTransformPassStateSnapshot(db, sessionId);
         const historianFailureState = earlyStateSnapshot.historianFailure;
 
-        if (isFirstTransformPassForSession && sessionMeta) {
+        const liveUsageBeforeReset = deps.contextUsageMap.get(sessionId);
+        const usageResetAfterRefusal = shouldResetRefusedUsage(
+            db,
+            sessionId,
+            sessionMeta,
+            liveUsageBeforeReset,
+        );
+        if ((isFirstTransformPassForSession || usageResetAfterRefusal) && sessionMeta) {
             const persistedPct = sessionMeta.lastContextPercentage ?? 0;
-            if (persistedPct > 0) {
+            // Another process can reset stored counters while this process retains its provider sample.
+            if (
+                persistedPct > 0 ||
+                (usageResetAfterRefusal &&
+                    (sessionMeta.lastInputTokens > 0 || deps.contextUsageMap.has(sessionId)))
+            ) {
+                const resetPct = persistedPct || liveUsageBeforeReset?.usage.percentage || 0;
                 sessionLog(
                     sessionId,
-                    `transform: first pass reset — percentage=${persistedPct.toFixed(1)}% — clearing stale usage state`,
+                    `transform: ${isFirstTransformPassForSession ? "first pass" : "refused turn recovery"} reset — percentage=${resetPct.toFixed(1)}% — clearing stale usage state`,
                 );
                 updateSessionMeta(db, sessionId, {
                     lastContextPercentage: 0,
@@ -1521,8 +1547,8 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        // Compute context usage AFTER first-pass reset so threshold checks use
-        // clean state (0%) instead of stale values from a previous model/session.
+        // Compute usage after the reset, falling back to the estimated size of
+        // the outgoing request until a new provider reading arrives.
         let contextUsageEarly = loadContextUsage(
             deps.contextUsageMap,
             db,
@@ -2576,15 +2602,20 @@ export function createTransform(deps: TransformDeps) {
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
-        // A recovery prefix is always normalized once a pass may rewrite it,
-        // even with nothing untagged: until then every pass re-serves its bytes.
+        let recoveryReleased = false;
         const untaggedReplayTailServed =
             !!recovery.prefix ||
             (untaggedReplayIds.size > 0 &&
                 messages.some((message) => untaggedReplayIds.has(message.info.id ?? "")));
+        const releaseRecoveryReplay = untaggedReplayTailServed
+            ? () => {
+                  recoveryReleased = true;
+              }
+            : undefined;
         const normalizeRecoveryTail = untaggedReplayTailServed
             ? () => {
                   if (recoveryNormalized) return;
+                  recoveryReleased = true;
                   const tail = messages.filter((message) =>
                       untaggedReplayIds.has(message.info.id ?? ""),
                   );
@@ -2753,6 +2784,9 @@ export function createTransform(deps: TransformDeps) {
             `targets=${targetTagNumbers.length} fetched=${targetsSliceTags.length}`,
         );
 
+        const recoveryBeforePostprocess = recovery.prefix
+            ? snapshotRecoveryMessages(messages)
+            : undefined;
         let didMutateFromFlushedStatuses = false;
         // Only run mutation stages when tagging succeeded. With targets={}
         // applyFlushedStatuses can't drive any of the persisted drops/
@@ -2961,9 +2995,9 @@ export function createTransform(deps: TransformDeps) {
 
         // HARD-bust signals for the m[0]/m[1] materialization decision capture
         // provider-side cache eviction, such as a model switch or system-block
-        // change, plus the TTL idle window. The tool-set fingerprint is observed
-        // alongside them but never folds m[0] because its process-global scope
-        // would create false-positive folds across sessions. When system.transform
+        // change, plus the TTL idle window. Only OpenCode 2 supplies a definition
+        // hash from the session's request; the process-global names fingerprint
+        // stays attribution-only on OpenCode 1. When system.transform
         // follows messages.transform (OpenCode 1), systemHash is the persisted
         // last-turn hash. The system hook then adopts a change on the request that
         // first carries it (see system-prompt-hash.ts), so the next pass does not
@@ -2985,6 +3019,7 @@ export function createTransform(deps: TransformDeps) {
         const m0HardSignals = {
             systemHash: hardSystemHash,
             toolSetHash: hardToolSetHash,
+            toolDefinitionsHash: deps.getToolDefinitionsHash?.(sessionId),
             modelKey: hardModelKey,
             cacheExpired: hardCacheExpired,
             lastResponseTime: sessionMeta.lastResponseTime,
@@ -3071,15 +3106,17 @@ export function createTransform(deps: TransformDeps) {
             // as before: recovery is a fit decision, and the emergency planner
             // must plan its reclaim against the whole rejected request.
             const overflowRecoveryPass = usagePercentageSynthetic || emergencyRecoveryArmed;
-            const savedProviderReading = overflowRecoveryPass
-                ? null
-                : savedProviderReadingForPass({
-                      persisted: persistedUsageBeforeResets,
-                      currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
-                      contextLimit: resolvedContextLimit,
-                      lastResponseTime: sessionMeta.lastResponseTime,
-                      cacheExpired: hardCacheExpired,
-                  });
+            const savedProviderReading =
+                overflowRecoveryPass || usageResetAfterRefusal
+                    ? null
+                    : savedProviderReadingForPass({
+                          persisted: persistedUsageBeforeResets,
+                          currentModelKey:
+                              currentModelKeyForBoundary ?? (hardModelKey || undefined),
+                          contextLimit: resolvedContextLimit,
+                          lastResponseTime: sessionMeta.lastResponseTime,
+                          cacheExpired: hardCacheExpired,
+                      });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
                 pressureEstimate = estimateFinalWireInputTokens({
@@ -3183,7 +3220,10 @@ export function createTransform(deps: TransformDeps) {
         const tPostProcess = performance.now();
         dropProjectionEmergency = contextUsage.percentage >= 95;
         const postTransformResult = await runPostTransformPhase({
+            opencode1: deps.storeGeneration === "v1",
             opencode2: deps.storeGeneration === "v2",
+            structuralSentinelUpgradeFailed,
+            releaseRecoveryPrefix: releaseRecoveryReplay,
             normalizeRecoveryTail,
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
@@ -3328,7 +3368,17 @@ export function createTransform(deps: TransformDeps) {
         // The pass recorded any strip the mode switch required; later passes
         // replay it from the persisted ledger.
         compactionModeTransitionPending.delete(sessionId);
-        if (recovery.prefix && !recoveryNormalized) {
+        if (recovery.prefix && recoveryReleased && !recoveryNormalized) {
+            if (!recoveryBeforePostprocess)
+                throw new Error("Cannot release recovery without its pre-edit snapshot");
+            const released = releaseRecoveryPrefix({
+                frozen: JSON.parse(recovery.prefix.json),
+                before: recoveryBeforePostprocess,
+                after: messages,
+            });
+            messages.splice(0, messages.length, ...released);
+        }
+        if (recovery.prefix && !recoveryReleased) {
             const renderedById = new Map<string, MessageLike[]>();
             for (const message of messages) {
                 if (!message.info.id) continue;
@@ -3344,7 +3394,12 @@ export function createTransform(deps: TransformDeps) {
         if (postTransformResult.finalizeServedPrefix?.(false))
             postTransformResult.bustedThisPass = true;
         const recoveryReleaseReason =
-            recovery.rebuildReason ?? (recoveryNormalized ? "recovery_tail_normalized" : undefined);
+            recovery.rebuildReason ??
+            (recoveryNormalized
+                ? "recovery_tail_normalized"
+                : recoveryReleased
+                  ? "recovery_prefix_released"
+                  : undefined);
         if (recoveryReleaseReason) postTransformResult.bustedThisPass = true;
         passOutcome.markFinalized();
 
@@ -3353,6 +3408,7 @@ export function createTransform(deps: TransformDeps) {
         // A persisted latch is cleared by the off-transition, never consumed
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
+        const logIncompleteFinalWire = createFinalWireIncompleteLogger(sessionId);
         // The durable refusal marker remembers, across restarts, that a held
         // signed turn could not be made to fit. It applies only to a held pass:
         // an unheld pass strips and drains like any model without prefix-bound
@@ -3412,6 +3468,7 @@ export function createTransform(deps: TransformDeps) {
                       )
                     : undefined);
             if (finalWireEstimate) {
+                logIncompleteFinalWire(finalWireEstimate, messages);
                 sessionLog(
                     sessionId,
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
@@ -3631,6 +3688,7 @@ export function createTransform(deps: TransformDeps) {
                 try {
                     // OpenCode 2 supplies a refusal callback because it has no v1 client abort method.
                     await host.hostRefuse(deps.client, sessionId);
+                    recordUsageRefusal(db, sessionId);
                 } catch (error) {
                     sessionLog(
                         sessionId,
@@ -3708,6 +3766,7 @@ export function createTransform(deps: TransformDeps) {
                 }
             }
         }
+        logIncompleteFinalWire(finalWireEstimate, messages);
         if (!finalWireEstimate) {
             sessionLog(
                 sessionId,
@@ -4212,7 +4271,17 @@ export function createTransform(deps: TransformDeps) {
     };
 
     const timedTransform: typeof transform = (input, output) =>
-        withTransformTimingSummary(() => transform(input, output));
+        withTransformTimingSummary(async () => {
+            const sessionId = findSessionId(output.messages as MessageLike[]);
+            try {
+                await transform(input, output);
+            } catch (error) {
+                // These refusals propagate; the wrapper does not replay a previously prepared request.
+                if (sessionId && !deps.compactionOff && error instanceof EmergencyFailClosedError)
+                    recordUsageRefusal(deps.db, sessionId);
+                throw error;
+            }
+        });
     return Object.assign(timedTransform, { clearSessionLogState });
 }
 

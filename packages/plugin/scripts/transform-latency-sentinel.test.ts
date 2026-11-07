@@ -38,6 +38,20 @@ test("p90 over ten passes, module climb over twenty, and quiet controls", async 
     expect(result.alerts.some((a) => a.sessionId === "ses_climb" && a.kind === "module_climb")).toBe(true);
     expect(result.alerts.some((a) => a.sessionId === "ses_quiet")).toBe(false);
 });
+test("a runner's step render lines count as passes, with the step answer wait as module time", async () => {
+    const step = (id: string, second: number, elapsed: number, wait: number) =>
+        `${new Date(BASE + second * 1000).toISOString()} INFO  thalamus-harness: step render session=${id} elapsed_ms=${elapsed} wait_ms=${wait} entries=421 view=3 cached=false\n`;
+    writeFileSync(path, [
+        step("ses_slowstep", 0, 13_500, 13_000),
+        step("019de471-4fdc-762d-9286-624dfad0b5fe", 1, 14_000, 200),
+        ...Array.from({ length: 10 }, (_, i) => step("ses_quietstep", 2 + i, 123, 111)),
+    ].join(""));
+    const result = await run();
+    expect(result.alerts.map((a) => `${a.sessionId}:${a.kind}`).sort()).toEqual([
+        "019de471-4fdc-762d-9286-624dfad0b5fe:single", "ses_slowstep:single",
+    ]);
+    expect(result.alerts.find((a) => a.sessionId === "ses_slowstep")).toMatchObject({ moduleP50: 13_000, pluginP50: 500 });
+});
 test("watermark resumes partial lines, handles rotation and re-alerts only at 50% or six hours", async () => {
     writeFileSync(path, line("ses_slow", 0, 13000).trimEnd());
     expect((await run()).alerts).toHaveLength(0);

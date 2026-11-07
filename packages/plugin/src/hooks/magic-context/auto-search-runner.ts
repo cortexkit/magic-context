@@ -36,16 +36,15 @@ import {
     clearUnpublishedAutoSearchNoHints,
     getUnpublishedAutoSearchNoHint,
 } from "../../shared/auto-search-lifecycle";
-import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
-    AUTO_SEARCH_TIMEOUT_MS,
     clearAutoSearchTimeoutForSession,
     persistAutoSearchSkip,
     wasAutoSearchSkipped,
     withAutoSearchDeadline,
 } from "./auto-search-deadline";
 import { buildAutoSearchHint, selectAutoSearchResults } from "./auto-search-hint";
+import { logDisabledAutoSearch, observeAutoSearch } from "./auto-search-observation";
 import {
     AutoSearchBusyError,
     coalesceAutoSearchTurn,
@@ -237,7 +236,12 @@ export async function runAutoSearchHint(args: {
 }): Promise<AutoSearchOutcome> {
     const startedAt = performance.now();
     const { sessionId, db, messages, options } = args;
-    if (!options.enabled) return AUTO_SEARCH_OK;
+    if (!options.enabled) {
+        const tail = findLatestMeaningfulUserMessage(messages);
+        if (tail && typeof tail.info.id === "string" && messages.at(-1) === tail)
+            logDisabledAutoSearch(db, sessionId, tail.info.id, options.scoreThreshold, startedAt);
+        return AUTO_SEARCH_OK;
+    }
 
     const userMsg = findLatestMeaningfulUserMessage(messages);
     if (!userMsg || typeof userMsg.info.id !== "string") return AUTO_SEARCH_OK;
@@ -286,6 +290,7 @@ export async function runAutoSearchHint(args: {
                 void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
                 return AUTO_SEARCH_OK;
             }
+            const observation = observeAutoSearch(sessionId, options.scoreThreshold, startedAt);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (!embeddingSnapshot) {
                 if (!options.memoryOwnerUnavailable)
@@ -301,6 +306,7 @@ export async function runAutoSearchHint(args: {
                             : undefined,
                     );
                 void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
+                observation.finish("no-candidates", "unregistered");
                 return AUTO_SEARCH_OK;
             }
 
@@ -319,16 +325,29 @@ export async function runAutoSearchHint(args: {
                 );
                 if (outcome === null) {
                     void persistAutoSearchSkip(db, sessionId, userMsgId);
+                    observation.finish("timeout");
                     return { ok: false, kind: "timeout" };
                 }
-                if (!outcome.ok)
+                if (!outcome.ok) {
+                    observation.finish("error", outcome.kind);
                     return {
                         ok: false,
                         kind: outcome.kind === "storage-busy" ? "storage-busy" : "cas-exhaustion",
                     };
+                }
                 if (outcome.kind === "already-present" && outcome.decision.decision === "hint") {
                     appendReminderToUserMessageById(messages, userMsgId, outcome.decision.text);
                 }
+                observation.finish(
+                    outcome.decision.decision === "hint"
+                        ? "attached"
+                        : reason === "below-threshold"
+                          ? "below-threshold"
+                          : reason === "error"
+                            ? "error"
+                            : "no-candidates",
+                    reason,
+                );
                 return AUTO_SEARCH_OK;
             };
 
@@ -336,10 +355,6 @@ export async function runAutoSearchHint(args: {
             // because the stripper removes the exact tags that signal "already augmented".
             const rawPartsText = collectUserPromptParts(userMsg);
             if (hasStackedAugmentation(rawPartsText)) {
-                sessionLog(
-                    sessionId,
-                    "auto-search: skipping — user message already carries augmentation/hint",
-                );
                 return writeNoHintAndReconcile("stacked");
             }
             const rawPrompt = extractUserPromptText(userMsg);
@@ -362,6 +377,7 @@ export async function runAutoSearchHint(args: {
                     const gitCommitsEnabled =
                         embeddingSnapshot?.gitCommitEnabled ?? options.gitCommitsEnabled ?? false;
                     const searchOptions: UnifiedSearchOptions = {
+                        autoSearchDiagnostics: observation.diagnostics,
                         limit: 10,
                         maxMessageOrdinal: Math.max(0, getLastCompartmentEndMessage(db, sessionId)),
                         excludeMessageId: userMsgId,
@@ -404,18 +420,12 @@ export async function runAutoSearchHint(args: {
                 if (error instanceof AutoSearchBusyError) {
                     // An earlier search of this session is still running. Serve this
                     // turn without a hint and freeze that decision, as a timeout does.
-                    sessionLog(
-                        sessionId,
-                        "auto-search: an earlier search of this session is still running, skipping hint for this turn",
-                    );
+                    observation.finish("timeout", "worker-busy");
                     void persistAutoSearchSkip(db, sessionId, userMsgId);
                     return { ok: false, kind: "timeout" };
                 }
                 // This pass serves the user message without a hint. Freeze that decision
                 // before returning so a recovered search cannot rewrite cached bytes.
-                log(
-                    `[auto-search] unified search failed for session ${sessionId} (no-hint frozen for this turn): ${error instanceof Error ? error.message : String(error)}`,
-                );
                 const outcome = await writeNoHintAndReconcile("error");
                 return outcome.ok ? { ok: false, kind: "search-failure" } : outcome;
             }
@@ -429,15 +439,8 @@ export async function runAutoSearchHint(args: {
                 if (results === null) {
                     // Freeze the served skip for this turn. Retrying could add a hint to a
                     // user message already sent to the provider, rewriting its cached bytes.
-                    sessionLog(
-                        sessionId,
-                        `auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
-                    );
+                    observation.finish("timeout");
                     void persistAutoSearchSkip(db, sessionId, userMsgId);
-                    sessionLog(
-                        sessionId,
-                        "auto-search: skip frozen; retries for this turn are replay-only",
-                    );
                     return { ok: false, kind: "timeout" };
                 }
 
@@ -446,10 +449,6 @@ export async function runAutoSearchHint(args: {
                 }
                 results = selectAutoSearchResults(results, options.scoreThreshold);
                 if (results.length === 0) {
-                    sessionLog(
-                        sessionId,
-                        `auto-search: no fragment meets relevance threshold ${options.scoreThreshold}`,
-                    );
                     return writeNoHintAndReconcile("below-threshold");
                 }
 
@@ -476,22 +475,19 @@ export async function runAutoSearchHint(args: {
                 );
                 if (outcome === null) {
                     void persistAutoSearchSkip(db, sessionId, userMsgId);
+                    observation.finish("timeout");
                     return { ok: false, kind: "timeout" };
                 }
                 if (!outcome.ok) {
+                    observation.finish("error", outcome.kind);
                     if (outcome.kind === "storage-busy") return { ok: false, kind: "storage-busy" };
-                    sessionLog(
-                        sessionId,
-                        `auto-search: CAS exhausted for ${userMsgId}; skipping wire append`,
-                    );
                     return { ok: false, kind: "cas-exhaustion" };
                 }
                 if (outcome.decision.decision === "hint") {
                     appendReminderToUserMessageById(messages, userMsgId, outcome.decision.text);
                 }
-                sessionLog(
-                    sessionId,
-                    `auto-search: attached hint to ${userMsgId} (${results.length} fragments, top relevance ${(results[0].relevanceScore ?? results[0].score).toFixed(3)})`,
+                observation.finish(
+                    outcome.decision.decision === "hint" ? "attached" : "no-candidates",
                 );
                 return AUTO_SEARCH_OK;
             } finally {

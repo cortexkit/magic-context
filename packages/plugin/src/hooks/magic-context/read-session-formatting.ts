@@ -16,6 +16,8 @@ export { tokenizerPackageRoots } from "./tokenizer-loader";
 export interface SessionChunkLine {
     ordinal: number;
     messageId: string;
+    /** Hashes from this raw message only, never from its merged display block. */
+    commitHashes?: string[];
 }
 
 export interface ChunkBlock {

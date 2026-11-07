@@ -9,7 +9,14 @@ type Json = Record<string, unknown>;
 export interface NormalizedPart {
     type: string;
     length: number;
+    /** Printable start of the part's text; always empty for reasoning parts. */
     textPrefix: string;
+    /**
+     * The same 120 characters for every part, reasoning included. Used only to
+     * check whether a shortened part still starts like its earlier version;
+     * never print it.
+     */
+    comparePrefix: string;
 }
 
 export interface NormalizedMessage {
@@ -18,7 +25,10 @@ export interface NormalizedMessage {
     hash: string;
     bytes: number;
     breakpoint: boolean;
+    /** Exact normalized JSON; the hash and divergence detection use it. Never print it. */
     canonical: string;
+    /** The canonical JSON with reasoning content redacted; safe to print in diffs. */
+    display: string;
 }
 
 export interface NormalizedRequestBody {
@@ -111,16 +121,82 @@ function partType(value: unknown, fallback: string): string {
     return typeof object?.type === "string" ? object.type : fallback;
 }
 
+/**
+ * Part and item types that carry model reasoning: Anthropic thinking blocks,
+ * OpenAI Responses reasoning items and their text and summary parts.
+ */
+const REASONING_TYPES = new Set([
+    "thinking",
+    "redacted_thinking",
+    "reasoning",
+    "reasoning_text",
+    "summary_text",
+    "thought",
+]);
+
+/** Keys whose values are opaque encrypted reasoning, on any object. */
+const OPAQUE_REASONING_KEYS = new Set(["signature", "thoughtSignature", "encrypted_content"]);
+
+/**
+ * Reasoning must never be printed: replaying it into an agent's context is
+ * refused as reasoning extraction. Gemini marks thought parts with
+ * `thought: true` and no type.
+ */
+function isReasoningShaped(value: unknown): boolean {
+    const object = asJson(value);
+    if (!object) return false;
+    return (
+        (typeof object.type === "string" && REASONING_TYPES.has(object.type)) ||
+        object.thought === true
+    );
+}
+
+function redactedString(text: string): string {
+    return `‹redacted ${text.length} chars ${sha(text)}›`;
+}
+
+/**
+ * A printable copy of a request value. Inside a reasoning-shaped object every
+ * string except `type` becomes a length-and-digest marker, so a diff still shows
+ * that a reasoning block changed without showing what it said. Opaque signature
+ * values are replaced on any object.
+ */
+function redactReasoning(value: unknown, insideReasoning = false): unknown {
+    if (typeof value === "string") return insideReasoning ? redactedString(value) : value;
+    if (Array.isArray(value)) return value.map((item) => redactReasoning(item, insideReasoning));
+    const object = asJson(value);
+    if (!object) return value;
+    const reasoning = insideReasoning || isReasoningShaped(object);
+    const redacted: Json = {};
+    for (const [key, child] of Object.entries(object)) {
+        if (key === "type" && typeof child === "string") {
+            redacted[key] = child;
+        } else if (OPAQUE_REASONING_KEYS.has(key) && typeof child === "string") {
+            redacted[key] = redactedString(child);
+        } else {
+            redacted[key] = redactReasoning(child, reasoning);
+        }
+    }
+    return redacted;
+}
+
 function normalizePart(value: unknown, fallbackType: string): NormalizedPart {
     // Normalize before measuring: the part length and text prefix both feed the
     // message identity the analyzer diffs on, so an un-normalized length or
     // prefix would diverge on a rotation the hash already forgives.
     const text = stripRotatingRequestFields(textForPart(value));
-    const oneLine = text.replace(/\s+/g, " ").trim();
+    const oneLine = (raw: string) => raw.replace(/\s+/g, " ").trim().slice(0, 120);
+    // A part with no text key prints as its JSON, which can carry a reasoning
+    // signature (Gemini's thoughtSignature on a function call), so the printed
+    // prefix comes from the redacted copy.
+    const printable = isReasoningShaped(value)
+        ? ""
+        : oneLine(stripRotatingRequestFields(textForPart(redactReasoning(value))));
     return {
         type: partType(value, fallbackType),
         length: text.length,
-        textPrefix: oneLine.slice(0, 120),
+        textPrefix: printable,
+        comparePrefix: oneLine(text),
     };
 }
 
@@ -137,7 +213,8 @@ function normalizedMessage(
     original: unknown,
     fallbackType: string,
 ): NormalizedMessage {
-    const canonical = JSON.stringify({ role, content: stripCacheControl(content) });
+    const stripped = stripCacheControl(content);
+    const canonical = JSON.stringify({ role, content: stripped });
     return {
         role,
         parts: contentParts(content, fallbackType),
@@ -145,6 +222,7 @@ function normalizedMessage(
         bytes: Buffer.byteLength(JSON.stringify(original)),
         breakpoint: hasCacheControl(original),
         canonical,
+        display: JSON.stringify({ role, content: redactReasoning(stripped) }),
     };
 }
 
@@ -293,8 +371,8 @@ export function describeBodyPair(
     return {
         index,
         description: `message[${index}] ${describeNormalizedMessage(message)}`,
-        previousText: previous[index]?.canonical ?? "(message absent)",
-        currentText: current[index]?.canonical ?? "(message absent)",
+        previousText: previous[index]?.display ?? "(message absent)",
+        currentText: current[index]?.display ?? "(message absent)",
     };
 }
 

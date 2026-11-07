@@ -787,6 +787,8 @@ export function getAllStatusTagTokenTotalsFlat(
         totals.set(owner, (totals.get(owner) ?? 0) + weight);
         // Summaries replace text and calls, not results or reasoning. Keep this
         // independent of tag status, just like the full-size tail weight above.
+        // Run caps and drain quotas count text and calls, not results or reasoning.
+        // Keep that weight independent of tag status, like the full tail weight.
         if (row.type === "tool" && row.input_token_count === null) {
             nullSummaryRemovedMessageIds.add(owner);
             summaryRemovedTotals.delete(owner);

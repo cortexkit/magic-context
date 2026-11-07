@@ -44,6 +44,8 @@ export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     /request entity too large/i, // HTTP 413
     /context length is only \d+ tokens/i, // vLLM
     /input length.*exceeds.*context length/i, // vLLM
+    /\bContextWindowExceededError\b/i, // LiteLLM
+    /\bthe input \(\d+ tokens?\) is longer than the model's context length \(\d+ tokens?\)/i, // LiteLLM
     /prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow
     /too large for model with \d+ maximum context length/i, // Mistral
     /model_context_window_exceeded/i, // z.ai non-standard finish_reason
@@ -86,6 +88,11 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
     // NOT N (the actual prompt size). Explicit pattern keeps the fallback below
     // from greedily matching N.
     { pattern: /exceeds? the context length of (\d+)/i, provenance: "combined" }, // vLLM overflow
+    {
+        pattern:
+            /\bthe input \(\d+ tokens?\) is longer than the model's context length \((\d+) tokens?\)/i,
+        provenance: "combined",
+    }, // LiteLLM
     {
         pattern: />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i,
         provenance: "prompt_only",
@@ -334,9 +341,9 @@ export function detectOverflow(error: unknown): OverflowDetection {
 }
 
 /**
- * Extract the reported context-limit (in tokens) from an error message if one
+ * Extract the rejected input count (in tokens) from an error message if one
  * of the known patterns matches. Returns undefined when no plausible number
- * can be extracted. Guards against false matches via plausibility clamp.
+ * can be extracted. Completion tokens are not part of the input count.
  */
 export function parseReportedInputTokens(message: string): number | undefined {
     if (!message) return undefined;
@@ -346,6 +353,8 @@ export function parseReportedInputTokens(message: string): number | undefined {
         /input length\s*(\d+)/i,
         /prompt was\s*(\d+)/i,
         /messages resulted in\s*(\d+)\s*tokens?/i,
+        /\bthe input \((\d+) tokens?\) is longer than the model's context length \(\d+ tokens?\)/i,
+        /\(\s*(\d+)\s+in the messages,\s*\d+\s+in the completion\s*\)/i,
     ];
     for (const pattern of patterns) {
         const raw = message.match(pattern)?.[1];

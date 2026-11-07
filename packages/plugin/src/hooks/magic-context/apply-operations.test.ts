@@ -283,9 +283,10 @@ describe("pending drop writer admission", () => {
             db.exec("BEGIN IMMEDIATE");
             console.log("LOCKED");
             setTimeout(() => {
+                const releasedAt = Date.now();
                 try { db.exec("ROLLBACK"); }
-                finally { db.close(); console.log("RELEASED"); }
-            }, 200);
+                finally { db.close(); console.log("RELEASED " + releasedAt); }
+            }, 400);
         `;
         const locker = Bun.spawn([process.execPath, "-e", script], {
             env: { FLUSH_LOCK_DB: databasePath!, PATH: process.env.PATH ?? "" },
@@ -312,13 +313,27 @@ describe("pending drop writer admission", () => {
                 output += new TextDecoder().decode(next.value);
             }
             const started = performance.now();
+            const startedAt = Date.now();
             const mutated = withSqliteTransformPass(() =>
                 applyPendingOperations(SES, db, targets, new Set()),
             );
+            const endedAt = Date.now();
             const waitMs = performance.now() - started;
             const exitCode = await locker.exited;
             expect(exitCode).toBe(0);
-            expect(waitMs).toBeGreaterThanOrEqual(150);
+            while (!/RELEASED \d+/.test(output)) {
+                const next = await reader.read();
+                if (next.done) break;
+                output += new TextDecoder().decode(next.value);
+            }
+            const releasedAt = Number(output.match(/RELEASED (\d+)/)?.[1]);
+            // Compare against the helper's own release time, on the shared wall
+            // clock, not a fixed duration: the moment this process reads LOCKED
+            // lags the real lock by however long the pipe takes on a loaded
+            // runner. The drain started while the writer held the lock, and it
+            // could only finish after the writer let go, so it waited.
+            expect(startedAt).toBeLessThan(releasedAt);
+            expect(endedAt).toBeGreaterThanOrEqual(releasedAt);
             expect(mutated).toBe(true);
             expect(applied).toEqual([1, 2]);
             expect([1, 2].map((tag) => getTagById(db, SES, tag)?.status)).toEqual([
@@ -327,7 +342,7 @@ describe("pending drop writer admission", () => {
             ]);
             expect(getPendingOps(db, SES)).toHaveLength(0);
             console.log(
-                `flush writer-lock evidence waitMs=${Math.round(waitMs)} applied=${applied.length} commits=${commits}`,
+                `flush writer-lock evidence waitMs=${Math.round(waitMs)} heldAfterStartMs=${releasedAt - startedAt} applied=${applied.length} commits=${commits}`,
             );
         } finally {
             reader.releaseLock();

@@ -1258,6 +1258,7 @@ function buildStatusDetail(
 								deps.smartNotesEnabled !== false ||
 								task !== "evaluate-smart-notes",
 						),
+						{ display: true },
 					),
 				{},
 			),

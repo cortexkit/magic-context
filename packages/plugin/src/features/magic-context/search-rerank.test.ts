@@ -89,6 +89,38 @@ const options: UnifiedSearchOptions = {
 };
 
 describe("prose classifier", () => {
+    test.each([
+        ["Chinese", "摘要块为什么只增不减，活跃块会打断候选区间"],
+        ["Japanese", "会話の履歴を保存する仕組みを説明してください"],
+        ["Korean", "이전 대화 기록을 검색하는 방법을 설명해 주세요"],
+        ["Thai", "ทำไมระบบจึงเก็บประวัติการสนทนาไว้ในฐานข้อมูล"],
+        ["Lao", "ລະບົບເກັບປະຫວັດການສົນທະນາໄວ້ໃນຖານຂໍ້ມູນ"],
+        ["Khmer", "ប្រព័ន្ធរក្សាទុកប្រវត្តិការសន្ទនានៅក្នុងមូលដ្ឋានទិន្នន័យ"],
+        ["Cyrillic", "Почему история сообщений хранится в базе данных"],
+        ["Arabic", "لماذا يتم حفظ سجل المحادثات في قاعدة البيانات"],
+        ["Devanagari", "बातचीत का इतिहास डेटाबेस में क्यों रखा जाता है"],
+        ["accented Latin", "où sont conservées les données de la dernière session"],
+        ["mixed Chinese and identifiers", "子代理开关为什么要拆成 compress 和 memoryWrite 两项"],
+        ["mixed Japanese and identifiers", "ctx_search はどのように会話の履歴を検索しますか"],
+    ])("recognizes %s prose", (_script, query) => {
+        expect(isProseQuery(query)).toBe(true);
+    });
+    test.each([
+        "压缩",
+        "история сообщений",
+        "src/features/搜索/cache.ts:118",
+        "C:\\项目\\搜索\\缓存.ts",
+        "TypeError: 无法读取历史记录中的属性",
+        "SQLITE_CANTOPEN: 无法打开历史记录数据库文件",
+        "错误详情 at search (历史记录)",
+        '"为什么需要保存完整的历史记录"',
+        "为什么需要保存历史记录\n以及如何恢复它们",
+        "为什么需要保存历史记录;如何恢复它们",
+        "历史记录::缓存预算为什么需要保持稳定",
+        "历史记录=缓存预算为什么需要保持稳定",
+    ])("keeps literal and code exclusions for %s", (query) => {
+        expect(isProseQuery(query)).toBe(false);
+    });
     test("manual fixture has zero literal false positives and a declared conservative miss", () => {
         const queries = [...fixture.queries, ...fixture.rerankSupplementQueries];
         const matrix = { trueProse: 0, missedProse: 0, falseProse: 0, trueLiteral: 0 };
@@ -345,6 +377,25 @@ test("product captures eligible lanes once and passes only fused top twenty text
             (text) => Buffer.byteLength(text) <= 1024,
         ),
     ).toBe(true);
+});
+
+test("explicit multilingual prose reaches the reranker", async () => {
+    const database = store();
+    const query = "缓存预算为什么需要保持稳定 cache";
+    let scoreCalls = 0;
+    const actual = await unifiedSearch(database, "s", "git:test", query, {
+        ...options,
+        rerankClient: client((method, params) => {
+            if (method === "models.list") return catalog;
+            scoreCalls++;
+            const request = params as { query: string; candidates: string[] };
+            expect(request.query).toBe(query);
+            expect(request.candidates).toHaveLength(20);
+            return { ...response, scores: request.candidates.map((_, index) => index) };
+        }),
+    });
+    expect(scoreCalls).toBe(1);
+    expect(actual).toHaveLength(10);
 });
 
 test("fallback logs once per reason without changing results", async () => {

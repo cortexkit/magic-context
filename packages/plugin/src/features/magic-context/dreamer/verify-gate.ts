@@ -14,6 +14,7 @@ import { getMemoryRevision } from "../memory/lifecycle-applier";
 import { runLeaseGuardedWrite } from "./lease";
 import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import type { VerifyPromptMemory } from "./verify-prompt";
+import { verificationFilesFingerprint, verificationMetadata } from "./verify-state";
 
 /**
  * Per-memory verify scope (DreamerV2 rework).
@@ -23,6 +24,8 @@ import type { VerifyPromptMemory } from "./verify-prompt";
  *  - partial progress STICKS: a timed-out verify banks the memories it checked;
  *    the next run skips them and continues (the cold-start trap is gone).
  *  - there is no watermark to advance and no coverage check.
+ * Inconclusive skips carry a separate backing-file fingerprint, not a successful
+ * verification time. Both modes leave them alone until the claim or files change.
  *
  * Scope = active memories that have a REAL backing-file mapping (recorded by the
  * map-memories backfill). Excluded:
@@ -113,7 +116,27 @@ export async function partitionVerifyScope(args: {
     // Candidates: active memories WITH a real backing-file mapping. A memory with
     // only the no-file sentinel (file-independent) or no mapping row at all is
     // excluded — see the doc comment.
-    const candidates = active.filter((m) => (verById.get(m.id)?.files.length ?? 0) > 0);
+    const candidates = [] as typeof active;
+    const unchangedSkippedIds: number[] = [];
+    const changedSkippedIds = new Set<number>();
+    for (const memory of active) {
+        const files = verById.get(memory.id)?.files ?? [];
+        if (!files.length) continue;
+        const skip = verificationMetadata(memory).dreamerVerifySkip as
+            | { contentHash?: unknown; fingerprint?: unknown }
+            | undefined;
+        if (
+            skip &&
+            skip.contentHash === memory.normalizedHash &&
+            typeof skip.fingerprint === "string" &&
+            skip.fingerprint === (await verificationFilesFingerprint(args.projectDirectory, files))
+        ) {
+            unchangedSkippedIds.push(memory.id);
+        } else {
+            candidates.push(memory);
+            if (skip) changedSkippedIds.add(memory.id);
+        }
+    }
 
     const toPrompt = (m: (typeof active)[number]): VerifyPromptMemory => {
         const verifiedAt = verById.get(m.id)?.verifiedAt ?? 0;
@@ -153,7 +176,11 @@ export async function partitionVerifyScope(args: {
             runStartedAt,
         });
         const broadCandidates = candidates
-            .filter((m) => (verById.get(m.id)?.verifiedAt ?? 0) < broadCycleStartAt)
+            .filter(
+                (m) =>
+                    changedSkippedIds.has(m.id) ||
+                    (verById.get(m.id)?.verifiedAt ?? 0) < broadCycleStartAt,
+            )
             .sort((a, b) => {
                 const verifiedAtA = verById.get(a.id)?.verifiedAt ?? 0;
                 const verifiedAtB = verById.get(b.id)?.verifiedAt ?? 0;
@@ -166,7 +193,10 @@ export async function partitionVerifyScope(args: {
             inScope: broadCandidates.map(toPrompt),
             unmapped,
             inScopeIds: broadCandidates.map((m) => m.id),
-            skippedIds: candidates.filter((m) => !broadIds.has(m.id)).map((m) => m.id),
+            skippedIds: [
+                ...unchangedSkippedIds,
+                ...candidates.filter((m) => !broadIds.has(m.id)).map((m) => m.id),
+            ],
             broadCycleStartAt,
             reason: `broad cycle (${broadCandidates.length} remain; started ${broadCycleStartAt})`,
         };
@@ -179,7 +209,7 @@ export async function partitionVerifyScope(args: {
             inScope: [],
             unmapped,
             inScopeIds: [],
-            skippedIds: [],
+            skippedIds: unchangedSkippedIds,
             reason: "no file-mapped memories in scope",
         };
     }
@@ -190,7 +220,7 @@ export async function partitionVerifyScope(args: {
         inScope: candidates.map(toPrompt),
         unmapped,
         inScopeIds: candidates.map((m) => m.id),
-        skippedIds: [],
+        skippedIds: unchangedSkippedIds,
         reason,
     });
 
@@ -225,12 +255,12 @@ export async function partitionVerifyScope(args: {
         : new Set<string>();
 
     const inScope: VerifyPromptMemory[] = [];
-    const skippedIds: number[] = [];
+    const skippedIds: number[] = [...unchangedSkippedIds];
     for (const m of candidates) {
         const v = verById.get(m.id);
         const verifiedAt = v?.verifiedAt ?? 0;
-        if (verifiedAt === 0) {
-            inScope.push(toPrompt(m)); // never content-verified
+        if (verifiedAt === 0 || changedSkippedIds.has(m.id)) {
+            inScope.push(toPrompt(m)); // never verified, or skipped evidence changed
             continue;
         }
         const files = v?.files ?? [];

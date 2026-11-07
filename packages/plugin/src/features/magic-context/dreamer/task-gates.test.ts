@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { _resetHarnessForTesting, setHarness } from "../../../shared/harness";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
@@ -32,6 +33,7 @@ import { formatDreamTaskBacklogs, processedDreamTaskItems } from "./task-registr
 let db: Database | null = null;
 
 afterEach(() => {
+    _resetHarnessForTesting();
     if (db) closeQuietly(db);
     db = null;
 });
@@ -63,6 +65,110 @@ function indexedSession(
 }
 
 describe("dream task backlog probes", () => {
+    test.each([
+        "opencode",
+        "opencode2",
+        "pi",
+        "omp",
+    ] as const)("retrospective counts only active-harness roots for %s, before and after a watermark", (harness) => {
+        setHarness(harness);
+        db = freshDb();
+        const project = "git:root-scope";
+        indexedSession(db, "root-ledger", harness, project, 100);
+        indexedSession(db, "root-index", harness, project, 400);
+        indexedSession(db, "child", harness, project, 900);
+        indexedSession(db, "foreign", harness === "opencode" ? "pi" : "opencode", project, 900);
+        db.prepare(
+            "INSERT INTO session_meta (session_id, harness, is_subagent) VALUES (?, ?, ?)",
+        ).run("root-ledger", harness, 0);
+        db.prepare(
+            "INSERT INTO session_meta (session_id, harness, is_subagent) VALUES (?, ?, ?)",
+        ).run("child", harness, 1);
+        advanceSessionActivity(db, "root-ledger", 300);
+        advanceSessionActivity(db, "child", 900);
+        for (const watermark of [null, 200]) {
+            expect(
+                getDreamTaskBacklog(db, project, "retrospective", {
+                    retrospectiveWatermarkMs: watermark,
+                }),
+            ).toEqual({ pending: 2, total: 2 });
+            expect(
+                getDreamTaskBacklogs(db, project, ["retrospective"], {
+                    retrospectiveWatermarkMs: watermark,
+                }).retrospective,
+            ).toEqual({ pending: 2, total: 2 });
+            expect(
+                evaluateTaskGate("retrospective", {
+                    db,
+                    projectIdentity: project,
+                    lastRunAt: null,
+                    retrospectiveWatermarkMs: watermark,
+                    promotionThreshold: 3,
+                }),
+            ).toBe(true);
+        }
+        db.prepare(
+            "DELETE FROM session_projects WHERE session_id IN ('root-ledger', 'root-index')",
+        ).run();
+        for (const watermark of [null, 200]) {
+            expect(
+                getDreamTaskBacklog(db, project, "retrospective", {
+                    retrospectiveWatermarkMs: watermark,
+                }),
+            ).toEqual({ pending: 0, total: 0 });
+            expect(
+                evaluateTaskGate("retrospective", {
+                    db,
+                    projectIdentity: project,
+                    lastRunAt: null,
+                    retrospectiveWatermarkMs: watermark,
+                    promotionThreshold: 3,
+                }),
+            ).toBe(false);
+        }
+    });
+
+    test("display polls reuse counts across unrelated writes and expire within sixty seconds", () => {
+        db = freshDb();
+        const project = "git:display-backlog";
+        indexedSession(db, "display-session", "opencode", project, 1);
+        const clock = spyOn(Date, "now").mockReturnValue(100_000);
+        const prepare = spyOn(db, "prepare");
+        const read = (display = true) =>
+            getDreamTaskBacklogs(db!, project, ["maintain-docs", "retrospective"], { display });
+        const countQueries = () =>
+            prepare.mock.calls.filter(([sql]) =>
+                /SELECT COUNT\(\*\) AS cnt\s+FROM (compartments c|session_projects)/.test(sql),
+            ).length;
+        try {
+            expect(read()["maintain-docs"]?.total).toBe(0);
+            for (let poll = 0; poll < 10; poll++) {
+                db.prepare(
+                    "INSERT OR REPLACE INTO schema_migrations_meta(key, value) VALUES ('unrelated', ?)",
+                ).run(String(poll));
+                clock.mockReturnValue(100_000 + poll * 1_000);
+                expect(read()["maintain-docs"]?.total).toBe(0);
+            }
+            expect(countQueries()).toBe(3);
+            db.prepare(
+                "INSERT INTO compartments (session_id, sequence, start_message, end_message, title, content, created_at) VALUES (?, 1, 1, 1, 'new', 'summary', 1)",
+            ).run("display-session");
+            // Scheduling is exact even while a display snapshot is still fresh.
+            expect(read(false)["maintain-docs"]?.total).toBe(1);
+            clock.mockReturnValue(159_999);
+            const snapshot = read();
+            expect(snapshot["maintain-docs"]?.total).toBe(0);
+            snapshot["maintain-docs"]!.total = 999;
+            expect(read()["maintain-docs"]?.total).toBe(0);
+            clock.mockReturnValue(160_000);
+            expect(read()["maintain-docs"]?.total).toBe(1);
+            expect(countQueries()).toBe(9);
+        } finally {
+            prepare.mockRestore();
+            clock.mockRestore();
+        }
+    });
+
     test("an empty task registry returns without requiring memory tables", () => {
         db = new Database(":memory:");
         expect(getDreamTaskBacklogs(db, "empty", [])).toEqual({});
@@ -330,15 +436,15 @@ describe("dream task backlog probes", () => {
     test("SDK retrospective backlog uses indexed activity without a ledger", () => {
         db = freshDb();
         const project = "git:bridge-backlog";
-        indexedSession(db, "old", "hermes", project, 100);
-        indexedSession(db, "at-watermark", "hermes", project, 200);
-        indexedSession(db, "fresh", "hermes", project, 300);
-        indexedSession(db, "newest", "hermes", project, 400);
-        indexedSession(db, "foreign", "hermes", "git:other", 500);
+        indexedSession(db, "old", "opencode", project, 100);
+        indexedSession(db, "at-watermark", "opencode", project, 200);
+        indexedSession(db, "fresh", "opencode", project, 300);
+        indexedSession(db, "newest", "opencode", project, 400);
+        indexedSession(db, "foreign", "opencode", "git:other", 500);
         // Binding changes without messages are not session activity.
         db.prepare(
             "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
-        ).run("unindexed", "hermes", project, 9999);
+        ).run("unindexed", "opencode", project, 9999);
         db.prepare(
             "INSERT INTO task_schedule_state (project_path, task, retrospective_watermark_ms) VALUES (?, ?, ?)",
         ).run(project, "retrospective", 200);
@@ -362,6 +468,7 @@ describe("dream task backlog probes", () => {
     });
 
     test("Pi retrospective backlog keeps ledger precision with mixed indexed sessions", () => {
+        setHarness("pi");
         db = freshDb();
         const project = "git:pi-backlog";
         indexedSession(db, "idle-pi", "pi", project, 9999);
@@ -374,7 +481,7 @@ describe("dream task backlog probes", () => {
             getDreamTaskBacklog(db, project, "retrospective", {
                 retrospectiveWatermarkMs: 200,
             }),
-        ).toEqual({ pending: 2, total: 2 });
+        ).toEqual({ pending: 1, total: 1 });
         expect(
             getDreamTaskBacklog(db, project, "retrospective", {
                 retrospectiveWatermarkMs: 300,
@@ -393,7 +500,7 @@ describe("evaluateTaskGate", () => {
         db = freshDb();
         const project = "git:bridge-schedule";
         const now = SCHEDULE_ACTIVITY_WINDOW_MS + 200;
-        indexedSession(db, "bridge", "hermes", project, 200);
+        indexedSession(db, "bridge", "opencode", project, 200);
         expect(taskHasSchedulableInput("retrospective", db, project, now)).toBe(false);
         expect(identityHasProjectInput(db, project, now)).toBe(false);
         db.prepare("UPDATE message_history_index SET updated_at = 300 WHERE session_id = ?").run(
@@ -457,6 +564,7 @@ describe("evaluateTaskGate", () => {
     });
 
     test("Pi retrospective gate prefers ledger timestamps over index maintenance", () => {
+        setHarness("pi");
         db = freshDb();
         const projectIdentity = "git:pi-gate";
         indexedSession(db, "pi-session", "pi", projectIdentity, 9999);

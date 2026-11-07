@@ -7,6 +7,7 @@ const MURAL_COMPONENT_PREFIX = "|mural-enabled:";
 const BUDGET_COMPONENT_PREFIX = "|render-budgets:";
 const RENDERED_BUDGETS_COMPONENT_PREFIX = "|rendered-budgets:";
 const M0_MEMORY_IDS_COMPONENT_PREFIX = "|m0-memory-ids:";
+const TOOL_DEFINITIONS_COMPONENT_PREFIX = "|request-tool-definitions:";
 
 export interface CachedM0UpgradeIdentity {
     upgradeState: string | null;
@@ -75,6 +76,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         value.indexOf(BUDGET_COMPONENT_PREFIX),
         value.indexOf(RENDERED_BUDGETS_COMPONENT_PREFIX),
         value.indexOf(M0_MEMORY_IDS_COMPONENT_PREFIX),
+        value.indexOf(TOOL_DEFINITIONS_COMPONENT_PREFIX),
     ].filter((index) => index >= 0);
     const identityEnd = componentIndexes.length > 0 ? Math.min(...componentIndexes) : value.length;
     const upgradeState = value.slice(0, identityEnd);
@@ -98,6 +100,31 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
 export function withCachedM0MemoryIds(identity: string | null, ids: readonly number[]): string {
     const withoutIds = (identity ?? "").replace(/\|m0-memory-ids:[^|]*/g, "");
     return `${withoutIds}${M0_MEMORY_IDS_COMPONENT_PREFIX}${JSON.stringify(ids)}`;
+}
+
+/**
+ * Extend the cached m[0] marker string with another key/value component, without a new database column.
+ * Escape the value so tool names cannot introduce another component separator.
+ * Replacing or removing this component preserves the renderer, budgets and IDs.
+ */
+export function withCachedM0ToolDefinitionsHash(
+    identity: string | null,
+    hash: string | null,
+): string | null {
+    const withoutHash = (identity ?? "").replace(/\|request-tool-definitions:[^|]*/g, "");
+    if (hash === null) return withoutHash || null;
+    return `${withoutHash}${TOOL_DEFINITIONS_COMPONENT_PREFIX}${encodeURIComponent(hash)}`;
+}
+
+export function readCachedM0ToolDefinitionsHash(identity: string | null): string | null {
+    const encoded = component(identity ?? "", TOOL_DEFINITIONS_COMPONENT_PREFIX);
+    if (!encoded) return null;
+    try {
+        return decodeURIComponent(encoded) || null;
+    } catch {
+        // Unreadable metadata has no reliable comparison baseline; adopt silently.
+        return null;
+    }
 }
 
 export function readCachedM0MemoryIds(

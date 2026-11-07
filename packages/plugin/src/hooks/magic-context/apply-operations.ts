@@ -43,9 +43,9 @@ import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
  *
  * CACHE SAFETY: the mode is decided once, at drop time (always a
  * cache-busting pass), persisted in `tags.drop_mode`, and replayed
- * byte-identically by `applyFlushedStatuses` on every later pass. A skeleton
- * is NEVER demoted to a full drop afterwards — that second mutation would be
- * a mid-prefix rewrite on some later pass (the volatile-boundary bust class).
+ * byte-identically by `applyFlushedStatuses` on every later pass. Subagents may
+ * retire an out-of-window skeleton on an independently permitted rebuilding
+ * pass; the persisted full mode then replays without re-evaluating its age.
  * Emergency drops use the same newest-window skeleton rule as agent drops;
  * heuristic dedup stays full-drop because dedup keeps the newest duplicate's
  * full content as the nearby anchor.
@@ -192,7 +192,7 @@ export type ConvertedToolDropMode = "skeleton_real" | "full";
 /**
  * HARD fold reasons whose trigger already loses the provider's cached prefix
  * whatever bytes Magic Context serves: a different model has its own cache, a
- * changed system prompt precedes every message, an idle TTL expiry means the
+ * changed system prompt or request tool definitions precede every message, an idle TTL expiry means the
  * cache was evicted, and a native host compaction replaced the conversation
  * after the prefix. Other reasons only bust when the fold changes the served
  * bytes (see foldChangesServedPrefix).
@@ -200,6 +200,7 @@ export type ConvertedToolDropMode = "skeleton_real" | "full";
 export const CACHE_LOSING_FOLD_REASONS: ReadonlySet<string> = new Set([
     "model_change",
     "system_hash",
+    "tool_definitions",
     "ttl_idle",
     "host_compaction",
 ]);
@@ -401,6 +402,87 @@ export function renderConvertedToolSkeletons(
         if (result === "removed" || result === "truncated") didMutate = true;
     }
     return didMutate;
+}
+
+/**
+ * Retire old subagent skeletons only with an existing rebuild permission.
+ * Persist the selected ids before rendering: defer replays `full`, never age.
+ * Persist thinking removals before releasing a skeleton whose tag-time safety
+ * flag still describes the original message.
+ */
+export function prepareAgedToolSkeletonConversions(
+    db: ContextDatabase,
+    sessionId: string,
+    targets: ReadonlyMap<number, TagTarget>,
+    options: {
+        thinkingStrippedIds?: ReadonlySet<string>;
+        prepareRemovals?: (rows: readonly { tagNumber: number; callId: string | null }[]) => void;
+    } = {},
+) {
+    const candidates = [...targets.keys()].sort((a, b) => a - b);
+    const readRows = (connection: ContextDatabase) => {
+        const window = getNewestToolTagNumbers(connection, sessionId, RECENT_TOOL_SKELETON_WINDOW);
+        const recent = new Set(window);
+        const statement = connection.prepare(
+            `SELECT tag_number AS tagNumber, drop_mode AS dropMode, message_id AS callId
+             FROM tags WHERE session_id = ? AND tag_number = ?
+               AND type = 'tool' AND status = 'dropped'
+               AND drop_mode IN ('truncated', 'skeleton_real', 'skeleton_stripped')`,
+        );
+        const rows = candidates
+            .filter((id) => !recent.has(id))
+            .flatMap((id) => {
+                const row = statement.get(sessionId, id) as
+                    | { tagNumber: number; dropMode: string; callId: string | null }
+                    | undefined;
+                return row ? [row] : [];
+            });
+        return { window, rows };
+    };
+    const snapshot = readRows(db);
+    options.prepareRemovals?.(snapshot.rows);
+    const converted = new Map<number, ConvertedToolDropMode>();
+    const plannedRemovals = new Set<unknown>();
+    for (const row of snapshot.rows) {
+        const target = targets.get(row.tagNumber);
+        if (
+            target?.thinkingDropProtected ||
+            target?.thinkingRewriteProtected ||
+            target?.identityRepairProtected
+        )
+            continue;
+        if (target?.canDrop?.() !== true || target.prepareDrop?.() === false) continue;
+        if (target.requiresToolArcSkeleton) {
+            const owners = target.mutationParts
+                ? target.mutationParts
+                      .map(({ message }) => message)
+                      .filter((message) => message.info.role === "assistant")
+                : target.message
+                  ? [target.message]
+                  : [];
+            if (
+                owners.length === 0 ||
+                owners.some((message) => !options.thinkingStrippedIds?.has(message.info.id ?? ""))
+            )
+                continue;
+        }
+        if (
+            target.cannotRemove?.() === true ||
+            target.wouldStrandConversationEnd?.(plannedRemovals) === true
+        )
+            continue;
+        converted.set(row.tagNumber, "full");
+        target.notePlannedRemoval?.(plannedRemovals);
+    }
+    return {
+        converted,
+        isCurrent: (connection: ContextDatabase) =>
+            JSON.stringify(readRows(connection)) === JSON.stringify(snapshot),
+        persist: (connection: ContextDatabase) => {
+            for (const tagNumber of converted.keys())
+                updateTagDropMode(connection, sessionId, tagNumber, "full");
+        },
+    };
 }
 
 export interface PendingOperationBatchDiagnostics {

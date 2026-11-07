@@ -174,12 +174,10 @@ const QUERY_STATEMENTS: Readonly<Record<string, string>> = {
         "SELECT id, session_id, type, seq, time_created, data FROM session_message WHERE session_id = ? AND id = ? AND type IN (?) LIMIT 1",
     messageExistsById:
         "SELECT 1 FROM session_message WHERE id = ? AND session_id = ? AND type IN (?) LIMIT 1",
-    messageOrdinalById: `WITH target AS (
-    SELECT seq FROM session_message WHERE session_id = ? AND id = ? AND type IN (?) LIMIT 1
-)
-SELECT (SELECT COUNT(*) FROM session_message WHERE session_id = ? AND type IN (?) AND seq <= target.seq) AS ordinal FROM target`,
+    messageOrdinalById:
+        "SELECT seq FROM session_message WHERE session_id = ? AND id = ? AND type IN (?) LIMIT 1",
     messageIdOrdinals:
-        "SELECT id FROM session_message WHERE session_id = ? AND type IN (?) ORDER BY seq ASC LIMIT ? OFFSET ?",
+        "SELECT id FROM session_message WHERE session_id = ? AND seq >= ? AND type IN (?) ORDER BY seq ASC LIMIT ?",
     messageOrdinalPage:
         "SELECT id, type, seq, json_valid(data) AS valid FROM session_message WHERE session_id = ? AND seq > ? ORDER BY seq ASC, id ASC LIMIT ?",
     rawRowsThrough:
@@ -295,6 +293,8 @@ interface ReaderConnection {
     identity: string;
     leases: number;
     retired: boolean;
+    ordinalVersion?: number;
+    ordinalSequences: Map<string, number[]>;
 }
 
 function connect(path: string, identity = ""): ReaderConnection {
@@ -311,7 +311,14 @@ function connect(path: string, identity = ""): ReaderConnection {
     counters.openReaders += 1;
     counters.readersOpened += 1;
     counters.maxOpenReaders = Math.max(counters.maxOpenReaders, counters.openReaders);
-    return { db, statements: new Map(), identity: acquiredIdentity, leases: 0, retired: false };
+    return {
+        db,
+        statements: new Map(),
+        identity: acquiredIdentity,
+        leases: 0,
+        retired: false,
+        ordinalSequences: new Map(),
+    };
 }
 
 function closeConnection(connection: ReaderConnection): void {
@@ -326,7 +333,7 @@ function closeConnection(connection: ReaderConnection): void {
 }
 
 /** Boot-scoped read-only handles. Each lease still closes in the caller's finally block.
- * Statements, not results, are cached: WAL updates are visible on the next query.
+ * Statements and revision-checked ordinal anchors are cached; WAL commits invalidate anchors.
  * A replaced/missing file cannot reuse the old inode, and disposal releases all handles.
  *
  * Work that opens readers over a long time (a hidden run polls the store for its whole
@@ -938,27 +945,61 @@ export class V2StoreReader {
         });
     }
 
+    /** Keep exact seq anchors on the read-only connection. Any external commit,
+     * including a revert or a type edit with an unchanged tail, drops the memo.
+     * A read transaction pins the revision and both lookups to the same snapshot.
+     * Cold construction reads seq only; warm ranges never walk an earlier prefix. */
+    private withOrdinalSequences<T>(sessionID: string, read: (sequences: number[]) => T): T {
+        return this.db
+            .transaction(() => {
+                // Establish the snapshot before reading its data_version.
+                this.prepare(
+                    "SELECT seq FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+                ).get(sessionID);
+                const { data_version: version } = this.prepare("PRAGMA data_version").get() as {
+                    data_version: number;
+                };
+                if (version !== this.connection.ordinalVersion) {
+                    this.connection.ordinalSequences.clear();
+                    this.connection.ordinalVersion = version;
+                }
+                let sequences = this.connection.ordinalSequences.get(sessionID);
+                if (!sequences) {
+                    const rows = this.prepare(`SELECT seq FROM session_message
+                    WHERE session_id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS}) ORDER BY seq ASC`).all(
+                        sessionID,
+                        ...RAW_MESSAGE_TYPES,
+                    ) as { seq: number }[];
+                    sequences = rows.map((row) => row.seq);
+                    if (this.connection.ordinalSequences.size >= 8)
+                        this.connection.ordinalSequences.clear();
+                    this.connection.ordinalSequences.set(sessionID, sequences);
+                }
+                return read(sequences);
+            })
+            .deferred();
+    }
+
     messageOrdinalById(sessionID: string, id: string): number | null {
-        return trackDecodeOperation("messageOrdinalById", () => {
-            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
-            const row = this.prepare(
-                `WITH target AS (
-                        SELECT seq FROM session_message
-                        WHERE session_id = ? AND id = ? AND type IN (${rawTypes})
-                        LIMIT 1
-                    )
-                    SELECT (
-                        SELECT COUNT(*) FROM session_message
-                        WHERE session_id = ?
-                          AND type IN (${rawTypes})
-                          AND seq <= target.seq
-                    ) AS ordinal
-                    FROM target`,
-            ).get(sessionID, id, ...RAW_MESSAGE_TYPES, sessionID, ...RAW_MESSAGE_TYPES) as
-                | { ordinal?: number }
-                | undefined;
-            return typeof row?.ordinal === "number" ? row.ordinal : null;
-        });
+        return trackDecodeOperation("messageOrdinalById", () =>
+            this.withOrdinalSequences(sessionID, (sequences) => {
+                const row = this.prepare(`SELECT seq FROM session_message
+                WHERE session_id = ? AND id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS}) LIMIT 1`).get(
+                    sessionID,
+                    id,
+                    ...RAW_MESSAGE_TYPES,
+                ) as { seq: number } | undefined;
+                if (!row) return null;
+                let low = 0;
+                let high = sequences.length;
+                while (low < high) {
+                    const middle = (low + high) >>> 1;
+                    if (sequences[middle] < row.seq) low = middle + 1;
+                    else high = middle;
+                }
+                return sequences[low] === row.seq ? low + 1 : null;
+            }),
+        );
     }
 
     messageIdOrdinals(
@@ -971,18 +1012,19 @@ export class V2StoreReader {
                 throw new Error("Invalid raw-message range start");
             if (!Number.isSafeInteger(toOrdinal) || toOrdinal < fromOrdinal)
                 throw new Error("Invalid raw-message range end");
-            const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
-            const rows = this.prepare(
-                `SELECT id FROM session_message
-                     WHERE session_id = ? AND type IN (${rawTypes})
-                     ORDER BY seq ASC LIMIT ? OFFSET ?`,
-            ).all(
-                sessionID,
-                ...RAW_MESSAGE_TYPES,
-                toOrdinal - fromOrdinal + 1,
-                fromOrdinal - 1,
-            ) as Array<{ id: string }>;
-            return new Map(rows.map((row, index) => [row.id, fromOrdinal + index]));
+            return this.withOrdinalSequences(sessionID, (sequences) => {
+                const anchor = sequences[fromOrdinal - 1];
+                if (anchor === undefined) return new Map<string, number>();
+                const rows = this.prepare(`SELECT id FROM session_message
+                    WHERE session_id = ? AND seq >= ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
+                    ORDER BY seq ASC LIMIT ?`).all(
+                    sessionID,
+                    anchor,
+                    ...RAW_MESSAGE_TYPES,
+                    toOrdinal - fromOrdinal + 1,
+                ) as { id: string }[];
+                return new Map(rows.map((row, index) => [row.id, fromOrdinal + index]));
+            });
         });
     }
 
@@ -1150,7 +1192,12 @@ export class V2StoreReader {
      * Identity columns of every row of a session up to and including `throughSeq`,
      * in seq order, without decoding any message body.
      */
-    rowStampsThrough(sessionID: string, throughSeq: number): V2RowStamp[] {
+    rowStampsThrough(sessionID: string, throughSeq: number, after?: number): V2RowStamp[] {
+        if (after !== undefined)
+            return this.prepare(
+                `SELECT id, type, seq, time_created FROM session_message
+                     WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC`,
+            ).all(sessionID, after, throughSeq) as V2RowStamp[];
         return this.prepare(
             `SELECT id, type, seq, time_created FROM session_message
                  WHERE session_id = ? AND seq <= ? ORDER BY seq ASC`,

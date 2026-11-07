@@ -100,6 +100,7 @@ export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number):
 }
 
 export interface V2RawMessageReader {
+    storePath?: string;
     getRevision(sessionID: string): number;
     getCountAfterRevision(sessionID: string, after: number, through: number): number;
     readPage(
@@ -227,16 +228,25 @@ export function* readV2RawMessagePagesForConversion(
     }
 }
 
-/** Build the SQL-bounded reader used by context, indexing, and historian passes. */
-export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
+/**
+ * Build the SQL-bounded reader used by context, indexing, and historian passes.
+ * A caller that retains one lease for a whole request can override releaseReader;
+ * that caller must close the lease when the request ends.
+ */
+export function createV2RawMessageReader(
+    openReader: () => V2StoreReader,
+    storePath?: string,
+    releaseReader: (reader: V2StoreReader) => void = (reader) => reader.close(),
+): V2RawMessageReader {
     const servedBoundaryCache = new Map<string, string | null>();
     return {
+        storePath,
         getRevision: (sessionID) => {
             const reader = openReader();
             try {
                 return reader.latestSequence(sessionID);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         getCountAfterRevision: (sessionID, after, through) => {
@@ -244,7 +254,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageCountAfterSequence(sessionID, after, through);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         readPage: (
@@ -261,7 +271,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                     afterOrdinal,
                 );
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         findById: (sessionID: string, messageID: string) => {
@@ -272,7 +282,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 if (ordinal === null || row === null) return null;
                 return rawMessagePage([row], ordinal - 1)[0] ?? null;
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         findPartsById: (sessionID: string, messageID: string) => {
@@ -281,7 +291,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 const row = reader.messageById(sessionID, messageID);
                 return row ? (rawMessagePage([row], 0)[0] ?? null) : null;
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         hasById: (sessionID: string, messageID: string) => {
@@ -289,7 +299,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageExistsById(sessionID, messageID);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         ordinalOf: (sessionID: string, messageID: string) => {
@@ -297,7 +307,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageOrdinalById(sessionID, messageID);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         orderOf: (sessionID: string, messageID: string) => {
@@ -305,7 +315,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.sequenceForId(sessionID, messageID) ?? null;
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         ordinalMapForRange: (sessionID: string, fromOrdinal: number, toOrdinal: number) => {
@@ -313,7 +323,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageIdOrdinals(sessionID, fromOrdinal, toOrdinal);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         readOrdinalPage: (
@@ -325,7 +335,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageOrdinalPage(sessionID, after, limit);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         getCount: (sessionID: string) => {
@@ -333,7 +343,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.messageCount(sessionID);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         getStoredCount: (sessionID: string) => {
@@ -341,7 +351,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
             try {
                 return reader.storedMessageCount(sessionID);
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
         servedBoundaryIdOf: (sessionID: string, messageID: string) => {
@@ -357,7 +367,7 @@ export function createV2RawMessageReader(openReader: () => V2StoreReader): V2Raw
                 if (served !== null) servedBoundaryCache.set(key, served);
                 return served;
             } finally {
-                reader.close();
+                releaseReader(reader);
             }
         },
     };
@@ -368,6 +378,9 @@ export function createV2RawMessageProvider(
     sessionID: string,
 ): BoundedRawMessageProvider {
     return {
+        ...(reader.storePath
+            ? { workerSource: { kind: "opencode2" as const, path: reader.storePath } }
+            : {}),
         readMessagePage: (afterOrdinal, limit, finalWatermark, after) =>
             reader.readPage(sessionID, afterOrdinal, limit, finalWatermark, after),
         readMessageById: (messageID) => reader.findById(sessionID, messageID),

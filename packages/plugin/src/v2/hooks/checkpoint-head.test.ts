@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import * as transformModule from "../../hooks/magic-context/transform";
@@ -126,6 +127,7 @@ async function fixture() {
         materialize: () => summary,
     });
     return {
+        db,
         hooks,
         draft,
         source,
@@ -192,6 +194,21 @@ test("checkpoint strip uses this pass's final permission, persists once, and rep
 test("compaction summary overrides the host keepID with an own undefined key", async () => {
     const f = await fixture();
     try {
+        appendCompartments(f.db, "s", [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "u1",
+                endMessageId: "u1",
+                title: "Earlier conversation",
+                content: "Earlier conversation summary.",
+                p1: "Earlier conversation summary.",
+                p2: "Earlier conversation summary.",
+                p3: "Earlier conversation summary.",
+                p4: "Earlier conversation summary.",
+            },
+        ]);
         const draft = f.draft();
         await f.hooks.get("compaction")!(draft);
         expect(draft.result?.summary).toContain("session-history");

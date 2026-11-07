@@ -131,6 +131,8 @@ export interface PiHeuristicCleanupConfig {
 		usagePercentage?: number;
 		/** Another mutation already rewrites the cached prefix on this pass. */
 		passAlreadyPriced?: boolean;
+		serializedImageTokens?: ReadonlyMap<string, number>;
+		fitCalibration?: { toolsRatio: number; proseRatio: number };
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
@@ -408,7 +410,8 @@ export function applyPiHeuristicCleanup(
 				.slice(0, 20)
 				.map((tag) => tag.tagNumber),
 		);
-		const calibration = sessionDecisionCalibration(db, sessionId);
+		const calibration =
+			emergency.fitCalibration ?? sessionDecisionCalibration(db, sessionId);
 		const tPrepare = performance.now();
 		// Measurement requests removal authorization even for retained skeletons.
 		// Prepare precisely those active, visible calls, preserving tag order and
@@ -427,17 +430,41 @@ export function applyPiHeuristicCleanup(
 		const tMeasure = performance.now();
 		const activeTags = tags
 			.filter((t) => t.status === "active")
-			.map((tag) =>
-				measureEmergencyTag(
+			.map((tag) => {
+				const target = targets.get(tag.tagNumber);
+				const imageTokens =
+					emergency.serializedImageTokens?.get(tag.messageId) ?? 0;
+				const observation = target?.measureReclaim;
+				// Image blocks have no text slot, so the shared observation omits them.
+				// Recovery adds the same serialized image mass used in the whole request.
+				const measuredTarget =
+					imageTokens && observation
+						? {
+								...target,
+								measureReclaim(skeleton: boolean) {
+									const measured = observation(skeleton);
+									return measured
+										? {
+												...measured,
+												beforeTools: measured.beforeTools + imageTokens,
+												afterTools:
+													measured.afterTools +
+													(target.canDrop?.() ? 0 : imageTokens),
+											}
+										: measured;
+								},
+							}
+						: target;
+				return measureEmergencyTag(
 					tag,
-					targets.get(tag.tagNumber),
+					measuredTarget,
 					calibration,
 					targets.get(tag.tagNumber)?.requiresToolArcSkeleton === true ||
 						((emergency.usagePercentage ?? 0) < 95 &&
 							recentTags.has(tag.tagNumber) &&
 							hasSmallToolInput(targets.get(tag.tagNumber))),
-				),
-			);
+				);
+			});
 		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
 		const droppableTags = candidateTags
 			.flatMap((tag) => {

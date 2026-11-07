@@ -117,13 +117,19 @@ function readSystemHash(sessionId: string): string {
     return row?.hash == null ? "" : String(row.hash);
 }
 
-function latestCompartmentEnd(sessionId: string): string | null {
+/**
+ * The end of the newest compartment published by `at` (ms). The historian keeps
+ * running after a fold, so a compartment it publishes later shows in the history
+ * delta message (m[1]), not in the folded baseline (m[0]), and must not count
+ * against the fold's boundary.
+ */
+function compartmentEndAt(sessionId: string, at: number): string | null {
     const row = h
         .contextDb()
         .prepare(
-            "SELECT end_message_id AS id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+            "SELECT end_message_id AS id FROM compartments WHERE session_id = ? AND created_at <= ? ORDER BY sequence DESC LIMIT 1",
         )
-        .get(sessionId) as { id: string | null } | null;
+        .get(sessionId, at) as { id: string | null } | null;
     return row?.id ?? null;
 }
 
@@ -330,13 +336,16 @@ it(
         const first = served[0] as string;
 
         // The first pass after the compaction folded: the cached baseline is newer
-        // than the host summary, and its boundary is the latest compartment end.
+        // than the host summary, and its boundary is the end of the newest
+        // compartment that existed when it folded.
         const summary = hostSummaryRow(sessionId);
         expect(summary).not.toBeNull();
         const after = readBaseline(sessionId);
         expect(after.hasM0).toBe(true);
         expect(after.materializedAt).toBeGreaterThan(summary?.completedAt ?? Number.POSITIVE_INFINITY);
-        expect(after.boundary).toBe(latestCompartmentEnd(sessionId));
+        expect(after.boundary, pluginLog().slice(-40000)).toBe(
+            compartmentEndAt(sessionId, after.materializedAt),
+        );
 
         // Which history is rendered does not change: the compartments stay in m[0]
         // and the host summary row is still left off the wire.

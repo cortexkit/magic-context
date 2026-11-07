@@ -29,6 +29,8 @@ import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-pat
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { getWorkerShutdownStats } from "../../shared/worker-shutdown";
+import { HostFoldIdle } from "../fold/idle";
+import { NativeFoldReplay } from "../fold/native-replay";
 import { V2MessageTimesCache } from "../message-times";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
@@ -511,5 +513,36 @@ test("v2 deletion completes while the session's auto-search backfill is running"
         query.mockRestore();
         batch.mockRestore();
         await f.cleanup();
+    }
+});
+
+test("v2 arms host folding without a capture from the served response's frozen TTL and cancels it at turn start", async () => {
+    const ready = Promise.withResolvers<void>();
+    let consumed = false;
+    const arm = spyOn(HostFoldIdle.prototype, "idle").mockImplementation(() => {});
+    const active = spyOn(HostFoldIdle.prototype, "active");
+    const baseline = spyOn(NativeFoldReplay.prototype, "baseline").mockResolvedValue(undefined);
+    const f = await fixture(async function* (signal) {
+        await ready.promise;
+        yield succeeded;
+        yield { type: "session.execution.started", data: { sessionID } };
+        consumed = true;
+        await aborted(signal);
+    });
+    try {
+        await f.start();
+        f.db.prepare("UPDATE session_meta SET cache_ttl='30m' WHERE session_id=?").run(sessionID);
+        active.mockClear();
+        ready.resolve();
+        await until(() => consumed);
+        expect(arm).toHaveBeenCalledTimes(1);
+        expect(arm.mock.calls[0]).toEqual([sessionID, "30m", 2000]);
+        expect(active).toHaveBeenCalledWith(sessionID);
+    } finally {
+        ready.resolve();
+        await f.cleanup();
+        baseline.mockRestore();
+        active.mockRestore();
+        arm.mockRestore();
     }
 });

@@ -1,3 +1,4 @@
+import { PI_NATIVE_TAG_STRIP_PROVENANCE } from "./native-replay-tag-provenance-pi";
 import {
 	piAgentHistory,
 	piIsDeveloperHistory,
@@ -16,6 +17,7 @@ import {
 } from "./pi-dispatch-chat-history";
 import {
 	PI_DATE_REMINDER_APIS,
+	piDateReminderText,
 	piDateReminderWireText,
 	piWithoutDateReminders,
 } from "./pi-dispatch-date-reminder";
@@ -996,6 +998,7 @@ function buildPiPreparedStructure(
 				model,
 				host,
 				alternatives,
+				object(projectedMessages[index])?.[PI_NATIVE_TAG_STRIP_PROVENANCE],
 			);
 			if (!texts) {
 				responsesMessages = undefined;
@@ -1642,12 +1645,23 @@ export function piPreparedStructureMismatch(
 	// Synthetic reminders always follow an existing conversation message, never
 	// the instruction prefix that the normal structural parser leaves out.
 	try {
-		const messages = plan ? object(payload)?.messages : undefined;
+		const body = plan ? object(payload) : undefined;
+		const messages = body?.messages ?? body?.input;
 		if (Array.isArray(messages)) {
 			for (const value of messages) {
 				const message = object(value);
 				if (message?.role !== "system" && message?.role !== "developer") break;
-				if (piDateReminderWireText(message.content, plan?.cwd) !== undefined)
+				const content = message.content;
+				const inputText =
+					Array.isArray(content) &&
+					content.length === 1 &&
+					object(content[0])?.type === "input_text"
+						? object(content[0])?.text
+						: undefined;
+				if (
+					piDateReminderWireText(content, plan?.cwd) !== undefined ||
+					piDateReminderText(inputText, plan?.cwd)
+				)
 					return "comparison=role";
 			}
 		}

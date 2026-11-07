@@ -89,7 +89,9 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         args.contextUsageMap.set(sessionID, {
             usage: { inputTokens: reading.inputTokens, percentage },
             hasUsageTokens: true,
-            updatedAt: Date.now(),
+            // The reply can be loaded after a later history publication. Date
+            // its usage by completion, not this pass's delayed read from the store.
+            updatedAt: reading.completed || Date.now(),
         });
     } else {
         args.contextUsageMap.delete(sessionID);

@@ -2,6 +2,7 @@
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { OpenCode2TestHarness } from "../src/opencode2-harness";
+import { expectNativeAdmission, summaryHeads } from "./opencode2/helpers/native-admission";
 import {
     createScenarioHarness,
     forEachHost,
@@ -13,12 +14,12 @@ import {
  * When OpenCode 1 has auto-compaction enabled, or a conflicting plugin is
  * installed, magic-context MUST self-disable. OpenCode 2 instead exposes a
  * compaction hook that Magic Context answers without a competing model call. This prevents double-compaction
- * behavior and guarantees that the plugin is a no-op in environments where
- * another system owns history management.
+ * behavior. A real conflicting plugin disables Magic Context on either host.
  *
- * We force conflict by setting `compaction: { auto: true }` in opencode.json.
- * Then we send a normal turn and verify the plugin never created its DB —
- * the cleanest proof that no plugin machinery ran for this session.
+ * We set `compaction: { auto: true }` in opencode.json. On v1 this is a
+ * conflict, so no plugin DB should be created. On v2 Magic Context still
+ * owns compaction through the host hook, so folding must leave the provider's
+ * frozen summary and system prompt unchanged.
  */
 
 forEachHost(import.meta.url, "conflict detection", (host) => {
@@ -62,10 +63,21 @@ forEachHost(import.meta.url, "conflict detection", (host) => {
             if (h instanceof OpenCode2TestHarness) {
                 expect(h.countTags(sessionId)).toBeGreaterThan(0);
                 const requests = h.mock.requests().length;
+                const before = structuredClone(h.mock.lastRequest()!.body);
                 await h.compactSession(sessionId);
                 expect(h.mock.requests().length).toBe(requests);
+                expectNativeAdmission(h, sessionId);
                 await h.sendPrompt(sessionId, "after native compaction");
-                expect(JSON.stringify(h.mock.lastRequest()?.body)).toContain("<conversation-checkpoint>");
+                const after = h.mock.lastRequest()!.body;
+                // The new turn extends the conversation; the frozen summary
+                // heads and system prompt must not change just because it folded.
+                expect(summaryHeads(after)).toEqual(summaryHeads(before));
+                expect(after.system).toEqual(before.system);
+                const sent = JSON.stringify(after);
+                expect(sent).toContain("hello — should not be tagged.");
+                expect(sent).toContain("after native compaction");
+                expect(sent).not.toContain("<conversation-checkpoint>");
+                expect(sent).not.toContain("<recent-context>");
                 return;
             }
 

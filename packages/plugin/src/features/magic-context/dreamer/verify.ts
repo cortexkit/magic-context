@@ -58,6 +58,7 @@ import {
     type VerifyPromptMemory,
     validateVerifyManifest,
 } from "./verify-prompt";
+import { verificationFilesFingerprint } from "./verify-state";
 
 /**
  * verify / verify-broad: check file-mapped memories against current source and
@@ -461,6 +462,7 @@ async function verifyOneBatch(
     let budgetFinalized = false;
     let failedCompletion: HiddenCompletion | undefined;
     let headAtPrompt: string | null = null;
+    const skipSnapshots = new Map<number, string | null>();
     const onBudgetUpdate: NonNullable<VerifyArgs["onBudgetUpdate"]> = (state) => {
         budgetFinalized ||= state.finalizeFired;
         args.onBudgetUpdate?.({
@@ -477,6 +479,17 @@ async function verifyOneBatch(
         });
     };
     try {
+        if (!args.moduleRoute) {
+            for (const memory of batch) {
+                skipSnapshots.set(
+                    memory.id,
+                    await shared.raceWithSignal(
+                        verificationFilesFingerprint(args.sessionDirectory, memory.mappedFiles),
+                        batchSignal,
+                    ),
+                );
+            }
+        }
         headAtPrompt = await shared.raceWithSignal(readGitHead(args.sessionDirectory), batchSignal);
         const evidence =
             !args.forceBroad && batch.every((m) => m.verifiedAt)
@@ -549,6 +562,7 @@ async function verifyOneBatch(
                 run.validated,
                 evidence?.head ?? headAtPrompt,
                 budgetFinalized,
+                skipSnapshots,
             );
         }
         const client = args.client;
@@ -629,6 +643,7 @@ async function verifyOneBatch(
             run.validated,
             evidence?.head ?? headAtPrompt,
             budgetFinalized,
+            skipSnapshots,
         );
     } catch (error) {
         const desc = describeError(error);
@@ -671,6 +686,7 @@ async function verifyOneBatch(
                 recovered,
                 headAtPrompt,
                 true,
+                skipSnapshots,
             );
             return {
                 ...counts,
@@ -736,6 +752,8 @@ async function verifyOneBatch(
  * TypeScript and module-owned routes use their automated memory applier, and
  * stale revisions never advance verification timestamps. Local writes use one
  * lease-guarded transaction; module writes use its fenced transaction.
+ * Rewritten claims stay unverified until their new evidence is checked. Local
+ * skips retain the backing-file snapshot without claiming a confirmation.
  */
 export async function applyVerifyManifest(
     args: VerifyArgs,
@@ -751,6 +769,7 @@ async function applyParsedVerifyManifest(
     parsed: ParsedVerifyManifest,
     headAtPrompt?: string | null,
     budgetFinalized = false,
+    skipSnapshots?: Map<number, string | null>,
 ): Promise<VerifyVerdictCounts> {
     batch = batch.map((memory) => ({
         ...memory,
@@ -797,6 +816,7 @@ async function applyParsedVerifyManifest(
     if (validIds.length === 0) {
         return { verified: 0, updated: 0, archived: 0, skipped: 0, refused: 0 };
     }
+
     const writes: VerifyWrite[] = [];
     const originals = new Map(batch.map((memory) => [memory.id, memory]));
     for (const entry of valid.verified)
@@ -846,13 +866,23 @@ async function applyParsedVerifyManifest(
             refusalReason,
         });
     }
-    for (const entry of valid.skipped)
+    for (const entry of valid.skipped) {
+        const original = originals.get(entry.id);
         writes.push({
             kind: "skipped",
             id: entry.id,
-            files: await normalizeFiles(args, originals.get(entry.id)?.mappedFiles ?? []),
+            files: await normalizeFiles(args, original?.mappedFiles ?? []),
             reason: entry.reason,
+            skipFingerprint: !args.moduleRoute
+                ? skipSnapshots
+                    ? (skipSnapshots.get(entry.id) ?? null)
+                    : await verificationFilesFingerprint(
+                          args.sessionDirectory,
+                          original?.mappedFiles ?? [],
+                      )
+                : undefined,
         });
+    }
     return commitVerificationWrites(args, batch, writes, checkedCommit);
 }
 
@@ -863,6 +893,7 @@ type VerifyWrite = {
     content?: string;
     reason?: string;
     refusalReason?: string;
+    skipFingerprint?: string | null;
 };
 
 async function commitVerificationWrites(
@@ -894,6 +925,7 @@ async function commitVerificationWrites(
             content: write.content,
             reason: write.reason,
             refusalReason: write.refusalReason,
+            skipFingerprint: write.skipFingerprint,
         };
     });
     const count = (result: string, kind: VerifyWrite["kind"], state?: string) => {

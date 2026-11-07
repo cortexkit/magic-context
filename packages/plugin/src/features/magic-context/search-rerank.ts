@@ -13,6 +13,7 @@ const DEADLINE_MS = 1500;
 // Keep the existing location/title/body recipe's 1 KiB budget: twenty documents
 // send at most 20 KiB of source text rather than unbounded stored conversations.
 const DOCUMENT_BYTES = 1024;
+const proseWordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
 
 /** Rerank questions and multi-word descriptions; prefer the existing ranking for short symbol-heavy lookups. */
 export function isProseQuery(query: string): boolean {
@@ -25,9 +26,14 @@ export function isProseQuery(query: string): boolean {
     )
         return false;
     if (/\b(?:[A-Z][A-Z_]+:|\w*(?:Error|Exception):)|\bat\s+\S+\s*\(/.test(text)) return false;
-    const words = text.replace(/[?!.]$/, "").split(/\s+/);
+    // Keep ASCII lookup classification stable; other scripts may not separate words with spaces.
+    const words = /(?![a-zA-Z])\p{L}/u.test(text)
+        ? [...proseWordSegmenter.segment(text)]
+              .filter((word) => word.isWordLike)
+              .map((word) => word.segment)
+        : text.replace(/[?!.]$/, "").split(/\s+/);
     if (words.length < 3) return false;
-    const plain = words.filter((word) => /^[a-zA-Z]+(?:['’-][a-zA-Z]+)*$/.test(word));
+    const plain = words.filter((word) => /^[\p{L}\p{M}]+(?:['’-][\p{L}\p{M}]+)*$/u.test(word));
     if (/^(?:how|why|what|where|when|which|who)\b/i.test(text)) return plain.length >= 3;
     // Three ordinary words distinguish descriptive phrases from symbol lists.
     return words.length >= 4 && plain.length >= 3 && !/[\\/]|::|=/.test(text);
