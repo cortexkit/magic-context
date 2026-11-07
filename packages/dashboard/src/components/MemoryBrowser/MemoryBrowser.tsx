@@ -6,6 +6,7 @@ import {
   enumerateMemoryProjects,
   formatDateTime,
   formatRelativeTime,
+  getDatabaseCapabilities,
   getMemories,
   getMemoryHistory,
   getMemoryStats,
@@ -27,6 +28,11 @@ import type {
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
+import {
+  archiveConfirmation,
+  MEMORY_HISTORY_REQUIREMENT,
+  memoryHistoryAvailable,
+} from "./database-features";
 import EditNotice from "./EditNotice";
 import MemoryDetail from "./MemoryDetail";
 import MemoryHistoryTimeline from "./MemoryHistoryTimeline";
@@ -98,6 +104,8 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
   createEffect(() => saveCollapsedCategories(collapsedCategories()));
 
   const [projects] = createResource(enumerateMemoryProjects);
+  const [capabilities] = createResource(getDatabaseCapabilities);
+  const historyAvailable = () => memoryHistoryAvailable(capabilities());
   const [workspaceSummaries] = createResource(listWorkspaceSummaries);
   const [mural] = createResource(
     () => props.project?.identity,
@@ -247,9 +255,8 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
   });
 
   // ── Audited edits ────────────────────────────────────────────
-  // Each edit carries the revision the panel displayed. The backend records
-  // it as an undoable history decision, or answers "conflict" when the memory
-  // moved on since it was loaded; the panel then offers a reload.
+  // Revision-aware stores record an undoable decision and reject stale edits.
+  // Older stores use the plugin's original edit and cache-invalidation rules.
 
   const [view, setView] = createSignal<"memories" | "history">("memories");
   const [historyReload, setHistoryReload] = createSignal(0);
@@ -470,10 +477,10 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
       setError("Select memories from one project at a time to archive them together.");
       return;
     }
-    const confirmed = await ask(
-      `Archive ${rows.length} memor${rows.length === 1 ? "y" : "ies"}? They stop going into sessions. You can undo this from History.`,
-      { title: "Confirm Archive", kind: "warning" },
-    );
+    const confirmed = await ask(archiveConfirmation(rows.length, historyAvailable()), {
+      title: "Confirm Archive",
+      kind: "warning",
+    });
     if (!confirmed) return;
     try {
       setError(null);
@@ -656,7 +663,12 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
         )}
       </Show>
 
-      <Show when={embedded()}>
+      <Show when={capabilities() && !historyAvailable()}>
+        <p class="history-intro">
+          {MEMORY_HISTORY_REQUIREMENT}. Edits remain available without revision checks or undo.
+        </p>
+      </Show>
+      <Show when={embedded() && historyAvailable()}>
         <div class="tab-pills memory-view-tabs">
           <button
             type="button"
@@ -677,7 +689,7 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
         </div>
       </Show>
 
-      <Show when={view() === "history" && embedded()}>
+      <Show when={view() === "history" && embedded() && historyAvailable()}>
         <div class="scroll-area">
           <p class="history-intro">
             Every change to this project's memories, newest first: what the dreamer, the historian,
@@ -1019,6 +1031,7 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
         {(mem) => (
           <MemoryDetail
             memory={mem()}
+            historyAvailable={historyAvailable()}
             historyReload={historyReload()}
             onClose={() => setSelectedMemory(null)}
             onStatusChange={handleStatusChange}

@@ -178,6 +178,14 @@ pub fn apply_workspace_changes(
     .map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+pub fn get_database_capabilities(
+    state: State<'_, AppState>,
+) -> Result<crate::db_capabilities::Capabilities, String> {
+    let conn = db::open_readonly(&state.get_db_path()?).map_err(|error| error.to_string())?;
+    crate::db_capabilities::get(&conn).map_err(|error| error.to_string())
+}
+
 async fn dashboard_edit(
     state: State<'_, AppState>,
     project_path: &str,

@@ -125,8 +125,7 @@ pub fn read(
     session: &str,
     rust_watermark: Option<i64>,
 ) -> rusqlite::Result<Scores> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('compartment_score_selections','compartment_score_revisions')", [], |row| row.get(0))?;
-    if count != 2 {
+    if !crate::db_capabilities::get(conn)?.compartment_scores {
         return Ok(Scores::default());
     }
     let mut stmt = conn.prepare(
@@ -140,23 +139,14 @@ pub fn read(
         [session],
         |row| row.get(0),
     )?;
-    let has_watermark: bool = conn
-        .prepare("PRAGMA table_info(session_meta)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|name| name == "cached_m0_score_selection_watermark");
-    let applied = if has_watermark {
-        conn.query_row(
+    let applied = conn
+        .query_row(
             "SELECT cached_m0_score_selection_watermark FROM session_meta WHERE session_id=?1",
             [session],
             |row| row.get::<_, i64>(0),
         )
         .optional()?
-        .unwrap_or(0)
-    } else {
-        0
-    };
+        .unwrap_or(0);
     Ok(Scores {
         selected,
         effective: view(conn, session, latest)?,
@@ -176,6 +166,8 @@ mod tests {
             CREATE TABLE compartment_score_selections(session_id TEXT,compartment_id INTEGER,sequence INTEGER,revision_id INTEGER);
             CREATE TABLE compartment_score_revisions(id INTEGER,session_id TEXT,compartment_id INTEGER,source_identity TEXT,new_importance INTEGER);
             CREATE TABLE session_meta(session_id TEXT,cached_m0_score_selection_watermark INTEGER);").unwrap();
+        // Production openers discover features before any read-only operation.
+        crate::db_capabilities::get(&conn).unwrap();
         conn
     }
     fn add(conn: &Connection, source: &serde_json::Value) {

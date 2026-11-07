@@ -220,6 +220,19 @@ export async function bulkArchiveMemories(
 
 // ── Memory history and undo ───────────────────────────────
 
+export interface DatabaseCapabilities {
+  schemaVersion: number;
+  memoryRevision: boolean;
+  memoryHistory: boolean;
+  memoryUndo: boolean;
+  compartmentScores: boolean;
+  legacyMemoryEdits: boolean;
+}
+
+export async function getDatabaseCapabilities(): Promise<DatabaseCapabilities> {
+  return invoke("get_database_capabilities");
+}
+
 /** Newest decision first; pass the returned cursor to read older ones. */
 export async function getMemoryHistory(request: MemoryHistoryRequest): Promise<MemoryHistoryPage> {
   return invoke("get_memory_history", { request });

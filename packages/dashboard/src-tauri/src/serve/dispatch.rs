@@ -302,6 +302,11 @@ struct IdContentArgs {
 
 pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value, DispatchError> {
     match cmd {
+        "get_database_capabilities" => {
+            parse_args::<NoArgs>(args)?;
+            let conn = open_readonly(state)?;
+            json(crate::db_capabilities::get(&conn).map_err(to_command)?)
+        }
         "get_projects" => {
             parse_args::<NoArgs>(args)?;
             let conn = open_readonly(state)?;

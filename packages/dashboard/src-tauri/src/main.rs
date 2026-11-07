@@ -48,6 +48,7 @@ fn main() {
             commands::get_primer_candidates,
             commands::get_mural,
             commands::get_memory_history,
+            commands::get_database_capabilities,
             commands::preview_memory_restore,
             commands::restore_memory_history,
             commands::update_memory_status,
