@@ -46,9 +46,7 @@ def assert_executed(expected, ignored, executed):
 
 def check_junit(directory, label, path):
     expected = (directory / (label + "-names.txt")).read_text().splitlines()
-    # The parity job runs with --run-ignored: its long differential is
-    # #[ignore]d only so local `cargo test` stays fast, and CI must execute it.
-    ignored = [] if label == "parity" else libtest_names((directory / "cargo-ignored.txt").read_text())
+    ignored = libtest_names((directory / "cargo-ignored.txt").read_text())
     executed = [case.attrib["name"] for case in ET.parse(path).iter("testcase")]
     count = assert_executed(expected, ignored, executed)
     print(f"PASS: {label} JUnit contains exactly {count} executed tests")
@@ -61,7 +59,7 @@ def check(directory):
     if nextest_names(all_tests) != expected or nextest_names(all_tests, ignored_only=True) != ignored:
         raise ValueError("archive discovery or ignored-test policy differs from cargo libtest")
     partitions = []
-    for label in ["lib-1", "lib-2", "lib-3", "lib-4", "parity"]:
+    for label in ["lib-1", "lib-2", "lib-3", "lib-4"]:
         document = json.loads((directory / (label + ".json")).read_text())
         names = nextest_names(document, selected_only=True)
         if not names:

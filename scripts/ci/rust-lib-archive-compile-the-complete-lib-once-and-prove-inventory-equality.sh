@@ -8,9 +8,8 @@ cargo test --locked -p mc-module --lib --profile ci-test -- --list > ci-rust-lib
 cargo test --locked -p mc-module --lib --profile ci-test -- --list --ignored > ci-rust-lib/cargo-ignored.txt
 cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all --message-format json > ci-rust-lib/all.json
 for shard in 1 2 3 4; do
-  cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all --partition "hash:$shard/4" -E "not ($MC_PARITY_FILTER)" --message-format json > "ci-rust-lib/lib-$shard.json"
+  cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all --partition "hash:$shard/4" --message-format json > "ci-rust-lib/lib-$shard.json"
 done
-cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all -E "$MC_PARITY_FILTER" --message-format json > ci-rust-lib/parity.json
 python3 scripts/check-nextest-inventory.py ci-rust-lib
 diff -u ci-rust-lib/cargo-names.txt ci-rust-lib/union-names.txt
 rustc -vV > ci-rust-lib/rustc.txt

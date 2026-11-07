@@ -18,7 +18,7 @@ env:
 #          ↓                    ↓
 #   e2e-opencode             e2e-pi                           (Docker smoke, respective unit gates)
 #   e2e-host-opencode        e2e-host-pi                      (host behavior, respective unit gates)
-#   e2e-rust-hermetic-build → e2e-rust-hermetic (4 shards)   (independent Rust build and suite)
+#   rust-module                                       (lib, scenarios, mock runner and wire)
 #                  ↓
 #   publish-npm, publish-npm-pi, publish-npm-cli           (gated by every test and e2e job)
 #                  ↓
@@ -350,144 +350,35 @@ jobs:
           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
           bun test --timeout 600000 $files
 
-  e2e-rust-hermetic-build:
-    name: E2E (Rust hermetic build)
+  # Keep publishing gated on the shipped module and daemon wiring, not the
+  # deleted TypeScript adapter that sent complete conversations to Rust.
+  rust-module:
+    name: Rust (module release gates)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      contents: read
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
-      - name: Resolve Cargo.lock crate pins
-        id: cargo-pins
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/cargo-lock-pins.py --self-test
-          pins="$(python3 scripts/cargo-lock-pins.py)"
-          printf '%s\n' "$pins" >> "$GITHUB_OUTPUT"
-          locked_crates="$(printf '%s\n' "$pins" | sed -n 's/^locked_crates=//p')"
-          echo "Cargo.lock pins: $locked_crates" >> "$GITHUB_STEP_SUMMARY"
-
-
-      # Cargo builds the locked subc-core library as a dependency but not its daemon
-      # binary target. Keep this checkout only in the artifact builder that produces
-      # ck-subc; the parallel e2e shards download and execute that binary.
-      - name: Check out Cargo.lock-pinned subconscious source for ck-subc
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/subconscious
-          path: .siblings/subconscious
-          ref: ${{ steps.cargo-pins.outputs.subc_revision }}
-
-      - name: Record locked daemon source revision
-        id: daemon-source
-        shell: bash
-        run: |
-          set -euo pipefail
-          sha="$(git -C "$GITHUB_WORKSPACE/.siblings/subconscious" rev-parse HEAD)"
-          expected="${{ steps.cargo-pins.outputs.subc_revision }}"
-          if [[ "$sha" != "$expected" ]]; then
-            echo "checked out daemon source $sha, expected Cargo.lock revision $expected" >&2
-            exit 1
-          fi
-          summary="ck-subc source pinned by Cargo.lock: $sha"
-          echo "$summary"
-          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Derive hermetic Cargo cache key
-        id: cargo-cache-key
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Include the resolved graph and the exact daemon source revision.
-          lock_digest="$(sha256sum Cargo.lock | awk '{print $1}')"
-          source_sha="${{ steps.daemon-source.outputs.sha }}"
-          digest="$(printf '%s\n%s\n' "$lock_digest" "$source_sha" | sha256sum | awk '{print $1}')"
-          echo "key=rust-hermetic-${RUNNER_OS}-${RUNNER_ARCH}-${digest}" >> "$GITHUB_OUTPUT"
-      - name: Restore ck-subc and ckdev-mc-e2e Cargo target cache
-        uses: actions/cache@v4
-        with:
-          path: packages/e2e-tests/.cache/rust-e2e-cargo-target
-          key: ${{ steps.cargo-cache-key.outputs.key }}
-      - name: Build hermetic binary pair (including fault-injection variant)
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$GITHUB_WORKSPACE/packages/e2e-tests/.cache/rust-e2e-cargo-target"
-          mkdir -p "$target/prebuilt"
-          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module
-          cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e"
-          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --features drive-fault
-          cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
-          (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
-          cp "$target/release/ck-subc" "$target/prebuilt/ckdev-subc"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rust-hermetic-binaries
-          path: packages/e2e-tests/.cache/rust-e2e-cargo-target/prebuilt/
-          if-no-files-found: error
-          retention-days: 1
-
-  e2e-rust-hermetic:
-    name: E2E (Rust hermetic ${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
-    needs: [e2e-rust-hermetic-build]
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
-      - name: Download hermetic binaries (retry transient failures and verify digest)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/download-ci-artifact.py --artifact-name rust-hermetic-binaries --path packages/e2e-tests/.cache/prebuilt
-      - name: Make downloaded binaries executable
-        run: |
-          if [[ ! -f packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e || ! -f packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault || ! -f packages/e2e-tests/.cache/prebuilt/ckdev-subc ]]; then
-            echo "::error::artifact not downloaded: missing one or more hermetic binaries" >&2
-            exit 1
-          fi
-          chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ckdev-subc
-      - name: Install pinned OpenCode
-        run: |
-          OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-      - name: Build host plugins
-        run: |
-          bun run --cwd packages/plugin build
-          bun run --cwd packages/pi-plugin build
-      - name: Run manifest shard
-        env:
-          MC_E2E_SHARD: ${{ matrix.shard }}/4
-          MC_E2E_CK_MC_PREBUILT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e
-          MC_E2E_CK_MC_DRIVE_FAULT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault
-          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
-        run: scripts/run-rust-hermetic-e2e.sh
+          components: clippy
+      - name: Clippy (including integration targets)
+        run: bash scripts/ci/rust-clippy-clippy-including-integration-targets.sh
+      - name: Test mc-module library
+        run: cargo test --locked -p mc-module --lib --no-fail-fast
+      - name: Test mc-module (integration, binary and doctest targets)
+        run: bash scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh
+      - name: Test the remaining workspace crates
+        run: bash scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh
+      - name: Test module wire protocol with daemon and mock runner
+        run: bash scripts/wire-gate.sh
   publish-npm:
     name: Publish plugin to npm
     runs-on: ubuntu-latest
     # Publishes are gated on the full e2e suite (OpenCode + Pi) so a tag
     # push can never produce a published npm package whose runtime fails
     # the install + first-turn smoke test.
-    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, e2e-rust-hermetic-build, e2e-rust-hermetic]
-    # Every Rust shard must pass before publishing.
+    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, rust-module]
+    # The shipped module's library, scenarios, mock runner and wire tests must pass.
     if: >-
       always() &&
       needs.test.result == 'success' &&
@@ -498,8 +389,7 @@ jobs:
       needs.e2e-pi.result == 'success' &&
       needs.e2e-host-opencode.result == 'success' &&
       needs.e2e-host-pi.result == 'success' &&
-      needs.e2e-rust-hermetic-build.result == 'success' &&
-      needs.e2e-rust-hermetic.result == 'success'
+      needs.rust-module.result == 'success'
     steps:
       - uses: actions/checkout@v5
 
@@ -538,8 +428,8 @@ jobs:
   publish-npm-pi:
     name: Publish pi-plugin to npm
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, e2e-rust-hermetic-build, e2e-rust-hermetic]
-    # Every Rust shard must pass before publishing.
+    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, rust-module]
+    # The shipped module's library, scenarios, mock runner and wire tests must pass.
     if: >-
       always() &&
       needs.test.result == 'success' &&
@@ -550,8 +440,7 @@ jobs:
       needs.e2e-pi.result == 'success' &&
       needs.e2e-host-opencode.result == 'success' &&
       needs.e2e-host-pi.result == 'success' &&
-      needs.e2e-rust-hermetic-build.result == 'success' &&
-      needs.e2e-rust-hermetic.result == 'success'
+      needs.rust-module.result == 'success'
     steps:
       - uses: actions/checkout@v5
 
@@ -585,8 +474,8 @@ jobs:
   publish-npm-cli:
     name: Publish unified CLI to npm
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, e2e-rust-hermetic-build, e2e-rust-hermetic]
-    # Every Rust shard must pass before publishing.
+    needs: [test, test-pi, test-cli, slow-unit, e2e-opencode, e2e-pi, e2e-host-opencode, e2e-host-pi, rust-module]
+    # The shipped module's library, scenarios, mock runner and wire tests must pass.
     if: >-
       always() &&
       needs.test.result == 'success' &&
@@ -597,8 +486,7 @@ jobs:
       needs.e2e-pi.result == 'success' &&
       needs.e2e-host-opencode.result == 'success' &&
       needs.e2e-host-pi.result == 'success' &&
-      needs.e2e-rust-hermetic-build.result == 'success' &&
-      needs.e2e-rust-hermetic.result == 'success'
+      needs.rust-module.result == 'success'
     steps:
       - uses: actions/checkout@v5
 

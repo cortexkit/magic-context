@@ -58,7 +58,7 @@ test("shared workspace installs and package wrappers serialize without blocking 
         }),
     ).rejects.toThrow("install failed");
     expect(await serial(async () => "next install ran")).toBe("next install ran");
-    expect(writesWorkspace("bun install --frozen-lockfile\n", "e2e-rust-hermetic")).toBe(true);
+    expect(writesWorkspace("bun install --frozen-lockfile\n", "e2e-host-opencode")).toBe(true);
     expect(writesWorkspace("bash scripts/ci/unit.sh", "unit-plugin")).toBe(true);
     expect(writesWorkspace("bash scripts/ci/slow.sh", "slow-unit")).toBe(true);
     expect(writesWorkspace("bun install --cwd target/private-host", "e2e-host-opencode2")).toBe(
@@ -75,29 +75,17 @@ test("local full expands CI's matrices, including both slow modes and every Rust
         "normal",
         "assertions",
     ]);
-    expect(
-        full.filter((lane) => lane.id === "e2e-rust-hermetic").map((lane) => lane.matrix.shard),
-    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    for (const id of ["e2e-rust-hermetic", "e2e-rust-hermetic-build", "rust-mc-module-parity"])
+        expect(full.some((lane) => lane.id === id)).toBe(false);
     expect(
         full.filter((lane) => lane.id === "rust-mc-module-lib").map((lane) => lane.matrix.shard),
     ).toEqual([1, 2, 3, 4]);
     expect(
         full.filter((lane) => lane.id === "e2e-host-opencode2").map((lane) => lane.matrix.version),
     ).toEqual(["2.0.22", "2.1.0", "2.0.22", "2.1.0"]);
-    // The rust-raw-replay-review lane is retired; unit-shard bridge tests use
-    // the same-commit conformance oracle instead.
     expect(full.some((lane) => lane.id === "rust-raw-replay-review")).toBe(false);
-    expect(
-        workflow.jobs["rust-lib-archive"].steps.some(
-            (step) => step.name === "Package conformance oracle test binary",
-        ),
-    ).toBe(true);
     for (const id of ["unit-plugin", "unit-pi-plugin", "rust-mc-module-integration"])
-        expect(
-            workflow.jobs[id].steps.some(
-                (step) => step.uses === "./.github/actions/restore-conformance-oracle",
-            ),
-        ).toBe(true);
+        expect(workflow.jobs[id].steps.some((step) => step.uses?.includes("oracle"))).toBe(false);
 });
 
 test("matrix substitutions and once-only checks fail closed on unknown workflow syntax", () => {
@@ -146,7 +134,7 @@ test("every non-transport CI check is runnable locally and shared scripts have n
                     "Restore staged native driver",
                     "Fetch pinned master baseline",
                     "Fetch pinned standalone differential base",
-                    "Package conformance oracle test binary",
+                    "Test module wire protocol with daemon and mock runner",
                 ]).toContain(step.name ?? step.run);
         }
     }
@@ -156,12 +144,8 @@ test("every non-transport CI check is runnable locally and shared scripts have n
 
 test("local producer dependencies and writable output locks preserve the CI handoffs", () => {
     expect(dependencies("rust-mc-module-lib")).toEqual(["rust-lib-archive"]);
-    expect(dependencies("rust-mc-module-parity")).toEqual(["rust-lib-archive"]);
-    expect(dependencies("rust-raw-replay-review")).toEqual(["e2e-rust-hermetic-build"]);
-    expect(dependencies("e2e-rust-hermetic")).toEqual(["e2e-rust-hermetic-build"]);
     expect(dependencies("rust-mc-module-integration")).toEqual([]);
     expect(resources("rust-mc-module-lib").lock).toBe("nextest-junit");
-    expect(resources("rust-mc-module-parity").lock).toBe("nextest-junit");
     expect(resources("rust-lib-archive").lock).toBe(resources("rust-clippy").lock);
 });
 
@@ -264,8 +248,8 @@ test("split full parts partition the CI graph and only the four Docker lanes are
     ]);
     for (const lane of lanes(workflow.jobs))
         expect(["unit", "native", "host"]).toContain(area(lane.id));
-    expect(area("rust-raw-replay-review")).toBe("native");
-    expect(area("e2e-rust-hermetic")).toBe("native");
+    expect(area("rust-lib-archive")).toBe("native");
+    expect(area("rust-mc-module-integration")).toBe("native");
     expect(area("e2e-host-opencode2")).toBe("host");
     expect(area("slow-unit")).toBe("unit");
     expect(area("check-dashboard")).toBe("unit");

@@ -1,5 +1,5 @@
 import { closeSync, openSync } from "node:fs";
-import { copyFile, mkdir, readFile, utimes } from "node:fs/promises";
+import { mkdir, readFile, utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createTestHome, prepareTestTools } from "./gate-tools";
 
@@ -24,12 +24,7 @@ type Lane = { id: string; job: Job; matrix: Record<string, string | number>; key
 const root = resolve(import.meta.dir, "..");
 export const githubOnly = new Set([
     "Package same-commit dists",
-    "Resolve Cargo.lock crate pins",
-    "Link locked daemon source for integration tests",
     "Download lib archive (retry transient failures and verify digest)",
-    "Download hermetic binaries (retry transient failures and verify digest)",
-    "Derive hermetic Cargo cache key",
-    "Record ck-subc source revision",
 ]);
 const aggregates = new Set(["check-plugin", "check-pi-plugin", "rust-crates", "ci-summary"]);
 // Remove these exclusions when build jobs have an approved Docker-compatible engine with Linux/amd64 support.
@@ -48,12 +43,11 @@ const localActions = new Set([
     "actions/cache@v4",
     "actions/upload-artifact@v4",
     "./.github/actions/restore-ci-dists",
-    "./.github/actions/restore-conformance-oracle",
     "./.github/actions/wait-ci-artifact",
 ]);
 
 export function area(id: string): string {
-    if (id.startsWith("rust-") || id.startsWith("e2e-rust-")) return "native";
+    if (id.startsWith("rust-")) return "native";
     return id.startsWith("e2e-host-") ? "host" : "unit";
 }
 
@@ -120,9 +114,7 @@ export function condition(
 }
 
 export function dependencies(id: string): string[] {
-    if (["rust-mc-module-lib", "rust-mc-module-parity"].includes(id)) return ["rust-lib-archive"];
-    if (["e2e-rust-hermetic", "rust-raw-replay-review"].includes(id))
-        return ["e2e-rust-hermetic-build"];
+    if (id === "rust-mc-module-lib") return ["rust-lib-archive"];
     return [];
 }
 
@@ -255,10 +247,8 @@ export async function preflightGroups(
 }
 
 export function resources(id: string): { cpu: number; lock: string } {
-    if (["rust-mc-module-lib", "rust-mc-module-parity"].includes(id))
-        return { cpu: 4, lock: "nextest-junit" };
-    if (id.startsWith("rust-") || id === "e2e-rust-hermetic-build")
-        return { cpu: 8, lock: "cargo-build" };
+    if (id === "rust-mc-module-lib") return { cpu: 4, lock: "nextest-junit" };
+    if (id.startsWith("rust-")) return { cpu: 8, lock: "cargo-build" };
     if (id.startsWith("e2e-host-opencode2")) return { cpu: 2, lock: "oc2-install" };
     if (id.startsWith("unit-") || id === "slow-unit" || id === "check-plugin-compat")
         return { cpu: 4, lock: "package-tests" };
@@ -339,7 +329,7 @@ async function main() {
         if (diff.exitCode) throw new Error(diff.stderr.toString());
         const files = diff.stdout.toString().trim().split("\n").filter(Boolean);
         // Only public prose-only diffs are provably independent of runtime behavior.
-        // All source/config/script changes retain the complete graph, including cross-language oracles.
+        // All source/config/script changes retain the complete graph, including native module tests.
         if (
             files.length &&
             files.every((file) => file.startsWith("docs/") && file.endsWith(".md"))
@@ -420,8 +410,6 @@ async function main() {
     }> = [];
     const active = new Map<string, { promise: Promise<void>; cpu: number; lock: string }>();
     const workspaceWriter = serializeTasks();
-    let nativeReady: Promise<void> | undefined;
-    let oracleReady: Promise<string> | undefined;
     let preflightOK = true;
     let distsReady = false;
 
@@ -508,31 +496,6 @@ async function main() {
             return writesWorkspace(command, lane.id) ? workspaceWriter(operation) : operation();
         }
         try {
-            if (["e2e-rust-hermetic-build", "rust-mc-module-integration"].includes(lane.id)) {
-                nativeReady ??= (async () => {
-                    if (
-                        !(await check(
-                            "Prepare locked daemon source",
-                            "bash scripts/gate-native-source.sh",
-                        ))
-                    )
-                        throw new Error("locked daemon source unavailable");
-                })();
-                await nativeReady;
-            }
-            if (["e2e-rust-hermetic", "rust-raw-replay-review"].includes(lane.id)) {
-                const artifact = join(
-                    temp,
-                    lane.id === "e2e-rust-hermetic" ? "hermetic-artifact" : "raw-replay-download",
-                );
-                await mkdir(artifact, { recursive: true });
-                const producer = join(run, "e2e-rust-hermetic-build");
-                for (const name of [
-                    "rust-hermetic-binaries.tar.gz",
-                    "rust-hermetic-binaries.sha256",
-                ])
-                    await copyFile(join(producer, name), join(artifact, name));
-            }
             const runSteps = async (
                 steps: Step[],
                 groupEnv: Record<string, string>,
@@ -560,31 +523,6 @@ async function main() {
                             const now = new Date();
                             await utimes(join(root, "packages/plugin/dist/index.js"), now, now);
                             restored = true;
-                        }
-                        if (step.uses === "./.github/actions/restore-conformance-oracle") {
-                            // Local lanes share the same checkout, so compile the oracle once
-                            // instead of downloading GitHub's same-commit artifact.
-                            oracleReady ??= (async () => {
-                                if (
-                                    !(await check(
-                                        "Prepare conformance oracle",
-                                        "bash scripts/ci/rust-mc-module-integration-build-system-delivery-fixture-test-binary.sh",
-                                        {},
-                                        groupEnv,
-                                    ))
-                                )
-                                    throw new Error("conformance oracle build failed");
-                                const binary = (await readFile(groupEnv.GITHUB_ENV!, "utf8"))
-                                    .split("\n")
-                                    .find((line) =>
-                                        line.startsWith("MC_SYSTEM_DELIVERY_FIXTURE_BINARY="),
-                                    )
-                                    ?.slice("MC_SYSTEM_DELIVERY_FIXTURE_BINARY=".length);
-                                if (!binary)
-                                    throw new Error("conformance oracle binary was not published");
-                                return binary;
-                            })();
-                            groupEnv.MC_CONFORMANCE_ORACLE_BINARY = await oracleReady;
                         }
                         if (!step.run || githubOnly.has(step.name ?? "")) continue;
                         const extra = Object.fromEntries(
