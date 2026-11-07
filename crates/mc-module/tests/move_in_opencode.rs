@@ -31,6 +31,7 @@ impl Fixture {
         ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
         let conn = Connection::open(dir.join("context.db")).unwrap();
         let row = |mid: &str, entry: Option<u64>| HostMessage {
+            source_entry: None,
             mid: mid.into(),
             entry,
             finished_summary: false,
@@ -69,6 +70,9 @@ impl Fixture {
             now: 1,
             messages: Some(messages),
             source_harness: Some("opencode".into()),
+            source_session: None,
+            source_runner_entries: false,
+            tag_floor: None,
             before_newest: None,
         };
         Self { dir, conn, request }

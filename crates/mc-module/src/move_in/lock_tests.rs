@@ -116,6 +116,7 @@ fn messages(n: usize) -> Vec<HostMessage> {
     let mut messages = vec![
         HostMessage {
             mid: "opener".into(),
+            source_entry: None,
             entry: None,
             finished_summary: false,
             added: false,
@@ -123,6 +124,7 @@ fn messages(n: usize) -> Vec<HostMessage> {
         },
         HostMessage {
             mid: "summary".into(),
+            source_entry: None,
             entry: None,
             finished_summary: true,
             added: false,
@@ -130,6 +132,7 @@ fn messages(n: usize) -> Vec<HostMessage> {
         },
     ];
     messages.extend((1..=n).map(|i| HostMessage {
+        source_entry: None,
         mid: format!("m{i}"),
         entry: Some(i as u64),
         finished_summary: false,
@@ -364,6 +367,9 @@ fn request(n: usize) -> MoveRequest {
         messages: Some(messages(n)),
         source_harness: Some("opencode".into()),
         before_newest: None,
+        source_session: None,
+        source_runner_entries: false,
+        tag_floor: None,
     }
 }
 
@@ -629,6 +635,7 @@ fn pi_resume_keeps_original_alignment_after_summaries_commit() {
         .into_iter()
         .enumerate()
         .map(|(i, (mid, role))| HostMessage {
+            source_entry: None,
             mid: mid.into(),
             entry: Some(i as u64 + 1),
             finished_summary: false,

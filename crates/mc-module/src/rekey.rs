@@ -6,7 +6,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::Serialize;
 
-use crate::store::{lock_store, SCHEMA_VERSION};
+use crate::store::{lock_store, session_tables, SCHEMA_VERSION};
 
 mod process_check;
 
@@ -101,29 +101,6 @@ pub struct Summary {
 
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut tables = connection.prepare(
-        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
-    )?;
-    let names = tables
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut result = Vec::new();
-    for name in names {
-        let mut columns = connection.prepare("SELECT name FROM pragma_table_info(?1)")?;
-        let columns = columns
-            .query_map([&name], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        if ["runner", "harness", "session"]
-            .iter()
-            .all(|column| columns.contains(*column))
-        {
-            result.push(name);
-        }
-    }
-    Ok(result)
 }
 
 fn refuse_in_flight(context_path: &Path, request: &Request) -> Result<(), String> {

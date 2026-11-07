@@ -1,0 +1,63 @@
+{
+  "moves": {
+    "shape": "runner",
+    "rows": [
+      {
+        "mid": "9ec28891",
+        "entry": null
+      },
+      {
+        "mid": "97f164f3",
+        "entry": 1
+      },
+      {
+        "mid": "5b9fb962",
+        "entry": 2
+      },
+      {
+        "mid": "38128df8",
+        "entry": 3
+      },
+      {
+        "mid": "f5cb6fd1",
+        "entry": 4
+      },
+      {
+        "mid": "4ad5a556",
+        "entry": 5
+      },
+      {
+        "mid": "fe6c32ff",
+        "entry": 6
+      },
+      {
+        "mid": "e55a56e1",
+        "entry": 7
+      },
+      {
+        "mid": "1da1ca56",
+        "entry": 8
+      },
+      {
+        "mid": "b086ce97",
+        "entry": 9
+      },
+      {
+        "mid": "8fbdcd6e",
+        "entry": 10
+      },
+      {
+        "mid": "e0758134",
+        "entry": 11
+      },
+      {
+        "mid": "caed7c98",
+        "entry": 12
+      }
+    ]
+  },
+  "history_version": 0,
+  "incarnation": "0effe857a5f33e6f854155204c68d3ea",
+  "imported_messages": 12,
+  "dropped_system_messages": 1
+}

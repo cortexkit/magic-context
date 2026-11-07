@@ -201,6 +201,9 @@ fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
         now: 1,
         messages: None,
         source_harness: None,
+        source_session: None,
+        source_runner_entries: false,
+        tag_floor: None,
         before_newest: Some("m1".into()),
     }
 }
@@ -306,6 +309,7 @@ fn lifecycle_move_converts_the_plugins_numbers_across_a_compaction() {
     request.session = SessionRef::new("mock-runner", "opencode", "s1");
     request.newest = cortexkit_role_compaction::read::Cursor::new(4, "m6", "d");
     let row = |mid: &str, entry: Option<u64>, finished_summary: bool| HostMessage {
+        source_entry: None,
         mid: mid.into(),
         entry,
         finished_summary,

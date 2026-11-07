@@ -111,6 +111,31 @@ pub struct Store {
     pub(crate) path: PathBuf,
 }
 
+/// Discover every per-session state table so auxiliary state and future
+/// schema additions receive the same collision checks as the main state row.
+pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut tables = connection.prepare(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+    )?;
+    let names = tables
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::new();
+    for name in names {
+        let mut columns = connection.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let columns = columns
+            .query_map([&name], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if ["runner", "harness", "session"]
+            .iter()
+            .all(|column| columns.contains(*column))
+        {
+            result.push(name);
+        }
+    }
+    Ok(result)
+}
+
 /// The newest mode3.db schema this build can read and write.
 pub const SCHEMA_VERSION: u32 = 5;
 
@@ -248,6 +273,23 @@ impl Store {
             _lease: lease,
             path: path.to_owned(),
         })
+    }
+
+    /// Detect occupied destination keys without decoding state. Malformed
+    /// state and auxiliary-only rows must not be overwritten by a move.
+    pub fn has_rows(&self, key: &SessionRef) -> Result<bool, String> {
+        let connection = self.lock();
+        for table in session_tables(&connection).map_err(|e| e.to_string())? {
+            let table = table.replace('"', "\"\"");
+            let exists: bool=connection.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE runner=?1 AND harness=?2 AND session=?3)"),
+                params![key.runner,key.harness,key.session],|row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if exists {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn load(&self, key: &SessionRef) -> Option<Durable> {

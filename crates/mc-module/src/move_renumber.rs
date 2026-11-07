@@ -79,6 +79,14 @@ pub struct HostMessage {
     pub mid: String,
     /// The runner's entry number for the row, or none for a marker row.
     pub entry: Option<u64>,
+    /// The source runner's ordinal. An explicit null means that runner did
+    /// not number the row; omission is only valid for standalone-plugin moves.
+    #[serde(
+        default,
+        deserialize_with = "source_entry",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_entry: Option<Option<u64>>,
     /// Whether the standalone plugin leaves the row out of its numbering:
     /// exactly `summary: true` with `finish: "stop"`, error or not. This is
     /// the plugin's rule, not the runner's marker rule (that one is `entry`
@@ -95,6 +103,12 @@ pub struct HostMessage {
     /// it (see [`Numbering::pi`]); OpenCode rows leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi: Option<PiRow>,
+}
+
+fn source_entry<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<u64>>, D::Error> {
+    <Option<u64> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 /// One message row of an OpenCode 1 session in the standalone plugin's
@@ -164,6 +178,7 @@ pub fn opencode1_to_2(
                 added[at].push(HostMessage {
                     mid: row.id.clone(),
                     entry: entry_of(row),
+                    source_entry: None,
                     finished_summary: false,
                     added: true,
                     pi: None,
@@ -178,6 +193,7 @@ pub fn opencode1_to_2(
             std::iter::once(HostMessage {
                 mid: row.mid.clone(),
                 entry: entries.get(row.mid.as_str()).copied().flatten(),
+                source_entry: None,
                 finished_summary: row.finished_summary,
                 added: false,
                 pi: None,
@@ -253,9 +269,73 @@ pub struct Numbering {
     by_mid: HashMap<String, Option<u64>>,
     checksum: String,
     alignment_warnings: Vec<String>,
+    /// Runner ordinals need not equal the row's position in the move list.
+    source_ordinals: Option<HashMap<i64, usize>>,
 }
 
 impl Numbering {
+    /// Map a runner's ordinals through stable message ids. Added rows belong
+    /// to the source row immediately before them, including its summary cut.
+    pub fn runner(messages: &[HostMessage], newest: &Cursor) -> Result<Self, String> {
+        let mut by_plugin: Vec<Numbered> = Vec::new();
+        let mut source_ordinals = HashMap::new();
+        let mut by_mid = HashMap::new();
+        let mut last_entry = 0;
+        let mut last_source = 0;
+        let mut owner: Option<usize> = None;
+        for message in messages {
+            let before = last_entry;
+            check_row(&mut by_mid, &mut last_entry, message)?;
+            if message.entry.is_some() && last_entry != before + 1 {
+                return Err(format!(
+                    "invalid_messages: missing target entry {}",
+                    before + 1
+                ));
+            }
+            let source = message.source_entry.ok_or_else(|| {
+                format!("invalid_messages: {} is missing source_entry", message.mid)
+            })?;
+            if message.added {
+                if source.is_some() || message.entry.is_none() || owner.is_none() {
+                    return Err(format!("invalid_messages: added row {} must follow a source entry and have only a target entry", message.mid));
+                }
+                by_plugin[owner.unwrap()].covers(message.entry);
+            } else if let Some(source) = source {
+                if source <= last_source || source > i64::MAX as u64 {
+                    return Err(
+                        "invalid_messages: source entries must be positive and rise in host order"
+                            .into(),
+                    );
+                }
+                last_source = source;
+                source_ordinals.insert(source as i64, by_plugin.len());
+                owner = Some(by_plugin.len());
+                by_plugin.push(Numbered::new(&message.mid, message.entry));
+            } else {
+                owner = None;
+            }
+        }
+        match messages
+            .iter()
+            .rev()
+            .find(|message| message.entry.is_some())
+        {
+            Some(last) if last.mid == newest.mid && last.entry == Some(newest.ordinal) => {}
+            _ => return Err(not_at_newest(newest)),
+        }
+        Ok(Self {
+            by_plugin,
+            has_added: messages.iter().any(|message| message.added),
+            by_mid,
+            checksum: format!(
+                "runner:{:x}",
+                Sha256::digest(serde_json::to_vec(messages).expect("message rows serialize"))
+            ),
+            alignment_warnings: Vec::new(),
+            source_ordinals: Some(source_ordinals),
+        })
+    }
+
     /// The OpenCode 1 plugin's numbering of `messages`, which must end at the
     /// transcript's newest message `newest`.
     pub fn opencode(messages: &[HostMessage], newest: &Cursor) -> Result<Self, String> {
@@ -300,6 +380,7 @@ impl Numbering {
             by_mid,
             checksum: checksum(messages),
             alignment_warnings: Vec::new(),
+            source_ordinals: None,
         })
     }
 
@@ -399,6 +480,7 @@ impl Numbering {
             by_mid,
             checksum: checksum(messages),
             alignment_warnings: Vec::new(),
+            source_ordinals: None,
         })
     }
 
@@ -612,9 +694,21 @@ impl Numbering {
         &self.alignment_warnings
     }
 
+    pub(crate) fn checksum(&self) -> &str {
+        &self.checksum
+    }
+
+    pub(crate) fn cut(&self, ordinal: i64) -> Option<(u64, &str)> {
+        let entry = self.position(ordinal) as u64;
+        self.by_mid
+            .iter()
+            .find_map(|(mid, &number)| (number == Some(entry)).then_some((entry, mid.as_str())))
+    }
+
     /// Whether every plugin number already is the runner's.
     fn is_identity(&self) -> bool {
-        !self.has_added
+        self.source_ordinals.is_none()
+            && !self.has_added
             && self.by_plugin.iter().enumerate().all(|(index, numbered)| {
                 let own = Some(index as u64 + 1);
                 numbered.entry == own && numbered.first == own && numbered.through == own
@@ -622,6 +716,11 @@ impl Numbering {
     }
 
     fn at(&self, ordinal: i64) -> Option<&Numbered> {
+        if let Some(ordinals) = &self.source_ordinals {
+            return ordinals
+                .get(&ordinal)
+                .and_then(|&index| self.by_plugin.get(index));
+        }
         usize::try_from(ordinal)
             .ok()
             .and_then(|ordinal| ordinal.checked_sub(1))
@@ -650,7 +749,13 @@ impl Numbering {
         if start < 1 || end < start || self.at(end).is_none() {
             return None;
         }
+        if self.source_ordinals.is_some() && end - start >= self.by_plugin.len() as i64 {
+            return None;
+        }
         let covered: Vec<&Numbered> = (start..=end).filter_map(|o| self.at(o)).collect();
+        if self.source_ordinals.is_some() && covered.len() as i64 != end - start + 1 {
+            return None;
+        }
         let first = covered.iter().filter_map(|numbered| numbered.first).min()?;
         let last = covered
             .iter()
@@ -663,6 +768,14 @@ impl Numbering {
     /// the first entry. A position past the transcript's end maps to its last
     /// entry.
     fn position(&self, ordinal: i64) -> i64 {
+        if let Some(ordinals) = &self.source_ordinals {
+            return ordinals
+                .iter()
+                .filter(|(source, _)| **source <= ordinal)
+                .filter_map(|(_, &index)| self.by_plugin[index].through)
+                .max()
+                .map_or(0, |entry| entry as i64);
+        }
         let Ok(ordinal) = usize::try_from(ordinal) else {
             return 0;
         };
@@ -764,15 +877,28 @@ pub fn renumber(
         }
     }
     let plan = crate::move_batches::Plan::default();
+    let record = plan_renumber(conn, harness, session, numbering, &plan, None)?;
+    plan.stage(conn, &key, record)
+}
+
+pub(crate) fn plan_renumber(
+    conn: &Connection,
+    harness: &str,
+    session: &str,
+    numbering: &Numbering,
+    plan: &crate::move_batches::Plan,
+    destination: Option<(&str, &str)>,
+) -> Result<Value, String> {
     let stats = std::cell::RefCell::new(serde_json::json!({}));
     if !numbering.is_identity() {
         Rewrite {
             conn,
-            plan: &plan,
+            plan,
             stats: &stats,
             harness,
             session,
             numbering,
+            destination,
         }
         .all()
         .map_err(|error| error.0)?;
@@ -780,7 +906,7 @@ pub fn renumber(
     let mut record = stats.into_inner();
     record["checksum"] = numbering.checksum.clone().into();
     record["alignment_warnings"] = serde_json::json!(numbering.alignment_warnings);
-    plan.stage(conn, &key, record)
+    Ok(record)
 }
 
 struct Failure(String);
@@ -800,6 +926,7 @@ struct Rewrite<'a> {
     harness: &'a str,
     session: &'a str,
     numbering: &'a Numbering,
+    destination: Option<(&'a str, &'a str)>,
 }
 
 impl Rewrite<'_> {
@@ -865,6 +992,11 @@ impl Rewrite<'_> {
             })?
             .collect::<Result<_, _>>()?;
         for (id, sequence, start, end, start_id, end_id) in rows {
+            if self.numbering.source_ordinals.is_some()
+                && (self.numbering.at(start).is_none() || self.numbering.at(end).is_none())
+            {
+                return Err(self.unmapped(&format!("summary {sequence}"), start, end));
+            }
             for (ordinal, stored) in [(start, &start_id), (end, &end_id)] {
                 let actual = self.numbering.mid(ordinal);
                 // A number kept for a message the Pi branch no longer reaches
@@ -955,22 +1087,28 @@ impl Rewrite<'_> {
                             .get("harness")
                             .and_then(Value::as_str)
                             .is_none_or(|harness| harness == self.harness));
-                let (Some(from), Some(to)) = (
-                    source["source_compartment_start"].as_i64(),
-                    source["source_compartment_end"].as_i64(),
-                ) else {
-                    continue;
-                };
                 if !ours {
                     continue;
                 }
-                let (first, last) = self
-                    .numbering
-                    .range(from, to)
-                    .ok_or_else(|| self.unmapped(&format!("{table} row {id}"), from, to))?;
-                source["source_compartment_start"] = first.into();
-                source["source_compartment_end"] = last.into();
-                changed = true;
+                if let (Some(from), Some(to)) = (
+                    source["source_compartment_start"].as_i64(),
+                    source["source_compartment_end"].as_i64(),
+                ) {
+                    let (first, last) = self
+                        .numbering
+                        .range(from, to)
+                        .ok_or_else(|| self.unmapped(&format!("{table} row {id}"), from, to))?;
+                    source["source_compartment_start"] = first.into();
+                    source["source_compartment_end"] = last.into();
+                    changed = true;
+                }
+                if let Some((harness, session)) = self.destination {
+                    source["session_id"] = session.into();
+                    if has_harness || source.get("harness").is_some() {
+                        source["harness"] = harness.into();
+                    }
+                    changed = true;
+                }
             }
             if changed {
                 self.plan.execute(
@@ -1008,10 +1146,11 @@ impl Rewrite<'_> {
                 return Err(self.unmapped("a compression depth", ordinal, ordinal));
             };
             if let Some(entry) = numbered.entry {
+                let (harness, session) = self.destination.unwrap_or((self.harness, self.session));
                 self.plan.execute(
                     "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![self.session, entry as i64, depth, self.harness],
+                    params![session, entry as i64, depth, harness],
                 )?;
             }
         }
@@ -1033,6 +1172,7 @@ impl Rewrite<'_> {
             })?
             .collect::<Result<_, _>>()?;
         for (id, anchor) in notes {
+            self.check_position("note anchor", anchor)?;
             self.plan.execute(
                 "UPDATE notes SET anchor_ordinal = ?1 WHERE id = ?2",
                 params![self.numbering.position(anchor), id],
@@ -1048,6 +1188,8 @@ impl Rewrite<'_> {
             )
             .optional()?;
         if let Some((last, dirty)) = progress {
+            self.check_position("search progress", last)?;
+            self.check_position("search dirty floor", dirty)?;
             self.plan.phase("renumber/message_history_index");
             self.plan.execute(
                 "UPDATE message_history_index SET last_indexed_ordinal = ?1, dirty_floor_ordinal = ?2
@@ -1062,11 +1204,39 @@ impl Rewrite<'_> {
         Ok(())
     }
 
+    fn check_position(&self, what: &str, ordinal: i64) -> Step {
+        if self.numbering.source_ordinals.is_some()
+            && ordinal != 0
+            && self.numbering.at(ordinal).is_none()
+        {
+            return Err(self.unmapped(what, ordinal, ordinal));
+        }
+        Ok(())
+    }
+
     /// The raw-message search index. Its rows name their message, so each
     /// moves by message id; rows for marker rows or for messages no longer on
     /// the active path go. Ids remain authoritative even when a source row's
     /// ordinal is stale or a missing Pi message's slot was only estimated.
     fn search_index(&self) -> Step {
+        if self.numbering.source_ordinals.is_some() {
+            // Runner coordinates are authoritative, unlike stale plugin index
+            // positions. Refuse missing source ordinals before staging any writes.
+            for table in [
+                "message_history_source",
+                "message_history_fts",
+                "message_fts_rowid_map",
+            ] {
+                let mut statement = self.conn.prepare(&format!(
+                    "SELECT message_ordinal FROM {table} WHERE session_id=?1"
+                ))?;
+                let ordinals =
+                    statement.query_map(params![self.session], |row| row.get::<_, i64>(0))?;
+                for ordinal in ordinals {
+                    self.check_position(table, ordinal?)?;
+                }
+            }
+        }
         self.plan.phase("renumber/message_history_source");
         let sources: Vec<String> = self
             .conn
@@ -1149,7 +1319,7 @@ impl Rewrite<'_> {
                 self.plan.execute(
                     "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![self.session, ordinal, rowid, time],
+                    params![self.destination.map_or(self.session, |(_, session)| session), ordinal, rowid, time],
                 )?;
             }
         }
@@ -1179,13 +1349,31 @@ impl Rewrite<'_> {
                 continue;
             }
             let entry = self.numbering.entry_of(mid).flatten();
+            if let Ok(record) = serde_json::from_str::<Value>(&value) {
+                if let Some(ordinal) = record["ordinal"].as_i64() {
+                    self.check_position("search skip", ordinal)?;
+                }
+            }
             match (entry, serde_json::from_str::<Value>(&value)) {
                 (Some(entry), Ok(mut record)) if record.get("ordinal").is_some() => {
                     record["ordinal"] = (entry as i64).into();
-                    self.plan.execute(
-                        "UPDATE schema_migrations_meta SET value = ?1 WHERE key = ?2",
-                        params![record.to_string(), key],
-                    )?;
+                    if let Some((_, session)) = self.destination {
+                        let target_key =
+                            format!("message_index_skip:{}", serde_json::json!([session, mid]));
+                        self.plan.execute(
+                            "DELETE FROM schema_migrations_meta WHERE key=?1",
+                            params![key],
+                        )?;
+                        self.plan.execute(
+                            "INSERT INTO schema_migrations_meta(key,value) VALUES (?1,?2)",
+                            params![target_key, record.to_string()],
+                        )?;
+                    } else {
+                        self.plan.execute(
+                            "UPDATE schema_migrations_meta SET value = ?1 WHERE key = ?2",
+                            params![record.to_string(), key],
+                        )?;
+                    }
                 }
                 (Some(_), _) => {}
                 (None, _) => {
@@ -1206,3 +1394,6 @@ fn range_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, i64, i64)> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runner_tests;
