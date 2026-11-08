@@ -711,9 +711,9 @@ it("deleting the part frontier defers the move instead of missing a part that re
 // the move. A part that existed at that scan as an ordinary part and is rewritten
 // in place into a compaction part with a tail_start_id keeps its ID and rowid, so
 // it is neither a known compaction part nor above the worker's rowid frontier.
-// The move then deletes a summary that the native tail still points at. Before
-// the no-wait change, the first move rescanned every part of the session in its
-// own read snapshot and refused.
+// The move then deletes a summary that the native tail still points at. When
+// the first move scanned every part of the session in its own read snapshot on
+// the main thread, it saw the rewrite and refused.
 it.failing("a part rewritten in place into a referencing compaction after worker discovery blocks the first move", async () => {
     const f = await markerFixture(20);
     try {

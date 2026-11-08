@@ -15022,12 +15022,13 @@ describe("marker no-wait review witnesses", () => {
         return { sessionId, publish, consumingPass, ordinaryPass };
     }
 
-    // Every marker injection invalidates the session's discovery basis, and only
-    // the drain of a consuming pass starts a new discovery. So the first
-    // consuming pass after each publication always defers, however small the
-    // session and however long ago the target was recorded; the move waits for
-    // a further history rebuild. Before the no-wait change that pass waited a
-    // few milliseconds for discovery and moved the marker.
+    // A transform pass never waits for summary discovery. Every marker injection
+    // invalidates the session's discovery basis, and only the drain of a
+    // consuming pass starts a new discovery, so the first consuming pass after
+    // each publication defers, however small the session and however long ago
+    // the target was recorded; the move waits for a further history rebuild.
+    // When the pass still awaited discovery, it waited a few milliseconds and
+    // moved the marker. This test expects the move once discovery could finish.
     it("a later marker move applies on its consuming pass once discovery had time to run", async () => {
         const f = twoMoveFixture();
         try {
@@ -15061,11 +15062,12 @@ describe("marker no-wait review witnesses", () => {
         }
     });
 
-    // Known gap, kept failing on purpose: before the no-wait change the Rust drain
-    // validated the target even when discovery failed, so a target whose end
-    // message no longer exists was retired (stale-skip). Now the drain returns
-    // while discovery is "preparing", and a discovery that never succeeds (a
-    // missing worker file, a repeated deadline) keeps the stale target forever.
+    // Known gap, kept failing on purpose. When the Rust drain still awaited
+    // discovery, it validated the target even after discovery failed, so a
+    // target whose end message no longer exists was retired (stale-skip). The
+    // drain now returns while discovery is "preparing", and a discovery that never
+    // succeeds (a missing worker file, a repeated deadline) keeps the stale
+    // target forever.
     it.failing("a Rust drain retires a stale pending target even while discovery cannot complete", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
