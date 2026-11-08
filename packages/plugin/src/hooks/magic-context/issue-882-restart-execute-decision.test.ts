@@ -333,9 +333,9 @@ describe("issue 882: the execute decision on the first pass after a restart", ()
     it("a saved reading below the threshold keeps the cleared reading for the decision", async () => {
         const result = await firstPassAfterRestart("below", { savedPercentage: 62.9 });
         console.log("ISSUE_882_UNIT below", JSON.stringify(result));
-        expect(result.passLog.some((line) => /first pass reset — percentage=62\.9%/.test(line))).toBe(
-            true,
-        );
+        expect(
+            result.passLog.some((line) => /first pass reset — percentage=62\.9%/.test(line)),
+        ).toBe(true);
         expect(result.decision).toBe("defer");
         expect(result.schedulerPercentage).toBe(0);
         expect(result.pendingAfter).toBe(1);
