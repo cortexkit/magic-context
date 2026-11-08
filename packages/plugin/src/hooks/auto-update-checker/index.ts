@@ -74,6 +74,18 @@ function warn(message: string): void {
  * that pass synthetic events keep working — the hook itself never
  * triggers a check now.
  */
+/**
+ * Maps the plugin's `auto_update` setting to checker options. `false` turns
+ * the checker off entirely so no npm request is made, matching the host
+ * updater's disable behavior.
+ */
+export function autoUpdateCheckerOptionsFromConfig(
+    autoUpdateSetting: boolean | undefined,
+): Pick<AutoUpdateCheckerOptions, "enabled" | "autoUpdate"> {
+    const enabled = autoUpdateSetting !== false;
+    return { enabled, autoUpdate: enabled };
+}
+
 export function createAutoUpdateCheckerHook(
     ctx: PluginInput,
     options: AutoUpdateCheckerOptions = {},
@@ -428,5 +440,4 @@ function showToast(
     ctx.client.tui.showToast({ body: { title, message, variant, duration } }).catch(() => {});
 }
 
-export { resolveNpmRegistry } from "./resolve-npm-registry";
 export type { AutoUpdateCheckerOptions } from "./types";
