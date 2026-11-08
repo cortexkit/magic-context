@@ -540,23 +540,33 @@ fn is_sweepable_notice(entry: &Entry) -> bool {
 /// on, so an output has to stay far behind across two rebuilds before it
 /// goes.
 pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
-    far_behind_matching(context, usable_window, |_, part| {
-        matches!(part.body, PartBody::Tool(_))
-    })
+    far_behind_matching(
+        context,
+        usable_window,
+        |_, part| matches!(part.body, PartBody::Tool(_)),
+        starts_user_turn,
+    )
 }
 
 /// Keep notice tags out of the tool bookmark's far/young constraint: tag order
 /// can differ from transcript order, so sharing that constraint changes tools.
 pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
-    far_behind_matching(context, usable_window, |entry, part| {
-        is_sweepable_notice(entry) && matches!(part.body, PartBody::Text { .. })
-    })
+    far_behind_matching(
+        context,
+        usable_window,
+        |entry, part| is_sweepable_notice(entry) && matches!(part.body, PartBody::Text { .. }),
+        // A notice usually starts a run that can act on it. Count every newer
+        // user-role entry for notice age rather than waiting for the person
+        // to speak; tools still count person turns.
+        |entry| entry.role == Role::User,
+    )
 }
 
 fn far_behind_matching(
     context: &Context,
     usable_window: u64,
     eligible: impl Fn(&Entry, &Part) -> bool,
+    starts_turn: impl Fn(&Entry) -> bool,
 ) -> u64 {
     let token_distance = if usable_window > 0 {
         usable_window as f64 * FAR_BEHIND_WINDOW_FRACTION
@@ -580,7 +590,7 @@ fn far_behind_matching(
                 newer_tokens += tokens::part(part);
             }
         }
-        if starts_user_turn(entry) {
+        if starts_turn(entry) {
             newer_turns += 1;
         }
     }
