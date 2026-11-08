@@ -8,8 +8,9 @@ import {
     type V2RowStamp,
     type V2StoreReader,
 } from "../store-reader";
-import { codeModeCatalogKind } from "./code-mode-catalog";
+import { supersededInstructionIDs } from "./code-mode-catalog";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "./host-media";
+import { retiredLiveInstructionIDs } from "./instruction-supersession";
 import type { NativeFoldCache, NativeRowRecord } from "./memory-cache";
 import { encodeNative, NativeReplayUnavailable, reviveNative } from "./native-codec";
 import {
@@ -275,20 +276,19 @@ export class NativeFoldReplay {
         if (!floor) throw new NativeReplayUnavailable("Manual compaction has no history boundary");
         const instructions = reader.instructionRowsThrough(sessionID, running.seq - 1);
         const retiredInstructionIDs: string[] = [];
-        let newerFullCatalog = false;
+        const superseded = supersededInstructionIDs(instructions);
+        const liveRetired = retiredLiveInstructionIDs(this.storage.db, sessionID);
         for (const instruction of [...instructions].reverse()) {
             const text = instruction.data.text ?? "";
-            const catalog = codeModeCatalogKind(instruction.data);
             // Beyond summary coverage, retire only a same-identity replacement
             // (the host's catalog notice) or content re-stated by the fresh fold.
             if (
                 instruction.seq > floor.after &&
-                ((catalog && catalog !== "combined-replacement" && newerFullCatalog) ||
+                (liveRetired.has(instruction.id) ||
+                    superseded.has(instruction.id) ||
                     (text.length > 0 && summary.includes(text)))
             )
                 retiredInstructionIDs.push(instruction.id);
-            if (catalog === "replacement" || catalog === "combined-replacement")
-                newerFullCatalog = true;
         }
         return {
             floor,
@@ -1411,13 +1411,46 @@ export class NativeFoldReplay {
             )
                 return false;
             const running = reader.latestRunningCompaction(draft.sessionID);
-            const replay =
+            let replay =
                 args.manual?.replay ??
                 (await this.floorState(draft.sessionID, reader, undefined, undefined, true));
             if (!running || !replay || replay.blocked) {
                 this.report(draft.sessionID, "fold refused: no usable host checkpoint boundary");
                 return false;
             }
+            const liveRetired = retiredLiveInstructionIDs(this.storage.db, draft.sessionID);
+            const absentRetired =
+                liveRetired.size === 0
+                    ? []
+                    : reader
+                          .instructionRowsThrough(
+                              draft.sessionID,
+                              reader.latestSequence(draft.sessionID),
+                          )
+                          .filter(
+                              (row) =>
+                                  liveRetired.has(row.id) &&
+                                  !draft.messages.some(
+                                      (message) =>
+                                          nativeRowID(message) === row.id ||
+                                          (message.role === "system" &&
+                                              !nativeRowID(message) &&
+                                              message.content
+                                                  .map((part) => part.text ?? "")
+                                                  .join("") === row.data.text),
+                                  ),
+                          )
+                          .map((row) => row.id);
+            // A checkpoint can take ownership of live retirements only when its
+            // input already omits those rows. Adoption must not remove instruction
+            // rows that are still present in the input.
+            if (absentRetired.length > 0)
+                replay = {
+                    ...replay,
+                    retiredInstructionIDs: [
+                        ...new Set([...(replay.retiredInstructionIDs ?? []), ...absentRetired]),
+                    ],
+                };
             const model = `${draft.model.providerID}/${draft.model.id}`;
             if (!args.manual && this.tail(draft.sessionID)?.model !== model)
                 this.storage.replaceRows(

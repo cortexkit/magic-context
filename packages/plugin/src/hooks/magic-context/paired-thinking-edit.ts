@@ -98,12 +98,12 @@ function restoreCaller(
     // its object identity: hosts map message objects to stable entry ids and
     // later lanes hold part references, so a rerun must find the same objects.
     for (const [container, saved] of before) {
-        const record = container as Record<PropertyKey, unknown>;
-        if (Array.isArray(container)) container.length = 0;
         for (const key of Reflect.ownKeys(container))
             if (!(Array.isArray(container) && key === "length"))
-                Reflect.deleteProperty(record, key);
-        for (const [key, value] of saved) record[key] = value;
+                Reflect.deleteProperty(container, key);
+        // Private host metadata must stay non-enumerable after rollback;
+        // assignment would make those properties visible to JSON.
+        for (const [key, descriptor] of saved) Object.defineProperty(container, key, descriptor);
     }
     if (args.state && state) {
         for (const key of Object.keys(args.state))
@@ -114,7 +114,7 @@ function restoreCaller(
 }
 
 /** Each reachable JSON container with its own properties as they were. */
-type RenderSnapshot = Map<object, [PropertyKey, unknown][]>;
+type RenderSnapshot = Map<object, [PropertyKey, PropertyDescriptor][]>;
 
 function snapshotRender(messages: unknown[]): RenderSnapshot {
     const saved: RenderSnapshot = new Map();
@@ -125,13 +125,13 @@ function snapshotRender(messages: unknown[]): RenderSnapshot {
         // Leave opaque values and callbacks as they are rather than rejecting a
         // valid host render.
         if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return;
-        const entries: [PropertyKey, unknown][] = [];
+        const entries: [PropertyKey, PropertyDescriptor][] = [];
         saved.set(value, entries);
         for (const key of Reflect.ownKeys(value)) {
-            if (Array.isArray(value) && key === "length") continue;
-            const child = (value as Record<PropertyKey, unknown>)[key];
-            entries.push([key, child]);
-            visit(child);
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (!descriptor) continue;
+            entries.push([key, descriptor]);
+            if ("value" in descriptor) visit(descriptor.value);
         }
     };
     visit(messages);

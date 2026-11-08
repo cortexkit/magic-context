@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { markCoveredInstructionRow } from "./host-served-rows";
+import {
+    cloneKeepingCoveredInstructionMarks,
+    markCoveredInstructionRow,
+    markHostInstructionRow,
+    markRetiredInstructionRow,
+} from "./host-served-rows";
 import {
     lkgRecoveryEntryUnproven,
     noteLkgHealthyPrefix,
@@ -25,6 +30,125 @@ const system = (text: string): MessageLike => ({
 const update =
     'The context under "k" changed and supersedes the previous value:\n<context key="k">\nv2\n</context>';
 const removal = 'The context under "k" no longer applies. Disregard it.';
+
+test("LKG instruction rows: a recorded retirement captures only its native row's exact empty shape", () => {
+    const input = [user("u0"), system(update), user("u1")];
+    markHostInstructionRow(input[1]!.info, { id: "retired-native-row" });
+    const projected = projectLkgEntry(input);
+    const retired = () => {
+        const output = cloneKeepingCoveredInstructionMarks(input);
+        output[1]!.parts = [];
+        markRetiredInstructionRow(output[1]!.info);
+        return output;
+    };
+    const output = retired();
+    expect(buildLkgPrefix(projected, output)?.jsonPrefix).toBe(
+        JSON.stringify([output[0], output[2]]),
+    );
+    for (const change of [
+        (messages: MessageLike[]) => {
+            markHostInstructionRow(messages[1]!.info, { id: "different-native-row" });
+        },
+        (messages: MessageLike[]) => {
+            messages[1]!.parts = [{ type: "text", text: "unrecorded replacement" }];
+        },
+        (messages: MessageLike[]) => {
+            messages[1]!.parts = structuredClone(input[1]!.parts);
+        },
+        (messages: MessageLike[]) => {
+            messages[1]!.info = { ...messages[1]!.info, role: "system", extra: "unrecorded" };
+            markHostInstructionRow(messages[1]!.info, { id: "retired-native-row" });
+            markRetiredInstructionRow(messages[1]!.info);
+        },
+        (messages: MessageLike[]) => {
+            messages[1]!.info = { role: "system" };
+            markHostInstructionRow(messages[1]!.info, { id: "retired-native-row" });
+        },
+        (messages: MessageLike[]) => {
+            messages.splice(1, 1);
+        },
+    ]) {
+        const changed = retired();
+        change(changed);
+        expect(buildLkgPrefix(projected, changed)).toBeNull();
+    }
+    const unbound = [user("u0"), system(update), user("u1")];
+    expect(buildLkgPrefix(projectLkgEntry(unbound), retired())).toBeNull();
+});
+
+test("LKG instruction rows: post-anchor retirements stay retired while the untouched tail stays fresh", () => {
+    resetLkgSlotsForTest();
+    const input: MessageLike[] = [
+        user("u0"),
+        system(update),
+        system(removal),
+        {
+            info: { id: "a0", role: "assistant", finish: "stop", time: { created: 2 } },
+            parts: [{ type: "text", text: "original tail" }],
+        },
+    ];
+    markHostInstructionRow(input[1]!.info, { id: "retired-native-row" });
+    const output = cloneKeepingCoveredInstructionMarks(input);
+    output[1]!.parts = [];
+    markRetiredInstructionRow(output[1]!.info);
+    const built = buildLkgPrefix(input, output)!;
+    expect(built.anchorIndex).toBe(1);
+    expect(built.jsonPrefix).toBe(JSON.stringify(output.slice(0, 1)));
+    expect(
+        captureLkgSlot({
+            sessionId: "retired-tail",
+            input,
+            output,
+            modelKey: "test/model",
+            providerKey: "test",
+        }),
+    ).toBe(true);
+    const fresh = structuredClone(input);
+    fresh[3]!.parts = [{ type: "text", text: "fresh untouched tail" }];
+    const replay = replayLkg({
+        sessionId: "retired-tail",
+        messages: fresh,
+        modelKey: "test/model",
+        providerKey: "test",
+    });
+    expect(replay.ok).toBe(true);
+    if (replay.ok) {
+        expect(replay.messages).toEqual([output[0], ...fresh.slice(2)]);
+        expect(replay.messages.slice(1)).toEqual(fresh.slice(2));
+    }
+
+    for (const change of [
+        (messages: MessageLike[]) => {
+            messages[1]!.parts = [{ type: "text", text: "unrecorded shape" }];
+        },
+        (messages: MessageLike[]) => {
+            markHostInstructionRow(messages[1]!.info, { id: "different-native-row" });
+        },
+    ]) {
+        const invalid = cloneKeepingCoveredInstructionMarks(output);
+        change(invalid);
+        const fallback = buildLkgPrefix(input, invalid)!;
+        expect(fallback.anchorIndex).toBe(0);
+        expect(fallback.jsonPrefix).toBe(JSON.stringify(output.slice(0, 1)));
+        expect(
+            captureLkgSlot({
+                sessionId: "retired-tail",
+                input,
+                output: invalid,
+                modelKey: "test/model",
+                providerKey: "test",
+            }),
+        ).toBe(true);
+        const fallbackReplay = replayLkg({
+            sessionId: "retired-tail",
+            messages: fresh,
+            modelKey: "test/model",
+            providerKey: "test",
+        });
+        expect(fallbackReplay.ok).toBe(true);
+        if (fallbackReplay.ok) expect(fallbackReplay.messages).toEqual(fresh);
+    }
+});
 
 test("LKG instruction rows: repeated notices across the anchor replay once in order", () => {
     resetLkgSlotsForTest();

@@ -19,6 +19,14 @@
  * unchanged.
  */
 
+import type { MessageLike } from "./tag-messages";
+
+/** A staged row edit becomes durable only after dependent reasoning decisions commit. */
+export interface HostRowReclaim {
+    edits: readonly MessageLike[];
+    commit(): void;
+}
+
 const HOST_UNSERVED_ROW = "hostUnservedRow";
 
 /** Mark a raw message (or a chunk line derived from one) as a row the host never serves by id. */
@@ -109,6 +117,43 @@ export function isHostRenderedSystemMessage(message: {
 }
 
 const COVERED_INSTRUCTION_ROW = "coveredInstructionRow";
+const HOST_INSTRUCTION_ROW = "hostInstructionRow";
+const RETIRED_INSTRUCTION_ROW = "retiredInstructionRow";
+
+/**
+ * Attach the stored instruction row a host-rendered message came from. The
+ * property is non-enumerable so it never reaches the request bytes or the
+ * last-good request's identity; only Magic Context's own lookups read it.
+ */
+export function markHostInstructionRow(target: object, row: unknown): void {
+    Object.defineProperty(target, HOST_INSTRUCTION_ROW, {
+        value: row,
+        enumerable: false,
+        configurable: true,
+    });
+}
+
+export function hostInstructionRow(target: object): unknown {
+    return (target as Record<string, unknown>)[HOST_INSTRUCTION_ROW];
+}
+
+export function hostInstructionRowID(target: object): string | undefined {
+    const row = hostInstructionRow(target) as { id?: unknown } | undefined;
+    return typeof row?.id === "string" && row.id.length > 0 ? row.id : undefined;
+}
+
+/** Mark only a retirement whose replay decision is already durable. */
+export function markRetiredInstructionRow(target: object): void {
+    Object.defineProperty(target, RETIRED_INSTRUCTION_ROW, {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    });
+}
+
+export function isRetiredInstructionRow(target: object): boolean {
+    return (target as Record<string, unknown>)[RETIRED_INSTRUCTION_ROW] === true;
+}
 
 /**
  * Mark an id-less instruction message that OpenCode 2's context hook restored
@@ -160,6 +205,9 @@ export function cloneKeepingCoveredInstructionMarks<T extends { info: object }>(
     messages.forEach((message, index) => {
         const copied = copy[index];
         if (copied && isCoveredInstructionRow(message.info)) markCoveredInstructionRow(copied.info);
+        const row = hostInstructionRow(message.info);
+        if (copied && row !== undefined) markHostInstructionRow(copied.info, row);
+        if (copied && isRetiredInstructionRow(message.info)) markRetiredInstructionRow(copied.info);
     });
     return copy;
 }

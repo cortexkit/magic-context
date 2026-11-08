@@ -6,6 +6,7 @@ import {
 import {
     isCoveredInstructionRow,
     markCoveredInstructionRow,
+    markHostInstructionRow,
 } from "../../hooks/magic-context/host-served-rows";
 import { providerNativePart } from "../../hooks/magic-context/provider-visible-parts";
 import { modelAcceptsEmptyContent } from "../../hooks/magic-context/sentinel";
@@ -14,6 +15,8 @@ import { getEmptyImageParts } from "../../hooks/magic-context/strip-content";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
+import type { SupersessionRow } from "../fold/instruction-supersession";
+import { nativeRowID } from "../fold/native-replay";
 import { isToolError, toolErrorText, toolStateContent } from "../tool-result";
 import { stripCopiedTagNotation } from "./copied-tag-notation";
 import type { SessionContext, V2Message } from "./types";
@@ -289,6 +292,7 @@ export function adaptPayload(
      * copy of the message, as if the message carried no time.
      */
     hiddenTimes = false,
+    instructionRows: ReadonlyMap<string, SupersessionRow> = new Map(),
 ) {
     const existingHeads = new Map(
         draft.messages.filter((m) => HEAD_IDS.some((id) => m.id === id)).map((m) => [m.id, m]),
@@ -502,6 +506,9 @@ export function adaptPayload(
             });
         }
         originals.set(mapped, message);
+        const instruction = instructionRows.get(nativeRowID(message) ?? "");
+        if (message.role === "system" && instruction)
+            markHostInstructionRow(mapped.info, instruction);
         markServedShapeRepair(mapped.info, copiedTagOnly);
         // The transform decides whether a restored covered instruction is served.
         if (isCoveredInstructionRow(message)) markCoveredInstructionRow(mapped.info);

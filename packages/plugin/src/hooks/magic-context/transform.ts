@@ -127,6 +127,7 @@ import {
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
+import type { HostRowReclaim } from "./host-served-rows";
 import { takeCoveredInstructionRows } from "./host-served-rows";
 import {
     capturePrefixTrimSourceOrder,
@@ -740,6 +741,12 @@ export interface TransformDeps {
      * derive its own permission.
      */
     onPassPermission?: (sessionId: string, prefixMutationPermitted: boolean) => void;
+    /** Stage host-owned row edits on shared permission; commit after dependent thinking omissions. */
+    reclaimHostRows?: (
+        sessionId: string,
+        messages: MessageLike[],
+        permitted: boolean,
+    ) => HostRowReclaim;
     /**
      * Set only by the bridge adapters' own deps. createTransform ignores it and
      * always runs the TypeScript transform.
@@ -3230,6 +3237,7 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             db,
             messages,
+            reclaimHostRows: deps.reclaimHostRows,
             // P0 perf: pass active-only tags. The downstream consumers
             // (applyHeuristicCleanup, nudger) both filter on
             // status === "active" and short-circuit otherwise — feeding
