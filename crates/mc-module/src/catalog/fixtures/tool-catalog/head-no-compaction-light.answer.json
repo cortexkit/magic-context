@@ -1,6 +1,6 @@
 {
-  "generation": "e4d4d790bdc620201dd69062c5c107ffeddeecd0d5fb81642e61226886390991",
-  "catalog_digest": "e4d4d790bdc620201dd69062c5c107ffeddeecd0d5fb81642e61226886390991",
+  "generation": "a803c454749189136f7595c24e0f9a5dc81bbdcb6dbdc6bc63ad6c20a653816b",
+  "catalog_digest": "a803c454749189136f7595c24e0f9a5dc81bbdcb6dbdc6bc63ad6c20a653816b",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -14,7 +14,7 @@
       "capabilities": [
         "magic-context:notes/v1"
       ],
-      "description": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
+      "description": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update replaces the whole note; include everything to keep; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -189,7 +189,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "599d9274453ad61432da4e3fa9caf88c670f5fe084d46ed7a3b4227c9899168d",
+    "preflight_digest": "9fc87011eee43666d50007524864cc4d64e062f19c870e6600c96d9762f779e3",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

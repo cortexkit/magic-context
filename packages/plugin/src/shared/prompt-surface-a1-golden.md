@@ -201,7 +201,7 @@ Finer recovery:
 }
 ```
 
-### ctx_note — description ~376 tokens, params ~296 tokens (total ~672)
+### ctx_note — description ~392 tokens, params ~296 tokens (total ~688)
 
 **Description:**
 
@@ -219,7 +219,7 @@ Don't use notes for: the next few steps; a plan you are actively executing; rest
 First line is the title (under 80 chars), followed by detail. Operations:
 - write: save a new note (content required)
 - read: one row per note — `#id · age · title` — ready smart notes first, then newest; rows untouched 30+ days are marked stale. Pass note_ids to read full bodies; limit/offset page; filter selects other statuses.
-- update: change one note (note_ids=[N])
+- update: rewrite one note (note_ids=[N]). The new content replaces the whole note, so include everything you want to keep.
 - dismiss: retire 1–50 notes (note_ids). Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read.
 - surface_condition: make it a smart note — an outside checker periodically tests the condition using only externally verifiable signals (GitHub state, files, git, releases, web), never this conversation or future actions; the note is parked until the condition holds.
 ```
