@@ -27,6 +27,9 @@ mod count_tests;
 #[path = "reminder_delivery_tests.rs"]
 mod reminder_delivery_tests;
 
+#[path = "move_floor_tests.rs"]
+mod move_floor_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

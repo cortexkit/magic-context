@@ -242,6 +242,13 @@ pub struct Session {
     /// base64, as the view sends it. Every view repeats `m[0]` byte for byte
     /// until the next fold, so the image is kept, not drawn again.
     mural_image: Option<(String, String)>,
+    /// For a session moved onto its runner, the entry its first view there
+    /// cut through. No view ck-mc publishes cuts before it, or goes without
+    /// a cut ([`move_floor`]).
+    move_floor: Option<MoveFloor>,
+    /// A pass held its view back because the view could not meet the move
+    /// floor, and no view has met it since: the hold is logged only once.
+    move_floor_held: bool,
 }
 
 /// A view the runner took (an `apply_view` it accepted, or a ride's answer)
@@ -421,6 +428,8 @@ impl Session {
             unconfirmed: Vec::new(),
             store: None,
             mural_image: None,
+            move_floor: None,
+            move_floor_held: false,
         }
     }
 
@@ -554,6 +563,7 @@ impl Session {
             floor_pending_for: self.floor_pending_for.clone(),
             unconfirmed: self.unconfirmed.clone(),
             summary_unshown: self.summary_unshown,
+            move_floor: self.move_floor.clone(),
         }
     }
 
@@ -602,6 +612,7 @@ impl Session {
             .last()
             .and_then(|pending| pending.before.transcript_retry);
         self.summary_unshown = durable.summary_unshown;
+        self.move_floor = durable.move_floor;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
         self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
@@ -723,6 +734,9 @@ impl Session {
         self.workdir = folder_of(route);
         self.seq = 0;
         self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
+        // Before anything is offered: a view offered again must meet the
+        // floor too.
+        self.load_move_floor(client).await;
         self.offer_unconfirmed_again(client).await;
         if !self.reconcile_summaries(client, 1, false).await {
             self.index_ready = false;
@@ -953,7 +967,14 @@ impl Session {
                 self.keep_requested = false;
             }
         }
-        if let Some(kept) = self.pending_keep.take_if(|_| !self.latest_unknown) {
+        // A `ctx_keep` waits while the summaries stop short of the move floor:
+        // no view can land it then, and the pass below must still be free to
+        // start the summary that reaches the floor again.
+        let short_of_move_floor = self.short_of_move_floor();
+        if let Some(kept) = self
+            .pending_keep
+            .take_if(|_| !self.latest_unknown && !short_of_move_floor)
+        {
             let (view, _) = self.build(settings, None, false, Some(&kept));
             if let Some(view) = view {
                 self.publish(client, view).await;
@@ -2960,6 +2981,7 @@ impl Session {
         }
         self.version = version;
         self.cut = cut.map(|(ordinal, _)| ordinal);
+        self.set_move_floor(cut);
         self.index = Index::starting_at(self.cut.unwrap_or(1));
         self.latest = Some(view.clone());
         Ok(view)
@@ -3005,6 +3027,17 @@ impl Session {
                 "ck-mc: session {}: no view until the runner's applied view is read back",
                 self.key.session
             );
+            return (None, 0);
+        }
+        // A moved session whose summaries stop short of its move floor can
+        // build no view the runner may take: each would cut where the
+        // summaries end, before the floor. A `ctx_keep` this pass carried
+        // waits for a view that can land it.
+        if self.short_of_move_floor() {
+            if let Some(kept) = keep {
+                self.pending_keep = Some(kept.clone());
+            }
+            self.hold_below_move_floor("a cut where the summaries end");
             return (None, 0);
         }
         self.next_keep = keep.cloned();
@@ -3277,6 +3310,15 @@ impl Session {
         );
         match built {
             Ok(Some(view)) => {
+                // A moved session's view must cut at or after its move floor
+                // (see `move_floor`). One that doesn't stays here, and the
+                // runner keeps serving the view it has.
+                if let Some(why) = self.move_floor_breach(&view) {
+                    self.discard_held_view();
+                    self.hold_below_move_floor(&why);
+                    return None;
+                }
+                self.release_move_floor_hold();
                 self.version = version;
                 self.next_covered = covered.to_vec();
                 Some(view)
@@ -3445,6 +3487,15 @@ impl Session {
             return;
         };
         let oldest = self.unconfirmed[0].view.version;
+        // Saved by a build from before the move floor was known, a view may
+        // cut before it. Such a view is not offered again: ck-mc puts back
+        // what accepting it changed, as when its fate is unknown, and takes
+        // whatever view the runner reports applying.
+        if let Some(why) = self.move_floor_breach_placed(client, &view).await {
+            self.hold_below_move_floor(&why);
+            self.roll_back(oldest, false, None);
+            return;
+        }
         match client
             .apply_view(&self.key, ApplyViewRequest::new(view.clone()))
             .await
@@ -4337,6 +4388,10 @@ mod lifecycle_tests;
 
 #[path = "app_read/projection.rs"]
 mod app_projection;
+
+#[path = "move_floor.rs"]
+mod move_floor;
+pub use move_floor::MoveFloor;
 
 #[cfg(test)]
 mod config_tests {

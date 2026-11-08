@@ -105,6 +105,11 @@ pub struct Durable {
     /// A summary was published that no view the runner took shows yet.
     #[serde(default)]
     pub summary_unshown: bool,
+    /// For a session moved onto its runner, the entry its first view cut
+    /// through: no later view may cut before it. Left out of the saved text
+    /// for every other session, so their rows don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_floor: Option<crate::session::MoveFloor>,
 }
 
 pub struct Store {
