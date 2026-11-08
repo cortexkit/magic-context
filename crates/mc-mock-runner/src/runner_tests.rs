@@ -507,6 +507,87 @@ fn drop_edit(since: u64, (mid, part): &(String, String)) -> Edit {
     )
 }
 
+/// The version of the view a notice says its reading was measured under,
+/// and the version the runner applies when it sends the notice (0 for none).
+fn reading_views(notices: &[NoticeRequest]) -> Vec<(Option<u64>, u64)> {
+    notices
+        .iter()
+        .filter(|notice| notice.conditions.last_prompt_tokens.is_some())
+        .map(|notice| {
+            (
+                notice.conditions.last_prompt_view,
+                notice.applied_view.as_ref().map_or(0, |view| view.version),
+            )
+        })
+        .collect()
+}
+
+/// Drop the first tool output once three exist.
+fn drop_first_of_three(runner: &Runner<TestProvider>) {
+    *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        (tools.len() == 3).then(|| vec![drop_edit(1, &tools[0])])
+    }));
+}
+
+fn three_reads() -> Vec<Step> {
+    vec![
+        user("start"),
+        work(100, 8_000),
+        work(100, 8_000),
+        work(100, 8_000),
+        answer(),
+        answer(),
+    ]
+}
+
+/// Each reading names the view its request was rendered with. Reported
+/// right after its step, that is the view the runner still applies.
+#[tokio::test]
+async fn a_reading_names_the_view_its_request_was_rendered_with() {
+    let mut runner = start(config(Kind::OpenAi, free(), 100_000)).await;
+    drop_first_of_three(&runner);
+    runner.play(&three_reads()).await;
+    let views = reading_views(&runner.provider().notices.lock().unwrap());
+    assert!(views.contains(&(Some(0), 0)), "{views:?}");
+    assert!(views.contains(&(Some(1), 1)), "{views:?}");
+    for (reading, applied) in views {
+        assert_eq!(reading, Some(applied));
+    }
+
+    // After a restart the runner can't tie its reading to a request.
+    runner.play(&[Step::RestartRunner, user("again")]).await;
+    let notices = runner.provider().notices.lock().unwrap();
+    let last = notices.last().unwrap();
+    assert!(last.conditions.last_prompt_tokens.is_some());
+    assert_eq!(last.conditions.last_prompt_view, None);
+}
+
+/// A runner whose notices trail its requests takes a view while a request
+/// is in flight; the reading of that request then arrives after the view is
+/// applied, naming the view it was rendered with (none).
+#[tokio::test]
+async fn lagging_notices_report_a_request_sent_before_the_newest_view() {
+    let mut runner = start(config(Kind::OpenAi, free(), 100_000)).await;
+    drop_first_of_three(&runner);
+    runner.host().lag_notices(true);
+    runner.play(&three_reads()).await;
+    let views = reading_views(&runner.provider().notices.lock().unwrap());
+    assert!(views.contains(&(Some(0), 1)), "{views:?}");
+    assert!(views.contains(&(Some(1), 1)), "{views:?}");
+    // Every step was reported, the last one when the script ended.
+    let requests = runner.report.requests.len();
+    let reported = runner
+        .provider()
+        .notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|notice| notice.conditions.last_prompt_tokens.is_some())
+        .count();
+    assert_eq!(reported, requests);
+}
+
 #[tokio::test]
 async fn between_views_every_request_extends_the_previous_one() {
     let mut runner = start(config(Kind::Anthropic, anthropic_bound(), 100_000)).await;

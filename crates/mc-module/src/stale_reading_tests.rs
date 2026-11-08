@@ -277,8 +277,8 @@ async fn stale_a_reading_keeps_the_summary_floor_mark() {
 }
 
 /// A worker on a model that binds its thinking to the prefix, whose turn
-/// spent 2,000 reasoning tokens, and whose `m[0]` was rendered under another
-/// head shape, so a fold is pending.
+/// spent `reasoning_tokens` reasoning tokens, and whose history baseline
+/// (`m[0]`) was rendered under another head shape, so a fold is pending.
 fn heavy_thinking_with_a_pending_fold(reasoning_tokens: u64) -> (Session, Client, Settings) {
     let (mut session, client, _, _, settings) = fixture();
     session.conditions.rules = ProviderRules::new(SignedParts::Bound, EditCost::Suffix);
