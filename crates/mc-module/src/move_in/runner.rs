@@ -32,7 +32,7 @@ pub(super) fn move_in(
                 || record["target"] != serde_json::to_value(target).map_err(|e| e.to_string())? {
                 return Err("renumber_conflict: source runner already has a move with a different transcript or destination".into());
             }
-            crate::move_renumber::check_plan_endpoints(conn, &record, &numbering, session_id, Some(&target.session))?;
+            crate::move_renumber::check_plan_endpoints(conn, &record, &numbering, source, session_id, Some((&target.harness, &target.session)))?;
             if move_batches::resume(conn, &progress_key)? {
                 return Ok(record);
             }

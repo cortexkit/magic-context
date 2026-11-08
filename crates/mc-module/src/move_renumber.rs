@@ -888,8 +888,9 @@ pub(crate) fn check_plan_endpoints(
     conn: &Connection,
     record: &Value,
     numbering: &Numbering,
+    harness: &str,
     session: &str,
-    destination: Option<&str>,
+    destination: Option<(&str, &str)>,
 ) -> Result<(), String> {
     let pending = matches!(record["state"].as_str(), Some("staging" | "applying"));
     let endpoints: Vec<(i64, String, String)> = if let Some(targets) =
@@ -898,8 +899,9 @@ pub(crate) fn check_plan_endpoints(
         serde_json::from_value(targets.clone())
             .map_err(|e| format!("move_progress_invalid: summary endpoints: {e}"))?
     } else {
-        conn.prepare("SELECT sequence, COALESCE(start_message_id, ''), COALESCE(end_message_id, '') FROM compartments WHERE session_id IN (?1, ?2)")
-            .and_then(|mut stmt| stmt.query_map(params![session, destination.unwrap_or(session)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect())
+        let (target_harness, target_session) = destination.unwrap_or((harness, session));
+        conn.prepare("SELECT sequence, COALESCE(start_message_id, ''), COALESCE(end_message_id, '') FROM compartments WHERE (session_id=?1 AND harness=?2) OR (session_id=?3 AND harness=?4)")
+            .and_then(|mut stmt| stmt.query_map(params![session, harness, target_session, target_harness], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect())
             .map_err(|e| e.to_string())?
     };
     for (sequence, start, end) in endpoints {
@@ -921,6 +923,16 @@ pub fn renumber(
     session: &str,
     numbering: &Numbering,
 ) -> Result<(), String> {
+    renumber_for_move(conn, harness, session, numbering, None)
+}
+
+pub(crate) fn renumber_for_move(
+    conn: &mut Connection,
+    harness: &str,
+    session: &str,
+    numbering: &Numbering,
+    destination: Option<(&str, &str)>,
+) -> Result<(), String> {
     let key = record_key(harness, session);
     if let Some(done) = crate::move_batches::record(conn, &key)? {
         if done["checksum"].as_str() != Some(numbering.checksum.as_str()) {
@@ -928,7 +940,7 @@ pub fn renumber(
                 "renumber_conflict: {session}'s numbers were already converted from a different transcript"
             ));
         }
-        check_plan_endpoints(conn, &done, numbering, session, None)?;
+        check_plan_endpoints(conn, &done, numbering, harness, session, destination)?;
         if crate::move_batches::resume(conn, &key)? {
             return Ok(());
         }

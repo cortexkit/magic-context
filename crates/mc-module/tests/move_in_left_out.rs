@@ -384,7 +384,11 @@ fn first_move_view_cut_stops_at_summary_coverage() {
 
 #[test]
 fn saved_renumber_plan_with_left_out_endpoint_refuses_without_writes() {
-    for state in ["done", "applying"] {
+    for (state, harness) in [
+        ("done", "opencode"),
+        ("applying", "opencode"),
+        ("done", "opencode2"),
+    ] {
         let mut f = Fixture::new(&tail(), &[(1, 2), (3, 6)]);
         let numbering = mc_module::move_renumber::Numbering::opencode(
             f.request.messages.as_ref().unwrap(),
@@ -397,6 +401,9 @@ fn saved_renumber_plan_with_left_out_endpoint_refuses_without_writes() {
             .execute_batch("UPDATE compartments SET end_message_id='empty6' WHERE sequence=1;")
             .unwrap();
         f.conn.execute("UPDATE schema_migrations_meta SET value=json_set(json_remove(value, '$.summary_endpoints'), '$.state', ?1) WHERE key='mode3_renumber:opencode:s1'", params![state]).unwrap();
+        f.conn
+            .execute("UPDATE compartments SET harness=?1", params![harness])
+            .unwrap();
         let mode3 = Connection::open(f.dir.path().join("mode3.db")).unwrap();
         let before_context = snapshot(&f.conn);
         let before_mode3 = snapshot(&mode3);
@@ -408,4 +415,18 @@ fn saved_renumber_plan_with_left_out_endpoint_refuses_without_writes() {
         assert_eq!(snapshot(&f.conn), before_context, "{state}");
         assert_eq!(snapshot(&mode3), before_mode3, "{state}");
     }
+}
+
+#[test]
+fn saved_plan_checks_only_the_moving_harnesses() {
+    let mut f = Fixture::new(&tail(), &[(1, 2), (3, 6)]);
+    let numbering = mc_module::move_renumber::Numbering::opencode(
+        f.request.messages.as_ref().unwrap(),
+        &f.request.newest,
+    )
+    .unwrap();
+    mc_module::move_renumber::renumber(&mut f.conn, "opencode", "s1", &numbering).unwrap();
+    f.conn.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness) VALUES ('s1', 100, 1, 2, 'foreign-user', 'foreign-assistant', 'foreign', 'foreign', 'foreign', 1, 'other-host');").unwrap();
+    f.run().unwrap();
+    assert_eq!(f.strings("SELECT start_message_id || ':' || end_message_id FROM compartments WHERE harness='other-host'"), ["foreign-user:foreign-assistant"]);
 }

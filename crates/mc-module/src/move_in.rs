@@ -264,7 +264,13 @@ pub fn move_in(
                 )?,
                 other => return Err(renumbering_unsupported(other)),
             };
-            crate::move_renumber::renumber(conn, source, &key.session, &numbering)?;
+            crate::move_renumber::renumber_for_move(
+                conn,
+                source,
+                &key.session,
+                &numbering,
+                Some((&key.harness, &key.session)),
+            )?;
             warnings = numbering.alignment_warnings().to_vec();
             Ok::<_, String>(())
         })?;
