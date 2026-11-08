@@ -311,7 +311,10 @@ fn a_range_covering_only_marker_rows_refuses() {
     let store = Store::new("unmapped");
     store.summary(0, (4, "opener"), (4, "opener"));
     let refused = run(&store, &numbering()).unwrap_err();
-    assert!(refused.starts_with("ordinal_unmapped:"), "{refused}");
+    assert!(
+        refused.starts_with("summary_covers_no_runner_entry:"),
+        "{refused}"
+    );
 }
 
 #[test]

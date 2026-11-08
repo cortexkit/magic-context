@@ -20,7 +20,8 @@
 //! - a range (a summary, a search chunk, a cited fact block, a user-memory or
 //!   primer source) maps to the entries of the messages it covers, from the
 //!   first to the last; a range that covers only marker rows can't be mapped,
-//!   and the move refuses (`ordinal_unmapped`) and changes nothing;
+//!   and the move refuses (`summary_covers_no_runner_entry` for summaries,
+//!   `ordinal_unmapped` for other ranges) and changes nothing;
 //! - a position in the session (a note's anchor, the search indexer's
 //!   progress) maps to the last entry at or before it;
 //! - a search-index row names its message id, and moves to that message's
@@ -31,6 +32,9 @@
 //! don't name the messages the transcript has at those numbers, the stored
 //! numbering doesn't belong to this transcript, and the move refuses
 //! (`ordinal_mismatch`).
+//! Endpoints on rows the runner left out move inward to the first and last
+//! covered entries, including their ids, so a later transcript check can
+//! still find the summary's boundaries.
 //!
 //! A session can also move across hosts: its OpenCode 1 store is converted to
 //! OpenCode 2, and the runner numbers the converted rows. The conversion keeps
@@ -267,6 +271,8 @@ pub struct Numbering {
     has_added: bool,
     /// Every message row on the active path: its entry, or none for a marker.
     by_mid: HashMap<String, Option<u64>>,
+    /// Only actual runner rows, not the virtual ids made by the Pi plugin.
+    runner_mids: HashMap<u64, String>,
     checksum: String,
     alignment_warnings: Vec<String>,
     /// Runner ordinals need not equal the row's position in the move list.
@@ -327,6 +333,7 @@ impl Numbering {
             by_plugin,
             has_added: messages.iter().any(|message| message.added),
             by_mid,
+            runner_mids: runner_mids(messages),
             checksum: format!(
                 "runner:{:x}",
                 Sha256::digest(serde_json::to_vec(messages).expect("message rows serialize"))
@@ -378,6 +385,7 @@ impl Numbering {
             by_plugin,
             has_added,
             by_mid,
+            runner_mids: runner_mids(messages),
             checksum: checksum(messages),
             alignment_warnings: Vec::new(),
             source_ordinals: None,
@@ -478,6 +486,7 @@ impl Numbering {
             by_plugin,
             has_added: false,
             by_mid,
+            runner_mids: runner_mids(messages),
             checksum: checksum(messages),
             alignment_warnings: Vec::new(),
             source_ordinals: None,
@@ -791,6 +800,22 @@ impl Numbering {
     fn entry_of(&self, mid: &str) -> Option<Option<u64>> {
         self.by_mid.get(mid).copied()
     }
+
+    /// Keep host ids for represented messages (including Pi's virtual user
+    /// messages), but replace an entry-less endpoint with a covered runner id.
+    fn endpoint<'a>(&'a self, ordinal: i64, entry: i64, stored: &'a str) -> Option<&'a str> {
+        if self.at(ordinal)?.entry.is_some() {
+            return Some(stored);
+        }
+        self.runner_mids.get(&(entry as u64)).map(String::as_str)
+    }
+}
+
+fn runner_mids(messages: &[HostMessage]) -> HashMap<u64, String> {
+    messages
+        .iter()
+        .filter_map(|row| row.entry.map(|entry| (entry, row.mid.clone())))
+        .collect()
 }
 
 /// Record `message` and check it is listed once, with an entry above every
@@ -856,6 +881,39 @@ pub fn record_key(harness: &str, session: &str) -> String {
     format!("mode3_renumber:{harness}:{session}")
 }
 
+/// Check the endpoint ids a saved plan will leave behind without converting
+/// already-converted ordinals again. Pending plans carry their target ids;
+/// completed plans are checked against the rows now in the database.
+pub(crate) fn check_plan_endpoints(
+    conn: &Connection,
+    record: &Value,
+    numbering: &Numbering,
+    harness: &str,
+    session: &str,
+    destination: Option<(&str, &str)>,
+) -> Result<(), String> {
+    let pending = matches!(record["state"].as_str(), Some("staging" | "applying"));
+    let endpoints: Vec<(i64, String, String)> = if let Some(targets) =
+        record.get("summary_endpoints").filter(|_| pending)
+    {
+        serde_json::from_value(targets.clone())
+            .map_err(|e| format!("move_progress_invalid: summary endpoints: {e}"))?
+    } else {
+        let (target_harness, target_session) = destination.unwrap_or((harness, session));
+        conn.prepare("SELECT sequence, COALESCE(start_message_id, ''), COALESCE(end_message_id, '') FROM compartments WHERE (session_id=?1 AND harness=?2) OR (session_id=?3 AND harness=?4)")
+            .and_then(|mut stmt| stmt.query_map(params![session, harness, target_session, target_harness], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect())
+            .map_err(|e| e.to_string())?
+    };
+    for (sequence, start, end) in endpoints {
+        for mid in [start, end] {
+            if numbering.entry_of(&mid).flatten().is_none() {
+                return Err(format!("renumber_plan_has_left_out_endpoint: summary {sequence} of {session} names {mid}, which has no runner entry; the saved plan cannot be resumed"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Rewrite stored numbers using a durable plan of absolute targets. All
 /// validation precedes staging; each small write batch commits with its cursor.
 /// The checksum rejects a different transcript even during an interrupted move.
@@ -865,6 +923,16 @@ pub fn renumber(
     session: &str,
     numbering: &Numbering,
 ) -> Result<(), String> {
+    renumber_for_move(conn, harness, session, numbering, None)
+}
+
+pub(crate) fn renumber_for_move(
+    conn: &mut Connection,
+    harness: &str,
+    session: &str,
+    numbering: &Numbering,
+    destination: Option<(&str, &str)>,
+) -> Result<(), String> {
     let key = record_key(harness, session);
     if let Some(done) = crate::move_batches::record(conn, &key)? {
         if done["checksum"].as_str() != Some(numbering.checksum.as_str()) {
@@ -872,6 +940,7 @@ pub fn renumber(
                 "renumber_conflict: {session}'s numbers were already converted from a different transcript"
             ));
         }
+        check_plan_endpoints(conn, &done, numbering, harness, session, destination)?;
         if crate::move_batches::resume(conn, &key)? {
             return Ok(());
         }
@@ -889,7 +958,7 @@ pub(crate) fn plan_renumber(
     plan: &crate::move_batches::Plan,
     destination: Option<(&str, &str)>,
 ) -> Result<Value, String> {
-    let stats = std::cell::RefCell::new(serde_json::json!({}));
+    let stats = std::cell::RefCell::new(serde_json::json!({"summary_endpoints": []}));
     if !numbering.is_identity() {
         Rewrite {
             conn,
@@ -1012,13 +1081,32 @@ impl Rewrite<'_> {
                     )));
                 }
             }
-            let (first, last) = self
-                .numbering
-                .range(start, end)
-                .ok_or_else(|| self.unmapped(&format!("summary {sequence}"), start, end))?;
+            let (first, last) = self.numbering.range(start, end).ok_or_else(|| {
+                if start > 0
+                    && end >= start
+                    && end - start < self.numbering.by_plugin.len() as i64
+                    && (start..=end).all(|o| self.numbering.at(o).is_some())
+                {
+                    Failure(format!(
+                        "summary_covers_no_runner_entry: summary {sequence} of {} covers only rows the runner left out ({start}..{end})",
+                        self.session
+                    ))
+                } else {
+                    self.unmapped(&format!("summary {sequence}"), start, end)
+                }
+            })?;
+            let first_id = self.numbering.endpoint(start, first, &start_id);
+            let last_id = self.numbering.endpoint(end, last, &end_id);
+            let (Some(first_id), Some(last_id)) = (first_id, last_id) else {
+                return Err(self.unmapped(&format!("summary {sequence} endpoints"), start, end));
+            };
+            self.stats.borrow_mut()["summary_endpoints"]
+                .as_array_mut()
+                .expect("summary endpoints are an array")
+                .push(serde_json::json!([sequence, first_id, last_id]));
             self.plan.execute(
-                "UPDATE compartments SET start_message = ?1, end_message = ?2 WHERE id = ?3",
-                params![first, last, id],
+                "UPDATE compartments SET start_message = ?1, end_message = ?2, start_message_id = ?3, end_message_id = ?4 WHERE id = ?5",
+                params![first, last, first_id, last_id, id],
             )?;
         }
         Ok(())

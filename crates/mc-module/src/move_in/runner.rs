@@ -32,6 +32,7 @@ pub(super) fn move_in(
                 || record["target"] != serde_json::to_value(target).map_err(|e| e.to_string())? {
                 return Err("renumber_conflict: source runner already has a move with a different transcript or destination".into());
             }
+            crate::move_renumber::check_plan_endpoints(conn, &record, &numbering, source, session_id, Some((&target.harness, &target.session)))?;
             if move_batches::resume(conn, &progress_key)? {
                 return Ok(record);
             }
@@ -84,6 +85,10 @@ pub(super) fn move_in(
         serde_json::from_value(progress["cut"].clone()).map_err(|e| e.to_string())?;
     let view = session
         .first_view_after_move(&settings, cut.as_ref().map(|(n, mid)| (*n, mid.as_str())))?;
+    let cut_mid = view.edits.iter().find_map(|edit| match &edit.op {
+        cortexkit_role_compaction::view::EditOp::Cut { through } => Some(through.as_str()),
+        _ => None,
+    });
     let tag_checkpoint = db
         .with_connection(|conn| {
             conn.query_row(
@@ -104,7 +109,7 @@ pub(super) fn move_in(
         "version": 3, "session": target.session, "harness": target.harness,
         "runner": target.runner, "state": "moved", "source_runner_entries": true,
         "source_harness": source, "source_session": session_id,
-        "tag_checkpoint": tag_checkpoint, "cut": cut.as_ref().map(|(_, mid)| mid),
+        "tag_checkpoint": tag_checkpoint, "cut": cut_mid,
         "view_version": view.version, "view_checksum": view.checksum, "moved_at": request.now,
     });
     db.with_connection(|conn| {

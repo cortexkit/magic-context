@@ -139,10 +139,10 @@ fn cut_before_newest(request: &MoveRequest) -> Result<Option<(u64, &str)>, Strin
         .ok_or_else(|| format!("invalid_messages: no row in the move list is entry {before}, the one before the newest"))
 }
 
-/// The message ids a fully summarized session's newest summary may end at:
+/// Before renumbering, a fully summarized session's newest summary may end at
 /// the transcript's newest message, or a row after it that the runner left
 /// out (OpenCode 2's conversion drops an assistant step that ended with no
-/// content), which renumbering maps to the newest entry.
+/// content). Renumbering snaps those endpoints to the newest kept row.
 fn summary_ends(request: &MoveRequest) -> Vec<&str> {
     let mut ends = vec![request.newest.mid.as_str()];
     if let Some(messages) = &request.messages {
@@ -264,7 +264,13 @@ pub fn move_in(
                 )?,
                 other => return Err(renumbering_unsupported(other)),
             };
-            crate::move_renumber::renumber(conn, source, &key.session, &numbering)?;
+            crate::move_renumber::renumber_for_move(
+                conn,
+                source,
+                &key.session,
+                &numbering,
+                Some((&key.harness, &key.session)),
+            )?;
             warnings = numbering.alignment_warnings().to_vec();
             Ok::<_, String>(())
         })?;
@@ -313,6 +319,10 @@ pub fn move_in(
     );
     let cut = cut_before_newest(request)?;
     let view = session.first_view_after_move(&settings, cut)?;
+    let cut_mid = view.edits.iter().find_map(|edit| match &edit.op {
+        cortexkit_role_compaction::view::EditOp::Cut { through } => Some(through.as_str()),
+        _ => None,
+    });
     let tag_checkpoint: u64 = db
         .with_connection(|conn| {
             conn.query_row(
@@ -334,7 +344,7 @@ pub fn move_in(
         "runner": key.runner,
         "state": "moved",
         "tag_checkpoint": tag_checkpoint,
-        "cut": cut.map(|(_, mid)| mid),
+        "cut": cut_mid,
         "view_version": view.version,
         "view_checksum": view.checksum,
         "moved_at": request.now,
