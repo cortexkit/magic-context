@@ -144,6 +144,38 @@ export function savedProviderReadingForPass(input: {
     return { percentage, inputTokens };
 }
 
+/**
+ * The saved provider reading that the first pass after a process restart uses
+ * for its scheduler decision, and for nothing else.
+ *
+ * That pass clears the saved reading, so the force band, overflow recovery,
+ * the 95% emergency, refusals and nudges never act on a measurement taken
+ * before the restart. Clearing it for the execute decision too would only
+ * delay work the session already owes: a reading at or above the execute
+ * threshold means the next measured pass decides "execute" anyway. When the
+ * provider cache went cold while the host was down, that one-pass delay costs
+ * a second full prefix write.
+ *
+ * The reading counts only when it still describes this request (same model,
+ * same limit, cache not expired; see savedProviderReadingForPass), is at or
+ * above the threshold, and the pass's own reading is below it. Otherwise this
+ * returns null and the scheduler sees the cleared reading, as before.
+ */
+export function firstPassExecuteReading(input: {
+    persisted: PersistedUsageState | null | undefined;
+    currentModelKey: string | undefined;
+    contextLimit: number | undefined;
+    lastResponseTime: number;
+    cacheExpired: boolean;
+    executeThresholdPercentage: number;
+    passPercentage: number;
+}): ContextUsage | null {
+    if (!(input.passPercentage < input.executeThresholdPercentage)) return null;
+    const saved = savedProviderReadingForPass(input);
+    if (!saved || saved.percentage < input.executeThresholdPercentage) return null;
+    return saved;
+}
+
 export function resolveUnknownUsageFromWireEstimate(input: {
     usage: ContextUsage;
     pricedPass: boolean;
