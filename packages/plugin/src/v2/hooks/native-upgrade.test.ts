@@ -79,7 +79,7 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
         await f.restart();
         f.idle(1);
         // The repair needs a pass that may replace the prefix; an expiry alone is not one.
-        f.setSystem("A changed system prefix rebuilds the request.");
+        f.setModel("second-model");
         const repaired = await f.pass();
         const sent = text(repaired.draft.messages);
         expect(sent).toContain("<session-history>");
@@ -101,8 +101,13 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
             repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])?.content[0]?.text,
         ).toBe(summary);
         expect(sent).not.toContain("<conversation-checkpoint>");
+        // The permitted rebuild is now a model-change fold, which merges the new
+        // summary into m[0]; the published compartment is served there.
+        expect(summary).toContain("Review history 0");
         const delta = repaired.draft.messages.find((message) => message.id === HEAD_IDS[1]);
-        expect(JSON.stringify(delta?.content)).toContain("Review history 0");
+        expect(JSON.stringify(delta?.content)).toContain(
+            "no new content since last materialization",
+        );
         expect((await f.pass()).bytes).toBe(repaired.bytes);
     } finally {
         await f.cleanup();

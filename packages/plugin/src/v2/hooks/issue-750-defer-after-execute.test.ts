@@ -270,10 +270,11 @@ for (const checkpoint of [true, false]) {
                     upgraded.draft.messages.slice(0, legacy.draft.messages.length),
                 ),
             ).toBeNull();
-            // The next pass allowed to rewrite the prefix serves the covered row.
-            f.respond(1, 700_000);
+            // The next pass allowed to rewrite the prefix serves the covered row. A
+            // changed system prompt is such a pass; an idle expiry no longer is.
+            f.setSystem("A changed system prefix rebuilds the request.");
             const rewrite = await f.pass();
-            expect(rewrite.logs.join("\n")).toMatch(/transform scheduler: .*decision=execute/);
+            expect(rewrite.logs.join("\n")).toMatch(/rematerialized=true, reason=system_hash/);
             expect(instructionTexts(rewrite.draft.messages)).toEqual([
                 "Today's date is now: day 2.",
                 "Today's date is now: day 6.",

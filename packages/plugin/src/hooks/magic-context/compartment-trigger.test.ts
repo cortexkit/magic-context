@@ -727,7 +727,6 @@ describe("checkCompartmentTrigger", () => {
                               permission: {
                                   signedThinkingHold: gate.signedThinkingHold,
                                   firstRender: false,
-                                  idleExpiry: false,
                                   emergency: gate.emergency === true,
                               },
                           }

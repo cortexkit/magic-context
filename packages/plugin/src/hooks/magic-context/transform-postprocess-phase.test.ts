@@ -6622,7 +6622,23 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             [2, makeDropTarget(reclaimable)],
             [3, makeDropTarget(newer)],
         ]);
-        const servedBeforeExpiry = JSON.stringify(messages);
+        // What a warm pass serves from the same input.
+        const warm = structuredClone(messages);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, warm, {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                tags: getActiveTagsBySession(db, sessionId),
+                targets,
+                currentTurnId: "turn-hardfold-reclaim-warm",
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: BASE_HARD,
+                },
+            }),
+        );
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
@@ -6653,7 +6669,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(statuses.get(2)).toBe("active");
         expect(statuses.get(3)).toBe("active");
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
-        expect(JSON.stringify(messages)).toBe(servedBeforeExpiry);
+        expect(JSON.stringify(messages)).toBe(JSON.stringify(warm));
         expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
 
         const deferReplayBytes = JSON.stringify(messages);
