@@ -459,8 +459,8 @@ impl Handler {
         let (method, params) = wire::decode(body)?;
         match method.as_str() {
             "role.describe" => {
-                self.host_and_session(channel)?;
-                Ok(json!({"result": {"capabilities": ["cache_policy"]}}))
+                let (host, _) = self.host_and_session(channel)?;
+                Ok(json!({"result": host.describe()}))
             }
             ops::SESSION_ENTRIES => {
                 let request: ReadRequest = wire::params(params)?;

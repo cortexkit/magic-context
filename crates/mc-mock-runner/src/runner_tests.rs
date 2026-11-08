@@ -165,6 +165,25 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
 }
 
 #[tokio::test]
+async fn notice_keep_declaration_controls_kept_notice_marks() {
+    let runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    let host = runner.host();
+    assert_eq!(host.describe()["capabilities"], json!(["cache_policy"]));
+    host.append_notice("unmarked worker result", false);
+    assert!(!host.entries().last().unwrap().notice.as_ref().unwrap().keep);
+    host.declare_notice_keep(true);
+    assert_eq!(
+        host.describe()["capabilities"],
+        json!(["cache_policy", "message_marks", "notice_keep"])
+    );
+    host.append_notice("the person's answer", true);
+    assert!(host.entries().last().unwrap().notice.as_ref().unwrap().keep);
+    host.declare_notice_keep(false);
+    assert_eq!(host.describe()["capabilities"], json!(["cache_policy"]));
+    assert!(host.entries().last().unwrap().notice.as_ref().unwrap().keep);
+}
+
+#[tokio::test]
 async fn contract_update_newer_signed_reply_strips_only_with_claude_policy() {
     for (provider, model, strip) in [
         ("anthropic", "claude-opus-5-5", true),

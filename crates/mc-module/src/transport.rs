@@ -374,6 +374,20 @@ impl RunnerClient for SubcRunnerClient {
         self.runner_capabilities.forget(runner);
     }
 
+    async fn notice_keep(&self, session: &SessionRef) -> bool {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .notice_keep(
+                &session.runner,
+                epoch,
+                self.call(session, LLM_RUNNER_ROLE, "role.describe", &json!({})),
+            )
+            .await
+    }
+
     async fn child_cache_policy(&self, child: &Child) -> bool {
         let epoch = match self.consumer().await {
             Ok(consumer) => consumer.current_epoch(),

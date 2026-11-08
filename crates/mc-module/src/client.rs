@@ -71,6 +71,11 @@ impl std::fmt::Display for ClientError {
 pub trait RunnerClient: Send + Sync + 'static {
     /// Setup can signal a runner restart without a consumer reconnect.
     fn runner_setup(&self, _runner: &str) {}
+    /// Whether this session's runner marks notices carrying the person's words.
+    /// Discovery failure leaves automatic notice reclaim disabled.
+    fn notice_keep(&self, _session: &SessionRef) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
     /// Whether the runner on this scoped child route accepts cache requests.
     /// An unknown or unavailable declaration leaves the runner's defaults in use.
     fn child_cache_policy(&self, _child: &Child) -> impl Future<Output = bool> + Send {

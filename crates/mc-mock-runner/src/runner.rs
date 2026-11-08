@@ -315,6 +315,7 @@ impl Report {
 }
 
 struct State {
+    notice_keep: bool,
     observations: Option<ObservationLog>,
     config: SessionConfig,
     transcript: Transcript,
@@ -433,6 +434,38 @@ pub struct Host {
 }
 
 impl Host {
+    /// Change the optional declaration before the next Setup, as a runner
+    /// upgrade would. Existing sessions keep their transcript marks.
+    pub fn declare_notice_keep(&self, declared: bool) {
+        self.lock().notice_keep = declared;
+    }
+
+    pub fn describe(&self) -> Value {
+        let capabilities = if self.lock().notice_keep {
+            vec!["cache_policy", "message_marks", "notice_keep"]
+        } else {
+            vec!["cache_policy"]
+        };
+        serde_json::json!({"capabilities": capabilities})
+    }
+
+    /// Store an inbox notice as core would deliver it, outside a model reply.
+    pub fn append_notice(&self, text: &str, keep: bool) {
+        let mut state = self.lock();
+        assert!(!keep || state.notice_keep, "keep requires notice_keep");
+        let mut origin = NoticeOrigin::new("prefrontal");
+        origin.keep = keep;
+        let now = state.now;
+        state.transcript.append(
+            Role::User,
+            Some(origin),
+            vec![(Seal::None, PartBody::Text { text: text.into() })],
+            None,
+            None,
+            now,
+        );
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("runner state lock")
     }
@@ -662,6 +695,7 @@ impl<P: Provider> Runner<P> {
             applied = Some(moved.view.clone());
         }
         let state = State {
+            notice_keep: false,
             observations: observe.then(|| ObservationLog {
                 started: Instant::now(),
                 values: Observations::default(),

@@ -86,6 +86,7 @@ pub struct Session {
     /// The age sweep's bookmark from the previous pass with permission to
     /// rebuild: tool outputs at or below it were already far behind then.
     reclaim_bookmark: u64,
+    notice_keep: bool,
     notice_reclaim_bookmark: u64,
     /// The bookmark a built view moves `reclaim_bookmark` to once the
     /// runner takes it (or once the pass ends without a view), so an undone
@@ -350,6 +351,7 @@ impl Session {
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
             notice_reclaim_bookmark: 0,
+            notice_keep: false,
             next_notice_reclaim_bookmark: None,
             emergency_latched: false,
             next_latch: false,
@@ -668,6 +670,8 @@ impl Session {
         self.suspended = false;
         self.conditions = conditions_of(request);
         self.child_harness = request.child_harness.clone();
+        self.notice_keep = false;
+        self.notice_keep = client.notice_keep(&self.key).await;
         self.project = route.project.clone();
         self.workdir = folder_of(route);
         self.seq = 0;
@@ -2858,10 +2862,17 @@ impl Session {
         ));
         wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
+        // An unmarked notice may carry the person's words. Without notice_keep,
+        // sweeping notices could drop them, so neither select nor bookmark them.
+        let notice_reclaim_bookmark = if self.notice_keep {
+            self.notice_reclaim_bookmark
+        } else {
+            0
+        };
         wanted.extend(lanes::age_sweep(
             &context,
             self.reclaim_bookmark,
-            self.notice_reclaim_bookmark,
+            notice_reclaim_bookmark,
             cutoff,
         ));
         let model = &self.conditions.model;
@@ -2979,7 +2990,11 @@ impl Session {
             self.next_caveman = Some(next);
         }
         let bookmark = lanes::far_behind_bookmark(&context, usable);
-        let notice_bookmark = lanes::notice_far_behind_bookmark(&context, usable);
+        let notice_bookmark = if self.notice_keep {
+            lanes::notice_far_behind_bookmark(&context, usable)
+        } else {
+            0
+        };
         // The age sweep only drops on the pass after the one that sees an
         // output far behind, so the first pass over the threshold frees
         // little by design. What it has lined up for the next pass counts as
@@ -2988,7 +3003,7 @@ impl Session {
         let lined_up: Vec<lanes::PartKey> = lanes::age_sweep(
             &context,
             bookmark.max(self.reclaim_bookmark),
-            notice_bookmark.max(self.notice_reclaim_bookmark),
+            notice_bookmark.max(notice_reclaim_bookmark),
             cutoff,
         )
         .into_iter()
@@ -2997,7 +3012,9 @@ impl Session {
         .collect();
         let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
-        self.next_notice_reclaim_bookmark = Some(self.notice_reclaim_bookmark.max(notice_bookmark));
+        self.next_notice_reclaim_bookmark = self
+            .notice_keep
+            .then_some(self.notice_reclaim_bookmark.max(notice_bookmark));
         // A pass whose lanes have no new edit publishes nothing (PD12). A
         // memory another writer saved changes only `m[1]`: it waits for a
         // pass that rewrites anyway, as the plugin's history refresh rides a

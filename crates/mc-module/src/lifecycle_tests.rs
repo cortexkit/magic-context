@@ -26,9 +26,25 @@ struct Client {
     /// The refusal a refused view gets; `bad_since`, which names no part,
     /// when unset.
     refusal: Mutex<Option<ViewRefusal>>,
+    capabilities: crate::runner_capabilities::RunnerCapabilities,
+    descriptions: Mutex<VecDeque<Result<Value, crate::client::ClientError>>>,
 }
 
 impl RunnerClient for Client {
+    fn runner_setup(&self, runner: &str) {
+        self.capabilities.forget(runner);
+    }
+    async fn notice_keep(&self, session: &SessionRef) -> bool {
+        self.capabilities
+            .notice_keep(&session.runner, 1, async {
+                self.descriptions
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(serde_json::json!({})))
+            })
+            .await
+    }
     async fn read(
         &self,
         _: &SessionRef,
@@ -1325,9 +1341,123 @@ fn old_notice_entries() -> Vec<Entry> {
     vec![old, text(2, "one"), text(3, "two"), text(4, "three")]
 }
 
+fn notice_and_tool_entries() -> Vec<Entry> {
+    let mut old_tool = output_part("p", 2);
+    if let PartBody::Tool(tool) = &mut old_tool.body {
+        tool.output = Some("old file contents ".repeat(5_000));
+    }
+    let mut entries = vec![
+        old_notice_entries().remove(0),
+        Entry::new(2, "old-tool", Role::Assistant, 2, vec![old_tool]),
+        text(3, "one"),
+        text(4, "two"),
+        text(5, "three"),
+    ];
+    entries.push(Entry::new(
+        6,
+        "newer-tools",
+        Role::Assistant,
+        6,
+        (6..=8)
+            .map(|tag| {
+                let mut part = output_part(&format!("p{tag}"), tag);
+                if let PartBody::Tool(tool) = &mut part.body {
+                    tool.output_bytes = Some(4);
+                }
+                part
+            })
+            .collect(),
+    ));
+    entries
+}
+
+fn assert_notice_stays_and_tool_sweeps(session: &mut Session, settings: &Settings) {
+    let original_bookmark = session.notice_reclaim_bookmark;
+    let mut tool_swept = false;
+    for _ in 0..6 {
+        let (view, _) = session.build(settings, None, true, None);
+        if let Some(view) = view {
+            assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+                EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-notice")));
+            tool_swept |= view.edits.iter().any(|edit| {
+                matches!(&edit.op,
+                EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-tool")
+            });
+            session.accept(view);
+        } else {
+            session.commit_bookmark();
+        }
+        assert_eq!(session.notice_reclaim_bookmark, original_bookmark);
+        assert!(session.next_notice_reclaim_bookmark.is_none());
+    }
+    assert!(tool_swept, "tool reclaim must not depend on notice_keep");
+}
+
+#[tokio::test]
+async fn lifecycle_notice_age_sweep_without_notice_keep_preserves_notices_only() {
+    for bookmark in [0, u64::MAX] {
+        let (mut session, client, route, mut request, settings) = fixture();
+        *client.entries.lock().unwrap() = notice_and_tool_entries();
+        request.newest = client.entries.lock().unwrap().last().map(cursor);
+        session
+            .setup(&client, &settings, &route, &request, session.features)
+            .await;
+        assert!(!session.notice_keep);
+        // A bookmark restored from a capable runner cannot authorize reclaim
+        // after that runner stops declaring notice_keep.
+        session.notice_reclaim_bookmark = bookmark;
+        assert_notice_stays_and_tool_sweeps(&mut session, &settings);
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_notice_age_sweep_discovery_failure_retries_on_setup() {
+    let (mut session, client, route, mut request, settings) = fixture();
+    *client.entries.lock().unwrap() = notice_and_tool_entries();
+    request.newest = client.entries.lock().unwrap().last().map(cursor);
+    session.notice_keep = true;
+    client.descriptions.lock().unwrap().extend([
+        Err(crate::client::ClientError::new("describe refused")),
+        Ok(serde_json::json!({"capabilities": ["message_marks", "notice_keep"]})),
+    ]);
+    client.runner_setup(&route.session.runner);
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    assert!(
+        !session.notice_keep,
+        "failure must revoke an earlier declaration"
+    );
+    assert_notice_stays_and_tool_sweeps(&mut session, &settings);
+    client.runner_setup(&route.session.runner);
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    assert!(session.notice_keep, "the next Setup must retry discovery");
+    assert!(client.descriptions.lock().unwrap().is_empty());
+    for _ in 0..2 {
+        let (view, _) = session.build(&settings, None, true, None);
+        if let Some(view) = view {
+            session.accept(view);
+        } else {
+            session.commit_bookmark();
+        }
+    }
+    assert!(session
+        .latest
+        .as_ref()
+        .unwrap()
+        .edits
+        .iter()
+        .any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+        if mid == "old-notice" && field == "text" && value == "[dropped §1§]")));
+}
+
 #[tokio::test]
 async fn lifecycle_notice_age_sweep_waits_two_rebuilds_and_defer_replays_bytes() {
     let (mut session, client, _, _, settings) = fixture();
+    session.notice_keep = true;
     let entries = old_notice_entries();
     session.index.extend(entries.clone());
     *client.entries.lock().unwrap() = entries;
@@ -1359,6 +1489,7 @@ async fn lifecycle_notice_age_sweep_waits_two_rebuilds_and_defer_replays_bytes()
 #[test]
 fn lifecycle_notice_age_sweep_restores_old_payload_conservatively() {
     let (mut session, _, _, _, settings) = fixture();
+    session.notice_keep = true;
     session.reclaim_bookmark = 100;
     let mut payload = serde_json::to_value(session.durable()).unwrap();
     payload
@@ -1383,6 +1514,7 @@ fn lifecycle_notice_age_sweep_restores_old_payload_conservatively() {
 fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
     for size in [1, 1_000, 100_000] {
         let (mut session, _, _, _, settings) = fixture();
+        session.notice_keep = true;
         let mut entries = old_notice_entries();
         entries[0].notice = None;
         entries[0].parts[0].body = PartBody::Text {
@@ -1403,6 +1535,7 @@ fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
 #[test]
 fn lifecycle_notice_age_sweep_counts_notice_wakes_without_aging_tools() {
     let (mut session, _, _, _, settings) = fixture();
+    session.notice_keep = true;
     let origin = old_notice_entries().remove(0).notice;
     let notice_entry = |ordinal| {
         let mut entry = text(ordinal, &format!("notice-{ordinal}"));
@@ -1489,6 +1622,7 @@ fn lifecycle_notice_age_sweep_counts_notice_wakes_without_aging_tools() {
 #[test]
 fn lifecycle_notice_age_sweep_keeps_marked_notice_beside_unkept_notice() {
     let (mut session, _, _, _, settings) = fixture();
+    session.notice_keep = true;
     let mut kept = old_notice_entries().remove(0);
     kept.notice.as_mut().unwrap().keep = true;
     let mut unkept = text(2, "unkept-notice");

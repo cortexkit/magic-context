@@ -116,6 +116,8 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
             ("tool_calls_results", true),
             ("reasoning", true),
             ("last_user_message", false),
+            ("user_messages", false),
+            ("notices", false),
         ]
     );
     let first_mid = runner.host().entries().first().unwrap().mid.clone();

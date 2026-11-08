@@ -182,6 +182,24 @@ impl RunnerClient for HostClient {
         self.runner_capabilities.forget(runner);
     }
 
+    async fn notice_keep(&self, session: &SessionRef) -> bool {
+        self.runner_capabilities
+            .notice_keep(&session.runner, 1, async {
+                self.describe
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| {
+                        Ok(self
+                            .host()
+                            .map(|host| host.describe())
+                            .unwrap_or_else(|_| json!({"capabilities": ["cache_policy"]})))
+                    })
+                    .map_err(ClientError::new)
+            })
+            .await
+    }
+
     async fn child_cache_policy(&self, child: &Child) -> bool {
         self.runner_capabilities
             .cache_policy(&child.session.runner, 1, async {
@@ -189,7 +207,12 @@ impl RunnerClient for HostClient {
                     .lock()
                     .unwrap()
                     .clone()
-                    .unwrap_or_else(|| Ok(json!({"capabilities": ["cache_policy"]})))
+                    .unwrap_or_else(|| {
+                        Ok(self
+                            .host()
+                            .map(|host| host.describe())
+                            .unwrap_or_else(|_| json!({"capabilities": ["cache_policy"]})))
+                    })
                     .map_err(ClientError::new)
             })
             .await
@@ -972,6 +995,79 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
     assert!(seen(host, 5).unwrap().starts_with("§5§ xxx"));
     assert!(seen(host, 7).unwrap().starts_with("§7§ xxx"));
     assert!(seen(host, 9).unwrap().starts_with("§9§ xxx"));
+}
+
+async fn notice_keep_scenario(declared: bool) {
+    let settings = Settings {
+        keep_min_recovery_percentage: 0.0,
+        ..Settings::default()
+    };
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), settings).await;
+    runner.host().declare_notice_keep(declared);
+    runner
+        .play(&[
+            Step::RestartRunner,
+            user("Review the module."),
+            read_file(30),
+        ])
+        .await;
+    let tool_tag = runner
+        .host()
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find(|part| matches!(part.body, PartBody::Tool(_)))
+        .unwrap()
+        .tag
+        .unwrap();
+    runner
+        .host()
+        .append_notice(&"worker result ".repeat(1_000), false);
+    let notice_tag = runner.host().entries().last().unwrap().parts[0]
+        .tag
+        .unwrap();
+    let kept_tag = declared.then(|| {
+        runner
+            .host()
+            .append_notice(&"the person's answer ".repeat(1_000), true);
+        runner.host().entries().last().unwrap().parts[0]
+            .tag
+            .unwrap()
+    });
+    for prompt in ["Review a.rs.", "Review b.rs.", "Review c.rs."] {
+        runner.play(&[user(prompt), read_file(1)]).await;
+    }
+    // Each prompt-cache expiry permits rebuilding the served view even at low usage.
+    for _ in 0..4 {
+        runner.play(&[Step::Wait { ms: 300_001 }, answer()]).await;
+    }
+    assert_clean(&runner);
+    assert_eq!(
+        seen(runner.host(), tool_tag).as_deref(),
+        Some(placeholder(tool_tag).as_str())
+    );
+    let notice = seen(runner.host(), notice_tag).unwrap();
+    if declared {
+        assert_eq!(notice, placeholder(notice_tag));
+        assert!(seen(runner.host(), kept_tag.unwrap())
+            .unwrap()
+            .contains("the person's answer"));
+    } else {
+        assert!(
+            notice.contains("worker result"),
+            "an unmarked answer must survive without notice_keep"
+        );
+    }
+}
+
+#[tokio::test]
+async fn notice_keep_omitted_preserves_notices_while_tool_outputs_sweep() {
+    notice_keep_scenario(false).await;
+}
+
+#[tokio::test]
+async fn notice_keep_declared_sweeps_only_unkept_notices() {
+    notice_keep_scenario(true).await;
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
-//! Optional runner features are discovered on a child's scoped route. A
+//! Optional runner features are discovered on the session's runner route. A
 //! missing or unreadable declaration keeps older runners usable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +10,7 @@ use tokio::sync::OnceCell;
 
 use crate::client::ClientError;
 
-type Declaration = (u64, Arc<OnceCell<bool>>);
+type Declaration = (u64, Arc<OnceCell<HashSet<String>>>);
 
 /// In-memory declarations, shared by summaries using the same runner and
 /// consumer connection. Negative answers are cached too, to avoid repeated
@@ -38,6 +38,28 @@ impl RunnerCapabilities {
         connection_epoch: u64,
         describe: impl Future<Output = Result<Value, ClientError>>,
     ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .contains("cache_policy")
+    }
+
+    pub async fn notice_keep(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        let declared = self.declared(runner, connection_epoch, describe).await;
+        // The runner contract requires message_marks alongside notice_keep.
+        declared.contains("notice_keep") && declared.contains("message_marks")
+    }
+
+    async fn declared(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> HashSet<String> {
         let cell = {
             let mut runners = self.runners.lock().expect("runner capabilities");
             let declaration = runners
@@ -48,25 +70,29 @@ impl RunnerCapabilities {
             }
             Arc::clone(&declaration.1)
         };
-        *cell
+        cell
             .get_or_init(|| async {
                 match describe.await {
                     Ok(value) => {
-                        let declared = value["capabilities"].as_array().is_some_and(|groups| {
-                            groups.iter().any(|group| group.as_str() == Some("cache_policy"))
-                        });
-                        if !declared {
+                        let declared: HashSet<String> = value["capabilities"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|group| group.as_str().map(str::to_owned))
+                            .collect();
+                        if !declared.contains("cache_policy") {
                             tracing::info!(runner, "summarizer cache omitted: runner does not declare cache_policy");
                         }
                         declared
                     }
                     Err(error) => {
                         tracing::warn!(runner, reason = %error.message, "summarizer cache omitted: runner discovery failed");
-                        false
+                        HashSet::new()
                     }
                 }
             })
             .await
+            .clone()
     }
 }
 
