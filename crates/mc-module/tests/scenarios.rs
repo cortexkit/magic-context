@@ -854,6 +854,86 @@ async fn a_queued_drop_two_refused_views_carried_is_forgotten() {
     assert_eq!(seen(host, 4).as_deref(), Some("§4§ Reading the next file."));
 }
 
+/// A runner whose notices trail its requests: each step is reported only
+/// after the next request went out. A view ck-mc builds from one step's
+/// reading is taken while the next request is in flight, so that request's
+/// reading, at 74% and measured without the view, arrives once the view is
+/// applied. Acting on it would build a second view right after the first
+/// and rewrite the cache twice in a row. ck-mc ignores it: the drop the
+/// model queued meanwhile waits, and lands only when a reading under the
+/// applied view reaches the threshold again.
+#[tokio::test]
+async fn a_reading_from_before_the_newest_view_builds_no_second_view() {
+    // Tags: the task is 1; reads 2/3 and 4/5; the first ctx_reduce 6/7;
+    // reads 8/9 and 10/11; an answer 12; the second ctx_reduce 13/14.
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    runner.host().lag_notices(true);
+    runner
+        .play(&[
+            user("Review the module."),
+            read_file(50),
+            read_file(50),
+            reduce("3,5"),
+            read_file(50),
+            read_file(50),
+            answer(),
+            // In flight while the previous step's reading builds view 1. The
+            // sentence (8) is droppable at once; the two reads (9, 11) wait
+            // until they leave the protected tail.
+            reduce("8,9,11"),
+            // Sent with view 1; the step before it is reported meanwhile.
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let offered = runner.provider().client.offered.lock().unwrap().clone();
+    assert_eq!(offered, [1], "a stale reading built another view");
+    let host = runner.host();
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert_eq!(seen(host, 8).as_deref(), Some("§8§ Reading the next file."));
+    let requests = &runner.report.requests;
+    let first = requests
+        .iter()
+        .position(|record| record.view == Some(1))
+        .unwrap();
+    // The reading that arrived under view 1 measured the request before it.
+    let stale = requests[first - 1].usage.prompt_tokens.unwrap();
+    assert!(stale > 25_350, "{requests:?}");
+    assert!(requests[first].usage.prompt_tokens < requests[first - 1].usage.prompt_tokens);
+    for pair in requests[first..].windows(2) {
+        assert_eq!(
+            pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens,
+            "a second rewrite followed the first: {requests:?}"
+        );
+    }
+
+    // Readings under view 1 decide as usual: below the threshold nothing
+    // lands, and once one reaches it the queued drops land in view 2.
+    runner
+        .play(&[
+            read_file(50),
+            read_file(50),
+            answer(),
+            answer(),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let offered = runner.provider().client.offered.lock().unwrap().clone();
+    assert_eq!(offered, [1, 2]);
+    let host = runner.host();
+    assert_eq!(host.applied_version(), Some(2));
+    assert_eq!(seen(host, 8).as_deref(), Some(placeholder(8).as_str()));
+    let requests = &runner.report.requests;
+    let rewrites = requests
+        .windows(2)
+        .filter(|pair| pair[1].usage.cache_read_tokens < pair[0].usage.prompt_tokens)
+        .count();
+    assert_eq!(rewrites, 2, "{requests:?}");
+}
+
 #[tokio::test]
 async fn an_execute_pass_with_nothing_to_drop_publishes_no_view() {
     // A worker whose task alone (about 28,000 tokens, which a worker never

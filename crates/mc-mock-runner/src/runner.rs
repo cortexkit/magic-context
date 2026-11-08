@@ -351,6 +351,17 @@ struct State {
     now: u64,
     last_send: Option<u64>,
     last_prompt_tokens: Option<u64>,
+    /// The view version the request `last_prompt_tokens` measured was
+    /// rendered with, 0 for none; `None` when the runner can't tie the
+    /// reading to a request, as after its restart.
+    last_prompt_view: Option<u64>,
+    /// Report each model step late: its notice goes only after the next
+    /// step has applied its view and rendered its request, as a runner does
+    /// whose notices trail its requests. A view the provider hands over in
+    /// answer to such a notice is accepted while a request is in flight.
+    lag_notices: bool,
+    /// A step's notice that [`State::lag_notices`] holds back.
+    notice_owed: bool,
     /// A cache loss already known before the next request.
     forced_cause: Option<RideCause>,
     events: Vec<Event>,
@@ -370,6 +381,11 @@ impl State {
             self.config.rules.clone(),
         );
         conditions.last_prompt_tokens = self.last_prompt_tokens;
+        // Sent only with the reading it describes (compaction contract,
+        // `Conditions`).
+        if self.last_prompt_tokens.is_some() {
+            conditions.last_prompt_view = self.last_prompt_view;
+        }
         conditions.accepts_images = self.config.accepts_images;
         conditions
     }
@@ -655,6 +671,14 @@ impl Host {
     pub fn applied_version(&self) -> Option<u64> {
         self.lock().applied.as_ref().map(|view| view.version)
     }
+
+    /// From now on, send each model step's notice only after the next step
+    /// has applied its view and rendered its request (see
+    /// [`State::lag_notices`]). A notice still held when a script ends goes
+    /// out then.
+    pub fn lag_notices(&self, lag: bool) {
+        self.lock().lag_notices = lag;
+    }
 }
 
 /// Plays a session against a compaction provider.
@@ -750,6 +774,9 @@ impl<P: Provider> Runner<P> {
             notified: None,
             last_send: None,
             last_prompt_tokens: None,
+            last_prompt_view: None,
+            lag_notices: false,
+            notice_owed: false,
             forced_cause: None,
             events: Vec::new(),
             compaction: true,
@@ -879,6 +906,9 @@ impl<P: Provider> Runner<P> {
                         let mut state = self.host.lock();
                         state.last_send = None;
                         state.forced_cause = Some(RideCause::CacheExpired);
+                        // The reading survives, but which request it measured
+                        // does not.
+                        state.last_prompt_view = None;
                     }
                     if let Err(error) = self.setup().await {
                         self.report.call_errors.push(error);
@@ -889,6 +919,9 @@ impl<P: Provider> Runner<P> {
             if !keep_going {
                 return;
             }
+        }
+        if self.host.lock().notice_owed {
+            self.notice().await;
         }
     }
 
@@ -1035,11 +1068,22 @@ impl<P: Provider> Runner<P> {
                 return false;
             }
         };
+        // The previous step's notice, held back while this request went out.
+        if self.host.lock().notice_owed {
+            self.notice().await;
+        }
         self.store_reply(turn, completion, highest_tag);
-        self.notice().await;
+        let lag = self.host.lock().lag_notices;
+        if lag {
+            self.host.lock().notice_owed = true;
+        } else {
+            self.notice().await;
+        }
         if !turn.tools.is_empty() {
             self.run_tools(&turn.tools).await;
-            self.notice().await;
+            if !lag {
+                self.notice().await;
+            }
         }
         self.host.lock().now += STEP_MS;
         true
@@ -1128,6 +1172,7 @@ impl<P: Provider> Runner<P> {
         }
         state.last_send = Some(now);
         state.last_prompt_tokens = usage.prompt_tokens;
+        state.last_prompt_view = Some(state.applied.as_ref().map_or(0, |view| view.version));
         self.report.requests.push(RequestRecord {
             ordinal: entry.ordinal,
             view: state.applied.as_ref().map(|view| view.version),
@@ -1417,6 +1462,7 @@ impl<P: Provider> Runner<P> {
         }
         let request = {
             let mut state = self.host.lock();
+            state.notice_owed = false;
             // An empty transcript, after a revert of every message, still
             // gets a notice, with no newest entry (compaction contract W4.1).
             let newest = state.transcript.cursor();

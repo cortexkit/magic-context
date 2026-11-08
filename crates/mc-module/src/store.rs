@@ -42,6 +42,14 @@ pub struct Durable {
     pub reminder_counter: u64,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
+    /// The newest view version the runner reported applying, which a
+    /// reading's `last_prompt_view` is judged against.
+    #[serde(default)]
+    pub newest_applied: u64,
+    /// The newest reading measured a request rendered with an older view,
+    /// so pressure counts as unknown until a reading under the current view.
+    #[serde(default)]
+    pub reading_stale: bool,
     /// Parts the model asked to drop that no view carries yet.
     pub queued: BTreeSet<(String, String)>,
     pub reclaim_bookmark: u64,

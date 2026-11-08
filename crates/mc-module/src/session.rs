@@ -83,6 +83,21 @@ pub struct Session {
     /// The highest version ck-mc has built for the session, accepted or not,
     /// so a version number is never used twice.
     version: u64,
+    /// The newest view version the runner has reported applying in this
+    /// session: a notice's, a ride's or Setup's `applied_view`, or the view
+    /// read back with `session.applied_view`. 0 until it reports one. A view
+    /// the runner took but has not applied yet doesn't count: until it
+    /// applies it, a reading under the view before it still measures what
+    /// the runner sends.
+    newest_applied: u64,
+    /// The newest reading the runner sent (`last_prompt_tokens`) measured a
+    /// request rendered with an older view than `newest_applied`. A runner
+    /// can take a view while a request is in flight; that request's size
+    /// arrives after the new view went out, and says nothing about the
+    /// requests the new view makes. Until a reading under the current view
+    /// arrives, every pressure decision treats usage as unknown
+    /// ([`Session::pressure`]).
+    reading_stale: bool,
     /// Parts the model asked to drop, held for the next view.
     queued: BTreeSet<(String, String)>,
     /// The age sweep's bookmark from the previous pass with permission to
@@ -350,6 +365,8 @@ impl Session {
             view_anchor: request.view_anchor == Some(true),
             latest: None,
             version: 0,
+            newest_applied: 0,
+            reading_stale: false,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
@@ -505,6 +522,8 @@ impl Session {
             head_stale: self.head_stale,
             reminder_counter: self.reminder_counter,
             version: self.version,
+            newest_applied: self.newest_applied,
+            reading_stale: self.reading_stale,
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
             notice_reclaim_bookmark: self.notice_reclaim_bookmark,
@@ -543,6 +562,8 @@ impl Session {
         self.head_stale = durable.head_stale;
         self.reminder_counter = durable.reminder_counter;
         self.version = durable.version;
+        self.newest_applied = durable.newest_applied;
+        self.reading_stale = durable.reading_stale;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
         self.notice_reclaim_bookmark = durable.notice_reclaim_bookmark;
@@ -672,6 +693,8 @@ impl Session {
         self.tools_only = false;
         self.suspended = false;
         self.conditions = conditions_of(request);
+        // Setup carries no reading, so none is stale.
+        self.reading_stale = false;
         self.child_harness = request.child_harness.clone();
         self.view_anchor = request.view_anchor == Some(true);
         self.notice_keep = false;
@@ -749,6 +772,7 @@ impl Session {
         notice: NoticeRequest,
     ) -> Option<run::Request> {
         self.seq = notice.seq;
+        let previous = reading_of(&self.conditions);
         self.conditions = notice.conditions.clone();
         self.threshold = (
             settings.execute_threshold_percentage,
@@ -779,6 +803,7 @@ impl Session {
             })
             .collect();
         self.settle_unconfirmed(notice.applied_view.as_ref(), &refused);
+        self.judge_reading(previous);
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
@@ -894,12 +919,19 @@ impl Session {
             self.adopt_runner_view(client).await;
         }
         self.forget_missing();
-        if !pass::in_force_band(&self.conditions, settings) {
-            self.emergency_latched = false;
-        }
-        let execute = pass::at_execute(&self.conditions, settings);
-        if !execute {
-            self.keep_requested = false;
+        // A stale reading changes no pressure state: the emergency latch and
+        // the `ctx_keep` request stay as the last current reading left them.
+        // Released on a reading that says nothing about usage, the latch would
+        // let the next reading in the force band take a second emergency
+        // batch right after the view that took the first.
+        if !self.reading_stale {
+            if !pass::in_force_band(&self.conditions, settings) {
+                self.emergency_latched = false;
+            }
+            let execute = pass::at_execute(&self.conditions, settings);
+            if !execute {
+                self.keep_requested = false;
+            }
         }
         if let Some(kept) = self.pending_keep.take_if(|_| !self.latest_unknown) {
             let (view, _) = self.build(settings, None, false, Some(&kept));
@@ -940,20 +972,80 @@ impl Session {
     /// summary run; a ride whose causes only say the provider forgot its
     /// cache asks it too, but never starts a summary.
     fn rebuild_permitted(&mut self, settings: &Settings) -> bool {
-        let hold = pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings);
+        let (hold, execute, force) = {
+            let pressure = self.pressure();
+            (
+                pass::signed_thinking_hold(self.index.entries(), &pressure, settings),
+                pass::at_execute(&pressure, settings),
+                pass::in_force_band(&pressure, settings),
+            )
+        };
+        // A stale reading can't say whether usage is under the hold's cap.
+        // When the turn holds heavy signed thinking, a fold waits for a
+        // current reading, as the hold would make it wait.
+        let fold_held = hold
+            || (self.reading_stale
+                && pass::heavy_signed_turn(self.index.entries(), &self.conditions));
         // A fold for a settings or window change waits out a heavy-thinking
         // turn, as an execute pass does: re-rendering `m[0]` then would drop
         // the signed thinking the model just paid for. The change is found
         // again on the next pass. A head made stale by an undo or a restore
         // can't wait: it shows history that no longer holds.
-        if !hold && self.head_shape_changed(settings) {
+        if !fold_held && self.head_shape_changed(settings) {
             self.fold_due = true;
             self.head_stale = true;
         }
-        self.head_stale
-            || (pass::at_execute(&self.conditions, settings)
-                && (pass::in_force_band(&self.conditions, settings) || !self.summary_on_its_way())
-                && !hold)
+        self.head_stale || (execute && (force || !self.summary_on_its_way()) && !hold)
+    }
+
+    /// Judge the reading the conditions just taken carry, once the notice's
+    /// or ride's `applied_view` is settled. A reading whose `last_prompt_view`
+    /// is older than the newest view the runner applies, or is 0 (no view)
+    /// once one is applied, measured bytes the runner no longer sends: a
+    /// runner takes a view while a request is in flight, and that request's
+    /// size arrives after the new view went out. Acting on it would build a
+    /// second view for pressure the first one already relieved, and rewrite
+    /// the cache again for nothing. A reading with no view version is used
+    /// as it is: the runner could not tie it to a request.
+    ///
+    /// The stored conditions keep the last reading that was current, not the
+    /// stale one, so the apps keep showing the usage they showed rather than
+    /// the larger size from before the newest view, and a restart restores a
+    /// reading that was current when it came. Pressure decisions read neither
+    /// until a reading under the current view arrives ([`Session::pressure`]).
+    fn judge_reading(&mut self, previous: (Option<u64>, Option<u64>)) {
+        let (tokens, view) = reading_of(&self.conditions);
+        self.reading_stale =
+            tokens.is_some() && view.is_some_and(|view| view < self.newest_applied);
+        if !self.reading_stale {
+            return;
+        }
+        tracing::info!(
+            "ck-mc: session {}: ignoring a prompt of {} tokens: reading from view {}, newest applied {}; waiting for a reading under the current view",
+            self.key.session,
+            tokens.unwrap_or(0),
+            view.unwrap_or(0),
+            self.newest_applied
+        );
+        (
+            self.conditions.last_prompt_tokens,
+            self.conditions.last_prompt_view,
+        ) = previous;
+    }
+
+    /// The conditions every pressure decision reads: the execute threshold,
+    /// the force band, the summary trigger's pressure, the signed-thinking
+    /// hold's cap and the emergency drop's prompt size. After a stale reading
+    /// they carry no reading at all, exactly as conditions without
+    /// `last_prompt_tokens` do.
+    fn pressure(&self) -> std::borrow::Cow<'_, Conditions> {
+        if !self.reading_stale {
+            return std::borrow::Cow::Borrowed(&self.conditions);
+        }
+        let mut conditions = self.conditions.clone();
+        conditions.last_prompt_tokens = None;
+        conditions.last_prompt_view = None;
+        std::borrow::Cow::Owned(conditions)
     }
 
     /// A summarizer run to start now, if one is due: the session has a
@@ -961,7 +1053,7 @@ impl Session {
     /// run at this usage.
     fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
         let threshold = settings.execute_threshold_percentage;
-        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let usage = pass::usage(&self.pressure()).unwrap_or(0.0) * 100.0;
         let prompt = self
             .index
             .entries()
@@ -969,7 +1061,9 @@ impl Session {
             .rev()
             .find(|entry| trigger::is_meaningful_user(entry))
             .map(|entry| (entry.ordinal, entry.mid.clone()));
-        if usage < threshold
+        // A stale reading says nothing about usage, so it doesn't clear the
+        // mark: the mark waits for a reading under the current view.
+        if (usage < threshold && !self.reading_stale)
             || self
                 .floor_pending_for
                 .as_ref()
@@ -982,7 +1076,7 @@ impl Session {
         }
         let memory_enabled = self.memory_admissions(settings) && self.project.is_some();
         let window = pass::usable_window(&self.conditions);
-        let force = pass::in_force_band(&self.conditions, settings);
+        let force = pass::in_force_band(&self.pressure(), settings);
         let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
         let tail = trigger::protected_tail_tokens(window, threshold, usage);
         let entries = self.index.entries();
@@ -1064,8 +1158,10 @@ impl Session {
             )
         };
         // Consume the mark before inspecting the lifted head. A head that has
-        // shrunk cannot re-arm the same mark on this evaluation.
-        let lift_floor = self.floor_pending_for.take().is_some();
+        // shrunk cannot re-arm the same mark on this evaluation. A pass after
+        // a stale reading leaves the mark for the next current one, since
+        // lifting the floor is for a pass at the threshold.
+        let lift_floor = !self.reading_stale && self.floor_pending_for.take().is_some();
         let mut until = bounded(tail, force || lift_floor);
         let mut decision = decide(until);
         if decision.is_none() && force {
@@ -1244,7 +1340,7 @@ impl Session {
         let Some(newest) = self.index.entries().last().map(|entry| entry.mid.clone()) else {
             return;
         };
-        let force = pass::in_force_band(&self.conditions, settings);
+        let force = pass::in_force_band(&self.pressure(), settings);
         let retried = match &self.no_progress {
             Some((previous, retried)) if *previous == newest => *retried || force,
             _ => force,
@@ -1549,9 +1645,12 @@ impl Session {
         }
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
-        if pass::at_execute(&self.conditions, settings)
-            && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
-        {
+        let execute = {
+            let pressure = self.pressure();
+            pass::at_execute(&pressure, settings)
+                && !pass::signed_thinking_hold(self.index.entries(), &pressure, settings)
+        };
+        if execute {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
@@ -1726,7 +1825,7 @@ impl Session {
         {
             return;
         }
-        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let usage = pass::usage(&self.pressure()).unwrap_or(0.0) * 100.0;
         // One request per stay over the threshold, with a durable send id
         // independent of the view version that crossed it.
         let Some(send_id) = self.next_reminder_id(KEEP_KIND) else {
@@ -1776,6 +1875,7 @@ impl Session {
         if !self.index_ready || self.suspended {
             return None;
         }
+        let previous = reading_of(&self.conditions);
         self.conditions = ride.conditions.clone();
         tracing::info!(
             "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {:?}, applied view {:?}",
@@ -1786,6 +1886,9 @@ impl Session {
             ride.applied_view.as_ref().map(|view| view.version),
         );
         self.settle_unconfirmed(ride.applied_view.as_ref(), &[]);
+        // An over-limit ride still lands on a stale reading: it acts on the
+        // runner's own estimate of the request it is about to send.
+        self.judge_reading(previous);
         let over_limit = ride
             .has(RideCause::OverLimit)
             .then_some(ride.request_tokens.unwrap_or(0));
@@ -2820,7 +2923,7 @@ impl Session {
     /// request must reclaim even when the pressure episode is already spent.
     fn emergency_drop_allowed(&self, settings: &Settings, over_limit: bool, priced: bool) -> bool {
         over_limit
-            || (pass::in_force_band(&self.conditions, settings)
+            || (pass::in_force_band(&self.pressure(), settings)
                 && (priced || !self.emergency_latched))
     }
 
@@ -2961,7 +3064,7 @@ impl Session {
             let emergency = lanes::Emergency {
                 prompt_tokens: over_limit
                     .unwrap_or(0)
-                    .max(self.conditions.last_prompt_tokens.unwrap_or(0)),
+                    .max(self.pressure().last_prompt_tokens.unwrap_or(0)),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
                 over_limit: over_limit.is_some(),
@@ -3449,6 +3552,7 @@ impl Session {
         refused: &[(u64, ViewRefusal)],
     ) {
         if let Some(applied) = applied {
+            self.newest_applied = self.newest_applied.max(applied.version);
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
             if let Some(at) = self
@@ -3658,6 +3762,12 @@ impl Session {
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
         match client.applied_view(&self.key).await {
             Ok(answer) => {
+                // The runner's own answer is what it applies now. It replaces
+                // the newest version rather than raising it: a runner whose
+                // state went back (a restore) measures under the view it
+                // applies, and a higher remembered version would make every
+                // reading it sends look stale.
+                self.newest_applied = answer.view.as_ref().map_or(0, |view| view.version);
                 // The runner's view now stands for itself.
                 self.unconfirmed.clear();
                 if let Some(view) = &answer.view {
@@ -3941,6 +4051,12 @@ fn folder_of(route: &Route) -> Option<String> {
         .as_ref()
         .map(|project| project.root.clone())
         .or_else(|| route.workdir.clone())
+}
+
+/// A reading as conditions carry it: the prompt size and the view version
+/// of the request it measured.
+fn reading_of(conditions: &Conditions) -> (Option<u64>, Option<u64>) {
+    (conditions.last_prompt_tokens, conditions.last_prompt_view)
 }
 
 fn conditions_of(request: &SetupRequest) -> Conditions {

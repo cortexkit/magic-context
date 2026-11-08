@@ -611,10 +611,11 @@ impl Session {
         }
         let usage = p.usages.last_key_value().map(|(_, usage)| usage);
         let at = usage.map(|usage| usage.at_ms);
-        let provider = self
-            .conditions
-            .last_prompt_tokens
-            .or_else(|| usage.and_then(|u| u.prompt));
+        let provider = self.conditions.last_prompt_tokens.or_else(|| {
+            // After a stale reading the newest step's own usage is that same
+            // stale request, so it doesn't stand in for the stored reading.
+            usage.and_then(|u| u.prompt).filter(|_| !self.reading_stale)
+        });
         let memory_count = self
             .unconfirmed
             .first()

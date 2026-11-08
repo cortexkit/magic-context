@@ -224,6 +224,18 @@ pub fn signed_thinking_hold(
     {
         return false;
     }
+    heavy_signed_turn(entries, conditions)
+}
+
+/// The part of [`signed_thinking_hold`] that doesn't depend on usage: the
+/// runner declares signed reasoning, and one of the current turn's last 15
+/// assistant steps spent more than 1,500 reasoning tokens. With no usage the
+/// hold can't be decided, so this says whether it would hold if usage were
+/// below its cap.
+pub fn heavy_signed_turn(entries: &[Entry], conditions: &Conditions) -> bool {
+    if conditions.rules.signed_parts != SignedParts::Bound {
+        return false;
+    }
     let Some(turn_start) = current_turn_start(entries) else {
         return false;
     };
