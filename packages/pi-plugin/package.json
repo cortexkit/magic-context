@@ -74,6 +74,8 @@
 		"omp-pi-ai-18126": "npm:@oh-my-pi/pi-ai@18.12.6",
 		"omp-pi-ai-1813": "npm:@oh-my-pi/pi-ai@18.13.0",
 		"omp-pi-ai-18132": "npm:@oh-my-pi/pi-ai@18.13.2",
+		"omp-pi-ai-18180": "npm:@oh-my-pi/pi-ai@18.18.0",
+		"omp-pi-ai-18181": "npm:@oh-my-pi/pi-ai@18.18.1",
 		"pi-agent-core-087": "npm:@earendil-works/pi-agent-core@0.87.1",
 		"pi-ai-086": "npm:@earendil-works/pi-ai@0.86.0",
 		"pi-ai-087": "npm:@earendil-works/pi-ai@0.87.1",

@@ -7,6 +7,10 @@ import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir
 import { pinOmpLoggerFiles } from "./__tests__/omp-log-files";
 import { registerPiGuardedContext } from "./pi-context-refusal";
 import { piCursorManagedRoots } from "./pi-dispatch-cursor";
+import {
+	piConversationFields,
+	piHasManagedSignature,
+} from "./pi-dispatch-identity";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -31,7 +35,15 @@ for (const key of [
 const require = createRequire(import.meta.url);
 const packageRoot = (alias: string) =>
 	require.resolve(`${alias}/package.json`).slice(0, -12);
-await pinOmpLoggerFiles(root, ["omp-coding-agent-18132", "omp-pi-ai-18132"]);
+const cursorVersions = [
+	{ version: "18.13.2", alias: "omp-pi-ai-18132", rulesEntry: false },
+	{ version: "18.18.0", alias: "omp-pi-ai-18180", rulesEntry: true },
+	{ version: "18.18.1", alias: "omp-pi-ai-18181", rulesEntry: true },
+] as const;
+await pinOmpLoggerFiles(root, [
+	"omp-coding-agent-18132",
+	...cursorVersions.map(({ alias }) => alias),
+]);
 const ompRoot = packageRoot("omp-coding-agent-18132");
 const aiRoot = packageRoot("omp-pi-ai-18132");
 const { ExtensionRunner: OmpRunner } = await import(
@@ -43,7 +55,14 @@ const { ExtensionRunner: PiRunner } = await import(
 		import.meta.resolve("@earendil-works/pi-coding-agent"),
 	).href
 );
-const { buildGrpcRequest } = await import(`${aiRoot}src/providers/cursor.ts`);
+const cursorBuilders = await Promise.all(
+	cursorVersions.map(async (entry) => ({
+		...entry,
+		buildGrpcRequest: (
+			await import(`${packageRoot(entry.alias)}src/providers/cursor.ts`)
+		).buildGrpcRequest,
+	})),
+);
 const { streamAnthropic } = await import(`${aiRoot}src/providers/anthropic.ts`);
 const { streamOpenAIResponses } = await import(
 	`${aiRoot}src/providers/openai-responses.ts`
@@ -178,7 +197,12 @@ function model(api: string) {
 	};
 }
 
-function harness(kind: "pi" | "omp", api: string, failPreparation = false) {
+function harness(
+	kind: "pi" | "omp",
+	api: string,
+	failPreparation = false,
+	messages = prepared,
+) {
 	__setPiHarnessKindForTesting(kind);
 	const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
 	const entries: string[] = [];
@@ -205,7 +229,7 @@ function harness(kind: "pi" | "omp", api: string, failPreparation = false) {
 		} as never,
 		async () => {
 			if (fail) throw new Error("fixture preparation failed");
-			return { messages: structuredClone(prepared) };
+			return { messages: structuredClone(messages) };
 		},
 	);
 	const extensions = [{ path: "magic-context", handlers }];
@@ -234,54 +258,163 @@ function harness(kind: "pi" | "omp", api: string, failPreparation = false) {
 	};
 }
 
-test("Cursor real OMP builder: managed root hashes match the host blob store, date injection and active action", async () => {
-	const h = harness("omp", "cursor-agent");
-	await h.prepare();
-	const date = new Date();
-	const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-	const context = new DateCwdReminderInjector().transform(
-		{ messages: prepared, systemPrompt: ["system"] },
-		day,
-		root,
-	);
-	let intercepted = false;
-	const state = {
-		conversationId: "fixture",
-		blobStore: new Map<string, Uint8Array>(),
-	};
-	await buildGrpcRequest(
-		h.ctx.model,
-		context,
-		{
-			onPayload: async (payload: unknown) => {
-				intercepted = true;
-				// OMP cursor.ts:5587-5596 hashes exactly the bytes emitted at 6113-6115;
-				// use its real blob store, not a second implementation of our expectation.
-				const expected = piCursorManagedRoots(
-					prepared,
-					"<session-history>",
+for (const { version, rulesEntry, buildGrpcRequest } of cursorBuilders) {
+	for (const blocks of [false, true]) {
+		for (const system of [false, true]) {
+			test(`Cursor real OMP ${version} builder: managed m0/m1 hashes, ${blocks ? "blocks" : "strings"} ${system ? "with system and date injection" : "without system"}, and retry identity`, async () => {
+				const delta =
+					"<session-history-since>managed delta</session-history-since>";
+				const messages = [managed, delta, "active user"].map((text, index) =>
+					userMessage(blocks ? [{ type: "text", text }] : text, index + 1),
+				);
+				const h = harness("omp", "cursor-agent", false, messages);
+				await h.prepare();
+				const date = new Date();
+				const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+				const reminder = `<system-reminder>\nToday: ${day}; current working directory: '${root.replace(/\\/gu, "/")}'. Do not repeat this information in your reply.\n</system-reminder>`;
+				const systemPrompt = system
+					? ["system instructions", "extra instructions"]
+					: [];
+				const systemRoots = system
+					? systemPrompt
+					: ["You are a helpful assistant."];
+				const expectedContents = [
+					!system
+						? [{ type: "text", text: managed }]
+						: blocks
+							? [
+									{ type: "text", text: reminder },
+									{ type: "text", text: managed },
+								]
+							: [{ type: "text", text: `${reminder}\n\n${managed}` }],
+					[{ type: "text", text: delta }],
+				];
+				const context = new DateCwdReminderInjector().transform(
+					{ messages, systemPrompt },
+					day,
 					root,
 				);
-				expect(expected.some((hash) => state.blobStore.has(hash))).toBe(true);
-				expect(await h.send(payload)).toBe(payload);
-				return payload;
-			},
-		},
-		state,
-	);
-	expect(intercepted).toBe(true);
-	expect(h.notices).toEqual([]);
-	expect(h.errors).toEqual([]);
-});
+				let firstFields: ReturnType<typeof piConversationFields>;
+				let firstMessageId: string | undefined;
+				for (let attempt = 0; attempt < 2; attempt++) {
+					let intercepted = false;
+					const state = {
+						conversationId: "fixture",
+						blobStore: new Map<string, Uint8Array>(),
+					};
+					await buildGrpcRequest(
+						h.ctx.model,
+						context,
+						{
+							onPayload: async (payload: unknown) => {
+								intercepted = true;
+								const request = payload as {
+									conversationState: { rootPromptMessagesJson: Uint8Array[] };
+									action: {
+										action: { value: { userMessage: { messageId: string } } };
+									};
+								};
+								const ids =
+									request.conversationState.rootPromptMessagesJson.map((id) =>
+										Buffer.from(id).toString("hex"),
+									);
+								// Decode the roots OMP actually sent, not candidates kept only in its blob store.
+								const roots = ids.map((id) =>
+									JSON.parse(new TextDecoder().decode(state.blobStore.get(id))),
+								);
+								const rules = system && rulesEntry;
+								expect(roots).toHaveLength(
+									systemRoots.length + (rules ? 1 : 0) + 2,
+								);
+								expect(roots.slice(0, systemRoots.length)).toEqual(
+									systemRoots.map((content) => ({ role: "system", content })),
+								);
+								if (rules)
+									expect(roots[systemRoots.length]).toEqual({
+										role: "user",
+										content:
+											"<rules>\nsystem instructions\n\nextra instructions\n</rules>",
+									});
+								for (const [index, signature] of [
+									"<session-history>",
+									"<session-history-since>",
+								].entries()) {
+									const expected = piCursorManagedRoots(
+										messages,
+										signature,
+										root,
+									);
+									const position = systemRoots.length + (rules ? 1 : 0) + index;
+									expect(expected).toContain(ids[position]);
+									expect(roots[position]).toEqual({
+										role: "user",
+										content: expectedContents[index],
+									});
+									expect(
+										piHasManagedSignature(payload, signature, expected),
+									).toBe(true);
+								}
+								const fields = piConversationFields(payload);
+								expect(fields).toBeDefined();
+								const messageId =
+									request.action.action.value.userMessage.messageId;
+								if (attempt === 0) {
+									firstFields = fields;
+									firstMessageId = messageId;
+								} else {
+									expect(fields).toEqual(firstFields);
+									expect(messageId).not.toBe(firstMessageId);
+								}
+								expect(await h.send(payload)).toBe(payload);
+								return payload;
+							},
+						},
+						state,
+					);
+					expect(intercepted).toBe(true);
+				}
+				expect(h.notices).toEqual([]);
+				expect(h.errors).toEqual([]);
+			});
+		}
+	}
+	for (const stale of [false, true]) {
+		test(`Cursor real OMP ${version} builder: ${stale ? "stale managed" : "raw"} root without the current receipt is refused`, async () => {
+			const h = harness("omp", "cursor-agent");
+			await h.prepare();
+			await expect(
+				buildGrpcRequest(
+					h.ctx.model,
+					{
+						systemPrompt: ["system instructions"],
+						messages: [
+							userMessage(stale ? `${managed} stale` : "raw history", 1),
+							userMessage("active user", 2),
+						],
+					},
+					{
+						onPayload: (payload: unknown) => h.send(payload),
+					},
+					{ conversationId: "fixture", blobStore: new Map() },
+				),
+			).rejects.toThrow("Magic Context could not safely prepare this turn");
+			expect(h.notices).toHaveLength(1);
+			expect(h.notices[0]).toContain("Cursor root hash did not match");
+			expect(h.notices[0]).toContain("provider API=cursor-agent");
+			expect(h.entries).toEqual(h.notices);
+			expect(h.errors).toEqual([]);
+		});
+	}
+}
 
 for (const kind of ["omp", "pi"] as const) {
-	for (const api of [
-		"anthropic-messages",
-		"openai-responses",
-		"cursor-agent",
+	for (const { api, version, buildGrpcRequest } of [
+		{ api: "anthropic-messages", version: "18.13.2" },
+		{ api: "openai-responses", version: "18.13.2" },
+		...cursorBuilders.map((builder) => ({ ...builder, api: "cursor-agent" })),
 	]) {
 		for (const refuses of [true, false]) {
-			test(`${kind} real runner: ${api} ${refuses ? "refusal stops transport and tools, shows reason, and next turn works" : "mock transport can execute a real agent tool"}`, async () => {
+			test(`${kind} real runner: ${api} ${version} ${refuses ? "refusal stops transport and tools, shows reason, and next turn works" : "mock transport can execute a real agent tool"}`, async () => {
 				// Stock Pi has no managed-shape fence. Exercise its failed-preparation
 				// backstop; OMP exercises the payload-time missing-receipt refusal.
 				const h = harness(kind, api, kind === "pi" && refuses);
