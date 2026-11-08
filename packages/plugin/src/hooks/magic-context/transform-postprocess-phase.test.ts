@@ -14094,7 +14094,10 @@ it("a first render reproducing the served pair keeps all signed thinking", async
     expect(result.proactiveThinkingStrip).toBeNull();
 });
 
-import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
+import {
+    getPreparedCompactionMarkerSummaryIds,
+    prepareCompactionMarkerCandidates,
+} from "../../features/magic-context/compaction-marker";
 import * as markerCandidates from "../../features/magic-context/compaction-marker-candidates";
 import { withTransformTimingSummary } from "./transform-stage-logger";
 
@@ -14934,4 +14937,157 @@ it("defers an unproven inline-empty repair without freezing or changing previous
     expect(result.bustedThisPass).toBe(false);
     expect(messages).toEqual(previous);
     expect(readReplayEnvelope(db, sessionId).servedShapeRepair).toBeUndefined();
+});
+
+// Review witnesses for marker discovery that a transform pass never waits for.
+describe("marker no-wait review witnesses", () => {
+    // A host store with user boundaries u1 and u2. Each publish adds the
+    // compartment ending at that boundary and records it as the pending target,
+    // as a background historian publish does.
+    function twoMoveFixture() {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        createOpenCodeDbWithoutMessages("postprocess-no-wait-review-");
+        const sessionId = "ses-marker-no-wait-review";
+        const host = new Database(join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db"));
+        for (const [id, time] of [
+            ["u1", 1],
+            ["u2", 2],
+        ] as const)
+            host.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+                id,
+                sessionId,
+                time,
+                time,
+                JSON.stringify({ role: "user" }),
+            );
+        host.close();
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const publish = (ordinal: number, id: string) => {
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: ordinal - 1,
+                    startMessage: ordinal,
+                    endMessage: ordinal,
+                    startMessageId: id,
+                    endMessageId: id,
+                    startBlockIndex: 0,
+                    endBlockIndex: 0,
+                    title: id,
+                    content: id,
+                },
+            ]);
+            setPendingCompactionMarkerState(db, sessionId, {
+                ordinal,
+                endMessageId: id,
+                publishedAt: ordinal,
+            });
+            deferredHistoryRefreshSessions.add(sessionId);
+        };
+        const messages = () =>
+            [
+                {
+                    info: { id: "fresh", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "fresh turn" }],
+                },
+            ] as MessageLike[];
+        // A pass that rebuilds history and consumes the published compartments.
+        const consumingPass = (ordinal: number, id: string) =>
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages(), {
+                    fullFeatureMode: false,
+                    passOutcome: createPassOutcome(),
+                    historyRebuiltThisPass: true,
+                    canConsumeDeferredLate: true,
+                    deferredHistoryWasPendingAtPassStart: true,
+                    deferredHistoryRefreshSessions,
+                    pendingCompartmentInjection: {
+                        compartmentEndMessage: ordinal,
+                        compartmentEndMessageId: id,
+                        compartmentCount: ordinal,
+                        renderedText: "rebuilt history",
+                        skippedVisibleMessages: 0,
+                    } as PostTransformArgs["pendingCompartmentInjection"],
+                }),
+            );
+        // A cache-hit pass between rebuilds: the pending target waits for the next one.
+        const ordinaryPass = () =>
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages(), {
+                    fullFeatureMode: false,
+                    passOutcome: createPassOutcome(),
+                    deferredHistoryRefreshSessions,
+                }),
+            );
+        return { sessionId, publish, consumingPass, ordinaryPass };
+    }
+
+    // Every marker injection invalidates the session's discovery basis, and only
+    // the drain of a consuming pass starts a new discovery. So the first
+    // consuming pass after each publication always defers, however small the
+    // session and however long ago the target was recorded; the move waits for
+    // a further history rebuild. Before the no-wait change that pass waited a
+    // few milliseconds for discovery and moved the marker.
+    it("a later marker move applies on its consuming pass once discovery had time to run", async () => {
+        const f = twoMoveFixture();
+        try {
+            f.publish(1, "u1");
+            // A warm process: discovery for the first move has already finished.
+            expect(await prepareCompactionMarkerCandidates(f.sessionId)).toBe(true);
+            await f.consumingPass(1, "u1");
+            expect(getPersistedCompactionMarkerState(db, f.sessionId)?.boundaryMessageId).toBe(
+                "u1",
+            );
+            expect(getPendingCompactionMarkerState(db, f.sessionId)).toBeNull();
+
+            f.publish(2, "u2");
+            await f.ordinaryPass();
+            // This store is scanned in milliseconds; allow background discovery
+            // up to 3 s to finish before the next history rebuild.
+            const deadline = Date.now() + 3_000;
+            while (
+                getPreparedCompactionMarkerSummaryIds(f.sessionId) === undefined &&
+                Date.now() < deadline
+            )
+                await new Promise((resolve) => setTimeout(resolve, 25));
+            await f.consumingPass(2, "u2");
+            expect(getPersistedCompactionMarkerState(db, f.sessionId)?.boundaryMessageId).toBe(
+                "u2",
+            );
+            expect(getPendingCompactionMarkerState(db, f.sessionId)).toBeNull();
+        } finally {
+            // Let a discovery the pass started finish before the store is removed.
+            await prepareCompactionMarkerCandidates(f.sessionId);
+        }
+    });
+
+    // Known gap, kept failing on purpose: before the no-wait change the Rust drain
+    // validated the target even when discovery failed, so a target whose end
+    // message no longer exists was retired (stale-skip). Now the drain returns
+    // while discovery is "preparing", and a discovery that never succeeds (a
+    // missing worker file, a repeated deadline) keeps the stale target forever.
+    it.failing("a Rust drain retires a stale pending target even while discovery cannot complete", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        createOpenCodeDbWithoutMessages("rust-stale-no-discovery-");
+        const sessionId = "ses-rust-stale-no-discovery";
+        // The end message is absent from the host store, so validation calls it stale.
+        const pending = { ordinal: 5, endMessageId: "gone", publishedAt: 1 };
+        setPendingCompactionMarkerState(db, sessionId, pending);
+        const prepare = spyOn(markerCandidates, "prepareMarkerCandidateBasis").mockResolvedValue(
+            false,
+        );
+        try {
+            applyRustModeDeferredCompactionMarker({
+                db,
+                sessionId,
+                cacheBustingPass: true,
+                admissionProven: true,
+                consumedBoundary: { rowVersion: 1, ordinal: 5, endMessageId: "gone" },
+            });
+            expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
+        } finally {
+            prepare.mockRestore();
+        }
+    });
 });
