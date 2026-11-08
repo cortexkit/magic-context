@@ -179,12 +179,12 @@ function traceWriter(db: Database, beforeLock: () => void = () => {}) {
 }
 
 function discoveryCost(reads: ReturnType<typeof traceWriter>["preparationReads"]) {
-    // Newest-row probes (ORDER BY rowid DESC LIMIT 1) are labelled SCAN but each
-    // stops after one row; they certify and record rowid frontiers.
+    // Newest-row probes (ORDER BY rowid DESC LIMIT) are labelled SCAN but each
+    // stops after a few rows; they certify and record rowid frontiers.
     const discovery = reads.filter(
         (read) =>
             read.sql !== candidates.MARKER_CERTIFICATION_SQL &&
-            !read.sql.includes("ORDER BY rowid DESC LIMIT 1"),
+            !read.sql.includes("ORDER BY rowid DESC LIMIT"),
     );
     const suffixes = discovery.filter((read) =>
         read.sql.includes("WHERE rowid > ? AND +session_id"),
@@ -468,13 +468,13 @@ it("marker replacement never scans historical session rows under the outer write
             expect(outcome.kind).toBe("committed");
             // A session-index equality with no ID/time bound reads the entire
             // session, even though EXPLAIN calls it SEARCH rather than SCAN.
-            // The certification and frontier ORDER BY rowid DESC LIMIT 1 probes
-            // are labelled SCAN too, but each stops after the newest row.
+            // The certification and frontier ORDER BY rowid DESC LIMIT probes
+            // are labelled SCAN too, but each stops after the newest rows.
             const sessionScans = trace.reads
                 .filter(
                     (read) =>
                         read.sql !== candidates.MARKER_CERTIFICATION_SQL &&
-                        !read.sql.includes("ORDER BY rowid DESC LIMIT 1"),
+                        !read.sql.includes("ORDER BY rowid DESC LIMIT"),
                 )
                 .flatMap((read) =>
                     read.plan.filter(
@@ -660,18 +660,23 @@ it("a reference part deleted after worker discovery no longer protects the old m
     }
 });
 
-it("deleting the part frontier defers the move instead of missing a part that reuses its rowid", async () => {
+it("deleting every recorded part frontier row defers the move instead of missing a part that reuses a rowid", async () => {
     const f = await markerFixture(20);
     try {
-        f.host
-            .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
-            .run("prt_zz_frontier", messageId(2), SESSION, 2, 2, '{"type":"text","text":"latest"}');
+        const latest = Array.from(
+            { length: candidates.MARKER_FRONTIER_CANDIDATES },
+            (_, index) => `prt_zz_frontier_${index}`,
+        );
+        for (const id of latest)
+            f.host
+                .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
+                .run(id, messageId(2), SESSION, 2, 2, '{"type":"text","text":"latest"}');
         candidates.discardMarkerCandidateBasis(f.writer, SESSION);
         expect(await prepareCompactionMarkerCandidates(SESSION)).toBe(true);
-        const frontier = candidates.readMarkerCandidateBasis(f.writer, SESSION)?.references
-            ?.partFrontier;
-        expect(frontier?.id).toBe("prt_zz_frontier");
-        f.host.prepare("DELETE FROM part WHERE id='prt_zz_frontier'").run();
+        const frontiers =
+            candidates.readMarkerCandidateBasis(f.writer, SESSION)?.references?.partFrontiers ?? [];
+        expect(frontiers.map((frontier) => frontier.id)).toEqual([...latest].reverse());
+        for (const id of latest) f.host.prepare("DELETE FROM part WHERE id=?").run(id);
         f.host
             .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
             .run(
@@ -682,15 +687,15 @@ it("deleting the part frontier defers the move instead of missing a part that re
                 1,
                 JSON.stringify({ type: "compaction", tail_start_id: f.marker.summaryMessageId }),
             );
-        // SQLite reused the deleted frontier's rowid, so a read of rows above the
-        // frontier alone would miss this reference.
+        // SQLite reused the lowest deleted frontier's rowid, so a read of rows
+        // above any recorded frontier row would miss this reference.
         expect(
             (
                 f.host.prepare("SELECT rowid FROM part WHERE id='prt_zz_reference'").get() as {
                     rowid: number;
                 }
             ).rowid,
-        ).toBe(frontier!.rowid);
+        ).toBe(Math.min(...frontiers.map((frontier) => frontier.rowid)));
         const before = hostRows(f.host);
         const deferred = moveMarker(f);
         expect(deferred.kind).toBe("deferred");
@@ -706,28 +711,57 @@ it("deleting the part frontier defers the move instead of missing a part that re
     }
 });
 
-// Known gap, kept failing on purpose. The first move in a process now seeds its
-// part references from the discovery worker's scan, which may be much older than
-// the move. A part that existed at that scan as an ordinary part and is rewritten
-// in place into a compaction part with a tail_start_id keeps its ID and rowid, so
-// it is neither a known compaction part nor above the worker's rowid frontier.
-// The move then deletes a summary that the native tail still points at. When
-// the first move scanned every part of the session in its own read snapshot on
-// the main thread, it saw the rewrite and refused.
-it.failing("a part rewritten in place into a referencing compaction after worker discovery blocks the first move", async () => {
+// A retired marker, a cleanup or a host revert can delete the newest part row
+// without going through a move. The next lower recorded frontier row still
+// bounds every later insert, so neither the worker's scan nor this process's
+// own snapshot needs a new discovery, and a part that reuses the deleted rowid
+// is still read.
+it("deleting the newest part row outside a move keeps discovery usable and still finds a part that reuses its rowid", async () => {
     const f = await markerFixture(20);
     try {
-        f.host.prepare("UPDATE part SET data=? WHERE id='prt_ordinary_000001'").run(
-            JSON.stringify({
-                type: "compaction",
-                auto: true,
-                tail_start_id: f.marker.summaryMessageId,
-            }),
-        );
+        f.host
+            .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
+            .run("prt_zz_latest", messageId(2), SESSION, 2, 2, '{"type":"text","text":"latest"}');
+        candidates.discardMarkerCandidateBasis(f.writer, SESSION);
+        expect(await prepareCompactionMarkerCandidates(SESSION)).toBe(true);
+        const [newest] =
+            candidates.readMarkerCandidateBasis(f.writer, SESSION)?.references?.partFrontiers ?? [];
+        expect(newest?.id).toBe("prt_zz_latest");
+        f.host.prepare("DELETE FROM part WHERE id='prt_zz_latest'").run();
+        f.host
+            .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
+            .run(
+                "prt_zz_reference",
+                messageId(1),
+                SESSION,
+                1,
+                1,
+                JSON.stringify({ type: "compaction", tail_start_id: f.marker.summaryMessageId }),
+            );
+        expect(
+            (
+                f.host.prepare("SELECT rowid FROM part WHERE id='prt_zz_reference'").get() as {
+                    rowid: number;
+                }
+            ).rowid,
+        ).toBe(newest!.rowid);
         const before = hostRows(f.host);
-        const outcome = moveMarker(f);
-        expect(outcome.kind).not.toBe("committed");
+        // The worker's scan is still usable: the move reads the reference and refuses.
+        const refused = moveMarker(f);
+        expect(refused.kind).not.toBe("deferred");
+        expect(refused.kind).not.toBe("committed");
+        if (refused.kind !== "committed") expect(refused.error.message).toContain("tail_start_id");
         expect(hostRows(f.host)).toEqual(before);
+        // The refused move recorded its own snapshot with that part newest. Deleting
+        // it again leaves the snapshot usable, and the move now goes ahead.
+        f.host.prepare("DELETE FROM part WHERE id='prt_zz_reference'").run();
+        const moved = moveMarker(f);
+        expect(moved.kind).toBe("committed");
+        expect(
+            f.host.prepare("SELECT id FROM message WHERE id=?").get(f.marker.summaryMessageId),
+        ).toBeNull();
+        // Let the discovery the move started for the next move finish first.
+        expect(await prepareCompactionMarkerCandidates(SESSION)).toBe(true);
     } finally {
         f.cleanup();
     }

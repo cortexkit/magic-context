@@ -232,6 +232,16 @@ export function publishRecoverableCompactionMarker(
                 return replacement;
             },
             sessionId,
+            // Part references need a new discovery. Nothing was locked or written,
+            // so this attempt cannot have cut anything, whatever intent is staged:
+            // a clean deferral serves the pass and retries the move later.
+            (): CompactionMarkerReplacementOutcome => {
+                reason = "candidate-preparation";
+                return {
+                    kind: "deferred",
+                    error: new Error("marker reference discovery pending; marker unchanged"),
+                };
+            },
         );
         if (result.kind === "committed") {
             // The outer host transaction has committed. If this write fails, its

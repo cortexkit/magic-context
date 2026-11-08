@@ -12,12 +12,12 @@ export interface MarkerFrontier {
     id: string;
 }
 /** Compaction parts that may carry a tail_start_id, found by one full scan of
- * the session, and the newest part row of that same read snapshot. A later read
- * rechecks these IDs by primary key and reads only parts inserted after the
- * frontier, so it never rescans the session's old parts. */
+ * the session, and the newest part rows of that same read snapshot. A later read
+ * rechecks these IDs by primary key and reads only parts inserted after a
+ * certified frontier row, so it never rescans the session's old parts. */
 export interface MarkerReferenceSeed {
     partIds: string[];
-    partFrontier: MarkerFrontier | null;
+    partFrontiers: MarkerFrontier[];
 }
 export interface MarkerCandidateSnapshot {
     ids: string[];
@@ -37,6 +37,9 @@ export interface MarkerCandidatePreparationOptions {
     resultMs?: number;
     /** Also scan the session for tail_start_id reference rows (default true). */
     references?: boolean;
+    /** Run a custom `entry` on the shared worker pool, as the default entry runs.
+     * The entry must then serve jobs through serveWorkerJobs. */
+    shareWorker?: boolean;
 }
 export type MarkerCandidateReply =
     | { kind: "accepted" }
@@ -51,8 +54,12 @@ const ownWriteRevisions = new Map<string, number>();
 let exitRegistered = false;
 
 function reportWorkerUnavailable(entry: URL, detail: string): void {
-    if (missingWorkerWarnings.has(entry.href)) return;
-    missingWorkerWarnings.add(entry.href);
+    // Once per distinct failure: discovery now also starts in the background
+    // after every move, and an unrelated failure (a store removed under a
+    // queued scan) must not hide a later, different one.
+    const key = `${entry.href}\0${detail}`;
+    if (missingWorkerWarnings.has(key)) return;
+    missingWorkerWarnings.add(key);
     const path = entry.protocol === "file:" ? fileURLToPath(entry) : entry.href;
     log(
         `[magic-context] [ERROR] compaction-marker: candidate worker unavailable ${path}: ${detail}; marker unchanged, advancement deferred`,
@@ -263,14 +270,21 @@ function runCandidateWorker(
             timer.unref?.();
         };
         try {
+            const pooled = !options.entry || options.shareWorker === true;
             worker = inRootAsyncContext(() =>
-                options.entry
-                    ? new Worker(entry, { workerData: { path, sessionId, references } })
-                    : reuseWorker(entry, { workerData: { path, sessionId, references } }),
+                pooled
+                    ? reuseWorker(entry, { workerData: { path, sessionId, references } })
+                    : new Worker(entry, { workerData: { path, sessionId, references } }),
             );
             workers.add(worker);
             worker.unref();
-            deadline(options.acceptMs ?? 2000);
+            // Marker jobs for one store share a worker thread and run one at a time,
+            // and a session's part scan can take many seconds. Start a queued job's
+            // accept deadline when the job starts (the lease's "online"), so waiting
+            // behind another session's scan is not reported as a dead worker. The
+            // running job's own result deadline bounds how long the queue can wait.
+            if (pooled) worker.once("online", () => deadline(options.acceptMs ?? 2000));
+            else deadline(options.acceptMs ?? 2000);
             worker.on("message", (reply: MarkerCandidateReply) => {
                 if (reply.kind === "accepted") deadline(options.resultMs ?? 600000);
                 else if (reply.kind === "candidates") finish(reply.snapshot);
@@ -336,7 +350,7 @@ export function scanMarkerCandidateSnapshot(
             frontier,
             references: {
                 partIds: readMarkerReferenceRows(db, sessionId, "part").map((row) => row.id),
-                partFrontier: readMarkerFrontier(db, "part"),
+                partFrontiers: readMarkerFrontiers(db, "part"),
             },
         };
     } finally {
@@ -345,7 +359,7 @@ export function scanMarkerCandidateSnapshot(
 }
 
 /** The newest row of a host table by rowid, or null when the table is empty. */
-export function readMarkerFrontier(db: Database, table: "part" | "message"): MarkerFrontier | null {
+function readMarkerFrontier(db: Database, table: "part" | "message"): MarkerFrontier | null {
     // all() rather than get(): a cursor left mid-step can pin the read snapshot.
     const frontier =
         (
@@ -358,33 +372,53 @@ export function readMarkerFrontier(db: Database, table: "part" | "message"): Mar
     return frontier;
 }
 
-export const markerReferenceFrontierSql = (table: "part" | "message") => `SELECT
-    (SELECT rowid FROM ${table} WHERE id = ?) AS previousRowid,
-    (SELECT rowid FROM ${table} ORDER BY rowid DESC LIMIT 1) AS newestRowid`;
+/** How many of the newest rows a reference snapshot records as frontier
+ * candidates. One deleted row (our own marker retirement, a cleanup, a host
+ * revert) then leaves a lower candidate to read above instead of forcing a
+ * new discovery. */
+export const MARKER_FRONTIER_CANDIDATES = 3;
 
-/** Whether every row inserted into `table` since `frontier` was read still has a
- * higher rowid. SQLite gives a new row a rowid above the current maximum, so
- * that holds while the frontier row keeps its ID and rowid. If the frontier row
- * was deleted or renumbered, a later insert may have reused a lower rowid and
- * a rowid-suffix read could miss it. This is the same rule the summary basis
- * certification applies to its message frontier. A null frontier means the
- * table was empty, so every row present now is read as new. */
-export function isMarkerReferenceFrontierCurrent(
+/** The newest rows of a host table by rowid, newest first; empty when the table is. */
+export function readMarkerFrontiers(
     db: Database,
     table: "part" | "message",
-    frontier: MarkerFrontier | null,
-): boolean {
-    if (!frontier) return true;
-    const current = db.prepare(markerReferenceFrontierSql(table)).all(frontier.id)[0] as {
-        previousRowid: number | null;
-        newestRowid: number | null;
-    };
-    return (
-        current.previousRowid === frontier.rowid &&
-        current.newestRowid !== null &&
-        Number.isSafeInteger(current.newestRowid) &&
-        current.newestRowid >= frontier.rowid
-    );
+    count = MARKER_FRONTIER_CANDIDATES,
+): MarkerFrontier[] {
+    // all() rather than get(): a cursor left mid-step can pin the read snapshot.
+    const frontiers = db
+        .prepare(`SELECT rowid,id FROM ${table} ORDER BY rowid DESC LIMIT ?`)
+        .all(count) as MarkerFrontier[];
+    if (frontiers.some((frontier) => !Number.isSafeInteger(frontier.rowid)))
+        throw new Error(`marker ${table} frontier rowid is not a safe integer`);
+    return frontiers;
+}
+
+export const MARKER_REFERENCE_FRONTIER_SQL = (table: "part" | "message") =>
+    `SELECT rowid FROM ${table} WHERE id = ?`;
+
+/** The rowid above which every row inserted into `table` since `frontiers` were
+ * read must lie, or undefined when no recorded candidate can prove that.
+ *
+ * SQLite gives a new row a rowid above the table's current maximum. While a
+ * recorded row keeps its ID and rowid, the maximum never drops below it, so
+ * every later insert lands above that row, even if newer recorded rows were
+ * deleted and their rowids reused. The highest candidate that still maps to its
+ * recorded rowid is therefore a safe floor. If every candidate was deleted or
+ * renumbered, a later insert may have reused a lower rowid and a suffix read
+ * could miss it. The summary basis certifies its message frontier by the same
+ * rule. No candidates means the table was empty: every row present now is new. */
+export function certifiedMarkerReferenceFloor(
+    db: Database,
+    table: "part" | "message",
+    frontiers: readonly MarkerFrontier[],
+): number | undefined {
+    if (frontiers.length === 0) return 0;
+    const probe = db.prepare(MARKER_REFERENCE_FRONTIER_SQL(table));
+    for (const frontier of [...frontiers].sort((a, b) => b.rowid - a.rowid)) {
+        const current = probe.all(frontier.id) as Array<{ rowid: number }>;
+        if (current[0]?.rowid === frontier.rowid) return frontier.rowid;
+    }
+    return undefined;
 }
 
 export interface MarkerTailReference {
@@ -400,8 +434,8 @@ const MARKER_TAIL_REFERENCE_COLUMNS = `id,
 /** Without `afterRowid`, read every reference row of the session: a full scan.
  * For parts only the discovery worker runs it; the message scan stays on the
  * main thread, once per session per process. With `afterRowid`, read only rows
- * inserted after a certified frontier; +session_id keeps SQLite on the rowid
- * range instead of the session index. */
+ * inserted after a certified frontier row; +session_id keeps SQLite on the
+ * rowid range instead of the session index. */
 export function readMarkerReferenceRows(
     db: Database,
     sessionId: string,

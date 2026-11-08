@@ -12,6 +12,7 @@ import {
     prepareCompactionMarkerCandidates,
     replaceCompactionMarker,
 } from "./compaction-marker";
+import { prepareMarkerCandidateBasis } from "./compaction-marker-candidates";
 
 it("an unloadable candidate worker reports its file once and retains the marker", async () => {
     const f = fixture();
@@ -146,6 +147,56 @@ it("marker receipt mismatch defers the advance without deleting any current mark
         closeCompactionMarkerDb();
         db.close();
         process.env.XDG_DATA_HOME = oldHome;
+        f.cleanup();
+    }
+});
+
+// Marker discovery jobs for one store share a worker thread and run one at a
+// time, and one session's part scan can take many seconds. A discovery queued
+// behind it must count its accept deadline from when its own job starts, not
+// from when it was queued; otherwise it fails with a misleading worker error.
+it("a discovery queued behind another session's long scan on the shared worker still succeeds", async () => {
+    const f = fixture();
+    const path = join(f.dir, "host.db");
+    const db = hostStore(path, 20);
+    const entry = join(f.dir, "queued-discovery.mjs");
+    writeFileSync(
+        entry,
+        `import {existsSync} from 'node:fs';
+        import {serveWorkerJobs} from ${JSON.stringify(new URL("../../shared/reusable-worker-entry.ts", import.meta.url).href)};
+        serveWorkerJobs(async (input, port) => {
+            port.postMessage({kind:'accepted'});
+            if (input.sessionId === 'long-scan')
+                while (!existsSync(input.path + '.release')) await new Promise((r) => setTimeout(r, 5));
+            const {Database} = await import(${JSON.stringify(new URL("../../shared/sqlite.ts", import.meta.url).href)});
+            const {scanMarkerCandidateSnapshot} = await import(${JSON.stringify(new URL("./compaction-marker-candidates.ts", import.meta.url).href)});
+            const db = new Database(input.path, {readonly: true});
+            const snapshot = scanMarkerCandidateSnapshot(db, input.sessionId, input.references !== false);
+            db.close();
+            port.postMessage({kind: 'candidates', snapshot});
+        });`,
+    );
+    const options = {
+        entry: new URL(`file://${entry}`),
+        shareWorker: true,
+        acceptMs: 300,
+        resultMs: 60_000,
+    };
+    const logs = spyOn(logger, "log");
+    try {
+        const long = prepareMarkerCandidateBasis(db, "long-scan", options);
+        const queued = prepareMarkerCandidateBasis(db, "queued", options);
+        // Hold the first scan well past the queued job's 300 ms accept deadline.
+        await Bun.sleep(1_000);
+        writeFileSync(`${path}.release`, "go");
+        expect(await long).toBe(true);
+        expect(await queued).toBe(true);
+        expect(
+            logs.mock.calls.filter(([line]) => String(line).includes("worker deadline exceeded")),
+        ).toHaveLength(0);
+    } finally {
+        logs.mockRestore();
+        db.close();
         f.cleanup();
     }
 });

@@ -161,6 +161,14 @@ function createOpenCodeDbWithoutMessages(prefix: string): void {
     opencodeDb.close();
 }
 
+/** Wait, starting nothing, for marker discovery that an earlier pass started in
+ * the background: the time between turns that a real session gives it. */
+async function waitForMarkerDiscovery(sessionId: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (!isCompactionMarkerDiscoveryReady(sessionId) && Date.now() < deadline)
+        await Bun.sleep(10);
+}
+
 afterEach(() => {
     if (db) db.close();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -3179,7 +3187,10 @@ describe("deferred compaction marker representation", () => {
         ] as unknown as MessageLike[];
         const taggedFold = tagMessages(sessionId, foldMessages, tagger, db);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
-        // The pass never waits for marker discovery; finish it first.
+        // This pass is the first to see the pending target in a fresh process, so
+        // no earlier pass or move could have started discovery and production
+        // would defer it once (covered by the no-wait drain tests). This test is
+        // about the pass that applies, so discovery has already finished.
         expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
 
         await runPostTransformPhase(
@@ -3573,8 +3584,16 @@ describe("deferred compaction marker advance representation", () => {
             expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
             expect(getPendingCompactionMarkerState(db, sessionId)?.ordinal).toBe(20);
         }
-        // The pass never waits for marker discovery; finish it first.
-        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
+        if (cleared) {
+            // The two defer passes above saw the pending target and started
+            // discovery in the background; give it the time a turn would.
+            await waitForMarkerDiscovery(sessionId);
+        } else {
+            // No pass has seen the pending target in this fresh process yet, so
+            // production would defer this first one (covered by the no-wait drain
+            // tests). This test is about the pass that applies.
+            expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
+        }
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, drainMessages, {
@@ -3916,7 +3935,8 @@ describe("deferred compaction marker CAS drain", () => {
             // Both passes were served while discovery was still held.
             expect(f.released()).toBe(false);
             f.release();
-            expect(await prepareCompactionMarkerCandidates(f.sessionId)).toBe(true);
+            await waitForMarkerDiscovery(f.sessionId);
+            expect(isCompactionMarkerDiscoveryReady(f.sessionId)).toBe(true);
             expect(f.starts()).toBe(1);
 
             await f.pass();
@@ -3926,7 +3946,10 @@ describe("deferred compaction marker CAS drain", () => {
             );
             expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(false);
             expect(f.hostRows().parts).toHaveLength(2);
-            expect(f.starts()).toBe(1);
+            // The committed move invalidated the basis and started the next move's
+            // discovery right away; the applying pass itself started none.
+            await waitForMarkerDiscovery(f.sessionId);
+            expect(f.starts()).toBe(2);
         } finally {
             f.restore();
         }
@@ -4033,7 +4056,10 @@ describe("deferred compaction marker CAS drain", () => {
         const covered = { ordinal: 10, endMessageId: "msg-10", publishedAt: 1 };
         setPendingCompactionMarkerState(db, sessionId, covered);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
-        // The pass never waits for marker discovery; finish it first.
+        // This pass is the first to see the pending target in a fresh process, so
+        // production would defer it once while discovery starts (in TypeScript
+        // mode even a stale target waits for discovery). This test is about the
+        // pass that drains, so discovery has already finished.
         expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
 
         await runPostTransformPhase(
@@ -5838,7 +5864,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         const hardMessages = makeTail();
         const hardTagged = tagMessages(sessionId, hardMessages, tagger, db);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
-        // The pass never waits for marker discovery; finish it first.
+        // This HARD fold is the first pass to see the pending target in a fresh
+        // process, so production would defer the marker once while discovery
+        // starts. This test is about the fold that applies it.
         expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
         const hardResult = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, hardMessages, {
@@ -10428,7 +10456,9 @@ describe("marker-drain reasoning representation", () => {
         applyFlushedStatuses(sessionId, db, first.targets);
         first.batch.finalize();
         stripStructuralNoise(applying);
-        // The pass never waits for marker discovery; finish it first.
+        // The applying pass is the first to see the pending target in a fresh
+        // process, so production would defer the marker once while discovery
+        // starts. This test is about the pass that applies it.
         expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, applying, {
@@ -14096,6 +14126,7 @@ it("a first render reproducing the served pair keeps all signed thinking", async
 
 import {
     getPreparedCompactionMarkerSummaryIds,
+    isCompactionMarkerDiscoveryReady,
     prepareCompactionMarkerCandidates,
 } from "../../features/magic-context/compaction-marker";
 import * as markerCandidates from "../../features/magic-context/compaction-marker-candidates";
@@ -15022,13 +15053,12 @@ describe("marker no-wait review witnesses", () => {
         return { sessionId, publish, consumingPass, ordinaryPass };
     }
 
-    // A transform pass never waits for summary discovery. Every marker injection
-    // invalidates the session's discovery basis, and only the drain of a
-    // consuming pass starts a new discovery, so the first consuming pass after
-    // each publication defers, however small the session and however long ago
-    // the target was recorded; the move waits for a further history rebuild.
-    // When the pass still awaited discovery, it waited a few milliseconds and
-    // moved the marker. This test expects the move once discovery could finish.
+    // A transform pass never waits for summary discovery, and every marker
+    // injection invalidates the session's discovery basis. Discovery therefore
+    // starts on any pass that sees a pending target and again right after each
+    // committed move, so by the pass that consumes the next rebuilt history it
+    // has normally finished and that pass moves the marker, as it did when the
+    // pass still waited a few milliseconds for discovery.
     it("a later marker move applies on its consuming pass once discovery had time to run", async () => {
         const f = twoMoveFixture();
         try {
@@ -15062,13 +15092,10 @@ describe("marker no-wait review witnesses", () => {
         }
     });
 
-    // Known gap, kept failing on purpose. When the Rust drain still awaited
-    // discovery, it validated the target even after discovery failed, so a
-    // target whose end message no longer exists was retired (stale-skip). The
-    // drain now returns while discovery is "preparing", and a discovery that never
-    // succeeds (a missing worker file, a repeated deadline) keeps the stale
-    // target forever.
-    it.failing("a Rust drain retires a stale pending target even while discovery cannot complete", () => {
+    // While discovery is still preparing (here: it never succeeds), a Rust drain
+    // still runs the checks that need no discovery, so a target whose end
+    // message no longer exists is retired (stale-skip) rather than kept forever.
+    it("a Rust drain retires a stale pending target even while discovery cannot complete", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         createOpenCodeDbWithoutMessages("rust-stale-no-discovery-");
@@ -15090,6 +15117,123 @@ describe("marker no-wait review witnesses", () => {
             expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
         } finally {
             prepare.mockRestore();
+        }
+    });
+
+    // A staged publication intent makes an ordinary deferral report an uncertain
+    // cut, which refuses the pass. When the part references need a new discovery,
+    // nothing is locked or written, so the drain must still defer cleanly.
+    it("a staged intent with missing part references defers the move and serves the pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        createOpenCodeDbWithoutMessages("postprocess-staged-intent-no-seed-");
+        const sessionId = "ses-marker-staged-intent-no-seed";
+        const hostPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        const host = new Database(hostPath);
+        host.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+            "u1",
+            sessionId,
+            1,
+            1,
+            JSON.stringify({ role: "user" }),
+        );
+        const latest = ["prt_latest_0", "prt_latest_1", "prt_latest_2"];
+        for (const id of latest)
+            host.prepare("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
+                id,
+                "u1",
+                sessionId,
+                1,
+                1,
+                JSON.stringify({ type: "text", text: id }),
+            );
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "u1",
+                endMessageId: "u1",
+                startBlockIndex: 0,
+                endBlockIndex: 0,
+                title: "history",
+                content: "history",
+            },
+        ]);
+        const pending = { ordinal: 1, endMessageId: "u1", publishedAt: 1 };
+        setPendingCompactionMarkerState(db, sessionId, pending);
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
+        // Every recorded part frontier row disappears, so the move would need a
+        // new discovery before it could read part references.
+        for (const id of latest) host.prepare("DELETE FROM part WHERE id = ?").run(id);
+        const hostRows = () => ({
+            messages: host.prepare("SELECT * FROM message ORDER BY id").all(),
+            parts: host.prepare("SELECT * FROM part ORDER BY id").all(),
+        });
+        const before = hostRows();
+        const intent = {
+            boundaryMessageId: "u1",
+            summaryMessageId: "msg_staged_summary",
+            compactionPartId: "prt_staged_compaction",
+            summaryPartId: "prt_staged_summary",
+            boundaryOrdinal: 1,
+            targetEndMessageId: "u1",
+        };
+        replayStorage.compareAndSetCompactionMarkerPublicationState(
+            db,
+            sessionId,
+            replayStorage.getCompactionMarkerPublicationState(db, sessionId).raw,
+            null,
+            intent,
+        );
+        const deferredHistoryRefreshSessions = new Set([sessionId]);
+        const passOutcome = createPassOutcome();
+        const messages = [
+            {
+                info: { id: "fresh", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "fresh rebuilt turn" }],
+            },
+        ] as MessageLike[];
+        const logs = spyOn(loggerModule, "sessionLog");
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    fullFeatureMode: false,
+                    passOutcome,
+                    historyRebuiltThisPass: true,
+                    canConsumeDeferredLate: true,
+                    deferredHistoryWasPendingAtPassStart: true,
+                    deferredHistoryRefreshSessions,
+                    pendingCompartmentInjection: {
+                        compartmentEndMessage: 1,
+                        compartmentEndMessageId: "u1",
+                        compartmentCount: 1,
+                        renderedText: "rebuilt history",
+                        skippedVisibleMessages: 0,
+                    } as PostTransformArgs["pendingCompartmentInjection"],
+                }),
+            );
+            expect(passOutcome.degradations).toEqual([]);
+            expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");
+            expect(
+                logs.mock.calls.some(([, line]) =>
+                    String(line).includes(
+                        "compaction-marker drain: candidate preparation deferred",
+                    ),
+                ),
+            ).toBe(true);
+            expect(getPendingCompactionMarkerState(db, sessionId)).toEqual(pending);
+            expect(
+                replayStorage.getCompactionMarkerPublicationState(db, sessionId).pending
+                    ?.summaryMessageId,
+            ).toBe(intent.summaryMessageId);
+            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+            expect(hostRows()).toEqual(before);
+        } finally {
+            logs.mockRestore();
+            // The deferral restarted discovery; let it finish before the store goes.
+            await waitForMarkerDiscovery(sessionId);
+            host.close();
         }
     });
 });

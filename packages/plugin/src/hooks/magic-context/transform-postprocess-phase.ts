@@ -977,20 +977,6 @@ export function applyRustModeDeferredCompactionMarker(args: {
     // Record the latest target above even when this pass cannot prove the cut safe.
     // Deferral does not spend retry attempts or arm the post-cut replay fence.
     if (args.admissionProven === false) return;
-    // Summary discovery runs on a worker and the pass never waits for it. While it
-    // runs, keep the pending target the same way: no fence, no retry spent. A host
-    // store that cannot be opened starts no discovery; the drain below reports
-    // that as a retryable failure, as before.
-    if (
-        (args.applyDeferred ?? applyDeferredCompactionMarker) === applyDeferredCompactionMarker &&
-        startCompactionMarkerCandidatePreparation(args.sessionId) === "preparing"
-    ) {
-        sessionLog(
-            args.sessionId,
-            "rust compaction-marker drain: candidate preparation deferred; pending target retained",
-        );
-        return;
-    }
     const trustedBoundary =
         boundary &&
         pending.ordinal === boundary.ordinal &&
@@ -1001,6 +987,37 @@ export function applyRustModeDeferredCompactionMarker(args: {
                   endMessageId: boundary.endMessageId,
               }
             : undefined;
+    // Summary discovery runs on a worker and the pass never waits for it. While it
+    // runs, the checks that need no discovery still retire a stale or already-
+    // covered target; the cut itself waits, with no fence armed and no retry
+    // spent. A host store that cannot be opened starts no discovery; the drain
+    // below reports that as a retryable failure, as before.
+    if (
+        (args.applyDeferred ?? applyDeferredCompactionMarker) === applyDeferredCompactionMarker &&
+        startCompactionMarkerCandidatePreparation(args.sessionId) === "preparing"
+    ) {
+        const settled = applyDeferredCompactionMarker(
+            args.db,
+            args.sessionId,
+            pending,
+            args.sessionDirectory,
+            trustedBoundary,
+            { validateOnly: true },
+        );
+        if (settled.kind === "stale-skip" || settled.kind === "already-current") {
+            if (!clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending))
+                sessionLog(
+                    args.sessionId,
+                    `rust compaction-marker drain: CAS lost${boundary ? ` after module row ${boundary.rowVersion}` : ""}; newer pending target retained`,
+                );
+            return;
+        }
+        sessionLog(
+            args.sessionId,
+            "rust compaction-marker drain: candidate preparation deferred; pending target retained",
+        );
+        return;
+    }
     args.beforeApply?.();
     const outcome = (args.applyDeferred ?? applyDeferredCompactionMarker)(
         args.db,
@@ -4159,6 +4176,15 @@ export async function runPostTransformPhase(
     // the same summary representation that this pass will emit.
     let suppressV12HistoryDrain = false;
     let persistedCompactionMarkerState = replaySnapshot?.compactionMarker ?? null;
+    // The drain never waits for summary discovery. Start it, without waiting, on
+    // every pass while a target is pending, so it has usually finished by the
+    // pass that consumes the rebuilt history; Rust mode does the same.
+    if (
+        replaySnapshot?.pendingCompactionMarker &&
+        (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy).applyDeferred ===
+            applyDeferredCompactionMarker
+    )
+        startCompactionMarkerCandidatePreparation(args.sessionId);
     if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
         const pending = replaySnapshot?.pendingCompactionMarker ?? null;
         if (pending) {

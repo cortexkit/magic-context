@@ -4637,6 +4637,15 @@ export function createRustModeTransform(
                 // reasoning recovery. Keep that basis unmodified, including nested parts;
                 // a postprocessed prefix can silently discard a message at the next splice.
                 pendingWireCache.nativeOutput = moduleMessages;
+                // Start summary discovery without waiting, on frozen replays too: it
+                // reads the whole session on a worker and changes no served bytes, and
+                // the marker drain defers until it is ready.
+                if (
+                    (materializedBoundary ||
+                        getPendingCompactionMarkerState(deps.db, sessionId) !== null) &&
+                    !deps.compactionOff
+                )
+                    startCompactionMarkerCandidatePreparation(sessionId);
                 // LKG captures postprocessed output, so running postprocess again would stop the
                 // fallback artifact from being an exact replay.
                 if (!replayedFrozenRepresentation) {
@@ -4645,9 +4654,6 @@ export function createRustModeTransform(
                             getPendingCompactionMarkerState(deps.db, sessionId) !== null) &&
                         !deps.compactionOff
                     ) {
-                        // Start summary discovery without waiting: it reads the whole
-                        // session on a worker. The marker drain defers until it is ready.
-                        startCompactionMarkerCandidatePreparation(sessionId);
                         try {
                             await withAsyncPrivilegedWriter(deps.db, () => undefined);
                         } catch (error) {

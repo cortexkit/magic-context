@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import {
+    isCompactionMarkerDiscoveryReady,
     listSessionCompactionMarkers,
     prepareCompactionMarkerCandidates,
 } from "../../features/magic-context/compaction-marker";
@@ -807,8 +808,11 @@ describe("Rust mode authority adapter", () => {
             });
         };
         let transform = build();
-        // A pass never waits for marker discovery; these faults concern the cut
-        // itself, so let discovery finish before each pass as a warm session would.
+        // A pass never waits for marker discovery. Here the module reports its
+        // boundary first on the busting pass that drains it, so no earlier pass
+        // could start discovery and production would defer that cut once. These
+        // faults concern the cut itself, so let discovery finish before each pass
+        // as it has in a session whose discovery already ran.
         const invoke = async (output: { messages: unknown[] }) => {
             const input = makeMessages(sid);
             await prepareCompactionMarkerCandidates(sid);
@@ -1711,8 +1715,11 @@ describe("Rust mode authority adapter", () => {
             expect(getPendingCompactionMarkerState(db, sessionId)).toEqual(pending);
             expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
         }
-        // The frozen passes started marker discovery without waiting for it.
-        await prepareCompactionMarkerCandidates(sessionId);
+        // The frozen passes saw the pending target and started marker discovery
+        // without waiting for it; give it the time a turn would.
+        const deadline = Date.now() + 5_000;
+        while (!isCompactionMarkerDiscoveryReady(sessionId) && Date.now() < deadline)
+            await Bun.sleep(10);
         await serve();
         expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
         expect(getPersistedCompactionMarkerState(db, sessionId)?.boundaryOrdinal).toBe(1);
