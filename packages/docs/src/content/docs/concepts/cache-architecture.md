@@ -58,16 +58,18 @@ Only **dashboard** memory edits bump the project memory epoch, forcing an immedi
 
 A fold is a prompt-cache rewrite. Providers may price cache writes and uncached input above cache reads, so frequent small folds can repeatedly bill overlapping prefix bytes. Magic Context batches due history, memory, and reduction work into fewer rebuilds; every ordinary turn between them replays the stable prefix byte for byte.
 
-`cache_ttl` is Magic Context's assumption about how long the provider retains that prefix. Its default is `5m`, and it can vary by model. When the assumed TTL has expired during idle time, Magic Context can rebuild on the next turn because it treats the old provider cache as gone. This setting does not change the provider's actual cache policy. See the [generated configuration reference](/reference/configuration/#context-management).
+`cache_ttl` is Magic Context's assumption about how long the provider retains that prefix. Its default is `5m`, and it can vary by model. It does not trigger a rebuild: when only the provider forgot the prefix, the next turn sends the same bytes, which keeps signed thinking valid and costs the same re-read. This setting does not change the provider's actual cache policy. See the [generated configuration reference](/reference/configuration/#context-management).
 
 ## Honest framing
 
 Occasional full re-materializations are by design. They happen when:
 
 - The model or provider changes (the cache was dead anyway).
-- The session has been idle past the TTL (the cache expired).
+- The system prompt or the tool list changes.
 - You edit memories through the dashboard (an external change the session needs to pick up).
 - The m[1] delta grows too large (the pressure backstop fires).
+
+An idle session is not one of them: after the provider's cache expires, the next turn replays the same bytes.
 
 In a steady-state working session, m[0] stays stable for hours or days. The prompt cache survives the whole session, and you pay cached-token rates for the large prefix.
 
