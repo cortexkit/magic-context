@@ -291,7 +291,7 @@ async function firstPassAfterRestart(name: string, restart: Restart) {
         schedulerPercentage: Number(/percentage=([\d.]+)%/.exec(scheduler)?.[1]),
         schedulerCacheTtl: /cacheTtl=(\S+)/.exec(scheduler)?.[1],
         // Whether the pass computed the provider cache as expired by idle time.
-        idleExpiry: /idle_expiry=(\w+)/.exec(
+        idleExpiry: /cache_expired=(\w+)/.exec(
             lines.find((line) => line.startsWith("rewrite permission:")) ?? "",
         )?.[1],
         pendingAfter: getPendingOps(db, sessionId).length,
