@@ -165,6 +165,112 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
 }
 
 #[tokio::test]
+async fn contract_update_newer_signed_reply_strips_only_with_claude_policy() {
+    for (provider, model, strip) in [
+        ("anthropic", "claude-opus-5-5", true),
+        ("google", "gemini-3-pro", false),
+    ] {
+        let mut config = config(Kind::Anthropic, anthropic_bound(), 40_000);
+        config.model = ModelRef::new(provider, model);
+        let mut runner = start(config).await;
+        runner
+            .play(&[
+                Step::User {
+                    text: "old request".into(),
+                },
+                Step::User {
+                    text: "current request".into(),
+                },
+            ])
+            .await;
+        let entries = runner.host().entries();
+        let view = View::seal_with_policy(
+            1,
+            vec![Edit::new(
+                1,
+                EditOp::Drop {
+                    mid: entries[0].mid.clone(),
+                    part: None,
+                },
+            )],
+            entries.last().map(|entry| entry.mid.clone()),
+            strip.then(|| "strip".into()),
+        );
+        runner
+            .play(&[Step::Model(Turn {
+                reasoning_tokens: Some(50),
+                text: Some("Read a file.".into()),
+                tools: vec![ToolCall::ok(
+                    "read",
+                    json!({"path":"a.rs"}),
+                    "file contents",
+                )],
+                ..Turn::default()
+            })])
+            .await;
+        assert!(runner
+            .host()
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .any(|part| part.seal == cortexkit_role_compaction::part::Seal::Signed));
+        let known = View::seal_with_policy(
+            1,
+            view.edits.clone(),
+            runner
+                .host()
+                .entries()
+                .last()
+                .map(|entry| entry.mid.clone()),
+            Some("strip".into()),
+        );
+        assert!(matches!(
+            runner.host().apply_view(ApplyViewRequest::new(known)),
+            ApplyViewAnswer::Refused {
+                refusal: ViewRefusal::Rule(RuleBreak::SignedPartInvalid { .. })
+            }
+        ));
+        let answer = runner.host().apply_view(ApplyViewRequest::new(view));
+        if strip {
+            assert_eq!(answer, ApplyViewAnswer::Accepted);
+            runner
+                .play(&[Step::Model(Turn {
+                    text: Some("Done.".into()),
+                    ..Turn::default()
+                })])
+                .await;
+            assert_eq!(runner.host().applied_version(), Some(1));
+            assert!(runner
+                .host()
+                .rendered()
+                .iter()
+                .flat_map(|message| &message.parts)
+                .all(|part| part.seal != cortexkit_role_compaction::part::Seal::Signed));
+            assert!(
+                runner.report.model_errors.is_empty(),
+                "{:?}",
+                runner.report.model_errors
+            );
+            assert!(
+                runner.report.view_refusals.is_empty(),
+                "{:?}",
+                runner.report.view_refusals
+            );
+        } else {
+            assert!(
+                matches!(
+                    answer,
+                    ApplyViewAnswer::Refused {
+                        refusal: ViewRefusal::Rule(RuleBreak::SignedPartInvalid { .. })
+                    }
+                ),
+                "{answer:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn await_notices_waits_for_the_session_tool_reply_without_advancing_time() {
     use std::future::Future;
     use std::task::Poll;

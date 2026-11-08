@@ -514,6 +514,9 @@ jobs:
       - name: Build cli
         run: bun run --cwd packages/cli build
 
+      - name: Copy README for npm package
+        run: cp README.md packages/cli/README.md
+
       # Uses npm Trusted Publishing (OIDC) — must be configured on npmjs.com
       # for @cortexkit/magic-context before first release.
       - name: Publish to npm

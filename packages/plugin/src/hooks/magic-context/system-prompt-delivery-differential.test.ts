@@ -747,10 +747,10 @@ it("independent differential retains base content across the admitted-thinking-s
     if (!s02 && passes === 80 && !process.env.REVIEW_OUT) {
         // Signed digests retain the fixture's fixed-floor guard: preserve tool
         // results when no amount of reclaim can fit the turn. Both OpenCode
-        // fixtures also include the author-based <system-reminder> guidance:
-        // a notice wrapper does not grant authority to quoted text. Only that
-        // system wording changed; all message parts, including thinking and empty
-        // companions, and every Pi byte remain at their prior baseline.
+        // fixtures also include the acted-on <system-reminder> notice guidance.
+        // Only that system wording changed; all message parts, including thinking,
+        // empty companions, tool calls and results, and every Pi byte remain at
+        // their prior baseline.
         // Collect every row before asserting, so one run reports each drifted key.
         const actual: Record<string, string | undefined> = {};
         const expected: Record<string, string | undefined> = {};

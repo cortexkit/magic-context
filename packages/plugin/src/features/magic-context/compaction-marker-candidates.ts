@@ -72,7 +72,7 @@ export function isMarkerCandidateBasisCurrent(db: Database, basis: MarkerCandida
         // known candidates therefore cannot delete unrelated messages or parts.
         const current = db
             .prepare(MARKER_CERTIFICATION_SQL)
-            .get(basis.frontier?.id ?? null, basis.frontier?.rowid ?? 0, basis.sessionId) as {
+            .all(basis.frontier?.id ?? null, basis.frontier?.rowid ?? 0, basis.sessionId)[0] as {
             previousRowid: number | null;
             newestRowid: number | null;
             newestId: string | null;
@@ -115,9 +115,19 @@ export function invalidateMarkerCandidateBasis(db: Database, sessionId: string):
 export function readMarkerCandidateBasis(
     db: Database,
     sessionId: string,
+    readConnection: Database = db,
 ): MarkerCandidateBasis | undefined {
     const basis = candidates.get(db)?.get(sessionId);
-    if (basis && isMarkerCandidateBasisCurrent(db, basis)) return basis;
+    if (basis) {
+        // Certify on the caller's read snapshot without moving the candidate
+        // cache to that connection. The writer must still certify its own basis
+        // after BEGIN IMMEDIATE, when all intervening host writes are visible.
+        const snapshot = readConnection === db ? basis : { ...basis, connection: readConnection };
+        if (isMarkerCandidateBasisCurrent(readConnection, snapshot)) {
+            basis.frontier = snapshot.frontier;
+            return readConnection === db ? basis : { ...snapshot, connection: db };
+        }
+    }
     candidates.get(db)?.delete(sessionId);
     return undefined;
 }

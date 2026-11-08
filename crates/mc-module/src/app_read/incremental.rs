@@ -5,6 +5,35 @@ use super::*;
 use crate::app_read::{Header, IndexRow, Update};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// Token-weighted provenance, in increasing order of uncertainty. Keeping it
+/// beside cached rows lets labels update without rescanning the transcript.
+#[derive(Clone, Copy, Default)]
+struct Sources([u64; 4]);
+impl Sources {
+    fn add(&mut self, tokens: u64, source: &str) {
+        let at = match source {
+            "runner" => 0,
+            "counted" => 1,
+            "reported" => 2,
+            _ => 3,
+        };
+        self.0[at] += tokens;
+    }
+    fn adjust(&mut self, old: Self, new: Self) {
+        for at in 0..4 {
+            self.0[at] = self.0[at] - old.0[at] + new.0[at];
+        }
+    }
+    fn estimated(self) -> bool {
+        self.0[2] > 0 || self.0[3] > 0
+    }
+    fn dominant(self) -> &'static str {
+        // max_by_key keeps the last equal weight: uncertainty wins a tie.
+        let at = (0..4).max_by_key(|at| self.0[*at]).unwrap();
+        ["runner", "counted", "reported", "estimate"][at]
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct PartInfo {
     id: String,
@@ -30,6 +59,8 @@ struct Cached {
     user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
+    /// Raw, tool, reasoning, person text, then notice text provenance.
+    sources: [Sources; 5],
     stamps: usize,
 }
 #[derive(Clone)]
@@ -66,6 +97,7 @@ pub(crate) struct Projection {
     user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
+    sources: [Sources; 5],
     queued: usize,
     pub(crate) dirty: BTreeSet<String>,
     pub(crate) summaries_dirty: bool,
@@ -112,6 +144,7 @@ impl Default for Projection {
             user_text: [0; 2],
             tool: 0,
             reasoning: 0,
+            sources: [Sources::default(); 5],
             queued: 0,
             dirty: BTreeSet::new(),
             summaries_dirty: true,
@@ -173,6 +206,9 @@ impl Projection {
             }
             self.tool -= old.tool;
             self.reasoning -= old.reasoning;
+            for at in 0..5 {
+                self.sources[at].adjust(old.sources[at], Sources::default());
+            }
             if !self.summarized(ordinal) {
                 self.queued -= old.stamps;
             }
@@ -295,6 +331,7 @@ impl Session {
                 user_text: [0; 2],
                 tool: 0,
                 reasoning: 0,
+                sources: [Sources::default(); 5],
                 stamps: 0,
             });
             if model_changed
@@ -532,7 +569,7 @@ impl Session {
             if !summarized {
                 p.queued -= cached.stamps;
             }
-            let (message, raw, tool, reasoning, user_text, stamps) = message(
+            let (message, raw, tool, reasoning, user_text, stamps, sources) = message(
                 self,
                 cached,
                 ordinal,
@@ -546,6 +583,10 @@ impl Session {
             cached.tool = tool;
             cached.reasoning = reasoning;
             cached.stamps = stamps;
+            for (at, source) in sources.iter().enumerate() {
+                p.sources[at].adjust(cached.sources[at], *source);
+            }
+            cached.sources = sources;
             p.raw += raw;
             for (total, count) in p.user_text.iter_mut().zip(user_text) {
                 *total += count;
@@ -588,19 +629,29 @@ impl Session {
                 estimate: !counted.exact,
             })
         };
+        let attributed = |name, tokens, sources: Sources| PartTokens {
+            part: name,
+            tokens: Some(tokens),
+            estimate: sources.estimated(),
+        };
+        let counted = |name, tokens| PartTokens {
+            part: name,
+            tokens: Some(tokens),
+            estimate: false,
+        };
         let parts = [
             surface("system_prompt", self.surface_tokens.0),
             surface("tool_definitions", self.surface_tokens.1),
-            PartTokens::estimate("memory", p.head[0]),
-            PartTokens::estimate("project_docs", p.head[1]),
-            PartTokens::estimate("user_profile", p.head[2]),
-            PartTokens::estimate("history_summaries", p.head[3]),
-            PartTokens::estimate("history_raw", p.raw),
-            PartTokens::estimate("tool_calls_results", p.tool),
-            PartTokens::estimate("reasoning", p.reasoning),
-            PartTokens::estimate("last_user_message", 0),
-            PartTokens::estimate("user_messages", p.user_text[0]),
-            PartTokens::estimate("notices", p.user_text[1]),
+            counted("memory", p.head[0]),
+            counted("project_docs", p.head[1]),
+            counted("user_profile", p.head[2]),
+            counted("history_summaries", p.head[3]),
+            attributed("history_raw", p.raw, p.sources[0]),
+            attributed("tool_calls_results", p.tool, p.sources[1]),
+            attributed("reasoning", p.reasoning, p.sources[2]),
+            counted("last_user_message", 0),
+            attributed("user_messages", p.user_text[0], p.sources[3]),
+            attributed("notices", p.user_text[1], p.sources[4]),
         ];
         // The window the apps scale to is the usable one, as the standalone
         // plugin reports it: the model's window less the output reserve.
@@ -609,6 +660,18 @@ impl Session {
             provider,
             crate::pass::usable_window(&self.conditions),
         );
+        let mut sources = Sources::default();
+        for source in p.sources {
+            sources.adjust(Sources::default(), source);
+        }
+        sources.add(p.head.iter().sum(), "counted");
+        for surface in [self.surface_tokens.0, self.surface_tokens.1]
+            .into_iter()
+            .flatten()
+        {
+            sources.add(surface.count, "runner");
+        }
+        breakdown["estimation_source"] = json!(sources.dominant());
         breakdown["managed"] = json!({"value":!self.tools_only&&!self.suspended});
         breakdown["as_of"] = json!({"step_ref":usage.map(|u|&u.mid),"at_ms":at});
         breakdown["parts"][2]["count"] = json!(memory_count);
@@ -846,7 +909,7 @@ fn message(
     messages: &BTreeSet<String>,
     replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
-) -> (Message, u64, u64, u64, [u64; 2], usize) {
+) -> (Message, u64, u64, u64, [u64; 2], usize, [Sources; 5]) {
     let mut stamped = Vec::new();
     let mut gone = Vec::new();
     let mut raw = 0;
@@ -855,6 +918,7 @@ fn message(
     let mut reasoning = 0;
     let mut tagged = 0;
     let mut items = Vec::with_capacity(cached.parts.len());
+    let mut sources = [Sources::default(); 5];
     let before = session
         .unconfirmed
         .first()
@@ -897,12 +961,17 @@ fn message(
         } else if !removed {
             if part.kind == "tool" {
                 tool += part.tokens;
+                sources[1].add(part.tokens, source);
             } else if part.kind == "reasoning" {
                 reasoning += tokens;
+                sources[2].add(tokens, source);
             } else if let Some(origin) = &part.origin {
-                user_text[usize::from(origin["kind"] == "notice")] += part.tokens;
+                let category = usize::from(origin["kind"] == "notice");
+                user_text[category] += part.tokens;
+                sources[3 + category].add(part.tokens, source);
             } else {
                 raw += part.tokens;
+                sources[0].add(part.tokens, source);
             }
         }
     }
@@ -923,6 +992,7 @@ fn message(
         reasoning,
         user_text,
         stamps,
+        sources,
     )
 }
 

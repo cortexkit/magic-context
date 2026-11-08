@@ -55,6 +55,7 @@ struct NoticeTrace {
 
 #[derive(Clone, Default)]
 struct HostClient {
+    child_harnesses: Arc<Mutex<Vec<(String, String)>>>,
     host: Arc<Mutex<Option<Host>>>,
     /// Every catch-up read ck-mc made (compact detail).
     reads: ReadLog,
@@ -274,6 +275,10 @@ impl RunnerClient for HostClient {
         child: &Child,
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
+        self.child_harnesses
+            .lock()
+            .unwrap()
+            .push(("send".into(), child.session.harness.clone()));
         self.child_scopes
             .lock()
             .unwrap()
@@ -283,9 +288,13 @@ impl RunnerClient for HostClient {
 
     async fn child_result(
         &self,
-        _: &Child,
+        child: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
+        self.child_harnesses
+            .lock()
+            .unwrap()
+            .push(("result".into(), child.session.harness.clone()));
         let pause = self.pause_children.lock().unwrap().clone();
         if let Some(pause) = pause {
             self.child_started.notify_one();

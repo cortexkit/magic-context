@@ -24,7 +24,7 @@
           "source": "usage",
           "tokens": 99000
         },
-        "estimation_source": "legacy_estimate",
+        "estimation_source": "runner",
         "items": [
           {
             "item": "system_prompt",
@@ -76,52 +76,52 @@
           },
           {
             "count": 0,
-            "estimate": true,
+            "estimate": false,
             "part": "memory",
             "tokens": 0
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "project_docs",
             "tokens": 12
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "user_profile",
             "tokens": 0
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "history_summaries",
             "tokens": 44
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "history_raw",
             "tokens": 3
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "tool_calls_results",
             "tokens": 712
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "reasoning",
             "tokens": 1001
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "last_user_message",
             "tokens": 0
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "user_messages",
             "tokens": 3
           },
           {
-            "estimate": true,
+            "estimate": false,
             "part": "notices",
             "tokens": 0
           }
@@ -135,7 +135,7 @@
       "schema": 1,
       "section": "token_breakdown",
       "state": "ready",
-      "version": "mca1:86a16cdc657d07757f119decff0d50f4606bf54925ef20445395f68496038015"
+      "version": "mca1:d1436eaba204da011434a0fa99577ecfb351719bb237a736a4a02d11459cba48"
     }
   }
 }

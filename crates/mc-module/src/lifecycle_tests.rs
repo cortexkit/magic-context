@@ -17,6 +17,7 @@ mod count_tests;
 
 #[derive(Default)]
 struct Client {
+    applied: Mutex<Option<AppliedViewAnswer>>,
     entries: Mutex<Vec<Entry>>,
     pages: Mutex<VecDeque<Result<ReadPage, crate::client::ClientError>>>,
     reads: Mutex<Vec<ReadRequest>>,
@@ -74,7 +75,7 @@ impl RunnerClient for Client {
         &self,
         _: &SessionRef,
     ) -> Result<AppliedViewAnswer, crate::client::ClientError> {
-        Ok(AppliedViewAnswer::new())
+        Ok(self.applied.lock().unwrap().clone().unwrap_or_default())
     }
     async fn send(
         &self,
@@ -98,6 +99,9 @@ impl RunnerClient for Client {
         Err(crate::client::ClientError::new("no child"))
     }
 }
+
+#[path = "contract_update_tests.rs"]
+mod contract_update_tests;
 
 fn text(ordinal: u64, name: &str) -> Entry {
     let mut part = Part::new("p", PartBody::Text { text: name.into() });
@@ -1480,6 +1484,35 @@ fn lifecycle_notice_age_sweep_counts_notice_wakes_without_aging_tools() {
     session.accept(view);
     assert_eq!(session.notice_reclaim_bookmark, 2);
     assert_eq!(session.reclaim_bookmark, 0);
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_keeps_marked_notice_beside_unkept_notice() {
+    let (mut session, _, _, _, settings) = fixture();
+    let mut kept = old_notice_entries().remove(0);
+    kept.notice.as_mut().unwrap().keep = true;
+    let mut unkept = text(2, "unkept-notice");
+    unkept.notice = old_notice_entries().remove(0).notice;
+    unkept.parts[0].body = kept.parts[0].body.clone();
+    let mut entries = vec![kept, unkept];
+    for ordinal in 3..=5 {
+        let mut newer = text(ordinal, &format!("notice-{ordinal}"));
+        newer.notice = entries[1].notice.clone();
+        entries.push(newer);
+    }
+    session.index.extend(entries);
+    assert!(session.build(&settings, None, true, None).0.is_none());
+    session.commit_bookmark();
+    let (view, _) = session.build(&settings, None, true, None);
+    let view = view.expect("an unkept notice is swept after two permitted rebuilds");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "unkept-notice" && field == "text" && value == "[dropped §2§]")));
+    assert!(
+        !view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-notice")),
+        "the notice marked keep must stay whole beside the swept notice"
+    );
 }
 
 fn output_part(id: &str, tag: u64) -> Part {

@@ -456,6 +456,28 @@ fn samples_v6_remain_pinned() {
     }
 }
 
+#[test]
+fn samples_v7_remain_pinned() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v7");
+    let sums = std::fs::read_to_string(root.join("SHA256SUMS")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(sums.as_bytes())),
+        "066e35f8267533977f6d26f0b74247356dafb35d67808931b99a37c3394f3b7f"
+    );
+    for line in sums.lines() {
+        let (hash, name) = line.split_once("  ").unwrap();
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(root.join(name)).unwrap())
+            ),
+            hash,
+            "changed v7 sample {name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn samples_v8() {
     let (_dir, conn) = search_db();

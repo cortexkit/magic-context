@@ -52,6 +52,9 @@ pub const CHILD: &str = "mc-summary";
 #[derive(Clone, Debug)]
 pub struct Request {
     pub session: SessionRef,
+    /// Snapshot the child's route when the run starts. Later Setup updates
+    /// affect the next run, never a child or continuation already in flight.
+    pub child_harness: Option<String>,
     /// The first ordinal no summary covers yet.
     pub from: u64,
     /// The first ordinal of the protected tail, which the run leaves alone.
@@ -600,7 +603,10 @@ async fn attempt<C: RunnerClient>(
         let child = Child {
             session: SessionRef::new(
                 job.session.runner.clone(),
-                job.session.harness.clone(),
+                job.child_harness
+                    .as_ref()
+                    .unwrap_or(&job.session.harness)
+                    .clone(),
                 child_name(job, label, retry),
             ),
             project_root: job.project_root.clone(),

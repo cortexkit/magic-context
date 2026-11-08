@@ -496,3 +496,83 @@ async fn lifecycle_tools_answer_while_the_historian_is_still_writing() {
         .unwrap();
     assert_clean(&runner);
 }
+
+#[tokio::test]
+async fn contract_update_setup_child_harness_changes_only_future_children() {
+    let client = HostClient::default();
+    let pause = Arc::new(tokio::sync::Semaphore::new(0));
+    *client.pause_children.lock().unwrap() = Some(pause.clone());
+    let mut runner = start_with_client(
+        client.clone(),
+        config("head", Kind::OpenAi, free()),
+        Settings::default(),
+        None,
+        false,
+        |_| {},
+    )
+    .await;
+    let module = runner.provider().module();
+    let route = runner.provider().route.clone();
+    let setup = |harness: Option<&str>| {
+        let mut request = SetupRequest::new(
+            "head",
+            ModelRef::new("test", "test-model"),
+            100_000,
+            1_000,
+            free(),
+            Vec::new(),
+            1,
+        );
+        request.child_harness = harness.map(str::to_owned);
+        request
+    };
+    module.setup(route.clone(), setup(Some("child-a"))).unwrap();
+    module.idle(&route.session).await.unwrap();
+    let play = tokio::spawn(async move {
+        let mut steps = turn("Look at a.rs.");
+        steps.extend(turn("And b.rs."));
+        steps.extend(turn("Then c.rs."));
+        steps.push(answer());
+        runner.play(&steps).await;
+        runner
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.child_started.notified(),
+    )
+    .await
+    .expect("the historian did not start");
+    module.setup(route.clone(), setup(Some("child-b"))).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        module.tool(&route, "ctx_reduce", json!({"drop":""})),
+    )
+    .await
+    .expect("Setup blocked behind the historian")
+    .unwrap();
+    *client.pause_children.lock().unwrap() = None;
+    pause.add_permits(1);
+    let runner = tokio::time::timeout(std::time::Duration::from_secs(5), play)
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = client.child_harnesses.lock().unwrap().clone();
+    assert_eq!(
+        calls[..2],
+        [
+            ("send".into(), "child-a".into()),
+            ("result".into(), "child-a".into())
+        ]
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(op, harness)| op == "send" && harness == "child-b"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[2..].iter().all(|(_, harness)| harness == "child-b"),
+        "{calls:?}"
+    );
+    assert_clean(&runner);
+}

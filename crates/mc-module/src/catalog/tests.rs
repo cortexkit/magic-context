@@ -5,7 +5,8 @@
 //! and guidance feature flags), and
 //! `testdata/tool-catalog-guidance-matrix.json` the digest of every guidance text
 //! for every combination of config inputs. Both are written by
-//! `crates_old/mc-module/gen/gen-tool-catalog.ts` from the same shared definition the module serves from, so these
+//! `crates/mc-module/gen/gen-tool-catalog.ts` from the same shared definition
+//! the module serves from, so these
 //! tests hold the generator's TypeScript renderer and this module's Rust one to
 //! the same bytes.
 

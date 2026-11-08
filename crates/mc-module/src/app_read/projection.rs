@@ -77,6 +77,7 @@ impl<'a> PartTokens<'a> {
             estimate: true,
         }
     }
+    #[cfg(test)]
     fn estimate(part: &'a str, tokens: u64) -> Self {
         Self {
             part,
@@ -772,6 +773,81 @@ mod tests {
             .find(|part| part["part"] == "notices")
             .unwrap();
         assert_eq!(notices["tokens"], 0);
+    }
+
+    #[test]
+    fn app_read_user_text_categories_preserve_sources_through_removal() {
+        let mut session = session();
+        let person = Entry::new(
+            201,
+            "person",
+            Role::User,
+            201,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "person words".into(),
+                },
+            )],
+        );
+        let mut notice = Entry::new(
+            202,
+            "notice",
+            Role::User,
+            202,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "runner measured notice".into(),
+                },
+            )],
+        );
+        notice.parts[0].tokens = Some(cortexkit_role_compaction::tokens::PartTokens::count(10_000));
+        notice.notice = Some(
+            serde_json::from_value(json!({
+                "sender":"worker-7", "template":"worker_result"
+            }))
+            .unwrap(),
+        );
+        session
+            .index
+            .extend_counted([person, notice], Some("claude-v5/1"));
+        let snapshot = session.app_snapshot();
+        let category = |snapshot: &Snapshot, name| {
+            snapshot.breakdown["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part["part"] == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            category(&snapshot, "user_messages"),
+            json!({
+                "part":"user_messages", "tokens":3, "estimate":false
+            })
+        );
+        assert_eq!(
+            category(&snapshot, "notices"),
+            json!({
+                "part":"notices", "tokens":10_000, "estimate":false
+            })
+        );
+        assert_eq!(
+            snapshot.messages["notice"].row["items"][0]["source"],
+            "runner"
+        );
+        assert_eq!(snapshot.breakdown["estimation_source"], "runner");
+        session.index.truncate(201);
+        let snapshot = session.app_snapshot();
+        assert_eq!(
+            category(&snapshot, "notices"),
+            json!({
+                "part":"notices", "tokens":0, "estimate":false
+            })
+        );
+        assert_eq!(snapshot.breakdown["estimation_source"], "counted");
     }
 
     #[test]
