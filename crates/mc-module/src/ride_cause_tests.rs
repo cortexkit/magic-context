@@ -40,7 +40,9 @@ fn touches(view: &View, mid: &str, part: &str) -> bool {
             mid: m,
             part: Some(p),
         }
-        | EditOp::Replace { mid: m, part: p, .. } => m == mid && p == part,
+        | EditOp::Replace {
+            mid: m, part: p, ..
+        } => m == mid && p == part,
         _ => false,
     })
 }
@@ -250,7 +252,9 @@ fn ride_a_forgotten_cache_adds_nothing_to_an_over_limit_ride() {
             vec![RideCause::OverLimit, cause.clone()],
         );
         assert_eq!(actual, expected, "over_limit with {cause:?}");
-        let view = actual.view.expect("the over-limit ride lands pressure work");
+        let view = actual
+            .view
+            .expect("the over-limit ride lands pressure work");
         assert!(
             touches(&view, "old", "p") || touches(&view, "old", "p2"),
             "no emergency drop with {cause:?}: {view:?}"

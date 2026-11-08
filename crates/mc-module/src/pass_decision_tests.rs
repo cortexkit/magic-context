@@ -272,10 +272,11 @@ const DIFFERENCES: &[Difference] = &[
     // The three entries below come from the forgotten-cache ride rule: a ride
     // whose causes only say the provider forgot its cache (expiry, a chain
     // reset, a tier or account switch) is no rebuild permission and lifts no
-    // signed-thinking hold. The table was generated before the TypeScript
-    // plugin took the same rule; regenerating it after both changes merge
-    // makes these entries stale, and this test then fails until they are
-    // removed or restated.
+    // signed-thinking hold. The checked-in table still encodes the plugin's
+    // older rule, under which an expiry permits a rebuild and lifts the hold.
+    // Once the table is regenerated from a plugin with the same rule, these
+    // entries go stale, and this test fails until they are removed or
+    // restated.
     Difference {
         rows: &["cache-true-true-false", "cache-false-true-false"],
         fields: &["rebuild", "queued_drops", "heuristics", "reasoning"],
