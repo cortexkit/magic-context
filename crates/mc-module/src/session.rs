@@ -1995,6 +1995,9 @@ impl Session {
             return None;
         }
         self.accept(view.clone());
+        // The runner takes a ride's view with the answer, so this is where it
+        // is accepted; it logs the same line as a pushed view.
+        self.log_view_accepted(&view);
         Some(view)
     }
 
@@ -3404,6 +3407,26 @@ impl Session {
         true
     }
 
+    /// The cache-bust analyzer parses this line to tell which request first
+    /// carried a rebuilt view and how far its cut reached, so keep its shape:
+    /// `cut through <message id>` or `no cut`.
+    fn log_view_accepted(&self, view: &View) {
+        let cut = view
+            .edits
+            .iter()
+            .find_map(|edit| match &edit.op {
+                EditOp::Cut { through } => Some(format!("cut through {through}")),
+                _ => None,
+            })
+            .unwrap_or_else(|| "no cut".to_string());
+        tracing::info!(
+            "ck-mc: session {}: view {} accepted ({} edits, {cut})",
+            self.key.session,
+            view.version,
+            view.edits.len()
+        );
+    }
+
     /// Hand `view` to the runner. It is accepted first, as unconfirmed, and
     /// the session's state saved, so that whatever happens to the call, a
     /// restarted ck-mc knows the view may be in the runner's hands. A view
@@ -3421,23 +3444,7 @@ impl Session {
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {
-                // The cache-bust analyzer parses this line to tell which request
-                // first carried a rebuilt view and how far its cut reached, so
-                // keep its shape: `cut through <message id>` or `no cut`.
-                let cut = view
-                    .edits
-                    .iter()
-                    .find_map(|edit| match &edit.op {
-                        EditOp::Cut { through } => Some(format!("cut through {through}")),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "no cut".to_string());
-                tracing::info!(
-                    "ck-mc: session {}: view {} accepted ({} edits, {cut})",
-                    self.key.session,
-                    view.version,
-                    view.edits.len()
-                );
+                self.log_view_accepted(&view);
                 self.app_view_status(view.version, "accepted");
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
