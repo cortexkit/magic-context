@@ -211,7 +211,7 @@ export function executeStatus(
             `- ${formatCacheTtlDisplay(ttlDisplay)}`,
             `- Last response: ${meta.lastResponseTime > 0 ? `${Math.round(elapsed / 1000)}s ago` : "never"}`,
             `- Remaining: ${cacheExpired ? "expired" : ttlMs === Number.POSITIVE_INFINITY ? "never (MC never assumes expiry — external cache-keep)" : `${Math.round(remainingMs / 1000)}s`}`,
-            `- Queue will auto-execute: ${cacheExpired ? "yes (cache expired)" : ttlMs === Number.POSITIVE_INFINITY ? `when context >= ${executeThresholdPercentage}%` : `when TTL expires or context >= ${executeThresholdPercentage}%`}`,
+            `- Queue will auto-execute: when context >= ${executeThresholdPercentage}%`,
             "",
             "### Execute Threshold",
             `- Execute threshold: ${formatExecuteThreshold(thresholdDetail, displayContextLimit)}`,

@@ -811,15 +811,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 const modelKey = resolveModelKey(info.providerID, info.modelID);
                 const updates: Partial<SessionMeta> = {};
                 // last_response_time is the idle clock for the provider cache:
-                // the scheduler's TTL execute and the ttl_idle HARD fold both
-                // measure from it. Usage proves the provider served a request;
+                // the cache-expiry status, the system date refresh and OpenCode
+                // 2's idle host checkpoint measure from it. Usage proves the provider served a request;
                 // successful completion above also proves it when usage is absent. OpenCode
                 // creates the assistant message for a new request with zero
                 // tokens before it runs that request's transform, and a request
                 // the provider refuses (a spent quota) ends with zero tokens.
                 // Stamping on those made the first pass after a long idle look
-                // like it followed a fresh response, so it deferred and queued
-                // drops never applied.
+                // like it followed a fresh response.
                 if (hasUsageTokens && !responseFailed) {
                     updates.lastResponseTime = responseTime;
                 }

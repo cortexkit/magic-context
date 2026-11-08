@@ -467,12 +467,10 @@ export function createSystemPromptHashHandler(deps: {
         // are the volatile resident at m[1]. Keep only guidance + sticky
         // date in system so BP1 remains stable.
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
-        // Some OpenCode 1 routes run messages.transform before this hook. An idle-expired
-        // request is already a full provider-cache rebuild, even if an aborted
-        // attempt prepared its frozen head. Adopt this request's system identity
-        // with that head instead of scheduling another rewrite on its next step.
-        // A scheduler execute alone is not proof: pressure passes can replay an
-        // unchanged, still-warm prefix, so those retain the hash-change fold.
+        // An idle-expired request still lets the sticky date advance (below), but
+        // it is not a reason to adopt a changed prompt without a fold: the prompt
+        // change itself rewrites the bytes before the conversation, so it folds
+        // and drains like a change on a warm cache.
         const idleCacheExpired =
             sessionMetaEarly !== undefined &&
             computeHardCacheExpired(
@@ -484,16 +482,15 @@ export function createSystemPromptHashHandler(deps: {
         // messages transform before this hook), a changed system prompt is already
         // a full provider-cache rewrite on this request, and Magic Context can no
         // longer fold into it. Queuing a rebuild for the next request would make the
-        // provider rewrite its cache a second time. Adopt the new identity here, as
-        // on an idle-expired request; queued work rides the next natural bust.
+        // provider rewrite its cache a second time. Adopt the new identity here;
+        // queued work rides the next natural bust.
         // This must not release the sticky date: OpenCode 1 reports
         // `requestMessagesFinal` on every request, warm or not.
         // A completed messages hook that kept m[0]/m[1] frozen for signed
         // thinking must instead wait for the matching successful provider reply.
         const adoptSystemChange =
-            idleCacheExpired ||
-            (requestMessagesFinal &&
-                !isHeldHeadForRequest(sessionId, currentLkgRequestIdentity(sessionId)));
+            requestMessagesFinal &&
+            !isHeldHeadForRequest(sessionId, currentLkgRequestIdentity(sessionId));
 
         // ── Step 2: Coalesce content/preset and date changes into one bust ──
         const liveSystemContent = output.system.join("\n");
@@ -731,7 +728,7 @@ export function createSystemPromptHashHandler(deps: {
         if (previousHash !== "" && previousHash !== "0" && previousHash !== currentHash) {
             sessionLog(
                 sessionId,
-                `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), ${idleCacheExpired ? "adopting on idle-expired request" : requestMessagesFinal ? "adopting on the request whose messages are already final" : "triggering flush"}; ${describeSystemPromptChange(previousPrompt, currentPrompt)}`,
+                `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), ${adoptSystemChange ? "adopting on the request whose messages are already final" : "triggering flush"}${idleCacheExpired ? " (idle-expired request)" : ""}; ${describeSystemPromptChange(previousPrompt, currentPrompt)}`,
             );
             // This request carries the new prompt, so the provider rewrites its
             // cache from the system block onward whatever the messages pass did.

@@ -1917,7 +1917,7 @@ export function createTransform(deps: TransformDeps) {
               })
             : null;
         // Compaction-off has no bust permission, so nothing could strip a turn
-        // whose prefix changes (an idle-expiry or memory fold still re-renders
+        // whose prefix changes (a memory fold still re-renders
         // m[0] there). It keeps the blanket hold for every open signed turn, as
         // before the hold was bounded; it has no history reclaim for the hold to
         // delay.
@@ -2455,13 +2455,12 @@ export function createTransform(deps: TransformDeps) {
                             "user_flush",
                         ),
                         publishedHistory: isCacheBusting,
-                        // The same gate postprocess applies. First render and idle
-                        // expiry are not known yet, so a held pass is credited no
-                        // ride here unless it is under emergency pressure.
+                        // The same gate postprocess applies. First render is not
+                        // known yet, so a held pass is credited no ride here
+                        // unless it is under emergency pressure.
                         permission: {
                             signedThinkingHold: activeThinkingPrefixHold,
                             firstRender: false,
-                            idleExpiry: false,
                             emergency:
                                 contextUsageEarly.percentage >= forceMaterializationPercentage,
                         },
@@ -2960,7 +2959,8 @@ export function createTransform(deps: TransformDeps) {
 
         // HARD-bust signals for the m[0]/m[1] materialization decision capture
         // provider-side cache eviction, such as a model switch or system-block
-        // change, plus the TTL idle window. Only OpenCode 2 supplies a definition
+        // change. The TTL idle window is passed along for logs only: an expired
+        // cache with unchanged bytes never folds. Only OpenCode 2 supplies a definition
         // hash from the session's request; the process-global names fingerprint
         // stays attribution-only on OpenCode 1. When system.transform
         // follows messages.transform (OpenCode 1), systemHash is the persisted
@@ -3875,9 +3875,9 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        // An idle-expired retry can replay a fold prepared by an aborted attempt.
-        // The provider still rebuilds the whole prefix, so record the expiry on
-        // the retry's own assistant even when this pass changed no message bytes.
+        // An idle-expired request makes the provider re-read the whole prefix
+        // even when this pass changed no message bytes, so record the expiry on
+        // its own assistant for the cache diagnostics.
         if (postTransformResult.bustedThisPass || hardCacheExpired) {
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),

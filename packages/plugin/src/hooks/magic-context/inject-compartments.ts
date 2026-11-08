@@ -918,7 +918,7 @@ export interface M0SnapshotMarkers {
  * Runtime cache-eviction signals threaded into the materialization decision.
  * These are NOT derived from durable DB state like the content markers — they
  * come from the current flight (system-prompt hash, tool-set fingerprint,
- * provider/model key) plus the TTL idle window. Only the session context's
+ * provider/model key). Only the session context's
  * name/description identity can trigger a tool change; the names-only hash is attribution.
  */
 export interface M0HardSignals {
@@ -928,7 +928,12 @@ export interface M0HardSignals {
     /** OpenCode 2 only: sorted names/descriptions observed by this session's context hook. */
     toolDefinitionsHash?: string;
     modelKey: string;
-    /** True when the provider cache TTL has elapsed since lastResponseTime. */
+    /**
+     * True when the provider cache TTL has elapsed since lastResponseTime.
+     * Recorded for logs only: an expired cache never triggers a fold, because
+     * resending the same bytes keeps signed thinking valid and costs the same
+     * re-read as a rebuild.
+     */
     cacheExpired: boolean;
     /** Epoch ms of the last completed assistant response (end-of-turn). */
     lastResponseTime: number;
@@ -1940,26 +1945,18 @@ export function mustMaterialize(args: {
             : null;
     const withToolSetHashComparison = (decision: MaterializeDecision): MaterializeDecision =>
         toolSetHashComparison ? { ...decision, ...toolSetHashComparison } : decision;
-    // Idle > TTL: the provider evicted the cache while the user was away. Guard
-    // for idempotence across a multi-pass "came back" turn: cacheExpired stays
-    // true on every pass until lastResponseTime updates at end-of-response, so
-    // fold only when the last completed response is newer than our last
-    // materialization. After the fold, materializedAt = Date.now() exceeds the
-    // pre-expiry lastResponseTime, so subsequent passes this turn skip; the next
-    // idle-after-response re-arms naturally. Self-consuming, no extra column.
-    if (
-        hard.cacheExpired &&
-        hard.lastResponseTime > 0 &&
-        hard.lastResponseTime > (args.state.cachedM0MaterializedAt ?? 0)
-    ) {
-        return withToolSetHashComparison({ value: true, reason: "ttl_idle" });
-    }
+    // An idle expiry (cacheExpired) is deliberately not a trigger. When only the
+    // provider forgot the cache, the bytes before the conversation are unchanged:
+    // resending them keeps every signed thinking block valid, and the provider
+    // re-reads the same prefix whether or not m[0] is re-rendered. Folding there
+    // would only cost the agent its reasoning and land drops early.
+    //
     // A native host compaction replaced the window after the last fold. The host
     // summary now stands in for the history before its retained tail, and the
     // stored baseline boundary still points at a row the host no longer serves.
     // The compaction already changed everything after the cached prefix, so the
-    // re-anchoring fold rides that change. Self-consuming like the idle expiry:
-    // after the fold, materializedAt is newer than the summary.
+    // re-anchoring fold rides that change. Self-consuming: after the fold,
+    // materializedAt is newer than the summary.
     const hostCompaction = hard.hostCompaction;
     if (
         hostCompaction !== undefined &&
