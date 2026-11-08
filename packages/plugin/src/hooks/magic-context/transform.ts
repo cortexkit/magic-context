@@ -710,6 +710,12 @@ export interface TransformDeps {
      * derive its own permission.
      */
     onPassPermission?: (sessionId: string, prefixMutationPermitted: boolean) => void;
+    /** Host-owned row reclaim rides the shared permission and returns newly emptied messages, not replayed removals. */
+    reclaimHostRows?: (
+        sessionId: string,
+        messages: MessageLike[],
+        permitted: boolean,
+    ) => readonly MessageLike[];
     /** Resolved project mode. Rust mode bypasses every TS mutation below. */
     transformMode?: "ts" | "rust";
     /** Prompt-surface routing and USER description overrides forwarded to Rust mode. */
@@ -3188,6 +3194,7 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             db,
             messages,
+            reclaimHostRows: deps.reclaimHostRows,
             // P0 perf: pass active-only tags. The downstream consumers
             // (applyHeuristicCleanup, nudger) both filter on
             // status === "active" and short-circuit otherwise — feeding

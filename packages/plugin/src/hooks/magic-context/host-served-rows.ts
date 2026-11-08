@@ -109,6 +109,20 @@ export function isHostRenderedSystemMessage(message: {
 }
 
 const COVERED_INSTRUCTION_ROW = "coveredInstructionRow";
+const HOST_INSTRUCTION_ROW = "hostInstructionRow";
+
+/** Store coordinates are internal observations, not part of the served request identity. */
+export function markHostInstructionRow(target: object, row: unknown): void {
+    Object.defineProperty(target, HOST_INSTRUCTION_ROW, {
+        value: row,
+        enumerable: false,
+        configurable: true,
+    });
+}
+
+export function hostInstructionRow(target: object): unknown {
+    return (target as Record<string, unknown>)[HOST_INSTRUCTION_ROW];
+}
 
 /**
  * Mark an id-less instruction message that OpenCode 2's context hook restored
@@ -160,6 +174,8 @@ export function cloneKeepingCoveredInstructionMarks<T extends { info: object }>(
     messages.forEach((message, index) => {
         const copied = copy[index];
         if (copied && isCoveredInstructionRow(message.info)) markCoveredInstructionRow(copied.info);
+        const row = hostInstructionRow(message.info);
+        if (copied && row !== undefined) markHostInstructionRow(copied.info, row);
     });
     return copy;
 }

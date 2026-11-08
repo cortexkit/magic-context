@@ -1638,6 +1638,11 @@ interface RunPostTransformPhaseArgs {
     sessionId: string;
     db: ContextDatabase;
     messages: MessageLike[];
+    reclaimHostRows?: (
+        sessionId: string,
+        messages: MessageLike[],
+        permitted: boolean,
+    ) => readonly MessageLike[];
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
     reasoningByMessage: Map<MessageLike, { type: string; thinking?: string; text?: string }[]>;
@@ -3080,6 +3085,21 @@ export async function runPostTransformPhase(
             Math.min(firstApplicationLocations.get(message) ?? Infinity, partIndex),
         );
     };
+    for (const message of args.reclaimHostRows?.(
+        args.sessionId,
+        args.messages,
+        !compactionOff && isCacheBustingPass,
+    ) ?? []) {
+        const index = args.messages.indexOf(message);
+        recordFirstApplicationWireEdit(
+            index < 0 ||
+                servesThinkingBlock(
+                    args.messages.slice(index + 1),
+                    args.resolvedProviderID,
+                    args.resolvedModelID,
+                ),
+        );
+    }
     let heuristicOrReasoningDidMutate = false;
     // Like heuristicOrReasoningDidMutate, but leaving out the oldest-prefix
     // reasoning removal, which on a prefix-bound model leaves every newer
