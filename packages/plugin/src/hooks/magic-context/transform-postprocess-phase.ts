@@ -2655,10 +2655,7 @@ export async function runPostTransformPhase(
         servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold:
-            rewritingSignedPrefix ||
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust,
+        hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
         // A reading that only a local count put in the force band is not
         // evidence the session is there: the count can overstate the provider.
         // Below 95% it waits for the provider's next measurement instead of

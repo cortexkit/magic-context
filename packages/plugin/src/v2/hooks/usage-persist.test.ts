@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createScheduler } from "../../features/magic-context/scheduler";
+import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -269,11 +269,12 @@ describe("persistV2UsageReading", () => {
             },
         });
         updateSessionMeta(db, sessionID, { cacheTtl: "1h" });
-        const scheduler = createScheduler({ executeThresholdPercentage: 90 });
-        const usage = { inputTokens: 1_000, percentage: 1 };
-        expect(scheduler.shouldExecute(getOrCreateSessionMeta(db, sessionID), usage, now)).toBe(
-            "execute",
-        );
+        // The idle clock decides whether the provider cache counts as expired.
+        const expired = (at: number) => {
+            const meta = getOrCreateSessionMeta(db, sessionID);
+            return computeHardCacheExpired(meta.cacheTtl, meta.lastResponseTime, at);
+        };
+        expect(expired(now)).toBe(true);
         for (const error of [{ name: "MessageAbortedError" }, { name: "APIError" }]) {
             const reading = resolveUsageReading({
                 draftModel,
@@ -285,9 +286,7 @@ describe("persistV2UsageReading", () => {
             })!;
             persistV2UsageReading({ db, sessionID, draftModel, contextUsageMap, reading });
         }
-        expect(scheduler.shouldExecute(getOrCreateSessionMeta(db, sessionID), usage, now)).toBe(
-            "execute",
-        );
+        expect(expired(now)).toBe(true);
         const reading = resolveUsageReading({
             draftModel,
             completed: now,
@@ -297,9 +296,7 @@ describe("persistV2UsageReading", () => {
         if (reading) persistV2UsageReading({ db, sessionID, draftModel, contextUsageMap, reading });
         expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(now);
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(1_000);
-        expect(
-            scheduler.shouldExecute(getOrCreateSessionMeta(db, sessionID), usage, now + 1_000),
-        ).toBe("defer");
+        expect(expired(now + 1_000)).toBe(false);
         persistV2UsageReading({
             db,
             sessionID,
@@ -307,9 +304,7 @@ describe("persistV2UsageReading", () => {
             contextUsageMap,
             reading: { ...reading!, completed: now + 2_000 },
         });
-        expect(
-            scheduler.shouldExecute(getOrCreateSessionMeta(db, sessionID), usage, now + 3_000),
-        ).toBe("defer");
+        expect(expired(now + 3_000)).toBe(false);
     });
 
     it("retains rejection-derived usage reading on a subsequent context pass with no new reply", () => {

@@ -44,8 +44,9 @@ for (const checkpoint of [true, false])
                 "Today's date is now: day 2.",
             );
             // The next compartment covers rows 5..15, across that instruction row.
+            // A reply at 70% of the window makes the next pass an execute pass.
             f.compartment(15);
-            f.idle();
+            f.respond(1, 700_000);
             const execute = await f.pass();
             expect(execute.logs.join("\n")).toMatch(/transform scheduler: .*decision=execute/);
             f.respond();
@@ -76,11 +77,13 @@ const reminder = (n: number) =>
 
 /**
  * Randomized served-byte differential over the real OpenCode 2 hook. Executing
- * passes (TTL expiry) and defer passes interleave with new turns, temporal gaps,
- * instruction rows, injected reminders (heuristic cleanup), published
- * compartments and host checkpoints. A defer pass must start with the exact
- * messages its predecessor served: checked for every tool-loop follow-up, and
- * for each new turn unless a host checkpoint or cache expiry came before it.
+ * passes (a reply at execute-threshold pressure) and defer passes interleave
+ * with new turns, temporal gaps, idle cache expiries, instruction rows, injected
+ * reminders (heuristic cleanup), published compartments and host checkpoints. A
+ * defer pass must start with the exact messages its predecessor served: checked
+ * for every tool-loop follow-up, and for each new turn unless a host checkpoint
+ * came before it. An idle expiry is no exception: only the provider forgot the
+ * cache, so the request replays.
  * Every pass must also serve every instruction row of the session.
  */
 async function runDifferential(provider: string, model: string, seeds: number[], steps: number) {
@@ -106,7 +109,6 @@ async function runDifferential(provider: string, model: string, seeds: number[],
             let folds = 0;
             for (let step = 0; step < steps; step++) {
                 const action = next(10);
-                let mayRebuild = false;
                 let comparable = true;
                 if (action === 0 && folds < 2 && f.rows.length > 20) {
                     await f.fold(3 + next(3));
@@ -129,12 +131,8 @@ async function runDifferential(provider: string, model: string, seeds: number[],
                 } else if (action === 3) {
                     f.instruction(`Today's date is now: ${seed} day ${step}.`);
                 }
-                if (next(4) === 0) {
-                    f.idle(2);
-                    mayRebuild = true;
-                }
+                if (next(4) === 0) f.idle(2);
                 const gap = next(3) === 0 ? 120000 : 600000 + next(4) * 900000;
-                if (gap > 3600000) mayRebuild = true;
                 f.user(
                     `${next(3) === 0 ? `${reminder(step)}\n` : ""}${seed}/${step}: ${prose.repeat(1 + next(3))}`,
                     gap,
@@ -158,7 +156,7 @@ async function runDifferential(provider: string, model: string, seeds: number[],
                     );
                 const deferred = /transform scheduler: .*decision=defer/.test(log);
                 if (/transform scheduler: .*decision=execute/.test(log)) executes++;
-                if (comparable && deferred && !mayRebuild) {
+                if (comparable && deferred) {
                     deferChecks++;
                     const divergence = firstDivergence(
                         previous.draft.messages,
@@ -195,7 +193,9 @@ async function runDifferential(provider: string, model: string, seeds: number[],
                         );
                 }
                 previous = followUp;
-                f.respond();
+                // Now and then the reply reports execute-threshold pressure, so the
+                // next turn's pass executes.
+                f.respond(1, next(5) === 0 ? 700_000 : undefined);
             }
         } finally {
             await f.cleanup();
@@ -249,7 +249,7 @@ for (const checkpoint of [true, false]) {
             if (checkpoint) await f.fold();
             await f.pass();
             f.compartment(15);
-            f.idle();
+            f.respond(1, 700_000);
             await f.pass();
             f.respond();
             const legacy = await f.pass();
@@ -271,7 +271,7 @@ for (const checkpoint of [true, false]) {
                 ),
             ).toBeNull();
             // The next pass allowed to rewrite the prefix serves the covered row.
-            f.idle();
+            f.respond(1, 700_000);
             const rewrite = await f.pass();
             expect(rewrite.logs.join("\n")).toMatch(/transform scheduler: .*decision=execute/);
             expect(instructionTexts(rewrite.draft.messages)).toEqual([
@@ -422,8 +422,9 @@ for (const where of ["admission", "transform"] as const)
             // Every instruction row (rows 7, 16, 21) is covered. Before covered
             // rows were served, the trim cut them all and the request had no
             // id-less row.
+            // A reply at 70% of the window makes the next pass an execute pass.
             f.compartment(22);
-            f.idle();
+            f.respond(1, 700_000);
             await f.pass();
             f.respond();
             await f.pass();
@@ -513,10 +514,10 @@ test("issue 750: an instruction row after the checkpoint is served once when the
         f.respond(3);
         f.user(`757 latest turn: ${prose.repeat(2)}`, 120000);
         await f.pass();
-        f.respond();
+        // A reply at 70% of the window makes the next pass an execute pass.
+        f.respond(1, 700_000);
         // The new compartment ends after the checkpoint, past the instruction row.
         f.compartment(boundary);
-        f.idle();
         const execute = await f.pass();
         f.respond();
         const defer = await f.pass();

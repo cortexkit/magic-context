@@ -731,7 +731,7 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(unknown.rematerialized).toBe(false);
     });
 
-    it("HARD (TTL idle): folds ONCE, then is idempotent across the multi-pass turn", () => {
+    it("an idle expiry alone never folds: the m[0] baseline replays across the multi-pass turn", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
@@ -739,8 +739,8 @@ describe("m[0]/m[1] materialization taxonomy", () => {
 
         // Simulate "came back after idle": the m[0] baseline was materialized in
         // the past, and a response completed AFTER that baseline (lastResponseTime
-        // > materializedAt). Both are real past timestamps so the post-fold
-        // materializedAt (= now) exceeds lastResponseTime → idempotent.
+        // > materializedAt). Only the provider forgot the cache, so the bytes
+        // before the conversation stay as they are: no fold on any pass.
         const tPast = Date.now() - 60 * 60 * 1000;
         db.prepare(
             "UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?",
@@ -751,13 +751,10 @@ describe("m[0]/m[1] materialization taxonomy", () => {
             lastResponseTime: tPast + 1000,
         };
 
-        const fold = pass({ projectDirectory, isCacheBustingPass: true, hard: ttlHard });
-        expect(fold.reason).toBe("ttl_idle");
-        expect(fold.rematerialized).toBe(true);
+        const first = pass({ projectDirectory, isCacheBustingPass: true, hard: ttlHard });
+        expect(first.reason).not.toBe("ttl_idle");
+        expect(first.rematerialized).toBe(false);
 
-        // Same signals again within the turn: cacheExpired stays true, but the
-        // fold advanced materializedAt to now, so lastResponseTime (past) is no
-        // longer > materializedAt → no re-fold.
         const again = pass({ projectDirectory, isCacheBustingPass: true, hard: ttlHard });
         expect(again.rematerialized).toBe(false);
         expect(again.reason).not.toBe("ttl_idle");

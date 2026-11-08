@@ -183,7 +183,7 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
             clearCtxReduceAvailability(sessionId);
         }
     });
-    it("a cold handler adopts a midnight date change on the idle-expired request", async () => {
+    it("a cold handler moves a midnight date on the idle-expired request and queues its fold", async () => {
         useTempDataHome("sph-cold-midnight-");
         const sessionId = "ses-cold-midnight";
         resolveCtxReduceAvailabilityFromMessages(sessionId, [
@@ -209,12 +209,14 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
         const meta = getOrCreateSessionMeta(openDatabase(), sessionId);
         expect(output.system.join("\n")).toContain("Today's date: Sat Oct 03 2026");
         expect(meta.systemPromptHash).not.toBe(oldHash);
-        expect(meta.cachedM0SystemHash).toBe(meta.systemPromptHash);
-        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        // The moved date changes the bytes before the conversation, so the
+        // change folds like any system-prompt change; the expiry adopts nothing.
+        expect(meta.cachedM0SystemHash).toBe(oldHash);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
         clearCtxReduceAvailability(sessionId);
     });
     for (const expired of [true, false]) {
-        it(`${expired ? "adopts" : "flushes"} a late system change on an ${expired ? "expired" : "warm"} request`, async () => {
+        it(`flushes a late system change on an ${expired ? "expired" : "warm"} request`, async () => {
             useTempDataHome("sph-idle-adopt-");
             const sessionId = `ses-idle-adopt-${expired}`;
             resolveCtxReduceAvailabilityFromMessages(sessionId, [
@@ -242,12 +244,12 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
             );
             const meta = getOrCreateSessionMeta(db, sessionId);
             expect(meta.systemPromptHash).not.toBe("old-system-hash");
-            expect(meta.cachedM0SystemHash).toBe(
-                expired ? meta.systemPromptHash : "old-system-hash",
-            );
-            expect(historyRefreshSessions.has(sessionId)).toBe(!expired);
-            expect(systemPromptRefreshSessions.has(sessionId)).toBe(!expired);
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(!expired);
+            // An expired cache is not a reason to adopt the change without a
+            // fold: the changed prompt rewrites the prefix, so it drains either way.
+            expect(meta.cachedM0SystemHash).toBe("old-system-hash");
+            expect(historyRefreshSessions.has(sessionId)).toBe(true);
+            expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
             clearCtxReduceAvailability(sessionId);
         });
     }

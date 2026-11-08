@@ -12015,8 +12015,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		strictThinkingKept: protectedSignedPrefix,
 		signedPrefixRewritten: rewritingSignedPrefix,
 		prefixRebuildAlreadyPriced:
-			firstRenderBust ||
-			(!!args.recoveryRebuildReason && isCacheBustingPass),
+			firstRenderBust || (!!args.recoveryRebuildReason && isCacheBustingPass),
 		identityRebuilt: identityRebuild,
 		servedTagNumbers,
 		heuristicsExecuted,
