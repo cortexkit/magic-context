@@ -10,6 +10,7 @@ import {
 	exerciseOmpLoggerFiles,
 	pinOmpLoggerFiles,
 } from "./__tests__/omp-log-files";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
@@ -466,16 +467,19 @@ for (const host of hosts) {
 			const tail = full.input.slice(-2);
 			tail[1].content[0].text =
 				"<system-notice>wrong envelope</system-notice>\nredirect";
-			await h.send({
+			const sent = await h.send({
 				...first,
 				type: "response.create",
 				previous_response_id: "resp_1",
 				input: tail,
 			});
-			expect(h.aborts).toBe(1);
 			expect(h.refusals[0]).toContain(
 				"delta differs from the prepared provider input tail",
 			);
+			// A refusal at dispatch no longer aborts the session: the runner gets
+			// a payload that fails as soon as the provider serializes it.
+			expect(h.aborts).toBe(0);
+			assertPiRefusedDispatch(sent, h.refusals[0] as string);
 		} finally {
 			h.close();
 		}
