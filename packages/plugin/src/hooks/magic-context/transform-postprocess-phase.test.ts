@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convertToModelMessages, type UIMessage } from "ai";
@@ -3179,6 +3179,8 @@ describe("deferred compaction marker representation", () => {
         ] as unknown as MessageLike[];
         const taggedFold = tagMessages(sessionId, foldMessages, tagger, db);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        // The pass never waits for marker discovery; finish it first.
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
@@ -3571,6 +3573,8 @@ describe("deferred compaction marker advance representation", () => {
             expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
             expect(getPendingCompactionMarkerState(db, sessionId)?.ordinal).toBe(20);
         }
+        // The pass never waits for marker discovery; finish it first.
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, drainMessages, {
@@ -3744,6 +3748,210 @@ describe("deferred compaction marker CAS drain", () => {
         });
     }
 
+    // A stand-in discovery worker. It records each start in `<store>.starts`, then
+    // holds until `<store>.release` exists, as a long scan of a large session would,
+    // and finally returns the real scan or reports a failure.
+    function heldDiscoveryWorker(outcome: "scan" | "error"): URL {
+        const entry = join(process.env.XDG_DATA_HOME!, `held-discovery-${outcome}.mjs`);
+        const sqlite = new URL("../../shared/sqlite.ts", import.meta.url).href;
+        const scan = new URL(
+            "../../features/magic-context/compaction-marker-candidates.ts",
+            import.meta.url,
+        ).href;
+        writeFileSync(
+            entry,
+            `import {parentPort,workerData} from 'node:worker_threads';
+            import {appendFileSync,existsSync} from 'node:fs';
+            parentPort.postMessage({kind:'accepted'});
+            appendFileSync(workerData.path+'.starts','x');
+            while(!existsSync(workerData.path+'.release'))await new Promise(r=>setTimeout(r,5));
+            ${
+                outcome === "error"
+                    ? "parentPort.postMessage({kind:'error',error:'injected discovery failure'});"
+                    : `const {Database}=await import(${JSON.stringify(sqlite)});
+            const {scanMarkerCandidateSnapshot}=await import(${JSON.stringify(scan)});
+            const db=new Database(workerData.path,{readonly:true});
+            const snapshot=scanMarkerCandidateSnapshot(db,workerData.sessionId,workerData.references!==false);
+            db.close();
+            parentPort.postMessage({kind:'candidates',snapshot});`
+            }
+            parentPort.close();`,
+        );
+        return new URL(`file://${entry}`);
+    }
+
+    // A session with a pending marker its rebuilt history covers, a host store
+    // holding the boundary user message, and no prepared discovery.
+    function noWaitDrainFixture(label: string, outcome: "scan" | "error") {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        createOpenCodeDbWithoutMessages(`postprocess-no-wait-${label}-`);
+        const sessionId = `ses-marker-no-wait-${label}`;
+        const hostPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        const host = new Database(hostPath);
+        host.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+            "u1",
+            sessionId,
+            1,
+            1,
+            JSON.stringify({ role: "user" }),
+        );
+        host.close();
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "u1",
+                endMessageId: "u1",
+                startBlockIndex: 0,
+                endBlockIndex: 0,
+                title: "history",
+                content: "history",
+            },
+        ]);
+        const pending = { ordinal: 1, endMessageId: "u1", publishedAt: 1 };
+        setPendingCompactionMarkerState(db, sessionId, pending);
+        const deferredHistoryRefreshSessions = new Set([sessionId]);
+        const entry = heldDiscoveryWorker(outcome);
+        const prepareBasis = markerCandidates.prepareMarkerCandidateBasis;
+        const prepare = spyOn(markerCandidates, "prepareMarkerCandidateBasis").mockImplementation(
+            (database, sid, options) =>
+                prepareBasis(database, sid, {
+                    ...options,
+                    entry,
+                    acceptMs: 60_000,
+                    resultMs: 60_000,
+                }),
+        );
+        const logs = spyOn(loggerModule, "sessionLog");
+        const release = () => writeFileSync(`${hostPath}.release`, "go");
+        // Without a release from the test, the stand-in discovery takes 3 s.
+        const timer = setTimeout(release, 3_000);
+        const pass = async () => {
+            const messages = [
+                {
+                    info: { id: "fresh", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "fresh rebuilt turn" }],
+                },
+            ] as MessageLike[];
+            const passOutcome = createPassOutcome();
+            const startedAt = performance.now();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    fullFeatureMode: false,
+                    passOutcome,
+                    historyRebuiltThisPass: true,
+                    canConsumeDeferredLate: true,
+                    deferredHistoryWasPendingAtPassStart: true,
+                    deferredHistoryRefreshSessions,
+                    pendingCompartmentInjection: {
+                        compartmentEndMessage: 1,
+                        compartmentEndMessageId: "u1",
+                        compartmentCount: 1,
+                        renderedText: "rebuilt history",
+                        skippedVisibleMessages: 0,
+                    } as PostTransformArgs["pendingCompartmentInjection"],
+                }),
+            );
+            return { elapsedMs: performance.now() - startedAt, messages, passOutcome };
+        };
+        const hostRows = () => {
+            const reader = new Database(hostPath, { readonly: true });
+            try {
+                return {
+                    messages: reader.prepare("SELECT * FROM message ORDER BY id").all(),
+                    parts: reader.prepare("SELECT * FROM part ORDER BY id").all(),
+                };
+            } finally {
+                reader.close();
+            }
+        };
+        return {
+            sessionId,
+            pending,
+            deferredHistoryRefreshSessions,
+            pass,
+            hostRows,
+            release,
+            starts: () => readFileSync(`${hostPath}.starts`, "utf8").length,
+            released: () => existsSync(`${hostPath}.release`),
+            deferralLogs: () =>
+                logs.mock.calls.filter(([, line]) =>
+                    String(line).includes("compaction-marker drain: candidate preparation deferred"),
+                ).length,
+            restore() {
+                clearTimeout(timer);
+                release();
+                prepare.mockRestore();
+                logs.mockRestore();
+            },
+        };
+    }
+
+    // A deferring pass takes a few milliseconds in this fixture (2.5 ms and 0.7 ms
+    // on the Linux runner) and the stand-in discovery is held for 3 s, so a
+    // 200 ms bound separates "served now" from "waited for discovery" with a wide
+    // margin either way.
+    const NO_WAIT_PASS_BOUND_MS = 200;
+
+    it("defers at once while discovery runs, starting one discovery, then applies after it finishes", async () => {
+        const f = noWaitDrainFixture("held", "scan");
+        try {
+            for (const attempt of [1, 2]) {
+                const { elapsedMs, messages, passOutcome } = await f.pass();
+                console.log(`no-wait marker drain: deferring pass ${attempt} took ${elapsedMs.toFixed(1)}ms`);
+                expect(elapsedMs).toBeLessThan(NO_WAIT_PASS_BOUND_MS);
+                expect(passOutcome.degradations).toEqual([]);
+                expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");
+                expect(getPendingCompactionMarkerState(db, f.sessionId)).toEqual(f.pending);
+                expect(getPersistedCompactionMarkerState(db, f.sessionId)).toBeNull();
+                expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(true);
+                expect(f.deferralLogs()).toBe(attempt);
+            }
+            // Both passes were served while discovery was still held.
+            expect(f.released()).toBe(false);
+            f.release();
+            expect(await prepareCompactionMarkerCandidates(f.sessionId)).toBe(true);
+            expect(f.starts()).toBe(1);
+
+            await f.pass();
+            expect(getPendingCompactionMarkerState(db, f.sessionId)).toBeNull();
+            expect(getPersistedCompactionMarkerState(db, f.sessionId)?.boundaryMessageId).toBe(
+                "u1",
+            );
+            expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(false);
+            expect(f.hostRows().parts).toHaveLength(2);
+            expect(f.starts()).toBe(1);
+        } finally {
+            f.restore();
+        }
+    });
+
+    it("serves the pass at once and leaves the marker unchanged when discovery fails", async () => {
+        const f = noWaitDrainFixture("failed", "error");
+        try {
+            const before = f.hostRows();
+            const first = await f.pass();
+            expect(first.elapsedMs).toBeLessThan(NO_WAIT_PASS_BOUND_MS);
+            expect(f.released()).toBe(false);
+            f.release();
+            // The background discovery reports its failure; nothing was certified.
+            expect(await prepareCompactionMarkerCandidates(f.sessionId)).toBe(false);
+            const second = await f.pass();
+            for (const { messages, passOutcome } of [first, second]) {
+                expect(passOutcome.degradations).toEqual([]);
+                expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");
+            }
+            expect(getPendingCompactionMarkerState(db, f.sessionId)).toEqual(f.pending);
+            expect(getPersistedCompactionMarkerState(db, f.sessionId)).toBeNull();
+            expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(true);
+            expect(f.hostRows()).toEqual(before);
+            expect(f.deferralLogs()).toBe(2);
+        } finally {
+            f.restore();
+        }
+    });
     it("preserves the deferred-history signal when a newer pending blob exists", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
@@ -3821,6 +4029,8 @@ describe("deferred compaction marker CAS drain", () => {
         const covered = { ordinal: 10, endMessageId: "msg-10", publishedAt: 1 };
         setPendingCompactionMarkerState(db, sessionId, covered);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        // The pass never waits for marker discovery; finish it first.
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [], {
@@ -5624,6 +5834,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         const hardMessages = makeTail();
         const hardTagged = tagMessages(sessionId, hardMessages, tagger, db);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        // The pass never waits for marker discovery; finish it first.
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
         const hardResult = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, hardMessages, {
                 tagger,
@@ -10212,6 +10424,8 @@ describe("marker-drain reasoning representation", () => {
         applyFlushedStatuses(sessionId, db, first.targets);
         first.batch.finalize();
         stripStructuralNoise(applying);
+        // The pass never waits for marker discovery; finish it first.
+        expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, applying, {
                 ...first,

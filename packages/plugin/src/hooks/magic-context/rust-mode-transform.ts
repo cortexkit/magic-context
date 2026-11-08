@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
-import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
+import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -4645,7 +4645,9 @@ export function createRustModeTransform(
                             getPendingCompactionMarkerState(deps.db, sessionId) !== null) &&
                         !deps.compactionOff
                     ) {
-                        await prepareCompactionMarkerCandidates(sessionId);
+                        // Start summary discovery without waiting: it reads the whole
+                        // session on a worker. The marker drain defers until it is ready.
+                        startCompactionMarkerCandidatePreparation(sessionId);
                         try {
                             await withAsyncPrivilegedWriter(deps.db, () => undefined);
                         } catch (error) {

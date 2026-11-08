@@ -7,13 +7,23 @@ import { reuseWorker } from "../../shared/reusable-worker";
 import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
 import { createWorkerShutdown } from "../../shared/worker-shutdown";
 
-interface MarkerFrontier {
+export interface MarkerFrontier {
     rowid: number;
     id: string;
+}
+/** Compaction parts that may carry a tail_start_id, found by one full scan of
+ * the session, and the newest part row of that same read snapshot. A later read
+ * rechecks these IDs by primary key and reads only parts inserted after the
+ * frontier, so it never rescans the session's old parts. */
+export interface MarkerReferenceSeed {
+    partIds: string[];
+    partFrontier: MarkerFrontier | null;
 }
 export interface MarkerCandidateSnapshot {
     ids: string[];
     frontier: MarkerFrontier | null;
+    /** Present when the preparation asked for reference discovery. */
+    references?: MarkerReferenceSeed;
 }
 export interface MarkerCandidateBasis extends MarkerCandidateSnapshot {
     connection: Database;
@@ -25,6 +35,8 @@ export interface MarkerCandidatePreparationOptions {
     entry?: URL;
     acceptMs?: number;
     resultMs?: number;
+    /** Also scan the session for tail_start_id reference rows (default true). */
+    references?: boolean;
 }
 export type MarkerCandidateReply =
     | { kind: "accepted" }
@@ -112,6 +124,11 @@ export function invalidateMarkerCandidateBasis(db: Database, sessionId: string):
     const revision = ownWriteRevisions.get(key);
     if (revision !== undefined) ownWriteRevisions.set(key, revision + 1);
 }
+
+/** Forget this session's prepared basis so the next preparation scans again. */
+export function discardMarkerCandidateBasis(db: Database, sessionId: string): void {
+    candidates.get(db)?.delete(sessionId);
+}
 export function readMarkerCandidateBasis(
     db: Database,
     sessionId: string,
@@ -154,7 +171,7 @@ export function prepareMarkerCandidateBasis(
         reportWorkerUnavailable(entry, "file missing");
         return Promise.resolve(false);
     }
-    const preparation = runCandidateWorker(path, sessionId, options)
+    const preparation = runCandidateWorker(path, sessionId, options.references !== false, options)
         .then((snapshot) => {
             if (!snapshot) return false;
             const basis: MarkerCandidateBasis = {
@@ -196,6 +213,7 @@ function markerWorkerEntry(): URL {
 function runCandidateWorker(
     path: string,
     sessionId: string,
+    references: boolean,
     options: MarkerCandidatePreparationOptions,
 ): Promise<MarkerCandidateSnapshot | undefined> {
     if (!exitRegistered) {
@@ -247,8 +265,8 @@ function runCandidateWorker(
         try {
             worker = inRootAsyncContext(() =>
                 options.entry
-                    ? new Worker(entry, { workerData: { path, sessionId } })
-                    : reuseWorker(entry, { workerData: { path, sessionId } }),
+                    ? new Worker(entry, { workerData: { path, sessionId, references } })
+                    : reuseWorker(entry, { workerData: { path, sessionId, references } }),
             );
             workers.add(worker);
             worker.unref();
@@ -297,24 +315,122 @@ export function scanMarkerSummaryCandidates(db: Database, sessionId: string): st
 }
 
 /** Read summary IDs and the newest row in one snapshot, so an insert between
- * those reads cannot be skipped by the next rowid-based certification. */
+ * those reads cannot be skipped by the next rowid-based certification. With
+ * `references`, the same snapshot also supplies the compaction parts and part
+ * frontier that marker replacement would otherwise have to scan for on the
+ * main thread. The part table is the expensive one: it holds every tool output
+ * and text of the session. */
 export function scanMarkerCandidateSnapshot(
     db: Database,
     sessionId: string,
+    references = true,
 ): MarkerCandidateSnapshot {
     const ownsSnapshot = !db.inTransaction;
     if (ownsSnapshot) db.exec("BEGIN");
     try {
         const ids = scanMarkerSummaryCandidates(db, sessionId);
-        const frontier = (db
-            .prepare("SELECT rowid,id FROM message ORDER BY rowid DESC LIMIT 1")
-            .get() ?? null) as MarkerFrontier | null;
-        if (frontier && !Number.isSafeInteger(frontier.rowid))
-            throw new Error("marker frontier rowid is not a safe integer");
-        return { ids, frontier };
+        const frontier = readMarkerFrontier(db, "message");
+        if (!references) return { ids, frontier };
+        return {
+            ids,
+            frontier,
+            references: {
+                partIds: readMarkerReferenceRows(db, sessionId, "part").map((row) => row.id),
+                partFrontier: readMarkerFrontier(db, "part"),
+            },
+        };
     } finally {
         if (ownsSnapshot) db.exec("ROLLBACK");
     }
+}
+
+/** The newest row of a host table by rowid, or null when the table is empty. */
+export function readMarkerFrontier(db: Database, table: "part" | "message"): MarkerFrontier | null {
+    // all() rather than get(): a cursor left mid-step can pin the read snapshot.
+    const frontier = ((
+        db.prepare(`SELECT rowid,id FROM ${table} ORDER BY rowid DESC LIMIT 1`).all() as Array<MarkerFrontier>
+    )[0] ?? null);
+    if (frontier && !Number.isSafeInteger(frontier.rowid))
+        throw new Error(`marker ${table} frontier rowid is not a safe integer`);
+    return frontier;
+}
+
+export const markerReferenceFrontierSql = (table: "part" | "message") => `SELECT
+    (SELECT rowid FROM ${table} WHERE id = ?) AS previousRowid,
+    (SELECT rowid FROM ${table} ORDER BY rowid DESC LIMIT 1) AS newestRowid`;
+
+/** Whether every row inserted into `table` since `frontier` was read still has a
+ * higher rowid. SQLite gives a new row a rowid above the current maximum, so
+ * that holds while the frontier row keeps its ID and rowid. If the frontier row
+ * was deleted or renumbered, a later insert may have reused a lower rowid and
+ * a rowid-suffix read could miss it. This is the same rule the summary basis
+ * certification applies to its message frontier. A null frontier means the
+ * table was empty, so every row present now is read as new. */
+export function isMarkerReferenceFrontierCurrent(
+    db: Database,
+    table: "part" | "message",
+    frontier: MarkerFrontier | null,
+): boolean {
+    if (!frontier) return true;
+    const current = db.prepare(markerReferenceFrontierSql(table)).all(frontier.id)[0] as {
+        previousRowid: number | null;
+        newestRowid: number | null;
+    };
+    return (
+        current.previousRowid === frontier.rowid &&
+        current.newestRowid !== null &&
+        Number.isSafeInteger(current.newestRowid) &&
+        current.newestRowid >= frontier.rowid
+    );
+}
+
+export interface MarkerTailReference {
+    id: string;
+    direct: unknown;
+    nested: unknown;
+}
+
+const MARKER_TAIL_REFERENCE_COLUMNS = `id,
+    CASE WHEN data LIKE '%tail_start_id%' THEN json_extract(data, '$.tail_start_id') END AS direct,
+    CASE WHEN data LIKE '%tail_start_id%' THEN json_extract(data, '$.compaction.tail_start_id') END AS nested`;
+
+/** Without `afterRowid`, read every reference row of the session: a full scan.
+ * For parts only the discovery worker runs it; the message scan stays on the
+ * main thread, once per session per process. With `afterRowid`, read only rows
+ * inserted after a certified frontier; +session_id keeps SQLite on the rowid
+ * range instead of the session index. */
+export function readMarkerReferenceRows(
+    db: Database,
+    sessionId: string,
+    table: "part" | "message",
+    afterRowid?: number,
+): MarkerTailReference[] {
+    // Discovery must also remember compactions with no tail yet: the host can
+    // publish their tail_start_id later by updating the same primary key.
+    return db
+        .prepare(
+            `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM ${table}
+             WHERE ${afterRowid === undefined ? "session_id = ?" : "rowid > ? AND +session_id = ?"}
+             AND ${table === "part" ? "data LIKE '%compaction%' AND json_valid(data) AND json_extract(data, '$.type') = 'compaction'" : "(data LIKE '%compaction%' OR data LIKE '%tail_start_id%') AND json_valid(data) AND (json_type(data, '$.compaction') IS NOT NULL OR json_type(data, '$.tail_start_id') IS NOT NULL)"}`,
+        )
+        .all(
+            ...(afterRowid === undefined ? [sessionId] : [afterRowid, sessionId]),
+        ) as MarkerTailReference[];
+}
+
+/** Reread known reference rows by primary key; a deleted row returns nothing. */
+export function readKnownMarkerReferenceRows(
+    db: Database,
+    sessionId: string,
+    table: "part" | "message",
+    ids: readonly string[],
+): MarkerTailReference[] {
+    const byId = db.prepare(
+        `SELECT ${MARKER_TAIL_REFERENCE_COLUMNS} FROM ${table} WHERE id = ? AND session_id = ?`,
+    );
+    // Consume the cursor completely before ending a read snapshot. A get() left
+    // mid-step can pin that snapshot across ROLLBACK and break the next writer.
+    return ids.flatMap((id) => byId.all(id, sessionId) as MarkerTailReference[]);
 }
 
 import { inRootAsyncContext } from "../../shared/sqlite";

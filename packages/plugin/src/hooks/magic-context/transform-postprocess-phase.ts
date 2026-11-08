@@ -977,6 +977,20 @@ export function applyRustModeDeferredCompactionMarker(args: {
     // Record the latest target above even when this pass cannot prove the cut safe.
     // Deferral does not spend retry attempts or arm the post-cut replay fence.
     if (args.admissionProven === false) return;
+    // Summary discovery runs on a worker and the pass never waits for it. While it
+    // runs, keep the pending target the same way: no fence, no retry spent. A host
+    // store that cannot be opened starts no discovery; the drain below reports
+    // that as a retryable failure, as before.
+    if (
+        (args.applyDeferred ?? applyDeferredCompactionMarker) === applyDeferredCompactionMarker &&
+        startCompactionMarkerCandidatePreparation(args.sessionId) === "preparing"
+    ) {
+        sessionLog(
+            args.sessionId,
+            "rust compaction-marker drain: candidate preparation deferred; pending target retained",
+        );
+        return;
+    }
     const trustedBoundary =
         boundary &&
         pending.ordinal === boundary.ordinal &&
@@ -4196,9 +4210,12 @@ export async function runPostTransformPhase(
             } else {
                 const tMarkerDrain = performance.now();
                 const strategy = args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy;
+                // Discovery reads the whole session on a worker and can take tens of
+                // seconds on a large one. The pass never waits for it: without a
+                // prepared basis this starts discovery in the background and defers.
                 const candidatesReady =
                     strategy.applyDeferred !== applyDeferredCompactionMarker ||
-                    (await prepareCompactionMarkerCandidates(args.sessionId));
+                    startCompactionMarkerCandidatePreparation(args.sessionId) === "ready";
                 const outcome: MarkerUpdateOutcome = candidatesReady
                     ? strategy.applyDeferred(
                           args.db,
@@ -4215,9 +4232,10 @@ export async function runPostTransformPhase(
                 );
                 switch (outcome.kind) {
                     case "deferred":
-                        // Summary discovery may observe a new summary or fail to load
-                        // its worker. Only marker replacement waits: serve the rebuilt
-                        // request now and retry replacement on a later history rebuild.
+                        // Summary discovery may still be running, observe a new summary
+                        // or fail to load its worker. Only marker replacement waits: serve
+                        // the rebuilt request now and retry replacement on a later history
+                        // rebuild.
                         suppressV12HistoryDrain = true;
                         sessionLog(
                             args.sessionId,
@@ -5324,7 +5342,7 @@ export function checkM0MutationDriftAndSignal(args: {
     return false;
 }
 
-import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
+import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
     hasPendingMaterializationOrigin,
