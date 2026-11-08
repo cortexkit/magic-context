@@ -264,10 +264,12 @@ async fn stale_a_reading_keeps_the_keep_request() {
 }
 
 /// A stale reading neither clears nor spends the mark that lets the next
-/// pass summarize past the newest prompt.
+/// pass summarize past the newest prompt. The session has a summarizer, so
+/// the pass reaches the point where a mark is spent.
 #[tokio::test]
 async fn stale_a_reading_keeps_the_summary_floor_mark() {
     let (mut session, client, settings, applied) = under_view_two().await;
+    session.features.summarizer = true;
     let mark = (5, "go on".to_owned());
     session.floor_pending_for = Some(mark.clone());
     let request = reading(&session, &client, 2, BELOW, Some(1), Some(&applied));
@@ -349,6 +351,143 @@ async fn stale_the_apps_show_the_last_current_reading() {
     assert_eq!(snapshot.breakdown["total"]["source"], "provider");
 }
 
+/// With no current reading to keep, the apps don't fall back to the newest
+/// step's own usage either: that step is the stale request. They show the
+/// estimate.
+#[tokio::test]
+async fn stale_with_no_earlier_reading_the_apps_show_the_estimate() {
+    let (mut session, client, settings) = worker();
+    let mut step = Entry::new(
+        6,
+        "reply",
+        Role::Assistant,
+        6,
+        vec![Part::new(
+            "t",
+            PartBody::Text {
+                text: "Done.".into(),
+            },
+        )],
+    );
+    step.usage =
+        Some(cortexkit_role_compaction::read::StepUsage::default().with_prompt_tokens(EXECUTE));
+    session.index.extend(vec![step.clone()]);
+    client.entries.lock().unwrap().push(step);
+    let applied = take_views(&mut session, 2);
+    let request = reading(&session, &client, 1, EXECUTE, Some(1), Some(&applied));
+    session.notice(&client, &settings, request).await;
+    assert!(session.reading_stale);
+    assert_eq!(session.conditions.last_prompt_tokens, None);
+    let snapshot = session.app_snapshot();
+    assert_eq!(snapshot.breakdown["total"]["source"], "estimate");
+    assert_ne!(snapshot.breakdown["total"]["tokens"], EXECUTE);
+}
+
+/// An over-limit ride after a stale reading sizes its emergency drop from
+/// the runner's estimate of the request it is about to send, not from the
+/// reading the stored conditions kept from before the newest view. Sized
+/// from that larger reading, the part of the prompt outside the transcript
+/// would look bigger than the threshold and the drop would take nothing.
+#[test]
+fn stale_an_over_limit_ride_sizes_its_emergency_drop_from_its_own_estimate() {
+    let (mut session, _, settings) = worker();
+    let applied = take_views(&mut session, 2);
+    session.conditions.last_prompt_tokens = Some(130_000);
+    session.conditions.last_prompt_view = Some(1);
+    let mut conditions = session.conditions.clone();
+    conditions.last_prompt_tokens = Some(FORCE);
+    conditions.last_prompt_view = Some(1);
+    let mut ride = RideRequest::new(vec![RideCause::OverLimit], 1_000, conditions)
+        .with_request_tokens(100_000);
+    ride.applied_view = Some(applied.applied());
+    let view = session
+        .ride(&settings, &ride)
+        .expect("an over-limit request must shrink");
+    assert!(session.reading_stale);
+    assert_eq!(session.conditions.last_prompt_tokens, Some(130_000));
+    assert!(
+        drops(&view, "old", "p"),
+        "the emergency drop was not sized from the ride's estimate: {view:?}"
+    );
+}
+
+/// Log output, for counting warnings.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The in-flight request's reading may repeat, and stays ignored. A
+/// different reading that still names a view the runner replaced was
+/// measured on a request sent later: the runner is at fault. ck-mc warns
+/// once, counts its readings whatever view they name, and judges them again
+/// after the next Setup.
+#[tokio::test]
+async fn stale_a_second_different_stale_reading_distrusts_the_runner_until_setup() {
+    let output = Captured::default();
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+
+    let (mut session, client, settings, applied) = under_view_two().await;
+    for seq in [2, 3] {
+        let request = reading(&session, &client, seq, EXECUTE, Some(1), Some(&applied));
+        session.notice(&client, &settings, request).await;
+        assert!(
+            session.reading_stale,
+            "a repeat of the ignored reading counted"
+        );
+    }
+    assert!(client.offered.lock().unwrap().is_empty());
+
+    for (seq, prompt) in [(4, EXECUTE + 1_000), (5, EXECUTE + 2_000)] {
+        let request = reading(&session, &client, seq, prompt, Some(1), Some(&applied));
+        session.notice(&client, &settings, request).await;
+        assert!(!session.reading_stale, "{prompt}");
+        assert!(session.prompt_views_untrusted, "{prompt}");
+    }
+    let offered = client.offered.lock().unwrap().clone();
+    assert!(
+        offered.first().is_some_and(|view| drops(view, "old", "p2")),
+        "the reading that showed the fault did not count: {offered:?}"
+    );
+    let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logs.matches("a second stale reading").count(),
+        1,
+        "exactly one warning: {logs}"
+    );
+    assert!(logs.contains("WARN"), "{logs}");
+
+    let (_, _, route, request, _) = fixture();
+    let mut setup = request;
+    setup.applied_view = Some(applied.applied());
+    setup.newest = client.entries.lock().unwrap().last().map(cursor);
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    assert!(!session.prompt_views_untrusted);
+    let request = reading(&session, &client, 1, EXECUTE, Some(1), Some(&applied));
+    session.notice(&client, &settings, request).await;
+    assert!(
+        session.reading_stale,
+        "after Setup a reading under a replaced view is ignored again"
+    );
+}
+
 /// The newest applied version and whether the reading is stale survive a
 /// restart; a row saved before they existed restores as nothing applied.
 #[tokio::test]
@@ -361,13 +500,29 @@ async fn stale_judgement_survives_a_restart() {
     restored.restore(durable.clone());
     assert_eq!(restored.newest_applied, 2);
     assert!(restored.reading_stale);
+    assert_eq!(restored.ignored_reading, Some((EXECUTE, 1, 2)));
+    assert!(!restored.prompt_views_untrusted);
 
     let mut older = serde_json::to_value(&durable).unwrap();
     let fields = older.as_object_mut().unwrap();
-    fields.remove("newest_applied");
-    fields.remove("reading_stale");
+    for field in [
+        "newest_applied",
+        "reading_stale",
+        "ignored_reading",
+        "prompt_views_untrusted",
+    ] {
+        fields.remove(field);
+    }
     let older: crate::store::Durable = serde_json::from_value(older).unwrap();
-    assert_eq!((older.newest_applied, older.reading_stale), (0, false));
+    assert_eq!(
+        (
+            older.newest_applied,
+            older.reading_stale,
+            older.ignored_reading,
+            older.prompt_views_untrusted
+        ),
+        (0, false, None, false)
+    );
 }
 
 /// The runner's own answer to `session.applied_view` replaces the newest

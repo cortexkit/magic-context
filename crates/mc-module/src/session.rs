@@ -83,12 +83,11 @@ pub struct Session {
     /// The highest version ck-mc has built for the session, accepted or not,
     /// so a version number is never used twice.
     version: u64,
-    /// The newest view version the runner has reported applying in this
-    /// session: a notice's, a ride's or Setup's `applied_view`, or the view
-    /// read back with `session.applied_view`. 0 until it reports one. A view
-    /// the runner took but has not applied yet doesn't count: until it
-    /// applies it, a reading under the view before it still measures what
-    /// the runner sends.
+    /// The view version the runner last reported applying: a notice's, a
+    /// ride's or Setup's `applied_view`, or the view read back with
+    /// `session.applied_view`. 0 when it reports none. A view the runner took
+    /// but has not applied yet doesn't count: until it applies it, a reading
+    /// under the view before it still measures what the runner sends.
     newest_applied: u64,
     /// The newest reading the runner sent (`last_prompt_tokens`) measured a
     /// request rendered with an older view than `newest_applied`. A runner
@@ -98,6 +97,17 @@ pub struct Session {
     /// arrives, every pressure decision treats usage as unknown
     /// ([`Session::pressure`]).
     reading_stale: bool,
+    /// The stale reading last ignored: its prompt size, the view version it
+    /// named, and the `newest_applied` it was judged against. With one
+    /// request in flight, a runner sends at most one distinct stale reading
+    /// per view it applies, repeated in that request's notices.
+    ignored_reading: Option<(u64, u64, u64)>,
+    /// The runner sent a second, different stale reading while applying the
+    /// same view: it named a view it had already replaced for a request it
+    /// sent later. Its view versions can't be trusted, and ignoring every
+    /// such reading would switch off every pressure decision for good, so
+    /// until the next Setup readings are judged as if they named no view.
+    prompt_views_untrusted: bool,
     /// Parts the model asked to drop, held for the next view.
     queued: BTreeSet<(String, String)>,
     /// The age sweep's bookmark from the previous pass with permission to
@@ -367,6 +377,8 @@ impl Session {
             version: 0,
             newest_applied: 0,
             reading_stale: false,
+            ignored_reading: None,
+            prompt_views_untrusted: false,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
@@ -524,6 +536,8 @@ impl Session {
             version: self.version,
             newest_applied: self.newest_applied,
             reading_stale: self.reading_stale,
+            ignored_reading: self.ignored_reading,
+            prompt_views_untrusted: self.prompt_views_untrusted,
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
             notice_reclaim_bookmark: self.notice_reclaim_bookmark,
@@ -564,6 +578,8 @@ impl Session {
         self.version = durable.version;
         self.newest_applied = durable.newest_applied;
         self.reading_stale = durable.reading_stale;
+        self.ignored_reading = durable.ignored_reading;
+        self.prompt_views_untrusted = durable.prompt_views_untrusted;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
         self.notice_reclaim_bookmark = durable.notice_reclaim_bookmark;
@@ -693,8 +709,12 @@ impl Session {
         self.tools_only = false;
         self.suspended = false;
         self.conditions = conditions_of(request);
-        // Setup carries no reading, so none is stale.
+        // Setup carries no reading, so none is stale. A runner that named
+        // views it had already replaced is trusted again: Setup starts its
+        // reports afresh.
         self.reading_stale = false;
+        self.ignored_reading = None;
+        self.prompt_views_untrusted = false;
         self.child_harness = request.child_harness.clone();
         self.view_anchor = request.view_anchor == Some(true);
         self.notice_keep = false;
@@ -1000,13 +1020,19 @@ impl Session {
 
     /// Judge the reading the conditions just taken carry, once the notice's
     /// or ride's `applied_view` is settled. A reading whose `last_prompt_view`
-    /// is older than the newest view the runner applies, or is 0 (no view)
-    /// once one is applied, measured bytes the runner no longer sends: a
-    /// runner takes a view while a request is in flight, and that request's
-    /// size arrives after the new view went out. Acting on it would build a
-    /// second view for pressure the first one already relieved, and rewrite
-    /// the cache again for nothing. A reading with no view version is used
-    /// as it is: the runner could not tie it to a request.
+    /// is older than the view the runner applies, or is 0 (no view) once one
+    /// is applied, measured bytes the runner no longer sends: a runner takes
+    /// a view while a request is in flight, and that request's size arrives
+    /// after the new view went out. Acting on it would build a second view
+    /// for pressure the first one already relieved, and rewrite the cache
+    /// again for nothing. A reading with no view version is used as it is:
+    /// the runner could not tie it to a request.
+    ///
+    /// Repeats of the reading last ignored stay ignored. A different stale
+    /// reading while the runner still applies the same view means it named a
+    /// replaced view for a request it sent later; from then until the next
+    /// Setup its view versions are disregarded (`prompt_views_untrusted`),
+    /// and that reading counts.
     ///
     /// The stored conditions keep the last reading that was current, not the
     /// stale one, so the apps keep showing the usage they showed rather than
@@ -1014,18 +1040,31 @@ impl Session {
     /// reading that was current when it came. Pressure decisions read neither
     /// until a reading under the current view arrives ([`Session::pressure`]).
     fn judge_reading(&mut self, previous: (Option<u64>, Option<u64>)) {
-        let (tokens, view) = reading_of(&self.conditions);
-        self.reading_stale =
-            tokens.is_some() && view.is_some_and(|view| view < self.newest_applied);
-        if !self.reading_stale {
+        self.reading_stale = false;
+        let (Some(tokens), Some(view)) = reading_of(&self.conditions) else {
+            return;
+        };
+        if self.prompt_views_untrusted || view >= self.newest_applied {
             return;
         }
+        let applied = self.newest_applied;
+        if let Some((ignored_tokens, ignored_view, _)) = self
+            .ignored_reading
+            .filter(|ignored| ignored.2 == applied && (ignored.0, ignored.1) != (tokens, view))
+        {
+            self.prompt_views_untrusted = true;
+            self.ignored_reading = None;
+            tracing::warn!(
+                "ck-mc: session {}: a second stale reading under applied view {applied}: {tokens} tokens from view {view}, after {ignored_tokens} tokens from view {ignored_view}; the runner names views it already replaced, so readings count whatever view they name until the next Setup",
+                self.key.session
+            );
+            return;
+        }
+        self.ignored_reading = Some((tokens, view, applied));
+        self.reading_stale = true;
         tracing::info!(
-            "ck-mc: session {}: ignoring a prompt of {} tokens: reading from view {}, newest applied {}; waiting for a reading under the current view",
-            self.key.session,
-            tokens.unwrap_or(0),
-            view.unwrap_or(0),
-            self.newest_applied
+            "ck-mc: session {}: ignoring a prompt of {tokens} tokens: reading from view {view}, newest applied {applied}; waiting for a reading under the current view",
+            self.key.session
         );
         (
             self.conditions.last_prompt_tokens,
@@ -3551,8 +3590,12 @@ impl Session {
         applied: Option<&AppliedView>,
         refused: &[(u64, ViewRefusal)],
     ) {
+        // The runner reports the view it applies now, and none when the field
+        // is absent. Taken as it stands, not as a maximum: a runner whose
+        // state went back, or that stopped applying any view, measures its
+        // requests under what it applies now.
+        self.newest_applied = applied.map_or(0, |applied| applied.version);
         if let Some(applied) = applied {
-            self.newest_applied = self.newest_applied.max(applied.version);
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
             if let Some(at) = self

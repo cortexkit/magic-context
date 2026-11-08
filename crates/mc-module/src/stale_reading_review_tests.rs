@@ -1,10 +1,9 @@
 //! Review witnesses and probes for readings judged by `last_prompt_view`.
 //!
-//! The tests marked `#[ignore]` are witnesses: each states behaviour the
-//! review expects and fails on the commit it reviewed. Run them with
-//! `cargo test --locked -p mc-module --lib review_stale_ -- --include-ignored`.
-//! The other tests are probes of behaviour the review found sound; they pass,
-//! and each carries a control showing it could fail.
+//! Witnesses state behaviour a review found missing: a runner that keeps
+//! naming replaced views, and one whose applied view goes back or away.
+//! Probes check behaviour the review found sound, each with a control
+//! showing it could fail.
 
 use super::*;
 
@@ -121,11 +120,10 @@ fn drops(view: &View, mid: &str, part: &str) -> bool {
 /// while it applies view 2. A correct runner has at most one request in
 /// flight per session when it applies a view, so after a view change it can
 /// send only one distinct stale reading (repeated across that request's
-/// notices). Five steps later, each with a larger reading in the force band,
-/// ck-mc has still built nothing and started no emergency drop. Only an
-/// over-limit ride would reach it, and a ride never starts a summary.
+/// notices). The second distinct one shows the runner at fault, and from
+/// then on its readings count: ck-mc must not stay blind to five growing
+/// readings in the force band, which only an over-limit ride would reach.
 #[tokio::test]
-#[ignore = "review witness: fails on 2290452b"]
 async fn review_stale_readings_stuck_under_an_old_view_stop_pressure_for_good() {
     let (mut session, client, settings, applied) = under_view_two().await;
     for (seq, ordinal) in (2..=6).zip(6..) {
@@ -142,11 +140,9 @@ async fn review_stale_readings_stuck_under_an_old_view_stop_pressure_for_good() 
 
 /// Witness. A runner whose state went back reports applying view 1 while
 /// ck-mc remembers view 2 applied. Its reading, measured under view 1, is the
-/// view it now applies, so it is current. The notice that reports the change
-/// judges it against the remembered version before `adopt_runner_view`
-/// lowers it, so that pass treats an execute-level reading as stale.
+/// view it now applies, so it is current already on the notice that reports
+/// the change, before `adopt_runner_view` reads the view back.
 #[tokio::test]
-#[ignore = "review witness: fails on 2290452b"]
 async fn review_stale_the_first_reading_after_the_runner_went_back_counts() {
     let (mut session, client, settings, _) = under_view_two().await;
     let older = View::seal(1, Vec::new());
@@ -170,10 +166,10 @@ async fn review_stale_the_first_reading_after_the_runner_went_back_counts() {
 /// Witness. ck-mc took a foreign module's view 3 as the runner's
 /// (`adopt_runner_view` keeps its version and no view of its own), then the
 /// runner stops applying any view. `runner_differs` sees nothing applied and
-/// no view of ck-mc's own, so no read-back lowers the remembered version 3,
-/// and every reading under no view (0) is stale for good.
+/// no view of ck-mc's own, so no read-back happens; the notices' absent
+/// `applied_view` itself says the runner applies none, so readings under no
+/// view (0) are current.
 #[tokio::test]
-#[ignore = "review witness: fails on 2290452b"]
 async fn review_stale_no_view_after_a_foreign_one_is_not_stale_for_good() {
     let (mut session, client, settings) = worker();
     session.queued.insert(("old".into(), "p2".into()));

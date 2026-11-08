@@ -42,7 +42,7 @@ pub struct Durable {
     pub reminder_counter: u64,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
-    /// The newest view version the runner reported applying, which a
+    /// The view version the runner last reported applying, which a
     /// reading's `last_prompt_view` is judged against.
     #[serde(default)]
     pub newest_applied: u64,
@@ -50,6 +50,14 @@ pub struct Durable {
     /// so pressure counts as unknown until a reading under the current view.
     #[serde(default)]
     pub reading_stale: bool,
+    /// The stale reading last ignored: prompt size, the view it named, and
+    /// the applied view it was judged against.
+    #[serde(default)]
+    pub ignored_reading: Option<(u64, u64, u64)>,
+    /// The runner named views it had already replaced; its view versions
+    /// are ignored until the next Setup.
+    #[serde(default)]
+    pub prompt_views_untrusted: bool,
     /// Parts the model asked to drop that no view carries yet.
     pub queued: BTreeSet<(String, String)>,
     pub reclaim_bookmark: u64,

@@ -1040,7 +1040,7 @@ impl<P: Provider> Runner<P> {
             }
         }
 
-        let (completion, highest_tag) = {
+        let (completion, highest_tag, rendered_view) = {
             let state = self.host.lock();
             let messages = state.render();
             let highest_tag = messages
@@ -1059,7 +1059,9 @@ impl<P: Provider> Runner<P> {
                 now: state.now,
                 reasoning_tokens: &lookup,
             };
-            (self.model.complete(&request), highest_tag)
+            // The view this request is rendered with, which its reading names.
+            let rendered_view = state.applied.as_ref().map_or(0, |view| view.version);
+            (self.model.complete(&request), highest_tag, rendered_view)
         };
         let completion = match completion {
             Ok(completion) => completion,
@@ -1072,7 +1074,7 @@ impl<P: Provider> Runner<P> {
         if self.host.lock().notice_owed {
             self.notice().await;
         }
-        self.store_reply(turn, completion, highest_tag);
+        self.store_reply(turn, completion, highest_tag, rendered_view);
         let lag = self.host.lock().lag_notices;
         if lag {
             self.host.lock().notice_owed = true;
@@ -1089,7 +1091,13 @@ impl<P: Provider> Runner<P> {
         true
     }
 
-    fn store_reply(&mut self, turn: &Turn, completion: Completion, highest_tag: u64) {
+    fn store_reply(
+        &mut self,
+        turn: &Turn,
+        completion: Completion,
+        highest_tag: u64,
+        rendered_view: u64,
+    ) {
         let mut state = self.host.lock();
         let mut bodies = Vec::new();
         if let Some(tokens) = turn.reasoning_tokens {
@@ -1172,7 +1180,7 @@ impl<P: Provider> Runner<P> {
         }
         state.last_send = Some(now);
         state.last_prompt_tokens = usage.prompt_tokens;
-        state.last_prompt_view = Some(state.applied.as_ref().map_or(0, |view| view.version));
+        state.last_prompt_view = Some(rendered_view);
         self.report.requests.push(RequestRecord {
             ordinal: entry.ordinal,
             view: state.applied.as_ref().map(|view| view.version),
