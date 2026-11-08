@@ -10,6 +10,7 @@ import {
 	resetLkgSlotsForTest,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { createTestTempDir } from "../../plugin/src/shared/test-temp-dir";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -212,12 +213,15 @@ test("Oh My Pi: a request refused at the provider-dispatch fence is not replayed
 	];
 	await emit("context", { messages: structuredClone(second) });
 	// The provider request does not match the prepared result: the fence refuses.
-	emit("before_provider_request", {
-		payload: {
-			messages: [userMessage("a request this pass never prepared", 9)],
-		},
-	});
-	expect(aborts).toBe(1);
+	assertPiRefusedDispatch(
+		emit("before_provider_request", {
+			payload: {
+				messages: [userMessage("a request this pass never prepared", 9)],
+			},
+		}),
+		"missing current receipt signature",
+	);
+	expect(aborts).toBe(0);
 	expect(refusals).toHaveLength(1);
 	expect(loadPersistedLkgSlot(db, sessionId)?.jsonPrefix).toContain(
 		"§2§ second turn",

@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { assistantMessage, fakeContext, userMessage } from "./test-utils.test";
 
@@ -57,8 +58,8 @@ function harness() {
 		ctx,
 		refusals,
 		emit,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		set idle(value: boolean) {
 			idle = value;
@@ -95,7 +96,7 @@ test("issue 673: a dispatched current pass survives an earlier end before provid
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 673: an owning end refuses even the identical previously managed payload", async () => {
@@ -105,7 +106,7 @@ test("issue 673: an owning end refuses even the identical previously managed pay
 		messages: [...structuredClone(raw), assistantMessage("done", 40)],
 	});
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("origin=agent_end");
 });
 
@@ -115,7 +116,7 @@ test("issue 673: an idle aborted run cannot retain a dispatched receipt", async 
 	h.idle = true;
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: a changed native anchor refuses a stale request with identical messages", async () => {
@@ -124,7 +125,7 @@ test("issue 673: a changed native anchor refuses a stale request with identical 
 	h.branch[2].id = "new-run-anchor";
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: same keys and anchor do not authorize changed native content", async () => {
@@ -136,7 +137,7 @@ test("issue 673: same keys and anchor do not authorize changed native content", 
 	);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: matching keys without matching end content are not an earlier transcript", async () => {
@@ -146,7 +147,7 @@ test("issue 673: matching keys without matching end content are not an earlier t
 		messages: [userMessage("different first prompt", 10), reply],
 	});
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: an end containing the whole input is not a strict earlier prefix", async () => {
@@ -154,7 +155,7 @@ test("issue 673: an end containing the whole input is not a strict earlier prefi
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone(raw) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: an empty end proves no earlier transcript", async () => {
@@ -162,7 +163,7 @@ test("issue 673: an empty end proves no earlier transcript", async () => {
 	await h.prepare();
 	h.emit("agent_end", { messages: [] });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: a pruned owning run cannot be mistaken for the earlier prefix", async () => {
@@ -171,7 +172,7 @@ test("issue 673: a pruned owning run cannot be mistaken for the earlier prefix",
 	h.branch = h.branch.slice(0, 2);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: unreadable native history leaves the end effective", async () => {
@@ -182,7 +183,7 @@ test("issue 673: unreadable native history leaves the end effective", async () =
 	};
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: a pass without a matching native input cannot preserve a dispatched receipt", async () => {
@@ -192,7 +193,7 @@ test("issue 673: a pass without a matching native input cannot preserve a dispat
 	h.branch[0].message = structuredClone(first);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: a new start without a pass cannot borrow the kept receipt", async () => {
@@ -201,7 +202,7 @@ test("issue 673: a new start without a pass cannot borrow the kept receipt", asy
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.emit("agent_start");
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("no context pass ran");
 });
 
@@ -210,7 +211,7 @@ test("issue 673: no earlier outstanding start means a dispatched end stays effec
 	await h.prepare(false);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 673: native prompt persistence can finish after context publication but before dispatch", async () => {
@@ -232,5 +233,5 @@ test("issue 673: willContinue alone does not preserve an already dispatched owni
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone(raw), willContinue: true });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });

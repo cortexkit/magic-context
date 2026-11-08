@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -221,8 +222,8 @@ async function guarded(
 	await emit("context", { messages: [userMessage("current", 2)] });
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		dispatch: (payload: unknown) =>
 			emit("before_provider_request", { payload }),
@@ -232,14 +233,14 @@ async function guarded(
 test("issue 686 image budget managed request sends and raw request without opener refuses", async () => {
 	const managed = await guarded();
 	managed.dispatch(wire("openai-completions"));
-	expect(managed.aborts).toBe(0);
+	expect(managed.stops).toBe(0);
 	expect(managed.refusals).toEqual([]);
 	clearPiContextReceipt(session);
 	const raw = await guarded();
 	const body = wire("openai-completions");
 	body.messages[0].content = "raw old history without managed opener";
 	raw.dispatch(body);
-	expect(raw.aborts).toBe(1);
+	expect(raw.stops).toBe(1);
 	expect(raw.refusals[0]).toContain("missing current receipt signature");
 });
 
@@ -665,7 +666,7 @@ test("issue 686 image budget trimmed sessions send with an obfuscated user secre
 		});
 		const h = await guarded(messages, api);
 		h.dispatch(body);
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		expect(h.refusals).toEqual([]);
 	}
 });

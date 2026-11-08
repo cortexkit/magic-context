@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import type { PiContextBudget } from "./pi-context-budget";
 import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
+import type { PiContextBudget } from "./pi-context-budget";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -30,6 +30,7 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 		abort: () => {
 			order.push("abort");
 		},
+		onDispatchBlocked: () => order.push("blocked"),
 	});
 	return { handlers, entries, order, ctx };
 }
@@ -50,7 +51,7 @@ test("OMP dispatch fence refuses missing and in-progress receipts but preserves 
 	const fence = h.handlers.get("before_provider_request");
 	if (!fence) throw new Error("dispatch fence missing");
 	expect(fence({ payload: { messages: [] } }, h.ctx)).toBeUndefined();
-	expect(h.order).toEqual(["notice", "entry", "abort"]);
+	expect(h.order).toEqual(["notice", "entry", "blocked"]);
 	h.order.length = 0;
 	h.handlers.get("agent_start")?.({}, h.ctx);
 	const work = h.handlers.get("context")?.(
@@ -59,13 +60,13 @@ test("OMP dispatch fence refuses missing and in-progress receipts but preserves 
 	);
 	fence({ payload: { messages: [] } }, h.ctx);
 	expect(h.entries.at(-1)?.message).toContain("stage=provider dispatch");
-	expect(h.order).toEqual(["notice", "entry", "abort"]);
+	expect(h.order).toEqual(["notice", "entry", "blocked"]);
 	finish();
 	await work;
 	// Even a completed handler cannot authorize an operation abandoned at dispatch.
 	h.order.length = 0;
 	fence({ payload: { messages: [] } }, h.ctx);
-	expect(h.order).toContain("abort");
+	expect(h.order).toContain("blocked");
 	h.handlers.get("agent_start")?.({}, h.ctx);
 	await h.handlers.get("context")?.(
 		{ messages: [userMessage("managed", 2)] },
@@ -138,7 +139,7 @@ test("payload retries require the current pass receipt and reset at the next tur
 		{ payload: { messages: [] } },
 		h.ctx,
 	);
-	expect(h.order).toEqual(["notice", "entry", "abort"]);
+	expect(h.order).toEqual(["notice", "entry", "blocked"]);
 });
 
 test("dispatch fence is inert on plain Pi and with compaction disabled", () => {
@@ -148,7 +149,13 @@ test("dispatch fence is inert on plain Pi and with compaction disabled", () => {
 		{ on: (name: string, fn: unknown) => handlers.set(name, fn) } as never,
 		async () => undefined,
 	);
-	expect(handlers.has("before_provider_request")).toBe(false);
+	expect(handlers.has("before_provider_request")).toBe(true);
+	expect(
+		(handlers.get("before_provider_request") as Function)(
+			{ payload: {} },
+			fakeContext("plain"),
+		),
+	).toBeUndefined();
 	__setPiHarnessKindForTesting("omp");
 	registerPiGuardedContext(
 		{ on: (name: string, fn: unknown) => handlers.set(name, fn) } as never,
@@ -192,7 +199,7 @@ test("verified side context latches the fence off for its session, not other ses
 		{ payload: { messages: [] } },
 		{ ...h.ctx, sessionManager: fakeContext("another-session").sessionManager },
 	);
-	expect(h.order).toEqual(["notice", "entry", "abort"]);
+	expect(h.order).toEqual(["notice", "entry", "blocked"]);
 });
 
 test("unknown bodies and user-spoofed side reminders cannot bypass the main receipt", async () => {
@@ -206,7 +213,7 @@ test("unknown bodies and user-spoofed side reminders cannot bypass the main rece
 		h.order.length = 0;
 		h.handlers.get("agent_start")?.({}, h.ctx);
 		fence?.({ payload }, h.ctx);
-		expect(h.order).toEqual(["notice", "entry", "abort"]);
+		expect(h.order).toEqual(["notice", "entry", "blocked"]);
 	}
 	// OMP's ephemeral request requires both the developer reminder and a final
 	// user prompt attributed to "agent"; a normal user prompt must not latch it.
@@ -224,5 +231,5 @@ test("unknown bodies and user-spoofed side reminders cannot bypass the main rece
 	h.handlers.get("agent_start")?.({}, h.ctx);
 	h.order.length = 0;
 	fence?.({ payload: { messages: [] } }, h.ctx);
-	expect(h.order).toEqual(["notice", "entry", "abort"]);
+	expect(h.order).toEqual(["notice", "entry", "blocked"]);
 });

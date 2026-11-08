@@ -38,10 +38,16 @@ import {
 	piPreparedHistory,
 } from "./pi-dispatch-chain";
 import {
+	piCursorConversation,
+	piCursorManagedRoots,
+} from "./pi-dispatch-cursor";
+import {
 	piConversationFields as conversationFields,
+	piDispatchShape,
 	piHasManagedSignature,
 	piManagedSignature,
 } from "./pi-dispatch-identity";
+import { piRefusedPayload } from "./pi-dispatch-refused";
 import {
 	type PiPreparedStructure,
 	piPreparedStructureMismatch,
@@ -81,6 +87,8 @@ interface Operation {
 	dispatchFields?: readonly LkgContentField[];
 	chainDispatchFields?: readonly LkgContentField[];
 	managedSignature?: string;
+	cursorRoots?: readonly string[];
+	refusalMessage?: string;
 	preparedStructure?: PiPreparedStructure;
 	// Recorded only for serializers that can chain through previous_response_id.
 	preparedHistory?: PiPreparedHistory;
@@ -139,6 +147,7 @@ function releasePiOperationPayloads(operation: Operation): void {
 	operation.dispatchFields = undefined;
 	operation.chainDispatchFields = undefined;
 	operation.managedSignature = undefined;
+	operation.cursorRoots = undefined;
 	operation.preparedStructure = undefined;
 	operation.preparedHistory = undefined;
 }
@@ -412,13 +421,14 @@ export function registerPiGuardedContext(
 		budget: PiContextBudget,
 		reason: unknown,
 		isCurrent: () => boolean,
-	): void => {
+		abort = true,
+	): string => {
 		if (!isCurrent()) {
 			log(
 				`[magic-context][pi] DISCARDED CONTEXT RESULT ${budget.diagnostic()}`,
 				reason,
 			);
-			return;
+			return RETRY_MESSAGE;
 		}
 		budget.abandoned = true;
 		budget.recovery =
@@ -442,7 +452,7 @@ export function registerPiGuardedContext(
 		} catch (error) {
 			log("[magic-context][pi] refusal entry failed", error);
 		} finally {
-			if (!budget.sideTurn) ctx.abort();
+			if (abort && !budget.sideTurn) ctx.abort();
 		}
 		// Refusal bookkeeping must stay in memory here. Diagnostic storage work
 		// must be queued, never performed on the synchronous payload dispatch stack.
@@ -451,6 +461,7 @@ export function registerPiGuardedContext(
 		} catch (error) {
 			log("[magic-context][pi] refusal diagnostic failed", error);
 		}
+		return message;
 	};
 	if (fenceEnabled) {
 		pi.on("agent_start", (_event, ctx) => {
@@ -541,7 +552,9 @@ export function registerPiGuardedContext(
 			if (signal ? signal.aborted : cancelledOperation?.pass?.isCancelled()) {
 				cancelledOperation?.pass?.cancel();
 				if (cancelledOperation) cancelledOperation.ready = false;
-				return;
+				return piRefusedPayload(
+					"Magic Context request cancelled before provider dispatch.",
+				);
 			}
 			if (options.compactionOff?.(ctx)) {
 				// An unmanaged request now owns the provider's latest response.
@@ -560,7 +573,22 @@ export function registerPiGuardedContext(
 			// Most sessions have no superseded payloads. Do not serialize their
 			// potentially multi-megabyte conversation just to inspect an empty set.
 			if (nonces?.size) {
-				const serializedPayload = JSON.stringify(payload);
+				let serializedPayload: string | undefined;
+				try {
+					serializedPayload = JSON.stringify(payload);
+				} catch {
+					const budget = new PiContextBudget();
+					budget.stage = "provider dispatch";
+					return piRefusedPayload(
+						refuse(
+							ctx,
+							budget,
+							`provider payload could not be inspected; ${piDispatchShape(payload, ctx.model?.api)}`,
+							() => true,
+							false,
+						),
+					);
+				}
 				if (
 					serializedPayload &&
 					[...nonces].some((nonce) => serializedPayload.includes(nonce))
@@ -569,13 +597,14 @@ export function registerPiGuardedContext(
 					// refusal applies only to the older, marked request.
 					const budget = new PiContextBudget();
 					budget.stage = "provider dispatch";
-					refuse(
+					const message = refuse(
 						ctx,
 						budget,
-						"superseded context fallback is not a managed request",
+						`superseded context fallback is not a managed request; ${piDispatchShape(payload, ctx.model?.api)}`,
 						() => true,
+						false,
 					);
-					return;
+					return piRefusedPayload(message);
 				}
 			}
 			// OMP also invokes this send hook for advisor agents. They review separate,
@@ -592,12 +621,11 @@ export function registerPiGuardedContext(
 			const capture = isOmpUnmanagedCaptureRequest(payload);
 			const budget =
 				(capture ? undefined : active.pass) ?? new PiContextBudget();
-			// Later callbacks for an already-refused context pass must still abort.
+			// Later callbacks for an already-refused context pass must still block serialization.
 			// Emit one notice, rather than wrapping the previous "provider dispatch"
 			// stage into itself on each attempt and repeatedly asking for a resend.
 			if (active.refused && active.pass === budget) {
-				ctx.abort();
-				return;
+				return piRefusedPayload(active.refusalMessage ?? RETRY_MESSAGE);
 			}
 			let refusalOrigin: "agent_end" | undefined;
 			try {
@@ -661,9 +689,17 @@ export function registerPiGuardedContext(
 					checked = expanded.payload;
 					chainInput = expanded.input;
 				}
-				if (!piHasManagedSignature(checked, active.managedSignature))
+				if (
+					!piHasManagedSignature(
+						checked,
+						active.managedSignature,
+						active.cursorRoots,
+					)
+				)
 					throw new Error(
-						"provider request does not match this pass's managed dispatch (missing current receipt signature)",
+						ctx.model?.api === "cursor-agent"
+							? "provider request does not match this pass's managed dispatch (Cursor root hash did not match and active message has no current receipt signature)"
+							: "provider request does not match this pass's managed dispatch (missing current receipt signature)",
 					);
 				const fields = conversationFields(payload);
 				if (!fields)
@@ -678,15 +714,17 @@ export function registerPiGuardedContext(
 				// The opener proves managed content, not freshness: stale prepared requests
 				// are not detected on this pass when no structural plan can be built.
 				const body = checked as { messages?: unknown; input?: unknown };
-				const skipReason = active.preparedStructure
-					? (active.preparedStructure.structuralSkipReason ??
-						(active.preparedStructure.api &&
-						body?.messages === undefined &&
-						Array.isArray(body?.input) &&
-						!active.preparedStructure.responsesMessages
-							? "provider selected Responses items without a matching history plan"
-							: undefined))
-					: "prepared history representation is not modeled";
+				const skipReason = piCursorConversation(checked)
+					? "Cursor history blob IDs do not expose prepared turn structure"
+					: active.preparedStructure
+						? (active.preparedStructure.structuralSkipReason ??
+							(active.preparedStructure.api &&
+							body?.messages === undefined &&
+							Array.isArray(body?.input) &&
+							!active.preparedStructure.responsesMessages
+								? "provider selected Responses items without a matching history plan"
+								: undefined))
+						: "prepared history representation is not modeled";
 				if (chained && skipReason)
 					throw new Error(
 						"provider request does not match this pass's managed dispatch (chained continuation requires a modeled prepared history)",
@@ -773,7 +811,9 @@ export function registerPiGuardedContext(
 					budget.cancel();
 					active.ready = false;
 					budget.dispatchCertificate?.refuse();
-					return;
+					return piRefusedPayload(
+						"Magic Context request cancelled before provider dispatch.",
+					);
 				}
 				active.refused = true;
 				budget.dispatchCertificate?.refuse();
@@ -782,8 +822,22 @@ export function registerPiGuardedContext(
 				budget.stage = refusalOrigin
 					? `provider dispatch (origin=${refusalOrigin}; context stage=${budget.stage})`
 					: "provider dispatch";
-				refuse(ctx, budget, error, isCurrent);
+				const reason = new Error(
+					`${error instanceof Error ? error.message : String(error)}; ${piDispatchShape(payload, ctx.model?.api)}`,
+				);
+				active.refusalMessage = refuse(ctx, budget, reason, isCurrent, false);
+				return piRefusedPayload(active.refusalMessage);
 			}
+		});
+	}
+	// Stock Pi has no managed-shape fence, but a failed preparation must
+	// not fall through its exception-swallowing request hook either.
+	if (!fenceEnabled) {
+		pi.on("before_provider_request", (_event, ctx) => {
+			const operation = operations.get(operationKey(ctx));
+			return operation?.refused
+				? piRefusedPayload(operation.refusalMessage ?? RETRY_MESSAGE)
+				: undefined;
 		});
 	}
 	pi.registerEntryRenderer?.<{ message: string }>(
@@ -832,6 +886,7 @@ export function registerPiGuardedContext(
 		// operation (its run's start or the previous end not delivered yet) is
 		// new work and earns its own receipt; the refused pass stays abandoned.
 		active.refused = false;
+		active.refusalMessage = undefined;
 		const { isOwned, isCurrent, assertOwner } = createPiContextOwnershipGuards(
 			operations,
 			key,
@@ -887,6 +942,12 @@ export function registerPiGuardedContext(
 				if (prepared.messages !== result.messages)
 					result.messages = prepared.messages;
 				active.managedSignature = piManagedSignature(result.messages);
+				if (ctx.model?.api === "cursor-agent")
+					active.cursorRoots = piCursorManagedRoots(
+						result.messages,
+						active.managedSignature,
+						ctx.cwd,
+					);
 				active.preparedStructure = prepared.structure;
 				if (
 					fenceEnabled &&
@@ -968,7 +1029,7 @@ export function registerPiGuardedContext(
 				throw error;
 			}
 			active.refused = true;
-			refuse(ctx, budget, error, isOwned);
+			active.refusalMessage = refuse(ctx, budget, error, isOwned);
 			return { messages: event.messages };
 		} finally {
 			// Side turns have no dispatch receipt. Native Pi has no dispatch

@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { assistantMessage, fakeContext, userMessage } from "./test-utils.test";
 
@@ -88,8 +89,8 @@ function harness(persisted = input.length) {
 	return {
 		refusals,
 		emit,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		get branch() {
 			return branch;
@@ -121,7 +122,7 @@ test("issue 674: goal inner run end preserves the parent's exact managed continu
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -131,7 +132,7 @@ test("issue 674: a persisted goal preface anchors a later-persisted continuation
 	h.branch = native(input);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 674: an anchor inside the ended transcript cannot identify the later run", async () => {
@@ -140,7 +141,7 @@ test("issue 674: an anchor inside the ended transcript cannot identify the later
 	h.branch = native(input);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: an incompletely persisted continuation cannot preserve a receipt", async () => {
@@ -148,7 +149,7 @@ test("issue 674: an incompletely persisted continuation cannot preserve a receip
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: changing the persisted goal preface ID refuses the stale continuation", async () => {
@@ -158,7 +159,7 @@ test("issue 674: changing the persisted goal preface ID refuses the stale contin
 	h.branch[2].id = "other-goal";
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: same custom timestamps and IDs do not authorize changed goal content", async () => {
@@ -167,7 +168,7 @@ test("issue 674: same custom timestamps and IDs do not authorize changed goal co
 	h.branch[2].content = "different objective";
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: invalid custom timestamps leave the end effective", async () => {
@@ -176,7 +177,7 @@ test("issue 674: invalid custom timestamps leave the end effective", async () =>
 	h.branch[2].timestamp = "not a timestamp";
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: the goal continuation's own end still refuses its managed payload", async () => {
@@ -184,7 +185,7 @@ test("issue 674: the goal continuation's own end still refuses its managed paylo
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone(input) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: a new model pass within the same run gets a fresh receipt without another start", async () => {
@@ -199,7 +200,7 @@ test("issue 674: a new model pass within the same run gets a fresh receipt witho
 	await h.emit("context", { messages: structuredClone(followup) });
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 674: raw history cannot borrow a receipt retained after an earlier end", async () => {
@@ -207,7 +208,7 @@ test("issue 674: raw history cannot borrow a receipt retained after an earlier e
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch({ messages: structuredClone(input) });
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"does not match this pass's managed dispatch",
 	);
@@ -218,7 +219,7 @@ test("issue 674: changed provider system content cannot borrow a retained receip
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch({ ...h.payload(), system: "different request" });
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: retry controls can change while the managed conversation stays identical", async () => {
@@ -230,7 +231,7 @@ test("issue 674: retry controls can change while the managed conversation stays 
 		tools: [{ name: "retry-without-strict" }],
 		max_tokens: 256,
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 674: unknown provider shapes cannot use a retained receipt", async () => {
@@ -238,7 +239,7 @@ test("issue 674: unknown provider shapes cannot use a retained receipt", async (
 	await h.prepare();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch({ input: "unproven opaque request" });
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: repeated stale callbacks still abort but notify once without nested stages", async () => {
@@ -247,7 +248,7 @@ test("issue 674: repeated stale callbacks still abort but notify once without ne
 	h.emit("agent_end", { messages: structuredClone(input) });
 	h.dispatch();
 	h.dispatch();
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	expect(h.refusals).toHaveLength(1);
 	expect(h.refusals[0]).toContain("context stage=LKG/served publication");
 	expect(h.refusals[0]).not.toContain("context stage=provider dispatch");
@@ -263,7 +264,7 @@ test("issue 674: persisting a tail cannot replace a changed prefix anchor", asyn
 	h.dispatch();
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 674: response-chain identifiers cannot change under a retained receipt", async () => {
@@ -281,5 +282,5 @@ test("issue 674: response-chain identifiers cannot change under a retained recei
 	h.dispatch(payload);
 	h.emit("agent_end", { messages: structuredClone([first, reply]) });
 	h.dispatch({ ...payload, previous_response_id: "stale-chain" });
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });

@@ -133,6 +133,7 @@ __setPiHarnessKindForTesting('omp');
 const handlers = new Map();
 const entries = [];
 let aborts = 0;
+let blocked = 0;
 const ctx = { signal: new AbortController().signal, sessionManager: { getSessionId: () => '698-log', getBranch: () => [] }, abort: () => aborts++ };
 const managed = [
  { role: 'user', content: '<session-history>PRIVATE_MESSAGE_TEXT</session-history>', timestamp: 1 },
@@ -140,7 +141,18 @@ const managed = [
  { role: 'toolResult', toolCallId: 'PRIVATE_EXPECTED_ID', toolName: 'PRIVATE_TOOL_NAME', content: 'PRIVATE_RESULT', timestamp: 3 },
 ];
 registerPiGuardedContext({ on: (name, fn) => handlers.set(name, fn), appendEntry: (_type, value) => entries.push(value) }, async () => ({ messages: structuredClone(managed) }));
-const emit = (name, event = {}) => handlers.get(name)(event, ctx);
+const emit = (name, event = {}) => {
+ const result = handlers.get(name)(event, ctx);
+ if (name === 'before_provider_request') {
+  try { JSON.stringify(result); } catch (error) {
+   if (error.message !== entries[0].message) throw error;
+   blocked++;
+   return;
+  }
+  throw new Error('refused payload reached mock provider');
+ }
+ return result;
+};
 emit('agent_start');
 await emit('context', { messages: [{ role: 'user', content: 'PRIVATE_RAW', timestamp: 4 }] });
 const changed = structuredClone(managed);
@@ -148,7 +160,7 @@ changed[1].content[0].id = 'PRIVATE_ACTUAL_ID';
 emit('before_provider_request', { payload: { messages: changed } });
 emit('before_provider_request', { payload: { messages: changed } });
 flushLogger();
-console.log(JSON.stringify({ path: getLogFilePath(), aborts, entries: entries.length }));
+console.log(JSON.stringify({ path: getLogFilePath(), aborts, blocked, entries: entries.length }));
 `;
 
 test("issue 698: dispatch refusal persists one sanitized full divergence line to magic-context.log", async () => {
@@ -186,7 +198,8 @@ test("issue 698: dispatch refusal persists one sanitized full divergence line to
 	]);
 	expect(exit, stderr).toBe(0);
 	const result = JSON.parse(stdout.trim());
-	expect(result.aborts).toBe(2);
+	expect(result.aborts).toBe(0);
+	expect(result.blocked).toBe(2);
 	expect(result.entries).toBe(1);
 	const lines = readFileSync(result.path, "utf8").trim().split("\n");
 	const refusals = lines.filter((line) => line.includes("CONTEXT REFUSED"));

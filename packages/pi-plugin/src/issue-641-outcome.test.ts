@@ -5,6 +5,7 @@ import {
 	resetLkgSlotsForTest,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	__test,
 	clearContextHandlerSession,
@@ -120,8 +121,11 @@ test("postprocess observer participates in the outcome budget and leaves dispatc
 		expect(result).toEqual({ messages });
 		const dispatch = fake.handlers.get("before_provider_request");
 		if (!dispatch) throw new Error("dispatch fence missing");
-		await dispatch({} as never, ctx as never);
-		expect(abort).toHaveBeenCalledTimes(2);
+		assertPiRefusedDispatch(
+			await dispatch({} as never, ctx as never),
+			"elapsed=26000ms",
+		);
+		expect(abort).toHaveBeenCalledTimes(1);
 	} finally {
 		clock.mockRestore();
 		__setPiHarnessKindForTesting(undefined);

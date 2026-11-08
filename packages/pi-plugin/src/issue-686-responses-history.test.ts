@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -112,8 +113,8 @@ function harness(messages: unknown[] = prepared()) {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		async prepare() {
 			emit("agent_start");
@@ -140,7 +141,7 @@ test("issue 686 Responses text-item equivalence: adjacent signed, cached and com
 	).toBe(true);
 	h.dispatch(payload());
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 for (const [name, index] of [
@@ -154,7 +155,7 @@ for (const [name, index] of [
 		const body = payload();
 		body.input.splice(index, 1);
 		h.dispatch(body);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("comparison=content");
 	});
 }
@@ -165,7 +166,7 @@ test("issue 686 Responses text-item guard: reordered text refuses", async () => 
 	const body = payload();
 	[body.input[1], body.input[2]] = [body.input[2], body.input[1]];
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -175,7 +176,7 @@ test("issue 686 Responses text-item guard: changed phase refuses", async () => {
 	const body = payload();
 	body.input[1] = item("§2§ signed commentary", "final_answer");
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -211,7 +212,7 @@ for (const field of [
 		if (field === "native-phase")
 			body.input[2] = item("cached commentary", "final_answer");
 		h.dispatch(body);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("comparison=content");
 	});
 }
@@ -224,7 +225,7 @@ test("issue 686 Responses native replay guard: truncated text payload refuses", 
 	const body = payload();
 	body.input.splice(2, 1);
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -278,7 +279,7 @@ for (const boundary of ["user", "toolResult"] as const) {
 				{ role: "user", content: "current prompt" },
 			],
 		});
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("prepared turn structure");
 	});
 }
@@ -289,7 +290,7 @@ test("issue 686 Responses text-item guard: raw request still refuses", async () 
 	const body = payload();
 	body.input[0] = { role: "user", content: "raw older history" };
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("missing current receipt signature");
 });
 
@@ -313,7 +314,7 @@ test("issue 686 Responses text-item guard: latest turn and ordered call IDs rema
 				output: "answer",
 			};
 		h.dispatch(body);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("prepared turn structure");
 	}
 });
@@ -366,7 +367,7 @@ test("issue 686 Responses grouping: same-model signed thinking, text and tool ca
 			{ role: "user", content: "current prompt" },
 		],
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -389,7 +390,7 @@ test("issue 686 Responses grouping: thinking-only assistant adds no row between 
 			{ role: "user", content: "current prompt" },
 		],
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -438,7 +439,7 @@ test("issue 686 Responses grouping guard: thinking exemption retains every prepa
 				{ role: "user", content: "current prompt" },
 			],
 		});
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("comparison=content");
 	}
 });

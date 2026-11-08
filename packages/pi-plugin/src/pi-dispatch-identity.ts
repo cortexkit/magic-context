@@ -9,6 +9,7 @@ import {
 	LKG_SNAPSHOT_UNDEFINED,
 	type LkgContentField,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { piCursorConversation } from "./pi-dispatch-cursor";
 import { piGoogleConversation } from "./pi-dispatch-google";
 
 // Limit structure and retained string volume, not just the number of messages.
@@ -50,15 +51,16 @@ export function piConversationFields(
 			};
 		} else {
 			const google = piGoogleConversation(payload);
-			if (!google) return undefined;
+			const cursor = google ? undefined : piCursorConversation(payload);
+			if (!google && !cursor) return undefined;
 			// Google/Vertex plans put instructions in config; Cloud Code Assist
 			// puts them beside contents inside request. Retain both locations so
 			// changing instructions on a retry cannot borrow the first receipt.
-			conversation = {
-				contents: google.contents,
-				systemInstruction: google.systemInstruction,
+			conversation = cursor?.conversation ?? {
+				contents: google?.contents,
+				systemInstruction: google?.systemInstruction,
 				configSystemInstruction: (
-					google.config as { systemInstruction?: unknown } | undefined
+					google?.config as { systemInstruction?: unknown } | undefined
 				)?.systemInstruction,
 			};
 		}
@@ -191,6 +193,7 @@ export function piManagedSignature(
 export function piHasManagedSignature(
 	payload: unknown,
 	signature: string | undefined,
+	cursorRoots?: readonly string[],
 ): boolean {
 	if (!signature || !payload || typeof payload !== "object") return false;
 	const body = payload as {
@@ -199,6 +202,16 @@ export function piHasManagedSignature(
 		inferenceConfig?: unknown;
 	};
 	const google = piGoogleConversation(payload);
+	const cursor =
+		body.messages === undefined && body.input === undefined && !google
+			? piCursorConversation(payload)
+			: undefined;
+	if (cursor?.activeText?.slice(0, 4096).includes(signature)) return true;
+	if (
+		cursorRoots?.length &&
+		cursor?.rootIds.some((id) => cursorRoots.includes(id))
+	)
+		return true;
 	const nativeText = !!google || body.inferenceConfig !== undefined;
 	if (typeof body.input === "string" && body.messages === undefined)
 		return body.input.slice(0, 4096).includes(signature);
@@ -206,7 +219,7 @@ export function piHasManagedSignature(
 		? body.messages
 		: Array.isArray(body.input)
 			? body.input
-			: (google?.contents as unknown[] | undefined);
+			: ((google?.contents as unknown[] | undefined) ?? cursor?.messages);
 	if (!messages) return false;
 	for (const message of messages.slice(0, 8)) {
 		if (!message || typeof message !== "object") continue;
@@ -233,4 +246,18 @@ export function piHasManagedSignature(
 		}
 	}
 	return false;
+}
+
+/** Report field names only, never conversation text or credentials. */
+export function piDispatchShape(payload: unknown, api?: string): string {
+	let keys: string;
+	try {
+		keys =
+			payload && typeof payload === "object"
+				? Object.keys(payload).sort().slice(0, 12).join(",")
+				: typeof payload;
+	} catch {
+		keys = "unreadable object";
+	}
+	return `provider API=${api ?? "unknown"} shape=${keys || "empty object"}`;
 }

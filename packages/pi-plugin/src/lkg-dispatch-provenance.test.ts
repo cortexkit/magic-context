@@ -24,6 +24,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDir } from "../../plugin/src/shared/test-temp-dir";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
@@ -295,9 +296,12 @@ test("OMP rechecks and refuses an exact replay after its refusal marker is repla
 	const first = guarded(f.coordinator, false);
 	first("agent_start");
 	await first("context", { messages: [userMessage("original input")] });
-	first("before_provider_request", {
-		payload: { messages: [userMessage("missing managed signature")] },
-	});
+	assertPiRefusedDispatch(
+		first("before_provider_request", {
+			payload: { messages: [userMessage("missing managed signature")] },
+		}),
+		"missing current receipt signature",
+	);
 	expect(notices).toHaveLength(1);
 	expect(notices[0]).toContain("missing current receipt signature");
 	expect(refusedChecks).toBe(1);
@@ -312,11 +316,14 @@ test("OMP rechecks and refuses an exact replay after its refusal marker is repla
 	const retry = guarded(restarted, true);
 	retry("agent_start");
 	await retry("context", { messages: [userMessage("original input")] });
-	retry("before_provider_request", {
-		payload: { messages: [userMessage("missing managed signature")] },
-	});
+	assertPiRefusedDispatch(
+		retry("before_provider_request", {
+			payload: { messages: [userMessage("missing managed signature")] },
+		}),
+		"missing current receipt signature",
+	);
 	expect(refusedChecks).toBe(2);
-	expect(aborts).toBe(2);
+	expect(aborts).toBe(0);
 	expect(notices).toHaveLength(2);
 	expect(notices[1]).toContain("missing current receipt signature");
 });

@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -407,7 +408,7 @@ for (const api of ["openai-codex-responses", "openai-completions"]) {
 				tail,
 			]),
 		});
-		expect(aborts).toBe(1);
+		expect(aborts + piBlockedDispatches(ctx)).toBe(1);
 		expect(refusals[0]).toContain("missing current receipt signature");
 	});
 }
