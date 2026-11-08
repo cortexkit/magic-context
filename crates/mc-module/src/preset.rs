@@ -7,7 +7,7 @@
 pub struct Features {
     /// Summaries of older history, rendered as messages at the start of the
     /// request in place of the messages they cover. A session with a summarizer rebuilds when a summary lands or
-    /// the cache is lost anyway; one without rebuilds on every execute pass,
+    /// the request's prefix changes anyway; one without rebuilds on every execute pass,
     /// because nothing else will ever make room.
     pub summarizer: bool,
     /// The session's first message is its task, and is never dropped, not

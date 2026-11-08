@@ -173,6 +173,8 @@ fn evaluate(row: &Row, table: &Table) -> Value {
     if input.cache_expired {
         // Cache loss is delivered by the runner as a ride, not a timed notice.
         // Give the ride an eligible edit so permission is observable as a view.
+        // A forgotten cache permits nothing by itself: the ride carries the
+        // edit only when a notice with the same conditions would rebuild.
         let entry = entries
             .iter()
             .find(|entry| entry.role == Role::Assistant)
@@ -204,11 +206,6 @@ fn evaluate(row: &Row, table: &Table) -> Value {
             session.conditions.clone(),
         );
         rebuild = session.ride(&settings, &ride).is_some();
-        assert!(
-            rebuild,
-            "{}: cache-loss ride failed to carry eligible work",
-            row.id
-        );
     }
     let priced = rebuild && (input.queued_tokens > 0 || input.cache_expired);
     let emergency_drop = rebuild && session.emergency_drop_allowed(&settings, false, priced);
@@ -216,7 +213,7 @@ fn evaluate(row: &Row, table: &Table) -> Value {
         "threshold": settings.execute_threshold_percentage,
         "execute": execute,
         "force": force,
-        "hold": hold && !input.cache_expired,
+        "hold": hold,
         "rebuild": rebuild,
         "floor_marked": session.floor_pending_for.is_some(),
         "queued_drops": rebuild,
@@ -257,7 +254,6 @@ const DIFFERENCES: &[Difference] = &[
             "thinking-window-1500-16-false", "thinking-window-1500-16-true",
             "thinking-window-1501-1-false", "thinking-window-1501-15-false",
             "thinking-window-1501-16-false", "thinking-window-1501-16-true",
-            "cache-true-true-true", "cache-false-true-true",
         ],
         fields: &["reasoning"],
         rule: "RC3",
@@ -269,9 +265,40 @@ const DIFFERENCES: &[Difference] = &[
         rows: &["cache-true-true-false", "cache-true-true-true", "cache-false-true-false", "cache-false-true-true"],
         fields: &["execute"],
         rule: "PD7",
-        reason: "Cache expiry is a runner ride with unconditional rebuild permission in mode 3, not a TTL-induced execute classification.",
+        reason: "Cache expiry is a runner ride in mode 3, not a TTL-induced execute classification.",
         typescript: true,
         rust: false,
+    },
+    // The three entries below come from the forgotten-cache ride rule: a ride
+    // whose causes only say the provider forgot its cache (expiry, a chain
+    // reset, a tier or account switch) is no rebuild permission and lifts no
+    // signed-thinking hold. The table was generated before the TypeScript
+    // plugin took the same rule; regenerating it after both changes merge
+    // makes these entries stale, and this test then fails until they are
+    // removed or restated.
+    Difference {
+        rows: &["cache-true-true-false", "cache-false-true-false"],
+        fields: &["rebuild", "queued_drops", "heuristics", "reasoning"],
+        rule: "PD7",
+        reason: "A forgotten-cache ride below the execute threshold answers nothing in mode 3; the table predates that rule and still lands every lane on expiry.",
+        typescript: true,
+        rust: false,
+    },
+    Difference {
+        rows: &["cache-true-true-true", "cache-false-true-true"],
+        fields: &["rebuild", "queued_drops", "heuristics"],
+        rule: "PD7",
+        reason: "A forgotten-cache ride below the execute threshold answers nothing in mode 3; the table predates that rule and still lands every lane on expiry.",
+        typescript: true,
+        rust: false,
+    },
+    Difference {
+        rows: &["cache-true-true-true", "cache-false-true-true"],
+        fields: &["hold"],
+        rule: "PD7",
+        reason: "A forgotten-cache ride keeps the signed-thinking hold in mode 3, since resending the same bytes keeps the thinking valid; the table predates that rule and lifts the hold on expiry.",
+        typescript: false,
+        rust: true,
     },
     Difference {
         rows: &["latch-true-85-0", "latch-true-94.9-0"],

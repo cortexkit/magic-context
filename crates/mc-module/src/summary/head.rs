@@ -5,7 +5,7 @@
 //!   as of the last fold (each at the detail tier its age and importance
 //!   earn under the history budget), and the project memories that fit
 //!   their budget. Its text is kept as rendered and changes only on a fold,
-//!   when the provider cache is lost anyway.
+//!   when the request's prefix is written again anyway.
 //! - `m[1]`, what changed since: memory corrections, newer summaries at full
 //!   detail, newer memories and profile lines, or a short placeholder.
 //!   Changing it rewrites the request from `m[1]` on, not from the start.

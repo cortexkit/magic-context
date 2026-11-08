@@ -5,8 +5,11 @@
 //! byte, so a view is built only on a pass that may pay for that:
 //! - when usage reaches the execute threshold, unless a summary is on its
 //!   way, in which case everything waits and lands with that summary;
-//! - when the runner reports that the cache is lost anyway, or that the next
-//!   request would not fit (a ride). The rewrite is then free, or unavoidable.
+//! - when the runner reports that the request's bytes before the
+//!   conversation change anyway, or that the next request would not fit (a
+//!   ride, see [`ride_cause_kind`]). The rewrite is then free, or
+//!   unavoidable. A ride that only says the provider forgot its cache
+//!   permits nothing by itself.
 //!
 //! Below the threshold nothing happens, and every request is a cache hit.
 
@@ -14,6 +17,7 @@ use std::collections::BTreeMap;
 
 use cortexkit_role_compaction::notice::Conditions;
 use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::ride::RideCause;
 use cortexkit_role_compaction::rules::SignedParts;
 
 use crate::lanes;
@@ -199,9 +203,11 @@ pub const HOLD_CAP_POINTS: f64 = 10.0;
 /// ([`force_band`]): a threshold above 75 would otherwise put the cap inside
 /// the band and hold back the emergency drop (the plugin's bounded hold
 /// yields to fit, `mayRebuildForFit`). A turn with no message a person wrote
-/// is empty, so nothing is held. A view the runner asks for because it is
-/// about to rewrite its cache anyway (a ride) is never held: that rewrite is
-/// paid for already, so the held work lands in it.
+/// is empty, so nothing is held. A ride whose request would not fit, or
+/// whose bytes before the conversation change anyway, is never held: the
+/// thinking is lost or the request must shrink either way. A ride that only
+/// says the provider forgot its cache is held like any other pass, since
+/// resending the same bytes keeps the thinking valid.
 pub fn signed_thinking_hold(
     entries: &[Entry],
     conditions: &Conditions,
@@ -250,4 +256,45 @@ pub fn force_band(settings: &Settings) -> f64 {
 /// Whether usage has reached the force band.
 pub fn in_force_band(conditions: &Conditions, settings: &Settings) -> bool {
     usage(conditions).is_some_and(|usage| usage * 100.0 >= force_band(settings))
+}
+
+/// What one `compaction.ride` cause means for the request the runner is about
+/// to send, and so whether it lets a rebuild land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RideCauseKind {
+    /// The request would not fit (`over_limit`). It must shrink, so every
+    /// lane lands and the emergency drop runs whatever the usage.
+    OverLimit,
+    /// The bytes before the conversation change anyway (`model_change`,
+    /// `surface_change`): the system prompt, the tool definitions or the
+    /// model differ, so the whole prefix is written again and any signed
+    /// thinking is invalid already. The head folds and every lane lands in
+    /// that rewrite for free.
+    PrefixChanges,
+    /// The provider forgot the cache, but the request's bytes stay the same
+    /// (`cache_expired`, `chain_reset`, `tier_change`, `account_change`, and
+    /// any cause ck-mc does not know). This is no rebuild permission, alone
+    /// or next to another cause. Sending the same bytes keeps signed
+    /// thinking valid (Anthropic invalidates every later thinking block when
+    /// anything before it changes), and the provider reads the prefix again
+    /// at full price either way, so a rewrite here saves nothing. It would
+    /// cost that reasoning and land drops the agent was told wait for the
+    /// execute threshold. Queued work waits for a pass that rebuilds anyway.
+    Forgotten,
+}
+
+/// Classify one ride cause; see [`RideCauseKind`].
+pub fn ride_cause_kind(cause: &RideCause) -> RideCauseKind {
+    match cause {
+        RideCause::OverLimit => RideCauseKind::OverLimit,
+        RideCause::ModelChange | RideCause::SurfaceChange => RideCauseKind::PrefixChanges,
+        RideCause::CacheExpired
+        | RideCause::ChainReset
+        | RideCause::TierChange
+        | RideCause::AccountChange
+        | RideCause::Unknown(_) => RideCauseKind::Forgotten,
+        // A cause a newer contract adds: until ck-mc knows it changes the
+        // request's bytes, it is taken as only a forgotten cache.
+        _ => RideCauseKind::Forgotten,
+    }
 }

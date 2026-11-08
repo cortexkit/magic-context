@@ -21,8 +21,10 @@
 //! Terms used throughout:
 //! - **Pass:** one decision on a notice or a ride about whether a new view is
 //!   built now. A **ride** is the runner telling ck-mc, before a request,
-//!   that the request rewrites the provider's cache anyway (or would not fit),
-//!   so held work can land in it at no extra cost.
+//!   that the request's bytes before the conversation change anyway (or it
+//!   would not fit), so held work can land in it at no extra cost. A ride
+//!   that only says the provider forgot its cache lands nothing by itself
+//!   ([`pass::RideCauseKind`]).
 //! - **Lane:** one kind of reduction (queued `ctx_reduce` drops, the age
 //!   sweep, reasoning clearing, emergency drops, ...).
 //! - **History head:** the two messages a head's view inserts at the start of

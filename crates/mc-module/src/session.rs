@@ -138,7 +138,7 @@ pub struct Session {
     /// A summarizer run is in progress.
     summarizing: bool,
     /// The next view re-renders the baseline (`m[0]`), because the
-    /// provider cache is lost anyway.
+    /// request's prefix changes anyway or `m[0]`'s settings changed.
     fold_due: bool,
     /// Where summaries and memories are kept; absent only in tests.
     db: Option<Arc<ContextDb>>,
@@ -927,6 +927,19 @@ impl Session {
     fn decide_notice(&mut self, settings: &Settings) -> NoticePass {
         let _timing = crate::notice_cost_timing::span("notice.decision");
         let summary = self.summary_due(settings);
+        NoticePass {
+            summary,
+            rebuild: self.rebuild_permitted(settings),
+            head_stale: self.head_stale,
+        }
+    }
+
+    /// Whether the session's own state lets this pass rebuild: a stale head,
+    /// or an execute pass with no summary on its way (or in the force band)
+    /// and no signed-thinking hold. A notice asks this after admitting a
+    /// summary run; a ride whose causes only say the provider forgot its
+    /// cache asks it too, but never starts a summary.
+    fn rebuild_permitted(&mut self, settings: &Settings) -> bool {
         let hold = pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings);
         // A fold for a settings or window change waits out a heavy-thinking
         // turn, as an execute pass does: re-rendering `m[0]` then would drop
@@ -937,15 +950,10 @@ impl Session {
             self.fold_due = true;
             self.head_stale = true;
         }
-        NoticePass {
-            summary,
-            rebuild: self.head_stale
-                || (pass::at_execute(&self.conditions, settings)
-                    && (pass::in_force_band(&self.conditions, settings)
-                        || !self.summary_on_its_way())
-                    && !hold),
-            head_stale: self.head_stale,
-        }
+        self.head_stale
+            || (pass::at_execute(&self.conditions, settings)
+                && (pass::in_force_band(&self.conditions, settings) || !self.summary_on_its_way())
+                && !hold)
     }
 
     /// A summarizer run to start now, if one is due: the session has a
@@ -1759,8 +1767,11 @@ impl Session {
         )
     }
 
-    /// A ride: the runner is about to send a request that rewrites the cache
-    /// anyway, or would not fit. Everything held lands now.
+    /// A ride: the runner is about to send a request whose bytes before the
+    /// conversation change anyway, or that would not fit, or whose cache the
+    /// provider forgot. The first two land everything held now; the last
+    /// lands only what the pass would land on a notice (see
+    /// [`pass::RideCauseKind`]).
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         if !self.index_ready || self.suspended {
             return None;
@@ -1778,16 +1789,42 @@ impl Session {
         let over_limit = ride
             .has(RideCause::OverLimit)
             .then_some(ride.request_tokens.unwrap_or(0));
-        // Any other cause loses the cache, so the head folds for free. So
-        // does a settings change `m[0]` depends on, as on a notice. A
-        // `ctx_keep` waiting for the next notice lands in this rewrite.
-        let cache_lost = ride.cache_lost();
-        if cache_lost || self.head_shape_changed(settings) {
-            self.fold_due = true;
+        // Only a cause that changes the request's bytes before the
+        // conversation folds the head for free. A forgotten cache (expiry, a
+        // chain reset, a tier or account switch, an unknown cause) adds
+        // nothing to any ride, whatever it comes with: `[over_limit,
+        // chain_reset]` is `[over_limit]`. Re-rendering `m[0]` there would
+        // invalidate every signed thinking block, and the request fits
+        // without it.
+        let prefix_changes = ride
+            .causes
+            .iter()
+            .any(|cause| pass::ride_cause_kind(cause) == pass::RideCauseKind::PrefixChanges);
+        let permitted = if over_limit.is_some() || prefix_changes {
+            // A settings change `m[0]` depends on folds in the same rewrite,
+            // as on a notice.
+            if prefix_changes || self.head_shape_changed(settings) {
+                self.fold_due = true;
+            }
+            true
+        } else {
+            // A forgotten cache alone: the pass rebuilds only if a notice
+            // with these conditions would.
+            self.rebuild_permitted(settings)
+        };
+        if !permitted {
+            tracing::info!(
+                "ck-mc: session {}: ride {:?} only says the provider forgot its cache; the current view stays",
+                self.key.session,
+                ride.causes,
+            );
+            return None;
         }
+        // A `ctx_keep` waiting for the next notice lands in this rewrite. On a
+        // ride that answers nothing it stays waiting for that notice.
         let kept = self.pending_keep.take_if(|_| !self.latest_unknown);
         let view = self
-            .build(settings, over_limit, cache_lost, kept.as_ref())
+            .build(settings, over_limit, prefix_changes, kept.as_ref())
             .0?;
         // The size limit holds for a view in a ride's answer as for a pushed
         // one (compaction contract V5); an oversized one is answered as nothing.
@@ -2797,7 +2834,9 @@ impl Session {
     /// `over_limit` is set when the runner asked for a view because its next
     /// request would not fit, and carries its estimate of that request. The
     /// emergency drop then runs whatever the usage, and the protections that
-    /// can yield do.
+    /// can yield do. `prefix_changes` is set on a ride whose request's bytes
+    /// before the conversation change anyway, so the cache is lost whether or
+    /// not a view follows.
     ///
     /// Also returns roughly how many tokens the new edits free, plus what the
     /// age sweep has lined up for the next pass.
@@ -2805,7 +2844,7 @@ impl Session {
         &mut self,
         settings: &Settings,
         over_limit: Option<u64>,
-        cache_lost: bool,
+        prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
         let _timing = crate::notice_cost_timing::span("build.total");
@@ -2822,7 +2861,7 @@ impl Session {
         self.next_keep = keep.cloned();
         self.app_cause = if over_limit.is_some() {
             "over_limit"
-        } else if cache_lost {
+        } else if prefix_changes {
             "cache_lost"
         } else if self.head_stale {
             "history_changed"
@@ -2909,14 +2948,14 @@ impl Session {
         wanted.retain(|(key, _)| !kept(key));
         let (mut ops, mut covered) = lanes::drop_ops(&context, &wanted);
         // Another rewrite on this pass: a lane edit, a history head or cut
-        // that changes, or a ride whose cache is lost anyway.
+        // that changes, or a ride whose request's prefix changes anyway.
         let head_changes = history.iter().any(|op| {
             !self
                 .latest
                 .as_ref()
                 .is_some_and(|view| view.edits.iter().any(|edit| edit.op == *op))
         });
-        let priced = !ops.is_empty() || head_changes || cache_lost;
+        let priced = !ops.is_empty() || head_changes || prefix_changes;
         self.next_latch = false;
         if self.emergency_drop_allowed(settings, over_limit.is_some(), priced) {
             let emergency = lanes::Emergency {
@@ -2946,11 +2985,12 @@ impl Session {
         }
         // A rewrite with no batch rearms the emergency lane, so outputs that
         // become droppable later can still form one (the plugin keeps the
-        // episode armed on such a pass). A lost cache is lost whether or not
-        // a view follows; a lane edit or head change counts once taken.
+        // episode armed on such a pass). A changed prefix loses the cache
+        // whether or not a view follows; a lane edit or head change counts
+        // once taken.
         self.next_rearm = false;
         if priced && !self.next_latch {
-            if cache_lost {
+            if prefix_changes {
                 self.emergency_latched = false;
             } else {
                 self.next_rearm = true;
@@ -3040,7 +3080,7 @@ impl Session {
         // pass that rewrites anyway, as the plugin's history refresh rides a
         // rewrite and never starts one.
         let history = if ops.is_empty()
-            && !cache_lost
+            && !prefix_changes
             && over_limit.is_none()
             && keep.is_none()
             && !self.summary_unshown
