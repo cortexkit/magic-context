@@ -116,6 +116,51 @@ it("paired rollback preserves opaque host callbacks without refusing the render"
     }
 });
 
+it("rollback preserves non-enumerable host metadata without serializing it", () => {
+    const db = new Database(":memory:");
+    const info = { role: "system" };
+    const source = { id: "instruction-row" };
+    Object.defineProperty(info, "hostInstructionRow", {
+        value: source,
+        enumerable: false,
+        configurable: true,
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(info, "hostInstructionRow");
+    const messages = [{ info, parts: [{ type: "text", text: "catalog" }] }];
+    const before = JSON.stringify(messages);
+    const edit = () => {
+        Object.defineProperty(info, "hostInstructionRow", {
+            value: { id: "edited-row" },
+            enumerable: true,
+            configurable: true,
+        });
+        Object.defineProperty(info, "added", { value: true, configurable: true });
+        throw new Error("refuse edit");
+    };
+    const unchanged = () => {
+        expect(Object.getOwnPropertyDescriptor(info, "hostInstructionRow")).toEqual(descriptor);
+        expect(Object.hasOwn(info, "added")).toBe(false);
+        expect(JSON.stringify(messages)).toBe(before);
+        expect(JSON.stringify(messages)).not.toContain("hostInstructionRow");
+    };
+    try {
+        expect(() =>
+            pairedThinkingEdit({
+                db,
+                messages,
+                edit,
+                needsCompanion: () => false,
+                persistCompanion: () => {},
+            }),
+        ).toThrow("refuse edit");
+        unchanged();
+        expect(() => editOutsideCompanionTransaction({ messages, edit })).toThrow("refuse edit");
+        unchanged();
+    } finally {
+        db.close();
+    }
+});
+
 it("a failed pair restores the trigger's original reasons and in-memory metadata", () => {
     const db = new Database(":memory:");
     const flags = new Set<string>();

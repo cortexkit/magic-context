@@ -148,6 +148,7 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
+import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
     getVisibleMemoryIds,
@@ -1771,6 +1772,11 @@ interface RunPostTransformPhaseArgs {
     sessionId: string;
     db: ContextDatabase;
     messages: MessageLike[];
+    reclaimHostRows?: (
+        sessionId: string,
+        messages: MessageLike[],
+        permitted: boolean,
+    ) => HostRowReclaim;
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
     reasoningByMessage: Map<MessageLike, { type: string; thinking?: string; text?: string }[]>;
@@ -3572,6 +3578,22 @@ export async function runPostTransformPhase(
     };
     for (const { message, block } of temporalFirstApplications)
         recordFirstApplicationAt(message, block);
+    const hostRowReclaim = args.reclaimHostRows?.(
+        args.sessionId,
+        args.messages,
+        !compactionOff && isCacheBustingPass && !activeThinkingPrefixHold,
+    );
+    for (const message of hostRowReclaim?.edits ?? []) {
+        const index = args.messages.indexOf(message);
+        recordFirstApplicationWireEdit(
+            index < 0 ||
+                servesThinkingBlock(
+                    args.messages.slice(index + 1),
+                    args.resolvedProviderID,
+                    args.resolvedModelID,
+                ),
+        );
+    }
     let heuristicOrReasoningDidMutate = false;
     let droppedCount = 0;
     let droppedTokens = 0;
@@ -5699,6 +5721,9 @@ export async function runPostTransformPhase(
         const committedCompanions = companionEnabled
             ? getMergedReasoningStrippedIds(args.db, args.sessionId)
             : new Set<string>();
+        // Host retirements and their required thinking omissions share the final
+        // representation transaction, so neither decision survives a failed write.
+        hostRowReclaim?.commit();
         for (const id of committedCompanions) {
             if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
             frozenThinkingBindingMessageIds.add(

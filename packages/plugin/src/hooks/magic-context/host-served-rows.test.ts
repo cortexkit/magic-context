@@ -3,10 +3,12 @@
 import { describe, expect, it } from "bun:test";
 import {
     cloneKeepingCoveredInstructionMarks,
+    hostInstructionRow,
     isCoveredInstructionRow,
     isHostRenderedSystemMessage,
     isHostUnservedRow,
     markCoveredInstructionRow,
+    markHostInstructionRow,
     markHostUnservedRow,
     retreatPastHostUnservedRows,
     snapTerminalCompartmentToServedRow,
@@ -74,6 +76,17 @@ describe("host-served rows", () => {
         expect(isHostRenderedSystemMessage({ info: { role: "system" } })).toBe(true);
         expect(isHostRenderedSystemMessage({ info: { role: "system", id: "row" } })).toBe(false);
         expect(isHostRenderedSystemMessage({ info: { role: "user" } })).toBe(false);
+    });
+
+    it("native instruction coordinates survive fit retry without changing request identity", () => {
+        const message = { info: { role: "system" }, parts: [{ type: "text", text: "catalog" }] };
+        const original = JSON.stringify(message);
+        const row = { id: "native-row", seq: 9 };
+        markHostInstructionRow(message.info, row);
+        expect(JSON.stringify(message)).toBe(original);
+        const copy = cloneKeepingCoveredInstructionMarks([message]);
+        expect(hostInstructionRow(copy[0]!.info)).toEqual(row);
+        expect(JSON.stringify(copy[0])).toBe(original);
     });
 });
 
