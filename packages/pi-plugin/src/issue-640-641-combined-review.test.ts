@@ -1,6 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import {
+	piBlockedDispatches,
+	registerPiGuardedContext,
+} from "./__tests__/dispatch-probe";
 import type { PiContextBudget } from "./pi-context-budget";
-import { registerPiGuardedContext } from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -31,8 +34,8 @@ function dispatchHarness() {
 		get budget() {
 			return budget;
 		},
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		invoke: (name: string, event: unknown) => {
 			const handler = handlers.get(name);
@@ -52,7 +55,7 @@ test("combined review: a completed managed receipt survives delayed provider ret
 	h.invoke("before_provider_request", {
 		payload: { messages: [userMessage("managed", 1)] },
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	// Provider backoff does not restart context preparation. Its completed result
 	// remains managed even when the next payload attempt is more than 25s later.
 	h.budget.elapsed = () => 26_000;
@@ -60,7 +63,7 @@ test("combined review: a completed managed receipt survives delayed provider ret
 		payload: { messages: [userMessage("managed", 1)] },
 	});
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("combined review control: an unfinished receipt is refused at dispatch", () => {
@@ -68,7 +71,7 @@ test("combined review control: an unfinished receipt is refused at dispatch", ()
 	h.invoke("agent_start", {});
 	h.invoke("before_provider_request", { payload: undefined });
 	expect(h.refusals).toHaveLength(1);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 const sideReminder =
@@ -103,7 +106,7 @@ test.failing("combined review: a previous side context must not authorize a late
 		payload: { messages: [{ role: "user", content: "unmanaged main" }] },
 	});
 	expect(h.refusals).toHaveLength(1);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test.skipIf(process.env.MC_COMBINED_TIMING !== "1")(

@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -143,8 +144,8 @@ function harness(messages: unknown[]) {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		async prepare() {
 			emit("agent_start");
@@ -171,7 +172,7 @@ async function dispatch(messages: unknown[], body: unknown) {
 test("issue 714 Codex native replay: own turn with reasoning, commentary and a call admits", async () => {
 	const h = await dispatch(prepared(), wire());
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 714 Codex native replay: whitespace-only final_answer that OMP drops admits", async () => {
@@ -230,7 +231,7 @@ test("issue 714 Codex native replay: whitespace-only final_answer that OMP drops
 		},
 	);
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 714 Codex native replay guard: cached text the prepared block does not own refuses", async () => {
@@ -245,7 +246,7 @@ test("issue 714 Codex native replay guard: cached text the prepared block does n
 		prepared(turn),
 		wire(nativeWire("UNMANAGED cached text")),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -263,7 +264,7 @@ test("issue 714 Codex native replay guard: an extra cached message refuses", asy
 		prepared(turn),
 		wire([reasoning, text, wireText("UNMANAGED extra", "final_answer"), call]),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -291,13 +292,13 @@ test("issue 714 Codex native replay guard: a cached user item refuses", async ()
 			...nativeWire(),
 		]),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
 test("issue 714 Codex native replay guard: a replacement cache without dt refuses", async () => {
 	const h = await dispatch(prepared(codexToolTurn({ dt: false })), wire());
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });
 
@@ -322,7 +323,7 @@ test("issue 714 Codex native replay guard: a cached call the prepared turn lacks
 			},
 		]),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
@@ -356,7 +357,7 @@ const foreignWire = (phase?: string) => [
 test("issue 714 cross-model Responses history: demoted thinking and phase-free text admit", async () => {
 	const h = await dispatch(prepared(foreign), wire(foreignWire()));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 714 cross-model Responses history guard: a phase OMP never sends refuses", async () => {
@@ -364,6 +365,6 @@ test("issue 714 cross-model Responses history guard: a phase OMP never sends ref
 		prepared(foreign),
 		wire(foreignWire("final_answer")),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 });

@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { injectM0M1Pi } from "./inject-compartments-pi";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
+import { injectM0M1Pi } from "./inject-compartments-pi";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -175,6 +176,6 @@ test("issue 686: an injected session dispatches its managed result but raw histo
 	emit("before_provider_request", {
 		payload: { messages: [userMessage("unmanaged request", 3)] },
 	});
-	expect(aborts).toBe(1);
+	expect(aborts + piBlockedDispatches(ctx)).toBe(1);
 	expect(refusals[0]).toContain("missing current receipt signature");
 });

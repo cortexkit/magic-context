@@ -1,7 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import {
+	piBlockedDispatches,
+	registerPiGuardedContext,
+} from "./__tests__/dispatch-probe";
 import captures from "./fixtures/omp-advisor-18.10.4.json";
 import { isOmpAdvisorRequest } from "./omp-request-kind";
-import { registerPiGuardedContext } from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext } from "./test-utils.test";
 
@@ -43,8 +46,8 @@ function fence() {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		dispatch: (payload: unknown) =>
 			handlers.get("before_provider_request")?.({ payload }, ctx),
@@ -56,7 +59,7 @@ function refused(body: unknown) {
 	expect(isOmpAdvisorRequest(body)).toBe(false);
 	const h = fence();
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals).toHaveLength(1);
 	expect(h.refusals[0]).toContain("no context pass ran for this operation");
 }
@@ -71,12 +74,12 @@ for (const [name, body] of Object.entries(advisors)) {
 		const h = fence();
 		h.dispatch(body);
 		expect(h.refusals).toEqual([]);
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		expect(JSON.stringify(body)).toBe(before);
 		// Letting an advisor review through must not authorize the next ordinary
 		// conversation: it still needs its own completed context-preparation pass.
 		h.dispatch(main);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("no context pass ran for this operation");
 	});
 

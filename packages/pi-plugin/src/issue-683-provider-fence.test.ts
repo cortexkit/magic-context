@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piConversationFields,
 	piHasManagedSignature,
@@ -87,8 +88,8 @@ function harness() {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		async prepare() {
 			emit("agent_start");
@@ -117,7 +118,7 @@ for (const [api, transport] of Object.entries(transports)) {
 			piMatchesPreparedStructure(payload, piPreparedStructure(managed)),
 		).toBe(true);
 		h.dispatch(payload);
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		expect(h.refusals).toEqual([]);
 	});
 	test(`issue 683 ${api}: same-shape raw conversation is refused`, async () => {
@@ -128,14 +129,14 @@ for (const [api, transport] of Object.entries(transports)) {
 			userMessage("current prompt", 2),
 		];
 		h.dispatch(native(raw));
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("missing current receipt signature");
 	});
 	test(`issue 683 ${api}: missing prepared turn is refused despite a managed marker`, async () => {
 		const h = harness();
 		await h.prepare();
 		h.dispatch(native(managed.slice(0, 1)));
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("prepared turn structure");
 	});
 	test(`issue 683 ${api}: changed retry content is refused`, async () => {
@@ -144,7 +145,7 @@ for (const [api, transport] of Object.entries(transports)) {
 		h.dispatch(native(managed));
 		const changed = [managed[0], userMessage("another prompt", 2)];
 		h.dispatch(native(changed));
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("does not match");
 	});
 	test(`issue 683 ${api}: changed retry instructions are refused`, async () => {
@@ -156,7 +157,7 @@ for (const [api, transport] of Object.entries(transports)) {
 			JSON.stringify(payload).replace("instructions", "other instructions"),
 		);
 		h.dispatch(changed);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 	});
 }
 

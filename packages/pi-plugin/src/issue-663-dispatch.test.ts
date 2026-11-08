@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import type { PiContextBudget } from "./pi-context-budget";
 import {
 	clearPiContextReceipt,
 	PiContextSupersededError,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
+import type { PiContextBudget } from "./pi-context-budget";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -30,8 +31,8 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 	return {
 		ctx,
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		emit: (name: string, event: unknown = {}) => {
 			const handler = handlers.get(name);
@@ -59,7 +60,7 @@ test("issue 663: a late first agent_start preserves the completed pass and its c
 	budget.elapsed = () => 32000;
 	h.emit("before_provider_request", payload);
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(budget.completed).toBe(true);
 });
 
@@ -80,7 +81,7 @@ test("issue 663: a late first agent_start preserves in-flight writer ownership",
 	h.emit("before_provider_request", {
 		payload: { messages: conversation.messages },
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -95,7 +96,7 @@ test("issue 663: context before the next start cannot reuse an ended operation",
 		payload: { messages: conversation.messages },
 	});
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 663: another start or cache eviction cannot borrow a previous receipt", async () => {
@@ -105,12 +106,12 @@ test("issue 663: another start or cache eviction cannot borrow a previous receip
 	h.emit("agent_start");
 	h.emit("before_provider_request", payload);
 	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	await h.emit("context", conversation);
 	clearPiContextReceipt("dispatch-663");
 	h.emit("before_provider_request", payload);
 	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 });
 
 test("issue 663: no-pass conversation and unknown bodies stay refused", () => {
@@ -126,7 +127,7 @@ test("issue 663: no-pass conversation and unknown bodies stay refused", () => {
 		expect(h.refusals.at(-1)).toContain(
 			"no context pass ran for this operation",
 		);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 	}
 });
 
@@ -139,7 +140,7 @@ test("issue 663: a pass without a result has a distinct receipt refusal", async 
 		"context pass ran without a managed context receipt",
 	);
 	expect(h.refusals.at(-1)).not.toContain("no context pass ran");
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 663: ended run refusal preserves its ownership origin and preparation stage", async () => {
@@ -154,7 +155,7 @@ test("issue 663: ended run refusal preserves its ownership origin and preparatio
 	h.emit("agent_end");
 	budget.elapsed = () => 115468;
 	h.emit("before_provider_request", payload);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals).toHaveLength(1);
 	expect(h.refusals[0]).toContain(
 		"stage=provider dispatch (origin=agent_end; context stage=final publication)",
@@ -194,7 +195,7 @@ test("issue 663: completed managed pass stays admitted when its writer owner gua
 	h.emit("before_provider_request", payload);
 	expect(ownerChecks).toBe(preparationChecks);
 	expect(JSON.stringify(payload)).toBe(bytes);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -212,7 +213,7 @@ test("issue 663: completed retry keeps managed bytes and the original clock afte
 	h.emit("before_provider_request", payload);
 	expect(JSON.stringify(payload)).toBe(bytes);
 	expect(budget.elapsed()).toBe(115468);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -259,11 +260,11 @@ test("issue 663: an identified advisor request needs no main pass and grants no 
 		},
 	])
 		h.emit("before_provider_request", { payload: body });
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 	h.emit("agent_start");
 	h.emit("before_provider_request", payload);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
 });
 
@@ -326,7 +327,7 @@ test("issue 663: advisor-looking user text and incomplete envelopes cannot bypas
 	]) {
 		const h = harness(async (event) => ({ messages: event.messages }));
 		h.emit("before_provider_request", { payload: body });
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 	}
 });
 
@@ -348,7 +349,7 @@ test("issue 663: raw auto-learn capture cannot borrow a completed conversation r
 			],
 		},
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals.at(-1)).toContain(
 		"no context pass ran for OMP auto-learn capture; raw conversation refused",
 	);
@@ -377,7 +378,7 @@ test("issue 663: ordinary context and dispatch preserve managed bytes", async ()
 			tools: [],
 		},
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 663: Responses auto-learn capture cannot borrow a completed receipt", async () => {
@@ -405,7 +406,7 @@ test("issue 663: Responses auto-learn capture cannot borrow a completed receipt"
 			],
 		},
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals.at(-1)).toContain(
 		"no context pass ran for OMP auto-learn capture; raw conversation refused",
 	);

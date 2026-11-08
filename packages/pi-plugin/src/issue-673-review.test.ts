@@ -2,8 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piHasManagedSignature,
 	piManagedSignature,
@@ -69,8 +70,8 @@ function harness(messages = input) {
 	return {
 		emit,
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		set native(value: ContextEvent["messages"]) {
 			current = value;
@@ -114,7 +115,7 @@ test("issue 673 print: first chat-completions dispatch admits the renderer instr
 			stream: true,
 			messages: [{ role, content: "Reply once, then stop." }, ...messages],
 		});
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		expect(h.refusals).toEqual([]);
 	}
 });
@@ -129,7 +130,7 @@ test("issue 673 print: a chat instruction prefix cannot hide a missing prepared 
 			...(h.payload().messages as unknown[]).slice(0, -1),
 		],
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
@@ -143,11 +144,11 @@ test("issue 673 print: retained chat dispatch still binds the instruction prefix
 	}));
 	h.retain();
 	h.dispatch(first);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	const changed = structuredClone(first);
 	(changed.messages as { content: string }[])[0].content = "Different system";
 	h.dispatch(changed);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("managed dispatch");
 });
 
@@ -161,7 +162,7 @@ test("review safety: retained Responses instructions and conversation are bound"
 		}));
 		h.retain();
 		h.dispatch({ ...body, [field]: "stale conversation" });
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("does not match");
 	}
 });
@@ -183,7 +184,7 @@ test("review identity: nested cache metadata and reasoning items are compared", 
 			items[items.length - 1].encrypted_content = "stale";
 		else items[0][change === "cache" ? "cache_control" : "metadata"] = "new";
 		h.dispatch(retry);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 	}
 });
 
@@ -202,7 +203,7 @@ test("review compatibility: top-level controls and tool ordering can change", as
 		cache_control: { type: "ephemeral" },
 		model: "another-model",
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("review compatibility: actual tool-loop followup needs no new start", async () => {
@@ -217,7 +218,7 @@ test("review compatibility: actual tool-loop followup needs no new start", async
 	h.native = structuredClone(next);
 	await h.emit("context", { messages: structuredClone(next) });
 	h.dispatch(h.payload());
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -238,7 +239,7 @@ test("review regression: dropping Anthropic cache breakpoints admits unchanged t
 	const retry = structuredClone(body);
 	delete (retry.system as Body[])[0].cache_control;
 	h.dispatch(retry);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -262,13 +263,13 @@ test("review regression: retained Responses receipt refuses a changed prompt tem
 		...body,
 		prompt: { id: "pmpt_other", variables: { transcript: "RAW_UNPREPARED" } },
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("does not match");
 	h.dispatch({
 		...body,
 		input: [{ role: "user", content: "changed raw input" }],
 	});
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	expect(h.refusals[0]).toContain("does not match");
 });
 
@@ -281,7 +282,7 @@ test("review witness: retained receipt accepts a hybrid unknown history represen
 		contents: [{ role: "user", parts: [{ text: "RAW_UNPREPARED" }] }],
 		systemInstruction: { parts: [{ text: "different system" }] },
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("review witness: retained receipt is not rechecked after native branch replacement", async () => {
@@ -290,7 +291,7 @@ test("review witness: retained receipt is not rechecked after native branch repl
 	h.retain();
 	h.native = [userMessage("compacted replacement", 100)];
 	h.dispatch(body);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("review regression: a completed overlapping pass refuses the prior raw request", async () => {
@@ -301,7 +302,7 @@ test("review regression: a completed overlapping pass refuses the prior raw requ
 	h.emit("agent_start");
 	await h.emit("context", { messages: structuredClone(next) });
 	h.dispatch({ messages: structuredClone(input) });
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("missing current receipt signature");
 });
 
@@ -313,7 +314,7 @@ test("review regression: an older managed body cannot be the replacement pass's 
 	h.emit("agent_start");
 	await h.emit("context", { messages: structuredClone(next) });
 	h.dispatch(earlier);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("does not match");
 });
 
@@ -330,7 +331,7 @@ test("review regression: first-send tool IDs bind the newest tool result", async
 	const rows = stale.messages as Body[];
 	rows[rows.length - 1].toolCallId = "older-call";
 	h.dispatch(stale);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
@@ -342,7 +343,7 @@ test("review regression: a first send with unreadable comparison data fails clos
 	const messages = body.messages as Body[];
 	messages[messages.length - 1].metadata = body;
 	h.dispatch(body);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("identity could not be established");
 });
 
@@ -353,7 +354,7 @@ test("review regression: ordinary retries compare the full conversation without 
 	const messages = retry.messages as Body[];
 	messages[messages.length - 1].content = "changed newest user turn";
 	h.dispatch(retry);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("does not match");
 });
 
@@ -366,7 +367,7 @@ test("review regression: equivalent message object key order is admitted", async
 		Object.fromEntries(Object.entries(message).reverse()),
 	);
 	h.dispatch(retry);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -450,6 +451,6 @@ test.skipIf(!process.env.MC673_REVIEW_BENCH)(
 				stringify,
 			}),
 		);
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 	},
 );

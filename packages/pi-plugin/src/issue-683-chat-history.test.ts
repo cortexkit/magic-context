@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -98,8 +99,8 @@ function harness(messages: unknown[]) {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		async prepare(next = messages) {
 			current = next;
@@ -126,7 +127,7 @@ test("issue 683 chat history: empty and unsupported same-model reasoning rows di
 	const h = harness(source);
 	await h.prepare();
 	h.dispatch([header, prompt]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -139,7 +140,7 @@ test("issue 683 chat history: a dropped non-empty assistant must refuse", async 
 	const h = harness(source);
 	await h.prepare();
 	h.dispatch([header, prompt]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
@@ -177,7 +178,7 @@ test("issue 683 chat history: latest prepared user remains required after empty-
 	const h = harness([header, assistant([], 2), prompt]);
 	await h.prepare();
 	h.dispatch([header]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 683 chat history: exact tool images follow the complete consecutive result run", async () => {
@@ -209,7 +210,7 @@ test("issue 683 chat history: exact tool images follow the complete consecutive 
 		image,
 		prompt,
 	]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -217,7 +218,7 @@ test("issue 683 chat history: an image row in the wrong place must refuse", asyn
 	const h = harness([header, call, result, prompt]);
 	await h.prepare();
 	h.dispatch([header, wireCall, image, wireResult, prompt]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
@@ -265,7 +266,7 @@ test("issue 683 chat history: orphan note uses OMP's exact template from the man
 	const h = harness([header, orphan, prompt]);
 	await h.prepare();
 	h.dispatch([header, { role: "user", content: note }, prompt]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
 
@@ -277,7 +278,7 @@ test("issue 683 chat history: an orphan note differing by one byte must refuse",
 		{ role: "user", content: note.replace("exact", "exAct") },
 		prompt,
 	]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("comparison=content");
 	for (const privateValue of ["retired", "orphan", "old output"])
 		expect(h.refusals[0]).not.toContain(privateValue);
@@ -316,7 +317,7 @@ test("issue 683 chat history: an older pass's orphan note cannot establish curre
 	await h.prepare();
 	await h.prepare([header, { ...orphan, toolCallId: "replacement" }, prompt]);
 	h.dispatch([header, { role: "user", content: note }, prompt]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 683 chat history: paired results and elevated instructions cannot borrow orphan-note equivalence", () => {
@@ -362,6 +363,6 @@ test("issue 683 chat history: raw history still refuses with a valid normalizati
 		{ role: "user", content: note },
 		prompt,
 	]);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain("missing current receipt signature");
 });

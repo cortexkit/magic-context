@@ -10,6 +10,7 @@ import * as persistence from "@magic-context/core/hooks/magic-context/lkg-persis
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import * as storagePermissions from "@magic-context/core/shared/storage-permissions";
 import { createTestTempDir } from "../../plugin/src/shared/test-temp-dir";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -69,6 +70,7 @@ function setup(root: string) {
 	});
 	registerPiContextHandler(fake.pi as never, { db });
 	let aborts = 0;
+	let blocked = 0;
 	let dispatches = 0;
 	const raw = [userMessage("review served bytes", 1)];
 	const ctx = Object.assign(fakeContext(sessionId, root, ["entry-1"], raw), {
@@ -93,9 +95,12 @@ function setup(root: string) {
 			messages: unknown[];
 		}>;
 	const dispatch = () => {
-		const before = aborts;
-		event("before_provider_request");
-		if (aborts === before) dispatches++;
+		const result = event("before_provider_request");
+		if (result === undefined) dispatches++;
+		else {
+			assertPiRefusedDispatch(result, "Magic Context could not safely prepare");
+			blocked++;
+		}
 	};
 	return {
 		root,
@@ -107,7 +112,7 @@ function setup(root: string) {
 		event,
 		serve,
 		dispatch,
-		aborts: () => aborts,
+		stops: () => aborts + blocked,
 		dispatches: () => dispatches,
 	};
 }
@@ -160,7 +165,7 @@ describe.skipIf(!enabled)("issue 650 publication review", () => {
 					await f.serve();
 					f.dispatch();
 					expect(reached).toBe(1);
-					expect(f.aborts()).toBeGreaterThan(0);
+					expect(f.stops()).toBeGreaterThan(0);
 					expect(f.dispatches()).toBe(0);
 					expect(
 						persistence.loadPersistedLkgSlot(f.db, f.sessionId)?.jsonPrefix,
@@ -208,7 +213,7 @@ describe.skipIf(!enabled)("issue 650 publication review", () => {
 			await f.serve();
 			f.event("agent_end");
 			f.dispatch();
-			expect(f.aborts()).toBe(1);
+			expect(f.stops()).toBe(1);
 			expect(f.dispatches()).toBe(0);
 			expect(readPiCommittedServedNumbers(f.db, f.sessionId)).toEqual([1]);
 			expect(
@@ -222,7 +227,7 @@ describe.skipIf(!enabled)("issue 650 publication review", () => {
 			const served = await f.serve();
 			f.dispatch();
 			expect(f.dispatches()).toBe(1);
-			expect(f.aborts()).toBe(0);
+			expect(f.stops()).toBe(0);
 			expect(
 				persistence.loadPersistedLkgSlot(f.db, f.sessionId)?.jsonPrefix,
 			).toBe(JSON.stringify(served.messages));

@@ -1,11 +1,12 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import * as diagnostic from "./omp-diagnostic-context";
-import { isOmpDumpContextStack } from "./omp-diagnostic-context";
 import {
 	clearPiContextReceipt,
 	PiContextSupersededError,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
+import * as diagnostic from "./omp-diagnostic-context";
+import { isOmpDumpContextStack } from "./omp-diagnostic-context";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -58,8 +59,8 @@ function harness(
 		emit,
 		entries,
 		notices,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 	};
 }
@@ -125,7 +126,7 @@ test("issue 668: diagnostic snapshots bypass all handler writes and leave a live
 		expect(ownerChecks).toBe(1);
 		expect(h.entries).toEqual([]);
 		expect(h.notices).toEqual([]);
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 	} finally {
 		held.resolve();
 		detect.mockRestore();
@@ -144,7 +145,7 @@ test("issue 668: an idle diagnostic does not mint a dispatch receipt", async () 
 		expect(writes).toBe(0);
 		expect(h.entries).toEqual([]);
 		h.emit("before_provider_request", { payload: { messages: [] } });
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(JSON.stringify(h.entries)).toContain("no context pass ran");
 	} finally {
 		detect.mockRestore();
@@ -215,27 +216,27 @@ test("issue 668: real conflict fallback and retries refuse without revoking the 
 		},
 	])
 		h.emit("before_provider_request", { payload });
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	expect(JSON.stringify(h.entries)).toContain(
 		"superseded context fallback is not a managed request",
 	);
 	h.emit("before_provider_request", { payload: { messages: newer } });
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	h.emit("before_provider_request", {
 		payload: {
 			messages: newer,
 			metadata: { nonceFragment: text.slice(0, -1) },
 		},
 	});
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	await h.emit("context", { messages: [userMessage("later clean pass", 3)] });
 	h.emit("before_provider_request", { payload: { input: "later clean pass" } });
-	expect(h.aborts).toBe(2);
+	expect(h.stops).toBe(2);
 	h.emit("before_provider_request", { payload: { messages: raw } });
-	expect(h.aborts).toBe(3);
+	expect(h.stops).toBe(3);
 	h.emit("agent_end");
 	h.emit("before_provider_request", { payload: { messages: raw } });
-	expect(h.aborts).toBe(4);
+	expect(h.stops).toBe(4);
 	expect(JSON.stringify(h.entries.at(-1))).toContain(
 		"superseded context fallback is not a managed request",
 	);
@@ -272,7 +273,7 @@ test("issue 668: nonce-free sessions never serialize the provider payload", asyn
 		},
 	};
 	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	const other = await markedFallback(h, 1, "issue-668-other");
 	await h.emit(
 		"context",
@@ -282,16 +283,16 @@ test("issue 668: nonce-free sessions never serialize the provider payload", asyn
 	// The other session's superseded-request nonce must not make this session
 	// serialize its payload.
 	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	const candidate = await prepareNonceCandidate(h, other);
 	h.emit("before_provider_request", { payload: { messages: candidate } });
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	h.emit(
 		"before_provider_request",
 		{ payload: { messages: candidate } },
 		"issue-668-other",
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 668: each session retains exactly its newest 32 unsendable nonces", async () => {
@@ -302,12 +303,12 @@ test("issue 668: each session retains exactly its newest 32 unsendable nonces", 
 	const other = await markedFallback(h, 100, "issue-668-other");
 	const retired = await prepareNonceCandidate(h, raw[0]);
 	h.emit("before_provider_request", { payload: { messages: retired } });
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	for (const messages of raw.slice(1)) {
 		const candidate = await prepareNonceCandidate(h, messages);
 		h.emit("before_provider_request", { payload: { messages: candidate } });
 	}
-	expect(h.aborts).toBe(32);
+	expect(h.stops).toBe(32);
 	await h.emit(
 		"context",
 		{ messages: [userMessage("managed"), ...other] },
@@ -318,7 +319,7 @@ test("issue 668: each session retains exactly its newest 32 unsendable nonces", 
 		{ payload: { messages: [userMessage("managed"), ...other] } },
 		"issue-668-other",
 	);
-	expect(h.aborts).toBe(33);
+	expect(h.stops).toBe(33);
 });
 
 test("issue 668: receipt cleanup also clears only that session's nonces", async () => {
@@ -333,7 +334,7 @@ test("issue 668: receipt cleanup also clears only that session's nonces", async 
 	clearPiContextReceipt("issue-668");
 	const candidate = await prepareNonceCandidate(h, raw);
 	h.emit("before_provider_request", { payload: { messages: candidate } });
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	const payload = {
 		messages: candidate,
 		toJSON() {
@@ -341,13 +342,13 @@ test("issue 668: receipt cleanup also clears only that session's nonces", async 
 		},
 	};
 	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	h.emit(
 		"before_provider_request",
 		{ payload: { messages: [userMessage("managed"), ...other] } },
 		"issue-668-other",
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 async function prepareNonceCandidate(

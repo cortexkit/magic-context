@@ -2,8 +2,9 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as logger from "@magic-context/core/shared/logger";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import { piAgentHistory } from "./pi-dispatch-agent-history";
 import { piResponsesAssistantTexts } from "./pi-dispatch-responses-history";
 import {
@@ -290,8 +291,8 @@ function harness(api: string, unsupported = true, extra?: unknown[]) {
 		handlers.get(name)?.(event, ctx);
 	return {
 		emit,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		async prepare() {
 			emit("agent_start");
@@ -317,12 +318,12 @@ test("issue 686 unmodeled Chat plan keeps the signature fence without per-messag
 		],
 	};
 	h.emit("before_provider_request", { payload: body });
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	await h.prepare();
 	h.emit("before_provider_request", {
 		payload: { messages: body.messages.slice(1) },
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 686 entirely unmodeled prepared history retains raw refusal", async () => {
@@ -338,12 +339,12 @@ test("issue 686 entirely unmodeled prepared history retains raw refusal", async 
 			],
 		},
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	await h.prepare();
 	h.emit("before_provider_request", {
 		payload: { input: [item("raw history")] },
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 686 provider-selected Responses items never fall back to per-message rows", async () => {
@@ -362,7 +363,7 @@ test("issue 686 provider-selected Responses items never fall back to per-message
 			],
 		},
 	});
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	await h.prepare();
 	h.emit("before_provider_request", {
 		payload: {
@@ -373,7 +374,7 @@ test("issue 686 provider-selected Responses items never fall back to per-message
 			],
 		},
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 for (const api of [
@@ -434,18 +435,18 @@ for (const api of [
 		h.emit("before_provider_request", {
 			payload: body("<session-history>current managed head</session-history>"),
 		});
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		await h.prepare();
 		h.emit("before_provider_request", {
 			payload: body("raw unmanaged history"),
 		});
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		const stale = body(
 			"<session-history>stale prepared head</session-history>",
 		);
 		await h.prepare();
 		h.emit("before_provider_request", { payload: stale });
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		// An older managed request still has the opener. With a modeled history,
 		// the missing newer turn is detectable; without a plan it is a known limit.
 		const modeled = harness(api, false, [
@@ -458,10 +459,10 @@ for (const api of [
 				true,
 			),
 		});
-		expect(modeled.aborts).toBe(0);
+		expect(modeled.stops).toBe(0);
 		await modeled.prepare();
 		modeled.emit("before_provider_request", { payload: stale });
-		expect(modeled.aborts).toBe(1);
+		expect(modeled.stops).toBe(1);
 	});
 }
 
@@ -479,7 +480,7 @@ test("issue 686 unmodeled Responses skips incomparable rows once per session but
 		};
 		h.emit("before_provider_request", { payload: body });
 		h.emit("before_provider_request", { payload: body });
-		expect(h.aborts).toBe(0);
+		expect(h.stops).toBe(0);
 		expect(
 			log.mock.calls.filter(([line]) =>
 				line.includes("structural comparison skipped"),
@@ -500,16 +501,16 @@ test("issue 686 unmodeled Responses skips incomparable rows once per session but
 				input: [...body.input, { role: "user", content: "changed retry" }],
 			},
 		});
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		await h.prepare();
 		h.emit("before_provider_request", {
 			payload: { input: [{ role: "user", content: "raw without head" }] },
 		});
-		expect(h.aborts).toBe(2);
+		expect(h.stops).toBe(2);
 		await h.prepare();
 		h.emit("agent_end", { messages: [] });
 		h.emit("before_provider_request", { payload: body });
-		expect(h.aborts).toBe(3);
+		expect(h.stops).toBe(3);
 	} finally {
 		log.mockRestore();
 	}

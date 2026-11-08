@@ -4,14 +4,15 @@ import {
 	withIndexChunk,
 } from "@magic-context/core/shared/sqlite";
 import {
+	clearPiContextReceipt,
+	piBlockedDispatches,
+	registerPiGuardedContext,
+} from "./__tests__/dispatch-probe";
+import {
 	__test,
 	clearContextHandlerSession,
 	registerPiContextHandler,
 } from "./context-handler";
-import {
-	clearPiContextReceipt,
-	registerPiGuardedContext,
-} from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	assistantMessage,
@@ -61,8 +62,8 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		emit,
 		dispatch: () =>
@@ -95,14 +96,14 @@ test("issue 667: a previous run's late agent_end does not refuse the next run's 
 	h.emit("agent_end", { messages: [first, reply] });
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	// The second run's own agent_start, delivered late, adopts the operation
 	// holding the second run's completed pass instead of replacing it with an
 	// empty one, so a retried dispatch is still admitted.
 	h.emit("agent_start");
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 667: a retried run's late willContinue agent_end does not refuse the continuation", async () => {
@@ -121,7 +122,7 @@ test("issue 667: a retried run's late willContinue agent_end does not refuse the
 	});
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 667: a slow pass refused at dispatch does not refuse the newer pass that replaces it", async () => {
@@ -141,7 +142,7 @@ test("issue 667: a slow pass refused at dispatch does not refuse the newer pass 
 	);
 	// OMP stopped waiting for the slow pass and dispatched its raw messages.
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	// The user resends before OMP delivers the aborted run's end.
 	const resent = userMessage("resent prompt", 3);
 	await h.emit("context", { messages: [first, resent] });
@@ -150,7 +151,7 @@ test("issue 667: a slow pass refused at dispatch does not refuse the newer pass 
 	finishSlow();
 	await slow;
 	h.dispatch();
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals).toHaveLength(1);
 });
 
@@ -168,7 +169,7 @@ test("issue 667: a run's own end still invalidates its receipt", async () => {
 		"the run that owned the latest context pass has ended",
 	);
 	expect(dispatched.refusals.at(-1)).not.toContain("superseded");
-	expect(dispatched.aborts).toBe(1);
+	expect(dispatched.stops).toBe(1);
 
 	// A pass whose run ended before its request went out (its input is entirely
 	// part of the ended run) authorizes nothing afterwards.
@@ -181,7 +182,7 @@ test("issue 667: a run's own end still invalidates its receipt", async () => {
 	expect(undispatched.refusals.at(-1)).toContain(
 		"the run that owned the latest context pass has ended",
 	);
-	expect(undispatched.aborts).toBe(1);
+	expect(undispatched.stops).toBe(1);
 });
 
 test("issue 667: the outcome deadline covers a pass whose handler never settles", async () => {
@@ -206,10 +207,10 @@ test("issue 667: the outcome deadline covers a pass whose handler never settles"
 			),
 		]);
 		expect(outcome).not.toBe("still running");
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals.at(-1)).toContain("recovery=no managed result; refused");
 		h.dispatch();
-		expect(h.aborts).toBe(2);
+		expect(h.stops).toBe(2);
 	} finally {
 		settle();
 		await stuck;

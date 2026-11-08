@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import {
 	piMatchesPreparedStructure,
 	piPreparedStructure,
@@ -208,7 +209,7 @@ test("issue 686 mid-history system: resumed hidden notice is admitted on Anthrop
 			content: "not the prepared notice",
 		};
 		emit("before_provider_request", { payload: changed });
-		expect(aborts).toBe(1);
+		expect(aborts + piBlockedDispatches(ctx)).toBe(1);
 		expect(refusals[0]).toContain("comparison=content");
 		clearPiContextReceipt(session);
 	}

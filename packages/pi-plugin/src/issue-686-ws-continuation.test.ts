@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import {
 	clearPiContextReceipt,
+	piBlockedDispatches,
 	registerPiGuardedContext,
-} from "./pi-context-refusal";
+} from "./__tests__/dispatch-probe";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
@@ -175,8 +176,8 @@ function harness() {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		/** One context pass; `newRun` ends the previous run first, as continuations do. */
 		async pass(messages: unknown[], newRun = false) {
@@ -227,7 +228,7 @@ test("issue 686 WebSocket continuation: a full request then a tool-result delta 
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation: a hidden resumed custom notice is encoded as developer, not system", async () => {
@@ -252,7 +253,7 @@ test("issue 686 WebSocket continuation: a hidden resumed custom notice is encode
 		]),
 	);
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation: changed hidden custom notice text refuses before admission", async () => {
@@ -275,7 +276,7 @@ test("issue 686 WebSocket continuation: changed hidden custom notice text refuse
 			},
 		]),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"delta differs from the prepared provider input tail",
 	);
@@ -292,7 +293,7 @@ test("issue 686 WebSocket continuation: a final answer then the automatic todo-r
 	await h.pass([...m2, a2.prepared, reminder], true);
 	h.send(chained("resp_2", [developerItem(reminder)]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation: two consecutive user turns on a reused transport admit", async () => {
@@ -310,7 +311,7 @@ test("issue 686 WebSocket continuation: two consecutive user turns on a reused t
 	await h.pass([...m1, answer1.prepared, u2, answer2.prepared, u3], true);
 	h.send(chained("resp_2", [userItem("§5§ third turn")]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation: a provider retry of the admitted continuation admits", async () => {
@@ -319,7 +320,7 @@ test("issue 686 WebSocket continuation: a provider retry of the admitted continu
 	h.send(frame);
 	h.send(frame);
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation: a full SSE fallback after the continuation in the same pass admits", async () => {
@@ -327,7 +328,7 @@ test("issue 686 WebSocket continuation: a full SSE fallback after the continuati
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
 	h.send(full([...w1, ...a1.wire, outputItem("call_1", "§3§ file body")]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation guard: a history mutation breaks the chain", async () => {
@@ -339,7 +340,7 @@ test("issue 686 WebSocket continuation guard: a history mutation breaks the chai
 	// stored context no longer matches what this pass prepared.
 	await h.pass([head, user("§1§ read the other file", 2), a1.prepared, r1]);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"prepared history does not extend the previous managed request",
 	);
@@ -375,7 +376,7 @@ test("issue 791: a drain changing only the injected pair's timestamps admits a c
 	await h.pass(afterDrain);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 	expect(JSON.stringify(afterDrain)).toBe(untouched);
 	expect(afterDrain.slice(0, 2).map((m) => m.content)).toEqual(
 		beforeDrain.slice(0, 2).map((m) => m.content),
@@ -413,7 +414,7 @@ for (const changed of [
 			});
 		await h.pass(next);
 		h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain(
 			"prepared history does not extend the previous managed request",
 		);
@@ -428,7 +429,7 @@ test("issue 686 WebSocket continuation guard: a stale previous_response_id refus
 	const reminder = todoReminder(6);
 	await h.pass([...m2, a2.prepared, reminder], true);
 	h.send(chained("resp_1", [developerItem(reminder)]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"continuation does not follow the last managed request's response",
 	);
@@ -437,7 +438,7 @@ test("issue 686 WebSocket continuation guard: a stale previous_response_id refus
 test("issue 686 WebSocket continuation guard: a wrong previous_response_id refuses", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_forged", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"continuation does not follow the last managed request's response",
 	);
@@ -447,7 +448,7 @@ test("issue 686 WebSocket continuation guard: a fresh process without the record
 	const h = harness();
 	await h.pass(m2);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"no completed managed response is recorded for this continuation",
 	);
@@ -458,7 +459,7 @@ test("issue 686 WebSocket continuation guard: malformed chain ids cannot fall th
 		const h = harness();
 		await h.pass(m1);
 		h.send({ ...full(w1), previous_response_id: id });
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain("invalid chained continuation frame");
 		clearPiContextReceipt(session);
 	}
@@ -480,7 +481,7 @@ test("issue 686 WebSocket continuation guard: an unknown prefix before the delta
 	});
 	await h.pass([...m1, other.prepared, r1]);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"prepared history does not continue from the previous managed response",
 	);
@@ -489,7 +490,7 @@ test("issue 686 WebSocket continuation guard: an unknown prefix before the delta
 test("issue 686 WebSocket continuation guard: a delta answering another call refuses", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_other", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"delta differs from the prepared provider input tail",
 	);
@@ -503,7 +504,7 @@ test("issue 686 WebSocket continuation guard: a delta with an unprepared extra i
 			userItem("UNMANAGED appended prompt"),
 		]),
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"delta differs from the prepared provider input tail",
 	);
@@ -513,7 +514,7 @@ test("issue 686 WebSocket continuation guard: an altered resend of the admitted 
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ altered body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"provider request does not match this pass's managed dispatch",
 	);
@@ -524,7 +525,7 @@ test("issue 686 WebSocket continuation guard: a resend naming another response r
 	const tail = [outputItem("call_1", "§3§ file body")];
 	h.send(chained("resp_1", tail));
 	h.send(chained("resp_0", tail));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"continuation does not follow the last managed request's response",
 	);
@@ -546,7 +547,7 @@ test("issue 686 WebSocket continuation guard: an errored response is not a conti
 	);
 	await h.pass(m2);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"no completed managed response is recorded for this continuation",
 	);
@@ -612,7 +613,7 @@ test("issue 686 WebSocket continuation guard: an errored response drops the earl
 		const u2 = user("§5§ try again", 6);
 		await h.pass([...m2, failed.prepared, u2], true);
 		h.send(chained(previous, [userItem("§5§ try again")]));
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		refusals.push(h.refusals[0] ?? "");
 		clearPiContextReceipt(session);
 	}
@@ -631,7 +632,7 @@ test("issue 686 WebSocket continuation guard: after an aborted response the earl
 	const u2 = user("§4§ next prompt", 5);
 	await h.pass([...m2, u2], true);
 	h.send(chained("resp_1", [userItem("§4§ next prompt")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"the last managed request has no completed response",
 	);
@@ -640,7 +641,7 @@ test("issue 686 WebSocket continuation guard: after an aborted response the earl
 test("issue 686 WebSocket continuation guard: altered tool-result text on the first delta refuses", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ edited body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"delta differs from the prepared provider input tail",
 	);
@@ -651,7 +652,7 @@ test("issue 686 WebSocket continuation parity: full requests retain their existi
 	// Full requests use the existing structural policy. A continuation may reuse
 	// a recorded response only if its delta exactly matches the prepared input tail.
 	h.send(full([...w1, ...a1.wire, outputItem("call_1", "§3§ edited body")]));
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 686 WebSocket continuation guard: altered user and todo-reminder text refuses", async () => {
@@ -670,7 +671,7 @@ test("issue 686 WebSocket continuation guard: altered user and todo-reminder tex
 				},
 			]),
 		);
-		expect(h.aborts).toBe(1);
+		expect(h.stops).toBe(1);
 		expect(h.refusals[0]).toContain(
 			"delta differs from the prepared provider input tail",
 		);
@@ -690,7 +691,7 @@ test("issue 686 WebSocket continuation guard: altered native response with the s
 	};
 	await h.pass([...m1, changed, r1]);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 	expect(h.refusals[0]).toContain(
 		"prepared response or tail encoding cannot continue",
 	);
@@ -714,5 +715,5 @@ test("issue 686 WebSocket continuation: split text blocks use the provider's exa
 	]);
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ first\nsecond")]));
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });

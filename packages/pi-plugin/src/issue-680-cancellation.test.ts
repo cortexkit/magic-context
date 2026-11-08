@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	__test,
 	clearContextHandlerSession,
@@ -355,7 +356,7 @@ test("issue 680: a fresh live dispatch cannot reuse a cancelled pass", async () 
 	older.abort();
 	emit("before_provider_request", oldContext, { payload: { messages: [] } });
 	expect(entries).toEqual([]);
-	emit(
+	const refused = emit(
 		"before_provider_request",
 		{
 			...hostContext(newer),
@@ -367,7 +368,11 @@ test("issue 680: a fresh live dispatch cannot reuse a cancelled pass", async () 
 		{ payload: { messages: [] } },
 	);
 	expect(entries).toHaveLength(1);
-	expect(aborts).toBe(1);
+	assertPiRefusedDispatch(
+		refused,
+		(entries[0] as [unknown, { message: string }])[1].message,
+	);
+	expect(aborts).toBe(0);
 });
 
 test("issue 680: cancellation revokes an identity-matched receipt retained after an earlier run end", async () => {
@@ -434,11 +439,15 @@ test("issue 680: cancellation revokes an identity-matched receipt retained after
 	}).toEqual({ entries: [], aborts: 0, completed: false, abandoned: true });
 	expect(() => pass.assertDecisionPublication()).toThrow();
 	// Even an exact old payload cannot authorize a fresh live provider request.
-	emit(
+	const refused = emit(
 		"before_provider_request",
 		{ payload },
 		{ ...ctx, signal: new AbortController().signal },
 	);
 	expect(entries).toHaveLength(1);
-	expect(aborts).toBe(1);
+	assertPiRefusedDispatch(
+		refused,
+		(entries[0] as [unknown, { message: string }])[1].message,
+	);
+	expect(aborts).toBe(0);
 });

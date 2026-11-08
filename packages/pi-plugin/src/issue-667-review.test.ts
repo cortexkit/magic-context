@@ -4,13 +4,14 @@ import {
 	withIndexChunk,
 } from "@magic-context/core/shared/sqlite";
 import {
+	clearPiContextReceipt,
+	piBlockedDispatches,
+	registerPiGuardedContext,
+} from "./__tests__/dispatch-probe";
+import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
 } from "./context-handler";
-import {
-	clearPiContextReceipt,
-	registerPiGuardedContext,
-} from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	assistantMessage,
@@ -60,8 +61,8 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 	};
 	return {
 		refusals,
-		get aborts() {
-			return aborts;
+		get stops() {
+			return aborts + piBlockedDispatches(ctx);
 		},
 		emit,
 		dispatch: () =>
@@ -112,7 +113,7 @@ test("issue 667 review: a run that ends before its request goes out invalidates 
 	expect(h.refusals.at(-1)).toContain(
 		"the run that owned the latest context pass has ended",
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 667 review: a dispatched pass's own run end invalidates its receipt even when the pass rewrote its input in place", async () => {
@@ -131,7 +132,7 @@ test("issue 667 review: a dispatched pass's own run end invalidates its receipt 
 	expect(h.refusals.at(-1)).toContain(
 		"the run that owned the latest context pass has ended",
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 667 review: a kept continuation pass is not adopted by a later run's agent_start", async () => {
@@ -156,7 +157,7 @@ test("issue 667 review: a kept continuation pass is not adopted by a later run's
 	h.emit("agent_start");
 	h.dispatch();
 	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 667 review: a kept pass whose own start was delivered is not adopted by the next run's start", async () => {
@@ -303,7 +304,7 @@ test("issue 667 review: an agent_end without a delivered start does not make lat
 	h.emit("agent_start");
 	h.dispatch();
 	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
 
 test("issue 667 review: clearing a session's receipt also resets its lifecycle counts", async () => {
@@ -325,7 +326,7 @@ test("issue 667 review: clearing a session's receipt also resets its lifecycle c
 	h.emit("agent_start");
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
-	expect(h.aborts).toBe(0);
+	expect(h.stops).toBe(0);
 });
 
 test("issue 667 review: a dispatched pass's own run end invalidates its receipt even when OMP rewrote the run's messages", async () => {
@@ -349,5 +350,5 @@ test("issue 667 review: a dispatched pass's own run end invalidates its receipt 
 	expect(h.refusals.at(-1)).toContain(
 		"the run that owned the latest context pass has ended",
 	);
-	expect(h.aborts).toBe(1);
+	expect(h.stops).toBe(1);
 });
