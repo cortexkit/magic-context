@@ -1,9 +1,8 @@
-//! Review witnesses and probes for readings judged by `last_prompt_view`.
+//! Witnesses and probes for readings judged by `last_prompt_view`.
 //!
-//! Witnesses state behaviour a review found missing: a runner that keeps
-//! naming replaced views, and one whose applied view goes back or away.
-//! Probes check behaviour the review found sound, each with a control
-//! showing it could fail.
+//! Witnesses cover a runner that keeps naming views it replaced, and one
+//! whose applied view goes back or away. Probes check behaviour that already
+//! holds, each with a control showing the test could fail.
 
 use super::*;
 
