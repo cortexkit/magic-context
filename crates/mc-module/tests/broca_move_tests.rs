@@ -513,7 +513,7 @@ fn runner_refusals_leave_both_full_database_dumps_unchanged() {
     let fixture = Fixture::new("pi");
     let system = fixture.request.messages.as_ref().unwrap()[0].mid.as_str();
     fixture.conn.execute("UPDATE compartments SET start_message=1,end_message=1,start_message_id=?1,end_message_id=?1 WHERE sequence=1",params![system]).unwrap();
-    fixture.refuses_unchanged("ordinal_unmapped: summary 1");
+    fixture.refuses_unchanged("summary_covers_no_runner_entry: summary 1");
 
     let mut fixture = Fixture::new("opencode2");
     fixture.run().unwrap();

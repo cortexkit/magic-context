@@ -2773,19 +2773,26 @@ impl Session {
             .is_some_and(|shape| shape.requires_fold(&self.head_shape(settings)))
     }
 
-    /// The first view of a session moved in from a standalone host whose
-    /// summaries cover its whole transcript: the history head, and a cut
-    /// through `cut` (ordinal, message id), the message before the
-    /// transcript's last one. The last
-    /// message stays shown, as after every other cut (a runner may refuse a
-    /// cut through its newest message), though its summary covers it too.
-    /// No cut when the transcript holds one message. The session then holds
-    /// the view as accepted, ready to be saved.
+    /// The first view of a moved session: the history head and a cut through
+    /// at most `cut` (ordinal, message id). The caller keeps the newest entry
+    /// visible; summary coverage can shorten that cut further, so unsummarized
+    /// entries never disappear. The session records the view as current; the
+    /// runner's move tool installs it before Setup.
     pub fn first_view_after_move(
         &mut self,
         settings: &Settings,
         cut: Option<(u64, &str)>,
     ) -> Result<View, String> {
+        let covered = self.last_summary_ordinal().zip(self.last_summary_end());
+        let cut = cut.and_then(|cut| {
+            covered.as_ref().map(|(ordinal, mid)| {
+                if cut.0 > *ordinal {
+                    (*ordinal, mid.as_str())
+                } else {
+                    cut
+                }
+            })
+        });
         self.fold_due = true;
         let mut ops = self.render_head(settings);
         if self.next_baseline.is_none() || !ops.iter().any(head::is_head) {
