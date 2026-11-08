@@ -2710,10 +2710,11 @@ export async function runPostTransformPhase(
             usableWindow: args.usableWindow,
         });
     // Thinking holds defer every new prefix edit, whether or not the provider
-    // cache is still warm. First render and pressure relief can admit work, but the target guards still
-    // forbid changes before any retained signature. A genuine prefix rewrite
-    // first omits every signed block. The directory veto freezes injection only.
-    // The historian's redundancy skip applies the same predicate.
+    // cache is still warm. First render and pressure relief can admit work,
+    // but the target guards still forbid changes before any retained
+    // signature. A genuine prefix rewrite first omits every signed block. The
+    // directory veto freezes injection only. The historian's redundancy skip
+    // applies the same predicate.
     const publishedWorkDrainAllowed =
         (!compactionOff || servedShapeRepair.needsRebuild) &&
         reclaimRidePermitted(rideSignals, {
