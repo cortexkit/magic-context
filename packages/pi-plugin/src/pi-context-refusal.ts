@@ -39,6 +39,7 @@ import {
 } from "./pi-dispatch-chain";
 import {
 	piConversationFields as conversationFields,
+	piCursorManagedReceipt,
 	piHasManagedSignature,
 	piManagedSignature,
 } from "./pi-dispatch-identity";
@@ -81,6 +82,7 @@ interface Operation {
 	dispatchFields?: readonly LkgContentField[];
 	chainDispatchFields?: readonly LkgContentField[];
 	managedSignature?: string;
+	managedCursorReceipt?: readonly string[];
 	preparedStructure?: PiPreparedStructure;
 	// Recorded only for serializers that can chain through previous_response_id.
 	preparedHistory?: PiPreparedHistory;
@@ -139,6 +141,7 @@ function releasePiOperationPayloads(operation: Operation): void {
 	operation.dispatchFields = undefined;
 	operation.chainDispatchFields = undefined;
 	operation.managedSignature = undefined;
+	operation.managedCursorReceipt = undefined;
 	operation.preparedStructure = undefined;
 	operation.preparedHistory = undefined;
 }
@@ -661,7 +664,13 @@ export function registerPiGuardedContext(
 					checked = expanded.payload;
 					chainInput = expanded.input;
 				}
-				if (!piHasManagedSignature(checked, active.managedSignature))
+				if (
+					!piHasManagedSignature(
+						checked,
+						active.managedSignature,
+						active.managedCursorReceipt,
+					)
+				)
 					throw new Error(
 						"provider request does not match this pass's managed dispatch (missing current receipt signature)",
 					);
@@ -679,13 +688,15 @@ export function registerPiGuardedContext(
 				// are not detected on this pass when no structural plan can be built.
 				const body = checked as { messages?: unknown; input?: unknown };
 				const skipReason = active.preparedStructure
-					? (active.preparedStructure.structuralSkipReason ??
-						(active.preparedStructure.api &&
-						body?.messages === undefined &&
-						Array.isArray(body?.input) &&
-						!active.preparedStructure.responsesMessages
-							? "provider selected Responses items without a matching history plan"
-							: undefined))
+					? active.preparedStructure.api === "cursor-agent"
+						? "Cursor AgentRunRequest root history is not modeled"
+						: (active.preparedStructure.structuralSkipReason ??
+							(active.preparedStructure.api &&
+							body?.messages === undefined &&
+							Array.isArray(body?.input) &&
+							!active.preparedStructure.responsesMessages
+								? "provider selected Responses items without a matching history plan"
+								: undefined))
 					: "prepared history representation is not modeled";
 				if (chained && skipReason)
 					throw new Error(
@@ -883,6 +894,10 @@ export function registerPiGuardedContext(
 				if (prepared.messages !== result.messages)
 					result.messages = prepared.messages;
 				active.managedSignature = piManagedSignature(result.messages);
+				active.managedCursorReceipt =
+					ctx.model?.api === "cursor-agent"
+						? piCursorManagedReceipt(result.messages)
+						: undefined;
 				active.preparedStructure = prepared.structure;
 				if (
 					fenceEnabled &&
