@@ -246,7 +246,14 @@ impl ValidationCache {
                 candidate.built_through.clone(),
                 candidate.new_signed.clone(),
             );
-            view::plan_view(&touched, &bounded, rules)?;
+            if bounded.built_through.is_some() || bounded.new_signed.is_some() {
+                view::plan_view(&touched, &bounded, rules)?;
+            } else {
+                // An unflagged runner plans explicit edits only; no signed
+                // part may rely on render-time stripping to make them valid.
+                view::plan(&touched, &bounded.edits)?;
+                rules::check(&touched, &bounded.edits, rules).map_err(ViewRefusal::Rule)?;
+            }
         }
         self.inserts = edits
             .iter()
@@ -275,7 +282,7 @@ pub fn next_view(
         ViewPolicy {
             rules,
             version,
-            built_through: entries.last().map(|entry| entry.mid.clone()),
+            built_through: None,
             new_signed: None,
         },
         retire,
@@ -396,7 +403,11 @@ pub(crate) fn next_view_cached(
         edits.push(Edit::new(version, op));
         added = true;
     }
-    if !added && !dropped_some && !replaced_in_place {
+    let policy_changed = previous.is_some_and(|previous| {
+        previous.built_through.is_some() != built_through.is_some()
+            || previous.new_signed != new_signed
+    });
+    if !added && !dropped_some && !replaced_in_place && !policy_changed {
         return Ok(None);
     }
     loop {

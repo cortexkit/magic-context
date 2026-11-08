@@ -44,6 +44,7 @@ struct TestProvider {
     version: Mutex<u64>,
     published: Mutex<Vec<ApplyViewAnswer>>,
     notices: Mutex<Vec<NoticeRequest>>,
+    setups: Mutex<Vec<SetupRequest>>,
     tool_reply: Mutex<Option<tokio::sync::oneshot::Receiver<Result<String, CallError>>>>,
 }
 
@@ -56,6 +57,7 @@ impl TestProvider {
             version: Mutex::new(0),
             published: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
+            setups: Mutex::new(Vec::new()),
             tool_reply: Mutex::new(None),
         }
     }
@@ -76,7 +78,8 @@ impl TestProvider {
 }
 
 impl Provider for TestProvider {
-    async fn setup(&self, _: SetupRequest) -> Result<SetupAnswer, CallError> {
+    async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
+        self.setups.lock().unwrap().push(request);
         Ok(SetupAnswer::Ready)
     }
 
@@ -155,6 +158,7 @@ fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
         model_latency_ms: 0,
         templates: Vec::new(),
         accepts_images: None,
+        view_anchor: true,
     }
 }
 
@@ -162,6 +166,49 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
     let runner = Runner::start(config, TestProvider::new()).await.unwrap();
     runner.provider().attach(runner.host().clone());
     runner
+}
+
+#[tokio::test]
+async fn contract_update_mock_anchor_opt_in_and_legacy_verification() {
+    let mut wire = serde_json::to_value(config(Kind::OpenAi, free(), 40_000)).unwrap();
+    wire.as_object_mut().unwrap().remove("view_anchor");
+    let defaults: SessionConfig = serde_json::from_value(wire).unwrap();
+    assert!(defaults.view_anchor);
+    for enabled in [true, false] {
+        let mut config = defaults.clone();
+        config.view_anchor = enabled;
+        let mut runner = start(config).await;
+        assert_eq!(
+            runner.provider().setups.lock().unwrap()[0].view_anchor,
+            enabled.then_some(true)
+        );
+        runner
+            .play(&[Step::User {
+                text: "prompt".into(),
+            }])
+            .await;
+        let anchor = runner.host().entries().last().unwrap().mid.clone();
+        let anchored = View::seal_with_policy(1, vec![], Some(anchor), None);
+        let answer = runner.host().apply_view(ApplyViewRequest::new(anchored));
+        assert_eq!(
+            answer,
+            if enabled {
+                ApplyViewAnswer::Accepted
+            } else {
+                ApplyViewAnswer::Refused {
+                    refusal: ViewRefusal::BadChecksum,
+                }
+            }
+        );
+        if !enabled {
+            assert_eq!(
+                runner
+                    .host()
+                    .apply_view(ApplyViewRequest::new(View::seal(1, vec![]))),
+                ApplyViewAnswer::Accepted
+            );
+        }
+    }
 }
 
 #[tokio::test]

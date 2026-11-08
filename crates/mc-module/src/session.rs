@@ -49,6 +49,8 @@ pub struct Session {
     reminder_counter: u64,
     conditions: Conditions,
     child_harness: Option<String>,
+    /// Only runners that opt in can verify the policy members in a view's checksum.
+    view_anchor: bool,
     /// Whether this session already logged that its runner's conditions
     /// leave out the prompt size while its steps report usage.
     warned_no_prompt: bool,
@@ -345,6 +347,7 @@ impl Session {
             index_ready: true,
             suspended: false,
             child_harness: request.child_harness.clone(),
+            view_anchor: request.view_anchor == Some(true),
             latest: None,
             version: 0,
             queued: BTreeSet::new(),
@@ -670,6 +673,7 @@ impl Session {
         self.suspended = false;
         self.conditions = conditions_of(request);
         self.child_harness = request.child_harness.clone();
+        self.view_anchor = request.view_anchor == Some(true);
         self.notice_keep = false;
         self.notice_keep = client.notice_keep(&self.key).await;
         self.project = route.project.clone();
@@ -3052,10 +3056,15 @@ impl Session {
             view_builder::ViewPolicy {
                 rules: &self.conditions.rules,
                 version,
-                built_through: self.index.cursor().map(|cursor| cursor.mid.clone()),
-                new_signed: cortexkit_compaction_view::rules::is_bound_signed_model(
-                    &self.conditions.model.model,
-                )
+                built_through: self
+                    .index
+                    .cursor()
+                    .filter(|_| self.view_anchor)
+                    .map(|cursor| cursor.mid.clone()),
+                new_signed: (self.view_anchor
+                    && cortexkit_compaction_view::rules::is_bound_signed_model(
+                        &self.conditions.model.model,
+                    ))
                 .then(|| "strip".into()),
             },
             retire,

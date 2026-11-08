@@ -12,6 +12,7 @@ async fn contract_update_views_bind_policy_to_index_and_model() {
     ] {
         let (mut session, client, route, mut setup, settings) = fixture();
         setup.model = ModelRef::new(provider, model);
+        setup.view_anchor = Some(true);
         *client.entries.lock().unwrap() = vec![text(1, "older"), text(2, "newest")];
         setup.newest = client.entries.lock().unwrap().last().map(cursor);
         session
@@ -51,6 +52,97 @@ async fn contract_update_views_bind_policy_to_index_and_model() {
         )
         .unwrap();
     assert_eq!(view.built_through, None);
+}
+
+#[tokio::test]
+async fn contract_update_unflagged_views_preserve_legacy_sealed_bytes() {
+    use sha2::{Digest, Sha256};
+
+    for flag in [None, Some(false)] {
+        for model in ["claude-opus-5-5", "gpt-5.4"] {
+            let (mut session, client, route, mut setup, settings) = fixture();
+            setup.model = ModelRef::new("test", model);
+            setup.view_anchor = flag;
+            *client.entries.lock().unwrap() = vec![text(1, "older"), text(2, "newest")];
+            setup.newest = client.entries.lock().unwrap().last().map(cursor);
+            session
+                .setup(&client, &settings, &route, &setup, Features::NONE)
+                .await;
+            let view = session
+                .seal(
+                    vec![EditOp::Drop {
+                        mid: "older".into(),
+                        part: Some("p".into()),
+                    }],
+                    &[],
+                )
+                .unwrap();
+            let wire = serde_json::to_value(&view).unwrap();
+            assert!(wire.get("built_through").is_none(), "{flag:?}, {model}");
+            assert!(wire.get("new_signed").is_none(), "{flag:?}, {model}");
+            // The original checksum input had exactly these two members.
+            let legacy = serde_json::json!({"version": view.version, "edits": view.edits});
+            let digest = Sha256::digest(serde_jcs::to_vec(&legacy).unwrap());
+            assert_eq!(view.checksum, format!("{digest:x}"));
+            let expected = View::seal(view.version, view.edits.clone());
+            assert_eq!(
+                serde_json::to_vec(&view).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+            assert_eq!(
+                view,
+                View::seal_for_setup(
+                    &setup,
+                    expected.version,
+                    expected.edits,
+                    Some("newest".into()),
+                    Some("strip".into())
+                )
+            );
+            assert!(view.verify());
+        }
+    }
+}
+
+#[tokio::test]
+async fn contract_update_setup_switches_the_next_view_policy() {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    setup.model = ModelRef::new("anthropic", "claude-opus-5-5");
+    *client.entries.lock().unwrap() = vec![text(1, "older"), text(2, "newest")];
+    setup.newest = client.entries.lock().unwrap().last().map(cursor);
+    for flag in [Some(true), Some(false), Some(true), None] {
+        setup.view_anchor = flag;
+        session
+            .setup(&client, &settings, &route, &setup, Features::NONE)
+            .await;
+        let view = session
+            .seal(
+                vec![EditOp::Drop {
+                    mid: "older".into(),
+                    part: Some("p".into()),
+                }],
+                &[],
+            )
+            .expect("a policy switch replaces the view even when edits are unchanged");
+        assert_eq!(
+            view.built_through.as_deref(),
+            (flag == Some(true)).then_some("newest")
+        );
+        assert_eq!(
+            view.new_signed.as_deref(),
+            (flag == Some(true)).then_some("strip")
+        );
+        let expected = View::seal_for_setup(
+            &setup,
+            view.version,
+            view.edits.clone(),
+            Some("newest".into()),
+            Some("strip".into()),
+        );
+        assert_eq!(view, expected);
+        setup.applied_view = Some(view.applied());
+        session.accept(view);
+    }
 }
 
 #[tokio::test]

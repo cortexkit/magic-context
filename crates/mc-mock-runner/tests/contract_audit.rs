@@ -87,6 +87,7 @@ fn config(context_window: u64) -> SessionConfig {
         model_latency_ms: 0,
         templates: Vec::new(),
         accepts_images: None,
+        view_anchor: true,
     }
 }
 

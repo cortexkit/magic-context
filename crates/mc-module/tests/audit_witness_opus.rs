@@ -222,6 +222,7 @@ fn config(preset: &str) -> SessionConfig {
         model_latency_ms: 0,
         templates: mc_module::nudges::templates(),
         accepts_images: None,
+        view_anchor: true,
     }
 }
 

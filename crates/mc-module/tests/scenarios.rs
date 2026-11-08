@@ -67,6 +67,7 @@ struct HostClient {
     refuse_views: Arc<Mutex<u32>>,
     /// The version of every view handed over, refused or not.
     offered: Arc<Mutex<Vec<u64>>>,
+    runner_refusals: Arc<Mutex<Vec<cortexkit_role_compaction::view::ViewRefusal>>>,
     /// The checksum of every view handed over, by version, the latest kept.
     offered_checksums: Arc<Mutex<std::collections::BTreeMap<u64, Vec<String>>>>,
     /// The project folder of every summarizer child send, for its scope.
@@ -269,7 +270,11 @@ impl RunnerClient for HostClient {
                 });
             }
         }
-        Ok(self.host()?.apply_view(request))
+        let answer = self.host()?.apply_view(request);
+        if let ApplyViewAnswer::Refused { refusal } = &answer {
+            self.runner_refusals.lock().unwrap().push(refusal.clone());
+        }
+        Ok(answer)
     }
 
     async fn applied_view(&self, _: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
@@ -533,6 +538,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         // The plan admits ck-mc's reminder templates, as core composes it.
         templates: mc_module::nudges::templates(),
         accepts_images: None,
+        view_anchor: true,
     }
 }
 
@@ -685,9 +691,40 @@ fn assert_clean(runner: &Runner<InProcess>) {
 
 #[tokio::test]
 async fn a_worker_lands_its_queued_drops_on_the_first_execute_pass() {
+    worker_queued_drops(true).await;
+}
+
+#[tokio::test]
+async fn an_unflagged_runner_accepts_every_view_in_the_drop_scenario() {
+    worker_queued_drops(false).await;
+}
+
+fn assert_legacy_views(runner: &Runner<InProcess>) {
+    let client = &runner.provider().client;
+    assert!(
+        !client.offered.lock().unwrap().is_empty(),
+        "no view offered"
+    );
+    assert!(
+        client.runner_refusals.lock().unwrap().is_empty(),
+        "{:?}",
+        client.runner_refusals.lock().unwrap()
+    );
+    let applied = runner.host().applied_view().view.unwrap();
+    assert_eq!(applied.built_through, None);
+    assert_eq!(applied.new_signed, None);
+    assert_eq!(
+        applied.checksum,
+        cortexkit_role_compaction::view::View::seal(applied.version, applied.edits).checksum
+    );
+}
+
+async fn worker_queued_drops(view_anchor: bool) {
     // Tags: the task is 1; each read step adds a sentence and a call (2/3,
     // 4/5, 6/7, 8/9); the ctx_reduce step is 10/11.
-    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    let mut config = config("worker", Kind::OpenAi, free());
+    config.view_anchor = view_anchor;
+    let mut runner = start(config).await;
     runner
         .play(&[
             user("Review the module."),
@@ -702,6 +739,9 @@ async fn a_worker_lands_its_queued_drops_on_the_first_execute_pass() {
         ])
         .await;
     assert_clean(&runner);
+    if !view_anchor {
+        assert_legacy_views(&runner);
+    }
     let host = runner.host();
     // Recent calls with small inputs keep their arguments; only the result
     // becomes the placeholder, with no tag prefix in front of it.
@@ -1550,7 +1590,18 @@ fn large_read() -> Step {
 
 #[tokio::test]
 async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages() {
-    let mut runner = start(config("head", Kind::OpenAi, free())).await;
+    head_summarizes_older_turns(true).await;
+}
+
+#[tokio::test]
+async fn an_unflagged_runner_accepts_every_view_in_the_summary_scenario() {
+    head_summarizes_older_turns(false).await;
+}
+
+async fn head_summarizes_older_turns(view_anchor: bool) {
+    let mut config = config("head", Kind::OpenAi, free());
+    config.view_anchor = view_anchor;
+    let mut runner = start(config).await;
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
@@ -1560,6 +1611,9 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
+    if !view_anchor {
+        assert_legacy_views(&runner);
+    }
     let host = runner.host();
 
     // The summarizer ran in its own child session, never in the transcript.

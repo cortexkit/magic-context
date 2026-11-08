@@ -78,6 +78,14 @@ pub struct SessionConfig {
     /// it; `None` when the runner doesn't know.
     #[serde(default)]
     pub accepts_images: Option<bool>,
+    /// Opt in to checksummed anchors and render-time signed-part stripping.
+    /// False omits the Setup member and emulates a pre-anchor runner.
+    #[serde(default = "anchor_enabled")]
+    pub view_anchor: bool,
+}
+
+fn anchor_enabled() -> bool {
+    true
 }
 
 /// What a move from a standalone host leaves in the runner: the old
@@ -384,9 +392,7 @@ impl State {
                 latest,
             });
         }
-        if !view.verify() {
-            return Err(ViewRefusal::BadChecksum);
-        }
+        self.verify(view)?;
         view::check_carried(self.latest_view(), view)?;
         let entries = self.transcript.entries();
         // broca refuses a cut through the transcript's newest message, so its
@@ -401,7 +407,35 @@ impl State {
                 fields: serde_json::Map::new(),
             });
         }
-        view::plan_view(entries, view, &self.config.rules)?;
+        self.plan(view)?;
+        Ok(())
+    }
+
+    fn verify(&self, candidate: &View) -> Result<(), ViewRefusal> {
+        let valid = if self.config.view_anchor {
+            candidate.verify()
+        } else {
+            // Older runners decode only version and edits when verifying a
+            // checksum, even if an unknown policy member was sent on the wire.
+            candidate.checksum == View::seal(candidate.version, candidate.edits.clone()).checksum
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ViewRefusal::BadChecksum)
+        }
+    }
+
+    fn plan(&self, candidate: &View) -> Result<(), ViewRefusal> {
+        self.verify(candidate)?;
+        let entries = self.transcript.entries();
+        if self.config.view_anchor {
+            view::plan_view(entries, candidate, &self.config.rules)?;
+        } else {
+            view::plan(entries, &candidate.edits)?;
+            cortexkit_compaction_view::rules::check(entries, &candidate.edits, &self.config.rules)
+                .map_err(ViewRefusal::Rule)?;
+        }
         Ok(())
     }
 
@@ -419,11 +453,12 @@ impl State {
                 )
             })
             .unwrap_or_else(|| View::seal(1, vec![]));
-        // apply_with_rules renders the same plan_view used at acceptance and
-        // step boundaries, including render-only removal of invalid signatures
-        // in entries appended after the view's indexed watermark.
-        view::apply_with_rules(entries, &candidate, &self.config.rules)
-            .expect("an applied view stays valid for the transcript it was checked against")
+        let rendered = if self.config.view_anchor {
+            view::apply_with_rules(entries, &candidate, &self.config.rules)
+        } else {
+            view::apply(entries, &candidate)
+        };
+        rendered.expect("an applied view stays valid for the transcript it was checked against")
     }
 }
 
@@ -767,6 +802,7 @@ impl<P: Provider> Runner<P> {
             request.applied_view = state.applied.as_ref().map(View::applied);
             request.newest = state.transcript.cursor();
             request.accepts_images = state.config.accepts_images;
+            request.view_anchor = state.config.view_anchor.then_some(true);
             request
         };
         let started = Instant::now();
@@ -1255,10 +1291,7 @@ impl<P: Provider> Runner<P> {
                         latest,
                     })
                 } else {
-                    view::check_carried(previous.as_ref(), &view).and_then(|()| {
-                        view::plan_view(state.transcript.entries(), &view, &state.config.rules)
-                            .map(|_| ())
-                    })
+                    view::check_carried(previous.as_ref(), &view).and_then(|()| state.plan(&view))
                 }
             };
             match result {
