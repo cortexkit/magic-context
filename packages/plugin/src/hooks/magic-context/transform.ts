@@ -215,6 +215,7 @@ import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-s
 import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform-compartment-phase";
 import {
     contextUsagePassSnapshot,
+    firstPassExecuteReading,
     loadContextUsage,
     recordUsageRefusal,
     resolveSchedulerDecision,
@@ -2012,16 +2013,71 @@ export function createTransform(deps: TransformDeps) {
         // approves an execute pass, so no pending-op drain, heuristic cleanup,
         // age sweep or smart drop can fire, and the execute-only
         // lastResponseTime watermark write below stays quiet too.
+        //
+        // The first pass after a process restart cleared the saved reading
+        // above. When that reading was taken on this model and window and is at
+        // or above the execute threshold, the scheduler decides from it instead:
+        // the work is already owed (see firstPassExecuteReading). Only the
+        // scheduler sees it; every other check on this pass keeps the cleared
+        // reading, and the priced-pass sizing below does not adopt it.
+        const liveModelForSavedReading = deps.liveModelBySession?.get(sessionId);
+        const savedReadingForExecute =
+            isFirstTransformPassForSession && !usageResetAfterRefusal && !compactionOff
+                ? firstPassExecuteReading({
+                      persisted: persistedUsageBeforeResets,
+                      currentModelKey:
+                          currentModelKeyForBoundary ??
+                          (liveModelForSavedReading
+                              ? `${liveModelForSavedReading.providerID}/${liveModelForSavedReading.modelID}`
+                              : undefined),
+                      contextLimit: resolvedContextLimit,
+                      lastResponseTime: sessionMeta.lastResponseTime,
+                      executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+                      passPercentage: contextUsageEarly.percentage,
+                  })
+                : null;
+        // The saved reading is needed only when the cleared reading defers. When
+        // the scheduler executes on the cleared reading for a reason of its own
+        // (such as idle time), the pass is an ordinary execute pass, decided and
+        // logged exactly as before. This extra call is unlogged; an error here
+        // leaves the saved reading unused, and the call below logs it.
+        let clearedReadingDefers = false;
+        if (savedReadingForExecute) {
+            try {
+                clearedReadingDefers =
+                    deps.scheduler.shouldExecute(
+                        sessionMeta,
+                        contextUsageEarly,
+                        undefined,
+                        sessionId,
+                        deps.getModelKey?.(sessionId),
+                        resolvedContextLimit,
+                    ) === "defer";
+            } catch {
+                clearedReadingDefers = false;
+            }
+        }
+        const schedulerReadsSavedReading = savedReadingForExecute !== null && clearedReadingDefers;
+        if (schedulerReadsSavedReading) {
+            sessionLog(
+                sessionId,
+                `transform: first pass after restart: saved reading ${savedReadingForExecute.percentage.toFixed(1)}% is at or above the ${effectiveExecuteThresholdPercentage}% execute threshold; the scheduler decides from it, every other pressure check keeps the cleared reading`,
+            );
+        }
         const schedulerDecision = compactionOff
             ? ("defer" as const)
             : resolveSchedulerDecision(
                   deps.scheduler,
                   sessionMeta,
-                  contextUsageEarly,
+                  schedulerReadsSavedReading ? savedReadingForExecute : contextUsageEarly,
                   sessionId,
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
+        // True only when the saved reading turned a deferred pass into an
+        // execute pass.
+        const executeFromSavedReading =
+            schedulerReadsSavedReading && schedulerDecision === "execute";
         const schedulerDeferReason =
             schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
         // Capture explicit history refresh immediately before the first
@@ -3020,14 +3076,31 @@ export function createTransform(deps: TransformDeps) {
                 ...renderOptions,
                 hardSignals: m0HardSignals,
             }).value;
+        const pricedBeyondExecute = (canConsumeDeferred: boolean) =>
+            isCacheBusting ||
+            contextUsage.percentage >= forceMaterializationPercentage ||
+            deps.pendingMaterializationSessions.has(sessionId) ||
+            (canConsumeDeferred && deferredMaterializationSessions.has(sessionId)) ||
+            protectionFoldWillBust;
         const protectionCacheBustingPass =
             !compactionOff &&
-            (schedulerDecision === "execute" ||
-                isCacheBusting ||
-                contextUsage.percentage >= forceMaterializationPercentage ||
-                deps.pendingMaterializationSessions.has(sessionId) ||
-                (canConsumeDeferredLate && deferredMaterializationSessions.has(sessionId)) ||
-                protectionFoldWillBust);
+            (schedulerDecision === "execute" || pricedBeyondExecute(canConsumeDeferredLate));
+        // An execute decision that only the first pass's saved reading produced
+        // prices this pass like any execute pass, but the pass is not sized from
+        // that reading below: the sizing feeds the force band and the emergency
+        // drop, which must not act on a reading taken before the restart. A pass
+        // also priced for another reason is sized exactly as before.
+        const sizeAsPricedPass = executeFromSavedReading
+            ? pricedBeyondExecute(
+                  canConsumeDeferredOnThisPass({
+                      schedulerDecision: "defer",
+                      contextPercentage: contextUsageEarly.percentage,
+                      justAwaitedPublication: compartmentPhase.justAwaitedPublication,
+                      activeRunBlocksMaterialization: lateActiveRunBlocksMaterialization,
+                      forceMaterializationPercentage,
+                  }),
+              )
+            : protectionCacheBustingPass;
         const calibrationBustReason = protectionFoldWillBust
             ? "fold"
             : contextUsage.percentage >= forceMaterializationPercentage
@@ -3064,7 +3137,7 @@ export function createTransform(deps: TransformDeps) {
         // (a long paste or tool output while the host was down), and waiting for
         // the provider would send a request that may not fit.
         let contextUsageFromEstimate = hostOverWindow;
-        if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
+        if (contextUsage.inputTokens <= 0 && sizeAsPricedPass) {
             // Overflow recovery sizes the request the provider just rejected, so
             // the saved reading (the last accepted request, which predates it) is
             // never used here, and the request is counted with the fit envelope
