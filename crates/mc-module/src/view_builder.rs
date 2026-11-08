@@ -470,7 +470,7 @@ mod tests {
         let mut cache = ValidationCache::default();
         for anchor in [None, Some("m2"), Some("m2"), Some("new-branch"), None] {
             for strip in [None, Some("strip"), None] {
-                let edits = vec![Edit::new(1, insert("head", "history"))];
+                let edits = vec![Edit::new(1, insert("m0", "history"))];
                 let expected = View::seal_with_policy(
                     3,
                     edits.clone(),
