@@ -2015,8 +2015,8 @@ export function createTransform(deps: TransformDeps) {
         // lastResponseTime watermark write below stays quiet too.
         //
         // The first pass after a process restart cleared the saved reading
-        // above. When that reading still describes this request and is at or
-        // above the execute threshold, the scheduler decides from it instead:
+        // above. When that reading was taken on this model and window and is at
+        // or above the execute threshold, the scheduler decides from it instead:
         // the work is already owed (see firstPassExecuteReading). Only the
         // scheduler sees it; every other check on this pass keeps the cleared
         // reading, and the priced-pass sizing below does not adopt it.
@@ -2032,18 +2032,33 @@ export function createTransform(deps: TransformDeps) {
                               : undefined),
                       contextLimit: resolvedContextLimit,
                       lastResponseTime: sessionMeta.lastResponseTime,
-                      // Recomputed below with failure reporting; an invalid TTL
-                      // falls back to the same 5m default either way.
-                      cacheExpired: computeHardCacheExpired(
-                          sessionMeta.cacheTtl,
-                          sessionMeta.lastResponseTime,
-                          Date.now(),
-                      ),
                       executeThresholdPercentage: effectiveExecuteThresholdPercentage,
                       passPercentage: contextUsageEarly.percentage,
                   })
                 : null;
+        // The saved reading is needed only when the cleared reading defers. When
+        // the scheduler executes on the cleared reading for a reason of its own
+        // (such as idle time), the pass is an ordinary execute pass, decided and
+        // logged exactly as before. This extra call is unlogged; an error here
+        // leaves the saved reading unused, and the call below logs it.
+        let clearedReadingDefers = false;
         if (savedReadingForExecute) {
+            try {
+                clearedReadingDefers =
+                    deps.scheduler.shouldExecute(
+                        sessionMeta,
+                        contextUsageEarly,
+                        undefined,
+                        sessionId,
+                        deps.getModelKey?.(sessionId),
+                        resolvedContextLimit,
+                    ) === "defer";
+            } catch {
+                clearedReadingDefers = false;
+            }
+        }
+        const schedulerReadsSavedReading = savedReadingForExecute !== null && clearedReadingDefers;
+        if (schedulerReadsSavedReading) {
             sessionLog(
                 sessionId,
                 `transform: first pass after restart: saved reading ${savedReadingForExecute.percentage.toFixed(1)}% is at or above the ${effectiveExecuteThresholdPercentage}% execute threshold; the scheduler decides from it, every other pressure check keeps the cleared reading`,
@@ -2054,16 +2069,15 @@ export function createTransform(deps: TransformDeps) {
             : resolveSchedulerDecision(
                   deps.scheduler,
                   sessionMeta,
-                  savedReadingForExecute ?? contextUsageEarly,
+                  schedulerReadsSavedReading ? savedReadingForExecute : contextUsageEarly,
                   sessionId,
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
-        // The cleared reading alone would not have decided "execute" here: the
-        // saved reading is used only below the threshold and with an unexpired
-        // cache, where the scheduler's other reason, idle expiry, cannot apply.
+        // True only when the saved reading turned a deferred pass into an
+        // execute pass.
         const executeFromSavedReading =
-            savedReadingForExecute !== null && schedulerDecision === "execute";
+            schedulerReadsSavedReading && schedulerDecision === "execute";
         const schedulerDeferReason =
             schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
         // Capture explicit history refresh immediately before the first

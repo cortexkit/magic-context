@@ -156,24 +156,57 @@ export function savedProviderReadingForPass(input: {
  * provider cache went cold while the host was down, that one-pass delay costs
  * a second full prefix write.
  *
- * The reading counts only when it still describes this request (same model,
- * same limit, cache not expired; see savedProviderReadingForPass), is at or
- * above the threshold, and the pass's own reading is below it. Otherwise this
- * returns null and the scheduler sees the cleared reading, as before.
+ * The reading counts when it was taken on the same model and against the same
+ * context limit (another limit makes it a percentage of a different window),
+ * is at or above the threshold, and the pass's own reading is below it.
+ * Otherwise this returns null and the scheduler sees the cleared reading, as
+ * before.
+ *
+ * Unlike savedProviderReadingForPass, an expired cache does not disqualify the
+ * reading here: idle time says nothing about how large the request is. An
+ * expired cache is also when deferring matters most: the provider must write
+ * the whole cached prompt prefix again on this request anyway, and an execute
+ * pass postponed to the next request rewrites it a second time.
  */
 export function firstPassExecuteReading(input: {
     persisted: PersistedUsageState | null | undefined;
     currentModelKey: string | undefined;
     contextLimit: number | undefined;
     lastResponseTime: number;
-    cacheExpired: boolean;
     executeThresholdPercentage: number;
     passPercentage: number;
 }): ContextUsage | null {
     if (!(input.passPercentage < input.executeThresholdPercentage)) return null;
-    const saved = savedProviderReadingForPass(input);
-    if (!saved || saved.percentage < input.executeThresholdPercentage) return null;
-    return saved;
+    const persisted = input.persisted;
+    if (!persisted) return null;
+    const { percentage, inputTokens } = persisted.usage;
+    if (
+        !Number.isFinite(percentage) ||
+        percentage < input.executeThresholdPercentage ||
+        !Number.isFinite(inputTokens) ||
+        inputTokens <= 0
+    ) {
+        return null;
+    }
+    // A reading with no recorded provider reply was not measured for this session.
+    if (!(input.lastResponseTime > 0)) return null;
+    if (
+        persisted.lastObservedModelKey === null ||
+        input.currentModelKey === undefined ||
+        input.currentModelKey.length === 0 ||
+        piModelRefToCanonical(persisted.lastObservedModelKey) !==
+            piModelRefToCanonical(input.currentModelKey)
+    ) {
+        return null;
+    }
+    if (
+        typeof input.contextLimit !== "number" ||
+        !(input.contextLimit > 0) ||
+        persisted.lastUsageContextLimit !== input.contextLimit
+    ) {
+        return null;
+    }
+    return { percentage, inputTokens };
 }
 
 export function resolveUnknownUsageFromWireEstimate(input: {

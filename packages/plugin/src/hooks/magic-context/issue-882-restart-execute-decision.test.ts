@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createScheduler } from "../../features/magic-context/scheduler";
+import { createScheduler, type Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -146,20 +146,38 @@ function sessionMessages(sessionId: string): TestMessage[] {
     return messages;
 }
 
+/**
+ * The idle-expiry branch of the real scheduler cannot reach a pass this
+ * scheduler decides: it executes on pressure alone. With it, a pass after an
+ * expired cache executes only when the reading it is given says so.
+ */
+function pressureOnlyScheduler(): Scheduler {
+    const scheduler = createScheduler({ executeThresholdPercentage: EXECUTE_THRESHOLD });
+    return {
+        shouldExecute: (sessionMeta, ...rest) =>
+            scheduler.shouldExecute({ ...sessionMeta, cacheTtl: "never" }, ...rest),
+    };
+}
+
 /** One host process: a real scheduler at the execute threshold, no historian executor. */
 function newProcess(args: {
     db: ReturnType<typeof openDatabase>;
     sessionId: string;
     model: Model;
     liveUsage?: ContextUsage;
+    /** The configured cache_ttl (default "never"). */
+    cacheTtl?: string;
+    pressureOnly?: boolean;
 }) {
     return createTransform({
         tagger: createTagger(),
-        scheduler: createScheduler({ executeThresholdPercentage: EXECUTE_THRESHOLD }),
+        scheduler: args.pressureOnly
+            ? pressureOnlyScheduler()
+            : createScheduler({ executeThresholdPercentage: EXECUTE_THRESHOLD }),
         executeThresholdPercentage: EXECUTE_THRESHOLD,
-        // A keep-warm plugin holds the provider cache, so idle time never
-        // expires it and only pressure can make a pass execute.
-        cacheTtlConfig: "never",
+        // By default a keep-warm plugin holds the provider cache, so idle time
+        // never expires it and only pressure can make a pass execute.
+        cacheTtlConfig: args.cacheTtl ?? "never",
         cacheTtlConfigured: true,
         contextUsageMap: new Map(
             args.liveUsage
@@ -192,6 +210,10 @@ type Restart = {
     passModel?: Model;
     /** A historian run is still in progress, so a summary can come. */
     summaryCanCome?: boolean;
+    /** The configured cache_ttl (default "never"); "5m" expires over the downtime. */
+    cacheTtl?: string;
+    /** Both processes decide with pressureOnlyScheduler. */
+    pressureOnly?: boolean;
 };
 
 /**
@@ -214,6 +236,8 @@ async function firstPassAfterRestart(name: string, restart: Restart) {
         sessionId,
         model: savedModel,
         liveUsage: { percentage: 40, inputTokens: Math.round(limit * 0.4) },
+        cacheTtl: restart.cacheTtl,
+        pressureOnly: restart.pressureOnly,
     });
     await before({}, { messages: sessionMessages(sessionId) });
     // What the event handler saved from the last reply before the host stopped.
@@ -242,7 +266,13 @@ async function firstPassAfterRestart(name: string, restart: Restart) {
         );
     }
 
-    const after = newProcess({ db, sessionId, model: passModel });
+    const after = newProcess({
+        db,
+        sessionId,
+        model: passModel,
+        cacheTtl: restart.cacheTtl,
+        pressureOnly: restart.pressureOnly,
+    });
     const lines: string[] = [];
     const spy = spyOn(logger, "sessionLog").mockImplementation((id: string, ...rest: unknown[]) => {
         if (id === sessionId) lines.push(rest.map(String).join(" "));
@@ -259,6 +289,11 @@ async function firstPassAfterRestart(name: string, restart: Restart) {
         scheduler,
         decision: /decision=(\w+)/.exec(scheduler)?.[1],
         schedulerPercentage: Number(/percentage=([\d.]+)%/.exec(scheduler)?.[1]),
+        schedulerCacheTtl: /cacheTtl=(\S+)/.exec(scheduler)?.[1],
+        // Whether the pass computed the provider cache as expired by idle time.
+        idleExpiry: /idle_expiry=(\w+)/.exec(
+            lines.find((line) => line.startsWith("rewrite permission:")) ?? "",
+        )?.[1],
         pendingAfter: getPendingOps(db, sessionId).length,
         oldestToolStatus: tagsAfter.find((tag) => tag.tagNumber === oldestTool.tagNumber)?.status,
         newestToolStatus: tagsAfter.find((tag) => tag.tagNumber === newestTool.tagNumber)?.status,
@@ -326,6 +361,24 @@ describe("issue 882: the execute decision on the first pass after a restart", ()
         expect(result.droppedTools).toBe(1);
         expect(result.oldestToolStatus).toBe("dropped");
         expect(result.newestToolStatus).toBe("active");
+    });
+
+    // The cache expired during the downtime (cache_ttl 5m, 5.8 hours stopped).
+    // Idle time says nothing about how large the request is, so the saved
+    // reading still decides "execute". The scheduler here has no idle-expiry
+    // branch, so only the reading it is given can make it execute.
+    it("a saved reading at the threshold decides execute after the cache expired", async () => {
+        const result = await firstPassAfterRestart("expired", {
+            savedPercentage: 63.1,
+            cacheTtl: "5m",
+            pressureOnly: true,
+        });
+        console.log("ISSUE_882_UNIT expired", JSON.stringify(result));
+        expect(result.schedulerCacheTtl).toBe("5m");
+        expect(result.idleExpiry).toBe("true");
+        expect(result.decision).toBe("execute");
+        expect(result.schedulerPercentage).toBe(63.1);
+        expect(result.savedPercentageAfter).toBe(0);
     });
 
     // Controls: these keep the reset exactly as before the change, so they
