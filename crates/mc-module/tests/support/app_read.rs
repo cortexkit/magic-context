@@ -68,7 +68,7 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
     assert_eq!(watch.recv().await.unwrap().unwrap()["kind"], "resync");
     let before = runner.host().applied_version();
     runner
-        .play(&[Step::Wait { ms: 400_000 }, answer(), answer()])
+        .play(&[switch_model("head"), answer(), answer()])
         .await;
     assert_clean(&runner);
     assert_ne!(runner.host().applied_version(), before);

@@ -117,7 +117,11 @@ fn request(preset: &str) -> SetupRequest {
         21_000,
         1_000,
         ProviderRules::new(SignedParts::None, EditCost::Suffix),
-        vec![RideCause::OverLimit, RideCause::CacheExpired],
+        vec![
+            RideCause::OverLimit,
+            RideCause::CacheExpired,
+            RideCause::SurfaceChange,
+        ],
         1,
     )
 }
@@ -307,8 +311,11 @@ async fn audit_cache_loss_rearms_emergency_when_no_batch_can_land_yet() {
 
     // Only the three protected calls remain, so a cold-cache ride cannot
     // select another batch. The cache loss must nevertheless rearm the latch.
+    // A surface change loses it: the prefix is written again whether or not
+    // a view follows. A ride that only reports an expired cache would not,
+    // since resending the same bytes is no rewrite.
     let mut ride = RideRequest::new(
-        vec![RideCause::CacheExpired],
+        vec![RideCause::SurfaceChange],
         1_000,
         conditions(&setup, 90_000),
     );
@@ -360,10 +367,12 @@ async fn audit_signed_text_reduction_uses_a_legal_whole_part_drop() {
         .tool(&runner, &settings, "ctx_reduce", &json!({"drop": "2"}))
         .await
         .unwrap();
+    // A surface change rewrites the prefix anyway, so the queued drop lands
+    // below the threshold.
     let view = session.ride(
         &settings,
         &RideRequest::new(
-            vec![RideCause::CacheExpired],
+            vec![RideCause::SurfaceChange],
             1_000,
             conditions(&setup, 1_000),
         ),
@@ -418,10 +427,11 @@ async fn audit_ctx_keep_drops_known_opaque_content_outside_the_kept_set() {
         )
         .await
         .unwrap();
+    // A surface change rewrites the prefix anyway, so the keep lands in it.
     let view = session.ride(
         &settings,
         &RideRequest::new(
-            vec![RideCause::CacheExpired],
+            vec![RideCause::SurfaceChange],
             1_000,
             conditions(&setup, 1_000),
         ),

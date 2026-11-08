@@ -514,6 +514,20 @@ fn bound() -> ProviderRules {
     ProviderRules::new(SignedParts::Bound, EditCost::Suffix)
 }
 
+/// The session moves to another model with the window and rules [`config`]
+/// gives `preset`. The request's bytes before the conversation change, so the
+/// runner rides with `model_change` before the next request, and everything
+/// held lands in that rewrite. A ride that only reports an expired cache
+/// lands nothing by itself.
+fn switch_model(preset: &str) -> Step {
+    Step::ChangeModel {
+        model: ModelRef::new("test", "other-model"),
+        context_window: if preset == "head" { 100_000 } else { 40_000 },
+        output_reserve: 1_000,
+        rules: free(),
+    }
+}
+
 /// A session whose usable window is 39,000 tokens, so the execute threshold
 /// (65%) sits at 25,350. A head's is 99,000 tokens (threshold 64,350): the
 /// summarizer reads at most a quarter of the usable window per run, and at
@@ -947,18 +961,33 @@ async fn drops_before_signed_reasoning_take_the_later_reasoning_with_them() {
 }
 
 #[tokio::test]
-async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
+async fn a_forgotten_cache_holds_queued_drops_below_the_threshold_until_the_prefix_changes() {
     let mut runner = start(config("worker", Kind::OpenAi, free())).await;
-    // Three newer reads take the dropped output out of the protected tail;
-    // a requested drop inside it would wait (`pendingDropVeto`).
+    // Reads of about 1,500 tokens each keep the session far below the
+    // execute threshold, where only a ride could land the drop. Three newer
+    // reads still take the dropped output out of the protected tail; a
+    // requested drop inside it would wait (`pendingDropVeto`).
+    let read = || {
+        Step::Model(Turn {
+            reasoning_tokens: Some(50),
+            text: Some("Reading the next file.".into()),
+            tools: vec![ToolCall::ok(
+                "read",
+                json!({"path": "a.rs"}),
+                "x".repeat(6_000),
+            )],
+            output_tokens: 20,
+            ..Turn::default()
+        })
+    };
     runner
         .play(&[
             user("Review the module."),
-            read_file(50),
+            read(),
             reduce("3"),
-            read_file(50),
-            read_file(50),
-            read_file(50),
+            read(),
+            read(),
+            read(),
             Step::Wait { ms: 300_001 },
             answer(),
             answer(),
@@ -968,18 +997,31 @@ async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
     let rides = &runner.report.rides;
     assert_eq!(rides.len(), 1);
     assert_eq!(rides[0].causes, [RideCause::CacheExpired]);
-    assert!(rides[0].got_view);
-    assert_eq!(
+    // The provider forgot its cache, but the request's bytes are the same:
+    // a rewrite would save nothing, so the drop keeps waiting.
+    assert!(!rides[0].got_view);
+    assert_ne!(
         seen(runner.host(), 3).as_deref(),
         Some(placeholder(3).as_str())
     );
-    // The ride's request rewrote the expired cache anyway; the next one reads
-    // all of it.
+    // The ride's request wrote the expired cache again, unchanged; the next
+    // one reads all of it.
     let requests = &runner.report.requests;
     let last = requests.len() - 1;
     assert_eq!(
         requests[last].usage.cache_read_tokens,
         requests[last - 1].usage.prompt_tokens
+    );
+
+    // A model switch changes the prefix anyway, and the held drop lands in it.
+    runner.play(&[switch_model("worker"), answer()]).await;
+    assert_clean(&runner);
+    let ride = runner.report.rides.last().unwrap();
+    assert_eq!(ride.causes, [RideCause::ModelChange]);
+    assert!(ride.got_view);
+    assert_eq!(
+        seen(runner.host(), 3).as_deref(),
+        Some(placeholder(3).as_str())
     );
 }
 
@@ -1720,9 +1762,9 @@ async fn caveman_compresses_older_long_text_by_age_when_turned_on() {
         .take(60)
         .collect();
     assert_eq!(seen(runner.host(), 1), Some(first));
-    // A lost cache rewrites the prefix anyway; the lanes ride it.
+    // A model switch rewrites the prefix anyway; the lanes ride it.
     runner
-        .play(&[Step::Wait { ms: 400_000 }, user("Next."), answer()])
+        .play(&[switch_model("head"), user("Next."), answer()])
         .await;
     assert_clean(&runner);
     let shown = |tag: u64| {
@@ -2328,7 +2370,7 @@ async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
 }
 
 #[tokio::test]
-async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
+async fn an_expired_cache_keeps_the_head_and_a_model_switch_folds_the_newer_summaries() {
     let mut runner = start(config("head", Kind::OpenAi, free())).await;
     let mut steps = Vec::new();
     for prompt in [
@@ -2342,13 +2384,15 @@ async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
     }
     runner.play(&steps).await;
     assert_clean(&runner);
-    let (_, m1) = head_texts(runner.host());
+    let (m0_before, m1) = head_texts(runner.host());
     assert!(
         m1.contains("<new-compartments>"),
         "no newer summary before the fold: {m1}"
     );
 
-    // The cache expires; the ride before the next request folds m[1] into m[0].
+    // The cache expires. The request's bytes are the same, so the ride
+    // before the next request answers nothing and m[0] stays as served:
+    // re-rendering it would invalidate signed thinking and save nothing.
     runner
         .play(&[Step::Wait { ms: 400_000 }, user("Next.")])
         .await;
@@ -2356,6 +2400,17 @@ async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
     assert_clean(&runner);
     let ride = runner.report.rides.last().unwrap();
     assert_eq!(ride.causes, [RideCause::CacheExpired]);
+    assert!(!ride.got_view);
+    let (m0, m1) = head_texts(runner.host());
+    assert_eq!(m0, m0_before);
+    assert!(m1.contains("<new-compartments>"), "{m1}");
+
+    // A model switch changes the prefix anyway; the ride before the next
+    // request folds m[1] into m[0].
+    runner.play(&[switch_model("head"), answer()]).await;
+    assert_clean(&runner);
+    let ride = runner.report.rides.last().unwrap();
+    assert_eq!(ride.causes, [RideCause::ModelChange]);
     assert!(ride.got_view);
     let (m0, m1) = head_texts(runner.host());
     assert!(
@@ -2857,9 +2912,9 @@ async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_
     );
     assert!(!m0_later.contains("Never force-push."), "{m0_later}");
 
-    // A lost cache folds both into m[0].
+    // A model switch rewrites the prefix anyway and folds both into m[0].
     runner
-        .play(&[Step::Wait { ms: 400_000 }, user("Next."), answer()])
+        .play(&[switch_model("head"), user("Next."), answer()])
         .await;
     assert_clean(&runner);
     let (m0, m1) = head_texts(runner.host());
@@ -3745,7 +3800,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         .expect("the free session finished its notice")
         .unwrap();
     // A ride on the stuck session answers within its deadline, with nothing.
-    let ride = RideRequest::new(vec![RideCause::CacheExpired], 200, conditions);
+    let ride = RideRequest::new(vec![RideCause::SurfaceChange], 200, conditions);
     let answer = tokio::time::timeout(limit, module.ride(&session("stuck"), ride))
         .await
         .expect("the ride kept its deadline")

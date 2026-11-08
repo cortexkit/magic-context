@@ -213,7 +213,7 @@ async fn a_stalled_background_read_does_not_hold_rides_pre_user_or_another_sessi
             module
                 .ride(
                     key,
-                    RideRequest::new(vec![RideCause::CacheExpired], 500, conditions.clone()),
+                    RideRequest::new(vec![RideCause::SurfaceChange], 500, conditions.clone()),
                 )
                 .await
                 .unwrap();

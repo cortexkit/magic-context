@@ -140,7 +140,11 @@ fn setup(runner: &AuditRunner, preset: &str) -> (Route, SetupRequest) {
         conditions.context_window,
         conditions.output_reserve,
         conditions.rules,
-        vec![RideCause::CacheExpired, RideCause::OverLimit],
+        vec![
+            RideCause::CacheExpired,
+            RideCause::SurfaceChange,
+            RideCause::OverLimit,
+        ],
         1,
     );
     request.newest = runner.transcript.cursor();
@@ -163,12 +167,15 @@ async fn enroll(
     session
 }
 
+/// A ride before a request whose system prompt or tools changed: the prefix
+/// is written again anyway, so the head folds and every lane lands. A ride
+/// that only reports an expired cache permits no rebuild by itself.
 async fn cold_ride(
     session: &mut Session,
     runner: &AuditRunner,
     settings: &Settings,
 ) -> Option<View> {
-    let mut ride = RideRequest::new(vec![RideCause::CacheExpired], 1_000, conditions());
+    let mut ride = RideRequest::new(vec![RideCause::SurfaceChange], 1_000, conditions());
     ride.applied_view = runner.view().as_ref().map(View::applied);
     let answer = session.ride(settings, &ride);
     if let Some(view) = &answer {
