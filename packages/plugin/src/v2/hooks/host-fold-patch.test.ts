@@ -245,6 +245,9 @@ test("manual compact payload accounting separates notices from the unsummarized 
     });
     try {
         f.compartment(12);
+        // Establish the cached prefix before queuing notices, so this test
+        // measures manual compaction rather than first-render reclaim.
+        await f.pass();
         const initial = renderCodeModeCatalog(["INITIAL_CATALOG"]);
         f.instruction(initial);
         const notices: string[] = [];
@@ -258,6 +261,7 @@ test("manual compact payload accounting separates notices from the unsummarized 
         const tail = "UNSUMMARIZED_CONVERSATION\n" + prose.repeat(1800);
         f.user(tail, 1000);
         const before = await f.pass();
+        expect(before.bytes).toContain("CATALOG_0");
         await f.nativeFold(3, 0, "", "manual");
         const after = await f.pass();
         expect(

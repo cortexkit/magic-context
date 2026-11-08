@@ -143,6 +143,7 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
+import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
     getVisibleMemoryIds,
@@ -1638,6 +1639,11 @@ interface RunPostTransformPhaseArgs {
     sessionId: string;
     db: ContextDatabase;
     messages: MessageLike[];
+    reclaimHostRows?: (
+        sessionId: string,
+        messages: MessageLike[],
+        permitted: boolean,
+    ) => HostRowReclaim;
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
     reasoningByMessage: Map<MessageLike, { type: string; thinking?: string; text?: string }[]>;
@@ -3080,6 +3086,22 @@ export async function runPostTransformPhase(
             Math.min(firstApplicationLocations.get(message) ?? Infinity, partIndex),
         );
     };
+    const hostRowReclaim = args.reclaimHostRows?.(
+        args.sessionId,
+        args.messages,
+        !compactionOff && isCacheBustingPass,
+    );
+    for (const message of hostRowReclaim?.edits ?? []) {
+        const index = args.messages.indexOf(message);
+        recordFirstApplicationWireEdit(
+            index < 0 ||
+                servesThinkingBlock(
+                    args.messages.slice(index + 1),
+                    args.resolvedProviderID,
+                    args.resolvedModelID,
+                ),
+        );
+    }
     let heuristicOrReasoningDidMutate = false;
     // Like heuristicOrReasoningDidMutate, but leaving out the oldest-prefix
     // reasoning removal, which on a prefix-bound model leaves every newer
@@ -4970,6 +4992,10 @@ export async function runPostTransformPhase(
             failPass("proactive-thinking-strip-persistence-failure");
         }
     }
+
+    // Host retirements must not survive a failed required thinking-strip write.
+    // The omission above is durable before its dependent row edit is committed.
+    hostRowReclaim?.commit();
 
     // Reasoning that a drop neutralized this pass. Canonical Anthropic keeps the
     // empty sentinel its adapter drops (its existing bytes). Elsewhere a drop

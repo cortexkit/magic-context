@@ -148,6 +148,11 @@ import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-desc
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
 import { HostFoldIdle } from "../fold/idle";
+import {
+    reclaimInstructionRows,
+    retiredLiveInstructionIDs,
+    type SupersessionRow,
+} from "../fold/instruction-supersession";
 import { stageManualBaseline } from "../fold/manual-baseline";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
@@ -274,10 +279,10 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
 
 function bindKeptInstructionCoordinates(
     messages: readonly V2Message[],
-    incoming: V2Message,
+    incoming: V2Message | undefined,
     reader: V2StoreReader,
     sessionID: string,
-): void {
+): ReturnType<V2StoreReader["instructionRowsThrough"]> {
     const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
     let previous: number | undefined;
     let pending: V2Message[] = [];
@@ -326,6 +331,7 @@ function bindKeptInstructionCoordinates(
         } else if (!id && message.role === "system") pending.push(message);
     }
     bind();
+    return rows;
 }
 
 function controlSuffixKeys(
@@ -2019,6 +2025,7 @@ export async function registerContext(context: V2Context) {
     // rule picked. Rust mode reads times only for temporal awareness.
     const temporalTimes = config.temporal_awareness === true;
     const anchorTimesOnly = !temporalTimes && !rustModeModuleClient;
+    const foldedInstructionIDs = new Map<string, Set<string>>();
     const retireInstructionMessages = async (
         sessionID: string,
         reader: V2StoreReader,
@@ -2026,6 +2033,20 @@ export async function registerContext(context: V2Context) {
     ) => {
         const retired = await nativeFoldReplay?.instructionRetirement(sessionID, reader);
         if (!retired) return messages;
+        if (db) {
+            foldedInstructionIDs.set(
+                sessionID,
+                new Set(
+                    [...retiredLiveInstructionIDs(db, sessionID)].filter((id) =>
+                        retired({
+                            type: "system",
+                            id,
+                            seq: reader.sequenceForId(sessionID, id) ?? Infinity,
+                        }),
+                    ),
+                ),
+            );
+        }
         return messages.filter((message) => {
             const id = nativeRowID(message);
             return (
@@ -2191,6 +2212,14 @@ export async function registerContext(context: V2Context) {
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);
             },
+            reclaimHostRows: (sessionID, messages, permitted) =>
+                reclaimInstructionRows(
+                    database,
+                    sessionID,
+                    messages,
+                    permitted,
+                    foldedInstructionIDs.get(sessionID),
+                ),
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same
             // conversation differently from the v1 tables a converted store
@@ -2713,6 +2742,7 @@ export async function registerContext(context: V2Context) {
             transform = initializeTransform(db);
             const admitted = new Set<string>();
             let messageTimes: ReturnType<V2StoreReader["messageTimes"]> | undefined;
+            let instructionRows: ReadonlyMap<string, SupersessionRow> = new Map();
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
@@ -2907,6 +2937,14 @@ export async function registerContext(context: V2Context) {
                         })),
                     );
                 }
+                instructionRows = new Map(
+                    bindKeptInstructionCoordinates(
+                        draft.messages,
+                        incoming || undefined,
+                        reader,
+                        draft.sessionID,
+                    ).map((row) => [row.id, row]),
+                );
                 draft.messages = await retireInstructionMessages(
                     draft.sessionID,
                     reader,
@@ -2937,7 +2975,13 @@ export async function registerContext(context: V2Context) {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
                 }
             }
-            const mapped = adaptPayload(draft, admitted, messageTimes, anchorTimesOnly);
+            const mapped = adaptPayload(
+                draft,
+                admitted,
+                messageTimes,
+                anchorTimesOnly,
+                instructionRows,
+            );
             bindSystemDateRequestIdentity(mapped, draft);
             checkpointPassPermissions.delete(draft.sessionID);
             checkpointInputEstimates.delete(draft.sessionID);
@@ -3260,6 +3304,7 @@ export async function registerContext(context: V2Context) {
                 nativeFoldReplay?.cancelEditedAdmission(draft.sessionID);
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);
+                foldedInstructionIDs.delete(draft.sessionID);
             }
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
