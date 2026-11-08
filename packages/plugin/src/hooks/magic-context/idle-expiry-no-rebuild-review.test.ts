@@ -276,10 +276,11 @@ for (const host of HOSTS) {
         await s.pass();
         await s.pass();
         await s.pass();
-        // Every pass above reported 0% to the scheduler. The base delivery
-        // landed the drop on the idle-expired pass; with that ride removed no
-        // pass ever measures this session, so the drop waits for a provider
-        // overflow error.
+        // Every pass above reported 0% to the scheduler, because nothing counts
+        // the request of a provider that never reports usage unless the pass
+        // already rebuilds. When an expired cache still triggered a rebuild, the
+        // idle-expired pass landed this drop; without it no pass ever lands it,
+        // and the drop waits for /ctx-flush or a provider overflow error.
         expect({ pendingOps: s.pendingOps(), status: s.status(tag) }).toEqual({
             pendingOps: 0,
             status: "dropped",
