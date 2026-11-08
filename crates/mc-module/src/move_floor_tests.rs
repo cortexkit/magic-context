@@ -42,7 +42,12 @@ impl Captured {
     }
 }
 
-fn summary(db: &ContextDb, sequence: i64, (start, start_mid): (u64, &str), (end, end_mid): (u64, &str)) {
+fn summary(
+    db: &ContextDb,
+    sequence: i64,
+    (start, start_mid): (u64, &str),
+    (end, end_mid): (u64, &str),
+) {
     db.with_connection(|conn| {
         conn.execute(
             "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness) VALUES ('s1', ?1, ?2, ?3, ?4, ?5, 'work', 'what happened', 'what happened', 1, 'mock')",
@@ -180,7 +185,11 @@ async fn move_floor_summaries_below_the_floor_publish_no_view() {
         moved.offered().iter().map(cut_through).collect::<Vec<_>>()
     );
     assert_eq!(moved.session.latest.as_ref(), Some(&moved.view));
-    assert_eq!(logs.count("cut_before_move_floor"), 1, "logged once per hold");
+    assert_eq!(
+        logs.count("cut_before_move_floor"),
+        1,
+        "logged once per hold"
+    );
     assert_eq!(logs.count("move floor entry 9 (m9)"), 1);
     assert_eq!(logs.count("summaries reach entry 5 (m5)"), 1);
 }
@@ -205,7 +214,11 @@ async fn move_floor_a_summary_past_the_floor_publishes_again() {
     moved.session.summary_unshown = true;
     moved.notice(2).await;
     let offered = moved.offered();
-    assert_eq!(offered.len(), 1, "no view after the summaries reached the floor");
+    assert_eq!(
+        offered.len(),
+        1,
+        "no view after the summaries reached the floor"
+    );
     assert_eq!(cut_through(&offered[0]), Some("m10"));
     assert!(moved.session.cut >= Some(FLOOR.0));
     assert_eq!(logs.count("views publish again"), 1);
@@ -260,10 +273,7 @@ async fn move_floor_a_moved_session_never_publishes_a_view_without_a_cut() {
     let mut moved = moved("only-drops", true);
     moved.set_up().await;
     moved.notice(1).await;
-    moved
-        .session
-        .queued
-        .insert(("m10".into(), "p".into()));
+    moved.session.queued.insert(("m10".into(), "p".into()));
     moved.notice(2).await;
     assert!(moved.offered().is_empty());
     assert!(
@@ -362,10 +372,16 @@ async fn move_floor_a_session_moved_earlier_takes_its_floor_from_the_fence() {
             mid: FLOOR.1.into()
         })
     );
-    assert!(moved.client.reads.lock().unwrap().iter().any(|read| matches!(
-        &read.select,
-        Select::Mids { mids } if mids == &[FLOOR.1.to_string()]
-    )));
+    assert!(moved
+        .client
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|read| matches!(
+            &read.select,
+            Select::Mids { mids } if mids == &[FLOOR.1.to_string()]
+        )));
     moved.notice(1).await;
     assert!(moved.offered().is_empty());
     assert!(moved.session.durable().move_floor.is_some());

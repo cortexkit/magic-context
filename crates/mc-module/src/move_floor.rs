@@ -5,12 +5,13 @@
 //! while the host the session came from numbered them its own way. A view
 //! that cuts before the floor, or carries no cut at all, would show the
 //! runner messages it cannot number the way ck-mc's summaries and tags do.
-//! A runner refuses such a view, and an older one sends the whole history
-//! unmanaged. So for a moved session every view ck-mc publishes cuts at or
-//! after the floor. When it can't (an undo or a reconciliation took away the
-//! summaries that reached the floor), ck-mc publishes no view at all: the
-//! runner keeps serving the view it has, and views publish again once the
-//! summaries reach the floor.
+//! A runner refuses such a view. One that predates that refusal sends the
+//! session's whole history as it is, without the summaries or drops, and a
+//! long session's requests then fail. So for a moved session every view
+//! ck-mc publishes cuts at or after the floor. When it can't (an undo or a
+//! reconciliation took away the summaries that reached the floor), ck-mc
+//! publishes no view at all: the runner keeps serving the view it has, and
+//! views publish again once the summaries reach the floor.
 //!
 //! The floor is kept in the session's saved state. A session moved before
 //! ck-mc kept it there has only its move fence, which names the cut entry by
@@ -48,7 +49,9 @@ fn breach(floor: &MoveFloor, cut: Option<(&str, Option<u64>)>) -> Option<String>
         Some(ordinal) if ordinal >= floor.ordinal => None,
         Some(ordinal) => Some(format!("a cut through entry {ordinal} ({through})")),
         // An entry ck-mc cannot place may lie anywhere, before the floor too.
-        None => Some(format!("a cut through {through}, an entry ck-mc cannot place")),
+        None => Some(format!(
+            "a cut through {through}, an entry ck-mc cannot place"
+        )),
     }
 }
 
