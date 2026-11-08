@@ -898,9 +898,18 @@ for (const host of HOSTS) {
                 kept: signedSignatures(out.messages ?? []),
                 logs: s.relevantLogs(),
             });
-            // Held: the turn's thinking stays, so the date holds. Unheld: the
-            // idle bust strips the turn, so the date advances as before.
-            expect(out.prompt).toContain(held ? "Date: 2026-10-21" : "Date: 2026-10-22");
+            // An idle expiry only means the provider forgot its cache: held or
+            // not, the pass replays the same bytes and keeps the turn's
+            // thinking, so the date holds.
+            expect(out.prompt).toContain("Date: 2026-10-21");
+            if (!held) {
+                // On an unheld turn the next real rebuild strips the thinking
+                // and lets the date move.
+                s.flush();
+                s.step(4, 200);
+                const rebuilt = await s.pass("2026-10-22", { systemFirst: true });
+                expect(rebuilt.prompt).toContain("Date: 2026-10-22");
+            }
             expect(s.problems).toEqual([]);
         }, 60_000);
 }
