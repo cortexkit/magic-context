@@ -77,6 +77,7 @@ impl<'a> PartTokens<'a> {
             estimate: true,
         }
     }
+    #[cfg(test)]
     fn estimate(part: &'a str, tokens: u64) -> Self {
         Self {
             part,

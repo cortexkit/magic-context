@@ -92,11 +92,32 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
     assert_eq!(breakdown["state"], "ready");
     assert_eq!(breakdown["row"]["managed"]["value"], true);
     assert_eq!(breakdown["row"]["total"]["source"], "provider");
-    assert!(breakdown["row"]["parts"]
+    let labels: Vec<_> = breakdown["row"]["parts"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|p| p["estimate"] == true));
+        .map(|part| {
+            (
+                part["part"].as_str().unwrap(),
+                part["estimate"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("system_prompt", true),
+            ("tool_definitions", true),
+            ("memory", false),
+            ("project_docs", false),
+            ("user_profile", false),
+            ("history_summaries", false),
+            ("history_raw", false),
+            ("tool_calls_results", true),
+            ("reasoning", true),
+            ("last_user_message", false),
+        ]
+    );
     let first_mid = runner.host().entries().first().unwrap().mid.clone();
     let states = app
         .read(

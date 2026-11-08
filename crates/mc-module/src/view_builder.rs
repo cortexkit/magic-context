@@ -24,6 +24,7 @@ use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 pub(crate) struct ValidationCache {
     inserts: Vec<EditOp>,
     hash_prefix: Vec<(Edit, sha2::Sha256)>,
+    hash_anchor: Option<String>,
     wire_sizes: Vec<(Edit, usize)>,
 }
 
@@ -36,19 +37,41 @@ impl ValidationCache {
             .filter(|e| view::plan(entries, std::slice::from_ref(e)).is_ok())
             .map(|e| e.op.clone())
             .collect();
-        self.seal(view.version, view.edits.clone());
+        self.seal(
+            view.version,
+            view.edits.clone(),
+            view.built_through.clone(),
+            view.new_signed.clone(),
+        );
         self.encoded_size(view);
     }
 
-    /// RFC 8785 orders the sealed object's keys as edits, then version. Reuse
+    /// RFC 8785 orders the policy anchor before edits, then the signed policy
+    /// and version. Reuse
     /// SHA-256 state only for an exact unchanged leading edit sequence; encode
     /// changed edits and the version through the same pinned JCS serializer.
     /// This produces the contract's checksum without hashing old history again.
-    fn seal(&mut self, version: u64, edits: Vec<Edit>) -> View {
+    fn seal(
+        &mut self,
+        version: u64,
+        edits: Vec<Edit>,
+        built_through: Option<String>,
+        new_signed: Option<String>,
+    ) -> View {
         use sha2::{Digest, Sha256};
         let _timing = crate::notice_cost_timing::span("view.checksum");
         let mut hash = Sha256::new();
-        hash.update(b"{\"edits\":[");
+        if self.hash_anchor != built_through {
+            self.hash_prefix.clear();
+            self.hash_anchor = built_through.clone();
+        }
+        hash.update(b"{");
+        if let Some(anchor) = &built_through {
+            hash.update(b"\"built_through\":");
+            hash.update(serde_jcs::to_vec(anchor).expect("canonical anchor"));
+            hash.update(b",");
+        }
+        hash.update(b"\"edits\":[");
         let mut unchanged = true;
         let mut prefix = Vec::new();
         for (index, edit) in edits.iter().enumerate() {
@@ -73,19 +96,32 @@ impl ValidationCache {
                 prefix.push((edit.clone(), hash.clone()));
             }
         }
-        hash.update(b"],\"version\":");
+        hash.update(b"]");
+        if let Some(policy) = &new_signed {
+            hash.update(b",\"new_signed\":");
+            hash.update(serde_jcs::to_vec(policy).expect("canonical signed policy"));
+        }
+        hash.update(b",\"version\":");
         hash.update(serde_jcs::to_vec(&serde_json::json!(version)).expect("canonical version"));
         hash.update(b"}");
         let mut view = View::seal(version, vec![]);
         view.checksum = format!("{:x}", hash.finalize());
         view.edits = edits;
+        view.built_through = built_through;
+        view.new_signed = new_signed;
         self.hash_prefix = prefix;
         view
     }
 
     pub(crate) fn encoded_size(&mut self, view: &View) -> usize {
-        let header =
+        let mut header =
             serde_json::json!({"version":view.version,"checksum":view.checksum,"edits":[]});
+        if let Some(anchor) = &view.built_through {
+            header["built_through"] = serde_json::json!(anchor);
+        }
+        if let Some(policy) = &view.new_signed {
+            header["new_signed"] = serde_json::json!(policy);
+        }
         let mut size = serde_json::to_vec(&header).expect("view header").len();
         let mut next = Vec::new();
         for (index, edit) in view.edits.iter().enumerate() {
@@ -106,7 +142,13 @@ impl ValidationCache {
         size
     }
 
-    fn check(&mut self, entries: &[Entry], edits: &[Edit]) -> Result<(), ViewRefusal> {
+    fn check(
+        &mut self,
+        entries: &[Entry],
+        candidate: &View,
+        rules: &ProviderRules,
+    ) -> Result<(), ViewRefusal> {
+        let edits = &candidate.edits;
         #[cfg(all(feature = "notice-cost-timing", target_os = "linux"))]
         {
             crate::notice_cost_timing::observe("view.held_entries", entries.len() as u64);
@@ -168,12 +210,19 @@ impl ValidationCache {
         // the newest entry with parts, so a projection without it would
         // judge some earlier entry to be the end. All edits remain,
         // preserving duplicate-ID and cross-edit checks. Provider signed-part
-        // rules still see the full transcript below, independently of this
-        // structural projection.
+        // rules need every signed entry and the policy anchor too. A trailing
+        // system note also protects the newest non-system turn.
         let final_turn = entries
             .iter()
             .rev()
             .find(|e| !e.parts.is_empty())
+            .map(|e| e.ordinal);
+        let final_non_system = entries
+            .iter()
+            .rev()
+            .find(|e| {
+                !e.parts.is_empty() && e.role != cortexkit_role_compaction::read::Role::System
+            })
             .map(|e| e.ordinal);
         let touched: Vec<_> = entries
             .iter()
@@ -181,12 +230,23 @@ impl ValidationCache {
                 targets.contains(e.mid.as_str())
                     || cut.is_some_and(|cut| e.ordinal <= cut)
                     || Some(e.ordinal) == final_turn
+                    || Some(e.ordinal) == final_non_system
+                    || candidate.built_through.as_ref() == Some(&e.mid)
+                    || e.parts
+                        .iter()
+                        .any(|part| part.seal == cortexkit_role_compaction::part::Seal::Signed)
             })
             .cloned()
             .collect();
         {
             let _timing = crate::notice_cost_timing::span("view.bounded_plan");
-            view::plan(&touched, &bounded)?;
+            let bounded = View::seal_with_policy(
+                candidate.version,
+                bounded,
+                candidate.built_through.clone(),
+                candidate.new_signed.clone(),
+            );
+            view::plan_view(&touched, &bounded, rules)?;
         }
         self.inserts = edits
             .iter()
@@ -212,23 +272,39 @@ pub fn next_view(
         previous,
         entries,
         new_ops,
-        rules,
-        version,
+        ViewPolicy {
+            rules,
+            version,
+            built_through: entries.last().map(|entry| entry.mid.clone()),
+            new_signed: None,
+        },
         retire,
         &mut ValidationCache::default(),
     )
+}
+
+pub(crate) struct ViewPolicy<'a> {
+    pub rules: &'a ProviderRules,
+    pub version: u64,
+    pub built_through: Option<String>,
+    pub new_signed: Option<String>,
 }
 
 pub(crate) fn next_view_cached(
     previous: Option<&View>,
     entries: &[Entry],
     new_ops: Vec<EditOp>,
-    rules: &ProviderRules,
-    version: u64,
+    policy: ViewPolicy<'_>,
     retire: impl Fn(&EditOp) -> bool,
     validation: &mut ValidationCache,
 ) -> Result<Option<View>, ViewRefusal> {
     let _timing = crate::notice_cost_timing::span("view.next");
+    let ViewPolicy {
+        rules,
+        version,
+        built_through,
+        new_signed,
+    } = policy;
     let previous_edits = previous
         .map(|view| view.edits.as_slice())
         .unwrap_or_default();
@@ -338,7 +414,7 @@ pub(crate) fn next_view_cached(
             )
         }));
     }
-    let view = validation.seal(version, edits);
+    let view = validation.seal(version, edits, built_through, new_signed);
     let _timing = crate::notice_cost_timing::span("view.check");
     {
         let _timing = crate::notice_cost_timing::span("view.check_carried");
@@ -349,11 +425,7 @@ pub(crate) fn next_view_cached(
         // The view was sealed immediately above. Planning performs every edit
         // and transcript check that apply performs, without constructing and
         // hashing rendered message parts that this provider would discard.
-        validation.check(entries, &view.edits)?;
-    }
-    {
-        let _timing = crate::notice_cost_timing::span("view.rules");
-        rules::check(entries, &view.edits, rules).map_err(ViewRefusal::Rule)?;
+        validation.check(entries, &view, rules)?;
     }
     Ok(Some(view))
 }
@@ -380,7 +452,7 @@ mod tests {
                 ];
                 edits.push(Edit::new(version,EditOp::Replace {mid:"target".into(),part:"part".into(),field:"input.options".into(),value:json!({"z":1e21,"a":-0.0,"fraction":1.25,"unicode":"\u{1f600}","suffix":suffix}),expect:"digest".into()}));
                 let reference = View::seal(version, edits.clone());
-                let next = cache.seal(version, edits);
+                let next = cache.seal(version, edits, None, None);
                 assert_eq!(
                     serde_json::to_vec(&next).unwrap(),
                     serde_json::to_vec(&reference).unwrap()
@@ -388,6 +460,33 @@ mod tests {
                 assert_eq!(
                     cache.encoded_size(&next),
                     serde_json::to_vec(&reference).unwrap().len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contract_update_cached_policy_checksum_matches_contract() {
+        let mut cache = ValidationCache::default();
+        for anchor in [None, Some("m2"), Some("m2"), Some("new-branch"), None] {
+            for strip in [None, Some("strip"), None] {
+                let edits = vec![Edit::new(1, insert("head", "history"))];
+                let expected = View::seal_with_policy(
+                    3,
+                    edits.clone(),
+                    anchor.map(str::to_owned),
+                    strip.map(str::to_owned),
+                );
+                let actual = cache.seal(
+                    3,
+                    edits,
+                    anchor.map(str::to_owned),
+                    strip.map(str::to_owned),
+                );
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    cache.encoded_size(&actual),
+                    serde_json::to_vec(&expected).unwrap().len()
                 );
             }
         }
@@ -548,8 +647,12 @@ mod tests {
             None,
             &entries,
             vec![cut("m2")],
-            &rules,
-            1,
+            ViewPolicy {
+                rules: &rules,
+                version: 1,
+                built_through: entries.last().map(|e| e.mid.clone()),
+                new_signed: None,
+            },
             |_| false,
             &mut cache,
         );
@@ -560,8 +663,12 @@ mod tests {
             None,
             &entries,
             vec![cut("m6")],
-            &rules,
-            1,
+            ViewPolicy {
+                rules: &rules,
+                version: 1,
+                built_through: entries.last().map(|e| e.mid.clone()),
+                new_signed: None,
+            },
             |_| false,
             &mut cache,
         );
@@ -689,7 +796,11 @@ mod tests {
         for edits in cases {
             let view = View::seal(2, edits);
             assert_eq!(
-                cache.check(&entries, &view.edits),
+                cache.check(
+                    &entries,
+                    &view,
+                    &ProviderRules::new(SignedParts::None, EditCost::Suffix)
+                ),
                 view::apply(&entries, &view).map(|_| ())
             );
         }

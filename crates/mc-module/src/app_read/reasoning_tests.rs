@@ -43,6 +43,32 @@ fn items(snapshot: &Snapshot, mid: &str) -> Vec<Value> {
 }
 
 #[test]
+fn app_read_breakdown_labels_follow_count_sources() {
+    let mut session = session();
+    let mut measured = assistant(201, vec![reasoning("r", Some(4))]);
+    measured.reasoning_tokens = Some(ReasoningTokens::new(9_000, true));
+    session.index.extend_counted([measured], Some("claude-v5/1"));
+    let snapshot = session.app_snapshot();
+    let estimate = |snapshot: &Snapshot, name: &str| snapshot.breakdown["parts"].as_array().unwrap().iter().find(|part| part["part"] == name).unwrap()["estimate"].clone();
+    assert_eq!(estimate(&snapshot, "history_raw"), false);
+    assert_eq!(estimate(&snapshot, "reasoning"), false);
+    assert_eq!(snapshot.breakdown["estimation_source"], "runner");
+    assert!(session.app_update().rows.is_empty());
+
+    session.index.extend([assistant(202, vec![reasoning("estimated", Some(80))])]);
+    let mixed = session.app_snapshot();
+    assert_eq!(estimate(&mixed, "reasoning"), true);
+    assert_eq!(mixed.breakdown["estimation_source"], "runner");
+    session.index.extend([assistant(202, vec![reasoning("estimated", Some(36_000))])]);
+    let tied = session.app_snapshot();
+    assert_eq!(tied.breakdown["estimation_source"], "estimate");
+    session.index.truncate(202);
+    let restored = session.app_snapshot();
+    assert_eq!(estimate(&restored, "reasoning"), false);
+    assert_eq!(restored.breakdown["estimation_source"], "runner");
+}
+
+#[test]
 fn app_read_reasoning_runner_counts_are_separate_and_update_only_the_changed_entry() {
     let mut session = session();
     let before = session.app_snapshot();

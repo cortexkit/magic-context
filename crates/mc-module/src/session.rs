@@ -48,6 +48,7 @@ pub struct Session {
     preset: crate::catalog::Preset,
     reminder_counter: u64,
     conditions: Conditions,
+    child_harness: Option<String>,
     /// Whether this session already logged that its runner's conditions
     /// leave out the prompt size while its steps report usage.
     warned_no_prompt: bool,
@@ -338,6 +339,7 @@ impl Session {
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
             suspended: false,
+            child_harness: request.child_harness.clone(),
             latest: None,
             version: 0,
             queued: BTreeSet::new(),
@@ -657,6 +659,7 @@ impl Session {
         self.tools_only = false;
         self.suspended = false;
         self.conditions = conditions_of(request);
+        self.child_harness = request.child_harness.clone();
         self.project = route.project.clone();
         self.workdir = folder_of(route);
         self.seq = 0;
@@ -1113,6 +1116,9 @@ impl Session {
         }
         Some(run::Request {
             session: self.key.clone(),
+            // Retries, repairs and turn two belong to one summary attempt;
+            // keep them on one harness even if Setup changes during the run.
+            child_harness: self.child_harness.clone(),
             from,
             until,
             project_root: self.workdir.clone(),
@@ -3006,8 +3012,15 @@ impl Session {
             self.latest.as_ref(),
             full.as_deref().unwrap_or(self.index.entries()),
             ops,
-            &self.conditions.rules,
-            version,
+            view_builder::ViewPolicy {
+                rules: &self.conditions.rules,
+                version,
+                built_through: self.index.cursor().map(|cursor| cursor.mid.clone()),
+                new_signed: cortexkit_compaction_view::rules::is_bound_signed_model(
+                    &self.conditions.model.model,
+                )
+                .then(|| "strip".into()),
+            },
             retire,
             &mut self.view_validation,
         );
@@ -3541,6 +3554,17 @@ impl Session {
                 if let Some(view) = &answer.view {
                     self.reset_transcript_retry();
                     self.version = self.version.max(view.version);
+                    // A different provider owns its cut and edits. Only its
+                    // version is a floor for our whole replacement.
+                    if answer
+                        .applied_by
+                        .as_deref()
+                        .is_some_and(|id| id != crate::MODULE_ID)
+                    {
+                        self.latest = None;
+                        self.latest_unknown = false;
+                        return;
+                    }
                     self.apply_cut(view);
                 }
                 self.latest = answer.view;
