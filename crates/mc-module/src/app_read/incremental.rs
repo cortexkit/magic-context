@@ -16,6 +16,7 @@ struct PartInfo {
     item_tokens: u64,
     source: &'static str,
     runner_tokens: Option<cortexkit_role_compaction::tokens::PartTokens>,
+    origin: Option<Value>,
 }
 struct Cached {
     mid: String,
@@ -23,8 +24,10 @@ struct Cached {
     at_ms: u64,
     parts: Vec<PartInfo>,
     reasoning_measure: (u64, &'static str),
+    user_origin: Option<Value>,
     row: Option<Arc<Message>>,
     raw: u64,
+    user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
     stamps: usize,
@@ -59,6 +62,8 @@ pub(crate) struct Projection {
     usages: BTreeMap<u64, Usage>,
     stamped: BTreeMap<u64, usize>,
     raw: u64,
+    /// Person text, then notice text, accounted separately from other raw content.
+    user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
     queued: usize,
@@ -104,6 +109,7 @@ impl Default for Projection {
             usages: BTreeMap::new(),
             stamped: BTreeMap::new(),
             raw: 0,
+            user_text: [0; 2],
             tool: 0,
             reasoning: 0,
             queued: 0,
@@ -162,6 +168,9 @@ impl Projection {
     fn remove(&mut self, ordinal: u64) {
         if let Some(old) = self.live.remove(&ordinal) {
             self.raw -= old.raw;
+            for (total, old) in self.user_text.iter_mut().zip(old.user_text) {
+                *total -= old;
+            }
             self.tool -= old.tool;
             self.reasoning -= old.reasoning;
             if !self.summarized(ordinal) {
@@ -267,14 +276,23 @@ impl Session {
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .collect();
             let measure = lanes::reasoning_measure(entry, &reasoning);
+            let user_origin =
+                (entry.role == cortexkit_role_compaction::read::Role::User).then(|| {
+                    entry.notice.as_ref().map_or_else(
+                        || json!({"kind":"person"}),
+                        |notice| json!({"kind":"notice", "sender":notice.sender}),
+                    )
+                });
             let row = p.live.entry(ordinal).or_insert_with(|| Cached {
                 mid: entry.mid.clone(),
                 digest: String::new(),
                 at_ms: entry.written_at,
                 parts: Vec::new(),
                 reasoning_measure: (0, "estimate"),
+                user_origin: None,
                 row: None,
                 raw: 0,
+                user_text: [0; 2],
                 tool: 0,
                 reasoning: 0,
                 stamps: 0,
@@ -283,6 +301,7 @@ impl Session {
                 || row.row.is_none()
                 || row.digest != entry.digest
                 || row.reasoning_measure != measure
+                || row.user_origin != user_origin
                 || row
                     .parts
                     .iter()
@@ -312,6 +331,11 @@ impl Session {
                             item_tokens,
                             source,
                             runner_tokens: part.tokens,
+                            origin: if matches!(part.body, PartBody::Text { .. }) {
+                                user_origin.clone()
+                            } else {
+                                None
+                            },
                             tool: match &part.body {
                                 PartBody::Tool(tool) => Some(tool.name.clone()),
                                 _ => None,
@@ -327,6 +351,7 @@ impl Session {
                     .collect();
                 row.digest = entry.digest.clone();
                 row.reasoning_measure = measure;
+                row.user_origin = user_origin;
                 p.dirty.insert(entry.mid.clone());
             }
             row.at_ms = entry.written_at;
@@ -499,12 +524,15 @@ impl Session {
             let summarized = p.summarized(ordinal);
             let cached = p.live.get_mut(&ordinal).expect("live position");
             p.raw -= cached.raw;
+            for (total, old) in p.user_text.iter_mut().zip(cached.user_text) {
+                *total -= old;
+            }
             p.tool -= cached.tool;
             p.reasoning -= cached.reasoning;
             if !summarized {
                 p.queued -= cached.stamps;
             }
-            let (message, raw, tool, reasoning, stamps) = message(
+            let (message, raw, tool, reasoning, user_text, stamps) = message(
                 self,
                 cached,
                 ordinal,
@@ -514,10 +542,14 @@ impl Session {
                 cut,
             );
             cached.raw = raw;
+            cached.user_text = user_text;
             cached.tool = tool;
             cached.reasoning = reasoning;
             cached.stamps = stamps;
             p.raw += raw;
+            for (total, count) in p.user_text.iter_mut().zip(user_text) {
+                *total += count;
+            }
             p.tool += tool;
             p.reasoning += reasoning;
             if !summarized {
@@ -567,6 +599,8 @@ impl Session {
             PartTokens::estimate("tool_calls_results", p.tool),
             PartTokens::estimate("reasoning", p.reasoning),
             PartTokens::estimate("last_user_message", 0),
+            PartTokens::estimate("user_messages", p.user_text[0]),
+            PartTokens::estimate("notices", p.user_text[1]),
         ];
         // The window the apps scale to is the usable one, as the standalone
         // plugin reports it: the model's window less the output reserve.
@@ -812,10 +846,11 @@ fn message(
     messages: &BTreeSet<String>,
     replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
-) -> (Message, u64, u64, u64, usize) {
+) -> (Message, u64, u64, u64, [u64; 2], usize) {
     let mut stamped = Vec::new();
     let mut gone = Vec::new();
     let mut raw = 0;
+    let mut user_text = [0; 2];
     let mut tool = 0;
     let mut reasoning = 0;
     let mut tagged = 0;
@@ -842,6 +877,9 @@ fn message(
                 (part.item_tokens, part.source)
             };
         let mut item = json!({"part_ref":{"part_key":part.id},"kind":part.kind,"tokens":tokens,"source":source,"state":if removed {"dropped"} else if queued {"stamped"} else {"live"}});
+        if let Some(origin) = &part.origin {
+            item["origin"] = origin.clone();
+        }
         if let Some(tool) = &part.tool {
             item["tool"] = json!(tool);
         }
@@ -861,6 +899,8 @@ fn message(
                 tool += part.tokens;
             } else if part.kind == "reasoning" {
                 reasoning += tokens;
+            } else if let Some(origin) = &part.origin {
+                user_text[usize::from(origin["kind"] == "notice")] += part.tokens;
             } else {
                 raw += part.tokens;
             }
@@ -881,6 +921,7 @@ fn message(
         raw,
         tool,
         reasoning,
+        user_text,
         stamps,
     )
 }

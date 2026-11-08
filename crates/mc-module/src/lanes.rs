@@ -526,6 +526,12 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
         })
 }
 
+/// Notices have a durable source outside the conversation, unlike the person's
+/// own words. Only runner-marked user entries may lose text to the age sweep.
+fn is_sweepable_notice(entry: &Entry) -> bool {
+    entry.role == Role::User && entry.notice.is_some()
+}
+
 /// The highest tag number below which every tool output is far behind: three
 /// newer user turns, or a quarter of the usable window of newer content.
 ///
@@ -534,6 +540,24 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
 /// on, so an output has to stay far behind across two rebuilds before it
 /// goes.
 pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
+    far_behind_matching(context, usable_window, |_, part| {
+        matches!(part.body, PartBody::Tool(_))
+    })
+}
+
+/// Keep notice tags out of the tool bookmark's far/young constraint: tag order
+/// can differ from transcript order, so sharing that constraint changes tools.
+pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
+    far_behind_matching(context, usable_window, |entry, part| {
+        is_sweepable_notice(entry) && matches!(part.body, PartBody::Text { .. })
+    })
+}
+
+fn far_behind_matching(
+    context: &Context,
+    usable_window: u64,
+    eligible: impl Fn(&Entry, &Part) -> bool,
+) -> u64 {
     let token_distance = if usable_window > 0 {
         usable_window as f64 * FAR_BEHIND_WINDOW_FRACTION
     } else {
@@ -545,7 +569,7 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
     let mut first_young = u64::MAX;
     for entry in context.index.entries().iter().rev() {
         for part in entry.parts.iter().rev() {
-            if let (PartBody::Tool(_), Some(tag)) = (&part.body, part.tag) {
+            if let Some(tag) = part.tag.filter(|_| eligible(entry, part)) {
                 if newer_turns >= FAR_BEHIND_USER_TURNS || newer_tokens as f64 >= token_distance {
                     far.push(tag);
                 } else {
@@ -568,27 +592,44 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
         .unwrap_or(0)
 }
 
-/// The age sweep: tool outputs at or below `bookmark` (recorded by the
-/// previous rebuild), worth dropping, and not protected.
-/// Tool outputs at or below the bookmark, outside the protected tail. The
+/// The age sweep: tool outputs and notice text at or below their bookmarks
+/// (recorded by the previous rebuild), worth dropping, and not protected. The
 /// plugin applies its age reclaim through the same protected-tail veto as
 /// every other drop (`pendingDropVeto`), so an output that is far behind by
 /// user turns but still among the newest calls stays.
-pub fn age_sweep(context: &Context, bookmark: u64, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
-    if bookmark == 0 {
+pub fn age_sweep(
+    context: &Context,
+    bookmark: u64,
+    notice_bookmark: u64,
+    cutoff: Option<u64>,
+) -> Vec<(PartKey, Shape)> {
+    if bookmark == 0 && notice_bookmark == 0 {
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
     let mut parts = Vec::new();
     for entry in context.index.entries() {
         for part in &entry.parts {
-            let (PartBody::Tool(_), Some(tag)) = (&part.body, part.tag) else {
+            let Some(tag) = part.tag else {
                 continue;
             };
+            let limit = match &part.body {
+                PartBody::Tool(_) => bookmark,
+                // A sealed part can only go whole, but a notice must keep its
+                // placeholder. Keep sealed notice text rather than violate either rule.
+                PartBody::Text { .. } if is_sweepable_notice(entry) && part.seal.is_none() => {
+                    notice_bookmark
+                }
+                _ => continue,
+            };
             let key = (entry.mid.clone(), part.id.clone());
-            if tag > bookmark
+            if tag > limit
                 || in_tail(part, cutoff)
-                || context.edited.covers(&entry.mid, &part.id)
+                || if matches!(part.body, PartBody::Tool(_)) {
+                    context.edited.covers(&entry.mid, &part.id)
+                } else {
+                    context.edited.touches(&entry.mid, &part.id)
+                }
                 || protected.contains(&key)
                 || reclaimable_tokens(context, entry, part) < AGE_SWEEP_MIN_TOKENS
             {
@@ -1503,6 +1544,103 @@ mod tests {
         (mid.to_owned(), part.to_owned())
     }
 
+    fn notice_text(tag: u64, bytes: usize) -> Entry {
+        let mut entry = entry(
+            tag,
+            Role::User,
+            vec![part(
+                format!("p{tag}"),
+                Some(tag),
+                Seal::None,
+                PartBody::Text {
+                    text: "x".repeat(bytes),
+                },
+            )],
+        );
+        entry.notice = Some(
+            serde_json::from_value(json!({
+                "sender": "prefrontal", "template": "worker_result"
+            }))
+            .unwrap(),
+        );
+        entry
+    }
+
+    #[test]
+    fn notice_age_sweep_keeps_small_tail_edited_and_non_notice_parts() {
+        let mut index = Index::default();
+        let mut person = notice_text(3, 40_000);
+        person.notice = None;
+        let mut assistant = notice_text(4, 40_000);
+        assistant.role = Role::Assistant;
+        let mut system = notice_text(5, 40_000);
+        system.role = Role::System;
+        let mut file_notice = notice_text(6, 4_000);
+        let file = part(
+            "file",
+            Some(7),
+            Seal::None,
+            PartBody::File(FileMedia::inline("text/plain", Some(4_000))),
+        );
+        file_notice.parts.push(file);
+        let mut sealed = notice_text(9, 4_000);
+        sealed.parts[0].seal = Seal::Encrypted;
+        index.extend([
+            notice_text(1, 4_000),
+            notice_text(2, 4),
+            person,
+            assistant,
+            system,
+            file_notice,
+            sealed,
+            notice_text(10, 4_000),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let ctx = context(&index, &edited, &none);
+        let selected = age_sweep(&ctx, 100, 100, Some(10));
+        assert_eq!(
+            selected,
+            vec![
+                (key("m1", "p1"), Shape::Default),
+                (key("m6", "p6"), Shape::Default),
+            ]
+        );
+        let (ops, _) = drop_ops(&ctx, &selected);
+        assert!(ops.iter().all(|op| matches!(op,
+            EditOp::Replace { field, value, .. }
+                if field == "text" && (value == "[dropped §1§]" || value == "[dropped §6§]")
+        )));
+        let view = View::seal(
+            1,
+            ops.into_iter()
+                .map(|op| cortexkit_role_compaction::view::Edit::new(1, op))
+                .collect(),
+        );
+        let edited = Edited::of(Some(&view), &index, None);
+        assert!(age_sweep(&context(&index, &edited, &none), 100, 100, Some(10)).is_empty());
+    }
+
+    #[test]
+    fn notice_bookmarks_do_not_change_tool_distance_or_count_as_user_turns() {
+        let index_without_notices = index();
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let ctx = context(&index_without_notices, &edited, &none);
+        assert_eq!(far_behind_bookmark(&ctx, 8_000), 4);
+        assert_eq!(notice_far_behind_bookmark(&ctx, 8_000), 0);
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![read(10, 4_000)]),
+            notice_text(2, 4_000),
+        ]);
+        let context = context(&index, &edited, &none);
+        assert_eq!(far_behind_bookmark(&context, 4_000), 10);
+        assert_eq!(notice_far_behind_bookmark(&context, 4_000), 0);
+        assert_eq!(far_behind_bookmark(&context, 0), 0);
+        assert!(!starts_user_turn(&notice_text(3, 4_000)));
+    }
+
     #[test]
     fn the_age_sweep_skips_small_outputs_and_the_newest_results_of_protected_tools() {
         let index = index();
@@ -1510,7 +1648,7 @@ mod tests {
         let none = BTreeMap::new();
         // The outputs numbered 2 and 3 (`m2/p2`, `m3/p3` above) are 10 tokens
         // each, under the 250-token floor.
-        let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6, None)
+        let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6, 0, None)
             .into_iter()
             .map(|(key, _)| key)
             .collect();
@@ -1520,7 +1658,7 @@ mod tests {
         // age sweep and not a drop another lane asks for.
         let one_read = BTreeMap::from([("read".to_owned(), 1)]);
         let protected = context(&index, &edited, &one_read);
-        let swept: Vec<PartKey> = age_sweep(&protected, 6, None)
+        let swept: Vec<PartKey> = age_sweep(&protected, 6, 0, None)
             .into_iter()
             .map(|(key, _)| key)
             .collect();
@@ -1702,7 +1840,7 @@ mod tests {
         let edited = Edited::default();
         let none = BTreeMap::new();
         // 100 output tokens, under the floor, though the whole part is over.
-        assert!(age_sweep(&context(&index, &edited, &none), 3, None).is_empty());
+        assert!(age_sweep(&context(&index, &edited, &none), 3, 0, None).is_empty());
     }
 
     /// An edit an earlier view dropped does not make the edit before it of

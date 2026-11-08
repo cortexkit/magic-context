@@ -457,7 +457,7 @@ fn samples_v6_remain_pinned() {
 }
 
 #[tokio::test]
-async fn samples_v7() {
+async fn samples_v8() {
     let (_dir, conn) = search_db();
     let mut replica = replica(Some(conn));
     replica.snapshots.clear();
@@ -494,9 +494,13 @@ async fn samples_v7() {
             json!({"query":"needle", "scope":{"session":key()}, "sources":["message"]}),
         ),
     ];
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v7");
-    let regenerate = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES").is_some();
+    let mut root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v8");
+    let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
+    let regenerate = output.is_some();
+    if let Some(output) = output.filter(|value| value != "1") {
+        root = output.into();
+    }
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {
         let mut response = replica.read(method, &params).unwrap();

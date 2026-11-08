@@ -1298,10 +1298,102 @@ async fn lifecycle_a_refused_view_puts_the_age_sweep_bookmark_back() {
     *client.refuse.lock().unwrap() = true;
     let (view, _) = session.build(&settings, None, false, None);
     session.next_reclaim_bookmark = Some(5);
+    session.notice_reclaim_bookmark = 1;
+    session.next_notice_reclaim_bookmark = Some(4);
     session
         .publish(&client, view.expect("both old outputs selected"))
         .await;
     assert_eq!(session.reclaim_bookmark, 3);
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+}
+
+fn old_notice_entries() -> Vec<Entry> {
+    let mut old = text(1, "old-notice");
+    old.parts[0].body = PartBody::Text {
+        text: "worker result ".repeat(1_000),
+    };
+    old.notice = Some(
+        serde_json::from_value(serde_json::json!({
+            "sender":"prefrontal", "template":"worker_result"
+        }))
+        .unwrap(),
+    );
+    vec![old, text(2, "one"), text(3, "two"), text(4, "three")]
+}
+
+#[tokio::test]
+async fn lifecycle_notice_age_sweep_waits_two_rebuilds_and_defer_replays_bytes() {
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = old_notice_entries();
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    let (first, _) = session.build(&settings, None, true, None);
+    if let Some(view) = first {
+        assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+            EditOp::Replace { mid, field, .. } if mid == "old-notice" && field == "text")));
+        session.accept(view);
+    } else {
+        session.commit_bookmark();
+    }
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+    let before = serde_json::to_vec(&session.latest).unwrap();
+    let mut request = notice(&session, 1, session.index.cursor());
+    request.conditions.last_prompt_tokens = Some(1_000);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(serde_json::to_vec(&session.latest).unwrap(), before);
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+    let (second, _) = session.build(&settings, None, true, None);
+    let view = second.expect("an old notice is reclaimed on the second rebuild");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "old-notice" && field == "text" && value == "[dropped §1§]")));
+    assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Drop { mid, .. } if mid == "old-notice")));
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_restores_old_payload_conservatively() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.reclaim_bookmark = 100;
+    let mut payload = serde_json::to_value(session.durable()).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("notice_reclaim_bookmark");
+    session.restore(serde_json::from_value(payload).unwrap());
+    session.index.extend(old_notice_entries());
+    session.index_ready = true;
+    assert_eq!(session.notice_reclaim_bookmark, 0);
+    let (view, _) = session.build(&settings, None, true, None);
+    assert!(!view
+        .iter()
+        .flat_map(|view| &view.edits)
+        .any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, .. } if mid == "old-notice" && field == "text")));
+    session.commit_bookmark();
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
+    for size in [1, 1_000, 100_000] {
+        let (mut session, _, _, _, settings) = fixture();
+        let mut entries = old_notice_entries();
+        entries[0].notice = None;
+        entries[0].parts[0].body = PartBody::Text {
+            text: "word ".repeat(size),
+        };
+        session.index.extend(entries);
+        session.reclaim_bookmark = u64::MAX;
+        session.notice_reclaim_bookmark = u64::MAX;
+        let (view, _) = session.build(&settings, Some(99_000), true, None);
+        assert!(!view
+            .iter()
+            .flat_map(|view| &view.edits)
+            .any(|edit| matches!(&edit.op,
+            EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-notice")));
+    }
 }
 
 fn output_part(id: &str, tag: u64) -> Part {

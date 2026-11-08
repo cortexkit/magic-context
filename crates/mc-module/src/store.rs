@@ -45,6 +45,9 @@ pub struct Durable {
     /// Parts the model asked to drop that no view carries yet.
     pub queued: BTreeSet<(String, String)>,
     pub reclaim_bookmark: u64,
+    /// Notice tags age independently so they cannot constrain tool reclaim.
+    #[serde(default)]
+    pub notice_reclaim_bookmark: u64,
     pub emergency_latched: bool,
     pub keep_requested: bool,
     /// What the head's `m[0]` holds, so a restart does not re-render it.

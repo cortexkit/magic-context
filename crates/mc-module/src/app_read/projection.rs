@@ -88,7 +88,7 @@ impl<'a> PartTokens<'a> {
 fn breakdown(parts: &[PartTokens<'_>], provider: Option<u64>, window: u64) -> Value {
     let estimated: u64 = parts.iter().filter_map(|part| part.tokens).sum();
     let total = provider.unwrap_or(estimated);
-    json!({"managed":{"value":true}, "as_of":{"step_ref":null, "at_ms":null}, "total":{"tokens":total, "source":if provider.is_some() {"provider"} else {"estimate"}}, "context_window":{"tokens":window, "source":"usage"}, "parts":parts.iter().map(|part| json!({"part":part.part,"tokens":part.tokens,"estimate":part.estimate})).collect::<Vec<_>>(), "unattributed":total.saturating_sub(estimated), "estimation_source":"legacy_estimate", "last_user_message_in_history_raw":true})
+    json!({"managed":{"value":true}, "as_of":{"step_ref":null, "at_ms":null}, "total":{"tokens":total, "source":if provider.is_some() {"provider"} else {"estimate"}}, "context_window":{"tokens":window, "source":"usage"}, "parts":parts.iter().map(|part| json!({"part":part.part,"tokens":part.tokens,"estimate":part.estimate})).collect::<Vec<_>>(), "unattributed":total.saturating_sub(estimated), "estimation_source":"legacy_estimate", "last_user_message_in_history_raw":false})
 }
 
 /// The tokens of every `tag` block in a history-head text, counted with
@@ -270,7 +270,7 @@ mod tests {
                 let mut entry = Entry::new(
                     ordinal,
                     format!("m{ordinal}"),
-                    if ordinal == 1 {
+                    if ordinal == 1 || ordinal == 3 {
                         Role::User
                     } else {
                         Role::Assistant
@@ -307,6 +307,12 @@ mod tests {
                     );
                 }
                 if ordinal == 3 {
+                    entry.notice = Some(
+                        serde_json::from_value(json!({
+                            "sender":"prefrontal", "template":"worker_result"
+                        }))
+                        .unwrap(),
+                    );
                     let mut usage = StepUsage::default();
                     usage.prompt_tokens = Some(80);
                     entry.usage = Some(usage);
@@ -682,13 +688,90 @@ mod tests {
         assert_eq!(
             session.app_snapshot().messages["text-message"].row["items"][0],
             json!(
-                {"part_ref":{"part_key":"text"}, "kind":"text", "tokens":tokens, "source":"counted", "state":"live"}
+                {"part_ref":{"part_key":"text"}, "kind":"text", "tokens":tokens, "source":"counted", "state":"live", "origin":{"kind":"person"}}
             )
         );
         assert!(
             session.app_update().rows.is_empty(),
             "unchanged parts reuse their counts"
         );
+    }
+
+    #[test]
+    fn app_read_user_text_origins_split_person_and_notice_totals() {
+        let mut session = session();
+        let before = session.app_snapshot();
+        let raw = before.breakdown["parts"][6]["tokens"].as_u64().unwrap();
+        let person = Entry::new(
+            201,
+            "person",
+            Role::User,
+            201,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "person words".into(),
+                },
+            )],
+        );
+        let mut notice = Entry::new(
+            202,
+            "notice",
+            Role::User,
+            202,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "worker result text".into(),
+                },
+            )],
+        );
+        notice.notice = Some(
+            serde_json::from_value(json!({
+                "sender":"worker-7", "template":"worker_result"
+            }))
+            .unwrap(),
+        );
+        session.index.extend([person, notice]);
+        let snapshot = session.app_snapshot();
+        assert_eq!(
+            snapshot.messages["person"].row["items"][0]["origin"],
+            json!({"kind":"person"})
+        );
+        assert_eq!(
+            snapshot.messages["notice"].row["items"][0]["origin"],
+            json!({"kind":"notice","sender":"worker-7"})
+        );
+        assert!(snapshot.messages["m1"].row["items"][0]
+            .get("origin")
+            .is_none());
+        let category = |name| {
+            snapshot.breakdown["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part["part"] == name)
+                .unwrap()["tokens"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(category("history_raw"), raw);
+        assert_eq!(category("user_messages"), 3);
+        assert_eq!(category("notices"), 5);
+        assert_eq!(
+            snapshot.breakdown["last_user_message_in_history_raw"],
+            false
+        );
+        assert!(session.app_update().rows.is_empty());
+        session.index.truncate(201);
+        let snapshot = session.app_snapshot();
+        let notices = snapshot.breakdown["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["part"] == "notices")
+            .unwrap();
+        assert_eq!(notices["tokens"], 0);
     }
 
     #[test]

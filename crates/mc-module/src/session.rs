@@ -85,10 +85,12 @@ pub struct Session {
     /// The age sweep's bookmark from the previous pass with permission to
     /// rebuild: tool outputs at or below it were already far behind then.
     reclaim_bookmark: u64,
+    notice_reclaim_bookmark: u64,
     /// The bookmark a built view moves `reclaim_bookmark` to once the
     /// runner takes it (or once the pass ends without a view), so an undone
     /// view puts the bookmark back with everything else it changed.
     next_reclaim_bookmark: Option<u64>,
+    next_notice_reclaim_bookmark: Option<u64>,
     /// An emergency batch landed during this stay in the force band. Another
     /// one waits until usage leaves the band, or a pass rewrites anyway, so
     /// the band never trickles one rewrite per pass.
@@ -252,6 +254,8 @@ struct Before {
     #[serde(default)]
     reclaim_bookmark: Option<u64>,
     #[serde(default)]
+    notice_reclaim_bookmark: Option<u64>,
+    #[serde(default)]
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
@@ -343,6 +347,8 @@ impl Session {
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
+            notice_reclaim_bookmark: 0,
+            next_notice_reclaim_bookmark: None,
             emergency_latched: false,
             next_latch: false,
             next_rearm: false,
@@ -494,6 +500,7 @@ impl Session {
             version: self.version,
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
+            notice_reclaim_bookmark: self.notice_reclaim_bookmark,
             emergency_latched: self.emergency_latched,
             keep_requested: self.keep_requested,
             baseline: self.baseline.clone(),
@@ -531,6 +538,7 @@ impl Session {
         self.version = durable.version;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
+        self.notice_reclaim_bookmark = durable.notice_reclaim_bookmark;
         self.emergency_latched = durable.emergency_latched;
         self.keep_requested = durable.keep_requested;
         self.baseline = durable.baseline;
@@ -2632,6 +2640,7 @@ impl Session {
             .max()
             .unwrap_or(0);
         self.reclaim_bookmark = self.reclaim_bookmark.min(held);
+        self.notice_reclaim_bookmark = self.notice_reclaim_bookmark.min(held);
     }
 
     /// Whether the history head and cut in `history` differ from the latest
@@ -2843,7 +2852,12 @@ impl Session {
         ));
         wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
-        wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark, cutoff));
+        wanted.extend(lanes::age_sweep(
+            &context,
+            self.reclaim_bookmark,
+            self.notice_reclaim_bookmark,
+            cutoff,
+        ));
         let model = &self.conditions.model;
         let anthropic = model.provider.contains("anthropic") || model.model.contains("claude");
         wanted.extend(lanes::reasoning_over_budget(
@@ -2959,19 +2973,25 @@ impl Session {
             self.next_caveman = Some(next);
         }
         let bookmark = lanes::far_behind_bookmark(&context, usable);
+        let notice_bookmark = lanes::notice_far_behind_bookmark(&context, usable);
         // The age sweep only drops on the pass after the one that sees an
         // output far behind, so the first pass over the threshold frees
         // little by design. What it has lined up for the next pass counts as
         // relief too, or every session would be asked for ctx_keep on its
         // first crossing.
-        let lined_up: Vec<lanes::PartKey> =
-            lanes::age_sweep(&context, bookmark.max(self.reclaim_bookmark), cutoff)
-                .into_iter()
-                .map(|(key, _)| key)
-                .filter(|key| !covered.contains(key))
-                .collect();
+        let lined_up: Vec<lanes::PartKey> = lanes::age_sweep(
+            &context,
+            bookmark.max(self.reclaim_bookmark),
+            notice_bookmark.max(self.notice_reclaim_bookmark),
+            cutoff,
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| !covered.contains(key))
+        .collect();
         let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
+        self.next_notice_reclaim_bookmark = Some(self.notice_reclaim_bookmark.max(notice_bookmark));
         // A pass whose lanes have no new edit publishes nothing (PD12). A
         // memory another writer saved changes only `m[1]`: it waits for a
         // pass that rewrites anyway, as the plugin's history refresh rides a
@@ -3272,6 +3292,9 @@ impl Session {
         if let Some(bookmark) = self.next_reclaim_bookmark.take() {
             self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
         }
+        if let Some(bookmark) = self.next_notice_reclaim_bookmark.take() {
+            self.notice_reclaim_bookmark = self.notice_reclaim_bookmark.max(bookmark);
+        }
     }
 
     fn accept(&mut self, view: View) {
@@ -3291,6 +3314,7 @@ impl Session {
             cut: self.cut,
             pruned_turns: self.pruned_turns,
             reclaim_bookmark: Some(self.reclaim_bookmark),
+            notice_reclaim_bookmark: Some(self.notice_reclaim_bookmark),
             summary_unshown: self.summary_unshown,
             pending_keep: self.next_keep.take(),
         };
@@ -3481,6 +3505,9 @@ impl Session {
         self.pruned_turns = before.pruned_turns;
         if let Some(bookmark) = before.reclaim_bookmark {
             self.reclaim_bookmark = bookmark;
+        }
+        if let Some(bookmark) = before.notice_reclaim_bookmark {
+            self.notice_reclaim_bookmark = bookmark;
         }
         if cut_moved {
             // The index already forgot what the cut removed; read it again
