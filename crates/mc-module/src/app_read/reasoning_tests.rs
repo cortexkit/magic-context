@@ -111,7 +111,7 @@ fn app_read_reasoning_runner_counts_are_separate_and_update_only_the_changed_ent
         .collect();
     assert_eq!(
         &names[7..],
-        ["tool_calls_results", "reasoning", "last_user_message"]
+        ["tool_calls_results", "reasoning", "last_user_message", "user_messages", "notices"]
     );
     assert!(session.app_update().rows.is_empty());
     entry.reasoning_tokens = Some(ReasoningTokens::new(103, false));

@@ -1302,10 +1302,217 @@ async fn lifecycle_a_refused_view_puts_the_age_sweep_bookmark_back() {
     *client.refuse.lock().unwrap() = true;
     let (view, _) = session.build(&settings, None, false, None);
     session.next_reclaim_bookmark = Some(5);
+    session.notice_reclaim_bookmark = 1;
+    session.next_notice_reclaim_bookmark = Some(4);
     session
         .publish(&client, view.expect("both old outputs selected"))
         .await;
     assert_eq!(session.reclaim_bookmark, 3);
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+}
+
+fn old_notice_entries() -> Vec<Entry> {
+    let mut old = text(1, "old-notice");
+    old.parts[0].body = PartBody::Text {
+        text: "worker result ".repeat(1_000),
+    };
+    old.notice = Some(
+        serde_json::from_value(serde_json::json!({
+            "sender":"prefrontal", "template":"worker_result"
+        }))
+        .unwrap(),
+    );
+    vec![old, text(2, "one"), text(3, "two"), text(4, "three")]
+}
+
+#[tokio::test]
+async fn lifecycle_notice_age_sweep_waits_two_rebuilds_and_defer_replays_bytes() {
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = old_notice_entries();
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    let (first, _) = session.build(&settings, None, true, None);
+    if let Some(view) = first {
+        assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+            EditOp::Replace { mid, field, .. } if mid == "old-notice" && field == "text")));
+        session.accept(view);
+    } else {
+        session.commit_bookmark();
+    }
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+    let before = serde_json::to_vec(&session.latest).unwrap();
+    let mut request = notice(&session, 1, session.index.cursor());
+    request.conditions.last_prompt_tokens = Some(1_000);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(serde_json::to_vec(&session.latest).unwrap(), before);
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+    let (second, _) = session.build(&settings, None, true, None);
+    let view = second.expect("an old notice is reclaimed on the second rebuild");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "old-notice" && field == "text" && value == "[dropped §1§]")));
+    assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Drop { mid, .. } if mid == "old-notice")));
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_restores_old_payload_conservatively() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.reclaim_bookmark = 100;
+    let mut payload = serde_json::to_value(session.durable()).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("notice_reclaim_bookmark");
+    session.restore(serde_json::from_value(payload).unwrap());
+    session.index.extend(old_notice_entries());
+    session.index_ready = true;
+    assert_eq!(session.notice_reclaim_bookmark, 0);
+    let (view, _) = session.build(&settings, None, true, None);
+    assert!(!view
+        .iter()
+        .flat_map(|view| &view.edits)
+        .any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, .. } if mid == "old-notice" && field == "text")));
+    session.commit_bookmark();
+    assert_eq!(session.notice_reclaim_bookmark, 1);
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
+    for size in [1, 1_000, 100_000] {
+        let (mut session, _, _, _, settings) = fixture();
+        let mut entries = old_notice_entries();
+        entries[0].notice = None;
+        entries[0].parts[0].body = PartBody::Text {
+            text: "word ".repeat(size),
+        };
+        session.index.extend(entries);
+        session.reclaim_bookmark = u64::MAX;
+        session.notice_reclaim_bookmark = u64::MAX;
+        let (view, _) = session.build(&settings, Some(99_000), true, None);
+        assert!(!view
+            .iter()
+            .flat_map(|view| &view.edits)
+            .any(|edit| matches!(&edit.op,
+            EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-notice")));
+    }
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_counts_notice_wakes_without_aging_tools() {
+    let (mut session, _, _, _, settings) = fixture();
+    let origin = old_notice_entries().remove(0).notice;
+    let notice_entry = |ordinal| {
+        let mut entry = text(ordinal, &format!("notice-{ordinal}"));
+        entry.notice = origin.clone();
+        entry
+    };
+    let mut old = notice_entry(2);
+    old.parts[0].body = PartBody::Text {
+        text: "worker result ".repeat(1_000),
+    };
+    let tiny_output = |id, tag| {
+        let mut part = output_part(id, tag);
+        if let PartBody::Tool(tool) = &mut part.body {
+            tool.output_bytes = Some(4);
+        }
+        part
+    };
+    session.index.extend([
+        Entry::new(
+            1,
+            "old-tool",
+            Role::Assistant,
+            1,
+            vec![output_part("p1", 1)],
+        ),
+        old,
+        notice_entry(3),
+        notice_entry(4),
+        Entry::new(
+            5,
+            "newer-tools",
+            Role::Assistant,
+            5,
+            vec![
+                tiny_output("p5", 5),
+                tiny_output("p6", 6),
+                tiny_output("p7", 7),
+            ],
+        ),
+    ]);
+    // Three newer calls keep the old notice outside the protected tail,
+    // without enough output tokens to reach the quarter-window distance.
+    assert!(session.build(&settings, None, true, None).0.is_none());
+    session.commit_bookmark();
+    assert_eq!(
+        session.notice_reclaim_bookmark, 0,
+        "two newer notices are not enough"
+    );
+    assert_eq!(session.reclaim_bookmark, 0);
+
+    let mut third = notice_entry(6);
+    third.parts[0].tag = Some(8);
+    session.index.extend([third]);
+    assert!(session
+        .index
+        .entries()
+        .iter()
+        .all(|entry| entry.role != Role::User || entry.notice.is_some()));
+    assert!(session.build(&settings, None, true, None).0.is_none());
+    session.commit_bookmark();
+    assert_eq!(
+        session.reclaim_bookmark, 0,
+        "notice wakes must not age tool outputs"
+    );
+    assert_eq!(session.notice_reclaim_bookmark, 2);
+
+    let (view, _) = session.build(&settings, None, true, None);
+    assert!(
+        session.failed_parts.is_empty(),
+        "{:?}",
+        session.failed_parts
+    );
+    let view = view.expect("three newer notice wakes qualify the old notice after two rebuilds");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "notice-2" && field == "text" && value == "[dropped §2§]")));
+    assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-tool")));
+    session.accept(view);
+    assert_eq!(session.notice_reclaim_bookmark, 2);
+    assert_eq!(session.reclaim_bookmark, 0);
+}
+
+#[test]
+fn lifecycle_notice_age_sweep_keeps_marked_notice_beside_unkept_notice() {
+    let (mut session, _, _, _, settings) = fixture();
+    let mut kept = old_notice_entries().remove(0);
+    kept.notice.as_mut().unwrap().keep = true;
+    let mut unkept = text(2, "unkept-notice");
+    unkept.notice = old_notice_entries().remove(0).notice;
+    unkept.parts[0].body = kept.parts[0].body.clone();
+    let mut entries = vec![kept, unkept];
+    for ordinal in 3..=5 {
+        let mut newer = text(ordinal, &format!("notice-{ordinal}"));
+        newer.notice = entries[1].notice.clone();
+        entries.push(newer);
+    }
+    session.index.extend(entries);
+    assert!(session.build(&settings, None, true, None).0.is_none());
+    session.commit_bookmark();
+    let (view, _) = session.build(&settings, None, true, None);
+    let view = view.expect("an unkept notice is swept after two permitted rebuilds");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "unkept-notice" && field == "text" && value == "[dropped §2§]")));
+    assert!(
+        !view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == "old-notice")),
+        "the notice marked keep must stay whole beside the swept notice"
+    );
 }
 
 fn output_part(id: &str, tag: u64) -> Part {

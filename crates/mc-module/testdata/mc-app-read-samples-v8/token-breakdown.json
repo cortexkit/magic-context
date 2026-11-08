@@ -59,7 +59,7 @@
             "tokens": 9
           }
         ],
-        "last_user_message_in_history_raw": true,
+        "last_user_message_in_history_raw": false,
         "managed": {
           "value": true
         },
@@ -98,7 +98,7 @@
           {
             "estimate": false,
             "part": "history_raw",
-            "tokens": 6
+            "tokens": 3
           },
           {
             "estimate": false,
@@ -114,6 +114,16 @@
             "estimate": false,
             "part": "last_user_message",
             "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "user_messages",
+            "tokens": 3
+          },
+          {
+            "estimate": false,
+            "part": "notices",
+            "tokens": 0
           }
         ],
         "total": {
@@ -125,7 +135,7 @@
       "schema": 1,
       "section": "token_breakdown",
       "state": "ready",
-      "version": "mca1:5c8ae6b2a9b4d573a61acc27a8fd77f5acb9de74c9f9e01a42dd0063e998dc0e"
+      "version": "mca1:d1436eaba204da011434a0fa99577ecfb351719bb237a736a4a02d11459cba48"
     }
   }
 }

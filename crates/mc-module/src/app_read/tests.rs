@@ -516,9 +516,13 @@ async fn samples_v8() {
             json!({"query":"needle", "scope":{"session":key()}, "sources":["message"]}),
         ),
     ];
-    let root =
+    let mut root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v8");
-    let regenerate = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES").is_some();
+    let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
+    let regenerate = output.is_some();
+    if let Some(output) = output.filter(|value| value != "1") {
+        root = output.into();
+    }
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {
         let mut response = replica.read(method, &params).unwrap();

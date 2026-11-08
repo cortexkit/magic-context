@@ -45,6 +45,7 @@ struct PartInfo {
     item_tokens: u64,
     source: &'static str,
     runner_tokens: Option<cortexkit_role_compaction::tokens::PartTokens>,
+    origin: Option<Value>,
 }
 struct Cached {
     mid: String,
@@ -52,11 +53,14 @@ struct Cached {
     at_ms: u64,
     parts: Vec<PartInfo>,
     reasoning_measure: (u64, &'static str),
+    user_origin: Option<Value>,
     row: Option<Arc<Message>>,
     raw: u64,
+    user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
-    sources: [Sources; 3],
+    /// Raw, tool, reasoning, person text, then notice text provenance.
+    sources: [Sources; 5],
     stamps: usize,
 }
 #[derive(Clone)]
@@ -89,9 +93,11 @@ pub(crate) struct Projection {
     usages: BTreeMap<u64, Usage>,
     stamped: BTreeMap<u64, usize>,
     raw: u64,
+    /// Person text, then notice text, accounted separately from other raw content.
+    user_text: [u64; 2],
     tool: u64,
     reasoning: u64,
-    sources: [Sources; 3],
+    sources: [Sources; 5],
     queued: usize,
     pub(crate) dirty: BTreeSet<String>,
     pub(crate) summaries_dirty: bool,
@@ -135,9 +141,10 @@ impl Default for Projection {
             usages: BTreeMap::new(),
             stamped: BTreeMap::new(),
             raw: 0,
+            user_text: [0; 2],
             tool: 0,
             reasoning: 0,
-            sources: [Sources::default(); 3],
+            sources: [Sources::default(); 5],
             queued: 0,
             dirty: BTreeSet::new(),
             summaries_dirty: true,
@@ -194,9 +201,12 @@ impl Projection {
     fn remove(&mut self, ordinal: u64) {
         if let Some(old) = self.live.remove(&ordinal) {
             self.raw -= old.raw;
+            for (total, old) in self.user_text.iter_mut().zip(old.user_text) {
+                *total -= old;
+            }
             self.tool -= old.tool;
             self.reasoning -= old.reasoning;
-            for at in 0..3 {
+            for at in 0..5 {
                 self.sources[at].adjust(old.sources[at], Sources::default());
             }
             if !self.summarized(ordinal) {
@@ -302,23 +312,33 @@ impl Session {
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .collect();
             let measure = lanes::reasoning_measure(entry, &reasoning);
+            let user_origin =
+                (entry.role == cortexkit_role_compaction::read::Role::User).then(|| {
+                    entry.notice.as_ref().map_or_else(
+                        || json!({"kind":"person"}),
+                        |notice| json!({"kind":"notice", "sender":notice.sender}),
+                    )
+                });
             let row = p.live.entry(ordinal).or_insert_with(|| Cached {
                 mid: entry.mid.clone(),
                 digest: String::new(),
                 at_ms: entry.written_at,
                 parts: Vec::new(),
                 reasoning_measure: (0, "estimate"),
+                user_origin: None,
                 row: None,
                 raw: 0,
+                user_text: [0; 2],
                 tool: 0,
                 reasoning: 0,
-                sources: [Sources::default(); 3],
+                sources: [Sources::default(); 5],
                 stamps: 0,
             });
             if model_changed
                 || row.row.is_none()
                 || row.digest != entry.digest
                 || row.reasoning_measure != measure
+                || row.user_origin != user_origin
                 || row
                     .parts
                     .iter()
@@ -348,6 +368,11 @@ impl Session {
                             item_tokens,
                             source,
                             runner_tokens: part.tokens,
+                            origin: if matches!(part.body, PartBody::Text { .. }) {
+                                user_origin.clone()
+                            } else {
+                                None
+                            },
                             tool: match &part.body {
                                 PartBody::Tool(tool) => Some(tool.name.clone()),
                                 _ => None,
@@ -363,6 +388,7 @@ impl Session {
                     .collect();
                 row.digest = entry.digest.clone();
                 row.reasoning_measure = measure;
+                row.user_origin = user_origin;
                 p.dirty.insert(entry.mid.clone());
             }
             row.at_ms = entry.written_at;
@@ -535,12 +561,15 @@ impl Session {
             let summarized = p.summarized(ordinal);
             let cached = p.live.get_mut(&ordinal).expect("live position");
             p.raw -= cached.raw;
+            for (total, old) in p.user_text.iter_mut().zip(cached.user_text) {
+                *total -= old;
+            }
             p.tool -= cached.tool;
             p.reasoning -= cached.reasoning;
             if !summarized {
                 p.queued -= cached.stamps;
             }
-            let (message, raw, tool, reasoning, stamps, sources) = message(
+            let (message, raw, tool, reasoning, user_text, stamps, sources) = message(
                 self,
                 cached,
                 ordinal,
@@ -550,6 +579,7 @@ impl Session {
                 cut,
             );
             cached.raw = raw;
+            cached.user_text = user_text;
             cached.tool = tool;
             cached.reasoning = reasoning;
             cached.stamps = stamps;
@@ -558,6 +588,9 @@ impl Session {
             }
             cached.sources = sources;
             p.raw += raw;
+            for (total, count) in p.user_text.iter_mut().zip(user_text) {
+                *total += count;
+            }
             p.tool += tool;
             p.reasoning += reasoning;
             if !summarized {
@@ -617,6 +650,8 @@ impl Session {
             attributed("tool_calls_results", p.tool, p.sources[1]),
             attributed("reasoning", p.reasoning, p.sources[2]),
             counted("last_user_message", 0),
+            attributed("user_messages", p.user_text[0], p.sources[3]),
+            attributed("notices", p.user_text[1], p.sources[4]),
         ];
         // The window the apps scale to is the usable one, as the standalone
         // plugin reports it: the model's window less the output reserve.
@@ -874,15 +909,16 @@ fn message(
     messages: &BTreeSet<String>,
     replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
-) -> (Message, u64, u64, u64, usize, [Sources; 3]) {
+) -> (Message, u64, u64, u64, [u64; 2], usize, [Sources; 5]) {
     let mut stamped = Vec::new();
     let mut gone = Vec::new();
     let mut raw = 0;
+    let mut user_text = [0; 2];
     let mut tool = 0;
     let mut reasoning = 0;
     let mut tagged = 0;
     let mut items = Vec::with_capacity(cached.parts.len());
-    let mut sources = [Sources::default(); 3];
+    let mut sources = [Sources::default(); 5];
     let before = session
         .unconfirmed
         .first()
@@ -905,6 +941,9 @@ fn message(
                 (part.item_tokens, part.source)
             };
         let mut item = json!({"part_ref":{"part_key":part.id},"kind":part.kind,"tokens":tokens,"source":source,"state":if removed {"dropped"} else if queued {"stamped"} else {"live"}});
+        if let Some(origin) = &part.origin {
+            item["origin"] = origin.clone();
+        }
         if let Some(tool) = &part.tool {
             item["tool"] = json!(tool);
         }
@@ -926,6 +965,10 @@ fn message(
             } else if part.kind == "reasoning" {
                 reasoning += tokens;
                 sources[2].add(tokens, source);
+            } else if let Some(origin) = &part.origin {
+                let category = usize::from(origin["kind"] == "notice");
+                user_text[category] += part.tokens;
+                sources[3 + category].add(part.tokens, source);
             } else {
                 raw += part.tokens;
                 sources[0].add(part.tokens, source);
@@ -947,6 +990,7 @@ fn message(
         raw,
         tool,
         reasoning,
+        user_text,
         stamps,
         sources,
     )

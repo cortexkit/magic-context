@@ -34,6 +34,9 @@
           "items": [
             {
               "kind": "text",
+              "origin": {
+                "kind": "person"
+              },
               "part_ref": {
                 "part_key": "p"
               },
@@ -144,6 +147,10 @@
           "items": [
             {
               "kind": "text",
+              "origin": {
+                "kind": "notice",
+                "sender": "prefrontal"
+              },
               "part_ref": {
                 "part_key": "p"
               },
@@ -184,7 +191,7 @@
       "schema": 1,
       "session_kind": "mode3",
       "state": "ready",
-      "version": "mca1:7d35ff8d7d76ef20f0b1098fc116930f622fb5ac82d6e1690df7379d1a8bd989"
+      "version": "mca1:907c5106028da8b7a746f7a31628471ed3d58002746846348cedea18ef51dffa"
     }
   }
 }
