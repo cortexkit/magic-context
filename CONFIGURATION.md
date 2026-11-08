@@ -266,8 +266,8 @@ Precedence: explicit per-model entry → built-in known-model lifetime → objec
 Supported formats: `"30s"`, `"5m"`, `"1h"`.
 
 **`"never"` sentinel:** set `cache_ttl` to `"never"` to mean Magic Context *never assumes* the cached prefix expires:
-`/ctx-status` shows no expiry, and OpenCode 2 schedules no idle checkpoint. Use this on lanes kept warm by an
-external keepwarm mechanism (prewarm proxies, dedicated cache-keep tools).
+`/ctx-status` shows no expiry, and OpenCode 2 schedules no idle checkpoint. Use this when an external keepwarm
+mechanism (prewarm proxies, dedicated cache-keep tools) keeps the provider's cache warm.
 
 `"never"` only changes MC's assumption; it does not extend the provider's cache lifetime. Provider-side extended
 TTL is a separate request-level concern (`cache_control: { ttl: "1h" }` in the request body).
