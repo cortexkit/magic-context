@@ -7,7 +7,11 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { listSessionCompactionMarkers } from "../../features/magic-context/compaction-marker";
+import {
+    isCompactionMarkerDiscoveryReady,
+    listSessionCompactionMarkers,
+    prepareCompactionMarkerCandidates,
+} from "../../features/magic-context/compaction-marker";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
@@ -804,8 +808,14 @@ describe("Rust mode authority adapter", () => {
             });
         };
         let transform = build();
+        // A pass never waits for marker discovery. Here the module reports its
+        // boundary first on the busting pass that drains it, so no earlier pass
+        // could start discovery and production would defer that cut once. These
+        // faults concern the cut itself, so let discovery finish before each pass
+        // as it has in a session whose discovery already ran.
         const invoke = async (output: { messages: unknown[] }) => {
             const input = makeMessages(sid);
+            await prepareCompactionMarkerCandidates(sid);
             await transform.run(sid, input, output, makeMeta(db, sid));
         };
         const serve = async () => {
@@ -825,6 +835,7 @@ describe("Rust mode authority adapter", () => {
             serveAliased: async () => {
                 const input = makeMessages(sid);
                 const output = { messages: input as unknown[] };
+                await prepareCompactionMarkerCandidates(sid);
                 await transform.run(sid, input, output, makeMeta(db, sid));
                 return JSON.stringify(output.messages);
             },
@@ -1704,6 +1715,11 @@ describe("Rust mode authority adapter", () => {
             expect(getPendingCompactionMarkerState(db, sessionId)).toEqual(pending);
             expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
         }
+        // The frozen passes saw the pending target and started marker discovery
+        // without waiting for it; give it the time a turn would.
+        const deadline = Date.now() + 5_000;
+        while (!isCompactionMarkerDiscoveryReady(sessionId) && Date.now() < deadline)
+            await Bun.sleep(10);
         await serve();
         expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
         expect(getPersistedCompactionMarkerState(db, sessionId)?.boundaryOrdinal).toBe(1);

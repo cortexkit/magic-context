@@ -987,6 +987,37 @@ export function applyRustModeDeferredCompactionMarker(args: {
                   endMessageId: boundary.endMessageId,
               }
             : undefined;
+    // Summary discovery runs on a worker and the pass never waits for it. While it
+    // runs, the checks that need no discovery still retire a stale or already-
+    // covered target; the cut itself waits, with no fence armed and no retry
+    // spent. A host store that cannot be opened starts no discovery; the drain
+    // below reports that as a retryable failure, as before.
+    if (
+        (args.applyDeferred ?? applyDeferredCompactionMarker) === applyDeferredCompactionMarker &&
+        startCompactionMarkerCandidatePreparation(args.sessionId) === "preparing"
+    ) {
+        const settled = applyDeferredCompactionMarker(
+            args.db,
+            args.sessionId,
+            pending,
+            args.sessionDirectory,
+            trustedBoundary,
+            { validateOnly: true },
+        );
+        if (settled.kind === "stale-skip" || settled.kind === "already-current") {
+            if (!clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending))
+                sessionLog(
+                    args.sessionId,
+                    `rust compaction-marker drain: CAS lost${boundary ? ` after module row ${boundary.rowVersion}` : ""}; newer pending target retained`,
+                );
+            return;
+        }
+        sessionLog(
+            args.sessionId,
+            "rust compaction-marker drain: candidate preparation deferred; pending target retained",
+        );
+        return;
+    }
     args.beforeApply?.();
     const outcome = (args.applyDeferred ?? applyDeferredCompactionMarker)(
         args.db,
@@ -4145,6 +4176,15 @@ export async function runPostTransformPhase(
     // the same summary representation that this pass will emit.
     let suppressV12HistoryDrain = false;
     let persistedCompactionMarkerState = replaySnapshot?.compactionMarker ?? null;
+    // The drain never waits for summary discovery. Start it, without waiting, on
+    // every pass while a target is pending, so it has usually finished by the
+    // pass that consumes the rebuilt history; Rust mode does the same.
+    if (
+        replaySnapshot?.pendingCompactionMarker &&
+        (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy).applyDeferred ===
+            applyDeferredCompactionMarker
+    )
+        startCompactionMarkerCandidatePreparation(args.sessionId);
     if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
         const pending = replaySnapshot?.pendingCompactionMarker ?? null;
         if (pending) {
@@ -4196,9 +4236,12 @@ export async function runPostTransformPhase(
             } else {
                 const tMarkerDrain = performance.now();
                 const strategy = args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy;
+                // Discovery reads the whole session on a worker and can take tens of
+                // seconds on a large one. The pass never waits for it: without a
+                // prepared basis this starts discovery in the background and defers.
                 const candidatesReady =
                     strategy.applyDeferred !== applyDeferredCompactionMarker ||
-                    (await prepareCompactionMarkerCandidates(args.sessionId));
+                    startCompactionMarkerCandidatePreparation(args.sessionId) === "ready";
                 const outcome: MarkerUpdateOutcome = candidatesReady
                     ? strategy.applyDeferred(
                           args.db,
@@ -4215,9 +4258,10 @@ export async function runPostTransformPhase(
                 );
                 switch (outcome.kind) {
                     case "deferred":
-                        // Summary discovery may observe a new summary or fail to load
-                        // its worker. Only marker replacement waits: serve the rebuilt
-                        // request now and retry replacement on a later history rebuild.
+                        // Summary discovery may still be running, observe a new summary
+                        // or fail to load its worker. Only marker replacement waits: serve
+                        // the rebuilt request now and retry replacement on a later history
+                        // rebuild.
                         suppressV12HistoryDrain = true;
                         sessionLog(
                             args.sessionId,
@@ -5324,7 +5368,7 @@ export function checkM0MutationDriftAndSignal(args: {
     return false;
 }
 
-import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
+import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
     hasPendingMaterializationOrigin,
