@@ -18,6 +18,9 @@ mod ride_cause_tests;
 #[path = "stale_reading_tests.rs"]
 mod stale_reading_tests;
 
+#[path = "stale_reading_review_tests.rs"]
+mod stale_reading_review_tests;
+
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
