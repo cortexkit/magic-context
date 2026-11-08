@@ -6690,6 +6690,78 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
+    for (const trigger of [
+        { reason: "model_change", hard: { ...BASE_HARD, modelKey: "anthropic/sonnet" } },
+        { reason: "system_hash", hard: { ...BASE_HARD, systemHash: "sys-v2" } },
+    ]) {
+        it(`drains pending ops and previously bookmarked age reclaim on the same low-usage ${trigger.reason} fold`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-hardfold-reclaim-drain-${trigger.reason}`;
+            materializeBaseline(sessionId);
+
+            const queued = makeToolMessage("tool-1");
+            const reclaimable = makeToolMessage("tool-2");
+            const newer = makeToolMessage("tool-3");
+            insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "edit");
+            insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "bash");
+            insertTag(db, sessionId, "tool-3", "tool", 4000, 3, 0, "read");
+            queuePendingOp(db, sessionId, 1, "drop", 1);
+            advanceToolReclaimWatermark(db, sessionId, 2);
+            const messages = [queued, reclaimable, newer];
+            const targets = new Map<number, TagTarget>([
+                [1, makeDropTarget(queued)],
+                [2, makeDropTarget(reclaimable)],
+                [3, makeDropTarget(newer)],
+            ]);
+
+            // A changed model or system prompt rewrites the bytes in front of the
+            // conversation, so the fold lands everything queued at 40% usage:
+            // the queued drop and the age reclaim bookmarked up to tag 2.
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    currentTurnId: `turn-hardfold-reclaim-${trigger.reason}`,
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: trigger.hard,
+                    },
+                }),
+            );
+
+            const statuses = new Map(
+                getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+            );
+            expect(statuses.get(1)).toBe("dropped");
+            expect(statuses.get(2)).toBe("dropped");
+            expect(statuses.get(3)).toBe("active");
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
+
+            const deferReplayBytes = JSON.stringify(messages);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    currentTurnId: `turn-hardfold-reclaim-${trigger.reason}-replay`,
+                    sessionMeta: getOrCreateSessionMeta(db, sessionId),
+                }),
+            );
+
+            expect(JSON.stringify(messages)).toBe(deferReplayBytes);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 3)?.status).toBe(
+                "active",
+            );
+        });
+    }
+
     it("does NOT drain while the historian runs on a NON-busting defer pass", async () => {
         // Counterpart: same historian-running condition, but NO hard fold and NOT
         // an execute pass → the compartmentRunning veto still holds (don't mutate

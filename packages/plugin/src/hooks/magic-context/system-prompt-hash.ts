@@ -467,10 +467,9 @@ export function createSystemPromptHashHandler(deps: {
         // are the volatile resident at m[1]. Keep only guidance + sticky
         // date in system so BP1 remains stable.
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
-        // An idle-expired request still lets the sticky date advance (below), but
-        // it is not a reason to adopt a changed prompt without a fold: the prompt
-        // change itself rewrites the bytes before the conversation, so it folds
-        // and drains like a change on a warm cache.
+        // An idle-expired request is treated exactly like a warm one: the provider
+        // only forgot its cache, so the expiry neither moves the sticky date nor
+        // adopts a changed prompt without a fold. It is kept for the log line.
         const idleCacheExpired =
             sessionMetaEarly !== undefined &&
             computeHardCacheExpired(
@@ -573,18 +572,18 @@ export function createSystemPromptHashHandler(deps: {
             deps.historyRefreshSessions,
             dateRequest,
         );
-        // An idle-expired request rewrites the provider cache, but a signed
-        // thinking block the messages pass kept on the wire stays bound to every
-        // byte in front of it, the system date included. On a prefix-bound model
-        // the date therefore stays frozen while the messages pass reports that
-        // it served signed thinking, as on any other bust.
+        // A signed thinking block the messages pass kept on the wire stays bound
+        // to every byte in front of it, the system date included. On a
+        // prefix-bound model the date therefore stays frozen while the messages
+        // pass reports that it served signed thinking, even on a permitted bust.
         const signedThinkingKept = systemDateSignedThinkingKept(
             deps.historyRefreshSessions,
             dateRequest,
         );
         // The one rule for moving the date: the request must be allowed to
-        // rewrite the prefix (a permitted rebuild, or an expired provider cache)
-        // and its messages pass must not report that it served signed thinking.
+        // rewrite the prefix (a permitted rebuild; an expired provider cache is
+        // not one, because the same bytes are replayed) and its messages pass
+        // must not report that it served signed thinking.
         // A pass that cannot report it (an ambiguous pairing, the Rust transform)
         // counts as not kept, as before. A held pass keeps that thinking even
         // when it is permitted to apply other work, so its date stays frozen.
@@ -595,19 +594,17 @@ export function createSystemPromptHashHandler(deps: {
         // accuracy about today; a moved date in front of served signed thinking
         // invalidates it, and the provider rejects the request.
         const systemDateMayMove = (rewrite: boolean, keptSignedThinking: boolean | undefined) =>
-            (rewrite || idleCacheExpired) && keptSignedThinking !== true;
+            rewrite && keptSignedThinking !== true;
         // A queued refresh alone cannot change the prompt before an assistant's
         // encrypted thinking that still requires its original earlier messages.
         // If the system hook runs first, wait for a permitted messages rebuild;
         // if the messages hook ran first, use its completed rebuild decision.
-        // On a prefix-bound model an idle-expired request waits the same way,
-        // for the messages pass to say whether it served signed thinking.
         let deferredDateRefresh = false;
         if (
             currentDate &&
             stickyDate &&
             currentDate !== stickyDate &&
-            (idleCacheExpired ? prefixBoundModel : isCacheBusting) &&
+            isCacheBusting &&
             !contentOrPresetChanged &&
             !requestMessagesFinal
         ) {

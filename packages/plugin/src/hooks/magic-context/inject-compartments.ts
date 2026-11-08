@@ -1779,9 +1779,11 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
  *   SOFT+  — defer pass, nothing new: replay m[0] AND m[1] byte-identical.
  *   SOFT   — exec / deferred-consume pass: m[1] re-renders (new compartments,
  *            new memories, new user-profile ride the m[1] delta), m[0] stays.
- *   HARD   — the provider cache is already dead (idle>TTL, model/system/tools
- *            changed) OR a genuine m[0] *content* marker changed: fold m[1] into
- *            m[0], re-run decay, reset m[1].
+ *   HARD   — the bytes before the conversation changed (model, system prompt or
+ *            tools changed, a host compaction) OR a genuine m[0] *content*
+ *            marker changed: fold m[1] into m[0], re-run decay, reset m[1]. An
+ *            expired provider cache (idle past the TTL) is not HARD: the same
+ *            bytes are replayed, as on a warm cache.
  *
  * `mustMaterialize` returns true ONLY for HARD. New compartments and additive
  * user-profile/memory changes are deliberately NOT triggers — they are m[1]
@@ -4335,7 +4337,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     }
 
     // Pressure backstop refold: the "or we have to due to pressures" half of the
-    // m[0]/m[1] contract. When NO HARD bust (TTL/system/tools/model) has arrived
+    // m[0]/m[1] contract. When NO HARD bust (system/tools/model change) has arrived
     // but the volatile m[1] delta has grown large, fold it into m[0] (re-run
     // decay, reset m[1]) so a marathon active session can't grow m[1] unbounded.
     // Runs only on cache-busting passes where m[1] was freshly recomputed; defer

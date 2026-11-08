@@ -54,6 +54,11 @@ import {
     clearCtxReduceAvailability,
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
+import {
+    beginSystemDateRequest,
+    finishSystemDateRefresh,
+    registerSystemDateRefresh,
+} from "./system-date-refresh";
 import { createSystemPromptHashHandler, isMagicContextInternalAgent } from "./system-prompt-hash";
 
 const tempDirs: string[] = [];
@@ -183,7 +188,7 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
             clearCtxReduceAvailability(sessionId);
         }
     });
-    it("a cold handler moves a midnight date on the idle-expired request and queues its fold", async () => {
+    it("a cold handler keeps a midnight date frozen on the idle-expired request and queues no fold", async () => {
         useTempDataHome("sph-cold-midnight-");
         const sessionId = "ses-cold-midnight";
         resolveCtxReduceAvailabilityFromMessages(sessionId, [
@@ -207,12 +212,14 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
         const output = { system: ["Base\nToday's date: Sat Oct 03 2026"] };
         await cold.handler({ sessionID: sessionId }, output);
         const meta = getOrCreateSessionMeta(openDatabase(), sessionId);
-        expect(output.system.join("\n")).toContain("Today's date: Sat Oct 03 2026");
-        expect(meta.systemPromptHash).not.toBe(oldHash);
-        // The moved date changes the bytes before the conversation, so the
-        // change folds like any system-prompt change; the expiry adopts nothing.
+        // The provider only forgot its cache. The cold handler restores the
+        // recorded date and keeps it frozen, as on a warm request, so the hash
+        // and the bytes before the conversation stay the same and no fold
+        // (which would land queued drops) is queued.
+        expect(output.system.join("\n")).toContain("Today's date: Fri Oct 02 2026");
+        expect(meta.systemPromptHash).toBe(oldHash);
         expect(meta.cachedM0SystemHash).toBe(oldHash);
-        expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         clearCtxReduceAvailability(sessionId);
     });
     for (const expired of [true, false]) {
@@ -245,7 +252,9 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
             const meta = getOrCreateSessionMeta(db, sessionId);
             expect(meta.systemPromptHash).not.toBe("old-system-hash");
             // An expired cache is not a reason to adopt the change without a
-            // fold: the changed prompt rewrites the prefix, so it drains either way.
+            // fold: the changed prompt rewrites the bytes before the
+            // conversation, so the request queues the history refresh, the
+            // system-prompt refresh and a system_hash fold, as on a warm cache.
             expect(meta.cachedM0SystemHash).toBe("old-system-hash");
             expect(historyRefreshSessions.has(sessionId)).toBe(true);
             expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
@@ -253,6 +262,146 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
             clearCtxReduceAvailability(sessionId);
         });
     }
+    // The provider forgetting its cache plays no part in the system date: on a
+    // prefix-bound and on an ordinary model, with either hook first, an expired
+    // request gives the same date and queues the same refresh signals as a warm
+    // one. A real rebuild with a queued refresh (what /ctx-flush and a variant
+    // change queue) still moves the date, unless the request serves signed
+    // thinking on a prefix-bound model.
+    const DATE_MODELS = {
+        "prefix-bound": { providerID: "anthropic", modelID: "claude-sonnet-5-5" },
+        ordinary: { providerID: "openai", modelID: "gpt-4.1" },
+    } as const;
+    async function midnightRequest(opts: {
+        model: keyof typeof DATE_MODELS;
+        systemFirst: boolean;
+        expired: boolean;
+        refreshQueued: boolean;
+        messagesPass: { permitted: boolean; signedThinkingKept: boolean };
+    }) {
+        const sessionId = `ses-expiry-date-${opts.model}-${opts.systemFirst}-${opts.expired}-${opts.refreshQueued}-${opts.messagesPass.permitted}-${opts.messagesPass.signedThinkingKept}`;
+        resolveCtxReduceAvailabilityFromMessages(sessionId, [
+            { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+        ] as never);
+        const history = new Set<string>();
+        const refresh = new Set<string>();
+        const pending = new Set<string>();
+        registerSystemDateRefresh(history);
+        const { handler, clearSession } = buildHandler({
+            historyRefreshSessions: history,
+            systemPromptRefreshSessions: refresh,
+            pendingMaterializationSessions: pending,
+            resolveModel: () => DATE_MODELS[opts.model],
+        });
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { cacheTtl: "1h", lastResponseTime: Date.now() - 1_000 });
+        await handler(
+            { sessionID: sessionId },
+            { system: ["Base\nToday's date: Fri Oct 02 2026"] },
+        );
+        const baseline = getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, {
+            lastResponseTime: Date.now() - (opts.expired ? 16.5 * 3_600_000 : 1_000),
+        });
+        if (opts.refreshQueued) refresh.add(sessionId);
+        const identity = {};
+        const output = { system: ["Base\nToday's date: Sat Oct 03 2026"] };
+        const finishMessagesPass = () =>
+            finishSystemDateRefresh(
+                history,
+                beginSystemDateRequest(history, sessionId, "messages", "u", identity),
+                opts.messagesPass.permitted,
+                opts.messagesPass.signedThinkingKept,
+            );
+        if (!opts.systemFirst) finishMessagesPass();
+        await handler({ sessionID: sessionId, dateRefreshRequest: identity }, output);
+        if (opts.systemFirst) finishMessagesPass();
+        const meta = getOrCreateSessionMeta(db, sessionId);
+        clearSession(sessionId);
+        clearCtxReduceAvailability(sessionId);
+        return {
+            date: /Today's date: ([^\n]+)/.exec(output.system.join("\n"))?.[1],
+            hashMoved: meta.systemPromptHash !== baseline.systemPromptHash,
+            adopted: meta.cachedM0SystemHash === meta.systemPromptHash,
+            historyRefresh: history.has(sessionId),
+            systemPromptRefresh: refresh.has(sessionId),
+            fold: pending.has(sessionId),
+        };
+    }
+    for (const model of ["prefix-bound", "ordinary"] as const)
+        for (const systemFirst of [true, false])
+            for (const rebuilds of [false, true])
+                it(`an expired request gives the same midnight date outcome as a warm one (${model} model, ${systemFirst ? "system hook first" : "messages transform first"}, messages pass ${rebuilds ? "rebuilds" : "replays"})`, async () => {
+                    useTempDataHome("sph-expiry-date-");
+                    // A replay of a prefix-bound model's turn serves its signed
+                    // thinking; a rebuild here serves none.
+                    const messagesPass = rebuilds
+                        ? { permitted: true, signedThinkingKept: false }
+                        : { permitted: false, signedThinkingKept: model === "prefix-bound" };
+                    const request = (expired: boolean) =>
+                        midnightRequest({
+                            model,
+                            systemFirst,
+                            expired,
+                            refreshQueued: false,
+                            messagesPass,
+                        });
+                    const warm = await request(false);
+                    const expired = await request(true);
+                    expect(expired).toEqual(warm);
+                    // With no refresh queued the date stays frozen either way.
+                    expect(expired).toEqual({
+                        date: "Fri Oct 02 2026",
+                        hashMoved: false,
+                        adopted: true,
+                        historyRefresh: false,
+                        systemPromptRefresh: false,
+                        fold: false,
+                    });
+                });
+    for (const model of ["prefix-bound", "ordinary"] as const)
+        for (const systemFirst of [true, false])
+            for (const expired of [false, true])
+                it(`a rebuild with a queued refresh moves the midnight date on an ${expired ? "expired" : "warm"} request (${model} model, ${systemFirst ? "system hook first" : "messages transform first"})`, async () => {
+                    useTempDataHome("sph-rebuild-date-");
+                    const moved = await midnightRequest({
+                        model,
+                        systemFirst,
+                        expired,
+                        refreshQueued: true,
+                        messagesPass: { permitted: true, signedThinkingKept: false },
+                    });
+                    // The rebuilding request carries the new date and adopts
+                    // its hash, so nothing folds a second time.
+                    expect(moved).toEqual({
+                        date: "Sat Oct 03 2026",
+                        hashMoved: true,
+                        adopted: true,
+                        historyRefresh: false,
+                        systemPromptRefresh: false,
+                        fold: false,
+                    });
+                    if (model === "prefix-bound") {
+                        // Served signed thinking keeps the date frozen and the
+                        // refresh queued for a later rebuild that serves none.
+                        const held = await midnightRequest({
+                            model,
+                            systemFirst,
+                            expired,
+                            refreshQueued: true,
+                            messagesPass: { permitted: true, signedThinkingKept: true },
+                        });
+                        expect(held).toEqual({
+                            date: "Fri Oct 02 2026",
+                            hashMoved: false,
+                            adopted: true,
+                            historyRefresh: false,
+                            systemPromptRefresh: true,
+                            fold: false,
+                        });
+                    }
+                });
     // OpenCode 1 runs the messages transform before this hook, so the request that
     // first carries a changed system prompt cannot take Magic Context's fold. A
     // flush would rebuild on the next request and rewrite the provider cache twice.

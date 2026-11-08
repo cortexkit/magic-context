@@ -1692,7 +1692,7 @@ export interface PiInjectionOptions {
 	muralEnabled?: boolean;
 }
 
-/** Scheduler config — gates cache-busting stages on TTL + threshold. */
+/** Scheduler config — gates cache-busting stages on the execute threshold. */
 export interface PiSchedulerOptions {
 	executeThresholdPercentage:
 		| number
@@ -1724,8 +1724,9 @@ export interface PiContextHandlerOptions {
 	 */
 	injection?: PiInjectionOptions;
 	/**
-	 * Scheduler config — gates heuristic cleanup on TTL/threshold.
-	 * When omitted, defaults to 65% threshold + 5m TTL behavior.
+	 * Scheduler config — gates heuristic cleanup on the execute threshold.
+	 * When omitted, defaults to a 65% threshold and a 5m TTL (the TTL is read
+	 * for diagnostics only).
 	 */
 	scheduler?: PiSchedulerOptions;
 	/**
@@ -4974,8 +4975,8 @@ export function registerPiContextHandler(
 			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
 			const tPressureResolution = performance.now();
 
-			// Resolve scheduler decision: execute-vs-defer based on TTL
-			// + threshold. Drives whether heuristic cleanup runs on this
+			// Resolve scheduler decision: execute-vs-defer based on the
+			// execute threshold. Drives whether heuristic cleanup runs on this
 			// pass. Read live context usage from Pi (tokens/percent) and
 			// the persisted session-meta record (last_response_time,
 			// cache_ttl).

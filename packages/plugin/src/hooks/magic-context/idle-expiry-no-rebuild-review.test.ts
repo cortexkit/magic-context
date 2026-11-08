@@ -8,9 +8,11 @@
 //    expired, and when it runs before the messages transform that move queues a
 //    full fold, which lands queued ctx_reduce drops below the execute threshold.
 //    With the messages transform first, the same move is adopted without a fold.
-// 2. A session whose provider never reports usage. Nothing measures its
-//    pressure on a pass that does not already rebuild, so it never reaches the
-//    execute threshold, and the idle expiry was its only automatic rebuild.
+// 2. A session whose provider never reports usage. Without a reading the
+//    scheduler saw 0% on every pass that did not already rebuild, so it never
+//    reached the execute threshold, and the idle expiry was its only automatic
+//    rebuild. The execute decision now reads the local count of the last
+//    served request instead.
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,6 +31,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { estimateTokens } from "./read-session-formatting";
 import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
@@ -237,6 +240,21 @@ const dated = (day: string, systemFirst: boolean) => ({
     systemFirst,
 });
 
+// Enough tool steps that the calibrated count of the served request is past
+// 65% of an 80K window (26 steps read about 57% by that count).
+const USAGELESS_STEPS = 32;
+
+/** The calibrated local count the transform records for the served request. */
+function calibratedTokens(s: ReturnType<typeof session>, sessionId: string, messages: unknown) {
+    return estimateFinalWireInputTokens({
+        messages: messages as never,
+        systemPromptTokens: getOrCreateSessionMeta(s.db, sessionId).systemPromptTokens,
+        providerID: MODEL.providerID,
+        modelID: MODEL.modelID,
+        sessionId,
+    }).pressureTokens;
+}
+
 for (const host of HOSTS) {
     for (const systemFirst of [true, false])
         it(`${host}: a date rollover that only the idle expiry allows lands no queued drop (${systemFirst ? "system hook first" : "messages transform first"})`, async () => {
@@ -261,13 +279,19 @@ for (const host of HOSTS) {
 
     it(`${host}: a session whose provider reports no usage lands queued drops once its request is over the execute threshold`, async () => {
         const s = session(host, `review-usageless-${host}`, null);
-        // An 80K window: the seeded history below is far past 65% of it by a
+        // An 80K window: the seeded history below is past 65% of it by a
         // local count, but the provider never says so.
         recordDetectedContextLimit(s.db, `review-usageless-${host}`, 80_000, "openai/gpt-4.1");
-        seed(s, 26);
+        seed(s, USAGELESS_STEPS);
         const first = await s.pass();
         const localTokens = estimateTokens(JSON.stringify(first.messages));
         expect(localTokens).toBeGreaterThan(0.65 * 80_000);
+        // The execute decision reads the calibrated count of the served request
+        // (what the provider would likely report), so the seed must put that
+        // count past the threshold too.
+        expect(calibratedTokens(s, `review-usageless-${host}`, first.messages)).toBeGreaterThan(
+            0.65 * 80_000,
+        );
         await s.pass();
         const tag = s.dropOldestTool();
         await s.pass();
@@ -276,14 +300,39 @@ for (const host of HOSTS) {
         await s.pass();
         await s.pass();
         await s.pass();
-        // Every pass above reported 0% to the scheduler, because nothing counts
-        // the request of a provider that never reports usage unless the pass
-        // already rebuilds. When an expired cache still triggered a rebuild, the
-        // idle-expired pass landed this drop; without it no pass ever lands it,
-        // and the drop waits for /ctx-flush or a provider overflow error.
+        // A provider that never reports usage gives the scheduler no reading,
+        // so the execute decision reads the calibrated local count of the last
+        // served request; past the threshold, an execute pass lands this drop.
+        // Without that count every pass read 0%, and once an expired cache no
+        // longer triggered a rebuild the drop waited for /ctx-flush or a
+        // provider overflow error.
         expect({ pendingOps: s.pendingOps(), status: s.status(tag) }).toEqual({
             pendingOps: 0,
             status: "dropped",
+        });
+    });
+
+    it(`${host}: control: a session whose provider reports usage below the threshold keeps its queued drop, whatever the local count`, async () => {
+        const sessionId = `review-usage-${host}`;
+        // The provider measures this session at 30%.
+        const s = session(host, sessionId, 30);
+        recordDetectedContextLimit(s.db, sessionId, 80_000, "openai/gpt-4.1");
+        seed(s, USAGELESS_STEPS);
+        const first = await s.pass();
+        expect(calibratedTokens(s, sessionId, first.messages)).toBeGreaterThan(0.65 * 80_000);
+        await s.pass();
+        const tag = s.dropOldestTool();
+        await s.pass();
+        await s.pass();
+        s.idle();
+        await s.pass();
+        await s.pass();
+        await s.pass();
+        // The provider's reading decides the execute threshold; the local count
+        // is never read while a provider reading exists.
+        expect({ pendingOps: s.pendingOps(), status: s.status(tag) }).toEqual({
+            pendingOps: 1,
+            status: "active",
         });
     });
 }

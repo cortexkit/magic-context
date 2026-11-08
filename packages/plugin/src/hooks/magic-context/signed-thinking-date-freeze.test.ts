@@ -631,8 +631,10 @@ for (const host of HOSTS)
             if (!compactionOff) {
                 const today = days.at(-1)!;
                 s.dropOldestTool();
-                // What /ctx-flush signals: a forced materialization and a
-                // system-prompt refresh.
+                // /ctx-flush queues two things: a forced rebuild of m[0]/m[1],
+                // which lands the queued drop and strips the earlier signed
+                // thinking, and a system-prompt refresh, which lets that
+                // rebuilding pass move the date.
                 s.flush();
                 s.systemPromptRefreshSessions.add(sessionId);
                 s.step(++n, 200);

@@ -109,17 +109,25 @@ describe("savedProviderReadingForPass", () => {
         currentModelKey: "mock/model-a",
         contextLimit: 91_808,
         lastResponseTime: 1_000,
-        cacheExpired: false,
     };
 
-    it("returns the saved reading for the same model and limit inside the cache window", () => {
+    it("returns the saved reading for the same model and limit, however old the last response is", () => {
         expect(savedProviderReadingForPass(qualifying)).toEqual({
             percentage: 59.9,
             inputTokens: 55_000,
         });
+        // A provider cache that expired three hours ago does not make the
+        // reading stale: it still describes the last request this model was
+        // sent, so a pass that rebuilds after a restart prices from it.
+        expect(
+            savedProviderReadingForPass({
+                ...qualifying,
+                lastResponseTime: Date.now() - 3 * 60 * 60 * 1000,
+            }),
+        ).toEqual({ percentage: 59.9, inputTokens: 55_000 });
     });
 
-    it("refuses a reading for another model, another or unknown limit, or an expired cache", () => {
+    it("refuses a reading for another model, another or unknown limit, or no served response", () => {
         expect(
             savedProviderReadingForPass({ ...qualifying, currentModelKey: "mock/model-b" }),
         ).toBeNull();
@@ -140,7 +148,6 @@ describe("savedProviderReadingForPass", () => {
                 persisted: { ...persisted, lastUsageContextLimit: 0 },
             }),
         ).toBeNull();
-        expect(savedProviderReadingForPass({ ...qualifying, cacheExpired: true })).toBeNull();
         expect(savedProviderReadingForPass({ ...qualifying, lastResponseTime: 0 })).toBeNull();
     });
 

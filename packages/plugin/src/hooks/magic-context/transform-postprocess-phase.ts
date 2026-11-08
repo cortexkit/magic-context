@@ -2713,8 +2713,10 @@ export async function runPostTransformPhase(
     // cache is still warm. First render and pressure relief can admit work,
     // but the target guards still forbid changes before any retained
     // signature. A genuine prefix rewrite first omits every signed block. The
-    // directory veto freezes injection only. The historian's redundancy skip
-    // applies the same predicate.
+    // directory veto freezes injection only. The historian trigger
+    // (compartment-trigger.ts) asks reclaimRidePermitted the same question
+    // before it skips a historian run on the grounds that queued drops will
+    // land, so both agree on whether those drops can land on this pass.
     const publishedWorkDrainAllowed =
         (!compactionOff || servedShapeRepair.needsRebuild) &&
         reclaimRidePermitted(rideSignals, {
@@ -3528,8 +3530,8 @@ export async function runPostTransformPhase(
         }
         // A prepared request has not refreshed the provider cache. In particular,
         // an aborted request may never report usage. Keep the response clock until
-        // the provider answers; cachedM0MaterializedAt already consumes the idle
-        // fold, so an expired retry can replay it without folding a second time.
+        // the provider answers. An expired retry then replays the same bytes: an
+        // expired provider cache grants no fold of its own.
 
         // Consume only after the shared tool/text batch actually changed bytes.
         if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
