@@ -76,6 +76,10 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn notice_keep(&self, _session: &SessionRef) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// Whether the runner explicitly admits clearing system-note reminders.
+    fn turn_system_cleared(&self, _session: &SessionRef) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
     /// Whether the runner on this scoped child route accepts cache requests.
     /// An unknown or unavailable declaration leaves the runner's defaults in use.
     fn child_cache_policy(&self, _child: &Child) -> impl Future<Output = bool> + Send {

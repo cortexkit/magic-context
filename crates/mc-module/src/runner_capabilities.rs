@@ -10,7 +10,13 @@ use tokio::sync::OnceCell;
 
 use crate::client::ClientError;
 
-type Declaration = (u64, Arc<OnceCell<HashSet<String>>>);
+type Declaration = (u64, Arc<OnceCell<Features>>);
+
+#[derive(Clone, Default)]
+struct Features {
+    capabilities: HashSet<String>,
+    delivery_order_modes: HashSet<String>,
+}
 
 /// In-memory declarations, shared by summaries using the same runner and
 /// consumer connection. Negative answers are cached too, to avoid repeated
@@ -30,8 +36,9 @@ impl RunnerCapabilities {
             .remove(runner);
     }
 
-    /// Only the capabilities array matters. Other discovery fields belong to
-    /// the runner and may evolve independently of this caller.
+    /// Read only the feature names ck-mc needs, without validating the entire
+    /// describe. Unknown capability groups and delivery modes must not disable
+    /// unrelated features such as notice_keep (automatic notice reclaim).
     pub async fn cache_policy(
         &self,
         runner: &str,
@@ -40,6 +47,7 @@ impl RunnerCapabilities {
     ) -> bool {
         self.declared(runner, connection_epoch, describe)
             .await
+            .capabilities
             .contains("cache_policy")
     }
 
@@ -51,7 +59,21 @@ impl RunnerCapabilities {
     ) -> bool {
         let declared = self.declared(runner, connection_epoch, describe).await;
         // The runner contract requires message_marks alongside notice_keep.
-        declared.contains("notice_keep") && declared.contains("message_marks")
+        declared.capabilities.contains("notice_keep")
+            && declared.capabilities.contains("message_marks")
+    }
+
+    /// Clearing system notes are opt-in, never implied by delivery_order.
+    pub async fn turn_system_cleared(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .delivery_order_modes
+            .contains("turn_system_cleared")
     }
 
     async fn declared(
@@ -59,7 +81,7 @@ impl RunnerCapabilities {
         runner: &str,
         connection_epoch: u64,
         describe: impl Future<Output = Result<Value, ClientError>>,
-    ) -> HashSet<String> {
+    ) -> Features {
         let cell = {
             let mut runners = self.runners.lock().expect("runner capabilities");
             let declaration = runners
@@ -74,20 +96,26 @@ impl RunnerCapabilities {
             .get_or_init(|| async {
                 match describe.await {
                     Ok(value) => {
-                        let declared: HashSet<String> = value["capabilities"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|group| group.as_str().map(str::to_owned))
-                            .collect();
-                        if !declared.contains("cache_policy") {
+                        let names = |field: &str| {
+                            value[field]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|name| name.as_str().map(str::to_owned))
+                                .collect()
+                        };
+                        let declared = Features {
+                            capabilities: names("capabilities"),
+                            delivery_order_modes: names("delivery_order_modes"),
+                        };
+                        if !declared.capabilities.contains("cache_policy") {
                             tracing::info!(runner, "summarizer cache omitted: runner does not declare cache_policy");
                         }
                         declared
                     }
                     Err(error) => {
                         tracing::warn!(runner, reason = %error.message, "summarizer cache omitted: runner discovery failed");
-                        HashSet::new()
+                        Features::default()
                     }
                 }
             })

@@ -15,7 +15,7 @@ use cortexkit_role_compaction::view::{
     AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
     MAX_VIEW_BYTES,
 };
-use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode, TemplateUse};
+use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::Value;
 
@@ -1637,14 +1637,10 @@ impl Session {
         let turns = self.pruned_turns + crate::nudges::person_turns(self.index.entries());
         let reminders = self.nudges.decide(&measurement, rebuilt, turns, cut_moved);
         let sends = [
-            (
-                reminders.tool_result,
-                crate::nudges::REMINDER_KIND,
-                Mode::ToolResult,
-            ),
-            (reminders.ceiling, crate::nudges::CEILING_KIND, Mode::Steer),
+            (reminders.tool_result, crate::nudges::REMINDER_KIND),
+            (reminders.ceiling, crate::nudges::CEILING_KIND),
         ];
-        for (template, kind, mode) in sends {
+        for (template, kind) in sends {
             let Some(template) = template else {
                 continue;
             };
@@ -1654,7 +1650,7 @@ impl Session {
             let Some(send_id) = self.next_reminder_id(kind) else {
                 continue;
             };
-            let request = reminder(send_id, template, kind, mode);
+            let request = self.reminder(client, send_id, template, kind).await;
             if let Err(error) = client.send(&self.key, request).await {
                 tracing::warn!(
                     "ck-mc: session {}: session.send failed: {error:?}",
@@ -1728,12 +1724,14 @@ impl Session {
         let Some(send_id) = self.next_reminder_id(KEEP_KIND) else {
             return;
         };
-        let request = reminder(
-            send_id,
-            crate::nudges::keep_request(usage, freed),
-            KEEP_KIND,
-            Mode::Steer,
-        );
+        let request = self
+            .reminder(
+                client,
+                send_id,
+                crate::nudges::keep_request(usage, freed),
+                KEEP_KIND,
+            )
+            .await;
         match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
             Err(error) => tracing::warn!(
@@ -1741,6 +1739,24 @@ impl Session {
                 self.key.session
             ),
         }
+    }
+
+    /// Resolve delivery at send time through the runner-connection describe
+    /// cache; Setup and reconnect can withdraw support between sends.
+    async fn reminder<C: RunnerClient>(
+        &self,
+        client: &C,
+        send_id: String,
+        template: TemplateUse,
+        kind: &str,
+    ) -> SendRequest {
+        let cleared = client.turn_system_cleared(&self.key).await;
+        SendRequest::template(
+            send_id,
+            &DeliveryOrder::new(crate::nudges::delivery(&template.id, cleared))
+                .with_dedupe_key(kind)
+                .with_template(template),
+        )
     }
 
     /// A ride: the runner is about to send a request that rewrites the cache
@@ -3906,19 +3922,6 @@ fn list(tags: &[u64]) -> String {
 }
 
 pub use crate::nudges::KEEP_KIND;
-
-/// A reminder as a plan template send (compaction contract SR1), delivered in `mode`
-/// only (`delivery_order`), so a routine reminder rides the next tool result
-/// and never starts a turn of its own. A queued reminder of the same `kind` is
-/// replaced by a newer one.
-fn reminder(send_id: String, template: TemplateUse, kind: &str, mode: Mode) -> SendRequest {
-    SendRequest::template(
-        send_id,
-        &DeliveryOrder::new(vec![mode])
-            .with_dedupe_key(kind)
-            .with_template(template),
-    )
-}
 
 /// Roughly what dropping `covered` frees: the parts not already changed by
 /// an earlier view.

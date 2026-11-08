@@ -166,18 +166,26 @@ pub fn plan_sender() -> PlanSender {
     PlanSender::new("magic-context").with_templates(templates())
 }
 
-/// How ck-mc sends a template: the ceiling reminder and the `ctx_keep`
-/// request as a steer, every other reminder with the next tool result.
-pub fn delivery(template_id: &str) -> Mode {
-    if template_id == KEEP_TEMPLATE || template_id.starts_with("mc.ctx_reduce.ceiling.") {
-        Mode::Steer
+/// Prefer a clearing system note only when this runner names the mode. The
+/// fallback is a steer for the ceiling and `ctx_keep`, else a tool-result ride.
+/// Plain turn_system persists in later requests and is never a reminder mode.
+pub fn delivery(template_id: &str, turn_system_cleared: bool) -> Vec<Mode> {
+    let fallback =
+        if template_id == KEEP_TEMPLATE || template_id.starts_with("mc.ctx_reduce.ceiling.") {
+            Mode::Steer
+        } else {
+            Mode::ToolResult
+        };
+    if turn_system_cleared {
+        vec![Mode::TurnSystemCleared, fallback]
     } else {
-        Mode::ToolResult
+        vec![fallback]
     }
 }
 
 /// The template list core checks before it admits ck-mc as a plan sender:
-/// each template's id, its digest and how ck-mc delivers it.
+/// each template's id, its digest and all modes ck-mc may use. Actual sends
+/// narrow this admission list to the modes the receiving runner declares.
 pub fn template_catalog() -> Vec<Value> {
     templates()
         .iter()
@@ -185,7 +193,7 @@ pub fn template_catalog() -> Vec<Value> {
             json!({
                 "id": template.id,
                 "digest": template_digest(template),
-                "delivery": [delivery(&template.id)],
+                "delivery": delivery(&template.id, true),
             })
         })
         .collect()

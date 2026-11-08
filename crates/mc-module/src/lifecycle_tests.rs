@@ -15,6 +15,9 @@ mod pass_decision_tests;
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
+#[path = "reminder_delivery_tests.rs"]
+mod reminder_delivery_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
@@ -37,6 +40,17 @@ impl RunnerClient for Client {
     async fn notice_keep(&self, session: &SessionRef) -> bool {
         self.capabilities
             .notice_keep(&session.runner, 1, async {
+                self.descriptions
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(serde_json::json!({})))
+            })
+            .await
+    }
+    async fn turn_system_cleared(&self, session: &SessionRef) -> bool {
+        self.capabilities
+            .turn_system_cleared(&session.runner, 1, async {
                 self.descriptions
                     .lock()
                     .unwrap()

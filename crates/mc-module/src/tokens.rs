@@ -85,6 +85,8 @@ pub fn tool_output(part: &Part, tool: &ToolPart) -> u64 {
 }
 
 fn rides(tool: &ToolPart) -> u64 {
+    // Count clearing system-note rides like tool-result rides until measured
+    // provider usage is available; then follow that measured usage.
     tool.delivered
         .iter()
         .map(|ride| {
@@ -222,6 +224,40 @@ mod tests {
         assert_eq!(super::part(&part), 1013);
         assert_eq!(result(&part), 1006);
         assert_eq!(removed_by_summary(&part), 7);
+    }
+
+    #[test]
+    fn cleared_rides_keep_the_same_conservative_weight_as_tool_result_rides() {
+        for counts in [None, Some(PartTokens::tool(12, 700))] {
+            for ride_count in [None, Some(TokenCount::new(9))] {
+                let ride: Delivered = serde_json::from_value(serde_json::json!({
+                    "sender": "sender", "text_bytes": 17,
+                    "forms": ["turn_system_cleared"], "tokens": ride_count,
+                }))
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&ride).unwrap()["forms"],
+                    serde_json::json!(["turn_system_cleared"])
+                );
+                let part = with_rides(counts, vec![ride]);
+                let output = if counts.is_some() {
+                    700
+                } else if ride_count.is_some() {
+                    1009
+                } else {
+                    1005
+                };
+                assert_eq!(result(&part), output);
+                assert_eq!(
+                    super::part(&part),
+                    output + if counts.is_some() { 12 } else { 7 }
+                );
+                assert_eq!(
+                    removed_by_summary(&part),
+                    if counts.is_some() { 12 } else { 7 }
+                );
+            }
+        }
     }
 
     #[test]
