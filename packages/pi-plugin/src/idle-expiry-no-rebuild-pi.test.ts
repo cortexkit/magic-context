@@ -184,7 +184,9 @@ test("Pi: an idle expiry below the execute threshold replays the request byte-id
 		s.idle();
 		const expired = await s.pass();
 		expect(
-			s.logs.some((line) => line.includes("HARD fold decision: reason=ttl_idle")),
+			s.logs.some((line) =>
+				line.includes("HARD fold decision: reason=ttl_idle"),
+			),
 		).toBe(false);
 		expect(expired).toBe(warm);
 		expect(s.pendingOps()).toBe(1);
