@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledCatalogGuidance } from "../../scripts/catalog-guidance.fixture";
+import { CTX_REDUCE_DESCRIPTION } from "../tools/ctx-reduce/constants";
+import { CTX_REDUCE_LIGHT_DESCRIPTION } from "../tools/light-descriptions";
 import { buildMagicContextSection } from "./magic-context-prompt";
 
 const CAVEMAN_MARKER = "BEWARE";
@@ -117,6 +119,61 @@ describe("buildMagicContextSection — subagent mode", () => {
         const explicitFalse = buildMagicContextSection(null, 20, true, false, false, false, false);
         expect(sixArg).toBe(explicitFalse);
         expect(sixArg).toContain("long-term partner");
+    });
+});
+
+describe("notice stamping guidance", () => {
+    it("allows acted-on notices to be stamped while preserving the user's messages and answers", () => {
+        const head = buildMagicContextSection(null, 20, true, false, false, false);
+        const subagent = buildMagicContextSection(null, 20, true, false, false, false, true);
+
+        expect(head).toContain("Never stamp the user's own message for what it asks of you");
+        expect(head).toContain(
+            "A notice in a `<system-reminder>` block, such as an inbox wake, a room digest or a worker's result, is not the user's message: stamp it once you have acted on it, unless it holds the user's answer to your question.",
+        );
+        expect(subagent).toContain("Never stamp the user's own message for what it asks of you");
+        expect(subagent).toContain(
+            "a notice in a `<system-reminder>` block can go once you have acted on it. Look at each tag before stamping",
+        );
+        expect(CTX_REDUCE_DESCRIPTION).toContain(
+            "a notice in a `<system-reminder>` block (an inbox wake, a room digest, a worker's result) once you have acted on it",
+        );
+        expect(CTX_REDUCE_DESCRIPTION).toContain(
+            "Keep: the user's own messages (never stamp one for its directive), a notice that holds the user's answer to your question,",
+        );
+        const lightHead = buildMagicContextSection(
+            null,
+            20,
+            true,
+            false,
+            false,
+            false,
+            false,
+            undefined,
+            true,
+            "light",
+        );
+        const lightSubagent = buildMagicContextSection(
+            null,
+            20,
+            true,
+            false,
+            false,
+            false,
+            true,
+            undefined,
+            false,
+            "light",
+        );
+        expect(lightHead).toContain(
+            "never stamp the user's own message for what it asks (a used paste inside one is fine); a `<system-reminder>` notice can go once acted on, unless it holds the user's answer to your question.",
+        );
+        expect(lightSubagent).toContain(
+            "never stamp the user's own message for what it asks; a `<system-reminder>` notice can go once acted on;",
+        );
+        expect(CTX_REDUCE_LIGHT_DESCRIPTION).toContain(
+            "acted-on `<system-reminder>` notices; keep the user's own messages, notices holding the user's answer to your question,",
+        );
     });
 });
 

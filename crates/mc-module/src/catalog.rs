@@ -8,8 +8,7 @@
 //! `assets/tool_catalog_v1.json`: the
 //! tools, their argument-schema structures, descriptions and parameter
 //! descriptions, and the guidance templates. The fixture generator
-//! (`crates_old/mc-module/gen/gen-tool-catalog.ts`, which still writes to
-//! the old fixture folder and has to move here before `crates_old/` goes)
+//! (`crates/mc-module/gen/gen-tool-catalog.ts`)
 //! reads the same files and checks them against the plugin's shipped
 //! strings.
 //!
