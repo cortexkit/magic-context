@@ -120,7 +120,11 @@ const COVERED_INSTRUCTION_ROW = "coveredInstructionRow";
 const HOST_INSTRUCTION_ROW = "hostInstructionRow";
 const RETIRED_INSTRUCTION_ROW = "retiredInstructionRow";
 
-/** Store coordinates are internal observations, not part of the served request identity. */
+/**
+ * Attach the stored instruction row a host-rendered message came from. The
+ * property is non-enumerable so it never reaches the request bytes or the
+ * last-good request's identity; only Magic Context's own lookups read it.
+ */
 export function markHostInstructionRow(target: object, row: unknown): void {
     Object.defineProperty(target, HOST_INSTRUCTION_ROW, {
         value: row,

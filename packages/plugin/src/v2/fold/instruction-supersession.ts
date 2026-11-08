@@ -49,8 +49,11 @@ export function reclaimInstructionRows(
     for (const { message, row } of rows) {
         if (!omitted.has(row.id)) continue;
         if (newlyRetired.has(row.id) && message.parts.length > 0) edits.push(message);
-        // Keep the position until the transform checks whether removing the row
-        // invalidates later signed reasoning. The payload bridge omits the emptied row.
+        // Empty the row in place rather than removing it. On some Anthropic models
+        // a thinking block's signature covers every byte before it, so removing
+        // this row invalidates later thinking. The transform still needs the
+        // row's position to find and strip that thinking. The payload bridge
+        // leaves the emptied row out of the request.
         message.parts = [];
     }
     return {
