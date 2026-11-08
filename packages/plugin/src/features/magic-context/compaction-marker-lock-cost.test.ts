@@ -610,20 +610,18 @@ for (const change of ["higher ID", "backdated ID", "known part rewritten"] as co
                 // A backdated ID sorts below every part the worker saw, yet SQLite
                 // still gives the new row a rowid above the worker's frontier.
                 expect(id < highest.id).toBe(change === "backdated ID");
-                f.host
-                    .prepare("INSERT INTO part VALUES (?,?,?,?,?,?)")
-                    .run(
-                        id,
-                        messageId(1),
-                        SESSION,
-                        1,
-                        1,
-                        JSON.stringify({
-                            type: "compaction",
-                            auto: true,
-                            tail_start_id: f.marker.summaryMessageId,
-                        }),
-                    );
+                f.host.prepare("INSERT INTO part VALUES (?,?,?,?,?,?)").run(
+                    id,
+                    messageId(1),
+                    SESSION,
+                    1,
+                    1,
+                    JSON.stringify({
+                        type: "compaction",
+                        auto: true,
+                        tail_start_id: f.marker.summaryMessageId,
+                    }),
+                );
             }
             const before = hostRows(f.host);
             const outcome = moveMarker(f);

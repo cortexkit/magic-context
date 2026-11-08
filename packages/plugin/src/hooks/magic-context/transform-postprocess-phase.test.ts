@@ -3878,7 +3878,9 @@ describe("deferred compaction marker CAS drain", () => {
             released: () => existsSync(`${hostPath}.release`),
             deferralLogs: () =>
                 logs.mock.calls.filter(([, line]) =>
-                    String(line).includes("compaction-marker drain: candidate preparation deferred"),
+                    String(line).includes(
+                        "compaction-marker drain: candidate preparation deferred",
+                    ),
                 ).length,
             restore() {
                 clearTimeout(timer);
@@ -3900,7 +3902,9 @@ describe("deferred compaction marker CAS drain", () => {
         try {
             for (const attempt of [1, 2]) {
                 const { elapsedMs, messages, passOutcome } = await f.pass();
-                console.log(`no-wait marker drain: deferring pass ${attempt} took ${elapsedMs.toFixed(1)}ms`);
+                console.log(
+                    `no-wait marker drain: deferring pass ${attempt} took ${elapsedMs.toFixed(1)}ms`,
+                );
                 expect(elapsedMs).toBeLessThan(NO_WAIT_PASS_BOUND_MS);
                 expect(passOutcome.degradations).toEqual([]);
                 expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");

@@ -2,6 +2,7 @@ import { afterEach, expect, it, spyOn } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import {
     closeDatabase,
@@ -646,6 +647,9 @@ for (const contentChange of [false, true]) {
                 publishedAt: Date.now(),
             });
             deferredHistoryRefreshSessions.add(sessionId);
+            // A pass never waits for marker discovery; finish it before the passes
+            // that are expected to move the marker.
+            expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
             if (contentChange)
                 await signals.handler(
                     { sessionID: sessionId },

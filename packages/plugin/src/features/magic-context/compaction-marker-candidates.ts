@@ -347,9 +347,12 @@ export function scanMarkerCandidateSnapshot(
 /** The newest row of a host table by rowid, or null when the table is empty. */
 export function readMarkerFrontier(db: Database, table: "part" | "message"): MarkerFrontier | null {
     // all() rather than get(): a cursor left mid-step can pin the read snapshot.
-    const frontier = ((
-        db.prepare(`SELECT rowid,id FROM ${table} ORDER BY rowid DESC LIMIT 1`).all() as Array<MarkerFrontier>
-    )[0] ?? null);
+    const frontier =
+        (
+            db
+                .prepare(`SELECT rowid,id FROM ${table} ORDER BY rowid DESC LIMIT 1`)
+                .all() as Array<MarkerFrontier>
+        )[0] ?? null;
     if (frontier && !Number.isSafeInteger(frontier.rowid))
         throw new Error(`marker ${table} frontier rowid is not a safe integer`);
     return frontier;
