@@ -19,6 +19,14 @@
  * unchanged.
  */
 
+import type { MessageLike } from "./tag-messages";
+
+/** A staged row edit becomes durable only after dependent reasoning decisions commit. */
+export interface HostRowReclaim {
+    edits: readonly MessageLike[];
+    commit(): void;
+}
+
 const HOST_UNSERVED_ROW = "hostUnservedRow";
 
 /** Mark a raw message (or a chunk line derived from one) as a row the host never serves by id. */
@@ -110,6 +118,7 @@ export function isHostRenderedSystemMessage(message: {
 
 const COVERED_INSTRUCTION_ROW = "coveredInstructionRow";
 const HOST_INSTRUCTION_ROW = "hostInstructionRow";
+const RETIRED_INSTRUCTION_ROW = "retiredInstructionRow";
 
 /** Store coordinates are internal observations, not part of the served request identity. */
 export function markHostInstructionRow(target: object, row: unknown): void {
@@ -122,6 +131,24 @@ export function markHostInstructionRow(target: object, row: unknown): void {
 
 export function hostInstructionRow(target: object): unknown {
     return (target as Record<string, unknown>)[HOST_INSTRUCTION_ROW];
+}
+
+export function hostInstructionRowID(target: object): string | undefined {
+    const row = hostInstructionRow(target) as { id?: unknown } | undefined;
+    return typeof row?.id === "string" && row.id.length > 0 ? row.id : undefined;
+}
+
+/** Mark only a retirement whose replay decision is already durable. */
+export function markRetiredInstructionRow(target: object): void {
+    Object.defineProperty(target, RETIRED_INSTRUCTION_ROW, {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    });
+}
+
+export function isRetiredInstructionRow(target: object): boolean {
+    return (target as Record<string, unknown>)[RETIRED_INSTRUCTION_ROW] === true;
 }
 
 /**
@@ -176,6 +203,7 @@ export function cloneKeepingCoveredInstructionMarks<T extends { info: object }>(
         if (copied && isCoveredInstructionRow(message.info)) markCoveredInstructionRow(copied.info);
         const row = hostInstructionRow(message.info);
         if (copied && row !== undefined) markHostInstructionRow(copied.info, row);
+        if (copied && isRetiredInstructionRow(message.info)) markRetiredInstructionRow(copied.info);
     });
     return copy;
 }

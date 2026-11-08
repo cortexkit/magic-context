@@ -1,5 +1,11 @@
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import { isCoveredInstructionRow, markCoveredInstructionRow } from "./host-served-rows";
+import {
+    hostInstructionRowID,
+    isCoveredInstructionRow,
+    isRetiredInstructionRow,
+    markCoveredInstructionRow,
+    markHostInstructionRow,
+} from "./host-served-rows";
 import { claimLkgRequestIdentity, noteCapturedLkgRequest } from "./lkg-measured-request";
 import {
     captureSlot,
@@ -63,6 +69,8 @@ export interface LkgEntryProjection {
     hasIncompleteTool: boolean;
     /** Immutable entry digest, exposed non-enumerably without retaining the live message. */
     contentDigest?: () => string | null;
+    /** Digest for this input row with empty parts; usable only when its matching store row is retired. */
+    retiredContentDigest?: () => string | null;
 }
 
 export function projectLkgEntry(messages: MessageLike[]): LkgEntryProjection[] {
@@ -150,6 +158,15 @@ function projectEntryWithDigests(
             enumerable: false,
         });
         if (isCoveredInstructionRow(message.info)) markCoveredInstructionRow(projection);
+        const instructionID = hostInstructionRowID(message.info);
+        if (instructionID) {
+            markHostInstructionRow(projection, { id: instructionID });
+            const retiredDigest = lkgContentDigest({ ...message, parts: [] });
+            Object.defineProperty(projection, "retiredContentDigest", {
+                value: () => retiredDigest,
+                enumerable: false,
+            });
+        }
         return projection;
     });
 }
@@ -324,7 +341,7 @@ export function buildLkgPrefix(
     jsonPrefix: string;
 } | null {
     const projected = asEntryProjection(input);
-    const anchorIndex =
+    let anchorIndex =
         completeOutput && projected.length > 0 ? projected.length - 1 : findLkgAnchor(projected);
     if (anchorIndex === null) return null;
     const ids = projected.map((message, index) =>
@@ -333,11 +350,6 @@ export function buildLkgPrefix(
     if (ids.some((id) => id === null)) return null;
     const validIds = ids as string[];
     if (new Set(validIds).size !== validIds.length) return null;
-    const anchorMessageId = validIds[anchorIndex];
-    const inputContentDigests = projected
-        .slice(0, anchorIndex + 1)
-        .map((message) => message.contentDigest?.() ?? null);
-    if (inputContentDigests.some((digest) => digest === null)) return null;
     const inputIndexById = new Map(validIds.map((id, index) => [id, index]));
     const systemIndices = new Map<MessageLike, number>();
     if (!completeOutput) {
@@ -362,21 +374,56 @@ export function buildLkgPrefix(
                 .some((message) => !isCoveredInstructionRow(message.info))
         )
             return null;
+        let retirementAnchor = anchorIndex;
+        let retirementExtensionValid = true;
         for (let index = 0; index < inputSystems.length; index += 1) {
             const source = inputSystems[index];
             const message = outputSystems[index + restoredCount];
             const digest = source.message.contentDigest?.();
-            if (!digest || lkgContentDigest(message) !== digest) return null;
+            const servedDigest = lkgContentDigest(message);
+            const sourceID = hostInstructionRowID(source.message);
+            const expectedDigest = isRetiredInstructionRow(message.info)
+                ? sourceID && hostInstructionRowID(message.info) === sourceID
+                    ? source.message.retiredContentDigest?.()
+                    : undefined
+                : digest;
+            if (!digest) return null;
+            if (!expectedDigest || servedDigest !== expectedDigest) {
+                if (!isRetiredInstructionRow(message.info) || source.index <= anchorIndex)
+                    return null;
+                // An unproven retired shape may stay outside the saved prefix.
+                // Keep the ordinary anchor and replay its pristine tail instead.
+                retirementExtensionValid = false;
+            } else if (isRetiredInstructionRow(message.info)) {
+                retirementAnchor = Math.max(retirementAnchor, source.index);
+            }
             if (isCoveredInstructionRow(message.info) && source.index > anchorIndex) return null;
             systemIndices.set(message, source.index);
         }
+        // Include validated retirements after the ordinary anchor; otherwise a
+        // saved-prefix replay would restore those retired system rows from its pristine tail.
+        if (retirementExtensionValid) anchorIndex = retirementAnchor;
     }
+    const anchorMessageId = validIds[anchorIndex];
+    const inputContentDigests = projected
+        .slice(0, anchorIndex + 1)
+        .map((message) => message.contentDigest?.() ?? null);
+    if (inputContentDigests.some((digest) => digest === null)) return null;
     const prefix: MessageLike[] = [];
     for (const message of output) {
         const postAnchor = completeOutput
             ? false
             : outputMessageIsPostAnchor(message, inputIndexById, anchorIndex, systemIndices);
         if (postAnchor === null) return null;
+        // The payload bridge omits durable empty instruction rows. Their raw
+        // coordinates still bind the prefix, but an empty system message is not
+        // part of the request the provider received.
+        if (
+            isRetiredInstructionRow(message.info) &&
+            messageRole(message) === "system" &&
+            messageParts(message).length === 0
+        )
+            continue;
         // Store only what the provider receives (see provider-visible-parts.ts).
         // The hosts build the request from the replayed array through conversions
         // that read none of the removed tool-state fields, so a replay sends the

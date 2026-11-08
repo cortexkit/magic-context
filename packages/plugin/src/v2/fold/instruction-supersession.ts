@@ -2,7 +2,11 @@ import {
     readReplayEnvelope,
     updateReplayDocument,
 } from "../../features/magic-context/storage-replay-document";
-import { hostInstructionRow } from "../../hooks/magic-context/host-served-rows";
+import {
+    type HostRowReclaim,
+    hostInstructionRow,
+    markRetiredInstructionRow,
+} from "../../hooks/magic-context/host-served-rows";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import type { Database } from "../../shared/sqlite";
 import type { StoreRow } from "../store-reader";
@@ -30,39 +34,46 @@ export function reclaimInstructionRows(
     messages: MessageLike[],
     permitted: boolean,
     folded: ReadonlySet<string> = new Set(),
-): MessageLike[] {
+): HostRowReclaim {
     const rows = messages.flatMap((message) => {
         const row = hostInstructionRow(message.info) as SupersessionRow | undefined;
         return row ? [{ message, row }] : [];
     });
-    if (!rows.length) return [];
-    let retired = retiredLiveInstructionIDs(db, sessionID);
+    const retired = rows.length ? retiredLiveInstructionIDs(db, sessionID) : new Set<string>();
     const selected = permitted
         ? supersededInstructionIDs(rows.map(({ row }) => row))
         : new Set<string>();
     const newlyRetired = new Set([...selected].filter((id) => !retired.has(id)));
-    if (newlyRetired.size > 0) {
-        if (
-            !updateReplayDocument(db, sessionID, (doc) => {
-                const current = decode(doc[namespace]);
-                if ([...newlyRetired].every((id) => current.has(id))) return false;
-                for (const id of folded) current.delete(id);
-                for (const id of newlyRetired) current.add(id);
-                doc.version = 2;
-                doc[namespace] = [...current];
-                return true;
-            })
-        )
-            throw new Error("Cannot persist instruction supersession");
-        retired = retiredLiveInstructionIDs(db, sessionID);
-    }
+    const omitted = new Set([...retired, ...newlyRetired]);
     const edits: MessageLike[] = [];
     for (const { message, row } of rows) {
-        if (!retired.has(row.id)) continue;
+        if (!omitted.has(row.id)) continue;
         if (newlyRetired.has(row.id) && message.parts.length > 0) edits.push(message);
         // Keep the position until the transform checks whether removing the row
         // invalidates later signed reasoning. The payload bridge omits the emptied row.
         message.parts = [];
     }
-    return edits;
+    return {
+        edits,
+        commit() {
+            // The transform calls this only after required thinking omissions are
+            // durable. A failed omission must leave these choices fresh for retry.
+            if (
+                newlyRetired.size > 0 &&
+                !updateReplayDocument(db, sessionID, (doc) => {
+                    const current = decode(doc[namespace]);
+                    if ([...newlyRetired].every((id) => current.has(id))) return false;
+                    for (const id of folded) current.delete(id);
+                    for (const id of newlyRetired) current.add(id);
+                    doc.version = 2;
+                    doc[namespace] = [...current];
+                    return true;
+                })
+            )
+                throw new Error("Cannot persist instruction supersession");
+            for (const { message, row } of rows) {
+                if (omitted.has(row.id)) markRetiredInstructionRow(message.info);
+            }
+        },
+    };
 }

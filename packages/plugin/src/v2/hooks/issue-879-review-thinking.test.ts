@@ -52,10 +52,12 @@ test("a retirement whose signed-thinking persistence failed must account for its
         expect(failed.logs.some((line) => line.endsWith("lkg_replay_served"))).toBe(true);
         expect(failed.bytes.includes("OLD_BEFORE_SIGNED")).toBe(true);
         expect(failed.bytes.includes("SIGNED_AGAINST_OLD_INSTRUCTION")).toBe(true);
-        expect(retiredLiveInstructionIDs(f.db, f.session).has(oldID)).toBe(true);
+        // A failed reasoning omission must roll back the retirement it would require.
+        expect(retiredLiveInstructionIDs(f.db, f.session).has(oldID)).toBe(false);
         const retry = await f.pass(thinking);
         expect(retry.bytes.includes("OLD_BEFORE_SIGNED")).toBe(false);
         expect(retry.bytes.includes("SIGNED_AGAINST_OLD_INSTRUCTION")).toBe(false);
+        expect(retiredLiveInstructionIDs(f.db, f.session).has(oldID)).toBe(true);
     } finally {
         strip.mockRestore();
         await f.cleanup();

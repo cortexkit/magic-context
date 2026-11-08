@@ -4,7 +4,7 @@ import * as instructionSupersession from "../fold/instruction-supersession";
 import { retiredLiveInstructionIDs } from "../fold/instruction-supersession";
 import { NativeFoldReplay } from "../fold/native-replay";
 import { addCodeModeEntries, replaceCodeModeCatalog } from "./__tests__/code-mode-catalog.fixture";
-import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import { installBusyAdmission, oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
 const options = { area: "issue-879", instructions: false, temporal: false, cacheTtl: "never" };
 const both = { instructionSources: ["core/codemode", "core/mcp-guidance"] };
@@ -23,6 +23,27 @@ const instructionTexts = (
     pass.draft.messages
         .filter((message) => message.role === "system")
         .flatMap((message) => message.content.map((part) => part.text));
+
+test("a retired catalog remains omitted byte-for-byte on a busy request replay", async () => {
+    const f = await oc2ContextFixture(29879, options);
+    const busy = installBusyAdmission();
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.instruction(combined("RETIRED_WIRE_CATALOG"), both);
+        f.instruction(combined("CURRENT_WIRE_CATALOG"), both);
+        f.respond(1, 900000);
+        const retired = await f.pass();
+        expect(instructionTexts(retired)).toEqual([combined("CURRENT_WIRE_CATALOG")]);
+        busy.state.busyNext = true;
+        const replay = await f.pass();
+        expect(replay.logs.some((line) => line.endsWith("lkg_replay_served"))).toBe(true);
+        expect(replay.bytes).toBe(retired.bytes);
+    } finally {
+        busy.restore();
+        await f.cleanup();
+    }
+}, 60000);
 
 test("force-band rebuild reclaims sixty combined catalogs by native row identity and replays after restart", async () => {
     const f = await oc2ContextFixture(20879, options);

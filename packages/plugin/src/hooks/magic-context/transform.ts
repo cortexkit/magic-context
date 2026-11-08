@@ -124,6 +124,7 @@ import {
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
+import type { HostRowReclaim } from "./host-served-rows";
 import { takeCoveredInstructionRows } from "./host-served-rows";
 import {
     capturePrefixTrimSourceOrder,
@@ -710,12 +711,12 @@ export interface TransformDeps {
      * derive its own permission.
      */
     onPassPermission?: (sessionId: string, prefixMutationPermitted: boolean) => void;
-    /** Host-owned row reclaim rides the shared permission and returns newly emptied messages, not replayed removals. */
+    /** Stage host-owned row edits on shared permission; commit after dependent thinking omissions. */
     reclaimHostRows?: (
         sessionId: string,
         messages: MessageLike[],
         permitted: boolean,
-    ) => readonly MessageLike[];
+    ) => HostRowReclaim;
     /** Resolved project mode. Rust mode bypasses every TS mutation below. */
     transformMode?: "ts" | "rust";
     /** Prompt-surface routing and USER description overrides forwarded to Rust mode. */
