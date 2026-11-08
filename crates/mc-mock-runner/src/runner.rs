@@ -13,7 +13,6 @@ use std::time::Instant;
 
 use cortexkit_compaction_view::clean::clean_reply;
 use cortexkit_compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
-use cortexkit_compaction_view::rules;
 use cortexkit_compaction_view::tags::tag_prefix;
 use cortexkit_role_compaction::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
@@ -401,19 +400,28 @@ impl State {
                 fields: serde_json::Map::new(),
             });
         }
-        view::apply(entries, view)?;
-        rules::check(entries, &view.edits, &self.config.rules).map_err(ViewRefusal::Rule)?;
+        view::plan_view(entries, view, &self.config.rules)?;
         Ok(())
     }
 
     fn render(&self) -> Vec<RenderedMessage> {
         let entries = self.transcript.entries();
-        let edits = self
+        let candidate = self
             .applied
             .as_ref()
-            .map(|view| edits_for_transcript(entries, &view.edits))
-            .unwrap_or_default();
-        view::apply_edits(entries, &edits)
+            .map(|applied| {
+                View::seal_with_policy(
+                    applied.version,
+                    edits_for_transcript(entries, &applied.edits),
+                    applied.built_through.clone(),
+                    applied.new_signed.clone(),
+                )
+            })
+            .unwrap_or_else(|| View::seal(1, vec![]));
+        // apply_with_rules renders the same plan_view used at acceptance and
+        // step boundaries, including render-only removal of invalid signatures
+        // in entries appended after the view's indexed watermark.
+        view::apply_with_rules(entries, &candidate, &self.config.rules)
             .expect("an applied view stays valid for the transcript it was checked against")
     }
 }
@@ -1213,16 +1221,10 @@ impl<P: Provider> Runner<P> {
                         latest,
                     })
                 } else {
-                    view::check_carried(previous.as_ref(), &view)
-                        .and_then(|()| view::apply(state.transcript.entries(), &view).map(|_| ()))
-                        .and_then(|()| {
-                            rules::check(
-                                state.transcript.entries(),
-                                &view.edits,
-                                &state.config.rules,
-                            )
-                            .map_err(ViewRefusal::Rule)
-                        })
+                    view::check_carried(previous.as_ref(), &view).and_then(|()| {
+                        view::plan_view(state.transcript.entries(), &view, &state.config.rules)
+                            .map(|_| ())
+                    })
                 }
             };
             match result {

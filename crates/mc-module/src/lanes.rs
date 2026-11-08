@@ -384,7 +384,9 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     (ops, covered)
 }
 
-/// The entry the request ends on: the newest entry that has parts. An entry
+/// The newest non-system entry with parts. A trailing turn-scoped system note
+/// does not replace the user/tool turn that the provider still needs.
+/// An entry
 /// with no parts renders no message, and the transcript may end with several:
 /// a step the runner has opened but not yet filled, or a dead step. Measured
 /// from the very last entry instead, the call whose result really ends the
@@ -395,7 +397,9 @@ fn transcript_end_mid(index: &Index) -> Option<&str> {
         .entries()
         .iter()
         .rev()
-        .find(|entry| !entry.parts.is_empty())
+        .find(|entry| {
+            !entry.parts.is_empty() && entry.role != cortexkit_role_compaction::read::Role::System
+        })
         .map(|entry| entry.mid.as_str())
 }
 
@@ -1862,6 +1866,46 @@ mod tests {
                     .any(|op| matches!(op, EditOp::Replace { field, .. } if field == "output")),
                 "{shape:?} should replace the call's output instead"
             );
+        }
+    }
+
+    #[test]
+    fn contract_update_system_note_after_tool_result_keeps_the_call() {
+        // In the neutral transcript a Tool part contains both the assistant
+        // call and its user-role result. The empty user row renders nothing.
+        let mut call = read(2, 4_000);
+        if let PartBody::Tool(tool) = &mut call.body {
+            tool.input = json!({"pattern": "x".repeat(2_000)});
+        }
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![call]),
+            entry(2, Role::User, vec![]),
+            entry(
+                3,
+                Role::System,
+                vec![part(
+                    "note",
+                    None,
+                    Seal::None,
+                    PartBody::Text {
+                        text: "turn instruction".into(),
+                    },
+                )],
+            ),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        for shape in [Shape::Default, Shape::Whole] {
+            let (ops, _) = drop_ops(&context, &[(key("m1", "p2"), shape)]);
+            assert!(
+                !ops.iter().any(|op| matches!(op, EditOp::Drop { .. })),
+                "{ops:?}"
+            );
+            assert!(ops
+                .iter()
+                .any(|op| matches!(op, EditOp::Replace { field, .. } if field == "output")));
         }
     }
 

@@ -17,6 +17,7 @@ mod count_tests;
 
 #[derive(Default)]
 struct Client {
+    applied: Mutex<Option<AppliedViewAnswer>>,
     entries: Mutex<Vec<Entry>>,
     pages: Mutex<VecDeque<Result<ReadPage, crate::client::ClientError>>>,
     reads: Mutex<Vec<ReadRequest>>,
@@ -74,7 +75,7 @@ impl RunnerClient for Client {
         &self,
         _: &SessionRef,
     ) -> Result<AppliedViewAnswer, crate::client::ClientError> {
-        Ok(AppliedViewAnswer::new())
+        Ok(self.applied.lock().unwrap().clone().unwrap_or_default())
     }
     async fn send(
         &self,
@@ -98,6 +99,9 @@ impl RunnerClient for Client {
         Err(crate::client::ClientError::new("no child"))
     }
 }
+
+#[path = "contract_update_tests.rs"]
+mod contract_update_tests;
 
 fn text(ordinal: u64, name: &str) -> Entry {
     let mut part = Part::new("p", PartBody::Text { text: name.into() });
