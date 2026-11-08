@@ -96,7 +96,7 @@ test("required host checkpoints answer without empty history and preserve raw re
     }
 }, 60000);
 
-test("an expired idle fold is recovered after reload, but a warm defer stays byte-identical", async () => {
+test("an expired idle fold is recovered after reload only on a rebuilding pass; warm and expired replays stay byte-identical", async () => {
     const threshold = process.env.MC_OC2_HOST_FOLD_ROWS;
     process.env.MC_OC2_HOST_FOLD_ROWS = "1";
     const f = await oc2ContextFixture(9848, {
@@ -115,6 +115,11 @@ test("an expired idle fold is recovered after reload, but a warm defer stays byt
         await settle();
         expect(compact).toHaveBeenCalledTimes(0);
         f.idle(1);
+        // Only the provider forgot the cache: the pass replays and queues nothing.
+        expect((await f.pass()).bytes).toBe(before.bytes);
+        await settle();
+        expect(compact).toHaveBeenCalledTimes(0);
+        f.setSystem("A changed system prefix rebuilds the request in the expired window.");
         await f.pass();
         await settle();
         expect(compact).toHaveBeenCalledTimes(1);
@@ -153,6 +158,8 @@ for (const blocked of ["subagent", "below-threshold", "never"] as const) {
             }
             await f.restart();
             f.idle(1);
+            // Rebuild for a real reason, so only the blocked condition can refuse.
+            f.setSystem("A changed system prefix rebuilds the request in the expired window.");
             await f.pass();
             await settle();
             expect(compact).toHaveBeenCalledTimes(0);
@@ -183,6 +190,9 @@ test("a claimed idle fold with host reason manual is not a user compaction", asy
         f.respond();
         await f.pass();
         f.idle(1);
+        // An expired cache alone does not rebuild, so the idle fold is recovered
+        // on the pass that rebuilds for a real reason.
+        f.setSystem("A changed system prefix rebuilds the request in the expired window.");
         const cold = await f.pass();
         await settle();
         expect(compact).toHaveBeenCalledTimes(1);

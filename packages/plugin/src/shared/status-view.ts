@@ -471,13 +471,11 @@ function cacheRows(source: StatusViewSource, now: number): StatusRow[] {
             tone: source.cacheExpired ? "warning" : "muted",
         });
     }
+    // An expired cache no longer executes the queue: only the execute
+    // threshold (or a rebuild that happens anyway) lands queued drops.
     rows.push({
         label: "Auto-execute",
-        value: source.cacheExpired
-            ? "yes (expired)"
-            : neverExpires
-              ? `at ≥${threshold}`
-              : `at TTL or ≥${threshold}`,
+        value: `at ≥${threshold}`,
         tone: "muted",
     });
     return rows;

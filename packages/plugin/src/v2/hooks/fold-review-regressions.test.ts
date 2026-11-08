@@ -113,7 +113,7 @@ for (const keptCount of [2, 3]) {
     }, 60000);
 }
 
-test("a staged V2 upgrade waits for independent expiry before committing once", async () => {
+test("a staged V2 upgrade waits through an expiry for an independent rebuild before committing once", async () => {
     const f = await oc2ContextFixture(9732, {
         area: "fold-review-regressions",
         instructions: false,
@@ -140,14 +140,23 @@ test("a staged V2 upgrade waits for independent expiry before committing once", 
             .get(f.session) as { cache_ttl: string; last_response_time: number };
         expect(clock.cache_ttl).toBe("30s");
         expect(Date.now()).toBeGreaterThan(clock.last_response_time + 30000);
-        expect(expired.logs.some((line) => /cacheTtl=30s.*decision=execute/.test(line))).toBe(true);
-        expect(expired.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+        // An expired cache alone is not permission to replace the prefix: the
+        // pass replays, and the staged upgrade keeps waiting.
+        expect(expired.logs.some((line) => /cacheTtl=30s.*decision=defer/.test(line))).toBe(true);
+        expect(expired.logs.some((line) => line.includes("upgrade-state HARD"))).toBe(false);
+        expect(expired.bytes).toBe(before.bytes);
+        expect(
+            await f.hostStorage.get(`native-fold/v3/${encodeURIComponent(f.session)}`),
+        ).toBeUndefined();
+        f.setSystem("A changed system prefix rebuilds the request.");
+        const rebuilt = await f.pass();
+        expect(rebuilt.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
         expect(
             await f.hostStorage.get(`native-fold/v3/${encodeURIComponent(f.session)}`),
         ).toBeDefined();
-        expect((await f.pass()).bytes).toBe(expired.bytes);
+        expect((await f.pass()).bytes).toBe(rebuilt.bytes);
         await f.restart();
-        expect((await f.pass()).bytes).toBe(expired.bytes);
+        expect((await f.pass()).bytes).toBe(rebuilt.bytes);
         expect(f.sessionLogs().filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(
             1,
         );

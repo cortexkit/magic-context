@@ -97,21 +97,21 @@ export function contextUsagePassSnapshot(sessionMeta: SessionMeta): ContextUsage
 /**
  * The provider's last usage reading, saved in session_meta, when it still
  * describes this pass's request: the same model, the same context limit, and a
- * last response recent enough that the provider cache is still warm. A pass
- * whose in-memory reading was reset (the first pass after a process restart)
- * reads its pressure from this before falling back to a local estimate.
+ * served response behind it. A pass whose in-memory reading was reset (the
+ * first pass after a process restart) reads its pressure from this before
+ * falling back to a local estimate.
  *
  * Both the model key and the limit must be known and equal. A reading taken
  * on another model or against another limit is a different percentage basis,
- * so it is not used. The TTL check mirrors the scheduler's idle clock: once the
- * TTL has elapsed the prefix is rebuilt anyway and the reading may be stale.
+ * so it is not used. The age of the reading is deliberately not checked: an
+ * expired provider cache rebuilds nothing, so the last request the provider
+ * measured is still the best basis for this one.
  */
 export function savedProviderReadingForPass(input: {
     persisted: PersistedUsageState | null | undefined;
     currentModelKey: string | undefined;
     contextLimit: number | undefined;
     lastResponseTime: number;
-    cacheExpired: boolean;
 }): ContextUsage | null {
     const persisted = input.persisted;
     if (!persisted) return null;
@@ -124,7 +124,7 @@ export function savedProviderReadingForPass(input: {
     ) {
         return null;
     }
-    if (!(input.lastResponseTime > 0) || input.cacheExpired) return null;
+    if (!(input.lastResponseTime > 0)) return null;
     if (
         persisted.lastObservedModelKey === null ||
         input.currentModelKey === undefined ||
@@ -162,11 +162,11 @@ export function savedProviderReadingForPass(input: {
  * Otherwise this returns null and the scheduler sees the cleared reading, as
  * before.
  *
- * Unlike savedProviderReadingForPass, an expired cache does not disqualify the
- * reading here: idle time says nothing about how large the request is. An
- * expired cache is also when deferring matters most: the provider must write
- * the whole cached prompt prefix again on this request anyway, and an execute
- * pass postponed to the next request rewrites it a second time.
+ * An expired cache does not disqualify the reading: idle time says nothing
+ * about how large the request is. An expired cache is also when deferring
+ * matters most: the provider must write the whole cached prompt prefix again
+ * on this request anyway, and an execute pass postponed to the next request
+ * rewrites it a second time.
  */
 export function firstPassExecuteReading(input: {
     persisted: PersistedUsageState | null | undefined;

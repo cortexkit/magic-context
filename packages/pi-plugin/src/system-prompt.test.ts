@@ -32,9 +32,9 @@ function tempDir(prefix: TestTempDirPrefix): string {
 	return createTestTempDir(prefix).dir;
 }
 
-describe("Pi idle date release", () => {
+describe("Pi system date through an idle expiry", () => {
 	for (const expired of [false, true]) {
-		it(`${expired ? "releases" : "freezes"} the midnight date on an ${expired ? "expired" : "warm"} provider cache`, () => {
+		it(`freezes the midnight date on an ${expired ? "expired" : "warm"} provider cache until a real rebuild moves it`, () => {
 			const db = createTestDb();
 			const sessionId = `ses-pi-idle-date-${expired}`;
 			try {
@@ -55,11 +55,20 @@ describe("Pi idle date release", () => {
 					systemPrompt: "Base\nToday's date: Sat Oct 03 2026",
 					isCacheBusting: false,
 				});
-				expect(next.systemPrompt).toContain(
-					expired ? "Sat Oct 03 2026" : "Fri Oct 02 2026",
-				);
-				expect(next.hashChanged).toBe(expired);
-				if (!expired) expect(next.currentHash).toBe(first.currentHash);
+				// An expired cache only means the provider forgot it, so the date
+				// stays frozen exactly as on a warm cache.
+				expect(next.systemPrompt).toContain("Fri Oct 02 2026");
+				expect(next.hashChanged).toBe(false);
+				expect(next.currentHash).toBe(first.currentHash);
+				// A pass that really rebuilds the prefix moves it.
+				const rebuilt = processSystemPromptForCache({
+					db,
+					sessionId,
+					systemPrompt: "Base\nToday's date: Sat Oct 03 2026",
+					isCacheBusting: true,
+				});
+				expect(rebuilt.systemPrompt).toContain("Sat Oct 03 2026");
+				expect(rebuilt.hashChanged).toBe(true);
 			} finally {
 				clearPiSystemPromptSession(sessionId);
 				closeQuietly(db);

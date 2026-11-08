@@ -1,7 +1,7 @@
 export const CONFIG_HELP = {
   cache_ttl: {
     page: "concepts/cache-architecture",
-    text: "This is Magic Context's deferral gate; it does not change the provider's cache lifetime. Enter a duration such as 5m, or ‘never’ to keep the prefix warm.",
+    text: "How long Magic Context assumes the provider keeps the cached prompt. It doesn't change the provider's cache lifetime, and an expiry triggers no rebuild. Enter a duration such as 5m, or ‘never’ when a keep-warm tool holds the cache.",
   },
   temporal_awareness: {
     page: "reference/configuration",

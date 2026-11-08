@@ -627,6 +627,8 @@ export interface PiM0SnapshotMarkers {
  * (parity with OpenCode M0HardSignals). systemHash + cacheExpired derive from
  * session_meta; modelKey comes from the volatile liveModelBySession map in
  * context-handler. toolSetHash is always "" on Pi (no tool.definition hook).
+ * cacheExpired is recorded for logs only and never triggers a fold: resending
+ * the same bytes after an idle expiry keeps signed thinking valid.
  */
 export interface PiM0HardSignals {
 	systemHash: string;
@@ -1242,23 +1244,9 @@ export function mustMaterializePi(
 			state.projectIdentity,
 		);
 	}
-	// Idle > TTL: self-consuming guard via cachedM0MaterializedAt (parity with
-	// OpenCode). cacheExpired stays true every pass until lastResponseTime
-	// updates, so fold only when the last response is newer than the last
-	// materialization; the fold sets materializedAt = now, so the rest of the
-	// turn skips. Next idle-after-response re-arms.
-	if (
-		hard.cacheExpired &&
-		hard.lastResponseTime > 0 &&
-		hard.lastResponseTime > (meta.cachedM0MaterializedAt ?? 0)
-	) {
-		return piMaterializeMismatch(
-			"ttl_idle",
-			"lastResponseTimeAfterMaterialization",
-			meta.cachedM0MaterializedAt ?? 0,
-			hard.lastResponseTime,
-		);
-	}
+	// An idle expiry (cacheExpired) is deliberately not a trigger (parity with
+	// OpenCode): when only the provider forgot the cache, resending the same
+	// bytes keeps every signed thinking block valid and costs the same re-read.
 
 	// ── HARD: genuine m[0] CONTENT change ──
 	if (cached.upgradeState !== current.upgradeState) {

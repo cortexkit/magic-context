@@ -6146,10 +6146,6 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
     const ADV_TRIGGERS: Array<{ name: string; signals: (base: M0HardSignals) => M0HardSignals }> = [
         { name: "model change", signals: (b) => ({ ...b, modelKey: "anthropic/sonnet" }) },
         { name: "system hash", signals: (b) => ({ ...b, systemHash: "sys-v2" }) },
-        {
-            name: "TTL idle",
-            signals: (b) => ({ ...b, cacheExpired: true, lastResponseTime: Date.now() + 60_000 }),
-        },
     ];
     function advTail(sessionId: string, newer: number): MessageLike[] {
         const tool = (id: string, callID: string, name: string, input: unknown) => ({
@@ -6540,6 +6536,23 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             expect(advSha(shared)).toBe(advSha(hard.messages));
         });
     }
+    it("ADV: legacy markers keep replaying byte-identically through an idle expiry", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-adv-TTL-idle";
+        materializeBaseline(sessionId);
+        const tags = advSeedLegacy(sessionId);
+        const d1 = await advPass(sessionId, {});
+        const modesBefore = advModes(sessionId, tags);
+        // An idle expiry only means the provider forgot the cache: no fold, so the
+        // legacy markers are not converted and the request replays unchanged.
+        const idle = await advPass(sessionId, {
+            hard: { ...BASE_HARD, cacheExpired: true, lastResponseTime: Date.now() + 60_000 },
+        });
+        expect(idle.result.materialized).toBe(false);
+        expect(advModes(sessionId, tags)).toEqual(modesBefore);
+        expect(advSha(idle.messages)).toBe(advSha(d1.messages));
+    });
     it("drains queued pending ops on a DEFER scheduler pass when m[0] HARD-folds", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
@@ -6833,7 +6846,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         ).toEqual(["dropped", "active", "dropped"]);
     });
 
-    it("drains pending ops and previously bookmarked age reclaim on the same low-usage TTL fold", async () => {
+    it("an idle expiry at low usage drains neither pending ops nor bookmarked age reclaim", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-reclaim-drain";
@@ -6853,6 +6866,23 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             [2, makeDropTarget(reclaimable)],
             [3, makeDropTarget(newer)],
         ]);
+        // What a warm pass serves from the same input.
+        const warm = structuredClone(messages);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, warm, {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                tags: getActiveTagsBySession(db, sessionId),
+                targets,
+                currentTurnId: "turn-hardfold-reclaim-warm",
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: BASE_HARD,
+                },
+            }),
+        );
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
@@ -6877,9 +6907,13 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         const statuses = new Map(
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
-        expect(statuses.get(1)).toBe("dropped");
-        expect(statuses.get(2)).toBe("dropped");
+        // Only the provider forgot the cache: the pass replays byte-identically
+        // and the queued drop waits for a real rebuild.
+        expect(statuses.get(1)).toBe("active");
+        expect(statuses.get(2)).toBe("active");
         expect(statuses.get(3)).toBe("active");
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        expect(JSON.stringify(messages)).toBe(JSON.stringify(warm));
         expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
 
         const deferReplayBytes = JSON.stringify(messages);
@@ -6899,6 +6933,78 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             "active",
         );
     });
+
+    for (const trigger of [
+        { reason: "model_change", hard: { ...BASE_HARD, modelKey: "anthropic/sonnet" } },
+        { reason: "system_hash", hard: { ...BASE_HARD, systemHash: "sys-v2" } },
+    ]) {
+        it(`drains pending ops and previously bookmarked age reclaim on the same low-usage ${trigger.reason} fold`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-hardfold-reclaim-drain-${trigger.reason}`;
+            materializeBaseline(sessionId);
+
+            const queued = makeToolMessage("tool-1");
+            const reclaimable = makeToolMessage("tool-2");
+            const newer = makeToolMessage("tool-3");
+            insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "edit");
+            insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "bash");
+            insertTag(db, sessionId, "tool-3", "tool", 4000, 3, 0, "read");
+            queuePendingOp(db, sessionId, 1, "drop", 1);
+            advanceToolReclaimWatermark(db, sessionId, 2);
+            const messages = [queued, reclaimable, newer];
+            const targets = new Map<number, TagTarget>([
+                [1, makeDropTarget(queued)],
+                [2, makeDropTarget(reclaimable)],
+                [3, makeDropTarget(newer)],
+            ]);
+
+            // A changed model or system prompt rewrites the bytes in front of the
+            // conversation, so the fold lands everything queued at 40% usage:
+            // the queued drop and the age reclaim bookmarked up to tag 2.
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    currentTurnId: `turn-hardfold-reclaim-${trigger.reason}`,
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: trigger.hard,
+                    },
+                }),
+            );
+
+            const statuses = new Map(
+                getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+            );
+            expect(statuses.get(1)).toBe("dropped");
+            expect(statuses.get(2)).toBe("dropped");
+            expect(statuses.get(3)).toBe("active");
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
+
+            const deferReplayBytes = JSON.stringify(messages);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    currentTurnId: `turn-hardfold-reclaim-${trigger.reason}-replay`,
+                    sessionMeta: getOrCreateSessionMeta(db, sessionId),
+                }),
+            );
+
+            expect(JSON.stringify(messages)).toBe(deferReplayBytes);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 3)?.status).toBe(
+                "active",
+            );
+        });
+    }
 
     it("does NOT drain while the historian runs on a NON-busting defer pass", async () => {
         // Counterpart: same historian-running condition, but NO hard fold and NOT
@@ -7118,16 +7224,21 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 arm: async () => ({ ...BASE_HARD, systemHash: "sys-v2" }),
                 identical: true,
             },
-            {
-                reason: "ttl_idle",
-                arm: async () => ({
-                    ...BASE_HARD,
-                    cacheExpired: true,
-                    lastResponseTime: Date.now() + 60_000,
-                }),
-                identical: true,
-            },
         ];
+
+        it("an idle expiry executes no HARD fold and serves the same m[0]/m[1]", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-identical-ttl_idle";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const idle = await pass(sessionId, {
+                hard: { ...BASE_HARD, cacheExpired: true, lastResponseTime: Date.now() + 60_000 },
+            });
+            expect(idle.result.materialized).toBe(false);
+            expect(idle.result.materializeReason).not.toBe("ttl_idle");
+            expect(head(idle.messages)).toBe(head(defer.messages));
+        });
 
         for (const trigger of TRIGGERS) {
             it(`${trigger.reason}: HARD fold executes and ${trigger.identical ? "re-renders m[0]/m[1] byte-identically" : "changes m[0]/m[1]"}`, async () => {
@@ -7682,14 +7793,6 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         }> = [
             { reason: "system_hash", arm: async () => ({ ...BASE_HARD, systemHash: "sys-v2" }) },
             {
-                reason: "ttl_idle",
-                arm: async () => ({
-                    ...BASE_HARD,
-                    cacheExpired: true,
-                    lastResponseTime: Date.now() + 60_000,
-                }),
-            },
-            {
                 reason: "cached_m1_missing",
                 arm: async (sessionId) => {
                     db.prepare(
@@ -7737,11 +7840,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 expect(hard.result.materialized).toBe(true);
                 expect(hard.result.materializeReason).toBe(trigger.reason);
                 expect(statusOf(sessionId, target)).toBe("dropped");
-                // A ttl_idle signal stays armed while cacheExpired is true, so the
-                // follow-up pass uses the settled signals the provider would send.
-                const after = await pass(sessionId, {
-                    hard: trigger.reason === "ttl_idle" ? BASE_HARD : hardSignals,
-                });
+                const after = await pass(sessionId, { hard: hardSignals });
                 console.log(
                     `ADV_OPEN_AFTER reason=${trigger.reason} afterMaterialized=${after.result.materialized} afterReason=${after.result.materializeReason} identical=${sha(after.messages) === sha(hard.messages)}`,
                 );
@@ -7762,6 +7861,23 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 expect(sha(after.messages)).toBe(sha(hard.messages));
             });
         }
+
+        it("an idle expiry opens no lane: the queued drop stays queued and the request replays", async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "ses-adv-open-ttl_idle";
+            materializeBaseline(sessionId);
+            const defer = await pass(sessionId);
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            queuePendingOp(db, sessionId, target, "drop");
+            const idle = await pass(sessionId, {
+                hard: { ...BASE_HARD, cacheExpired: true, lastResponseTime: Date.now() + 60_000 },
+            });
+            expect(idle.result.materialized).toBe(false);
+            expect(statusOf(sessionId, target)).toBe("active");
+            expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            expect(sha(idle.messages)).toBe(sha(defer.messages));
+        });
     });
 });
 
@@ -13869,7 +13985,7 @@ describe("signed-prefix riders on unavoidable busts", () => {
         it(
             cause === "first render"
                 ? "a rewriting first render strips every signed block and admits queued work"
-                : "idle expiry admits suffix work while keeping every signed block",
+                : "idle expiry admits no work on a held pass and keeps every signed block",
             async () => {
                 db = new Database(":memory:");
                 initializeDatabase(db);
@@ -13953,10 +14069,13 @@ describe("signed-prefix riders on unavoidable busts", () => {
                     return { messages: source, result };
                 };
                 const priced = await pass(true);
-                expect(getPendingOps(db, sessionId)).toHaveLength(0);
+                // A first render rebuilds the prefix anyway, so queued work rides it.
+                // An idle expiry only means the provider forgot the cache: the hold
+                // stands and the queued drop waits.
+                expect(getPendingOps(db, sessionId)).toHaveLength(cause === "first render" ? 0 : 1);
                 expect(
                     getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
-                ).toBe("dropped");
+                ).toBe(cause === "first render" ? "dropped" : "active");
                 expect(priced.result.proactiveThinkingStrip).toBeNull();
                 if (cause === "first render") {
                     expect(getMergedReasoningStrippedIds(db, sessionId)).toContain(
@@ -13989,7 +14108,7 @@ describe("signed-prefix riders on unavoidable busts", () => {
     }
 });
 
-it("an already-cold held pass runs safe routine cleanup without stripping thinking before a kept block", async () => {
+it("an already-cold held pass runs no routine cleanup and keeps every signed block", async () => {
     db = new Database(":memory:");
     initializeDatabase(db);
     const sessionId = "held-cold-protected-only";
@@ -14058,8 +14177,8 @@ it("an already-cold held pass runs safe routine cleanup without stripping thinki
                 },
             }),
         );
-        expect(cleanup).toHaveBeenCalledTimes(1);
-        expect(cleanup.mock.calls[0]?.[4].routine).toBe(true);
+        // The expired cache lifts nothing: the held pass stays a replay.
+        expect(cleanup).toHaveBeenCalledTimes(0);
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
         expect(result.proactiveThinkingStrip).toBeNull();
         expect(old.parts[0]).toEqual({ type: "reasoning", text: "old signed thought" });

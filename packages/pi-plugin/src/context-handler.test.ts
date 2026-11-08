@@ -17,6 +17,7 @@ import {
 	isSessionReconciled,
 } from "@magic-context/core/features/magic-context/message-index-async";
 import { readEpochFloorSnapshot } from "@magic-context/core/features/magic-context/protection-window";
+import { computeHardCacheExpired } from "@magic-context/core/features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	AUTO_SEARCH_DECISION_SOFT_LIMIT,
@@ -520,6 +521,15 @@ for (const configured of [true, false]) {
 						message.includes("decision="),
 				)
 				.at(-1)?.[1];
+		// Whether the pass's effective TTL counts the provider cache as expired.
+		const expired = () => {
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			return computeHardCacheExpired(
+				meta.cacheTtl,
+				meta.lastResponseTime,
+				Date.now(),
+			);
+		};
 		try {
 			registerPiContextHandler(fake.pi as never, {
 				db,
@@ -564,9 +574,10 @@ for (const configured of [true, false]) {
 			});
 			ttl = configured ? "13h" : "10m";
 			const served = await pass();
-			expect(decision()).toContain(
-				configured ? "decision=defer" : "decision=execute",
-			);
+			// An expired cache is not an execute pass: the queued drop waits.
+			expect(expired()).toBe(!configured);
+			expect(decision()).toContain("decision=defer");
+			expect(getPendingOps(db, sessionId)).toHaveLength(1);
 			expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe(
 				configured ? "13h" : "5m",
 			);
@@ -577,11 +588,14 @@ for (const configured of [true, false]) {
 				expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe("1m");
 				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 				expect(decision()).toContain("decision=defer");
+				expect(expired()).toBe(false);
 				updateSessionMeta(db, sessionId, {
 					lastResponseTime: Date.now() - 120_000,
 				});
 				await pass();
-				expect(decision()).toContain("decision=execute");
+				expect(expired()).toBe(true);
+				expect(decision()).toContain("decision=defer");
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 			}
 		} finally {
 			logCalls.mockRestore();

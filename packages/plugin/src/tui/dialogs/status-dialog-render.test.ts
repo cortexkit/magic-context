@@ -129,7 +129,7 @@ const COMPLETE_ROWS: Array<[string, string]> = [
     ["Last reduce anchor", "0 tok"],
     ["Subagent", "no"],
     ["History block", "~0 tok"],
-    ["Auto-execute", "at TTL or ≥65%"],
+    ["Auto-execute", "at ≥65%"],
 ];
 
 const LONG_MODEL_KEY =

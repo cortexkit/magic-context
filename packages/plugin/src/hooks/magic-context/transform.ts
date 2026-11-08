@@ -160,6 +160,7 @@ import {
 } from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot, lkgInputIdentity } from "./lkg-slot";
+import { createLocalWireReadings } from "./local-wire-reading";
 import { onNoteTrigger } from "./note-nudger";
 import { logNudgeEvaluation } from "./nudge-evaluation-log";
 import {
@@ -801,6 +802,9 @@ export function createTransform(deps: TransformDeps) {
     // window, because the usage reading such a pass sees is not this request's:
     // it is missing, or on an OpenCode 2 fork it is the parent's last reply.
     const unmanagedOverWindowSessions = new Set<string>();
+    // The local count of the last served request, for the execute decision of
+    // a session whose provider reports no usage (see local-wire-reading.ts).
+    const localWireReadings = createLocalWireReadings();
     const rustModeTransform =
         deps.transformMode === "rust" && deps.rustModeModuleClient
             ? createRustModeTransform(deps, {
@@ -1553,6 +1557,8 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             contextUsagePassSnapshot(sessionMeta),
         );
+        const providerReadingMissing =
+            !(contextUsageEarly.inputTokens > 0) && !(contextUsageEarly.percentage > 0);
 
         let recoveryNoHeadEscapeActive = false;
         let emergencyRecoveryArmed = false;
@@ -1918,7 +1924,7 @@ export function createTransform(deps: TransformDeps) {
               })
             : null;
         // Compaction-off has no bust permission, so nothing could strip a turn
-        // whose prefix changes (an idle-expiry or memory fold still re-renders
+        // whose prefix changes (a memory fold still re-renders
         // m[0] there). It keeps the blanket hold for every open signed turn, as
         // before the hold was bounded; it has no history reclaim for the hold to
         // delay.
@@ -2009,6 +2015,27 @@ export function createTransform(deps: TransformDeps) {
             Number.isFinite(emergencyCeilingLimit) && emergencyCeilingLimit > 0
                 ? Math.floor(emergencyCeilingLimit * (effectiveExecuteThresholdPercentage / 100))
                 : undefined;
+        // A session whose provider reports no usage has no reading here, so its
+        // execute decision reads the local count of the last request it served,
+        // over the usable window (or the trusted context limit for a model the
+        // catalog does not describe). Nothing else on this pass reads that count.
+        const localReadingWindow = windowGeometry?.usableHard ?? resolvedContextLimit;
+        const localReadingModelKey = modelForBudget
+            ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
+            : undefined;
+        const schedulerUsage = localWireReadings.schedulerUsage({
+            sessionId,
+            providerUsage: contextUsageEarly,
+            providerReadingMissing,
+            modelKey: localReadingModelKey,
+            usableWindow: localReadingWindow,
+        });
+        if (schedulerUsage !== contextUsageEarly && !compactionOff) {
+            sessionLog(
+                sessionId,
+                `transform: no provider usage reading; the execute decision reads the local count of the last served request percentage=${schedulerUsage.percentage.toFixed(1)} inputTokens=${schedulerUsage.inputTokens}`,
+            );
+        }
         // Compaction-off: drop scheduling is gated off — the scheduler never
         // approves an execute pass, so no pending-op drain, heuristic cleanup,
         // age sweep or smart drop can fire, and the execute-only
@@ -2036,18 +2063,18 @@ export function createTransform(deps: TransformDeps) {
                       passPercentage: contextUsageEarly.percentage,
                   })
                 : null;
-        // The saved reading is needed only when the cleared reading defers. When
-        // the scheduler executes on the cleared reading for a reason of its own
-        // (such as idle time), the pass is an ordinary execute pass, decided and
-        // logged exactly as before. This extra call is unlogged; an error here
-        // leaves the saved reading unused, and the call below logs it.
+        // The saved reading is needed only when the reading the scheduler would
+        // otherwise see defers. When that reading already executes, the pass is
+        // an ordinary execute pass, decided and logged exactly as before. This
+        // extra call is unlogged; an error here leaves the saved reading unused,
+        // and the call below logs it.
         let clearedReadingDefers = false;
         if (savedReadingForExecute) {
             try {
                 clearedReadingDefers =
                     deps.scheduler.shouldExecute(
                         sessionMeta,
-                        contextUsageEarly,
+                        schedulerUsage,
                         undefined,
                         sessionId,
                         deps.getModelKey?.(sessionId),
@@ -2069,7 +2096,7 @@ export function createTransform(deps: TransformDeps) {
             : resolveSchedulerDecision(
                   deps.scheduler,
                   sessionMeta,
-                  schedulerReadsSavedReading ? savedReadingForExecute : contextUsageEarly,
+                  schedulerReadsSavedReading ? savedReadingForExecute : schedulerUsage,
                   sessionId,
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
@@ -2511,13 +2538,12 @@ export function createTransform(deps: TransformDeps) {
                             "user_flush",
                         ),
                         publishedHistory: isCacheBusting,
-                        // The same gate postprocess applies. First render and idle
-                        // expiry are not known yet, so a held pass is credited no
-                        // ride here unless it is under emergency pressure.
+                        // The same gate postprocess applies. First render is not
+                        // known yet, so a held pass is credited no ride here
+                        // unless it is under emergency pressure.
                         permission: {
                             signedThinkingHold: activeThinkingPrefixHold,
                             firstRender: false,
-                            idleExpiry: false,
                             emergency:
                                 contextUsageEarly.percentage >= forceMaterializationPercentage,
                         },
@@ -3016,7 +3042,8 @@ export function createTransform(deps: TransformDeps) {
 
         // HARD-bust signals for the m[0]/m[1] materialization decision capture
         // provider-side cache eviction, such as a model switch or system-block
-        // change, plus the TTL idle window. Only OpenCode 2 supplies a definition
+        // change. The TTL idle window is passed along for logs only: an expired
+        // cache with unchanged bytes never folds. Only OpenCode 2 supplies a definition
         // hash from the session's request; the process-global names fingerprint
         // stays attribution-only on OpenCode 1. When system.transform
         // follows messages.transform (OpenCode 1), systemHash is the persisted
@@ -3131,7 +3158,7 @@ export function createTransform(deps: TransformDeps) {
         // in the force band after a restart.
         //
         // The provider's own last reading, saved in session_meta, is preferred
-        // when it is for this model and limit and the cache is still warm. The
+        // when it is for this model and limit, however long ago it was taken. The
         // one exception is a count at or past the 95% emergency line while the
         // saved reading is lower: the request grew after that reading was taken
         // (a long paste or tool output while the host was down), and waiting for
@@ -3153,7 +3180,6 @@ export function createTransform(deps: TransformDeps) {
                               currentModelKeyForBoundary ?? (hardModelKey || undefined),
                           contextLimit: resolvedContextLimit,
                           lastResponseTime: sessionMeta.lastResponseTime,
-                          cacheExpired: hardCacheExpired,
                       });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
@@ -3503,6 +3529,37 @@ export function createTransform(deps: TransformDeps) {
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
                 );
             }
+            // Count the request this pass serves, for the next pass's execute
+            // decision while the provider still reports no usage. A pass with a
+            // provider reading only clears the local one.
+            let servedPressureTokens: number | undefined;
+            if (providerReadingMissing) {
+                servedPressureTokens = finalWireEstimate?.pressureTokens;
+                if (servedPressureTokens === undefined) {
+                    try {
+                        servedPressureTokens = estimateFinalWireInputTokens({
+                            messages,
+                            systemPromptTokens: sessionMeta.systemPromptTokens,
+                            providerID: modelForBudget?.providerID,
+                            modelID: modelForBudget?.modelID,
+                            agentName: notificationParams.agent,
+                            sessionId,
+                        }).pressureTokens;
+                    } catch (error) {
+                        sessionLog(
+                            sessionId,
+                            `transform: local count of the served request unavailable: ${getErrorMessage(error)}`,
+                        );
+                    }
+                }
+            }
+            localWireReadings.record({
+                sessionId,
+                providerReadingMissing,
+                modelKey: localReadingModelKey,
+                usableWindow: localReadingWindow,
+                pressureTokens: servedPressureTokens,
+            });
             if (
                 (finalWireEstimate?.refusalGrade ||
                     (finalWireEstimate?.refusalBasis === "byte-bound" &&
@@ -3822,8 +3879,8 @@ export function createTransform(deps: TransformDeps) {
         // system prompt in front of it, whether the bust kept it (it edited
         // nothing in front of it) or a hold did. The served array, after every
         // strip and any recovered prefix, is what decides. The last argument
-        // carries the same fact to an idle-expired request, whose date would
-        // otherwise advance without asking for permission.
+        // reports that fact to the system hook as well, which keeps the date
+        // frozen on a permitted pass that still serves signed thinking.
         const signedThinkingServed =
             isPrefixBoundThinkingModel(modelForBudget?.providerID, modelForBudget?.modelID) &&
             servesThinkingBlock(messages, modelForBudget?.providerID, modelForBudget?.modelID);
@@ -3948,9 +4005,9 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        // An idle-expired retry can replay a fold prepared by an aborted attempt.
-        // The provider still rebuilds the whole prefix, so record the expiry on
-        // the retry's own assistant even when this pass changed no message bytes.
+        // An idle-expired request makes the provider re-read the whole prefix
+        // even when this pass changed no message bytes, so record the expiry on
+        // its own assistant for the cache diagnostics.
         if (postTransformResult.bustedThisPass || hardCacheExpired) {
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),

@@ -18,7 +18,11 @@ import {
     __resetMessageIndexAsyncForTests,
     isSessionReconciled,
 } from "../../features/magic-context/message-index-async";
-import { createScheduler, type Scheduler } from "../../features/magic-context/scheduler";
+import {
+    computeHardCacheExpired,
+    createScheduler,
+    type Scheduler,
+} from "../../features/magic-context/scheduler";
 import { readSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import {
     clearPendingOps,
@@ -256,7 +260,11 @@ for (const generation of ["v1", "v2"] as const) {
             const sessionId = `ttl-${generation}-${configured}`;
             let ttl = configured ? "1h" : "5m";
             const scheduler = createScheduler({ executeThresholdPercentage: 65 });
-            const decide = spyOn(scheduler, "shouldExecute");
+            // Whether the pass's effective TTL counts the provider cache as expired.
+            const expired = () => {
+                const meta = getOrCreateSessionMeta(db, sessionId);
+                return computeHardCacheExpired(meta.cacheTtl, meta.lastResponseTime, Date.now());
+            };
             const refresh = new Set<string>();
             const materialize = new Set<string>();
             const transform = createTransform({
@@ -288,33 +296,27 @@ for (const generation of ["v1", "v2"] as const) {
                 await transform({}, { messages });
                 return JSON.stringify(messages);
             };
-            try {
+            await pass();
+            updateSessionMeta(db, sessionId, {
+                lastResponseTime: Date.now() - 2 * 60 * 60 * 1000,
+            });
+            ttl = configured ? "13h" : "10m";
+            const served = await pass();
+            expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe(configured ? "13h" : "5m");
+            expect(readSessionCacheTtl(db, sessionId)?.source).toBe(
+                configured ? "config" : "default",
+            );
+            expect(expired()).toBe(!configured);
+            expect(refresh.size).toBe(0);
+            expect(materialize.size).toBe(0);
+            updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+            if (configured) {
+                ttl = "1m";
+                expect(await pass()).toBe(served);
+                expect(expired()).toBe(false);
+                updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() - 120_000 });
                 await pass();
-                updateSessionMeta(db, sessionId, {
-                    lastResponseTime: Date.now() - 2 * 60 * 60 * 1000,
-                });
-                ttl = configured ? "13h" : "10m";
-                const served = await pass();
-                expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe(
-                    configured ? "13h" : "5m",
-                );
-                expect(readSessionCacheTtl(db, sessionId)?.source).toBe(
-                    configured ? "config" : "default",
-                );
-                expect(decide.mock.results.at(-1)?.value).toBe(configured ? "defer" : "execute");
-                expect(refresh.size).toBe(0);
-                expect(materialize.size).toBe(0);
-                updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
-                if (configured) {
-                    ttl = "1m";
-                    expect(await pass()).toBe(served);
-                    expect(decide.mock.results.at(-1)?.value).toBe("defer");
-                    updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() - 120_000 });
-                    await pass();
-                    expect(decide.mock.results.at(-1)?.value).toBe("execute");
-                }
-            } finally {
-                decide.mockRestore();
+                expect(expired()).toBe(true);
             }
         });
     }

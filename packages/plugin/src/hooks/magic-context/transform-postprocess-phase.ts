@@ -2679,25 +2679,14 @@ export async function runPostTransformPhase(
         return depth === null ? "not loaded (deferred pass)" : String(depth);
     };
     // All first applications share an independently priced cache-bust permission.
-    // A retry after an aborted idle fold is still provider-cold even though its
-    // persisted pair needs no second fold. Any newly queued work belongs on that
-    // retry, not on the warm tool step after the provider finally answers.
-    const heldIdleExpiryRebuild =
-        activeThinkingPrefixHold && args.m0M1?.hardSignals?.cacheExpired === true;
-    // An expired timer alone cannot authorize cleanup when an unresolved project
-    // directory requires replaying cached m[0]/m[1]. Unfinished signed turns
-    // retain their separately protected opportunity to edit the suffix.
-    const idleExpiryRebuild =
-        (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
+    // An expired provider cache is not one of them: when only the provider forgot
+    // the cache, the pass replays byte-identically like a warm one, so queued
+    // drops, cleanup and signed thinking all wait for a real ride.
     const rideSignals = {
         servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold:
-            rewritingSignedPrefix ||
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            idleExpiryRebuild,
+        hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
         // A reading that only a local count put in the force band is not
         // evidence the session is there: the count can overstate the provider.
         // Below 95% it waits for the provider's next measurement instead of
@@ -2751,17 +2740,19 @@ export async function runPostTransformPhase(
             }),
             usableWindow: args.usableWindow,
         });
-    // Warm-cache thinking holds defer every new prefix edit. First render, idle
-    // expiry and pressure relief can admit work, but the target guards still
-    // forbid changes before any retained signature. A genuine prefix rewrite
-    // first omits every signed block. The directory veto freezes injection only.
-    // The historian's redundancy skip applies the same predicate.
+    // Thinking holds defer every new prefix edit, whether or not the provider
+    // cache is still warm. First render and pressure relief can admit work,
+    // but the target guards still forbid changes before any retained
+    // signature. A genuine prefix rewrite first omits every signed block. The
+    // directory veto freezes injection only. The historian trigger
+    // (compartment-trigger.ts) asks reclaimRidePermitted the same question
+    // before it skips a historian run on the grounds that queued drops will
+    // land, so both agree on whether those drops can land on this pass.
     const publishedWorkDrainAllowed =
         (!compactionOff || servedShapeRepair.needsRebuild) &&
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
-            idleExpiry: idleExpiryRebuild,
             emergency: emergencyDropEligible,
         });
     const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
@@ -2778,7 +2769,6 @@ export async function runPostTransformPhase(
             // without creating an independent prefix rewrite.
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
-            heldIdleExpiryRebuild ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
@@ -2800,7 +2790,7 @@ export async function runPostTransformPhase(
     // - a pass whose head changed (fold, first render, m[1] refresh) strips
     //   now, before any lane edits, through the same persisted freeze a held
     //   pass's release uses;
-    // - any other bust (flush, pressure, idle expiry, subagent execute) strips
+    // - any other bust (flush, pressure, subagent execute) strips
     //   at the end of the pass through the proactive strip, only if one of its
     //   edits lies before newer thinking, so a bust with nothing to apply keeps
     //   the turn's thinking.
@@ -2848,7 +2838,7 @@ export async function runPostTransformPhase(
         isCacheBustingPass && !activeThinkingPrefixHold && recoveredShapeRewriteProof !== null;
     sessionLog(
         args.sessionId,
-        `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} idle_expiry=${idleExpiryRebuild} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
+        `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} cache_expired=${args.m0M1?.hardSignals?.cacheExpired === true} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
     );
     let recoveryTailNormalizedThisPass = false;
     if (args.normalizeRecoveryTail && canNormalizeRecoveredShape) {
@@ -3243,7 +3233,6 @@ export async function runPostTransformPhase(
                 pendingOpsDidMutate ||
                 foldBustsServedPrefixThisPass ||
                 firstRenderBust ||
-                heldIdleExpiryRebuild ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
@@ -3572,8 +3561,8 @@ export async function runPostTransformPhase(
         }
         // A prepared request has not refreshed the provider cache. In particular,
         // an aborted request may never report usage. Keep the response clock until
-        // the provider answers; cachedM0MaterializedAt already consumes the idle
-        // fold, so an expired retry can replay it without folding a second time.
+        // the provider answers. An expired retry then replays the same bytes: an
+        // expired provider cache grants no fold of its own.
 
         // Consume only after the shared tool/text batch actually changed bytes.
         if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
@@ -4982,7 +4971,6 @@ export async function runPostTransformPhase(
     }
     const prefixEditBesidesReasoningTrim =
         firstRenderBust ||
-        heldIdleExpiryRebuild ||
         materializationRequested ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully ||

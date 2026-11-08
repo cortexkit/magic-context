@@ -21,12 +21,13 @@
  *
  * The boot pass sizes the session in this order, and each order has a case
  * that fails without it:
- * - the provider's saved reading, when it is for this model and limit and the
- *   cache is still warm ("prefers the saved provider reading"), unless the
+ * - the provider's saved reading, when it is for this model and limit, however
+ *   long the session sat idle ("prefers the saved provider reading", "an
+ *   expired restart prices from the saved provider reading"), unless the
  *   local count is past the 95% emergency line ("a request that grew past the
  *   emergency line");
- * - otherwise a calibrated local count, neutral for an unseeded model ("an
- *   expired restart sizes ... with calibrated counts");
+ * - otherwise a calibrated local count, neutral for an unseeded model ("a
+ *   restart without a usable saved reading sizes ... with calibrated counts");
  * - and a reading from that count alone never grants the force ride below 95%
  *   ("an estimate in the force band ... leaves the queued drop queued").
  */
@@ -440,13 +441,24 @@ describe("issue 752: first pass after a restart", () => {
         expect(result.newestToolStatus).toBe("dropped");
     });
 
-    // Two hours idle: the saved reading may be stale and the idle rebuild is
-    // owed, so the pass counts the request locally. A calibrated count of an
-    // unseeded model is its neutral local count, about 66% here; the fit
-    // envelope would read twice that and lift the protected tail.
-    it("an expired restart sizes a 60% session with calibrated counts, not the fit envelope", async () => {
+    // Two hours idle: the provider forgot its cache, but an expired cache
+    // rebuilds nothing, so the reading the provider took of the last request is
+    // still the best basis for this one and the pass prices from it.
+    it("an expired restart prices from the saved provider reading", async () => {
         const result = await flushPass(true, { lastResponseAgeMs: TWO_HOURS });
         console.log("ISSUE_752_UNIT boot-expired", JSON.stringify(result));
+        expect(result.passLog.some((line) => /using saved provider reading/.test(line))).toBe(true);
+        expect(result.bootReading).toBe(TRUE_PERCENTAGE);
+        expect(result.newestToolStatus).toBe("active");
+    });
+
+    // The saved reading was taken against another limit, so the pass counts the
+    // request locally. A calibrated count of an unseeded model is its neutral
+    // local count, about 66% here; the fit envelope would read twice that and
+    // lift the protected tail.
+    it("a restart without a usable saved reading sizes a 60% session with calibrated counts, not the fit envelope", async () => {
+        const result = await flushPass(true, { savedReadingLimit: 40_000 });
+        console.log("ISSUE_752_UNIT boot-other-limit", JSON.stringify(result));
         expect(result.passLog.some((line) => /using wire estimate/.test(line))).toBe(true);
         expect(result.bootReading ?? 0).toBeGreaterThan(0);
         expect(result.bootReading ?? 0).toBeLessThan(85);
