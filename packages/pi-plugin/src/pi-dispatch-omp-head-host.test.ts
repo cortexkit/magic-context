@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lkgContentFields } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
+import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	exerciseOmpLoggerFiles,
 	pinOmpLoggerFiles,
 } from "./__tests__/omp-log-files";
-import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
