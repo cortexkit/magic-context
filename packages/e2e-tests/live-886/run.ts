@@ -23,6 +23,8 @@ const { values } = parseArgs({ options: {
     "threshold-tokens": { type: "string", default: "250000" },
     // Toggle the MCP server every N head steps for the whole run (0 = only steps 2, 4, 6 and batch boundaries).
     "mcp-every": { type: "string", default: "0" },
+    // Tools the MCP server lists; more tools make each catalog row as large as a real server's.
+    "mcp-tools": { type: "string", default: "2" },
     cli: { type: "string" }, "ai-root": { type: "string" },
     "evidence-dir": { type: "string" },
 } });
@@ -42,6 +44,8 @@ const timeout = positive("timeout-minutes") * 60000;
 const thresholdTokens = positive("threshold-tokens");
 const mcpEvery = Number(values["mcp-every"]);
 if (!Number.isInteger(mcpEvery) || mcpEvery < 0) throw new Error("Invalid --mcp-every");
+const mcpTools = positive("mcp-tools");
+if (!Number.isInteger(mcpTools)) throw new Error("Invalid --mcp-tools");
 if (![stepCap, inputLimit, contextLimit, outputLimit, batchSteps, batchCount].every(Number.isInteger)) throw new Error("Steps and token limits must be integers");
 if (contextLimit <= outputLimit || inputLimit > contextLimit) throw new Error("Invalid model geometry");
 if (values["evidence-dir"] && !values.fake) throw new Error("--evidence-dir is only available for fake proofs; live artifacts stay private");
@@ -193,7 +197,7 @@ try {
         probePlugin: join(import.meta.dir, "probe"),
         extraConfig: { permission: { "*": "allow" }, enabled_providers: ["deepseek"],
             mcp: { servers: { issue886: { type: "local", codemode: true, protocol: "legacy",
-                command: [process.execPath, join(import.meta.dir, "mcp-server.ts"), mcpRevisionFile] } } } },
+                command: [process.execPath, join(import.meta.dir, "mcp-server.ts"), mcpRevisionFile, String(mcpTools)] } } } },
     });
     const client = OpenCode.make({ baseUrl: host.url,
         headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
