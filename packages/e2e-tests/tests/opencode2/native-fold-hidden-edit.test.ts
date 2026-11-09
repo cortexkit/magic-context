@@ -157,3 +157,145 @@ test("real instruction catalogs without wire ids retire only on a rebuilding pas
         }));
     } finally { source.close(); db.close(); await host.stop(); }
 }, 180000);
+
+// A minimal MCP server over stdio (newline-delimited JSON-RPC): it answers the
+// initialize handshake with server instructions and lists fixed tools. The
+// "stable" server lists enough tools with long descriptions to make OpenCode's
+// Code Mode catalog partial, so every change to the connected servers restates
+// the whole catalog, as it does for users with large MCP tool sets.
+const TOY_MCP_SERVER = `
+const name = process.argv[2];
+const tools = name === "stable"
+    ? Array.from({ length: 60 }, (_, i) => ({
+        name: "lookup_" + String(i).padStart(2, "0"),
+        description: "Look up stable fixture record " + i + " " + "with a deliberately long description ".repeat(4),
+        inputSchema: { type: "object", properties: { id: { type: "string" } } },
+    }))
+    : [{ name: "probe", description: "Probe the toggling fixture server", inputSchema: { type: "object", properties: {} } }];
+const instructions = name.toUpperCase() + "_SERVER_GUIDANCE: use the " + name + " fixture tools.";
+const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+const results = {
+    initialize: (params) => ({
+        protocolVersion: params?.protocolVersion ?? "2025-06-18",
+        capabilities: { tools: {}, prompts: {}, resources: {} },
+        serverInfo: { name, version: "1.0.0" },
+        instructions,
+    }),
+    "tools/list": () => ({ tools }),
+    "tools/call": () => ({ content: [{ type: "text", text: "fixture" }] }),
+    "prompts/list": () => ({ prompts: [] }),
+    "resources/list": () => ({ resources: [] }),
+    "resources/templates/list": () => ({ resourceTemplates: [] }),
+    ping: () => ({}),
+};
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    for (let end = buffer.indexOf("\\n"); end >= 0; end = buffer.indexOf("\\n")) {
+        const line = buffer.slice(0, end).trim();
+        buffer = buffer.slice(end + 1);
+        if (!line) continue;
+        const message = JSON.parse(line);
+        if (message.id === undefined) continue;
+        const result = results[message.method];
+        send(result
+            ? { id: message.id, result: result(message.params) }
+            : { id: message.id, error: { code: -32601, message: "Method not found" } });
+    }
+});
+`;
+
+test.failing("MCP servers that connect and disconnect leave only the newest catalog row across rebuilds and folds", async () => {
+    const fixture = isolation();
+    fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
+    const script = join(fixture.root, "toy-mcp.mjs");
+    writeFileSync(script, TOY_MCP_SERVER);
+    const server = (name: string) => ({ type: "local", command: [process.execPath, script, name] });
+    const host = await spawnOpencode2({ existingIsolation: fixture,
+        compactionAuto: false, modelContextLimit: 302000, modelOutputLimit: 1024,
+        additionalModelIDs: ["catalog-rebuild"],
+        extraConfig: { mcp: { servers: { stable: server("stable"), toggle: server("toggle") } } },
+        magicContextConfig: { cache_ttl: "never", protected_tokens: 4000,
+            historian: { disable: true }, dreamer: { disable: true }, memory: { enabled: false } },
+    });
+    const client = OpenCode.make({ baseUrl: host.url,
+        headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
+    const location = { directory: fixture.cwd };
+    const source = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!));
+    try {
+        await waitForPluginActive(client, fixture.cwd);
+        const status = async (name: string, want: string) => {
+            const deadline = Date.now() + 30_000;
+            for (;;) {
+                const { data } = await client.mcp.list({ location });
+                const found = data.find(entry => entry.name === name) as { status?: { status?: string } } | undefined;
+                if (found?.status?.status === want) return;
+                if (Date.now() > deadline) throw new Error(`MCP server ${name} never reached ${want}: ${JSON.stringify(data)}`);
+                await Bun.sleep(100);
+            }
+        };
+        await status("stable", "connected");
+        await status("toggle", "connected");
+        const session = await client.session.create({ location, model: { providerID: "openai", id: "mock-model" } });
+        const turn = async (text: string) => {
+            const start = host.mock.requests().length;
+            await client.session.prompt({ sessionID: session.id, text });
+            await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
+            const request = host.mock.requests().slice(start).at(-1);
+            expect(request).toBeDefined();
+            return request!;
+        };
+        const toggle = async (connect: boolean) => {
+            if (connect) await client.mcp.connect({ server: "toggle", location });
+            else await client.mcp.disconnect({ server: "toggle", location });
+            await status("toggle", connect ? "connected" : "disabled");
+            // OpenCode reloads its tool registry 100 ms after a server's tools
+            // change; a prompt sent sooner still sees the previous catalog.
+            await Bun.sleep(1000);
+        };
+        const wire = (value: unknown) => JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item);
+        const replacement = "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.";
+        const copies = (request: { body: { input?: unknown } }) => wire(request.body.input).split(replacement).length - 1;
+        const served: Record<string, number> = {};
+        await turn("Establish the cache.");
+        let connected = true;
+        for (let i = 0; i < 6; i++) {
+            connected = !connected;
+            await toggle(connected);
+            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+        }
+        const rows = (source.prepare("SELECT id, data FROM session_message WHERE session_id=? AND type='system' ORDER BY seq").all(session.id) as Array<{ id: string; data: string }>)
+            .map(row => ({ id: row.id, ...(JSON.parse(row.data) as { text: string; metadata?: { instructionSources?: string[] } }) }));
+        await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "catalog-rebuild" } });
+        served["model switch rebuild"] = copies(await turn("A model switch already rebuilds the prefix."));
+        for (let i = 6; i < 8; i++) {
+            connected = !connected;
+            await toggle(connected);
+            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+        }
+        await client.session.compact({ sessionID: session.id });
+        await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
+        served["after host fold"] = copies(await turn("Continue after the host fold."));
+        console.log("ISSUE886_MCP_TOGGLE_EVIDENCE", JSON.stringify({
+            version: process.env.MC_E2E_OPENCODE2_VERSION, root: fixture.root,
+            rows: rows.map(row => ({ id: row.id, sources: row.metadata?.instructionSources,
+                chars: row.text.length, mcp: row.text.slice(row.text.lastIndexOf("\n\n") + 2, row.text.lastIndexOf("\n\n") + 120) })),
+            catalogCopiesServed: served,
+        }));
+        expect(rows).toHaveLength(6);
+        for (const [index, row] of rows.entries()) {
+            expect(row.metadata?.instructionSources).toEqual(["core/codemode", "core/mcp-guidance"]);
+            expect(row.text).toStartWith(`${replacement}\n\n# Code Mode\n`);
+            expect(row.text.slice(row.text.lastIndexOf("\n\n") + 2)).toStartWith(index % 2 === 0
+                ? "Instructions for the following MCP servers are no longer available: toggle."
+                : "New MCP server instructions are available in addition to those previously listed:\n  <server name=\"toggle\">");
+        }
+        // Before the rebuild every row is served, so each change adds a copy.
+        expect([0, 1, 2, 3, 4, 5].map(i => served[`toggle ${i}`])).toEqual([1, 2, 3, 4, 5, 6]);
+        // A rebuild keeps only the newest restatement; later changes append until the next one.
+        expect(served["model switch rebuild"]).toBe(1);
+        expect([served["toggle 6"], served["toggle 7"]]).toEqual([2, 3]);
+        expect(served["after host fold"]).toBe(1);
+    } finally { source.close(); await host.stop(); }
+}, 240000);
