@@ -1,7 +1,5 @@
 /// <reference types="bun-types" />
-// Review witnesses for the execute decision of a session whose provider never
-// reports usage. Skipped unless MC_REVIEW_USAGELESS=1, because the first case
-// records a known defect and fails until it is fixed.
+// The execute decision of a session whose provider never reports usage.
 //
 // Such a session has no provider reading, so the scheduler reads the local
 // count of the last request the transform served (local-wire-reading.ts).
@@ -13,12 +11,11 @@
 //   grants (its "force ride" in ARCHITECTURE.md) waits for a provider
 //   measurement, because the reading is only a local count; a usage-less
 //   provider never sends one;
-// - an execute pass may originate its own rebuild (invariant 3 in
-//   ARCHITECTURE.md) only while the reading is below the force band, because
-//   above it the force band's permission is expected to take over.
-// So in that band neither rule lets the pass rebuild, and a queued ctx_reduce
-// drop waits until the local count reaches 95%. Just below the force band the
-// same drop lands on the first execute pass, which the control case shows.
+// - so the execute pass's own bounded rebuild (invariant 3 in ARCHITECTURE.md)
+//   stays available there. Were it cut off at the force band, as it is for a
+//   provider-measured reading, a queued ctx_reduce drop would wait until the
+//   local count reached 95%.
+// The control case shows the same drop landing just below the force band.
 //
 // The model here is described by the catalog, as a usage-less provider with a
 // configured `limit.context` is. Without catalog metadata the transform has no
@@ -39,16 +36,27 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
-import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    clearModelsDevCache,
+    getSdkWindowGeometry,
+    refreshModelLimitsFromApi,
+} from "../../shared/models-dev-cache";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { createTransform } from "./transform";
 
-const ENABLED = process.env.MC_REVIEW_USAGELESS === "1";
-
 const MODEL = { providerID: "usageless-review", modelID: "usageless-model" };
 const CONTEXT = 80_000;
 const OUTPUT = 8_000;
+// A model whose output reserve makes the two usable windows differ: the
+// provider reading's limit reserves min(64K, 25% of 200K) = 50K for output
+// (150K usable), while the hard request wall reserves only the 32K OpenCode
+// output cap (168K).
+const RESERVED_MODEL = { providerID: "usageless-review", modelID: "usageless-reserved" };
+const RESERVED_CONTEXT = 200_000;
+const RESERVED_OUTPUT = 64_000;
+const RESERVED_USABLE_SOFT = 150_000;
+const RESERVED_USABLE_HARD = 168_000;
 const EXECUTE_THRESHOLD = 65;
 // escalationBands(65): max(85, 65 + 2).
 const FORCE_BAND = 85;
@@ -70,6 +78,9 @@ beforeEach(async () => {
                             id: MODEL.providerID,
                             models: {
                                 [MODEL.modelID]: { limit: { context: CONTEXT, output: OUTPUT } },
+                                [RESERVED_MODEL.modelID]: {
+                                    limit: { context: RESERVED_CONTEXT, output: RESERVED_OUTPUT },
+                                },
                             },
                         },
                     ],
@@ -95,7 +106,7 @@ afterEach(() => {
  * handler does for a reply without token counts. No historian can run, so no
  * summary can come and an execute pass may rebuild for queued drops.
  */
-function usagelessSession(sessionId: string) {
+function usagelessSession(sessionId: string, model: typeof MODEL = MODEL) {
     const dataHome = createTestTempDir("mc-usageless-review-data-").dir;
     const directory = createTestTempDir("mc-usageless-review-session-").dir;
     tempDirs.push(dataHome, directory);
@@ -113,7 +124,7 @@ function usagelessSession(sessionId: string) {
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
         lastHeuristicsTurnId: new Map(),
-        liveModelBySession: new Map([[sessionId, MODEL]]),
+        liveModelBySession: new Map([[sessionId, model]]),
         protectedTokens: 2000,
         protectedTools: { bash: 0 },
         historianRunnable: false,
@@ -157,7 +168,7 @@ function usagelessSession(sessionId: string) {
                         sessionID: sessionId,
                         time: { created: clock++ },
                         finish: "tool-calls",
-                        ...MODEL,
+                        ...model,
                         tokens: { input: 0, output: 300, reasoning: 0 },
                     },
                     parts: [
@@ -192,6 +203,12 @@ function usagelessSession(sessionId: string) {
             return getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === tagNumber)
                 ?.status;
         },
+        /** The tags of every tool output dropped so far, queued or not. */
+        droppedTools() {
+            return getTagsBySession(db, sessionId)
+                .filter((tag) => tag.type === "tool" && tag.status === "dropped")
+                .map((tag) => tag.tagNumber);
+        },
         pendingOps() {
             return getPendingOps(db, sessionId).length;
         },
@@ -207,9 +224,10 @@ function usagelessSession(sessionId: string) {
                 const messages = structuredClone(source);
                 await handler({}, { messages });
                 updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
-                const local = /reads the local count of the last served request percentage=([\d.]+)/
-                    .exec(logs.find((line) => line.includes("reads the local count")) ?? "")
-                    ?.at(1);
+                const localLine = logs.find((line) => line.includes("reads the local count"));
+                const local = /reads the local count of the last served request percentage=([\d.]+) inputTokens=([\d.]+)/.exec(
+                    localLine ?? "",
+                );
                 const sized = /using wire estimate for priced pass .*percentage=([\d.]+)/
                     .exec(logs.find((line) => line.includes("using wire estimate")) ?? "")
                     ?.at(1);
@@ -217,7 +235,8 @@ function usagelessSession(sessionId: string) {
                     decision: /decision=(\w+)/.exec(
                         logs.find((line) => line.startsWith("transform scheduler:")) ?? "",
                     )?.[1],
-                    localPercentage: local === undefined ? undefined : Number(local),
+                    localPercentage: local ? Number(local[1]) : undefined,
+                    localInputTokens: local ? Number(local[2]) : undefined,
                     sizedPercentage: sized === undefined ? undefined : Number(sized),
                     held: logs.some((line) => line.startsWith("pending ops held")),
                     applied: logs.some((line) => line.startsWith("pending ops WILL APPLY")),
@@ -243,46 +262,86 @@ async function queuedDropAfterExecutePasses(sessionId: string, totalSteps: numbe
     s.grow(totalSteps - 12);
     await s.pass();
     const tag = s.dropOldestTool();
-    const passes = [await s.pass(), await s.pass(), await s.pass()];
-    return { passes, pendingOps: s.pendingOps(), status: s.status(tag) };
+    const first = await s.pass();
+    // Read before the later passes, which may drop more as the session grows.
+    const droppedOnFirst = s.droppedTools();
+    const passes = [first, await s.pass(), await s.pass()];
+    return { passes, tag, droppedOnFirst, pendingOps: s.pendingOps(), status: s.status(tag) };
 }
 
-it.skipIf(!ENABLED)(
-    "a usage-less session whose local count is between the force band and 95% lands a queued drop on its execute passes",
-    async () => {
-        // 24 tool steps serve about 91% of the usable window by the local count.
-        const result = await queuedDropAfterExecutePasses("usageless-force-band", 24);
-        // Preconditions: the first pass after the drop is queued is an execute
-        // pass decided from the local count, sized inside the force band but
-        // below 95%.
-        const first = result.passes[0]!;
-        expect(first.decision).toBe("execute");
-        expect(first.localPercentage).toBeGreaterThanOrEqual(EXECUTE_THRESHOLD);
-        expect(first.sizedPercentage).toBeGreaterThanOrEqual(FORCE_BAND);
-        expect(first.sizedPercentage).toBeLessThan(95);
-        // The drop is worth more than 2% of the window and no summary can
-        // come, so an execute pass should land it, as it does below the band.
-        expect({
-            heldOnEveryPass: result.passes.every((pass) => pass.held),
-            pendingOps: result.pendingOps,
-            status: result.status,
-        }).toEqual({ heldOnEveryPass: false, pendingOps: 0, status: "dropped" });
-    },
-);
+it("a usage-less session whose local count is between the force band and 95% lands a queued drop on its execute passes", async () => {
+    // 24 tool steps serve about 91% of the usable window by the local count.
+    const result = await queuedDropAfterExecutePasses("usageless-force-band", 24);
+    // Preconditions: the first pass after the drop is queued is an execute
+    // pass decided from the local count, sized inside the force band but
+    // below 95%.
+    const first = result.passes[0]!;
+    expect(first.decision).toBe("execute");
+    expect(first.localPercentage).toBeGreaterThanOrEqual(EXECUTE_THRESHOLD);
+    expect(first.sizedPercentage).toBeGreaterThanOrEqual(FORCE_BAND);
+    expect(first.sizedPercentage).toBeLessThan(95);
+    // The drop is worth more than 2% of the window and no summary can come,
+    // so the first execute pass lands it, as it does below the band.
+    expect(first.applied).toBe(true);
+    expect({
+        heldOnEveryPass: result.passes.every((pass) => pass.held),
+        pendingOps: result.pendingOps,
+        status: result.status,
+    }).toEqual({ heldOnEveryPass: false, pendingOps: 0, status: "dropped" });
+    // A local count below 95% runs no tiered emergency tool drop: that
+    // rebuild drops the queued tool output and nothing else.
+    expect(result.droppedOnFirst).toEqual([result.tag]);
+});
 
-it.skipIf(!ENABLED)(
-    "control: just below the force band the same queued drop lands on the first execute pass",
-    async () => {
-        // 22 tool steps serve about 83% of the usable window by the local count.
-        const result = await queuedDropAfterExecutePasses("usageless-below-band", 22);
-        const first = result.passes[0]!;
-        expect(first.decision).toBe("execute");
-        expect(first.localPercentage).toBeGreaterThanOrEqual(EXECUTE_THRESHOLD);
-        expect(first.sizedPercentage).toBeLessThan(FORCE_BAND);
-        expect(first.applied).toBe(true);
-        expect({ pendingOps: result.pendingOps, status: result.status }).toEqual({
-            pendingOps: 0,
-            status: "dropped",
-        });
-    },
-);
+it("at 95% by a local count the first execute pass also runs the tiered emergency tool drop", async () => {
+    // 26 tool steps serve about 99% of the usable window by the local count.
+    const result = await queuedDropAfterExecutePasses("usageless-emergency", 26);
+    const first = result.passes[0]!;
+    expect(first.decision).toBe("execute");
+    expect(first.sizedPercentage).toBeGreaterThanOrEqual(95);
+    expect(first.applied).toBe(true);
+    expect(result.status).toBe("dropped");
+    // At 95% or more a local count is force-band pressure, so the emergency
+    // tool drop removes unqueued tool outputs on the same rebuild.
+    expect(result.droppedOnFirst).toContain(result.tag);
+    expect(result.droppedOnFirst.length).toBeGreaterThan(1);
+});
+
+it("control: just below the force band the same queued drop lands on the first execute pass", async () => {
+    // 22 tool steps serve about 83% of the usable window by the local count.
+    const result = await queuedDropAfterExecutePasses("usageless-below-band", 22);
+    const first = result.passes[0]!;
+    expect(first.decision).toBe("execute");
+    expect(first.localPercentage).toBeGreaterThanOrEqual(EXECUTE_THRESHOLD);
+    expect(first.sizedPercentage).toBeLessThan(FORCE_BAND);
+    expect(first.applied).toBe(true);
+    expect({ pendingOps: result.pendingOps, status: result.status }).toEqual({
+        pendingOps: 0,
+        status: "dropped",
+    });
+});
+
+it("a usage-less session's local reading is a percentage of the limit a provider reading uses", async () => {
+    // Precondition: the two usable windows of this model differ.
+    expect(getSdkWindowGeometry(RESERVED_MODEL.providerID, RESERVED_MODEL.modelID)).toMatchObject({
+        usableSoft: RESERVED_USABLE_SOFT,
+        usableHard: RESERVED_USABLE_HARD,
+    });
+    const s = usagelessSession("usageless-reserved-window", RESERVED_MODEL);
+    s.grow(12);
+    await s.pass();
+    // The second pass reads the local count of the request the first served.
+    const second = await s.pass();
+    const tokens = second.localInputTokens;
+    expect(tokens).toBeGreaterThan(0);
+    // A provider reading is a percentage of the output-reserved limit, so the
+    // local reading is too: the same request then reaches the execute
+    // threshold whether or not the provider reports usage. Over the larger
+    // hard window it would read lower and execute later.
+    expect(second.localPercentage).toBe(
+        Number((((tokens ?? 0) / RESERVED_USABLE_SOFT) * 100).toFixed(1)),
+    );
+    expect(second.localPercentage).not.toBe(
+        Number((((tokens ?? 0) / RESERVED_USABLE_HARD) * 100).toFixed(1)),
+    );
+});

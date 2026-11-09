@@ -12,7 +12,10 @@
 //    scheduler saw 0% on every pass that did not already rebuild, so it never
 //    reached the execute threshold, and the idle expiry was its only automatic
 //    rebuild. The execute decision now reads the local count of the last
-//    served request instead.
+//    served request instead, and the execute pass is sized from a local count
+//    of its own request. Between the force band and 95% that sized reading
+//    gets no force ride, so the execute pass's own bounded rebuild lands the
+//    drop there.
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,19 +29,46 @@ import {
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { recordDetectedContextLimit } from "../../features/magic-context/storage-meta-persisted";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
-import { estimateTokens } from "./read-session-formatting";
 import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { createTransform } from "./transform";
 
 const MODEL = { providerID: "openai", modelID: "gpt-4.1" };
+// A model the catalog describes (an 80K window with an 8K output reserve, so
+// 72K usable), as a usage-less provider with a configured `limit.context` is.
+// Without catalog metadata the transform has no window geometry, and an
+// execute pass with no provider reading cannot be sized.
+const USAGELESS_MODEL = { providerID: "usageless-idle-review", modelID: "usageless-model" };
+const USAGELESS_USABLE = 72_000;
+
+async function registerUsagelessModel() {
+    await refreshModelLimitsFromApi({
+        config: {
+            providers: async () => ({
+                data: {
+                    providers: [
+                        {
+                            id: USAGELESS_MODEL.providerID,
+                            models: {
+                                [USAGELESS_MODEL.modelID]: {
+                                    limit: { context: 80_000, output: 8_000 },
+                                },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+    });
+}
+
 type Part = Record<string, unknown>;
 type Message = { info: Record<string, unknown>; parts: Part[] };
 const BULK = "ROW value = compute(input, options); // generated line\n".repeat(160);
@@ -48,6 +78,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 afterEach(() => {
     resetLkgSlotsForTest();
+    clearModelsDevCache();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -60,7 +91,12 @@ afterEach(() => {
  * provider's last reading; null models a provider that never reports usage
  * (its completions still advance the idle clock, as event-handler.ts does).
  */
-function session(host: (typeof HOSTS)[number], sessionId: string, usage: number | null = 30) {
+function session(
+    host: (typeof HOSTS)[number],
+    sessionId: string,
+    usage: number | null = 30,
+    model: typeof MODEL = MODEL,
+) {
     const dataHome = createTestTempDir("mc-idle-review-data-").dir;
     const directory = createTestTempDir("mc-idle-review-session-").dir;
     tempDirs.push(dataHome, directory);
@@ -95,7 +131,7 @@ function session(host: (typeof HOSTS)[number], sessionId: string, usage: number 
         historyRefreshSessions,
         pendingMaterializationSessions: pending,
         lastHeuristicsTurnId: new Map(),
-        liveModelBySession: new Map([[sessionId, MODEL]]),
+        liveModelBySession: new Map([[sessionId, model]]),
         protectedTokens: 2000,
         protectedTools: { bash: 0 },
         historianRunnable: false,
@@ -122,7 +158,7 @@ function session(host: (typeof HOSTS)[number], sessionId: string, usage: number 
     const systemHandler = createSystemPromptHashHandler({
         db,
         dreamerEnabled: false,
-        resolveModel: () => MODEL,
+        resolveModel: () => model,
         historyRefreshSessions,
         systemPromptRefreshSessions,
         pendingMaterializationSessions: pending,
@@ -152,7 +188,7 @@ function session(host: (typeof HOSTS)[number], sessionId: string, usage: number 
                     sessionID: sessionId,
                     time: { created: clock++ },
                     finish: "tool-calls",
-                    ...MODEL,
+                    ...model,
                     tokens: { input: 0, output: 300, reasoning: 0 },
                 },
                 parts: [
@@ -240,19 +276,50 @@ const dated = (day: string, systemFirst: boolean) => ({
     systemFirst,
 });
 
-// Enough tool steps that the calibrated count of the served request is past
-// 65% of an 80K window (26 steps read about 57% by that count).
-const USAGELESS_STEPS = 32;
+// The usage-less case grows to this many steps, so that the local count of its
+// served request is between the force band (85%) and 95% of the 72K usable
+// window.
+const USAGELESS_BAND_STEPS = 31;
 
 /** The calibrated local count the transform records for the served request. */
 function calibratedTokens(s: ReturnType<typeof session>, sessionId: string, messages: unknown) {
     return estimateFinalWireInputTokens({
         messages: messages as never,
         systemPromptTokens: getOrCreateSessionMeta(s.db, sessionId).systemPromptTokens,
-        providerID: MODEL.providerID,
-        modelID: MODEL.modelID,
+        providerID: USAGELESS_MODEL.providerID,
+        modelID: USAGELESS_MODEL.modelID,
         sessionId,
     }).pressureTokens;
+}
+
+/** The reading a priced pass with no provider reading was sized at, if it was. */
+function sizedPercentage(logs: string[]): number | undefined {
+    const line = logs.find((entry) => entry.includes("using wire estimate for priced pass"));
+    const match = /percentage=([\d.]+)/.exec(line ?? "");
+    return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * A session on the catalog model whose first request (a first render) is below
+ * the execute threshold and whose second is grown into the force band, so the
+ * band is first reached on an ordinary pass rather than on the first render.
+ * Returns the session and the second served request.
+ */
+async function grownSession(
+    host: (typeof HOSTS)[number],
+    sessionId: string,
+    usage: number | null,
+) {
+    const s = session(host, sessionId, usage, USAGELESS_MODEL);
+    // After `session` points the data home at its own temporary directory,
+    // where the catalog refresh saves its copy.
+    await registerUsagelessModel();
+    seed(s, 12);
+    await s.pass();
+    for (let n = 13; n <= USAGELESS_BAND_STEPS; n++) s.step(n);
+    s.user("another task");
+    const grown = await s.pass();
+    return { s, grown };
 }
 
 for (const host of HOSTS) {
@@ -277,50 +344,54 @@ for (const host of HOSTS) {
             }).toEqual({ folded: null, pendingOps: 1, status: "active", messagesUnchanged: true });
         });
 
-    it(`${host}: a session whose provider reports no usage lands queued drops once its request is over the execute threshold`, async () => {
-        const s = session(host, `review-usageless-${host}`, null);
-        // An 80K window: the seeded history below is past 65% of it by a
-        // local count, but the provider never says so.
-        recordDetectedContextLimit(s.db, `review-usageless-${host}`, 80_000, "openai/gpt-4.1");
-        seed(s, USAGELESS_STEPS);
-        const first = await s.pass();
-        const localTokens = estimateTokens(JSON.stringify(first.messages));
-        expect(localTokens).toBeGreaterThan(0.65 * 80_000);
+    it(`${host}: a session whose provider reports no usage lands a queued drop on its first execute pass, also between the force band and 95%`, async () => {
+        const sessionId = `review-usageless-${host}`;
+        const { s, grown } = await grownSession(host, sessionId, null);
         // The execute decision reads the calibrated count of the served request
-        // (what the provider would likely report), so the seed must put that
-        // count past the threshold too.
-        expect(calibratedTokens(s, `review-usageless-${host}`, first.messages)).toBeGreaterThan(
-            0.65 * 80_000,
-        );
-        await s.pass();
+        // (what the provider would likely report), and the provider never says
+        // otherwise. The grown request is in the force band by that count.
+        expect(
+            calibratedTokens(s, sessionId, grown.messages),
+        ).toBeGreaterThanOrEqual(0.85 * USAGELESS_USABLE);
         const tag = s.dropOldestTool();
-        await s.pass();
-        await s.pass();
-        s.idle();
-        await s.pass();
-        await s.pass();
-        await s.pass();
-        // A provider that never reports usage gives the scheduler no reading,
-        // so the execute decision reads the calibrated local count of the last
-        // served request; past the threshold, an execute pass lands this drop.
-        // Without that count every pass read 0%, and once an expired cache no
-        // longer triggered a rebuild the drop waited for /ctx-flush or a
-        // provider overflow error.
-        expect({ pendingOps: s.pendingOps(), status: s.status(tag) }).toEqual({
-            pendingOps: 0,
-            status: "dropped",
-        });
+        const passes: Array<{
+            sized: number | undefined;
+            status: string | undefined;
+            droppedTools: number[];
+        }> = [];
+        for (let pass = 0; pass < 3; pass++) {
+            const served = await s.pass();
+            passes.push({
+                sized: sizedPercentage(served.logs),
+                status: s.status(tag),
+                droppedTools: getTagsBySession(s.db, sessionId)
+                    .filter((row) => row.type === "tool" && row.status === "dropped")
+                    .map((row) => row.tagNumber),
+            });
+        }
+        // The first pass after the drop is queued executes from that count and
+        // is sized from a local count of its own request, inside the force
+        // band. A local count below 95% gets no force ride, so the execute
+        // pass's own rebuild lands the drop: on that first pass, with no idle
+        // expiry. Without the local count every pass read 0%, and once an
+        // expired cache no longer triggered a rebuild the drop waited for
+        // /ctx-flush or a provider overflow error.
+        expect(passes[0]?.sized).toBeGreaterThanOrEqual(85);
+        expect(passes[0]?.sized).toBeLessThan(95);
+        expect(passes.map((pass) => pass.status)).toEqual(["dropped", "dropped", "dropped"]);
+        expect(s.pendingOps()).toBe(0);
+        // Nor does a local count below 95% run the tiered emergency tool drop:
+        // that rebuild drops the queued tool output and nothing else.
+        expect(passes[0]?.droppedTools).toEqual([tag]);
     });
 
     it(`${host}: control: a session whose provider reports usage below the threshold keeps its queued drop, whatever the local count`, async () => {
         const sessionId = `review-usage-${host}`;
         // The provider measures this session at 30%.
-        const s = session(host, sessionId, 30);
-        recordDetectedContextLimit(s.db, sessionId, 80_000, "openai/gpt-4.1");
-        seed(s, USAGELESS_STEPS);
-        const first = await s.pass();
-        expect(calibratedTokens(s, sessionId, first.messages)).toBeGreaterThan(0.65 * 80_000);
-        await s.pass();
+        const { s, grown } = await grownSession(host, sessionId, 30);
+        expect(
+            calibratedTokens(s, sessionId, grown.messages),
+        ).toBeGreaterThanOrEqual(0.85 * USAGELESS_USABLE);
         const tag = s.dropOldestTool();
         await s.pass();
         await s.pass();

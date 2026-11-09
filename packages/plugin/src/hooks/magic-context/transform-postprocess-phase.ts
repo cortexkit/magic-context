@@ -1696,8 +1696,11 @@ interface RunPostTransformPhaseArgs {
     /**
      * True when `contextUsage` was raised by a local count of the request, not
      * by a provider measurement or an overflow latch (the first pass after a
-     * restart, or after a model switch). Such a reading below 95% may not by
-     * itself grant the force ride.
+     * restart or a model switch, or any priced pass of a session whose provider
+     * reports no usage). Such a reading below 95% may not by itself grant the
+     * force ride, lift the signed-thinking hold or run the tiered emergency
+     * tool drop, and it leaves the execute pass's own bounded rebuild
+     * available.
      */
     contextUsageFromEstimate?: boolean;
     /** Usable tokens available for soft scheduling thresholds and usage-ratio calculation. */
@@ -2201,6 +2204,16 @@ export async function runPostTransformPhase(
     // ≥ the force-materialize threshold.
     const emergencyDropEligible =
         !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
+    // A reading that only a local count put in the force band can overstate
+    // the provider, and a provider that reports no usage never sends the
+    // measurement that would confirm it. Below 95% such a reading is therefore
+    // not force-band pressure: it takes no force ride, lifts no signed-thinking
+    // hold and runs no tiered emergency tool drop. A rebuild the pass makes for
+    // another reason (such as the execute pass's own bounded rebuild below)
+    // carries only queued drops and routine cleanup.
+    const forceRideWaitsOnLocalCount =
+        args.contextUsageFromEstimate === true && args.contextUsage.percentage < 95;
+    const forceBandConfirmed = emergencyDropEligible && !forceRideWaitsOnLocalCount;
     const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
     if (!executePressureEligible) {
         routinePressureAppliedBySession.delete(args.sessionId);
@@ -2712,6 +2725,13 @@ export async function runPostTransformPhase(
                     legacyPublishedHeadChanged(args))),
     };
     const protectedToolTags = protectedToolTagNumbers(args.tags, args.protectedTools);
+    // From the force band up, the force ride normally takes over from the
+    // execute pass's own rebuild. A reading that only a local count put there
+    // gets no force ride below 95%, so cutting the execute rebuild off at the
+    // force band would leave a session whose provider reports no usage with no
+    // rebuild at all until 95%: it stays available there. Its own bounds still
+    // apply: the 2% queued-work bound, the third held pass and the hold while
+    // a summary can come.
     rideSignals.executeReclaim =
         !compactionOff &&
         originateExecuteReclaim({
@@ -2720,7 +2740,8 @@ export async function runPostTransformPhase(
             primaryExecute:
                 args.fullFeatureMode &&
                 args.schedulerDecision === "execute" &&
-                args.contextUsage.percentage < args.forceMaterializationPercentage,
+                (args.contextUsage.percentage < args.forceMaterializationPercentage ||
+                    forceRideWaitsOnLocalCount),
             alreadyBusting: Object.values(rideSignals).some(Boolean) || args.historyRebuiltThisPass,
             summaryCanCome:
                 compartmentRunning ||
@@ -2753,7 +2774,10 @@ export async function runPostTransformPhase(
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
-            emergency: emergencyDropEligible,
+            // A reading that only a local count put in the force band lifts the
+            // signed-thinking hold only at 95% or more, by the same rule as the
+            // force ride.
+            emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
     const shouldRunHeuristics =
@@ -3240,7 +3264,7 @@ export async function runPostTransformPhase(
             // emergency batch so all candidates accumulated during sustained
             // force pressure can ride it instead of waiting for another episode.
             if (
-                emergencyDropEligible &&
+                forceBandConfirmed &&
                 emergencyRewriteAlreadyPriced &&
                 getEmergencyInputSample(args.db, args.sessionId) > 0
             ) {
@@ -3250,7 +3274,7 @@ export async function runPostTransformPhase(
             // A small pressure dip or a process restart cannot rearm just the text lane.
             // Independent work and the absolute emergency arm still admit all lanes.
             let routineCleanupApplied =
-                (emergencyDropEligible
+                (forceBandConfirmed
                     ? args.contextUsage.percentage >= 95 ||
                       getEmergencyInputSample(args.db, args.sessionId) === 0
                     : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
@@ -3273,8 +3297,10 @@ export async function runPostTransformPhase(
                     // ceiling (cold start) or below-threshold usage → no
                     // emergency arg → routine pass does dedup/injection-strip
                     // only (Phase 2 removed need-blind routine tool drops).
+                    // A reading that only a local count put in the band runs
+                    // it only at 95% or more (see `forceBandConfirmed`).
                     emergency:
-                        emergencyDropEligible &&
+                        forceBandConfirmed &&
                         args.emergencyCeilingTokens !== undefined &&
                         args.emergencyCeilingTokens > 0
                             ? {
@@ -3565,7 +3591,9 @@ export async function runPostTransformPhase(
         // expired provider cache grants no fold of its own.
 
         // Consume only after the shared tool/text batch actually changed bytes.
-        if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
+        // A local count below 95% ran no emergency batch (see
+        // `forceBandConfirmed`), so it leaves the episode unconsumed.
+        if (forceBandConfirmed && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
             setEmergencyDropSample(args.db, args.sessionId, args.contextUsage.inputTokens);
         }
         const toolReclaimApplicationOpportunity = isCacheBustingPass;

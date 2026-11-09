@@ -2016,10 +2016,21 @@ export function createTransform(deps: TransformDeps) {
                 ? Math.floor(emergencyCeilingLimit * (effectiveExecuteThresholdPercentage / 100))
                 : undefined;
         // A session whose provider reports no usage has no reading here, so its
-        // execute decision reads the local count of the last request it served,
-        // over the usable window (or the trusted context limit for a model the
-        // catalog does not describe). Nothing else on this pass reads that count.
-        const localReadingWindow = windowGeometry?.usableHard ?? resolvedContextLimit;
+        // execute decision reads the local count of the last request it served.
+        // The count is a percentage of the same limit a provider reading uses
+        // (the trusted context limit, which reserves room for output), so such a
+        // session reaches the execute threshold at the same request size as one
+        // that reports usage.
+        //
+        // Only the scheduler reads this count, but an execute decision has a
+        // further effect: with no provider reading, the priced-pass sizing below
+        // counts this pass's own request, and every later pressure check on the
+        // pass reads that sized reading. A reading that only a local count
+        // produced takes the force ride, runs the tiered emergency tool drop and
+        // lifts the signed-thinking hold only at 95% or more. Below 95% the
+        // execute pass keeps its own bounded rebuild (see the postprocess
+        // phase), so queued drops are not stranded until then.
+        const localReadingWindow = resolvedContextLimit ?? windowGeometry?.usableSoft;
         const localReadingModelKey = modelForBudget
             ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
             : undefined;
@@ -3146,11 +3157,12 @@ export function createTransform(deps: TransformDeps) {
             onAdopt: (message) => sessionLog(sessionId, message),
         });
         // A cache-busting pass can lack input-token usage for the selected model:
-        // the first pass after a process restart resets the reading, and a model
-        // switch clears it. Emergency tool-output reclaim needs a reading, so
-        // size the pass here. This is a pressure reading, not a fit check: the
-        // over-window first-pass check, the overflow-recovery bump and the final
-        // refusal check stay the fit guards.
+        // the first pass after a process restart resets the reading, a model
+        // switch clears it, and a provider that reports no usage never sends
+        // one. Emergency tool-output reclaim needs a reading, so size the pass
+        // here. This is a pressure reading, not a fit check: the over-window
+        // first-pass check, the overflow-recovery bump and the final refusal
+        // check stay the fit guards.
         //
         // The request is counted with calibrated ratios (`pressureTokens`): an
         // unseeded model counts neutrally. The fit envelope (`tokens`) doubles

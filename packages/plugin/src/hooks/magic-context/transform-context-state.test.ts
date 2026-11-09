@@ -16,6 +16,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { computeHardCacheExpired } from "./transform";
 import {
     contextUsagePassSnapshot,
+    firstPassExecuteReading,
     loadContextUsage,
     recordUsageRefusal,
     resolveUnknownUsageFromWireEstimate,
@@ -159,6 +160,83 @@ describe("savedProviderReadingForPass", () => {
                 persisted: { ...persisted, usage: { percentage: 59.9, inputTokens: 0 } },
             }),
         ).toBeNull();
+    });
+});
+
+describe("firstPassExecuteReading", () => {
+    const persisted = {
+        usage: { percentage: 70.2, inputTokens: 64_450 },
+        updatedAt: 1_000,
+        lastObservedModelKey: "mock/model-a",
+        lastUsageContextLimit: 91_808,
+    };
+    // A saved reading at or above the 65% threshold, for this model and limit,
+    // on a pass whose own (cleared) reading is below it.
+    const qualifying = {
+        persisted,
+        currentModelKey: "mock/model-a",
+        contextLimit: 91_808,
+        lastResponseTime: 1_000,
+        executeThresholdPercentage: 65,
+        passPercentage: 0,
+    };
+
+    it("returns a saved reading at or above the threshold for the same model and limit", () => {
+        expect(firstPassExecuteReading(qualifying)).toEqual({
+            percentage: 70.2,
+            inputTokens: 64_450,
+        });
+        expect(
+            firstPassExecuteReading({
+                ...qualifying,
+                persisted: { ...persisted, usage: { percentage: 65, inputTokens: 59_675 } },
+            }),
+        ).toEqual({ percentage: 65, inputTokens: 59_675 });
+    });
+
+    it("refuses a reading with no recorded provider reply", () => {
+        expect(firstPassExecuteReading({ ...qualifying, lastResponseTime: 0 })).toBeNull();
+    });
+
+    it("refuses a reading whose saved model key is null", () => {
+        expect(
+            firstPassExecuteReading({
+                ...qualifying,
+                persisted: { ...persisted, lastObservedModelKey: null },
+            }),
+        ).toBeNull();
+    });
+
+    it("refuses a reading when the pass's context limit is unknown", () => {
+        expect(firstPassExecuteReading({ ...qualifying, contextLimit: undefined })).toBeNull();
+        // A zero limit never matches either, even against a zero saved limit.
+        expect(
+            firstPassExecuteReading({
+                ...qualifying,
+                contextLimit: 0,
+                persisted: { ...persisted, lastUsageContextLimit: 0 },
+            }),
+        ).toBeNull();
+    });
+
+    it("refuses a reading with no input tokens", () => {
+        expect(
+            firstPassExecuteReading({
+                ...qualifying,
+                persisted: { ...persisted, usage: { percentage: 70.2, inputTokens: 0 } },
+            }),
+        ).toBeNull();
+    });
+
+    it("refuses a reading below the threshold, or when the pass already reaches it", () => {
+        expect(
+            firstPassExecuteReading({
+                ...qualifying,
+                persisted: { ...persisted, usage: { percentage: 64.9, inputTokens: 59_583 } },
+            }),
+        ).toBeNull();
+        expect(firstPassExecuteReading({ ...qualifying, passPercentage: 65 })).toBeNull();
+        expect(firstPassExecuteReading({ ...qualifying, persisted: null })).toBeNull();
     });
 });
 

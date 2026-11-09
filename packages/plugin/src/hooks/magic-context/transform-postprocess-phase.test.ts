@@ -13836,6 +13836,7 @@ describe("signed-prefix hold review", () => {
             execute: boolean;
             flush: Set<string>;
             deferred?: Set<string>;
+            fromEstimate?: boolean;
         },
     ) => {
         const messages = heldSource();
@@ -13858,6 +13859,7 @@ describe("signed-prefix hold review", () => {
                     percentage: options.percentage,
                     inputTokens: options.percentage * 1000,
                 },
+                contextUsageFromEstimate: options.fromEstimate,
                 emergencyCeilingTokens: 65_000,
                 pendingMaterializationSessions: options.flush,
                 deferredMaterializationSessions: options.deferred ?? new Set(),
@@ -13911,6 +13913,48 @@ describe("signed-prefix hold review", () => {
                 percentage: 85,
                 execute: true,
                 flush: new Set([sessionId]),
+            });
+            expect(drain).toHaveBeenCalledTimes(1);
+        } finally {
+            drain.mockRestore();
+        }
+    });
+
+    it("a held pass that only a local count puts in the force band keeps its hold below 95%", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "hold-review-local-count";
+        const baseline = await runHeld(sessionId, {
+            held: true,
+            percentage: 20,
+            execute: false,
+            flush: new Set(),
+        });
+        for (const tag of oldTags(sessionId)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        const queued = getPendingOps(db, sessionId).length;
+        expect(queued).toBeGreaterThan(0);
+        const drain = spyOn(operations, "applyPendingOperations");
+        try {
+            // A local count can overstate the provider, so below 95% it is not
+            // the emergency pressure that lifts the hold: the flush waits, as it
+            // does below the force band, and the pass replays the same bytes.
+            const held = await runHeld(sessionId, {
+                held: true,
+                percentage: 90,
+                execute: true,
+                flush: new Set([sessionId]),
+                fromEstimate: true,
+            });
+            expect(drain).not.toHaveBeenCalled();
+            expect(held.messages).toBe(baseline.messages);
+            expect(getPendingOps(db, sessionId)).toHaveLength(queued);
+            // At 95% or more the same local count lifts the hold.
+            await runHeld(sessionId, {
+                held: true,
+                percentage: 96,
+                execute: true,
+                flush: new Set([sessionId]),
+                fromEstimate: true,
             });
             expect(drain).toHaveBeenCalledTimes(1);
         } finally {
@@ -13978,6 +14022,148 @@ describe("signed-prefix hold review", () => {
         expect(released.messages).not.toBe(baseline.messages);
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
     });
+});
+
+// A session whose provider reports no usage has its execute passes sized from a
+// local count of the request. Between the force band (85% here) and 95% such a
+// reading gets no force ride: it waits for a provider measurement, which this
+// provider never sends. The execute pass's own bounded rebuild must therefore
+// stay available in that band, with every one of its bounds.
+describe("execute rebuild while the force ride waits on a local count", () => {
+    const WINDOW = 100_000;
+
+    /**
+     * Queues a drop of one tool output of `bytes` and returns a runner for a
+     * primary execute pass at `percentage`, with the reading marked as a local
+     * count when `fromEstimate` is set.
+     */
+    const setup = (
+        sessionId: string,
+        options: {
+            bytes: number;
+            percentage: number;
+            fromEstimate: boolean;
+            summaryCanCome?: boolean;
+        },
+    ) => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const message = makeToolMessage(`${sessionId}-tool`);
+        insertTag(
+            db,
+            sessionId,
+            `${sessionId}-call`,
+            "tool",
+            options.bytes,
+            1,
+            0,
+            "bash",
+            0,
+            message.info.id,
+        );
+        padRecentToolSkeletonWindow(sessionId, 1);
+        const args = basePostTransformArgs(db, sessionId, [message], {
+            schedulerDecision: "execute",
+            schedulerDeferReason: null,
+            contextUsage: {
+                percentage: options.percentage,
+                inputTokens: options.percentage * (WINDOW / 100),
+            },
+            contextUsageFromEstimate: options.fromEstimate,
+            usableWindow: WINDOW,
+            emergencyCeilingTokens: 65_000,
+            tags: getActiveTagsBySession(db, sessionId),
+            targets: new Map([[1, makeDropTarget(message)]]),
+            sessionMeta: {
+                ...getOrCreateSessionMeta(db, sessionId),
+                compartmentInProgress: options.summaryCanCome === true,
+            },
+        });
+        const baseline = JSON.stringify(args.messages);
+        queuePendingOp(db, sessionId, 1, "drop");
+        return {
+            baseline,
+            async pass() {
+                await runPostTransformPhase(args);
+                return {
+                    pendingOps: getPendingOps(db, sessionId).length,
+                    unchanged: JSON.stringify(args.messages) === baseline,
+                };
+            },
+        };
+    };
+
+    // 40,000 bytes count as 10,000 tokens: 10% of the window, past the 2% bound.
+    const WORTHWHILE = 40_000;
+    // 1,000 bytes count as 250 tokens: below the 2% bound.
+    const SMALL = 1_000;
+
+    it("lands a queued drop worth 2% of the window on the first execute pass", async () => {
+        const s = setup("local-band-worthwhile", {
+            bytes: WORTHWHILE,
+            percentage: 90,
+            fromEstimate: true,
+        });
+        expect(await s.pass()).toEqual({ pendingOps: 0, unchanged: false });
+    });
+
+    it("holds the drop while a summary can come", async () => {
+        const s = setup("local-band-summary", {
+            bytes: WORTHWHILE,
+            percentage: 90,
+            fromEstimate: true,
+            summaryCanCome: true,
+        });
+        for (let pass = 0; pass < 4; pass++)
+            expect(await s.pass()).toEqual({ pendingOps: 1, unchanged: true });
+    });
+
+    it("holds a drop worth less than 2% until the third execute pass", async () => {
+        const s = setup("local-band-small", { bytes: SMALL, percentage: 90, fromEstimate: true });
+        expect(await s.pass()).toEqual({ pendingOps: 1, unchanged: true });
+        expect(await s.pass()).toEqual({ pendingOps: 1, unchanged: true });
+        expect(await s.pass()).toEqual({ pendingOps: 0, unchanged: false });
+    });
+
+    it("control: a provider-measured reading in the band leaves the drop to the force ride", async () => {
+        // The force ride takes a provider-measured reading in the band, so the
+        // drop lands on the first pass whatever its size.
+        const s = setup("local-band-provider", {
+            bytes: SMALL,
+            percentage: 90,
+            fromEstimate: false,
+        });
+        expect(await s.pass()).toEqual({ pendingOps: 0, unchanged: false });
+    });
+
+    for (const [percentage, emergency] of [
+        [90, false],
+        [96, true],
+    ] as const) {
+        it(`a local count at ${percentage}% ${emergency ? "runs" : "runs no"} tiered emergency tool drop on the rebuild`, async () => {
+            const s = setup(`local-band-emergency-${percentage}`, {
+                bytes: WORTHWHILE,
+                percentage,
+                fromEstimate: true,
+            });
+            const cleanup = spyOn(heuristicCleanup, "applyHeuristicCleanup");
+            try {
+                expect(await s.pass()).toEqual({ pendingOps: 0, unchanged: false });
+                // The rebuild still runs routine cleanup; only the emergency
+                // tool drop waits for 95%.
+                expect(cleanup).toHaveBeenCalled();
+                const options = cleanup.mock.calls[0]?.[4] as
+                    | { emergency?: unknown; routine?: boolean }
+                    | undefined;
+                expect({
+                    emergency: options?.emergency !== undefined,
+                    routine: options?.routine,
+                }).toEqual({ emergency, routine: true });
+            } finally {
+                cleanup.mockRestore();
+            }
+        });
+    }
 });
 
 describe("signed-prefix riders on unavoidable busts", () => {

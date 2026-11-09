@@ -11,15 +11,24 @@ import type { ContextUsage } from "../../features/magic-context/types";
  * same request a provider reading would describe, after this pass's own
  * reductions), and the next pass's execute decision reads it. The served
  * request is counted rather than the incoming messages, because the incoming
- * messages still carry tool outputs that were already dropped.
+ * messages still carry tool outputs that were already dropped. The reading is
+ * a percentage of the same limit a provider reading uses, so the execute
+ * threshold falls at the same request size whether or not usage is reported.
  *
- * Only the execute decision reads it. The force band, the emergency paths and
- * the historian trigger keep using the provider reading, so a reading that
- * only a local count produced still waits for the provider below 95%.
+ * Only the scheduler reads it, but its "execute" decision prices the pass, and
+ * a priced pass with no provider reading is sized from a local count of its own
+ * request (transform.ts). Every later pressure check on that pass reads the
+ * sized reading, but a reading that only a local count produced takes the
+ * force ride, runs the tiered emergency tool drop and lifts the signed-thinking
+ * hold only at 95% or more. Below 95% the execute pass's own bounded rebuild
+ * stays available, so queued drops do not wait for a provider measurement
+ * that never comes.
  *
- * The readings live in memory only: the first pass after a restart reads no
- * local reading, and a reading taken on another model or against another
- * usable window is ignored.
+ * A reading taken on another model or against another usable window is
+ * ignored. Known limits: the readings live in memory only, so no reading
+ * survives a restart and the scheduler reads 0% on the first pass after one;
+ * and the historian trigger does not see the local count, so for such a session
+ * it fires on tail size alone, never on pressure.
  */
 export interface LocalWireReadings {
     /** The usage the scheduler should see on this pass. */
