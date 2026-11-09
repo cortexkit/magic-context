@@ -148,3 +148,42 @@ test("a rebuilt request drops only the superseded rows and keeps the newest rest
         await f.cleanup();
     }
 }, 60000);
+
+test("a per-server retirement before a kept signed block strips that block on a prefix-bound model", async () => {
+    const f = await oc2ContextFixture(33886, {
+        ...options,
+        provider: "anthropic",
+        model: "claude-opus-5-5",
+    });
+    try {
+        await f.pass();
+        const githubGone = catalogRow("BEFORE_THINKING", [docs, github], [docs]);
+        f.instruction(githubGone, both);
+        f.respond();
+        const signedID = f.rows.at(-1)!.id;
+        const addThinking = (draft: Parameters<NonNullable<Parameters<typeof f.pass>[0]>>[0]) => {
+            draft.messages
+                .find((message) => message.id === signedID)!
+                .content.unshift({
+                    type: "reasoning",
+                    text: "KEEP_SIGNED_REASONING",
+                    native: { anthropic: { signature: "signed-block" } },
+                });
+        };
+        const before = await f.pass(addThinking);
+        expect(before.bytes).toContain("KEEP_SIGNED_REASONING");
+        // The newer row restates the catalog and mentions github again, so the
+        // older row retires on this rebuilding pass. That edit sits before the
+        // signed block, which therefore no longer verifies and is removed.
+        const githubBack = catalogRow("AFTER_THINKING", [docs], [docs, github]);
+        f.instruction(githubBack, both);
+        f.user("Continue after the completed signed turn.", 1000);
+        f.respond(1, 900000);
+        const after = await f.pass(addThinking);
+        expect(instructionTexts(after)).toEqual([githubBack]);
+        expect(after.bytes).not.toContain("KEEP_SIGNED_REASONING");
+        expect((await f.pass(addThinking)).bytes).toBe(after.bytes);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);

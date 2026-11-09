@@ -1,4 +1,4 @@
-type CatalogVersion = "2.0.22" | "2.1.4" | "2.2.3";
+type CatalogVersion = "2.0.22" | "2.1.2" | "2.1.4" | "2.2.3";
 
 export const codeModeInstructionMetadata = {
     notice: "instructions",
@@ -7,7 +7,8 @@ export const codeModeInstructionMetadata = {
 
 // Mirrors render() and the complete-catalog added-entry branch of update() in
 // OpenCode packages/core/src/codemode/instructions.ts at v2.0.22, v2.1.4 and
-// v2.2.3, with namespace/entry lines from codemode/catalog.ts. Descriptions are
+// v2.2.3 (v2.1.2 renders the catalog as v2.1.4 does), with namespace/entry
+// lines from codemode/catalog.ts. Descriptions are
 // fixture inputs; changing a namespace description makes update() emit a full
 // replacement. The newer version changes the prompt, not the replacement rules.
 // Each namespace has one pinned tool, keeping the catalog complete even when
@@ -62,11 +63,12 @@ export interface McpServerFixture {
 }
 
 // Mirrors entries(), render(), update() and the `removed` renderer in OpenCode
-// packages/core/src/mcp/instructions.ts at v2.0.22, v2.1.4 and v2.2.5, and
-// McpTool.namespace() in tool/mcp.ts. Before 2.2, a server whose instructions
-// changed made update() restate the whole list; from 2.2 it renders a "have
-// changed" entry instead. Added and removed servers render as entries in
-// every version, so connecting or disconnecting a server never restates the list.
+// packages/core/src/mcp/instructions.ts at v2.0.22, v2.1.2, v2.1.4 and v2.2.5,
+// and McpTool.namespace() in tool/mcp.ts. Up to v2.1.2, a server whose
+// instructions changed made update() restate the whole list; from v2.1.3 it
+// renders a "have changed" entry instead. Added and removed servers render as
+// entries in every version, so connecting or disconnecting a server never
+// restates the list.
 function mcpEntries(servers: readonly McpServerFixture[]): string[] {
     return servers.flatMap((server) => [
         `  <server name="${server.server}">`,
@@ -101,9 +103,9 @@ export function updateMcpGuidance(
         );
     });
     const restate =
-        version === "2.2.3"
-            ? added.length === 0 && changed.length === 0 && removed.length === 0
-            : changed.length > 0 || (added.length === 0 && removed.length === 0);
+        version === "2.0.22" || version === "2.1.2"
+            ? changed.length > 0 || (added.length === 0 && removed.length === 0)
+            : added.length === 0 && changed.length === 0 && removed.length === 0;
     if (restate)
         return [
             "The available MCP server instructions have changed. This list supersedes the previous one.",

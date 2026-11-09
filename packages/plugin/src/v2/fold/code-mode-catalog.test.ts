@@ -148,10 +148,11 @@ test("a full MCP list is retired only by a newer full list or removal notice", (
     expect(retired(rows(list, gone, back, none, initial))).toEqual(["l", "x", "y", "z"]);
 });
 
-test("a changed server restates the whole list before 2.2 and names only that server from 2.2", () => {
+test("a changed server restates the whole list up to v2.1.2 and names only that server from v2.1.3", () => {
     const changedGithub = { ...github, instructions: "GITHUB_SERVER_GUIDANCE_V2" };
     for (const [version, expected] of [
-        ["2.1.4", ["o", "p"]],
+        ["2.1.2", ["o", "p"]],
+        ["2.1.4", ["p"]],
         ["2.2.3", ["p"]],
     ] as const) {
         const catalog = (label: string, guidance: string): [string, string, string[]] => [
@@ -272,10 +273,8 @@ test("parts, entries and source lists OpenCode never writes keep their rows", ()
     expect(retired(rows(older, ...unparsedGuidance))).toEqual([]);
 });
 
-// Review witnesses. Each test asserts the behaviour a reviewer expects and
-// fails on the current supersededInstructionIDs, so it is marked
-// test.failing; it starts failing (and should become a plain test) once the
-// gap is closed.
+// Rows that carry something no newer row restates, in shapes a looser reading
+// of OpenCode's text would retire. Each asserts that the row stays.
 
 // OpenCode 2.0.15 and older wrote instruction rows without
 // metadata.instructionSources and joined the sources in the order builtins,
@@ -284,7 +283,7 @@ test("parts, entries and source lists OpenCode never writes keep their rows", ()
 const unkeyed = (...entries: [id: string, text: string][]) =>
     entries.map(([id, text]) => ({ id, data: { text } }));
 
-test.failing("an unkeyed row keeps its MCP guidance when a later part does not parse", () => {
+test("an unkeyed row keeps its MCP guidance when a later part does not parse", () => {
     const older = instructionRow(
         replaceCodeModeCatalog(["OLD"]),
         updateMcpGuidance([docs], [docs, github], "2.1.4"),
@@ -297,7 +296,7 @@ test.failing("an unkeyed row keeps its MCP guidance when a later part does not p
     expect([...ids]).toEqual([]);
 });
 
-test.failing("an unkeyed row keeps project instructions that sit between its catalog and its MCP guidance", () => {
+test("an unkeyed row keeps project instructions that sit between its catalog and its MCP guidance", () => {
     const older = instructionRow(
         replaceCodeModeCatalog(["OLD"]),
         "New instructions apply from:\nInstructions from: /work/AGENTS.md\nRun the linter before committing.",
@@ -313,7 +312,7 @@ test.failing("an unkeyed row keeps project instructions that sit between its cat
     expect([...ids]).toEqual([]);
 });
 
-test.failing("removing a server whose name contains a comma does not count as a mention of a different server", () => {
+test("removing a server whose name contains a comma does not count as a mention of a different server", () => {
     const alpha: McpServerFixture = { server: "alpha", instructions: "ALPHA_SERVER_GUIDANCE" };
     const alphaBeta: McpServerFixture = {
         server: "alpha, beta",
@@ -341,4 +340,80 @@ test.failing("removing a server whose name contains a comma does not count as a 
         ],
     );
     expect(retired(list)).toEqual([]);
+});
+
+test("an unkeyed row is read when the strict split accounts for all of its text", () => {
+    const ids = (...entries: [id: string, text: string][]) =>
+        [...supersededInstructionIDs(unkeyed(...entries))].sort();
+    // A whole catalog followed by MCP guidance, and a whole catalog alone.
+    expect(
+        ids(
+            [
+                "older",
+                instructionRow(
+                    replaceCodeModeCatalog(["OLD"]),
+                    updateMcpGuidance([docs], [docs, github], "2.0.22"),
+                ),
+            ],
+            ["middle", replaceCodeModeCatalog(["MIDDLE"])],
+            [
+                "newer",
+                instructionRow(
+                    replaceCodeModeCatalog(["NEW"]),
+                    updateMcpGuidance([docs, github], [docs], "2.0.22"),
+                ),
+            ],
+        ),
+    ).toEqual(["middle", "older"]);
+    // MCP guidance alone, up to the notice that the last server left.
+    expect(
+        ids(["delta", updateMcpGuidance([docs], [docs, github])], ["none", MCP_GUIDANCE_REMOVED]),
+    ).toEqual(["delta"]);
+    // A Code Mode delta has no end the split can check, so it stays.
+    expect(
+        ids(["delta", addCodeModeEntries(["ADDED"])], ["newer", replaceCodeModeCatalog(["NEW"])]),
+    ).toEqual([]);
+});
+
+test("a removal line counts only when entries name its servers", () => {
+    const catalog = (label: string, guidance: string): [string, string, string[]] => [
+        label,
+        instructionRow(replaceCodeModeCatalog([label]), guidance),
+        [codeMode, mcp],
+    ];
+    // docs is named only in the session's initial instructions, so the line
+    // removing docs and github is not read: github's addition stays.
+    const githubAdded = catalog("github added", updateMcpGuidance([docs], [docs, github]));
+    const bothGone = catalog(
+        "docs and github gone",
+        updateMcpGuidance([docs, github, search], [search]),
+    );
+    expect(retired(rows(githubAdded, bothGone))).toEqual([]);
+    // Once an entry names docs, the line reads as two servers.
+    const docsBack = catalog("docs back", updateMcpGuidance([search], [docs, search]));
+    expect(retired(rows(githubAdded, bothGone, docsBack))).toEqual(["github added"]);
+    // When entries name alpha, beta and "alpha, beta", the line "alpha, beta"
+    // could be either, so it is not read and no addition retires.
+    const alpha: McpServerFixture = { server: "alpha", instructions: "ALPHA_SERVER_GUIDANCE" };
+    const beta: McpServerFixture = { server: "beta", instructions: "BETA_SERVER_GUIDANCE" };
+    const alphaBeta: McpServerFixture = {
+        server: "alpha, beta",
+        instructions: "ALPHA_BETA_SERVER_GUIDANCE",
+    };
+    expect(
+        retired(
+            rows(
+                catalog("alpha added", updateMcpGuidance([docs], [docs, alpha])),
+                catalog("beta added", updateMcpGuidance([docs, alpha], [docs, alpha, beta])),
+                catalog(
+                    "alpha, beta added",
+                    updateMcpGuidance([docs, alpha, beta], [docs, alpha, beta, alphaBeta]),
+                ),
+                catalog(
+                    "alpha, beta removed",
+                    updateMcpGuidance([docs, alpha, beta, alphaBeta], [docs, alpha, beta]),
+                ),
+            ),
+        ),
+    ).toEqual([]);
 });

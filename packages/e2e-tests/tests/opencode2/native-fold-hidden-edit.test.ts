@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
-import { isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { CLI, isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 test("a hidden row edited in place expires cold fold provenance and rebuilds once through the shared gate", async () => {
     const fixture = isolation();
@@ -206,7 +207,7 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-test("MCP servers that connect and disconnect leave only the newest catalog row across rebuilds and folds", async () => {
+test("MCP servers that connect and disconnect leave only the newest catalog row on every rebuild, including a post-compaction pass that rebuilds", async () => {
     const fixture = isolation();
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const script = join(fixture.root, "toy-mcp.mjs");
@@ -276,12 +277,24 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         }
         await client.session.compact({ sessionID: session.id });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
+        const compactLogStart = host.pluginLog().length;
         served["after host fold"] = copies(await turn("Continue after the host fold."));
+        // The plugin buffers its log for up to half a second.
+        const permissionLine = /rewrite permission: allowed=(\w+) ride=(\S+)/;
+        const logDeadline = Date.now() + 5_000;
+        while (!permissionLine.test(host.pluginLog().slice(compactLogStart)) && Date.now() < logDeadline) await Bun.sleep(100);
+        const compactLog = host.pluginLog().slice(compactLogStart);
+        const permission = permissionLine.exec(compactLog);
+        const postCompact = { rebuilt: permission?.[1] === "true", ride: permission?.[2] ?? "not logged",
+            foldReason: /HARD fold decision: reason=(\S+)/.exec(compactLog)?.[1] ?? "none" };
+        await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "mock-model" } });
+        served["rebuild after fold"] = copies(await turn("Switching back rebuilds the prefix again."));
+        const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8", env: fixture.env }).stdout.trim();
         console.log("ISSUE886_MCP_TOGGLE_EVIDENCE", JSON.stringify({
-            version: process.env.MC_E2E_OPENCODE2_VERSION, root: fixture.root,
+            version: hostVersion, root: fixture.root,
             rows: rows.map(row => ({ id: row.id, sources: row.metadata?.instructionSources,
                 chars: row.text.length, mcp: row.text.slice(row.text.lastIndexOf("\n\n") + 2, row.text.lastIndexOf("\n\n") + 120) })),
-            catalogCopiesServed: served,
+            catalogCopiesServed: served, postCompact,
         }));
         expect(rows).toHaveLength(6);
         for (const [index, row] of rows.entries()) {
@@ -296,6 +309,15 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         // A rebuild keeps only the newest restatement; later changes append until the next one.
         expect(served["model switch rebuild"]).toBe(1);
         expect([served["toggle 6"], served["toggle 7"]]).toEqual([2, 3]);
-        expect(served["after host fold"]).toBe(1);
+        // Whether the pass after /compact rebuilds does not depend on this rule.
+        // On 2.0.22 and 2.1.0 it usually rebuilds because OpenCode changes the
+        // system prompt after compacting (fold reason system_hash), not because
+        // Magic Context recognizes a host fold, and on 2.2.x it does not
+        // rebuild. Host-fold detection is traced separately, so the copy count
+        // is checked only when that pass rebuilt; postCompact in the evidence
+        // line says which happened.
+        if (postCompact.rebuilt) expect(served["after host fold"]).toBe(1);
+        // On every version the next rebuild keeps only the newest catalog row.
+        expect(served["rebuild after fold"]).toBe(1);
     } finally { source.close(); await host.stop(); }
 }, 240000);
