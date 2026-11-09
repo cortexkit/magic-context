@@ -94,8 +94,7 @@ test("a rebuilt request drops only the superseded rows and keeps the newest rest
         });
     try {
         await pass();
-        const day = (offset: number) =>
-            changedDate(new Date(Date.UTC(2026, 10, 7 + offset, 12)));
+        const day = (offset: number) => changedDate(new Date(Date.UTC(2026, 10, 7 + offset, 12)));
         const githubGone = catalogRow("CATALOG_0", [docs, github], [docs]);
         const searchAdded = catalogRow("CATALOG_1", [docs], [docs, search]);
         const githubBack = catalogRow("CATALOG_2", [docs, search], [docs, github, search]);

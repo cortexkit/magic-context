@@ -164,10 +164,7 @@ test("a changed server restates the whole list before 2.2 and names only that se
                 rows(
                     catalog("o", renderMcpGuidance([docs, github])),
                     catalog("p", updateMcpGuidance([docs], [docs, github], version)),
-                    catalog(
-                        "q",
-                        updateMcpGuidance([docs, github], [docs, changedGithub], version),
-                    ),
+                    catalog("q", updateMcpGuidance([docs, github], [docs, changedGithub], version)),
                 ),
             ),
         ).toEqual([...expected]);
@@ -238,7 +235,8 @@ test("a row with project instructions stays, and only its leading catalog restat
 
 test("parts, entries and source lists OpenCode never writes keep their rows", () => {
     const catalog = replaceCodeModeCatalog(["OLD"]);
-    const header = "New MCP server instructions are available in addition to those previously listed:";
+    const header =
+        "New MCP server instructions are available in addition to those previously listed:";
     const malformed: [string, string, string[]][] = [
         ["unindented", `${catalog}\n\n${header}\n  <server name="github">\nGUIDANCE\n  </server>`],
         ["unclosed", `${catalog}\n\n${header}\n  <server name="github">\n    GUIDANCE`],

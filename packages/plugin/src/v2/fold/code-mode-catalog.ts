@@ -108,7 +108,7 @@ function serverEntries(lines: readonly string[], start: number) {
         let end = index + 1;
         while (lines[end]?.startsWith("    ")) end++;
         if (end === index + 1 || lines[end] !== "  </server>") return undefined;
-        names.push(open[1]!);
+        names.push(open[1]);
         index = end + 1;
     }
 }
@@ -169,14 +169,15 @@ function splitRow(text: string, sources: readonly string[]): (SourcePart | undef
     let rest = text;
     let index = sources.length - 1;
     for (; index > 0; index--) {
-        const source = sources[index]!;
+        const source = sources[index];
         const cut = rest.lastIndexOf("\n\n");
-        const part = source === codeMode || cut < 0 ? undefined : parsers[source]?.(rest.slice(cut + 2));
+        const part =
+            source === codeMode || cut < 0 ? undefined : parsers[source]?.(rest.slice(cut + 2));
         if (!part) break;
         parts[index] = part;
         rest = rest.slice(0, cut);
     }
-    if (index === 0) parts[0] = parsers[sources[0]!]?.(rest);
+    if (index === 0) parts[0] = parsers[sources[0]]?.(rest);
     else if (sources[0] === codeMode && startsWithFullCatalog(text)) parts[0] = { full: true };
     return parts;
 }
@@ -199,7 +200,8 @@ function rowParts(data: MessageData) {
     // catalog with its MCP guidance, a catalog alone, or MCP guidance alone.
     const combined = splitRow(text, [codeMode, mcp]);
     if (combined.every(Boolean)) return { sources: [codeMode, mcp], parts: combined };
-    const catalog = codeModePart(text) ?? (startsWithFullCatalog(text) ? { full: true } : undefined);
+    const catalog =
+        codeModePart(text) ?? (startsWithFullCatalog(text) ? { full: true } : undefined);
     if (catalog) return { sources: [codeMode], parts: [catalog] };
     const guidance = mcpPart(text);
     return guidance ? { sources: [mcp], parts: [guidance] } : { sources: [], parts: [] };
@@ -226,20 +228,20 @@ export function supersededInstructionIDs(
     const mentioned = new Set<string>();
     const retired = new Set<string>();
     for (let index = rows.length - 1; index >= 0; index--) {
-        const row = rows[index]!;
+        const row = rows[index];
         const { sources, parts } = rowParts(row.data);
         if (
             sources.length > 0 &&
             parts.every(
                 (part, i) =>
                     part !== undefined &&
-                    (restated.has(sources[i]!) ||
+                    (restated.has(sources[i]) ||
                         (part.servers?.every((server) => mentioned.has(server)) ?? false)),
             )
         )
             retired.add(row.id);
         parts.forEach((part, i) => {
-            if (part?.full) restated.add(sources[i]!);
+            if (part?.full) restated.add(sources[i]);
             for (const server of part?.servers ?? []) mentioned.add(server);
         });
     }
