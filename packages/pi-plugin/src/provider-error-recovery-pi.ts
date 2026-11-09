@@ -450,6 +450,12 @@ export function resolvePiBindingStripOrder(args: {
 	entryIds: readonly (string | undefined)[];
 	/** Known before any stage runs: this pass is allowed to change served bytes. */
 	bustPermittedAtStart: boolean;
+	/**
+	 * This pass strips every signed block (its request tools changed), so it
+	 * rewrites everything the order could affect and may switch whatever the
+	 * branch carries.
+	 */
+	releasesAllThinking?: boolean;
 }): "start" | "end" {
 	const ledger = getMergedReasoningStrippedIds(args.db, args.sessionId);
 	if (ledger.has(THINKING_BINDING_STRIP_ORDER_END_MARKER)) return "end";
@@ -469,7 +475,8 @@ export function resolvePiBindingStripOrder(args: {
 	// alike now, and switching would move the byte change to a later pass,
 	// which could be a defer pass.
 	const mayChangeOrder =
-		onBranch && carriesThinking && args.bustPermittedAtStart;
+		(onBranch && carriesThinking && args.bustPermittedAtStart) ||
+		args.releasesAllThinking === true;
 	if (
 		mayChangeOrder &&
 		addMergedReasoningStrippedIds(args.db, args.sessionId, [

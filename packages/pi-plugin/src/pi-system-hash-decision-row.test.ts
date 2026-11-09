@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it, spyOn } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { openDatabase } from "@magic-context/core/features/magic-context/storage
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { __test as decisionLog } from "@magic-context/core/features/magic-context/transform-decision-log";
 import { setHarness } from "@magic-context/core/shared/harness";
+import * as logger from "@magic-context/core/shared/logger";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
@@ -31,10 +32,12 @@ import {
 } from "./test-utils.test";
 
 // A changed system prompt rewrites the provider's prompt cache on the first
-// request that carries it. In a signed Anthropic tool loop Pi keeps m[0]/m[1]
-// frozen on that request, so its pass changes no message bytes and used to
-// stage no transform_decisions row. The row bound to that request's reply must
-// still name system_hash, and passes with an unchanged prompt add no row.
+// request that carries it. In a signed Anthropic tool loop Pi holds m[0]/m[1]
+// frozen for the turn's thinking, but on a prefix-bound model that thinking is
+// invalid behind the changed prompt, so the request that carries the change
+// releases the hold: it strips every signed block and folds on system_hash in
+// the same rebuild. The row bound to that request's reply must name
+// system_hash, and passes with an unchanged prompt add no row.
 
 const roots: string[] = [];
 afterEach(() => {
@@ -182,13 +185,12 @@ function fixture() {
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		return { messages: served.messages, prompt, id };
 	};
-	// Enter a signed tool loop: the newest assistant carries signed thinking.
+	// Enter a signed tool loop: the newest assistant carries signed thinking
+	// whose recorded reasoning is heavy enough for Pi to hold the turn.
 	const hold = () => {
 		source.push(
-			assistantMessage(
-				"",
-				50,
-				extra([
+			assistantMessage("", 50, {
+				...extra([
 					{
 						type: "thinking",
 						thinking: "active plan",
@@ -201,7 +203,16 @@ function fixture() {
 						arguments: { path: "current.ts" },
 					},
 				]),
-			),
+				usage: {
+					input: 0,
+					output: 50,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 50,
+					reasoning: 1_600,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
 			toolResultMessage("active-call", "current result", 51),
 		);
 		ids.push("thinking", "result");
@@ -226,6 +237,14 @@ function fixture() {
 			const meta = getOrCreateSessionMeta(db, sessionId);
 			return `${meta.cachedM0Bytes}\u0000${meta.cachedM1Bytes}`;
 		},
+		/** The system prompt hash m[0] was last folded under, and the current one. */
+		systemHashes: () => {
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			return {
+				folded: meta.cachedM0SystemHash,
+				current: meta.systemPromptHash,
+			};
+		},
 		close: () => {
 			clearContextHandlerSession(sessionId);
 			clearPiSystemPromptSession(sessionId);
@@ -241,10 +260,16 @@ it("Pi: the held pass that carries a system prompt change records system_hash", 
 		f.hold();
 		await f.serve("base instruction");
 		const control = await f.serve("base instruction");
-		const prefix = f.pair();
+		const foldedBefore = f.systemHashes().folded;
 		const changed = await f.serve("genuine changed instruction");
-		// The change rode a held signed loop: m[0]/m[1] did not move.
-		expect(f.pair()).toBe(prefix);
+		// The held turn's thinking is invalid behind the new prompt, which already
+		// loses the whole cache: the hold is released, the thinking stripped, and
+		// the system_hash fold lands on this same pass rather than on a later one,
+		// so the change costs one rebuild, not two. (This fixture renders an empty
+		// history head, so the fold shows in the hash m[0] records, not its bytes.)
+		expect(f.systemHashes().folded).not.toBe(foldedBefore);
+		expect(f.systemHashes().folded).toBe(f.systemHashes().current);
+		expect(JSON.stringify(changed.messages)).not.toContain("active plan");
 		const after = await f.serve("genuine changed instruction");
 		// The row staged by the pass before this one is written when this pass starts.
 		await f.serve("genuine changed instruction");
@@ -268,6 +293,38 @@ it("Pi: the held pass that carries a system prompt change records system_hash", 
 			rows.filter((row) => row.materialize_reason === "system_hash"),
 		).toHaveLength(1);
 	} finally {
+		f.close();
+	}
+}, 60_000);
+
+it("Pi: the pass after a released held system prompt change replays it byte for byte", async () => {
+	const f = fixture();
+	const logs = spyOn(logger, "sessionLog");
+	try {
+		await f.serve("base instruction");
+		f.hold();
+		await f.serve("base instruction");
+		const held = await f.serve("base instruction");
+		expect(JSON.stringify(held.messages)).toContain("active plan");
+		const changed = await f.serve("genuine changed instruction");
+		expect(JSON.stringify(changed.messages)).not.toContain("active plan");
+		// The held path released it, not an unheld bust.
+		expect(
+			logs.mock.calls.some(
+				(call) =>
+					call[1] ===
+					"system prompt changed under a held signed turn: releasing signed thinking",
+			),
+		).toBe(true);
+		const pair = f.pair();
+		const after = await f.serve("genuine changed instruction");
+		// The strip and the folded head replay unchanged; nothing new lands.
+		expect(JSON.stringify(after.messages)).toBe(
+			JSON.stringify(changed.messages),
+		);
+		expect(f.pair()).toBe(pair);
+	} finally {
+		logs.mockRestore();
 		f.close();
 	}
 }, 60_000);

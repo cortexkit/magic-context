@@ -54,7 +54,11 @@ afterEach(() => {
 		rmSync(root, { recursive: true, force: true });
 });
 
-function fixture(name: string, harness: "pi" | "omp" = "pi") {
+function fixture(
+	name: string,
+	harness: "pi" | "omp" = "pi",
+	compactionOff = false,
+) {
 	const parent = join(tmpdir(), "magic-context", "fable-5-2-tool-binding");
 	mkdirSync(parent, { recursive: true });
 	const root = createTestTempDirFromPath(join(parent, `pi-${name}-`));
@@ -94,6 +98,7 @@ function fixture(name: string, harness: "pi" | "omp" = "pi") {
 		},
 		heuristics: { keepReasoningTokens: 2000 },
 		scheduler: { executeThresholdPercentage: 65 },
+		compactionOff,
 	});
 	const anthropic = (content: unknown[]) => ({
 		provider: "anthropic",
@@ -200,11 +205,11 @@ for (const harness of ["pi", "omp"] as const) {
 	}, 60_000);
 }
 
-// Known gap: Pi's fold signals carry no tool identity (inject-compartments-pi.ts),
-// so a tool that does not change the system prompt keeps the signed thinking,
-// and Claude Fable 5.2 rejects the request. Remove `.failing` when a tool
-// change strips that thinking.
-it.failing("Pi, claude-fable-5-2: a tool added without a prompt snippet strips the kept signed thinking", async () => {
+// Pi's fold signals carry no tool identity (inject-compartments-pi.ts), so a
+// tool that does not change the system prompt never folds the history head.
+// The tool-list release, computed from Pi's active and registered tools,
+// strips the kept thinking anyway.
+it("Pi, claude-fable-5-2: a tool added without a prompt snippet strips the kept signed thinking", async () => {
 	const f = fixture("tool");
 	try {
 		const served = await f.acrossChange(() => {
@@ -227,12 +232,33 @@ it.failing("Pi, claude-fable-5-2: a tool added without a prompt snippet strips t
 	}
 }, 60_000);
 
-// Known gap, OMP: OMP's system prompt names every active tool (and renders
-// full tool descriptors unless it lists names only), so an added or removed
-// tool already changes the system prompt. A changed description or schema in
-// list mode does not, and nothing else here sees it. Remove `.failing` when
-// such a change strips the kept thinking.
-it.failing("OMP, claude-fable-5-2: a changed tool schema strips the kept signed thinking", async () => {
+// Compaction-off has no rebuild permission and folds no history head; the
+// tool-list release strips the kept thinking there too.
+it("Pi compaction-off, claude-fable-5-2: a tool added without a prompt snippet strips the kept signed thinking", async () => {
+	const f = fixture("compaction-off-tool", "pi", true);
+	try {
+		const served = await f.acrossChange(() => {
+			f.tools.push({
+				name: "mcp_search",
+				description: "Search the connected MCP server",
+				parameters: { type: "object" },
+			});
+			f.active.push("mcp_search");
+			return "base instruction";
+		});
+		expect(served.kept).toContain(THINKING);
+		expect(served.unchanged).toContain(THINKING);
+		expect(served.changed).not.toContain(THINKING);
+	} finally {
+		f.close();
+	}
+}, 60_000);
+
+// OMP's system prompt names every active tool (and renders full tool
+// descriptors unless it lists names only), so an added or removed tool already
+// changes the system prompt. A changed description or schema in list mode does
+// not; the tool-list release counts schemas, so it strips the kept thinking.
+it("OMP, claude-fable-5-2: a changed tool schema strips the kept signed thinking", async () => {
 	const f = fixture("omp-schema", "omp");
 	try {
 		const served = await f.acrossChange(() => {

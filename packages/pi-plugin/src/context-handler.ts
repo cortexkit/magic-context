@@ -63,6 +63,7 @@ import {
 	protectedToolTagNumbers,
 	protectedToolTokenCount,
 } from "@magic-context/core/features/magic-context/reclaim-protection";
+import type { RequestToolsChange } from "@magic-context/core/features/magic-context/request-tool-definitions";
 import {
 	createScheduler,
 	parseCacheTtl,
@@ -247,6 +248,7 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
+import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
@@ -453,6 +455,7 @@ import {
 	PiStorageBusyError,
 	piFallbackRefusal,
 } from "./pi-raw-fallback";
+import { readPiRequestToolsFingerprint } from "./pi-request-tools";
 import {
 	notePiPublicationIssue,
 	PiServedEnvelopeUnavailable,
@@ -4770,6 +4773,32 @@ export function registerPiContextHandler(
 			const lkgInputIdByRef = new Map<unknown, string>();
 			for (const input of lkgPassSnapshot.inputs)
 				lkgInputIdByRef.set(event.messages[input.messageIndex], input.id);
+			// A prefix-bound model binds every signed thinking block to the request's
+			// tools. Pi builds the request from the session's active tools, so a
+			// change there since the session's last pass on this model makes the
+			// kept thinking invalid: the pipeline releases it (no hold, every signed
+			// block stripped) and rides the cache loss the changed tools cause.
+			const requestToolsRelease = isPrefixBoundThinkingModel(
+				ctx.model?.provider,
+				ctx.model?.id,
+			)
+				? (() => {
+						const fingerprint = readPiRequestToolsFingerprint(
+							pi,
+							toolWireSchema,
+							event.messages as unknown[],
+						);
+						return fingerprint
+							? evaluateRequestToolsRelease({
+									db: options.db,
+									sessionId,
+									modelKey: `${ctx.model?.provider}/${ctx.model?.id}`,
+									fingerprint,
+								})
+							: undefined;
+					})()
+				: undefined;
+			const requestToolsChange = requestToolsRelease?.change ?? null;
 			// Binding-mismatch strips normally run on the final array at the end of
 			// the pass, so every stage sees the same thinking on every pass. A
 			// session whose strips predate that order keeps stripping here, before
@@ -4780,6 +4809,7 @@ export function registerPiContextHandler(
 				messages: event.messages as unknown[],
 				entryIds: lkgEntryIds ?? [],
 				bustPermittedAtStart: hasPendingMaterialization(sessionId),
+				releasesAllThinking: requestToolsChange !== null,
 			});
 			const startOfPassBindingRecovery =
 				bindingStripOrder === "start"
@@ -5744,17 +5774,20 @@ export function registerPiContextHandler(
 				// when the configured force percentage has not been reached.
 				forceMaterialization: forceMaterialization || isEmergency,
 				forceMaterializationPercentage,
-				signedThinkingHold: resolvePiSignedThinkingHold({
-					sessionId,
-					db: options.db,
-					messages: event.messages,
-					prefixBound: isPrefixBoundThinkingModel(
-						ctx.model?.provider,
-						ctx.model?.id,
-					),
-					usagePercentage,
-					executeThresholdPercentage: effectiveExecuteThresholdPercentage,
-				}),
+				signedThinkingHold:
+					requestToolsChange === null &&
+					resolvePiSignedThinkingHold({
+						sessionId,
+						db: options.db,
+						messages: event.messages,
+						prefixBound: isPrefixBoundThinkingModel(
+							ctx.model?.provider,
+							ctx.model?.id,
+						),
+						usagePercentage,
+						executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+					}),
+				requestToolsChange,
 				contextUsage: {
 					percentage: usagePercentage,
 					inputTokens: usageInputTokens,
@@ -5943,6 +5976,9 @@ export function registerPiContextHandler(
 					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
 				});
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
+			// The pipeline persisted the strip a tools release required, so the new
+			// tool list becomes the one later passes compare with.
+			requestToolsRelease?.commit();
 			thinkingFitInputObserverForTests?.({
 				sessionId,
 				held: pipelineArgs.signedThinkingHold === true,
@@ -8475,6 +8511,12 @@ interface RunPipelineArgs {
 	 * of a prefix-bound model; omitted means not held.
 	 */
 	signedThinkingHold?: boolean;
+	/**
+	 * What changed in the request's tools since the session's last pass on this
+	 * prefix-bound model, or null. Signed thinking is bound to the tools, so the
+	 * pass strips every signed block and the caller passes no hold.
+	 */
+	requestToolsChange?: RequestToolsChange | null;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	providerApi?: string;
@@ -8797,8 +8839,10 @@ async function runCompactionOffPipeline(
 		// Compaction-off has no bust permission. An open signed turn on a
 		// prefix-bound model keeps replaying its cached m[0]/m[1] until it ends,
 		// so a fold (a project memory change, for example) cannot re-render the
-		// head in front of its kept thinking.
+		// head in front of its kept thinking. A pass whose request tools changed
+		// strips that thinking anyway (below), so nothing holds the head.
 		const signedTurnHoldsHead =
+			!args.requestToolsChange &&
 			args.reasoningClearing?.prefixBound === true &&
 			hasActiveAnthropicThinkingTurn(
 				args.messages,
@@ -8860,11 +8904,11 @@ async function runCompactionOffPipeline(
 		}
 	}
 	// The head changed in front of signed thinking (an open signed turn's, or
-	// an earlier turn's): strip every signed block on the wire, the open turn's
-	// included (removing every block is always accepted). The entries are
-	// persisted first; the binding-mismatch replay at the end of every pass,
-	// compaction-off included, keeps them stripped.
-	if (headChangedUnderSignedThinking)
+	// an earlier turn's), or the request's tools did: strip every signed block
+	// on the wire, the open turn's included (removing every block is always
+	// accepted). The entries are persisted first; the binding-mismatch replay
+	// at the end of every pass, compaction-off included, keeps them stripped.
+	if (headChangedUnderSignedThinking || args.requestToolsChange)
 		applyPiProactiveThinkingStrip({
 			db: args.db,
 			sessionId: args.sessionId,
@@ -9089,6 +9133,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		(args.forceSignedRebuildForFit && signedTurnOnPrefixBoundModel)
 	)
 		stripForPrefixRewrite(isCacheBustingPass);
+	// The request's tools changed (the caller logged what changed and passed
+	// no hold). Tools come first in the request, so this pass already loses the
+	// whole provider cache: strip every signed block, completed turns included,
+	// and let queued work ride the rewrite. The m[0] fold decision is unaffected.
+	if (args.requestToolsChange && !rewritingSignedPrefix)
+		stripForPrefixRewrite();
 	// An unheld bust invalidates the signed thinking still kept in the turn.
 	// Strip every block before any lane edits, so latest-turn protection is
 	// lifted and queued drops and cleanup land on this bust as on any other
@@ -9321,6 +9371,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		lastServedSystemHashBySession.has(args.sessionId) &&
 		lastServedSystemHashBySession.get(args.sessionId) !==
 			args.effectiveSystemHash;
+	// A held signed turn whose system prompt changed (mid-turn, as Pi's
+	// setActiveTools rebuilds it) is invalid behind the new prompt, and the
+	// changed prompt already loses the whole cache. Nothing is left for the hold
+	// to protect: release it before the fold check, so the system_hash fold and
+	// the strip of every signed block land on this one rebuild.
+	if (effectiveSystemChangedThisPass && protectedSignedPrefix) {
+		sessionLog(
+			args.sessionId,
+			"system prompt changed under a held signed turn: releasing signed thinking",
+		);
+		stripForPrefixRewrite();
+	}
 	// The one bust permission an executed fold grants: true only when the fold
 	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
 	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
