@@ -38,7 +38,10 @@ import {
 } from "./features/magic-context/storage-db";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
-import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
+import {
+    autoUpdateCheckerOptionsFromConfig,
+    createAutoUpdateCheckerHook,
+} from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
@@ -881,7 +884,8 @@ const server: Plugin = async (ctx) => {
                 },
             },
             autoUpdateChecker: createAutoUpdateCheckerHook(ctx, {
-                autoUpdate: pluginConfig.auto_update !== false,
+                // auto_update: false skips the checker entirely: no npm request.
+                ...autoUpdateCheckerOptionsFromConfig(pluginConfig.auto_update),
                 signal: autoUpdateAbort.signal,
                 // Multi-project plugin reloads coordinate via this on-disk
                 // timestamp so npm gets hit at most once per check window
