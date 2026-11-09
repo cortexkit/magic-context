@@ -437,6 +437,8 @@ for (let i=0, attempts=0; i<12;) {
         try {
             writeStorageFileSync(`${f.path}.tmp`, "orphan", { forcePrivate: true });
             writeStorageFileSync(`${f.path}.dead.tmp`, "legacy", { forcePrivate: true });
+            const old = new Date(Date.now() - 11 * 60_000);
+            fs.utimesSync(`${f.path}.dead.tmp`, old, old);
             const unrelated = join(dirname(f.path), "unrelated.tmp");
             writeStorageFileSync(unrelated, "keep", { forcePrivate: true });
             clearPersistedLkgSlotStrict(f.db, "session");

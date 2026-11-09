@@ -30,6 +30,26 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform === "win32")("startup permission certificate", () => {
+    it("keeps fresh legacy fence temp files and removes only ones older than ten minutes", () => {
+        const root = fixture();
+        const fences = join(root, "lkg-recovery-fences");
+        const fresh = join(fences, "fresh.json.publisher.tmp");
+        const old = join(fences, "old.json.publisher.tmp");
+        const unrelated = join(fences, "unrelated.tmp");
+        const fixed = join(fences, "fixed.json.tmp");
+        const now = Date.now();
+        for (const path of [fresh, old, unrelated, fixed]) {
+            fs.writeFileSync(path, "keep", { mode: 0o600 });
+            const age = path === fresh ? 9 * 60_000 : 11 * 60_000;
+            fs.utimesSync(path, new Date(now - age), new Date(now - age));
+        }
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(fresh)).toBe(true);
+        expect(fs.existsSync(old)).toBe(false);
+        expect(fs.readFileSync(unrelated, "utf8")).toBe("keep");
+        expect(fs.readFileSync(fixed, "utf8")).toBe("keep");
+    });
+
     it("sweeps only empty orphan fence lock directories during the full pass", () => {
         const root = fixture();
         const fences = join(root, "lkg-recovery-fences");
