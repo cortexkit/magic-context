@@ -100,8 +100,8 @@ describe("one admission limit for every last-known-good replay", () => {
                 systemPromptTokens: 0,
                 estimator: estimateOf(tokens),
             });
-        // No replay (failure, wrapper or healthy frozen) is admitted between the
-        // trusted limit and the usable hard limit.
+        // No replay is admitted between the trusted limit and the usable hard
+        // limit.
         expect(fits(trusted).fits).toBe(true);
         expect(fits(trusted + 1).fits).toBe(false);
         expect(fits(usableHard).fits).toBe(false);

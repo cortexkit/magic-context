@@ -8,6 +8,7 @@ import {
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
 } from "../../features/magic-context/storage-meta-persisted";
+import * as storageTags from "../../features/magic-context/storage-tags";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import * as finalWire from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
@@ -182,8 +183,8 @@ interface LocalCountPasses {
  * renders the history head) and sizes itself from a local count; the next pass
  * reads the local count of the request the first one served.
  */
-async function localCountPasses(): Promise<LocalCountPasses> {
-    const f = await reporterSession(8862, 0);
+async function localCountPasses(seed = 8862): Promise<LocalCountPasses> {
+    const f = await reporterSession(seed, 0);
     return withSession(f, async () => {
         const arrays: Array<{ line: string; messages: Composition }> = [];
         const original = finalWire.estimateFinalWireInputTokens;
@@ -262,6 +263,34 @@ test("a pass sized from a local count counts the request it serves", async () =>
     const ratio = result.sized.inputTokens / result.served.inputTokens;
     expect(ratio).toBeGreaterThan(0.9);
     expect(ratio).toBeLessThan(1.1);
+}, 300_000);
+
+// A session's tag ownership summary can still be in preparation on the first
+// pass after the hook starts. The postprocess phase then clears no reasoning,
+// so the count keeps all of it, and it still counts the head and the rows.
+test("a pass sized before the tag ownership summary is ready counts the reasoning it keeps", async () => {
+    const estimates = spyOn(storageTags, "getReasoningTokenEstimatesByMessage").mockImplementation(
+        () => {
+            throw new storageTags.TagOwnerSummaryNotReady();
+        },
+    );
+    const tryEstimates = spyOn(
+        storageTags,
+        "tryGetReasoningTokenEstimatesByMessage",
+    ).mockReturnValue(undefined);
+    try {
+        const result = await localCountPasses(8869);
+        expect(result.servedArray.head).toBeGreaterThan(15_000);
+        expect(result.countedArray.head).toBe(result.servedArray.head);
+        expect(result.countedArray.instructions).toBe(result.servedArray.instructions);
+        expect(result.countedArray.reasoning).toBe(result.servedArray.reasoning);
+        const ratio = result.sized.inputTokens / result.served.inputTokens;
+        expect(ratio).toBeGreaterThan(0.9);
+        expect(ratio).toBeLessThan(1.1);
+    } finally {
+        estimates.mockRestore();
+        tryEstimates.mockRestore();
+    }
 }, 300_000);
 
 test("first pass after a restart and 1h41m idle with a saved 83.9% reading", async () => {

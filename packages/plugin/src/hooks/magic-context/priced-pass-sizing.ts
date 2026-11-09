@@ -2,6 +2,7 @@ import {
     hostInstructionRetentionEnabled,
     isHostInstructionRetentionOn,
 } from "../../features/magic-context/storage-host-instruction-retention";
+import { TagOwnerSummaryNotReady } from "../../features/magic-context/storage-tags";
 import type { Database } from "../../shared/sqlite";
 import { headMessagesForSizing, type M0M1RenderOptions } from "./inject-compartments";
 import { projectOpencodeReasoningBudgetCutoff } from "./reasoning-budget";
@@ -56,21 +57,33 @@ export function servedRequestForSizing(input: PricedPassSizingInput): MessageLik
             : [];
     // The same projection of the keep budget the summary trigger reads: the
     // reasoning of every message tagged at or below the cutoff leaves the request.
-    const cutoff = input.reasoning
-        ? projectOpencodeReasoningBudgetCutoff(
-              input.db,
-              input.sessionId,
-              [...input.messages],
-              input.reasoning.keepTokens,
-              input.reasoning.clearedThroughTag,
-              input.reasoning.proseRatio,
-          )
-        : 0;
+    const cutoff = input.reasoning ? clearedReasoningCutoff(input, input.reasoning) : 0;
     const conversation =
         cutoff > 0
             ? input.messages.map((message) => withoutClearedReasoning(message, input, cutoff))
             : input.messages;
     return [...head, ...instructions, ...conversation];
+}
+
+function clearedReasoningCutoff(
+    input: PricedPassSizingInput,
+    reasoning: NonNullable<PricedPassSizingInput["reasoning"]>,
+): number {
+    try {
+        return projectOpencodeReasoningBudgetCutoff(
+            input.db,
+            input.sessionId,
+            [...input.messages],
+            reasoning.keepTokens,
+            reasoning.clearedThroughTag,
+            reasoning.proseRatio,
+        );
+    } catch (error) {
+        // While the session's tag ownership summary is still being built, the
+        // postprocess phase clears no reasoning, so the request keeps all of it.
+        if (error instanceof TagOwnerSummaryNotReady) return 0;
+        throw error;
+    }
 }
 
 function withoutClearedReasoning(
