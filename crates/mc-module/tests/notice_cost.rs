@@ -10,7 +10,7 @@ use std::time::Instant;
 use cortexkit_role_compaction::notice::{Conditions, NoticeAnswer, NoticeRequest};
 use cortexkit_role_compaction::part::{PartBody, Seal, ToolPart, ToolStatus};
 use cortexkit_role_compaction::read::{
-    Cursor, Entry, Head, ReadPage, ReadRequest, Role, Select, SessionRef,
+    Cursor, Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, Select, SessionRef,
 };
 use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
 use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
@@ -41,6 +41,7 @@ const WARM_STEPS: u64 = 3;
 enum Shape {
     Pi,
     OpenCode2,
+    Broca,
 }
 
 impl Shape {
@@ -48,6 +49,7 @@ impl Shape {
         match self {
             Self::Pi => "pi",
             Self::OpenCode2 => "opencode2",
+            Self::Broca => "broca",
         }
     }
 
@@ -55,6 +57,7 @@ impl Shape {
         match self {
             Self::Pi => "thalamus-pi",
             Self::OpenCode2 => "thalamus-opencode2",
+            Self::Broca => "broca",
         }
     }
 }
@@ -107,9 +110,47 @@ fn assistant(n: u64, output_bytes: u64) -> Entry {
     entry(n, Role::Assistant, vec![text(n, "assistant"), tool])
 }
 
+fn broca_assistant(n: u64, output_bytes: u64) -> Entry {
+    let mut message = assistant(n, output_bytes);
+    let reasoning =
+        "Check the implementation and cache boundaries before choosing a compatible edit. "
+            .repeat(3);
+    message.parts.insert(
+        0,
+        part(
+            format!("p{n}-reasoning"),
+            None,
+            Seal::Signed,
+            PartBody::Reasoning {
+                text_bytes: Some(reasoning.len() as u64),
+                text: Some(reasoning),
+            },
+        ),
+    );
+    // Entry digests include the parts; construct again after adding reasoning.
+    entry(n, Role::Assistant, message.parts)
+}
+
+fn broca_wake(n: u64) -> Entry {
+    entry(n, Role::User, vec![text(n, "wake")]).with_notice(NoticeOrigin::new("prefrontal"))
+}
+
 fn cycle(shape: Shape, n: u64, offset: usize) -> Entry {
     match offset % 3 {
+        // Start the unsummarized messages with one genuine user prompt, then
+        // use marked inbox notifications for the rest of this autonomous turn.
+        // That prompt and the bounded amount of later content keep the
+        // summarizer from starting a model call during a notice-only test.
+        0 if matches!(shape, Shape::Broca) && offset > 0 => broca_wake(n),
         0 => entry(n, Role::User, vec![text(n, "user")]),
+        1 if matches!(shape, Shape::Broca) => broca_assistant(
+            n,
+            if (offset / 3).is_multiple_of(64) {
+                20_480
+            } else {
+                2_048
+            },
+        ),
         1 => assistant(
             n,
             if (offset / 3).is_multiple_of(64) {
@@ -121,7 +162,7 @@ fn cycle(shape: Shape, n: u64, offset: usize) -> Entry {
         _ => match shape {
             // Compaction contract W4.1: Pi toolResult rows have no parts;
             // their result is attached to the original call's tool part.
-            Shape::Pi => entry(n, Role::User, vec![]),
+            Shape::Pi | Shape::Broca => entry(n, Role::User, vec![]),
             Shape::OpenCode2 => entry(n, Role::Assistant, vec![text(n, "assistant")]),
         },
     }
@@ -159,9 +200,16 @@ impl Client {
     fn step(&self, shape: Shape) -> Vec<Entry> {
         let mut state = self.0.lock().unwrap();
         let n = state.original.len() as u64 + state.added.len() as u64 + 1;
-        let mut entries = vec![assistant(n, 2_048)];
-        if matches!(shape, Shape::Pi) {
+        let mut entries = vec![if matches!(shape, Shape::Broca) {
+            broca_assistant(n, 2_048)
+        } else {
+            assistant(n, 2_048)
+        }];
+        if matches!(shape, Shape::Pi | Shape::Broca) {
             entries.push(entry(n + 1, Role::User, vec![]));
+        }
+        if matches!(shape, Shape::Broca) {
+            entries.push(broca_wake(n + 2));
         }
         state.added.extend(entries.clone());
         entries
@@ -532,10 +580,18 @@ async fn drain(module: &Module<Client>, key: &SessionRef) {
 }
 
 fn request(client: &Client, seq: u64, entries: Vec<Entry>, threshold: bool) -> NoticeRequest {
-    let conditions: Conditions = serde_json::from_value(json!({
+    let mut conditions: Conditions = serde_json::from_value(json!({
         "model":model(),"context_window":WINDOW,"output_reserve":RESERVE,"rules":rules(),"now":2_000_000,
         "last_prompt_tokens": if threshold { 566_800 } else { 436_000 }
     })).unwrap();
+    if entries.iter().any(|entry| {
+        entry
+            .parts
+            .iter()
+            .any(|part| matches!(part.body, PartBody::Reasoning { .. }))
+    }) {
+        conditions.last_prompt_view = Some(client.applied().version);
+    }
     let mut request = NoticeRequest::new(seq, conditions).with_newest(client.newest());
     request.applied_view = Some(client.applied());
     request.entries = entries;
@@ -601,7 +657,7 @@ fn trial_recording(
             warm.push(cpu_us() - before);
             module.search_idle(&fixture.key).await.unwrap();
         }
-        let candidate = fixture.entries[fixture.cut + 1].parts[0].tag.unwrap();
+        let candidate = fixture.entries[fixture.cut + 1].parts.iter().find_map(|p| p.tag).unwrap();
         module
             .tool(&route, "ctx_reduce", json!({"drop":candidate.to_string()}))
             .await
@@ -663,6 +719,7 @@ fn notice_cost_fixture_paths() {
         (Shape::Pi, false),
         (Shape::OpenCode2, false),
         (Shape::Pi, true),
+        (Shape::Broca, false),
     ] {
         let fixture = Fixture::create(shape, 1_000, moved);
         for threshold in [false, true] {
@@ -672,6 +729,21 @@ fn notice_cost_fixture_paths() {
         }
     }
     assert_eq!(stats(&(1..=200).collect::<Vec<_>>())["p95"], 190);
+}
+
+#[test]
+fn notice_cost_broca_shape() {
+    let assistant = cycle(Shape::Broca, 2, 1);
+    assert!(
+        matches!(assistant.parts[0].body, PartBody::Reasoning { text_bytes: Some(n), .. } if n > 0)
+    );
+    assert_eq!(assistant.parts[0].tag, None);
+    assert!(
+        matches!(&assistant.parts[2].body, PartBody::Tool(tool) if tool.output_bytes == Some(20_480))
+    );
+    assert!(cycle(Shape::Broca, 3, 2).parts.is_empty());
+    assert!(cycle(Shape::Broca, 4, 3).notice.is_some());
+    assert!(cycle(Shape::Broca, 1, 0).notice.is_none());
 }
 
 #[test]
