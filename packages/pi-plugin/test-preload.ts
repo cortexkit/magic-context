@@ -13,6 +13,7 @@ import { afterAll, afterEach } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { __setLocalEmbeddingPoolingTestFallback } from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
+import { getHarness, setHarness } from "@magic-context/core/shared/harness";
 import { resetReusableWorkersForTests } from "@magic-context/core/shared/reusable-worker";
 import {
 	createTestTempDir,
@@ -66,6 +67,34 @@ afterAll(() => {
 	if (violations.length > 0) {
 		throw new Error(
 			`Test storage leaked into the package directory:\n${violations.join("\n")}`,
+		);
+	}
+});
+
+// Preload afterAll hooks run after each file's own cleanup. Do not reset leaked
+// state here: the file that selected another host must restore Pi itself.
+afterAll(() => {
+	const violations: string[] = [];
+	try {
+		// An unused harness is unlocked and may still have the OpenCode default.
+		// Selecting Pi accepts that case but rejects any conflicting locked host.
+		setHarness("pi");
+	} catch {
+		violations.push(`harness locked to "${getHarness()}"`);
+	}
+	const detection = (
+		globalThis as typeof globalThis & {
+			[key: symbol]: { kind: string } | undefined;
+		}
+	)[Symbol.for("magic-context.pi.harness-detection")];
+	if (detection !== undefined && detection.kind !== "pi") {
+		violations.push(`detection memo is "${detection.kind}"`);
+	}
+	if (violations.length > 0) {
+		throw new Error(
+			`Pi test harness isolation leak after file cleanup: ${violations.join("; ")}. ` +
+				'Restore the harness with _resetHarnessForTesting() and setHarness("pi"), ' +
+				"and clear detection with __setPiHarnessKindForTesting(undefined).",
 		);
 	}
 });
