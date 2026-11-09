@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { retiredLiveInstructionIDs } from "../fold/instruction-supersession";
+import {
+    retiredLiveInstructionIDs,
+    setCoveredInstructionSupersessionEnabledForTests,
+} from "../fold/instruction-supersession";
 import {
     changedDate,
     instructionRow,
@@ -184,6 +187,141 @@ test("a per-server retirement before a kept signed block strips that block on a 
         expect(after.bytes).not.toContain("KEEP_SIGNED_REASONING");
         expect((await f.pass(addThinking)).bytes).toBe(after.bytes);
     } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// Rows the history summary covers are cut from the conversation and served
+// again at the head of the request, ahead of every uncovered row. They must
+// follow the same supersession decisions as the rows after the cut.
+const sameBytes = (later: Pass, earlier: Pass) => {
+    expect(JSON.stringify(later.draft.system)).toBe(JSON.stringify(earlier.draft.system));
+    expect(JSON.stringify(later.draft.messages.slice(0, earlier.draft.messages.length))).toBe(
+        JSON.stringify(earlier.draft.messages),
+    );
+};
+
+test("a covered row is retired by a newer uncovered row on the next pass that may rebuild", async () => {
+    const f = await oc2ContextFixture(34886, options);
+    const pass = () =>
+        f.pass((draft) => {
+            draft.model.limit = { context: 302000 };
+        });
+    try {
+        await pass();
+        const githubGone = catalogRow("COVERED_GONE", [docs, github], [docs]);
+        f.instruction(githubGone, both);
+        const coveredID = f.rows.at(-1)!.id;
+        f.user("First batch.", 1000);
+        f.respond();
+        // The summary covers the row, and the rebuild after it moves the cut.
+        f.compartment(f.rows.length - 1);
+        f.user("Second batch.", 1000);
+        f.respond(1, 260000);
+        expect(instructionTexts(await pass())).toEqual([githubGone]);
+        f.respond();
+        expect(instructionTexts(await pass())).toEqual([githubGone]);
+        // A newer row after the cut restates the catalog and names github.
+        const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
+        f.instruction(githubBack, both);
+        f.user("Third batch.", 1000);
+        f.respond(1, 260000);
+        const rebuilt = await pass();
+        expect(instructionTexts(rebuilt)).toEqual([githubBack]);
+        expect(retiredLiveInstructionIDs(f.db, f.session).has(coveredID)).toBe(true);
+        f.respond();
+        sameBytes(await pass(), rebuilt);
+        await f.restart();
+        f.respond();
+        expect(instructionTexts(await pass())).toEqual([githubBack]);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+test("a row retired before the cut stays retired once the history summary covers it", async () => {
+    const f = await oc2ContextFixture(35886, options);
+    const pass = () =>
+        f.pass((draft) => {
+            draft.model.limit = { context: 302000 };
+        });
+    try {
+        await pass();
+        const githubGone = catalogRow("RETIRED_LIVE", [docs, github], [docs]);
+        const githubBack = catalogRow("NEWEST", [docs], [docs, github]);
+        f.instruction(githubGone, both);
+        f.user("First batch.", 1000);
+        f.respond();
+        f.instruction(githubBack, both);
+        f.user("Second batch.", 1000);
+        f.respond(1, 260000);
+        expect(instructionTexts(await pass())).toEqual([githubBack]);
+        // A later summary covers both rows; the rebuild that moves the cut
+        // must not serve the retired row again.
+        f.compartment(f.rows.length - 1);
+        f.user("Third batch.", 1000);
+        f.respond(1, 260000);
+        const covered = await pass();
+        expect(instructionTexts(covered)).toEqual([githubBack]);
+        f.respond();
+        sameBytes(await pass(), covered);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+test("after an upgrade, covered rows a release served are retired only on a pass that may rebuild", async () => {
+    const f = await oc2ContextFixture(36886, options);
+    const pass = () =>
+        f.pass((draft) => {
+            draft.model.limit = { context: 302000 };
+        });
+    // Serve the session as the previous release did: covered rows skipped
+    // supersession, so a row retired while uncovered came back once covered.
+    setCoveredInstructionSupersessionEnabledForTests(false);
+    try {
+        await pass();
+        const githubGone = catalogRow("RESERVED_BY_RELEASE", [docs, github], [docs]);
+        const githubBack = catalogRow("NEWEST", [docs], [docs, github]);
+        f.instruction(githubGone, both);
+        f.user("First batch.", 1000);
+        f.respond();
+        f.instruction(githubBack, both);
+        f.user("Second batch.", 1000);
+        f.respond(1, 260000);
+        await pass();
+        f.compartment(f.rows.length - 1);
+        f.user("Third batch.", 1000);
+        f.respond(1, 260000);
+        // The rebuild that moves the cut still sees both rows uncovered.
+        expect(instructionTexts(await pass())).toEqual([githubBack]);
+        // The next pass sets them aside as covered, and that release served
+        // the retired row again, on a pass that may not rebuild.
+        f.respond();
+        const legacy = await pass();
+        expect(instructionTexts(legacy)).toEqual([githubGone, githubBack]);
+        // Upgrade: a pass that may not rebuild serves the same bytes.
+        setCoveredInstructionSupersessionEnabledForTests(true);
+        await f.restart();
+        f.respond();
+        const upgraded = await pass();
+        sameBytes(upgraded, legacy);
+        expect(
+            f.db
+                .prepare(
+                    "SELECT json_extract(trailing_blank_decisions, '$.coveredInstructionSupersession') AS doc FROM session_meta WHERE session_id=?",
+                )
+                .get(f.session),
+        ).toEqual({ doc: null });
+        // The next pass that may rebuild retires the covered row and turns the
+        // switch on; later passes replay that request.
+        f.respond(1, 260000);
+        const rebuilt = await pass();
+        expect(instructionTexts(rebuilt)).toEqual([githubBack]);
+        f.respond();
+        sameBytes(await pass(), rebuilt);
+    } finally {
+        setCoveredInstructionSupersessionEnabledForTests(true);
         await f.cleanup();
     }
 }, 60000);

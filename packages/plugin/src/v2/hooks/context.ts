@@ -2212,13 +2212,14 @@ export async function registerContext(context: V2Context) {
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);
             },
-            reclaimHostRows: (sessionID, messages, permitted) =>
+            reclaimHostRows: (sessionID, messages, permitted, covered) =>
                 reclaimInstructionRows(
                     database,
                     sessionID,
                     messages,
                     permitted,
                     foldedInstructionIDs.get(sessionID),
+                    covered,
                 ),
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same

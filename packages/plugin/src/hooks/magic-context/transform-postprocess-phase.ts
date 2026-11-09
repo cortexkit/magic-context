@@ -1674,6 +1674,8 @@ interface RunPostTransformPhaseArgs {
         sessionId: string,
         messages: MessageLike[],
         permitted: boolean,
+        /** Covered host instruction rows this pass serves ahead of `messages`. */
+        covered: MessageLike[],
     ) => HostRowReclaim;
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
@@ -3131,10 +3133,38 @@ export async function runPostTransformPhase(
             Math.min(firstApplicationLocations.get(message) ?? Infinity, partIndex),
         );
     };
+    // OpenCode 2 instruction rows are served even once the history summary
+    // covers them; the delivery trim below already keeps every one still in
+    // the array. The switch that extends this to the earlier trims is set on
+    // the first pass allowed to rewrite the whole prefix, so a session served
+    // before it never changes bytes on a defer pass. Every pass after that
+    // serves the same rows, whichever pass moved the history boundary.
+    // Decided before the host-row reclaim, which applies instruction
+    // supersession to the covered rows this pass serves as well; the switch
+    // itself is persisted below, where the covered rows are put back.
+    const coveredHostInstructions = args.coveredHostInstructions ?? [];
+    let coveredRetentionOn = false;
+    let retainCoveredInstructions = false;
+    if (
+        m0M1EnabledForFold &&
+        args.m0M1 &&
+        !compactionOff &&
+        args.opencode2 &&
+        (coveredHostInstructions.length > 0 || canEditWholePrefix) &&
+        hostInstructionRetentionEnabled()
+    ) {
+        try {
+            coveredRetentionOn = isHostInstructionRetentionOn(args.db, args.sessionId);
+        } catch (error) {
+            failPass("host-instruction-retention-read-failure", error);
+        }
+        retainCoveredInstructions = coveredRetentionOn || canEditWholePrefix;
+    }
     const hostRowReclaim = args.reclaimHostRows?.(
         args.sessionId,
         args.messages,
         !compactionOff && isCacheBustingPass,
+        retainCoveredInstructions ? coveredHostInstructions : [],
     );
     for (const message of hostRowReclaim?.edits ?? []) {
         const index = args.messages.indexOf(message);
@@ -3868,32 +3898,15 @@ export async function runPostTransformPhase(
 
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
-    if (m0M1Enabled && args.m0M1 && !compactionOff && args.opencode2) {
-        // OpenCode 2 instruction rows are served even once the history summary
-        // covers them; the delivery trim below already keeps every one still in
-        // the array. The switch that extends this to the earlier trims is set on
-        // the first pass allowed to rewrite the whole prefix, so a session served
-        // before it never changes bytes on a defer pass. Every pass after that
-        // serves the same rows, whichever pass moved the history boundary.
-        const covered = args.coveredHostInstructions ?? [];
-        if (covered.length > 0 || canEditWholePrefix) {
-            let retain = false;
-            if (hostInstructionRetentionEnabled()) {
-                try {
-                    retain = isHostInstructionRetentionOn(args.db, args.sessionId);
-                } catch (error) {
-                    failPass("host-instruction-retention-read-failure", error);
-                }
-                if (!retain && canEditWholePrefix) {
-                    if (!markHostInstructionRetention(args.db, args.sessionId))
-                        failPass("host-instruction-retention-persistence-failure");
-                    retain = true;
-                }
-            }
-            // The covered rows are older than everything left in the array.
-            if (retain && covered.length > 0) args.messages.unshift(...covered);
-        }
-    }
+    if (
+        retainCoveredInstructions &&
+        !coveredRetentionOn &&
+        !markHostInstructionRetention(args.db, args.sessionId)
+    )
+        failPass("host-instruction-retention-persistence-failure");
+    // The covered rows are older than everything left in the array.
+    if (retainCoveredInstructions && coveredHostInstructions.length > 0)
+        args.messages.unshift(...coveredHostInstructions);
     if (m0M1Enabled && args.m0M1) {
         // Serve the persisted pair and its trim boundary as they are. Marking
         // the replay contention-exhausted keeps this pass from counting as
