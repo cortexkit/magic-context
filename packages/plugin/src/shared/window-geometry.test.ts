@@ -210,6 +210,53 @@ describe("window geometry", () => {
         expect(escaped.geometry.derivation.absoluteWall).toBe(90_000);
     });
 
+    test("caps the hard wall at a declared input limit", () => {
+        // A provider rejects a prompt over its declared input limit however much
+        // room the context window leaves after output, so that limit is the wall
+        // the 95% emergency lines read, for every geometry.
+        const cases = [
+            {
+                provider: "opencode-go",
+                limit: { context: 1_000_000, input: 302_222, output: 65_536 },
+                usableHard: 302_222,
+            },
+            {
+                provider: "anthropic",
+                limit: { context: 1_000_000, input: 900_000, output: 128_000 },
+                usableHard: 900_000,
+            },
+            {
+                provider: "google",
+                limit: { context: 1_048_576, input: 1_000_000, output: 65_536 },
+                usableHard: 1_000_000,
+            },
+        ] as const;
+        for (const { provider, limit, usableHard } of cases) {
+            const result = deriveWindowGeometry(provider, "model", limit);
+            expect({ usableSoft: result?.usableSoft, usableHard: result?.usableHard }).toEqual({
+                usableSoft: limit.input,
+                usableHard,
+            });
+        }
+        // Without a declared input limit the wall stays the context less the
+        // output the request asks for.
+        expect(
+            deriveWindowGeometry("opencode-go", "model", { context: 1_000_000, output: 65_536 })
+                ?.usableHard,
+        ).toBe(968_000);
+        // A configured output reserve narrows the usable window, not the wall.
+        const reserved = deriveWindowGeometry(
+            "openai-codex",
+            "gpt-5.6-sol",
+            { context: 400_000, input: 272_000, output: 128_000 },
+            { outputReserveOverride: 16_384 },
+        );
+        expect({ usableSoft: reserved?.usableSoft, usableHard: reserved?.usableHard }).toEqual({
+            usableSoft: 272_000 - 16_384,
+            usableHard: 272_000,
+        });
+    });
+
     test("clamps an inversion and logs it", () => {
         const logs: string[] = [];
         const result = deriveWindowGeometry(

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { setOutputReserveConfig } from "@magic-context/core/shared/models-dev-cache";
-import { resolvePiUsableContextLimit } from "./pi-context-limit";
+import {
+	resolvePiUsableContextLimit,
+	resolvePiWindowGeometry,
+} from "./pi-context-limit";
 
 describe("resolvePiUsableContextLimit", () => {
 	afterEach(() => setOutputReserveConfig(undefined));
@@ -104,5 +107,46 @@ describe("resolvePiUsableContextLimit", () => {
 				model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
 			}),
 		).toBe(100_000);
+	});
+});
+
+describe("resolvePiWindowGeometry", () => {
+	// Pi's model metadata carries a context window and an output limit, never a
+	// separate input limit, so the shared cap of the hard wall at a declared
+	// input limit never reaches a Pi session. Its usable window and hard wall
+	// (which its pressure and 95% emergency checks read) stay as they were.
+	test("keeps the usable window and hard wall of a Pi session unchanged", () => {
+		const cases = [
+			{
+				model: {
+					provider: "anthropic",
+					id: "claude-sonnet",
+					contextWindow: 200_000,
+					maxTokens: 64_000,
+				},
+				usableSoft: 150_000,
+				usableHard: 200_000 - 4_096,
+			},
+			{
+				model: {
+					provider: "opencode-go",
+					id: "deepseek-v4.1-flash",
+					contextWindow: 1_000_000,
+					maxTokens: 65_536,
+				},
+				usableSoft: 1_000_000 - 65_536,
+				usableHard: 1_000_000 - 4_096,
+			},
+		];
+		for (const { model, usableSoft, usableHard } of cases) {
+			const geometry = resolvePiWindowGeometry({
+				rawContextWindow: model.contextWindow,
+				model,
+			});
+			expect({
+				usableSoft: geometry?.usableSoft,
+				usableHard: geometry?.usableHard,
+			}).toEqual({ usableSoft, usableHard });
+		}
 	});
 });

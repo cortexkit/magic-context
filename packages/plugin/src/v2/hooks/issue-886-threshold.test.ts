@@ -2,7 +2,12 @@ import { expect, spyOn, test } from "bun:test";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { updateSessionMeta } from "../../features/magic-context/storage";
-import { markProtectedTailPolicyV3Seeded } from "../../features/magic-context/storage-meta-persisted";
+import {
+    incrementHistorianFailure,
+    markProtectedTailPolicyV3Seeded,
+    recordOverflowDetected,
+    resetEmergencyRecoveryRegistryForTest,
+} from "../../features/magic-context/storage-meta-persisted";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import * as finalWire from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
@@ -225,38 +230,34 @@ const localCountResult = () => {
     return localCount;
 };
 
-test("a pass sized from a local count counts the array before the history head and instruction rows are added", async () => {
+test("a pass sized from a local count counts the history head, the instruction rows and the reasoning it serves", async () => {
     const result = await localCountResult();
     console.log(
         `ISSUE886_LOCAL_COUNT ${JSON.stringify({ sized: result.sized, served: result.served, countedArray: result.countedArray, servedArray: result.servedArray })}`,
     );
-    // The count that sizes the pass has neither the two history messages at the
-    // head (m[0] and m[1]) nor the instruction rows; the request the pass serves
-    // has both.
-    expect(result.countedArray.head).toBe(0);
-    expect(result.countedArray.instructions).toBe(0);
+    // The pass is sized before it puts the two history messages at the head
+    // (m[0] and m[1]), serves the covered instruction rows again and clears old
+    // reasoning. The count that sizes it includes the head and those rows, and
+    // leaves out the reasoning the pass then clears.
     expect(result.servedArray.head).toBeGreaterThan(15_000);
     expect(result.servedArray.instructions).toBeGreaterThan(10_000);
-    // It also still holds reasoning the same pass then clears from the request.
-    expect(result.countedArray.reasoning).toBeGreaterThan(result.servedArray.reasoning);
+    expect(result.countedArray.head).toBe(result.servedArray.head);
+    expect(result.countedArray.instructions).toBe(result.servedArray.instructions);
+    expect(result.countedArray.reasoning).toBe(result.servedArray.reasoning);
 }, 300_000);
 
-// Expected to fail until the local count is read against the same window as a
-// provider reading. A provider reading is a percentage of the input limit
-// (302,222 here); the priced-pass sizing divides by the hard window, the
-// 1,000,000-token context minus the 32,000-token output cap (968,000), so the
-// same request reads about a third as full. A fix flips this to `test`.
-test.failing("a pass sized from a local count reads it against the input limit provider readings use", async () => {
+// A provider reading is a percentage of the input limit (302,222 here), so a
+// local count of the same request reads against that window too, not against
+// the 1,000,000-token context less the 32,000-token output cap (968,000).
+test("a pass sized from a local count reads it against the input limit provider readings use", async () => {
     const result = await localCountResult();
     const expected = (result.sized.inputTokens / INPUT_WINDOW) * 100;
     expect(Math.abs(result.sized.percentage - expected)).toBeLessThan(0.1);
 }, 300_000);
 
-// Expected to fail until the sizing counts the request the pass serves. Today
-// it counts the array before the history head and the instruction rows are
-// added and before reasoning is cleared, so it differs from the next pass's
-// count of the same request by tens of percent. A fix flips this to `test`.
-test.failing("a pass sized from a local count counts the request it serves", async () => {
+// The sizing count is within ten percent of the next pass's count of the
+// request the pass served.
+test("a pass sized from a local count counts the request it serves", async () => {
     const result = await localCountResult();
     const ratio = result.sized.inputTokens / result.served.inputTokens;
     expect(ratio).toBeGreaterThan(0.9);
@@ -354,4 +355,125 @@ test("force band in the reporter's shape: what the summary tail and the drop pro
             first.logs.some((line) => /emergency tiered drop skipped: no-candidates/.test(line)),
         ).toBe(true);
     });
+}, 300_000);
+
+// A pass sized from a local count and a pass with a provider reading of the
+// same token total read the same percentage, with and without a declared input
+// limit: the execute threshold and the force band are percentages of the
+// window provider readings use, so a local count read against a larger window
+// executes late on exactly the passes that have no provider reading.
+const WINDOW_CASES = [
+    {
+        name: "Anthropic 200k/64k",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        limit: { context: 200_000, output: 64_000 },
+    },
+    {
+        name: "Codex 272k/128k",
+        provider: "openai",
+        model: "gpt-5-codex",
+        limit: { context: 272_000, output: 128_000 },
+    },
+    {
+        name: "input limit 302,222 in a 1M context",
+        provider: "opencode-go",
+        model: "deepseek-v4.1-flash",
+        limit: LIMIT,
+    },
+];
+for (const [index, windowCase] of WINDOW_CASES.entries()) {
+    test(`a local count and a provider reading of the same request read the same percentage: ${windowCase.name}`, async () => {
+        const f = await fixture(8870 + index, {
+            area: "issue-886-threshold",
+            provider: windowCase.provider,
+            model: windowCase.model,
+            limit: windowCase.limit,
+        });
+        try {
+            f.user(`Review these records:\n${prose.repeat(300)}`, 60_000);
+            // The provider has reported no usage: the first pass is priced (it
+            // renders the history head) and sizes itself from a local count.
+            f.respond(1, 0);
+            const first = await f.pass();
+            const sized =
+                /using wire estimate for priced pass inputTokens=(\d+) percentage=([\d.]+)/.exec(
+                    first.logs.join("\n"),
+                );
+            if (!sized) throw new Error(`no local count:\n${first.logs.join("\n")}`);
+            // The provider then reports exactly that many input tokens.
+            f.respond(1, Number(sized[1]));
+            const second = await f.pass();
+            const reading = new RegExp(
+                `transform scheduler: percentage=([\\d.]+)% inputTokens=${sized[1]} `,
+            ).exec(second.logs.join("\n"));
+            if (!reading) throw new Error(`no provider reading:\n${second.logs.join("\n")}`);
+            console.log(
+                `ISSUE886_WINDOW ${JSON.stringify({ case: windowCase.name, tokens: Number(sized[1]), local: Number(sized[2]), provider: Number(reading[1]) })}`,
+            );
+            // Both are logged to one decimal place.
+            expect(Math.abs(Number(sized[2]) - Number(reading[1]))).toBeLessThanOrEqual(0.1);
+        } finally {
+            await f.cleanup();
+        }
+    }, 300_000);
+}
+
+// The two 95% emergency lines read the hard wall, and a declared input limit
+// caps it: with 302,222 inside a 1,000,000-token context, a reading of 96% of
+// the input limit is an emergency. Against the context less the output cap
+// (968,000) the same reading is about 30%.
+const EMERGENCY_TOKENS = Math.round(INPUT_WINDOW * 0.96);
+
+test("historian recovery is requested at 95% of the input limit, not of the context", async () => {
+    const f = await fixture(8866, {
+        area: "issue-886-threshold",
+        provider: "opencode-go",
+        model: "deepseek-v4.1-flash",
+        limit: LIMIT,
+        historian: true,
+    });
+    await withSession(f, async () => {
+        incrementHistorianFailure(f.db, f.session, "historian failed");
+        const requested = (logs: string[]) =>
+            logs.some((line) => /EMERGENCY: historian recovery requested at/.test(line));
+        f.respond(1, Math.round(INPUT_WINDOW * 0.9));
+        const below = await f.pass();
+        f.respond(1, EMERGENCY_TOKENS);
+        const above = await f.pass();
+        expect(requested(below.logs)).toBe(false);
+        expect(requested(above.logs)).toBe(true);
+    });
+}, 300_000);
+
+test("a provider overflow at 95% of the input limit is refused, not sent", async () => {
+    const f = await fixture(8867, {
+        area: "issue-886-threshold",
+        provider: "opencode-go",
+        model: "deepseek-v4.1-flash",
+        limit: LIMIT,
+    });
+    try {
+        // A first pass renders the history head, so the refused pass below
+        // folds nothing.
+        await f.pass();
+        f.respond(1, EMERGENCY_TOKENS);
+        recordOverflowDetected(
+            f.db,
+            f.session,
+            undefined,
+            "opencode-go/deepseek-v4.1-flash",
+            "provider_overflow",
+        );
+        const attempt = await f.attempt();
+        // The 95% fail-closed line refuses the turn. The fixture's host cannot
+        // show the refusal notice, so the refusal surfaces as that step's error.
+        expect(attempt.error).toBeInstanceOf(Error);
+        expect(
+            attempt.logs.some((line) => /v2 refusal: .*EmergencyFailClosedError/.test(line)),
+        ).toBe(true);
+    } finally {
+        resetEmergencyRecoveryRegistryForTest();
+        await f.cleanup();
+    }
 }, 300_000);

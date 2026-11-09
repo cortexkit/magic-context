@@ -177,16 +177,17 @@ function editingAssistant(sessionId: string, id: string, fileBytes: number): Mes
 }
 
 describe("the raw fallback is admitted like a last-known-good replay", () => {
-    it("refuses a raw fallback between the trusted limit and the usable hard limit", async () => {
+    it("refuses a raw fallback over the prompt limit Copilot enforces", async () => {
         await registerCopilotRow();
-        // A 150k-token history: under the 232k usable hard limit, over the 128k
-        // prompt limit Copilot enforces.
+        // A 150k-token history, over the 128k prompt limit Copilot enforces. That
+        // declared limit caps the usable hard limit as well, so the history is
+        // over both.
         const s = fallbackSession(() => trustedEstimate(150_000));
         const ctx = { db: s.db, sessionID: s.sessionId };
         expect(resolveTrustedContextLimit(COPILOT.providerID, COPILOT.modelID, ctx)).toBe(128_000);
         expect(
             resolveContextWindowGeometry(COPILOT.providerID, COPILOT.modelID, ctx)?.usableHard,
-        ).toBeGreaterThan(150_000);
+        ).toBe(128_000);
         const input = [user(s.sessionId, "m1", "question")];
         const outcome = await s.run(input).catch((error: unknown) => error);
         expect(outcome).toBeInstanceOf(RawFallbackContextLimitError);

@@ -221,6 +221,12 @@ export function deriveWindowGeometry(
         const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
         usableHard = hardWindow - requestedOutput;
     }
+    // A declared input limit is the largest prompt the provider accepts, however
+    // much of the context window the output leaves free. Without this cap a model
+    // whose input limit is 302,222 inside a 1,000,000-token context would put its
+    // hard wall at 968,000, and the 95% lines that read it would sit past every
+    // prompt the provider accepts.
+    if (isFinitePositive(input)) usableHard = Math.min(usableHard, input);
     usableHard = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
     if (usableHard < usableSoft) {
         logGeometryClampOnce(

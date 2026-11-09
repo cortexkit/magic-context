@@ -130,6 +130,7 @@ import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
+    type M0M1State,
     mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -177,6 +178,7 @@ import {
     hasPendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";
+import { servedRequestForSizing } from "./priced-pass-sizing";
 import { prepareStructuralSentinelChoices } from "./project-structural-sentinels";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -3193,10 +3195,63 @@ export function createTransform(deps: TransformDeps) {
                           contextLimit: resolvedContextLimit,
                           lastResponseTime: sessionMeta.lastResponseTime,
                       });
+            // Count the request this pass will serve, not the array as it stands:
+            // the postprocess phase below adds the history head and the covered
+            // instruction rows and clears old reasoning (see servedRequestForSizing).
+            // Should that projection fail, the array as it stands is counted.
+            let sizingMessages: MessageLike[] = messages;
+            try {
+                const servesHead =
+                    (!!projectIdentity || !!sessionDirectory) && (fullFeatureMode || compactionOff);
+                sizingMessages = servedRequestForSizing({
+                    db,
+                    sessionId,
+                    messages,
+                    messageTagNumbers,
+                    head: servesHead
+                        ? {
+                              db,
+                              sessionId,
+                              state: sessionMeta as M0M1State,
+                              projectDirectory: sessionDirectory,
+                              ...renderOptions,
+                              hardSignals: m0HardSignals,
+                              compactionOff,
+                          }
+                        : undefined,
+                    coveredInstructions:
+                        deps.storeGeneration === "v2" && servesHead && !compactionOff
+                            ? coveredHostInstructions
+                            : [],
+                    mayEditWholePrefix: protectionCacheBustingPass && !activeThinkingPrefixHold,
+                    // Reasoning is cleared only for a resolved provider, never on
+                    // a pass held for signed thinking, and never partially on a
+                    // prefix-bound model.
+                    reasoning:
+                        !compactionOff &&
+                        !activeThinkingPrefixHold &&
+                        resolvedProviderID !== undefined &&
+                        !isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID)
+                            ? {
+                                  keepTokens: resolveKeepReasoningTokens(
+                                      deps.keepReasoningTokens,
+                                      currentModelKeyForBoundary,
+                                  ),
+                                  clearedThroughTag: sessionMeta.clearedReasoningThroughTag,
+                                  proseRatio: sessionDecisionCalibration(db, sessionId).proseRatio,
+                              }
+                            : undefined,
+                });
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: priced-pass sizing counts the array without the parts the pass adds: ${getErrorMessage(error)}`,
+                );
+            }
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
                 pressureEstimate = estimateFinalWireInputTokens({
-                    messages,
+                    messages: sizingMessages,
                     systemPromptTokens: sessionMeta.systemPromptTokens,
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
@@ -3209,13 +3264,16 @@ export function createTransform(deps: TransformDeps) {
                     `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
                 );
             }
-            const usableHard = windowGeometry?.usableHard;
+            // Read against the window a provider reading of the same request is a
+            // share of (the scheduler's local reading uses it too), so the count
+            // reads the percentage that reading would. The two 95% emergency
+            // lines read the hard wall instead.
             const countPercentage =
                 pressureEstimate?.pressureTokens !== undefined &&
                 Number.isFinite(pressureEstimate.pressureTokens) &&
-                typeof usableHard === "number" &&
-                usableHard > 0
-                    ? (pressureEstimate.pressureTokens / usableHard) * 100
+                typeof localReadingWindow === "number" &&
+                localReadingWindow > 0
+                    ? (pressureEstimate.pressureTokens / localReadingWindow) * 100
                     : 0;
             const grewPastSavedReading =
                 savedProviderReading !== null &&
@@ -3242,7 +3300,7 @@ export function createTransform(deps: TransformDeps) {
                     wireEstimateTrusted: pressureEstimate.trusted,
                     providerProvenInputTokens: providerProvenInputForRecovery,
                     providerProvenLimitTokens: providerProvenLimitForRecovery,
-                    usableHardLimit: usableHard,
+                    windowTokens: localReadingWindow,
                 });
                 if (contextUsage.inputTokens > 0) {
                     const usedProviderInput =
