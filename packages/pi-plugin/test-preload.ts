@@ -20,6 +20,7 @@ import {
 	installTestTempDirCleanup,
 	sweepStaleTestTempDirs,
 } from "@magic-context/core/shared/test-temp-dir";
+import { __setPiHarnessKindForTesting } from "./src/pi-harness-kind";
 
 // Pooled threads and idle timers must not outlive the test that created them.
 afterEach(resetReusableWorkersForTests);
@@ -38,6 +39,12 @@ const { dir: isolatedDataHome } = createTestTempDir("mc-pi-test-xdg-");
 process.env.MAGIC_CONTEXT_TEST_DATA_DIR = isolatedDataHome;
 process.env.XDG_DATA_HOME = isolatedDataHome;
 process.env.XDG_CONFIG_HOME = isolatedDataHome;
+
+// Oh My Pi (OMP) compatibility dependencies can expose pi-utils beside the test
+// runner. Select Pi before index.ts captures host detection at module load.
+// Tests simulating OMP can override detection; the cleanup guard still rejects
+// any file that leaves a non-Pi harness lock or detection memo.
+__setPiHarnessKindForTesting("pi");
 
 // Provider fixtures in this package use fake model IDs and retain the legacy mean path.
 __setLocalEmbeddingPoolingTestFallback({

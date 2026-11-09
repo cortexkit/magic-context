@@ -9,13 +9,29 @@ const preload = fileURLToPath(new URL("../test-preload.ts", import.meta.url));
 const harness = import.meta.resolve("@magic-context/core/shared/harness");
 const detection = new URL("./pi-harness-kind.ts", import.meta.url).href;
 
-function runFiles(mutator: string) {
+function runFiles(mutator: string, withOmpUtils = false) {
 	const { dir, cleanup } = createTestTempDir("mc-pi-harness-isolation-");
 	try {
 		const home = join(dir, "home");
 		mkdirSync(home);
 		const first = join(dir, "01-mutator.test.ts");
 		const victim = join(dir, "02-victim.test.ts");
+		if (withOmpUtils) {
+			const utils = join(dir, "node_modules", "@oh-my-pi", "pi-utils");
+			mkdirSync(utils, { recursive: true });
+			writeFileSync(
+				join(utils, "package.json"),
+				JSON.stringify({
+					name: "@oh-my-pi/pi-utils",
+					type: "module",
+					exports: { ".": { import: "./index.js" } },
+				}),
+			);
+			writeFileSync(
+				join(utils, "index.js"),
+				'export const APP_NAME = "omp";\n',
+			);
+		}
 		writeFileSync(
 			first,
 			`import { afterAll, test } from "bun:test";
@@ -60,6 +76,22 @@ test("a later Pi file can select its harness", () => {
 		cleanup();
 	}
 }
+
+test("entry imports stay Pi when OMP test dependencies are installed", () => {
+	const entry = new URL("./index.ts", import.meta.url).href;
+	const result = runFiles(
+		`import { expect } from "bun:test";
+import { getHarness } from ${JSON.stringify(harness)};
+await import(${JSON.stringify(entry)});
+test("entry captured the Pi harness", () => {
+  expect(getHarness()).toBe("pi");
+});`,
+		true,
+	);
+	expect(result.output).not.toContain("Pi test harness isolation leak");
+	expect(result.status).toBe(0);
+	expect(result.output).toContain("2 pass");
+});
 
 test.each([
 	"omp",
