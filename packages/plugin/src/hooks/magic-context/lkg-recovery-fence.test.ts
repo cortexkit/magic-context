@@ -1,6 +1,7 @@
 import { Database as BunDatabase } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -10,7 +11,7 @@ import {
 import { clearSession, closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { deleteSessionScopedRows } from "../../features/magic-context/storage-session-tables";
 import type { Database } from "../../shared/sqlite";
-import { writeStorageFileSync } from "../../shared/storage-permissions";
+import { tightenStorageTreeSync, writeStorageFileSync } from "../../shared/storage-permissions";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import {
     clearPersistedLkgSlotStrict,
@@ -117,6 +118,37 @@ ${code}`,
 }
 
 describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
+    test("locked publications remove their directory after two operations on the same fence", () => {
+        const f = fixture();
+        try {
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+            f.dirty();
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+            expect(saveLkgSlotToDb(f.db, "session", slot, undefined, { rebuild: true })).toBe(true);
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+        } finally {
+            f.raw.close();
+        }
+    });
+    test("temp cleanup removes only the known name without listing the fence folder", () => {
+        const f = fixture();
+        const known = `${f.path}.tmp`;
+        const unrelated = `${f.path}.unrelated.tmp`;
+        writeStorageFileSync(known, "stale", { forcePrivate: true });
+        writeStorageFileSync(unrelated, "keep", { forcePrivate: true });
+        const list = spyOn(fs, "readdirSync");
+        try {
+            f.dirty();
+            expect(existsSync(known)).toBe(false);
+            expect(readFileSync(unrelated, "utf8")).toBe("keep");
+            expect(
+                list.mock.calls.filter(([path]) => String(path) === dirname(f.path)),
+            ).toHaveLength(0);
+        } finally {
+            list.mockRestore();
+            f.raw.close();
+        }
+    });
     test("warm synchronous captures perform zero fence I/O", () => {
         const f = fixture();
         const operations: string[] = [];
@@ -400,14 +432,21 @@ for (let i=0, attempts=0; i<12;) {
             f.raw.close();
         }
     });
-    test("session clear removes the certificate and orphan temporary records", () => {
+    test("session clear removes the certificate and its known temporary record", () => {
         const f = fixture();
         try {
-            writeStorageFileSync(`${f.path}.dead.tmp`, "orphan", { forcePrivate: true });
+            writeStorageFileSync(`${f.path}.tmp`, "orphan", { forcePrivate: true });
+            writeStorageFileSync(`${f.path}.dead.tmp`, "legacy", { forcePrivate: true });
+            const unrelated = join(dirname(f.path), "unrelated.tmp");
+            writeStorageFileSync(unrelated, "keep", { forcePrivate: true });
             clearPersistedLkgSlotStrict(f.db, "session");
             expect(f.load()).toBeUndefined();
             expect(existsSync(f.path)).toBe(false);
+            expect(existsSync(`${f.path}.tmp`)).toBe(false);
+            expect(existsSync(`${f.path}.dead.tmp`)).toBe(true);
+            expect(tightenStorageTreeSync(dirname(dirname(f.path))).failures).toBe(0);
             expect(existsSync(`${f.path}.dead.tmp`)).toBe(false);
+            expect(readFileSync(unrelated, "utf8")).toBe("keep");
             clearLkgRecoveryFence("session");
         } finally {
             f.raw.close();
