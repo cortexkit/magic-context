@@ -271,3 +271,76 @@ test("parts, entries and source lists OpenCode never writes keep their rows", ()
     const unparsedGuidance = malformed.filter(([id]) => id !== "unknown catalog");
     expect(retired(rows(older, ...unparsedGuidance))).toEqual([]);
 });
+
+// Review witnesses. Each test asserts the behaviour a reviewer expects and
+// fails on the current supersededInstructionIDs, so it is marked
+// test.failing; it starts failing (and should become a plain test) once the
+// gap is closed.
+
+// OpenCode 2.0.15 and older wrote instruction rows without
+// metadata.instructionSources and joined the sources in the order builtins,
+// Code Mode, project instructions, skills, references, MCP guidance, then API
+// context entries (session/context.ts and instruction-entry.ts at v2.0.15).
+const unkeyed = (...entries: [id: string, text: string][]) =>
+    entries.map(([id, text]) => ({ id, data: { text } }));
+
+test.failing("an unkeyed row keeps its MCP guidance when a later part does not parse", () => {
+    const older = instructionRow(
+        replaceCodeModeCatalog(["OLD"]),
+        updateMcpGuidance([docs], [docs, github], "2.1.4"),
+        '<context key="ticket">\nTICKET-42 is the current task.\n</context>',
+    );
+    // The older row is github's only mention and the only copy of the API
+    // context; a newer catalog restates neither.
+    const newer = replaceCodeModeCatalog(["NEW"]);
+    expect([...supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]))]).toEqual(
+        [],
+    );
+});
+
+test.failing("an unkeyed row keeps project instructions that sit between its catalog and its MCP guidance", () => {
+    const older = instructionRow(
+        replaceCodeModeCatalog(["OLD"]),
+        "New instructions apply from:\nInstructions from: /work/AGENTS.md\nRun the linter before committing.",
+        updateMcpGuidance([docs], [docs, github], "2.1.4"),
+    );
+    // The newer row restates the catalog and mentions github again, but
+    // nothing restates the AGENTS.md text the older row carries.
+    const newer = instructionRow(
+        replaceCodeModeCatalog(["NEW"]),
+        updateMcpGuidance([docs, github], [docs], "2.1.4"),
+    );
+    expect([...supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]))]).toEqual(
+        [],
+    );
+});
+
+test.failing("removing a server whose name contains a comma does not count as a mention of a different server", () => {
+    const alpha: McpServerFixture = { server: "alpha", instructions: "ALPHA_SERVER_GUIDANCE" };
+    const alphaBeta: McpServerFixture = {
+        server: "alpha, beta",
+        instructions: "ALPHA_BETA_SERVER_GUIDANCE",
+    };
+    // OpenCode renders the removal as "...no longer available: alpha, beta.",
+    // which names one server; alpha is still connected and the first row is
+    // its only entry.
+    const list = rows(
+        [
+            "alpha added",
+            instructionRow(
+                replaceCodeModeCatalog(["A"]),
+                updateMcpGuidance([docs, alphaBeta], [docs, alphaBeta, alpha]),
+            ),
+            [codeMode, mcp],
+        ],
+        [
+            "alpha, beta removed",
+            instructionRow(
+                replaceCodeModeCatalog(["B"]),
+                updateMcpGuidance([docs, alphaBeta, alpha], [docs, alpha]),
+            ),
+            [codeMode, mcp],
+        ],
+    );
+    expect(retired(list)).toEqual([]);
+});
