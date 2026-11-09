@@ -239,12 +239,13 @@ export function piResponsesAssistantTexts(
 			output = true;
 			continue;
 		}
-		if (
-			item?.type !== "message" ||
-			item.role !== "assistant" ||
-			!Array.isArray(item.content)
-		)
-			return texts;
+		// Oh My Pi replays every native item it keeps, and the turn comparison
+		// cannot read any other kind (a generated image's image_generation_call,
+		// a hosted web_search_call). Leave such a turn unmodeled, which skips the
+		// comparison for the request; the native-drop check at dispatch still
+		// covers its dropped parts.
+		if (item?.type !== "message") return undefined;
+		if (item.role !== "assistant" || !Array.isArray(item.content)) return texts;
 		const itemTexts: string[] = [];
 		for (const value of item.content) {
 			const part = object(value);

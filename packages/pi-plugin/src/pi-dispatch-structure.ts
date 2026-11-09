@@ -1,4 +1,7 @@
-import { piNativeDropMismatch } from "./native-replay-pi";
+import {
+	type PiNativeDropExpectation,
+	piNativeDropExpectations,
+} from "./native-replay-pi";
 import { PI_NATIVE_TAG_STRIP_PROVENANCE } from "./native-replay-tag-provenance-pi";
 import {
 	piAgentHistory,
@@ -737,8 +740,8 @@ export function preparePiDispatch<T>(
 ): {
 	messages: T[];
 	structure: PiPreparedStructure | undefined;
-	/** Why a dropped part would reach Oh My Pi's provider as its original text. */
-	nativeDrop?: string;
+	/** Dropped parts the dispatch hook must find as placeholders in the request. */
+	nativeDrops?: readonly PiNativeDropExpectation[];
 } {
 	let output = messages;
 	const structure = buildPiPreparedStructure(
@@ -760,8 +763,12 @@ export function preparePiDispatch<T>(
 	const reminders = structure && dateReminderPlans.get(structure);
 	if (reminders) reminders.cwd = cwd;
 	// Read-only and independent of the turn structure, which may be unmodeled.
-	const nativeDrop = omp ? piNativeDropMismatch(output, model) : undefined;
-	return { messages: output, structure, ...(nativeDrop ? { nativeDrop } : {}) };
+	const nativeDrops = omp ? piNativeDropExpectations(output, model) : [];
+	return {
+		messages: output,
+		structure,
+		...(nativeDrops.length ? { nativeDrops } : {}),
+	};
 }
 
 function buildPiPreparedStructure(

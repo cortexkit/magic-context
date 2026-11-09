@@ -17,6 +17,7 @@ import {
 	registerPiContextHandler,
 	signalPiPendingMaterialization,
 } from "./context-handler";
+import { piNativeDropWireMismatch } from "./native-replay-pi";
 import {
 	piPreparedStructureMismatch,
 	preparePiDispatch,
@@ -27,12 +28,13 @@ import { createFakePi, createTestDb, fakeContext } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
 // The prepared-turn check compares a Responses request with Magic Context's
-// projection of it only when it can model every assistant turn; one block it
-// cannot model skips that comparison for the whole request. Blocks that Oh My
-// Pi itself drops for a Responses target are modeled as dropped. A second
-// check reads only the prepared messages: Oh My Pi's encoder replays a
-// same-model turn from its stored native items, so a drop that never reached
-// the native item would go out as the original text, skip or not.
+// projection of it only when it can model every assistant turn; one block or
+// native item it cannot model skips that comparison for the whole request.
+// Blocks that Oh My Pi itself drops for a Responses target are modeled as
+// dropped. A second check runs either way: Oh My Pi's encoder sends a
+// same-model turn as its stored native items or rebuilt from its blocks, and
+// the request must carry every dropped part's placeholder, never the stale
+// native text a drop that missed the native item would leave.
 const { dir: root, cleanup } = createTestTempDir("mc-codex-unmodeled-");
 const keys = [
 	"HOME",
@@ -256,15 +258,25 @@ function dispatch(messages: unknown[], convert: any) {
 		systemPrompt: ["system"],
 		messages: prepared.messages,
 	});
-	const skipped =
-		!prepared.structure || !!prepared.structure.structuralSkipReason;
 	return {
 		input,
 		prepared,
-		skipped,
 		bytes: JSON.stringify(input),
+		...verdict(input, prepared),
+	};
+}
+
+/** The dispatch hook's two checks, in its order: native drops, then the turn comparison. */
+function verdict(
+	input: unknown[],
+	prepared: ReturnType<typeof preparePiDispatch>,
+) {
+	const skipped =
+		!prepared.structure || !!prepared.structure.structuralSkipReason;
+	return {
+		skipped,
 		refusal:
-			prepared.nativeDrop ??
+			piNativeDropWireMismatch({ input }, prepared.nativeDrops) ??
 			(skipped
 				? undefined
 				: piPreparedStructureMismatch({ input }, prepared.structure)),
@@ -345,9 +357,11 @@ for (const encoder of encoders) {
 			expect(sent.refusal).toBeUndefined();
 		});
 
-		test("without positional pairing a signed drop is found by id and phase", () => {
+		test("a hosted web search turn: a signed drop is checked on the wire", () => {
 			__setPiHarnessKindForTesting("omp");
-			// An item kind the pairing does not model leaves only the signed lookup.
+			// The turn comparison cannot read the replayed web_search_call, so the
+			// turn is unmodeled; positional pairing is unavailable too, which leaves
+			// the signed lookup by id and phase for the stale native text.
 			const search = {
 				type: "web_search_call",
 				id: "ws_synthetic",
@@ -357,17 +371,77 @@ for (const encoder of encoders) {
 				drop(request(codexReply(signed("msg_c"), ORIGINAL, [search]))),
 				encoder.convert,
 			);
-			expect(mirrored.prepared.nativeDrop).toBeUndefined();
+			expect(mirrored.skipped).toBe(true);
+			expect(mirrored.refusal).toBeUndefined();
 			const stale = dispatch(
 				drop(request(codexReply(signed("msg_other"), ORIGINAL, [search]))),
 				encoder.convert,
 			);
-			expect(stale.prepared.nativeDrop).toBe(
-				"message=2 comparison=native_drop",
+			expect(stale.bytes).toContain(ORIGINAL);
+			expect(stale.refusal).toBe("message=2 comparison=native_drop");
+		});
+
+		test("a same-model turn with a hosted web search call and no drop is admitted", () => {
+			__setPiHarnessKindForTesting("omp");
+			const search = {
+				type: "web_search_call",
+				id: "ws_synthetic",
+				status: "completed",
+				action: { type: "search", query: "synthetic" },
+			};
+			const reply = codexReply(
+				{ ...signed("msg_c"), text: `§2§ ${ORIGINAL}` },
+				ORIGINAL,
+				[search],
 			);
+			const sent = dispatch(request(reply), encoder.convert);
+			expect(sent.bytes).toContain('"type":"web_search_call"');
+			expect(sent.refusal).toBeUndefined();
 		});
 	});
 }
+
+describe("OpenAI Responses lane: the request shows whether a turn was replayed", () => {
+	/** The same signed-mismatch reply, produced on the OpenAI Responses lane. */
+	const reply = () => {
+		const turn = signedMismatch();
+		turn.api = responsesModel.api;
+		turn.provider = responsesModel.provider;
+		turn.providerPayload.provider = responsesModel.provider;
+		return turn;
+	};
+	for (const host of responsesHosts)
+		test(`${host.version}: a cold rebuild carrying the placeholder is admitted, a warm replay of stale text refused`, () => {
+			__setPiHarnessKindForTesting("omp");
+			const messages = drop(request(reply()));
+			const prepared = preparePiDispatch(
+				messages,
+				responsesModel as never,
+				true,
+				"/work",
+			);
+			for (const replay of [false, true]) {
+				const input = host.build({
+					model: responsesModel,
+					context: { messages: prepared.messages },
+					strictResponsesPairing: false,
+					supportsImageDetailOriginal: false,
+					nativeHistory: { replay, filterReasoning: false },
+				});
+				const bytes = JSON.stringify(input);
+				if (replay) {
+					expect(bytes).toContain(ORIGINAL);
+					expect(verdict(input, prepared).refusal).toBe(
+						"message=2 comparison=native_drop",
+					);
+				} else {
+					expect(bytes).toContain(PLACEHOLDER);
+					expect(bytes).not.toContain(ORIGINAL);
+					expect(verdict(input, prepared).refusal).toBeUndefined();
+				}
+			}
+		});
+});
 
 describe("blocks Oh My Pi drops from another model's turn", () => {
 	for (const [kind, block] of Object.entries(droppedKinds)) {
