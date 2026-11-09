@@ -3,8 +3,9 @@
  * enough must not send a request over the model's window. Pi otherwise refuses
  * only a request whose byte count proves it is over the whole context window;
  * dense text (many tokens per byte) passes that check while its token count is
- * far over the window. Pi has no proactive model-shrink arm, so provider
- * overflow is the recovery origin tested here.
+ * far over the window. Pi never arms recovery by itself when the person
+ * switches to a smaller model (OpenCode does), so a provider overflow is the
+ * recovery tested here.
  */
 
 import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
@@ -186,7 +187,9 @@ it("sends a provider-overflow recovery request that fits under the 95% line", as
 		const { served, refusal } = await recoveryPass(f);
 		expect(refusal).toBeUndefined();
 		expect(served ?? 0).toBeGreaterThan(0);
-		expect(served ?? Number.POSITIVE_INFINITY).toBeLessThan(usableHard() * 0.95);
+		expect(served ?? Number.POSITIVE_INFINITY).toBeLessThan(
+			usableHard() * 0.95,
+		);
 	} finally {
 		f.close();
 	}

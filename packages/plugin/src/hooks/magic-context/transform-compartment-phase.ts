@@ -470,8 +470,9 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
      * over the line, keep the historian running on the next eligible chunk,
      * inside the same inline join budget the first run had. Stops when the
      * request fits, a run publishes nothing, no eligible history is left, the
-     * drain budget is spent or the budget runs out. The fold happens once,
-     * after this returns.
+     * historian's drain budget (the tokens of raw history it may summarize per
+     * time window, see isHistorianDrainBudgetSpent) is spent, or the inline
+     * join budget runs out. The fold happens once, after this returns.
      */
     async function chainRecoveryRuns(
         firstRun: ActiveCompartmentRun,

@@ -2971,9 +2971,10 @@ export function createTransform(deps: TransformDeps) {
 
         let contextUsage = contextUsageEarly;
         const rawGetNotifParams = runNotificationParams;
-        // The request this pass will serve, as the priced-pass sizing and the
-        // recovery chain count it before the postprocess phase builds it (see
-        // servedRequestForSizing).
+        // Builds the request this pass will serve, for counting only, before the
+        // postprocess phase builds the real one (see servedRequestForSizing). Two
+        // callers use it: the sizing of a pass the provider has not measured
+        // (below the compartment phase) and the recovery chain's fit check.
         const servedRequestSizingFor = (
             messagesToSize: MessageLike[],
             options: {
@@ -3030,7 +3031,10 @@ export function createTransform(deps: TransformDeps) {
         // summarizing while it does not. The count is the served-request count
         // with the history after the newest compartment as the raw tail; the
         // head is the current one, since the fold renders it only after the
-        // phase returns. The final check before sending counts the real request.
+        // phase returns. After a model switch that head was rendered for the old
+        // model's history budget, so the count can read high and the chain run
+        // an extra chunk; it never decides whether the request is sent. The
+        // final check before sending counts the real request.
         const recoveryChainWindow = windowGeometry?.usableHard ?? resolvedContextLimit;
         // The compartment phase does not replace the session record it reads.
         const recoveryChainMeta = sessionMeta;
@@ -3673,9 +3677,10 @@ export function createTransform(deps: TransformDeps) {
             }
             // Count the request this pass serves, for the next pass's execute
             // decision while the provider still reports no usage. A pass with a
-            // provider reading only clears the local one. A pass in overflow or
-            // model-shrink recovery also counts it, to check it against the
-            // model's 95% line before it is sent (see evaluateEmergencyFailClosed).
+            // provider reading records no count and clears any saved one. A pass
+            // in overflow or model-shrink recovery also counts it, to check it
+            // against the model's 95% line before it is sent (see
+            // evaluateEmergencyFailClosed).
             const recoveryAdmissionPass =
                 emergencyRecoveryArmed &&
                 emergencyRecoveryOrigin !== null &&
