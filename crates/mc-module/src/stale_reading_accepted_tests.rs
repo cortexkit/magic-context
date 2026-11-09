@@ -257,26 +257,39 @@ async fn stale_accepted_a_ride_view_counts_until_its_answer_is_lost() {
     }
 }
 
-/// Until the runner renders the view it accepted, it may send more than one
-/// reading under the view before it (its notices trail its requests). None
-/// of them is a fault, so none makes ck-mc stop trusting the views it
-/// names. Once the runner applies the accepted view, a different reading
-/// under an older view is the fault the check is for, as before.
+/// The request in flight when the runner accepted view 19 is measured under
+/// view 18. Its reading is excused, and so is every repeat of it: the
+/// notices of that step and a ride carrying the same reading. None of them
+/// warns or makes ck-mc stop trusting the views the runner names. Once the
+/// runner applies view 19, a reading under view 18 is older than the view
+/// it applies, and the check for a runner naming replaced views starts
+/// afresh from it: the first is ignored, a different second one is the
+/// fault that check is for.
 #[tokio::test]
-async fn stale_accepted_readings_before_the_runner_renders_the_view_are_no_fault() {
+async fn stale_accepted_the_reading_in_flight_is_excused_with_its_repeats() {
     let (logs, _logging) = capture();
     let (mut session, client, settings, eighteen) = under_view_eighteen().await;
     let nineteen = hand_over(&mut session, &client).await;
-    for (seq, prompt) in [(2, HIGH), (3, HIGH + 1_000), (4, HIGH + 2_000)] {
-        let request = reading(&session, &client, seq, prompt, 18, &eighteen);
+    for seq in [2, 3] {
+        let request = reading(&session, &client, seq, HIGH, 18, &eighteen);
         session.notice(&client, &settings, request).await;
-        assert!(session.reading_stale, "{prompt}");
-        assert!(!session.prompt_views_untrusted, "{prompt}");
+        assert!(session.reading_stale, "notice {seq}");
     }
+    let mut conditions = session.conditions.clone();
+    conditions.last_prompt_tokens = Some(HIGH);
+    conditions.last_prompt_view = Some(18);
+    let mut ride = RideRequest::new(vec![RideCause::CacheExpired], 1_000, conditions);
+    ride.applied_view = Some(eighteen.applied());
+    let answer = session.ride(&settings, &ride);
+    assert!(session.reading_stale);
+    assert!(answer.is_none(), "{answer:?}");
+    assert_eq!(offered(&client), vec![nineteen.clone()]);
+    assert!(!session.prompt_views_untrusted);
+    assert!(!logs.text().contains("measured a later request"));
 
-    // The runner applies view 19; its notice still carries the newest
-    // reading under view 18, now older than the view it applies.
-    let request = reading(&session, &client, 5, HIGH + 2_000, 18, &nineteen);
+    // The runner applies view 19; its notice still carries the reading
+    // under view 18, now older than the view it applies.
+    let request = reading(&session, &client, 4, HIGH, 18, &nineteen);
     session.notice(&client, &settings, request).await;
     assert!(session.reading_stale);
     assert!(!session.prompt_views_untrusted);
@@ -285,11 +298,57 @@ async fn stale_accepted_readings_before_the_runner_renders_the_view_are_no_fault
 
     // Control: a different reading under view 18 while the runner applies
     // view 19 still shows the runner at fault.
-    let request = reading(&session, &client, 6, HIGH + 3_000, 18, &nineteen);
+    let request = reading(&session, &client, 5, HIGH + 1_000, 18, &nineteen);
     session.notice(&client, &settings, request).await;
     assert!(session.prompt_views_untrusted);
     assert!(!session.reading_stale);
     assert_eq!(logs.text().matches("a second stale reading").count(), 1);
+}
+
+/// A second, different reading under view 18 while view 19 is accepted and
+/// still not applied: only one request can have been in flight when the
+/// runner accepted, so this one was rendered after it, without view 19.
+/// ck-mc warns once, stops counting view 19, and judges this reading and the
+/// later ones by the applied view, so pressure is not hidden for good. It is
+/// a fault in applying views, not in naming them, so the runner's view
+/// versions stay trusted. View 19 stays unconfirmed for the runner to apply
+/// or refuse.
+#[tokio::test]
+async fn stale_accepted_a_second_different_reading_stops_the_view_counting() {
+    let (logs, _logging) = capture();
+    let (mut session, client, settings, eighteen) = under_view_eighteen().await;
+    let nineteen = hand_over(&mut session, &client).await;
+    let request = reading(&session, &client, 2, HIGH, 18, &eighteen);
+    session.notice(&client, &settings, request).await;
+    assert!(session.reading_stale);
+
+    let request = reading(&session, &client, 3, LOW + 1_000, 18, &eighteen);
+    session.notice(&client, &settings, request).await;
+    assert!(!session.reading_stale);
+    assert_eq!(session.conditions.last_prompt_tokens, Some(LOW + 1_000));
+    assert!(!session.prompt_views_untrusted);
+    assert!(session
+        .unconfirmed
+        .iter()
+        .any(|pending| pending.view.version == 19));
+    let warning = format!(
+        "runner accepted view 19 but measured a later request without it ({} tokens from view 18, after {HIGH} tokens from view 18); counting readings against the applied view 18",
+        LOW + 1_000
+    );
+    assert!(logs.text().contains(&warning), "{}", logs.text());
+
+    // A later reading under view 18 counts: at the threshold it lands the
+    // queued drop.
+    let request = reading(&session, &client, 4, HIGH + 2_000, 18, &eighteen);
+    session.notice(&client, &settings, request).await;
+    assert!(!session.reading_stale);
+    assert!(!session.prompt_views_untrusted);
+    let views = offered(&client);
+    assert!(
+        views.len() == 2 && views[0] == nineteen && drops(&views[1], "old", "p2"),
+        "{views:?}"
+    );
+    assert_eq!(logs.text().matches("measured a later request").count(), 1);
 }
 
 /// Setup again for the session, with the runner reporting `applied`.

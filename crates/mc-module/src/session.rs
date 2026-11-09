@@ -284,6 +284,15 @@ pub struct Unconfirmed {
     /// Setup offers it again and the runner's answer says it holds it.
     #[serde(skip)]
     accepted: bool,
+    /// The one reading under an older view that this accepted view excused:
+    /// its prompt size and the view it named. A session has one step in
+    /// flight at a time, and an accepted view takes force at the runner's
+    /// next step, so at most one measured request can follow acceptance
+    /// under an older view: the one already in flight. A second, different
+    /// one means the runner rendered a request after accepting the view
+    /// without it ([`Session::judge_reading`]). Not saved, like `accepted`.
+    #[serde(skip)]
+    excused: Option<(u64, u64)>,
 }
 
 /// The state a view's acceptance replaced.
@@ -626,6 +635,7 @@ impl Session {
         // `Unconfirmed::accepted`).
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
+            pending.excused = None;
         }
         // Like refused_once, the retry guard survives in an unconfirmed
         // view's rollback snapshot, not in a separate store column.
@@ -1075,15 +1085,23 @@ impl Session {
     /// not apply yet is stale for the same reason ([`Session::newest_accepted`]):
     /// the runner keeps an accepted view pending until its next step and
     /// reports the view before it as applied until then, but every request it
-    /// renders from then on carries the accepted view.
+    /// renders from then on carries the accepted view. A session has one step
+    /// in flight at a time, so only the request already in flight when the
+    /// runner accepted can be measured under the older view: the accepted
+    /// views excuse one such measurement, and its repeats. A second,
+    /// different one shows the runner rendered a later request without the
+    /// view it accepted. ck-mc then stops counting the accepted views, warns
+    /// once, and judges this reading and later ones by the applied view
+    /// alone; the views stay unconfirmed until the runner applies or refuses
+    /// them, or Setup offers them again.
     ///
     /// Repeats of the reading last ignored stay ignored. A different reading
     /// older than the same applied view means the runner named a replaced
     /// view for a request it sent later; from then until the next Setup its
     /// view versions are disregarded (`prompt_views_untrusted`), and that
     /// reading counts. A reading stale only against an accepted view is
-    /// never part of that check: until the runner's next step, every reading
-    /// it sends names the view it still applies, which is no fault.
+    /// never part of that check: the view a reading names is right there,
+    /// and only the runner's applying of accepted views can be at fault.
     ///
     /// The stored conditions keep the last reading that was current, not the
     /// stale one, so the apps keep showing the usage they showed rather than
@@ -1105,6 +1123,11 @@ impl Session {
         let applied = self.newest_applied;
         let accepted = self.newest_accepted(applied_view);
         if view >= applied.max(accepted) {
+            return;
+        }
+        if view >= applied && !self.excuse_in_flight(tokens, view, accepted) {
+            // Judged by the applied view alone, which the reading is not
+            // older than.
             return;
         }
         if view < applied {
@@ -1138,10 +1161,45 @@ impl Session {
         ) = previous;
     }
 
+    /// Excuse a reading under an older view than the newest accepted one
+    /// (`accepted`) as the request in flight when the runner accepted: the
+    /// accepted views record it, and a repeat of it is excused again. A
+    /// different reading after one was excused stops every accepted view
+    /// counting, and returns false.
+    fn excuse_in_flight(&mut self, tokens: u64, view: u64, accepted: u64) -> bool {
+        let reading = (tokens, view);
+        let earlier = self
+            .unconfirmed
+            .iter()
+            .filter(|pending| pending.accepted)
+            .find_map(|pending| pending.excused.filter(|excused| *excused != reading));
+        let Some((earlier_tokens, earlier_view)) = earlier else {
+            for pending in self
+                .unconfirmed
+                .iter_mut()
+                .filter(|pending| pending.accepted)
+            {
+                pending.excused = Some(reading);
+            }
+            return true;
+        };
+        for pending in &mut self.unconfirmed {
+            pending.accepted = false;
+        }
+        tracing::warn!(
+            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {earlier_tokens} tokens from view {earlier_view}); counting readings against the applied view {}",
+            self.key.session,
+            self.newest_applied
+        );
+        false
+    }
+
     /// The newest view the runner accepted from ck-mc and still holds
     /// without applying it yet: 0 when there is none. A view leaves the
     /// unconfirmed list the moment the runner refuses it or ck-mc rolls it
-    /// back, so it stops counting at once. None counts while the runner
+    /// back, so it stops counting at once; it also stops counting once a
+    /// reading shows the runner rendered a request without it
+    /// ([`Session::excuse_in_flight`]). None counts while the runner
     /// applies a view ck-mc doesn't expect (`applied_view`, the one the
     /// notice or ride reports): a runner whose state went back no longer
     /// holds what it accepted, and measures under the view it applies.
@@ -3560,9 +3618,10 @@ impl Session {
     async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
         // A runner that set up again may have restarted and lost a view it
         // had accepted. Its answer to this offer says again whether it holds
-        // the view.
+        // the view, and its readings are judged afresh from here.
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
+            pending.excused = None;
         }
         let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
             return;
@@ -3707,6 +3766,7 @@ impl Session {
             before,
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
+            excused: None,
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
