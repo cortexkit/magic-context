@@ -41814,6 +41814,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn ctx_memory_empty_required_fillers_match_documented_calls() {
+        for category in [
+            "PROJECT_RULES",
+            "ARCHITECTURE",
+            "CONSTRAINTS",
+            "CONFIG_VALUES",
+            "NAMING",
+        ] {
+            let resolver =
+                FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+            let (handler, store, _dir, project) = handler_with_store_and_resolver(
+                Arc::new(ProducerState::default()),
+                default_test_config(),
+                resolver,
+            );
+            let written = tool_text(
+                call_facade(
+                    &handler,
+                    "ctx_memory",
+                    json!({
+                        "action": "write",
+                        "content": "Standalone filler contract fact.",
+                        "category": "PROJECT_RULES",
+                        "ids": []
+                    }),
+                )
+                .await,
+            );
+            assert!(written.contains("Saved memory"), "{written}");
+            let id = store
+                .load_active_memories(project.to_str().unwrap(), now_ms())
+                .unwrap()[0]
+                .id;
+            let clean = tool_text(
+                call_facade(
+                    &handler,
+                    "ctx_memory",
+                    json!({"action": "get", "ids": [id]}),
+                )
+                .await,
+            );
+            let fetched = tool_text(
+                call_facade(
+                    &handler,
+                    "ctx_memory",
+                    json!({"action": "get", "ids": [id], "content": "", "category": category}),
+                )
+                .await,
+            );
+            assert_eq!(fetched, clean, "get category {category}");
+            assert!(
+                fetched.contains("Standalone filler contract fact."),
+                "{fetched}"
+            );
+            let archived = tool_text(
+                call_facade(
+                    &handler,
+                    "ctx_memory",
+                    json!({"action": "archive", "ids": [id], "content": "", "category": category}),
+                )
+                .await,
+            );
+            assert!(archived.contains("Archived memory"), "{archived}");
+            let memory = store.get_memory_full(id).unwrap().unwrap();
+            assert_eq!(memory.content, "Standalone filler contract fact.");
+            assert_eq!(memory.category, "PROJECT_RULES");
+            assert_eq!(memory.status, "archived");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn ctx_reduce_empty_drop_filler_is_refused_without_queuing() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, _project) = handler_with_store_and_resolver(
