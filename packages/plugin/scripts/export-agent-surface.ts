@@ -20,6 +20,7 @@ import { createCtxMemoryTools } from "../src/tools/ctx-memory/tools";
 import { createCtxNoteTools } from "../src/tools/ctx-note/tools";
 import { createCtxReduceTools } from "../src/tools/ctx-reduce/tools";
 import { createCtxSearchTools } from "../src/tools/ctx-search/tools";
+import { parameterDescriptionsFor } from "../src/tools/parameter-descriptions";
 
 const tokenizer = new Tokenizer(claudeEncoding);
 const t = (s: string) => tokenizer.count(s);
@@ -86,6 +87,16 @@ const definitions = {
 out.push("## 2. Tool surface (description + parameters as serialized to the provider)");
 out.push("");
 for (const [name, definition] of Object.entries(definitions)) {
+    const descriptions = parameterDescriptionsFor(name, "full");
+    definition.args = Object.fromEntries(
+        Object.entries(definition.args).map(([parameter, schema]) => [
+            parameter,
+            descriptions?.[parameter]
+                ? (schema as typeof schema & { describe(description: string): typeof schema })
+                    .describe(descriptions[parameter])
+                : schema,
+        ]),
+    );
     normalizeToolArgSchemas(definition);
     const params: Record<string, unknown> = {};
     for (const [param, schema] of Object.entries(definition.args)) {

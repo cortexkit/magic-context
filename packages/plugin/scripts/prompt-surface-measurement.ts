@@ -15,6 +15,7 @@ import { createCtxMemoryTools } from "../src/tools/ctx-memory/tools";
 import { createCtxNoteTools } from "../src/tools/ctx-note/tools";
 import { createCtxReduceTools } from "../src/tools/ctx-reduce/tools";
 import { createCtxSearchTools } from "../src/tools/ctx-search/tools";
+import { parameterDescriptionsFor } from "../src/tools/parameter-descriptions";
 
 export const TOKENIZER_PACKAGE = "ai-tokenizer";
 export const TOKENIZER_ENCODING = "claude";
@@ -133,7 +134,17 @@ function buildToolDefinitions() {
         );
     }
 
-    for (const definition of Object.values(definitions)) {
+    for (const [id, definition] of Object.entries(definitions)) {
+        const descriptions = parameterDescriptionsFor(id, "full");
+        definition.args = Object.fromEntries(
+            Object.entries(definition.args).map(([name, schema]) => [
+                name,
+                descriptions?.[name]
+                    ? (schema as typeof schema & { describe(description: string): typeof schema })
+                        .describe(descriptions[name])
+                    : schema,
+            ]),
+        );
         normalizeToolArgSchemas(definition);
     }
     return definitions;
