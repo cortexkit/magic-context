@@ -341,6 +341,52 @@ describe("a dropped reply whose signature Oh My Pi removed", () => {
 				message.content[1].textSignature = "legacy-plain-id";
 			},
 		],
+		// The three cases below each need one sibling guard on its own: the
+		// dropped block itself still pairs with its hook-rewritten item.
+		[
+			"a signed sibling whose paired item has another id",
+			(message) => {
+				message.content.splice(2, 0, {
+					type: "text",
+					text: "Second.",
+					textSignature: JSON.stringify({
+						v: 1,
+						id: "msg_second",
+						phase: "commentary",
+					}),
+				});
+				message.providerPayload.items.splice(2, 0, {
+					type: "message",
+					id: "msg_unrelated",
+					role: "assistant",
+					status: "completed",
+					phase: "commentary",
+					content: [{ type: "output_text", text: "Second.", annotations: [] }],
+				});
+			},
+		],
+		[
+			"an unsigned sibling whose paired text the hook did not produce",
+			(message) => {
+				message.content.splice(2, 0, { type: "text", text: "Second." });
+				message.providerPayload.items.splice(2, 0, {
+					type: "message",
+					id: "msg_second",
+					role: "assistant",
+					status: "completed",
+					phase: "commentary",
+					content: [
+						{ type: "output_text", text: "Unrelated.", annotations: [] },
+					],
+				});
+			},
+		],
+		[
+			"a message from an api that is not a Responses lane",
+			(message) => {
+				message.api = "openai-completions";
+			},
+		],
 	];
 	for (const [name, change, text] of guards) {
 		test(`never writes native text for ${name}`, async () => {
