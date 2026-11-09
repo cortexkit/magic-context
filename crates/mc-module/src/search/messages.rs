@@ -75,7 +75,7 @@ mod attribution_tests {
         );
         assert!(!super::content_of(&entry).is_empty());
         entry.speaks_for =
-            Some(serde_json::from_value(serde_json::json!({"agent_id":"head"})).unwrap());
+            Some(serde_json::from_value(serde_json::json!({"agent_id":"lead-agent"})).unwrap());
         assert!(super::content_of(&entry).is_empty());
     }
 }

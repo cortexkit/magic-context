@@ -347,7 +347,7 @@ mod tests {
             .collect();
         entries[6] = entry(7, Role::User, false, "head brief");
         entries[6].speaks_for =
-            Some(serde_json::from_value(serde_json::json!({"agent_id":"head"})).unwrap());
+            Some(serde_json::from_value(serde_json::json!({"agent_id":"lead-agent"})).unwrap());
         assert!(!is_meaningful_user(&entries[6]));
         assert_eq!(tail_start(&entries, |_| 1_000, 1, 2_000, false), 9);
         assert_eq!(tail_start(&entries, |_| 1_000, 1, 2_000, true), 9);

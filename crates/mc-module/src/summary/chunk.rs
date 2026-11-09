@@ -756,8 +756,9 @@ mod tests {
                 .build(std::slice::from_ref(&relay), 10_000, counter)
                 .unwrap();
             let misses = cache.misses;
-            relay.speaks_for =
-                Some(serde_json::from_value(json!({"agent_id":"head", "name":"Alfonso"})).unwrap());
+            relay.speaks_for = Some(
+                serde_json::from_value(json!({"agent_id":"lead-agent", "name":"Alfonso"})).unwrap(),
+            );
             let actual = cache
                 .build(std::slice::from_ref(&relay), 10_000, counter)
                 .unwrap();
@@ -803,7 +804,7 @@ mod tests {
             }
         }
         let mut long = entry(1, Role::User, false, vec![text(&"é".repeat(2_000))]);
-        long.speaks_for = Some(serde_json::from_value(json!({"agent_id":"head"})).unwrap());
+        long.speaks_for = Some(serde_json::from_value(json!({"agent_id":"lead-agent"})).unwrap());
         let (role, lines, _, _) = render_entry(&long, true).unwrap();
         assert_eq!(role, 'R');
         assert_eq!(lines.len(), 1);

@@ -1596,7 +1596,8 @@ mod tests {
                     },
                 )],
             );
-            brief.speaks_for = Some(serde_json::from_value(json!({"agent_id":"head"})).unwrap());
+            brief.speaks_for =
+                Some(serde_json::from_value(json!({"agent_id":"lead-agent"})).unwrap());
             brief
         };
         let entries = [
