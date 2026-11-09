@@ -1,4 +1,5 @@
 import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
+import { isPiDropPlaceholder } from "./native-replay-pi";
 import { ownsNativeResponseTagStrip } from "./native-replay-tag-provenance-pi";
 import { piOmitsTruncatedAssistant } from "./pi-dispatch-assistant-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
@@ -258,28 +259,39 @@ export function piResponsesAssistantTexts(
 				// Remove only our current prepared ordinal from the visible side;
 				// unrelated visible edits must not inherit the native text or phase.
 				const stripped = stripPersistedAssistantText(part.text);
+				// A dropped block is sent as the placeholder itself. When the native
+				// item already carries those exact bytes, OMP replays them with the
+				// item's own phase, so bind the block to that item. The hook's cleanup
+				// cannot describe this pair: it would strip the placeholder's tag.
+				const droppedPlaceholder =
+					isPiDropPlaceholder(block.text as string) && part.text === block.text;
 				if (
 					!allowUnsigned ||
 					"textSignature" in block ||
-					stripped !== (block.text as string).replace(/^§\d+§ /u, "")
+					(!droppedPlaceholder &&
+						stripped !== (block.text as string).replace(/^§\d+§ /u, ""))
 				)
 					return texts;
 				unsigned = true;
 				// Clean unsigned text cannot normally establish native phase ownership.
 				// Persisted strip evidence preserves that ownership only for the exact
 				// native identity and body, without restoring a removed text signature.
+				// A matching drop placeholder establishes it for that block alone.
 				allUnsignedFrozen &&=
-					part.text === block.text &&
-					ownsNativeResponseTagStrip(
-						frozenTagStrips,
-						item.id,
-						item.phase,
-						part.text,
-					);
+					droppedPlaceholder ||
+					(part.text === block.text &&
+						ownsNativeResponseTagStrip(
+							frozenTagStrips,
+							item.id,
+							item.phase,
+							part.text,
+						));
 				// Reapplying the echoed ordinal can restore the original bytes, but
 				// the hook still removed the signature. Native replay owns the phase
 				// even when the prepared text now equals the cached output text.
-				rewrittenText ||= part.text !== stripped;
+				// A placeholder is not evidence of that hook rewrite, so it must not
+				// admit clean unsigned siblings in the same message.
+				rewrittenText ||= !droppedPlaceholder && part.text !== stripped;
 			}
 			bound++;
 			itemTexts.push(part.text);

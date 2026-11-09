@@ -1,7 +1,21 @@
+import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 
 import { isPiSystemEntry } from "./system-entry-pi";
+
+const DROP_PLACEHOLDER = /^\[dropped §\d+§\]$/u;
+const TAG_LABEL = /^§\d+§ /u;
+const RESPONSES_APIS = new Set([
+	"openai-responses",
+	"azure-openai-responses",
+	"openai-codex-responses",
+]);
+
+/** The exact text a dropped part is sent as: `[dropped §N§]` and nothing else. */
+export function isPiDropPlaceholder(text: string): boolean {
+	return DROP_PLACEHOLDER.test(text);
+}
 
 type NativeEnvelope = {
 	message: Record<string, unknown>;
@@ -145,11 +159,114 @@ function textIdentity(
 	return undefined;
 }
 
-/** Mirror prepared text edits without converting or discarding opaque native history. */
+type NativeTextSlot = { itemIndex: number; outputIndex: number; text: string };
+
+/**
+ * Pair every typed text block with the native output text that Oh My Pi
+ * replays in its place, in order, as the dispatch check pairs them
+ * (`piResponsesAssistantTexts`). Undefined unless they pair one to one.
+ */
+function nativeTextSlots(
+	content: readonly unknown[],
+	items: readonly unknown[],
+): NativeTextSlot[] | undefined {
+	const slots: NativeTextSlot[] = [];
+	for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+		const item = items[itemIndex];
+		if (!isRecord(item)) return undefined;
+		if (
+			item.type === "reasoning" ||
+			item.type === "function_call" ||
+			item.type === "custom_tool_call"
+		)
+			continue;
+		if (
+			item.type !== "message" ||
+			item.role !== "assistant" ||
+			!Array.isArray(item.content)
+		)
+			return undefined;
+		for (
+			let outputIndex = 0;
+			outputIndex < item.content.length;
+			outputIndex++
+		) {
+			const output = item.content[outputIndex];
+			if (
+				!isRecord(output) ||
+				output.type !== "output_text" ||
+				typeof output.text !== "string"
+			)
+				return undefined;
+			slots.push({ itemIndex, outputIndex, text: output.text });
+		}
+	}
+	const blocks = content.filter(
+		(block) => isRecord(block) && block.type === "text",
+	).length;
+	return slots.length === blocks ? slots : undefined;
+}
+
+/**
+ * The native output that an unsigned text block replays as, when Oh My Pi's
+ * assistant-message hook explains the missing signature. The hook removes a
+ * block's signature only when it rewrites that block's text, and leaves the
+ * native item as the provider returned it. So the native text must differ
+ * from its own cleanup, and that cleanup must equal the text the block had
+ * before this pass. Every other text block must pair as the dispatch check
+ * pairs it, so the positional pairing cannot shift onto another item.
+ */
+function hookRewrittenSlot(
+	previous: readonly unknown[],
+	partIndex: number,
+	items: readonly unknown[],
+): NativeTextSlot | undefined {
+	const slots = nativeTextSlots(previous, items);
+	if (!slots) return undefined;
+	let ordinal = 0;
+	let target: NativeTextSlot | undefined;
+	for (let index = 0; index < previous.length; index++) {
+		const block = previous[index];
+		if (!isRecord(block) || block.type !== "text") continue;
+		const slot = slots[ordinal++];
+		const item = items[slot.itemIndex] as Record<string, unknown>;
+		if (typeof block.text !== "string") return undefined;
+		if ("textSignature" in block) {
+			const identity = textIdentity(block);
+			if (
+				index === partIndex ||
+				!identity ||
+				item.id !== identity.id ||
+				item.phase !== identity.phase
+			)
+				return undefined;
+			continue;
+		}
+		const stripped = stripPersistedAssistantText(slot.text);
+		if (stripped !== block.text.replace(TAG_LABEL, "")) return undefined;
+		if (index !== partIndex) continue;
+		if (stripped === slot.text || (item.content as unknown[]).length !== 1)
+			return undefined;
+		target = slot;
+	}
+	return target;
+}
+
+/**
+ * Mirror prepared text edits without converting or discarding opaque native history.
+ *
+ * A signed block finds its native item by the signature's id and phase. With
+ * `unsignedDrops` (Oh My Pi only), a dropped block whose signature the host's
+ * assistant-message hook removed also gets its placeholder mirrored, into the
+ * native item that hook left behind (see `hookRewrittenSlot`). Without that,
+ * the host would replay the dropped text itself, and the dispatch check would
+ * refuse every later turn of the session.
+ */
 export function rewriteNativeAssistantTexts(
 	message: unknown,
 	previous: unknown,
 	sessionId?: string,
+	options: { unsignedDrops?: boolean } = {},
 ): void {
 	const envelope = getNativeEnvelope(message);
 	if (
@@ -160,6 +277,13 @@ export function rewriteNativeAssistantTexts(
 	)
 		return;
 	const content = envelope.message.content;
+	// Pair unsigned blocks against the items as they arrived; the signed
+	// rewrites below replace text only, so positions stay valid.
+	const arrivedItems = envelope.items;
+	const unsignedDrops =
+		options.unsignedDrops === true &&
+		RESPONSES_APIS.has(String(envelope.message.api)) &&
+		envelope.payload.dt === true;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		const before = previous.content[index];
@@ -180,6 +304,30 @@ export function rewriteNativeAssistantTexts(
 		)
 			continue;
 		const identity = textIdentity(part);
+		if (
+			identity === undefined &&
+			unsignedDrops &&
+			isPiDropPlaceholder(part.text) &&
+			!("textSignature" in part)
+		) {
+			const slot = hookRewrittenSlot(previous.content, index, arrivedItems);
+			if (slot) {
+				// Keep the item's id, phase and every other field; only its one
+				// output text becomes the placeholder the typed block now holds.
+				const item = envelope.items[slot.itemIndex] as Record<string, unknown>;
+				const outputs = (item.content as unknown[]).slice();
+				outputs[slot.outputIndex] = {
+					...(outputs[slot.outputIndex] as Record<string, unknown>),
+					text: part.text,
+				};
+				const items = envelope.items.slice();
+				items[slot.itemIndex] = { ...item, content: outputs };
+				envelope.items = items;
+				envelope.payload = { ...envelope.payload, items };
+				envelope.message.providerPayload = envelope.payload;
+				continue;
+			}
+		}
 		const sameIdentity = (value: unknown) => {
 			const other = textIdentity(value);
 			return (
