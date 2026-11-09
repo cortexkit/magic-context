@@ -563,6 +563,15 @@ fn tool_summary(name: &str, input: &Value) -> String {
             ["symbol", "module", "action"]
                 .iter()
                 .find_map(|key| input.get(*key).and_then(Value::as_str).map(str::to_owned))
+        })
+        // A shell call's command, on one line: the summarizer never sees tool
+        // output, so without it the call says nothing about the work.
+        .or_else(|| {
+            input
+                .get("command")
+                .and_then(Value::as_str)
+                .map(|command| truncate_units(&normalize(command), COMMAND_ARG_MAX_UNITS))
+                .filter(|command| !command.is_empty())
         });
     match key {
         Some(key) => format!("TC: {name}({key})"),
@@ -570,13 +579,23 @@ fn tool_summary(name: &str, input: &Value) -> String {
     }
 }
 
+/// Longest command a `TC:` line keeps, in UTF-16 units like the plugin's
+/// `extractKeyArg`. A shell command often opens with `cd <absolute path> &&`,
+/// which alone can fill the 60 units other key arguments keep.
+const COMMAND_ARG_MAX_UNITS: usize = 200;
+
 /// At most 60 UTF-16 code units, then an ellipsis.
 fn truncate_arg(value: &str) -> String {
+    truncate_units(value, 60)
+}
+
+/// At most `max` UTF-16 code units, then an ellipsis.
+fn truncate_units(value: &str, max: usize) -> String {
     let units: Vec<u16> = value.encode_utf16().collect();
-    if units.len() <= 60 {
+    if units.len() <= max {
         return value.to_owned();
     }
-    format!("{}…", crate::js_text::string_from_utf16_prefix(&units, 60))
+    format!("{}…", crate::js_text::string_from_utf16_prefix(&units, max))
 }
 
 fn normalize(text: &str) -> String {
@@ -1047,6 +1066,32 @@ mod tests {
             ),
             "{}",
             merged.input
+        );
+    }
+
+    /// A shell call with no description keeps its command, on one line and
+    /// cut at 200 UTF-16 units, as the plugin's `extractKeyArg` does. A stated
+    /// description still wins, and a blank command adds nothing.
+    #[test]
+    fn shell_calls_without_a_description_keep_their_command() {
+        assert_eq!(
+            tool_summary("shell", &json!({"command": "git status\n  --short"})),
+            "TC: shell(git status --short)"
+        );
+        assert_eq!(
+            tool_summary("bash", &json!({"command": "a".repeat(201)})),
+            format!("TC: bash({}…)", "a".repeat(200))
+        );
+        assert_eq!(
+            tool_summary(
+                "bash",
+                &json!({"command": "make", "description": "Build it"})
+            ),
+            "TC: Build it"
+        );
+        assert_eq!(
+            tool_summary("bash", &json!({"command": " \n "})),
+            "TC: bash"
         );
     }
 
