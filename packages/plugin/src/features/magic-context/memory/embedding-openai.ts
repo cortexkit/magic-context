@@ -11,6 +11,7 @@ import type { EmbeddingFailure, EmbeddingFailureClass } from "./embedding-failur
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { embeddingModelsMatch, resolveEmbeddingTextPrefixes } from "./embedding-model-match";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
+import { EmbeddingQueryTimeoutError } from "./embedding-query-deadline";
 import { blockedEmbeddingEndpointReason } from "./embedding-ssrf";
 
 interface OpenAICompatibleEmbeddingProviderOptions {
@@ -134,9 +135,10 @@ export { embeddingModelsMatch } from "./embedding-model-match";
  *   - On success, we fully close and reset failure counters.
  */
 const FAILURE_THRESHOLD = 3;
-const FAILURE_WINDOW_MS = 60_000;
 const OPEN_DURATION_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 30_000;
+// Leave a full timeout of scheduling slack around three serial request starts.
+const FAILURE_WINDOW_MS = FAILURE_THRESHOLD * FETCH_TIMEOUT_MS;
 
 /**
  * HTTP 429 handling. A rate limit means the endpoint is healthy but asking us
@@ -454,6 +456,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         let internalController: AbortController | undefined;
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         let onOuterAbort: (() => void) | undefined;
+        let rateLimitedResponse = false;
+        const requestStartedAt = Date.now();
 
         try {
             const claim = this.claimProbeOrShortCircuit();
@@ -467,7 +471,26 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             // dangling for the full 30s FETCH_TIMEOUT_MS.
             internalController = new AbortController();
             timeoutHandle = setTimeout(() => internalController?.abort(), FETCH_TIMEOUT_MS);
-            onOuterAbort = () => internalController?.abort();
+            onOuterAbort = () => {
+                if (signal?.reason instanceof EmbeddingQueryTimeoutError && !rateLimitedResponse) {
+                    // Search can return keyword results before fetch rejects, so
+                    // count its endpoint timeout synchronously with the abort.
+                    const timeoutMs = signal.reason.timeoutMs;
+                    log(
+                        `[magic-context] openai-compatible embedding request timed out after ${timeoutMs}ms`,
+                    );
+                    this.recordFailure(
+                        requestStartedAt,
+                        isProbe,
+                        this.failure(
+                            "transport_error",
+                            `request timed out after ${timeoutMs}ms`,
+                            true,
+                        ),
+                    );
+                }
+                internalController?.abort();
+            };
             if (signal) {
                 signal.addEventListener("abort", onOuterAbort, { once: true });
             }
@@ -499,6 +522,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             });
 
             if (response.status === 429) {
+                rateLimitedResponse = true;
                 // Drain the body so the connection can be reused. Its content
                 // is not needed: every 429 is handled the same way.
                 await response.text().catch(() => "");
@@ -508,6 +532,9 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 
             if (!response.ok) {
                 const excerpt = await response.text().catch(() => "");
+                // The query deadline already counted an aborted body read; a
+                // caller cancellation must not become an HTTP failure either.
+                if (signal?.aborted) return Array.from({ length: texts.length }, () => null);
                 const failure = this.failure(
                     "http_error",
                     `HTTP ${response.status} from endpoint${this.bodyExcerpt(excerpt)}`,
@@ -516,7 +543,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
 
@@ -530,7 +557,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             let body: EmbeddingResponseBody;
@@ -545,7 +572,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             // Model-substitution guard. A local server (LMStudio/Ollama) can
@@ -565,6 +592,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     this.modelMismatchLogged = true;
                 }
                 this.recordFailure(
+                    requestStartedAt,
                     isProbe,
                     this.failure(
                         "substitution_rejected",
@@ -585,7 +613,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             if (body.data.length === 0) {
@@ -593,7 +621,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
 
@@ -607,7 +635,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             const results: (Float32Array | null)[] = Array.from(
@@ -633,7 +661,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
             } else {
                 this.recordSuccess();
             }
@@ -648,9 +676,10 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 // Distinguish outer-caller abort (not our problem — don't penalize
                 // the endpoint) from our internal timeout (endpoint is slow).
                 if (signal?.aborted) {
-                    // Caller gave up. Don't count this against the endpoint.
-                    // Half-open probe slot is released without state change so
-                    // the next real call can probe again.
+                    // Caller cancellation is uncounted; a search budget expiry
+                    // was already counted by onOuterAbort.
+                    // On caller cancellation the half-open probe slot is released
+                    // without state change, so the next real call can probe again.
                 } else {
                     log(
                         `[magic-context] openai-compatible embedding request timed out after ${FETCH_TIMEOUT_MS}ms`,
@@ -660,7 +689,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                         `request timed out after ${FETCH_TIMEOUT_MS}ms`,
                         true,
                     );
-                    this.recordFailure(isProbe, failure);
+                    this.recordFailure(requestStartedAt, isProbe, failure);
                 }
             } else {
                 const detail = error instanceof Error ? error.message : String(error);
@@ -672,7 +701,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 log(
                     `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe, failure);
+                this.recordFailure(requestStartedAt, isProbe, failure);
             }
             return Array.from({ length: texts.length }, () => null);
         } finally {
@@ -782,7 +811,11 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         return excerpt ? `: ${excerpt}` : "";
     }
 
-    private recordFailure(isProbe: boolean, failure?: EmbeddingFailure): void {
+    private recordFailure(
+        requestStartedAt: number,
+        isProbe: boolean,
+        failure?: EmbeddingFailure,
+    ): void {
         if (failure) this.lastFailureReason = failure;
         if (isProbe) {
             // Canonical half-open: single probe failure re-opens the circuit.
@@ -798,9 +831,11 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         }
 
         const now = Date.now();
-        const cutoff = now - FAILURE_WINDOW_MS;
-        this.failureTimes = this.failureTimes.filter((t) => t > cutoff);
-        this.failureTimes.push(now);
+        // Compare request starts, not completions: slow failures must accumulate
+        // even when each request spends its full timeout waiting for the endpoint.
+        const cutoff = requestStartedAt - FAILURE_WINDOW_MS;
+        this.failureTimes = this.failureTimes.filter((t) => t >= cutoff);
+        this.failureTimes.push(requestStartedAt);
 
         if (this.failureTimes.length >= FAILURE_THRESHOLD) {
             this.circuitOpenUntil = now + OPEN_DURATION_MS;

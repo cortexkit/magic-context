@@ -20,6 +20,7 @@ import {
 	embedTextForProject,
 	getProjectEmbeddingSnapshot,
 } from "@magic-context/core/features/magic-context/memory/embedding";
+import { withQueryEmbeddingDeadline } from "@magic-context/core/features/magic-context/memory/embedding-query-deadline";
 import {
 	directoryHasGitMetadata,
 	resolveProjectIdentityForSession,
@@ -257,11 +258,15 @@ export function createCtxSearchTool(
 					memoryEnabled,
 					embeddingEnabled,
 					embedQuery: async (text, signal) => {
-						const result = await embedTextForProject(
-							projectIdentity,
-							text,
+						const result = await withQueryEmbeddingDeadline(
+							(embeddingSignal) =>
+								embedTextForProject(
+									projectIdentity,
+									text,
+									embeddingSignal,
+									"query",
+								),
 							signal,
-							"query",
 						);
 						return result?.vector ?? null;
 					},
