@@ -150,8 +150,12 @@ test("a manual host checkpoint uses Magic Context's history without calling a su
     expect(manualControl.providerCalls).toBe(0);
 });
 
-// Keep the isolated-host and recovery checks above outside test.failing, so a
-// broken fixture cannot masquerade as the expected over-limit egress defect.
-test.failing("a smaller-model switch never sends a request beyond the new provider window", () => {
+// Keep the isolated-host and recovery checks above in their own tests, so a
+// broken fixture cannot pass for a recovery that never sent anything.
+test("a smaller-model switch never sends a request beyond the new provider window", () => {
+    const primary = evidence.requests.filter(request => request.model === NEW_MODEL && !request.historian);
     expect(evidence.requests.filter(request => request.model === NEW_MODEL && request.rejected)).toEqual([]);
+    // The session reaches a fitting request on the smaller model.
+    expect(primary.length).toBeGreaterThan(0);
+    expect(primary.every(request => request.tokens <= SMALL)).toBe(true);
 });

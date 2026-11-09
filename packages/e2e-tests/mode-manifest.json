@@ -6,7 +6,7 @@
             "path": "tests/opencode2/issue-889-model-switch.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Real OpenCode 2 shrinking-model recovery with a context-enforcing fake provider; passing trace guards and an expected-failing over-limit egress assertion. PID lsof proves throwaway stores.",
+            "rationale": "Real OpenCode 2 shrinking-model recovery with a context-enforcing fake provider; passing trace guards and an assertion that no smaller-model request exceeds the provider window. PID lsof proves throwaway stores.",
             "contract_refs": ["OC2-S1", "FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode2"]
         },

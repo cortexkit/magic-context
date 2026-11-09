@@ -30,6 +30,7 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
+import type { RecoveryFitProjection } from "./recovery-fit";
 import { sendStatusNotification } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
 
@@ -142,6 +143,22 @@ interface RunCompartmentPhaseArgs {
      * snapshot has no runnable window.
      */
     preResolvedBoundarySnapshot?: ProtectedTailBoundarySnapshot;
+    /**
+     * Supplied only on a pass in overflow or model-shrink recovery: counts the
+     * request a fold on this pass would send after the publications joined so
+     * far, with the line it must stay under. A blocking join then keeps the
+     * historian running on the next eligible chunk while the request does not
+     * fit (see chainRecoveryRuns).
+     */
+    projectRecoveryRequest?: () => RecoveryFitProjection | undefined;
+    /** The host's protected-tail resolver, for the chunks a recovery chain reads. */
+    resolveRecoveryBoundary?: (emergencyTailScale?: 0.5 | 0.25) => ProtectedTailBoundarySnapshot;
+}
+
+/** How long one join may wait, and the whole budget it belongs to (for refusal messages). */
+interface InlineJoinWindow {
+    timeoutMs: number;
+    budgetMs: number;
 }
 
 /**
@@ -222,6 +239,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     rebuiltHistoryThisPass: boolean;
     historianJoinTimedOut: boolean;
     historianJoinBudgetMs: number | null;
+    /** Historian runs a recovery pass started after its first join (see chainRecoveryRuns). */
+    chainedRecoveryRuns: number;
 }> {
     let pendingCompartmentInjection = args.pendingCompartmentInjection;
     let compartmentInProgress = args.sessionMeta.compartmentInProgress;
@@ -230,6 +249,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     let rebuiltHistoryThisPass = false;
     let historianJoinTimedOut = false;
     let historianJoinBudgetMs: number | null = null;
+    let chainedRecoveryRuns = 0;
     const historianRunnable = args.historianRunnable !== false;
 
     // Compaction-off mode (issue #266): the historian/compartment phase is
@@ -254,6 +274,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             rebuiltHistoryThisPass,
             historianJoinTimedOut,
             historianJoinBudgetMs,
+            chainedRecoveryRuns,
         };
     }
     let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null =
@@ -320,6 +341,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     async function awaitCompartmentRun(
         activeRun: ActiveCompartmentRun,
         reason: string,
+        join: InlineJoinWindow = fullInlineJoinWindow(),
     ): Promise<"completed" | "timed_out"> {
         // Let a just-completed run settle before deciding whether its exhausted
         // foreground budget should leave this pass on the background-only path.
@@ -334,8 +356,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             return "timed_out";
         }
         sessionLog(args.sessionId, reason);
-        const timeoutMs = resolveHistorianInlineJoinBudget(args.historianTimeoutMs);
-        historianJoinBudgetMs = timeoutMs;
+        const timeoutMs = join.timeoutMs;
+        historianJoinBudgetMs = join.budgetMs;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const timeout = new Promise<"timeout">((resolve) => {
             timer = setTimeout(() => resolve("timeout"), timeoutMs);
@@ -347,7 +369,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             if (timer !== undefined) clearTimeout(timer);
         }
         if (result === "timeout") {
-            activeRun.inlineJoinTimedOutBudgetMs = timeoutMs;
+            activeRun.inlineJoinTimedOutBudgetMs = join.budgetMs;
             historianJoinTimedOut = true;
             sessionLog(
                 args.sessionId,
@@ -355,14 +377,19 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             );
             return "timed_out";
         }
+        justAwaitedPublication = justAwaitedPublication || activeRun.published;
+        published = published || activeRun.published;
+        return "completed";
+    }
+
+    /** Re-prepare the history injection once the blocking join has finished. */
+    function refreshCompartmentCoverage(): void {
         sessionLog(
             args.sessionId,
             "transform: compartment agent completed, refreshing compartment coverage",
         );
-        justAwaitedPublication = activeRun.published;
-        published = published || activeRun.published;
         const historyReprepareShouldBust =
-            activeRun.published && args.deferredHistoryRefreshSessions.has(args.sessionId);
+            published && args.deferredHistoryRefreshSessions.has(args.sessionId);
         pendingCompartmentInjection = prepareCompartmentInjection(
             args.db,
             args.resolvedSessionId,
@@ -376,7 +403,154 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         if (historyReprepareShouldBust) {
             rebuiltHistoryThisPass = true;
         }
-        return "completed";
+    }
+
+    function fullInlineJoinWindow(): InlineJoinWindow {
+        const budgetMs = resolveHistorianInlineJoinBudget(args.historianTimeoutMs);
+        return { timeoutMs: budgetMs, budgetMs };
+    }
+
+    function historianRunDeps(
+        boundarySnapshot: ProtectedTailBoundarySnapshot | undefined,
+    ): Parameters<typeof startCompartmentAgent>[0] {
+        return {
+            client: args.client,
+            hiddenCompletionExecutor: args.hiddenCompletionExecutor,
+            compactionMarkerStrategy: args.compactionMarkerStrategy,
+            db: args.db,
+            sessionId: args.sessionId,
+            historianChunkTokens: args.historianChunkTokens,
+            boundarySnapshot,
+            currentContextLimit: args.boundaryContextLimit,
+            historyBudgetTokens: args.historyBudgetTokens,
+            historianTimeoutMs: args.historianTimeoutMs,
+            model: args.historianModel,
+            historianContextLimit: args.historianContextLimit,
+            historianMaxOutputTokens: args.historianMaxOutputTokens,
+            fallbackModels: args.fallbackModels,
+            directory: args.compartmentDirectory,
+            fallbackModelId: args.fallbackModelId,
+            ensureProjectRegistered: args.ensureProjectRegistered,
+            getNotificationParams: args.getNotificationParams,
+            experimentalUserMemories: args.experimentalUserMemories,
+            userObservationsRequested: args.userObservationsRequested,
+            historianTwoPass: args.historianTwoPass,
+            historianExpandTools: args.historianExpandTools,
+            memoryEnabled: args.memoryEnabled,
+            autoPromote: args.autoPromote,
+            onCompartmentStatePublished: args.onCompartmentStatePublished,
+            preserveInjectionCacheUntilConsumed: true,
+        };
+    }
+
+    /**
+     * The next eligible chunk after the publications this pass has already
+     * joined. The boundary read at the start of the pass predates them, so it
+     * is resolved again from the stored compartments.
+     */
+    function resolveNextRecoveryBoundary(): ProtectedTailBoundarySnapshot | null {
+        rawEligibility = null;
+        cachedBoundarySnapshot = null;
+        if (!hasNewRawHistoryForCompartment()) return null;
+        const resolve = args.resolveRecoveryBoundary ?? resolveBoundarySnapshot;
+        let snapshot = resolve();
+        if (!hasRunnableCompartmentWindow(snapshot)) {
+            snapshot = resolve(
+                args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5,
+            );
+        }
+        cachedBoundarySnapshot = snapshot;
+        return hasRunnableCompartmentWindow(snapshot) ? snapshot : null;
+    }
+
+    /**
+     * Overflow or model-shrink recovery: one historian run can leave the request
+     * far over the window (after a switch to a much smaller model each run
+     * summarizes one chunk). While the request a fold would now send is still
+     * over the line, keep the historian running on the next eligible chunk,
+     * inside the same inline join budget the first run had. Stops when the
+     * request fits, a run publishes nothing, no eligible history is left, the
+     * drain budget is spent or the budget runs out. The fold happens once,
+     * after this returns.
+     */
+    async function chainRecoveryRuns(
+        firstRun: ActiveCompartmentRun,
+        project: () => RecoveryFitProjection | undefined,
+        deadline: number,
+        budgetMs: number,
+    ): Promise<void> {
+        let lastRun = firstRun;
+        for (;;) {
+            if (!lastRun.published) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: recovery chain stops: the last historian run published nothing (${chainedRecoveryRuns} chained runs)`,
+                );
+                return;
+            }
+            let fit: RecoveryFitProjection | undefined;
+            try {
+                fit = project();
+            } catch (error) {
+                sessionLog(
+                    args.sessionId,
+                    "transform: recovery chain stops: the request could not be counted:",
+                    error,
+                );
+                return;
+            }
+            if (!fit) return;
+            if (Number.isFinite(fit.tokens) && fit.tokens <= fit.lineTokens) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: recovery chain done: the request is about ${fit.tokens} tokens, under the 95% line ${fit.lineTokens} (${chainedRecoveryRuns} chained runs)`,
+                );
+                return;
+            }
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: recovery chain stops: the ${budgetMs}ms inline join budget is spent; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
+                );
+                return;
+            }
+            const boundary = resolveNextRecoveryBoundary();
+            if (!boundary) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: recovery chain stops: no eligible history before the protected tail; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
+                );
+                return;
+            }
+            if (
+                isHistorianDrainBudgetSpent({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    contextLimit: args.boundaryContextLimit,
+                    executeThresholdPercentage: args.boundaryExecuteThresholdPercentage,
+                    usagePercentage: args.boundaryUsage.percentage,
+                })
+            )
+                return;
+            startCompartmentAgent(historianRunDeps(boundary));
+            const nextRun = getActiveCompartmentRun(args.sessionId);
+            if (!nextRun || nextRun === lastRun) {
+                sessionLog(
+                    args.sessionId,
+                    "transform: recovery chain stops: the next historian run did not start",
+                );
+                return;
+            }
+            chainedRecoveryRuns += 1;
+            const result = await awaitCompartmentRun(
+                nextRun,
+                `transform: recovery request still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}; blocking for historian run ${chainedRecoveryRuns + 1} on the next chunk`,
+                { timeoutMs: remainingMs, budgetMs },
+            );
+            if (result === "timed_out") return;
+            lastRun = nextRun;
+        }
     }
 
     // A saved flag cannot publish a summary without an executor or a live run.
@@ -481,34 +655,9 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 args.sessionId,
                 `transform: 95% reached (${args.contextUsage.percentage.toFixed(1)}%), force-starting compartment agent and blocking`,
             );
-            startCompartmentAgent({
-                client: args.client,
-                hiddenCompletionExecutor: args.hiddenCompletionExecutor,
-                compactionMarkerStrategy: args.compactionMarkerStrategy,
-                db: args.db,
-                sessionId: args.sessionId,
-                historianChunkTokens: args.historianChunkTokens,
-                boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
-                currentContextLimit: args.boundaryContextLimit,
-                historyBudgetTokens: args.historyBudgetTokens,
-                historianTimeoutMs: args.historianTimeoutMs,
-                model: args.historianModel,
-                historianContextLimit: args.historianContextLimit,
-                historianMaxOutputTokens: args.historianMaxOutputTokens,
-                fallbackModels: args.fallbackModels,
-                directory: args.compartmentDirectory,
-                fallbackModelId: args.fallbackModelId,
-                ensureProjectRegistered: args.ensureProjectRegistered,
-                getNotificationParams: args.getNotificationParams,
-                experimentalUserMemories: args.experimentalUserMemories,
-                userObservationsRequested: args.userObservationsRequested,
-                historianTwoPass: args.historianTwoPass,
-                historianExpandTools: args.historianExpandTools,
-                memoryEnabled: args.memoryEnabled,
-                autoPromote: args.autoPromote,
-                onCompartmentStatePublished: args.onCompartmentStatePublished,
-                preserveInjectionCacheUntilConsumed: true,
-            });
+            startCompartmentAgent(
+                historianRunDeps(getBoundarySnapshotForCompartment() ?? undefined),
+            );
             activeRun = getActiveCompartmentRun(args.sessionId);
         } else if (!activeRun && hasEligibleHistoryForCompartment()) {
             sessionLog(
@@ -544,13 +693,25 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     ),
                 );
             }
+            const join = fullInlineJoinWindow();
+            const joinDeadline = Date.now() + join.budgetMs;
             const awaitResult = await awaitCompartmentRun(
                 activeRun,
                 `transform: blocking at ${args.contextUsage.percentage.toFixed(1)}% until compartment agent completes`,
+                join,
             );
             if (awaitResult === "completed") {
                 awaitedCompartmentRun = true;
                 compartmentInProgress = false;
+                if (args.projectRecoveryRequest) {
+                    await chainRecoveryRuns(
+                        activeRun,
+                        args.projectRecoveryRequest,
+                        joinDeadline,
+                        join.budgetMs,
+                    );
+                }
+                refreshCompartmentCoverage();
             } else {
                 // Timeout: historian is still running in the background.
                 // Keep compartmentInProgress = true so future passes know the run is active.
@@ -575,5 +736,6 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         rebuiltHistoryThisPass,
         historianJoinTimedOut,
         historianJoinBudgetMs,
+        chainedRecoveryRuns,
     };
 }

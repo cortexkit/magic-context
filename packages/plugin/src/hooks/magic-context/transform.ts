@@ -64,7 +64,7 @@ import {
     noteOpenCodeUnbustedPass,
     recordPendingTransformDecision,
 } from "../../features/magic-context/transform-decision-log";
-import type { ContextUsage } from "../../features/magic-context/types";
+import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
@@ -130,10 +130,12 @@ import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
+    type M0HardSignals,
     type M0M1State,
     mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
+    rawTailAfterNewestCompartment,
     selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
 import {
@@ -197,6 +199,7 @@ import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
 } from "./reasoning-budget";
+import { type RecoveryFitProjection, recoveryLineTokens } from "./recovery-fit";
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -2968,6 +2971,99 @@ export function createTransform(deps: TransformDeps) {
 
         let contextUsage = contextUsageEarly;
         const rawGetNotifParams = runNotificationParams;
+        // The request this pass will serve, as the priced-pass sizing and the
+        // recovery chain count it before the postprocess phase builds it (see
+        // servedRequestForSizing).
+        const servedRequestSizingFor = (
+            messagesToSize: MessageLike[],
+            options: {
+                meta: SessionMeta;
+                hardSignals?: M0HardSignals;
+                mayEditWholePrefix: boolean;
+            },
+        ): MessageLike[] => {
+            const servesHead =
+                (!!projectIdentity || !!sessionDirectory) && (fullFeatureMode || compactionOff);
+            return servedRequestForSizing({
+                db,
+                sessionId,
+                messages: messagesToSize,
+                messageTagNumbers,
+                head: servesHead
+                    ? {
+                          db,
+                          sessionId,
+                          state: options.meta as M0M1State,
+                          projectDirectory: sessionDirectory,
+                          ...renderOptions,
+                          hardSignals: options.hardSignals,
+                          compactionOff,
+                      }
+                    : undefined,
+                coveredInstructions:
+                    deps.storeGeneration === "v2" && servesHead && !compactionOff
+                        ? coveredHostInstructions
+                        : [],
+                mayEditWholePrefix: options.mayEditWholePrefix,
+                // Reasoning is cleared only for a resolved provider, never on
+                // a pass held for signed thinking, and never partially on a
+                // prefix-bound model.
+                reasoning:
+                    !compactionOff &&
+                    !activeThinkingPrefixHold &&
+                    resolvedProviderID !== undefined &&
+                    !isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID)
+                        ? {
+                              keepTokens: resolveKeepReasoningTokens(
+                                  deps.keepReasoningTokens,
+                                  currentModelKeyForBoundary,
+                              ),
+                              clearedThroughTag: options.meta.clearedReasoningThroughTag,
+                              proseRatio: sessionDecisionCalibration(db, sessionId).proseRatio,
+                          }
+                        : undefined,
+            });
+        };
+        // On a pass in overflow or model-shrink recovery, the compartment phase
+        // asks after each historian publication whether the request a fold would
+        // now send fits under the 95% line of this model's window, and keeps
+        // summarizing while it does not. The count is the served-request count
+        // with the history after the newest compartment as the raw tail; the
+        // head is the current one, since the fold renders it only after the
+        // phase returns. The final check before sending counts the real request.
+        const recoveryChainWindow = windowGeometry?.usableHard ?? resolvedContextLimit;
+        // The compartment phase does not replace the session record it reads.
+        const recoveryChainMeta = sessionMeta;
+        const projectRecoveryRequest =
+            fullFeatureMode &&
+            !compactionOff &&
+            emergencyRecoveryArmed &&
+            emergencyRecoveryOrigin !== null &&
+            typeof recoveryChainWindow === "number" &&
+            recoveryChainWindow > 0
+                ? (): RecoveryFitProjection => {
+                      const served = servedRequestSizingFor(
+                          [...rawTailAfterNewestCompartment(db, sessionId, messages)],
+                          // A recovery pass is at 95%, so it may rebuild its prefix.
+                          {
+                              meta: recoveryChainMeta,
+                              mayEditWholePrefix: !activeThinkingPrefixHold,
+                          },
+                      );
+                      const estimate = estimateFinalWireInputTokens({
+                          messages: served,
+                          systemPromptTokens: recoveryChainMeta.systemPromptTokens,
+                          providerID: modelForBudget?.providerID,
+                          modelID: modelForBudget?.modelID,
+                          agentName: notificationParams.agent,
+                          sessionId,
+                      });
+                      return {
+                          tokens: estimate.pressureTokens ?? estimate.tokens,
+                          lineTokens: recoveryLineTokens(recoveryChainWindow),
+                      };
+                  }
+                : undefined;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
@@ -2983,6 +3079,18 @@ export function createTransform(deps: TransformDeps) {
             boundaryUsage: boundaryUsageForProtectedTail,
             boundaryUsageSource,
             preResolvedBoundarySnapshot: triggerBoundarySnapshot,
+            projectRecoveryRequest,
+            resolveRecoveryBoundary: (emergencyTailScale) =>
+                host.hostProtectedTailBoundary({
+                    db,
+                    sessionId: resolvedSessionId,
+                    mode: "transform-force",
+                    contextLimit: boundaryContextLimit,
+                    executeThresholdPercentage: boundaryExecuteThreshold,
+                    usage: boundaryUsageForProtectedTail,
+                    usageSource: boundaryUsageSource,
+                    emergencyTailScale,
+                }),
             client: deps.client,
             db,
             sessionId,
@@ -3201,46 +3309,10 @@ export function createTransform(deps: TransformDeps) {
             // Should that projection fail, the array as it stands is counted.
             let sizingMessages: MessageLike[] = messages;
             try {
-                const servesHead =
-                    (!!projectIdentity || !!sessionDirectory) && (fullFeatureMode || compactionOff);
-                sizingMessages = servedRequestForSizing({
-                    db,
-                    sessionId,
-                    messages,
-                    messageTagNumbers,
-                    head: servesHead
-                        ? {
-                              db,
-                              sessionId,
-                              state: sessionMeta as M0M1State,
-                              projectDirectory: sessionDirectory,
-                              ...renderOptions,
-                              hardSignals: m0HardSignals,
-                              compactionOff,
-                          }
-                        : undefined,
-                    coveredInstructions:
-                        deps.storeGeneration === "v2" && servesHead && !compactionOff
-                            ? coveredHostInstructions
-                            : [],
+                sizingMessages = servedRequestSizingFor(messages, {
+                    meta: sessionMeta,
+                    hardSignals: m0HardSignals,
                     mayEditWholePrefix: protectionCacheBustingPass && !activeThinkingPrefixHold,
-                    // Reasoning is cleared only for a resolved provider, never on
-                    // a pass held for signed thinking, and never partially on a
-                    // prefix-bound model.
-                    reasoning:
-                        !compactionOff &&
-                        !activeThinkingPrefixHold &&
-                        resolvedProviderID !== undefined &&
-                        !isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID)
-                            ? {
-                                  keepTokens: resolveKeepReasoningTokens(
-                                      deps.keepReasoningTokens,
-                                      currentModelKeyForBoundary,
-                                  ),
-                                  clearedThroughTag: sessionMeta.clearedReasoningThroughTag,
-                                  proseRatio: sessionDecisionCalibration(db, sessionId).proseRatio,
-                              }
-                            : undefined,
                 });
             } catch (error) {
                 sessionLog(
@@ -3601,9 +3673,15 @@ export function createTransform(deps: TransformDeps) {
             }
             // Count the request this pass serves, for the next pass's execute
             // decision while the provider still reports no usage. A pass with a
-            // provider reading only clears the local one.
+            // provider reading only clears the local one. A pass in overflow or
+            // model-shrink recovery also counts it, to check it against the
+            // model's 95% line before it is sent (see evaluateEmergencyFailClosed).
+            const recoveryAdmissionPass =
+                emergencyRecoveryArmed &&
+                emergencyRecoveryOrigin !== null &&
+                emergencyUsagePercentage >= 95;
             let servedPressureTokens: number | undefined;
-            if (providerReadingMissing) {
+            if (providerReadingMissing || recoveryAdmissionPass) {
                 servedPressureTokens = finalWireEstimate?.pressureTokens;
                 if (servedPressureTokens === undefined) {
                     try {
@@ -3628,7 +3706,7 @@ export function createTransform(deps: TransformDeps) {
                 providerReadingMissing,
                 modelKey: localReadingModelKey,
                 usableWindow: localReadingWindow,
-                pressureTokens: servedPressureTokens,
+                pressureTokens: providerReadingMissing ? servedPressureTokens : undefined,
             });
             if (
                 (finalWireEstimate?.refusalGrade ||
@@ -3803,6 +3881,18 @@ export function createTransform(deps: TransformDeps) {
                 ) === piModelRefToCanonical(currentModelKeyForRecovery)
                     ? overflowStateForFinalWire.detectedContextLimit
                     : undefined;
+            // The 95% line of the window the emergency band is measured against.
+            const recoveryWindowTokens = windowGeometry?.usableHard ?? resolvedContextLimit;
+            const recoveryServedRequest =
+                recoveryAdmissionPass &&
+                servedPressureTokens !== undefined &&
+                typeof recoveryWindowTokens === "number" &&
+                recoveryWindowTokens > 0
+                    ? {
+                          tokens: servedPressureTokens,
+                          lineTokens: recoveryLineTokens(recoveryWindowTokens),
+                      }
+                    : undefined;
             const emergencyFailClosed = evaluateEmergencyFailClosed({
                 usagePercentage: emergencyUsagePercentage,
                 emergencyRecoveryArmed,
@@ -3816,6 +3906,7 @@ export function createTransform(deps: TransformDeps) {
                     deps.protectedTools,
                     resolveDecisionCalibration(modelForBudget?.providerID, modelForBudget?.modelID),
                 ),
+                recoveryServedRequest,
             });
             if (emergencyFailClosed.disarm) {
                 clearEmergencyRecovery(db, sessionId);
@@ -3827,6 +3918,31 @@ export function createTransform(deps: TransformDeps) {
             if (emergencyFailClosed.shouldAbort) {
                 if (emergencyFailClosed.refusalMessage) {
                     throw contextRefusalError(emergencyFailClosed.refusalMessage);
+                }
+                if (
+                    emergencyFailClosed.reason === "recovery-request-over-limit" &&
+                    emergencyRecoveryOrigin !== null
+                ) {
+                    sessionLog(
+                        sessionId,
+                        `transform: recovery request still over the window: about ${recoveryServedRequest?.tokens} tokens against the 95% line ${recoveryServedRequest?.lineTokens} of ${recoveryWindowTokens}; not sending it, recovery stays armed for the next turn`,
+                    );
+                    // A historian publication clears the recovery latch, but the
+                    // request still does not fit. Keep it armed (flag only, no
+                    // detected limit written) so the next turn continues recovery.
+                    try {
+                        recordOverflowDetected(
+                            db,
+                            sessionId,
+                            undefined,
+                            currentModelKeyForRecovery,
+                            emergencyRecoveryOrigin,
+                        );
+                    } catch (error) {
+                        throw new EmergencyFailClosedError("Emergency recovery re-arm failed", {
+                            cause: error,
+                        });
+                    }
                 }
                 // The notice must finish before host refusal so recovery instructions survive interruption.
                 try {
