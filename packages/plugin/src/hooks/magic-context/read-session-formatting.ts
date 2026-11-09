@@ -409,6 +409,9 @@ export function compactRole(role: string): string {
 }
 
 export function formatBlock(block: ChunkBlock): string {
+    // Relay labels already name their source; none may inherit a user prefix.
+    if (block.role === "R")
+        return block.parts.map((part) => `[${block.endOrdinal}] ${part}`).join("\n");
     const range =
         block.startOrdinal === block.endOrdinal
             ? `[${block.startOrdinal}]`

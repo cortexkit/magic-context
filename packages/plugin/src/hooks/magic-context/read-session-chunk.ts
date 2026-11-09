@@ -54,6 +54,7 @@ import {
     readRawSessionTailFromDb,
 } from "./read-session-raw";
 import { buildToolArcs } from "./read-session-true-raw-tokens";
+import { isRelayedWake, relayedWakeLines } from "./relayed-wake";
 import { stripOutsideSteeringWrappers } from "./system-injection-stripper";
 import { isFilePart, isTextPart } from "./tag-part-guards";
 import { extractToolCallObservation } from "./tool-drop-target";
@@ -1526,6 +1527,32 @@ export function readSessionChunk(
         // ordinals for coverage, but omit their text as the Rust reader does.
         if (msg.role === "system") {
             recordFilteredNoise(meta);
+            continue;
+        }
+
+        const rawTexts = extractTexts(msg.parts);
+        const wake = msg.role === "user" && isRelayedWake(rawTexts.join("\n"));
+        if (wake) {
+            const relayParts = relayedWakeLines(rawTexts.join("\n"));
+            if (!relayParts.length) {
+                recordFilteredNoise(meta);
+                continue;
+            }
+            if (!flushCurrentBlock()) break;
+            currentBlock = {
+                role: "R",
+                startOrdinal: msg.ordinal,
+                endOrdinal: msg.ordinal,
+                parts: relayParts,
+                partMeta: relayParts.map(() => ({ ordinal: msg.ordinal, toolResultBodyTokens: 0 })),
+                meta: [...pendingNoiseMeta, meta],
+                commitHashes: [],
+                isToolOnly: false,
+            };
+            pendingNoiseMeta = [];
+            pinComponentWhenFormattedBudgetCrosses(msg.ordinal, relayParts.join("\n"));
+            // Each wake stays isolated, even next to another wake or a real prompt.
+            if (!flushCurrentBlock()) break;
             continue;
         }
 

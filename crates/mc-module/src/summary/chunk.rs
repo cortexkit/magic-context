@@ -7,9 +7,12 @@
 //! (`TC: read(src/a.rs)`), and such a line counts as tool-only, a range the
 //! summarizer may skip. Reasoning is never shown.
 //!
-//! Reminders, notices and directives are noise: their numbers stay covered,
-//! but their text is left out. The exception is a user's answer to a parked
-//! question, which is the user's own decision and becomes a user line.
+//! A whole `<system-reminder>` message whose body starts with `Inbox:`
+//! becomes source-labelled relay lines, never user lines.
+//! Other reminders, notices and directives keep their message ordinals but stay hidden, except
+//! a user's reply to an explicit ask for a decision, which carries that decision.
+
+mod relayed_wake;
 
 use std::sync::OnceLock;
 
@@ -45,7 +48,7 @@ pub struct Chunk {
 /// One `[N]`/`[N-M]` line of the chunk as the summarizer reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrintedBlock {
-    /// `U` or `A`.
+    /// `U`, `A`, or `R` for source-labelled relays, never user evidence.
     pub role: String,
     pub start: u64,
     pub end: u64,
@@ -95,6 +98,14 @@ impl Block {
     }
 
     fn format(&self) -> String {
+        if self.role == 'R' {
+            return self
+                .parts
+                .iter()
+                .map(|part| format!("[{}] {part}", self.end))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         format!("{}{}", self.header(), self.parts.join(" / "))
     }
 }
@@ -296,14 +307,14 @@ fn build_counted(
             continue;
         };
         present.push(number);
-        if per_message {
+        if per_message && role != 'R' {
             // A message's text is one part, so evidence may quote across its
             // text parts as it reads on the line.
             parts = vec![parts.join(" / ")];
         }
         if let Some(block) = current
             .as_mut()
-            .filter(|block| !per_message && block.role == role)
+            .filter(|block| !per_message && role != 'R' && block.role == role)
         {
             block.end = number;
             block.parts.extend(parts);
@@ -335,7 +346,11 @@ fn build_counted(
             }
         }
         let mut block_lines = std::mem::take(&mut pending_noise);
-        let start = block_lines.first().map_or(number, |first| first.ordinal);
+        let start = if role == 'R' {
+            number
+        } else {
+            block_lines.first().map_or(number, |first| first.ordinal)
+        };
         block_lines.push(line);
         current = Some(Block {
             role,
@@ -346,6 +361,22 @@ fn build_counted(
             commit_hashes: commits,
             tool_only: !narrative,
         });
+        // A relay's labels all name this message, not adjacent hidden ordinals.
+        if role == 'R'
+            && !flush(
+                current.take().expect("just opened relay block"),
+                &mut lines,
+                &mut printed,
+                &mut covered,
+                &mut tool_only,
+                &mut total,
+                &mut clusters,
+                &mut last_role,
+            )
+        {
+            stopped = true;
+            break;
+        }
     }
     if let Some(block) = current.take() {
         if !flush(
@@ -439,6 +470,11 @@ fn render_entry(entry: &Entry, verbatim: bool) -> Option<(char, Vec<String>, Vec
         .collect();
     match entry.role {
         Role::User => {
+            let whole_text = raw_texts.join("\n");
+            if is_relayed_wake(&whole_text) {
+                let parts = relayed_wake::lines(&whole_text);
+                return (!parts.is_empty()).then(|| ('R', parts, Vec::new(), true));
+            }
             // A notice's own text is never the user's words, but an answer
             // notice carries the user's decision.
             let mut parts: Vec<String> = if entry.notice.is_some() {
@@ -531,6 +567,13 @@ fn clean_user_text(text: &str) -> String {
         .unwrap_or_else(|| text.trim().to_owned())
         .trim()
         .to_owned()
+}
+
+/// The summarizer's newest-prompt check uses this same envelope boundary.
+/// `crate::injection::strip` removes through the first closing reminder tag,
+/// so nested reminders can otherwise leave relay text looking like a user prompt.
+pub(super) fn is_relayed_wake(text: &str) -> bool {
+    relayed_wake::is_wake(text)
 }
 
 /// One `U (answered "<question>"): <answer>` line per answered parked
@@ -673,6 +716,135 @@ mod tests {
 
     fn text(text: &str) -> PartBody {
         PartBody::Text { text: text.into() }
+    }
+
+    #[test]
+    fn relayed_wake_vectors_retain_attribution_without_creating_user_evidence() {
+        let vectors: Value =
+            serde_json::from_str(include_str!("../../testdata/relayed-wakes.json")).unwrap();
+        let expand = |value: &str| {
+            let mut value = value.to_owned();
+            for (key, replacement) in vectors["replacements"].as_object().unwrap() {
+                value = value.replace(
+                    &format!("{{{{{key}}}}}"),
+                    &replacement["text"]
+                        .as_str()
+                        .unwrap()
+                        .repeat(replacement["count"].as_u64().unwrap() as usize),
+                );
+            }
+            value
+        };
+        for vector in vectors["cases"].as_array().unwrap() {
+            let raw = expand(vector["text"].as_str().unwrap());
+            let expected: Vec<String> = vector["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|line| expand(line.as_str().unwrap()))
+                .collect();
+            assert_eq!(relayed_wake::lines(&raw), expected, "{}", vector["name"]);
+            for notice in [false, true] {
+                if notice && vector["userText"].is_string() {
+                    continue;
+                }
+                for mode in [Lines::Merged, Lines::PerMessage] {
+                    let wake = entry(1, Role::User, notice, vec![text(&raw)]);
+                    let chunk = build_with(
+                        std::slice::from_ref(&wake),
+                        100_000,
+                        mode,
+                        crate::count::Counter::for_model(None),
+                    );
+                    if let Some(user_text) = vector["userText"].as_str() {
+                        assert_eq!(
+                            chunk.unwrap().input,
+                            format!("Messages 1-1:\n\n[1] U: {user_text}")
+                        );
+                    } else {
+                        assert!(!super::super::trigger::is_meaningful_user(&wake));
+                        if expected.is_empty() {
+                            assert!(chunk.is_none(), "{}", vector["name"]);
+                        } else {
+                            let chunk = chunk.unwrap();
+                            assert_eq!(
+                                chunk.input,
+                                format!(
+                                    "Messages 1-1:\n\n{}",
+                                    expected
+                                        .iter()
+                                        .map(|line| format!("[1] {line}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                )
+                            );
+                            assert!(chunk.printed_blocks.iter().all(|block| block.role == "R"));
+                            assert!(chunk.validation.tool_only_ranges.is_empty());
+                        }
+                    }
+                    if expected.is_empty() {
+                        continue;
+                    }
+                    let followed = build_with(
+                        &[
+                            wake,
+                            entry(
+                                2,
+                                Role::User,
+                                false,
+                                vec![text("The real user's decision.")],
+                            ),
+                        ],
+                        100_000,
+                        mode,
+                        crate::count::Counter::for_model(None),
+                    )
+                    .unwrap();
+                    assert!(followed
+                        .input
+                        .ends_with("\n[2] U: The real user's decision."));
+                    assert_eq!(
+                        followed
+                            .printed_blocks
+                            .iter()
+                            .filter(|block| block.role == "U")
+                            .flat_map(|block| &block.parts)
+                            .collect::<Vec<_>>(),
+                        vec!["The real user's decision."]
+                    );
+                    let surrounded = build_with(
+                        &[
+                            entry(1, Role::System, false, vec![text("hidden before")]),
+                            entry(2, Role::User, notice, vec![text(&raw)]),
+                            entry(3, Role::System, false, vec![text("hidden after")]),
+                        ],
+                        100_000,
+                        mode,
+                        crate::count::Counter::for_model(None),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        surrounded.input,
+                        format!(
+                            "Messages 1-3:\n\n{}",
+                            expected
+                                .iter()
+                                .map(|line| format!("[2] {line}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    );
+                    assert_eq!(
+                        (
+                            surrounded.printed_blocks[0].start,
+                            surrounded.printed_blocks[0].end
+                        ),
+                        (2, 2)
+                    );
+                    assert_eq!(surrounded.messages, 3);
+                }
+            }
+        }
     }
 
     /// A message the user sent while the agent ran, which older OpenCode

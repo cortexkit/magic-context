@@ -69,6 +69,17 @@ pub fn protected_tail_tokens(
 pub fn is_meaningful_user(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
+        && !super::chunk::is_relayed_wake(
+            &entry
+                .parts
+                .iter()
+                .filter_map(|part| match &part.body {
+                    PartBody::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !crate::injection::strip(text)
                 .unwrap_or_else(|| text.clone())

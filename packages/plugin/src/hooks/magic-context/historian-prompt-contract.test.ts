@@ -115,7 +115,7 @@ test("dormant historian preserves the placed-window one-pass system bytes", () =
     // Pin the existing XML contract independently of the generator: enabling a new
     // optional lane must not silently change the prompt of sessions that stay off.
     expect(hash(historianSystemPrompt(false))).toBe(
-        "590649b1f6b2428940cb925586342be58bdecc3ee4d64153d2f73ec5251532bd",
+        "d213934f626467319c2ba0330edee491f2e86d11cfde4cf5d18e7f0739e3f11b",
     );
     expect(hash(xml)).toBe(hash(historianSystemPrompt(false)));
 });

@@ -5,11 +5,8 @@
  * The Markdown source renders XML and combined output contracts. TypeScript
  * constants keep these assets available in bundles without runtime file reads.
  *
- * Regenerate both systems in order:
+ * Regenerate the plugin and current Rust copies together:
  *   bun packages/plugin/scripts/build-historian-prompt.ts
- *   bun crates/mc-module/gen/gen-historian-system-prompt.ts
- * Check Rust artifact drift without rewriting:
- *   bun crates/mc-module/gen/gen-historian-system-prompt.ts --check
  * Changing either system or tool-definition bytes requires a new validation epoch:
  * revalidate the affected profile against the new exact bytes before enabling it.
  */
@@ -67,6 +64,13 @@ export const COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT = \`${escape(renderHistori
 `;
 
 writeFileSync(OUT, out, "utf-8");
+const rustRoot = resolve(here, "../../../crates/mc-module/testdata");
+for (const [format, file] of [
+  ["xml", "historian-system-prompt.txt"],
+  ["combined", "historian-system-prompt-combined.txt"],
+] as const) {
+  writeFileSync(resolve(rustRoot, file), renderHistorianSystemPrompt(raw, format), "utf-8");
+}
 console.log(
   `build-historian-prompt: emitted ${raw.length} chars → ${OUT}`,
 );
