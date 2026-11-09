@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "./rpc-utils";
 import { withStorageFileMutex } from "./storage-file-mutex";
@@ -8,6 +8,46 @@ import * as permissions from "./storage-permissions";
 import { createTestTempDir } from "./test-temp-dir";
 
 const mutex = join(import.meta.dir, "storage-file-mutex.ts");
+
+test("mutex removes its empty directory after sequential operations and thrown work", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-sequence-");
+    const directory = join(root, "locks");
+    try {
+        for (let i = 0; i < 2; i++) {
+            expect(withStorageFileMutex(directory, () => i)).toBe(i);
+            expect(existsSync(directory)).toBe(false);
+        }
+        expect(() =>
+            withStorageFileMutex(directory, () => {
+                throw new Error("work failed");
+            }),
+        ).toThrow("work failed");
+        expect(existsSync(directory)).toBe(false);
+    } finally {
+        cleanup();
+    }
+});
+
+test("mutex directory cleanup preserves a ticket published during locked work", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-ticket-");
+    const directory = join(root, "locks");
+    const contender = join(directory, `${process.pid}-00000000-0000-0000-0000-000000000000.lock`);
+    try {
+        expect(
+            withStorageFileMutex(directory, () => {
+                writeFileSync(contender, "choosing", { mode: 0o600 });
+                return "done";
+            }),
+        ).toBe("done");
+        expect(readFileSync(contender, "utf8")).toBe("choosing");
+        expect(readdirSync(directory)).toHaveLength(1);
+        rmSync(contender);
+        withStorageFileMutex(directory, () => undefined);
+        expect(existsSync(directory)).toBe(false);
+    } finally {
+        cleanup();
+    }
+});
 
 test("mutex retries ticket creation when empty-directory cleanup wins the mkdir race", () => {
     const { dir: root, cleanup } = createTestTempDir("mc-mutex-rmdir-");
@@ -101,7 +141,7 @@ test.skipIf(process.platform === "win32")(
                 200,
             );
             expect(reached).toBe(true);
-            expect(readdirSync(join(root, "locks"))).toEqual([]);
+            expect(existsSync(join(root, "locks"))).toBe(false);
         } finally {
             if (child.exitCode === null) {
                 child.kill("SIGKILL");

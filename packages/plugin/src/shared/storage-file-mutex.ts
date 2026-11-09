@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isPidAlive, readProcessStartTime } from "./rpc-utils";
 import {
@@ -136,5 +136,10 @@ export function withStorageFileMutex<T>(directory: string, work: () => T, timeou
         return result;
     } finally {
         rmSync(ownPath, { force: true });
+        try {
+            rmdirSync(directory);
+        } catch {
+            // Do not remove a live contender's ticket.
+        }
     }
 }
