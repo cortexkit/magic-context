@@ -234,7 +234,7 @@ const localCountResult = () => {
 test("a pass sized from a local count counts the history head, the instruction rows and the reasoning it serves", async () => {
     const result = await localCountResult();
     console.log(
-        `ISSUE886_LOCAL_COUNT ${JSON.stringify({ sized: result.sized, served: result.served, countedArray: result.countedArray, servedArray: result.servedArray })}`,
+        `ISSUE886_LOCAL_COUNT ${JSON.stringify({ sized: result.sized, served: result.served, countedArray: result.countedArray, servedArray: result.servedArray, sizing: result.logs.filter((line) => /priced pass|priced-pass sizing/.test(line)) })}`,
     );
     // The pass is sized before it puts the two history messages at the head
     // (m[0] and m[1]), serves the covered instruction rows again and clears old
@@ -265,22 +265,30 @@ test("a pass sized from a local count counts the request it serves", async () =>
     expect(ratio).toBeLessThan(1.1);
 }, 300_000);
 
-// A session's tag ownership summary can still be in preparation on the first
-// pass after the hook starts. The postprocess phase then clears no reasoning,
-// so the count keeps all of it, and it still counts the head and the rows.
-test("a pass sized before the tag ownership summary is ready counts the reasoning it keeps", async () => {
+// A session's tag ownership summary can still be in preparation off-thread
+// when the pass is sized, and ready by the time the postprocess phase clears
+// reasoning. The count projects that clearing from the pass's own tags.
+test("a pass sized while the tag ownership summary is being prepared leaves out the reasoning the pass clears", async () => {
+    // Only the sizing sees the summary as not ready; the postprocess phase,
+    // later in the same pass, reads it ready.
+    const realEstimates = storageTags.getReasoningTokenEstimatesByMessage;
+    let sizingReads = 0;
     const estimates = spyOn(storageTags, "getReasoningTokenEstimatesByMessage").mockImplementation(
-        () => {
-            throw new storageTags.TagOwnerSummaryNotReady();
+        (...args) => {
+            if (new Error().stack?.includes("priced-pass-sizing")) {
+                sizingReads += 1;
+                throw new storageTags.TagOwnerSummaryNotReady();
+            }
+            return realEstimates(...args);
         },
     );
-    const tryEstimates = spyOn(
-        storageTags,
-        "tryGetReasoningTokenEstimatesByMessage",
-    ).mockReturnValue(undefined);
     try {
         const result = await localCountPasses(8869);
+        expect(sizingReads).toBeGreaterThan(0);
         expect(result.servedArray.head).toBeGreaterThan(15_000);
+        // The pass cleared the reasoning past the keep budget (17,040 tokens
+        // before it).
+        expect(result.servedArray.reasoning).toBeLessThan(12_000);
         expect(result.countedArray.head).toBe(result.servedArray.head);
         expect(result.countedArray.instructions).toBe(result.servedArray.instructions);
         expect(result.countedArray.reasoning).toBe(result.servedArray.reasoning);
@@ -289,7 +297,6 @@ test("a pass sized before the tag ownership summary is ready counts the reasonin
         expect(ratio).toBeLessThan(1.1);
     } finally {
         estimates.mockRestore();
-        tryEstimates.mockRestore();
     }
 }, 300_000);
 

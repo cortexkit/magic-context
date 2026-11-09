@@ -2,10 +2,18 @@ import {
     hostInstructionRetentionEnabled,
     isHostInstructionRetentionOn,
 } from "../../features/magic-context/storage-host-instruction-retention";
+import {
+    getMergedReasoningStrippedIds,
+    THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
+} from "../../features/magic-context/storage-meta-persisted";
+import { getReasoningRemovalState } from "../../features/magic-context/storage-reasoning-removal";
 import { TagOwnerSummaryNotReady } from "../../features/magic-context/storage-tags";
 import type { Database } from "../../shared/sqlite";
 import { headMessagesForSizing, type M0M1RenderOptions } from "./inject-compartments";
-import { projectOpencodeReasoningBudgetCutoff } from "./reasoning-budget";
+import {
+    opencodeReasoningBudgetCutoff,
+    projectOpencodeReasoningBudgetCutoff,
+} from "./reasoning-budget";
 import type { MessageLike } from "./tag-messages";
 
 const REASONING_PART_TYPES = new Set(["reasoning", "thinking", "redacted_thinking"]);
@@ -79,11 +87,32 @@ function clearedReasoningCutoff(
             reasoning.proseRatio,
         );
     } catch (error) {
-        // While the session's tag ownership summary is still being built, the
-        // postprocess phase clears no reasoning, so the request keeps all of it.
-        if (error instanceof TagOwnerSummaryNotReady) return 0;
-        throw error;
+        if (!(error instanceof TagOwnerSummaryNotReady)) throw error;
     }
+    // The session's tag ownership summary is still being prepared off-thread.
+    // It is usually ready by the time the postprocess phase clears reasoning,
+    // so project the same cutoff from this pass's own tag numbers, pricing each
+    // step from its reasoning text. If the summary is still not ready then,
+    // that pass clears nothing and this count reads low until the next pass.
+    const gone = new Set(getReasoningRemovalState(input.db, input.sessionId).messageIds);
+    for (const [message, tag] of input.messageTagNumbers) {
+        if (tag > 0 && tag <= reasoning.clearedThroughTag && typeof message.info.id === "string")
+            gone.add(message.info.id);
+    }
+    const frozenMergedIds = getMergedReasoningStrippedIds(input.db, input.sessionId);
+    return opencodeReasoningBudgetCutoff({
+        messages: [...input.messages],
+        messageTagNumbers: input.messageTagNumbers,
+        budget: reasoning.keepTokens,
+        alreadyRemoved: gone,
+        proseRatio: reasoning.proseRatio,
+        frozenMergedIds,
+        alsoGone: new Set(
+            [...frozenMergedIds]
+                .filter((id) => id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
+                .map((id) => id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length)),
+        ),
+    });
 }
 
 function withoutClearedReasoning(
