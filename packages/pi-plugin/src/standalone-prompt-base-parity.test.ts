@@ -11,14 +11,18 @@ import { standaloneParitySequences } from "./fixtures/standalone-prompt-parity-c
 const BASE_HANDLER_SHA256 =
 	"c2bc50b99ebbec58802e9b4580ef4f2f988976ad015a35a41abd370b5537a0cd";
 const BASE_HELPER_SHA256 =
-	"dfe90fcef71d11bf030b728a207cdec901fd8dc373667f2ffc1b5278c8b99fcb";
+	"feb4918e54f132a4bf385a8aff324f1016ae1dafa05b4085e3ae2c2b487f0d93";
 const sha = (bytes: Uint8Array) =>
 	createHash("sha256").update(bytes).digest("hex");
 
-// The callback excerpt and complete cache helper are unformatted git-show bytes
-// from 3debe36204b0605bfe881d613777781c557e330f, not a rewritten legacy renderer.
+// The callback excerpt and complete cache helper are unformatted git-show bytes,
+// not a rewritten legacy renderer. The callback is from
+// 3debe36204b0605bfe881d613777781c557e330f and is unchanged through master
+// 9d4fb56b. The helper is from 9d4fb56b (release 0.49.44): it is 3debe36's
+// helper with the 0.49.44 date rule, under which an expired provider cache no
+// longer lets the date move, so the base follows the same rule as the extraction.
 
-test("standalone parity fixtures pin the verbatim 3debe36 registered hook and cache helper", () => {
+test("standalone parity fixtures pin the verbatim base registered hook and cache helper", () => {
 	expect(
 		sha(
 			readFileSync(
@@ -29,7 +33,7 @@ test("standalone parity fixtures pin the verbatim 3debe36 registered hook and ca
 	expect(
 		sha(
 			readFileSync(
-				join(import.meta.dir, "fixtures/system-prompt-3debe36.ts.txt"),
+				join(import.meta.dir, "fixtures/system-prompt-9d4fb56b.ts.txt"),
 			),
 		),
 	).toBe(BASE_HELPER_SHA256);

@@ -212,7 +212,7 @@ export function registerNoProposalReviewWitnesses(driver: ProjectionDriver): voi
                     const options = {
                         memoryBudget: 8_000,
                         historyBudget: 16_000,
-                        cacheExpired: pass === 2,
+                        genuineHard: pass === 2,
                     };
                     const a = driver.pass(actual, actual.sessions[0], pass !== 0, options);
                     const b = driver.pass(delayed, delayed.sessions[0], pass !== 0, options);

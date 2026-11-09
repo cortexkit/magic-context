@@ -47,7 +47,7 @@ const historicalHandler = readFileSync(
 	"utf8",
 );
 const historicalHelper = readFileSync(
-	join(fixtureDir, "system-prompt-3debe36.ts.txt"),
+	join(fixtureDir, "system-prompt-9d4fb56b.ts.txt"),
 	"utf8",
 );
 

@@ -52,22 +52,26 @@ test("review probe: an applied turn-two edit is invisible on Pi SOFT and defer p
 	const f = createProjectionFixture("s6-review-pi", createTestDb);
 	try {
 		const [session] = f.sessions;
-		const state = (cacheExpired = false) => ({
+		// A model switch is a genuine HARD trigger: the new model has its own
+		// provider cache. An expired provider cache is not one.
+		const state = (modelSwitch = false) => ({
 			sessionId: session,
 			projectIdentity: f.projectPath,
 			projectDirectory: f.directory,
 			injectDocs: false,
 			hardSignals: {
 				systemHash: "system",
-				modelKey: "anthropic/claude",
-				cacheExpired,
-				lastResponseTime: cacheExpired ? Date.now() + 60_000 : 1,
+				modelKey: modelSwitch
+					? "anthropic/claude-switched"
+					: "anthropic/claude",
+				cacheExpired: false,
+				lastResponseTime: 1,
 			},
 		});
-		const pass = (busting: boolean, cacheExpired = false) => {
+		const pass = (busting: boolean, modelSwitch = false) => {
 			const messages: Parameters<typeof injectM0M1Pi>[2] = [];
 			const result = injectM0M1Pi(
-				state(cacheExpired),
+				state(modelSwitch),
 				f.db,
 				messages,
 				undefined,

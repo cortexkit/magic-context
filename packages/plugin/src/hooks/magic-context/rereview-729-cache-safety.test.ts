@@ -870,9 +870,11 @@ for (const host of HOSTS) {
         expect(s.cachedM0()).toBe(headBytesBefore[0]);
         expect(toolHeads(waitingForFold.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
         expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
-        // Idle expiry really rebuilds the earlier prefix, admitting both the new
-        // memory and the recovery tags on that same pass.
-        s.idle();
+        // A real rebuild of the earlier prefix admits both the new memory and the
+        // recovery tags on that same pass. An idle expiry no longer is one (the
+        // request resends the same bytes), so the cached pair is lost instead,
+        // as a store rebase or a migration clears it, and the head renders anew.
+        s.clearHead();
         const flushed = await s.pass();
         expect(s.cachedM0()).not.toBe(headBytesBefore[0]);
         expect(toolHeads(flushed.messages ?? [])[1]?.startsWith("§")).toBe(true);

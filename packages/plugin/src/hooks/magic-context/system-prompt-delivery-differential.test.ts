@@ -750,7 +750,10 @@ it("independent differential retains base content across the admitted-thinking-s
         // fixtures also include the acted-on <system-reminder> notice guidance.
         // Only that system wording changed; all message parts, including thinking,
         // empty companions, tool calls and results, and every Pi byte remain at
-        // their prior baseline.
+        // their prior baseline, except where release 0.49.44 stopped an expired
+        // provider cache from rebuilding: on an expiry pass the OpenCode runs now
+        // keep their signed thinking and their cut instead of stripping and
+        // refolding (see referenceExpiryUpdate in the strip-gating fixture).
         // Collect every row before asserting, so one run reports each drifted key.
         const actual: Record<string, string | undefined> = {};
         const expected: Record<string, string | undefined> = {};

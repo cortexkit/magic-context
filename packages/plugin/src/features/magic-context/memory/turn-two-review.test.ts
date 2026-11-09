@@ -845,7 +845,9 @@ describe("S6 review probes: projection (passed at dafaede1)", () => {
         const f = createProjectionFixture("s6-review");
         try {
             const [session] = f.sessions;
-            const options = (cacheExpired = false) => ({
+            // A model switch is a genuine HARD trigger: the new model has its own
+            // provider cache. An expired provider cache is not one.
+            const options = (modelSwitch = false) => ({
                 db: f.db,
                 state: getOrCreateSessionMeta(f.db, session),
                 sessionId: session,
@@ -854,14 +856,14 @@ describe("S6 review probes: projection (passed at dafaede1)", () => {
                 injectDocs: false,
                 hardSignals: {
                     systemHash: "system",
-                    modelKey: "anthropic/claude",
-                    cacheExpired,
-                    lastResponseTime: cacheExpired ? Date.now() + 60_000 : 1,
+                    modelKey: modelSwitch ? "anthropic/claude-switched" : "anthropic/claude",
+                    cacheExpired: false,
+                    lastResponseTime: 1,
                 },
             });
-            const pass = (busting: boolean, cacheExpired = false) => {
+            const pass = (busting: boolean, modelSwitch = false) => {
                 const result = injectM0M1({
-                    ...options(cacheExpired),
+                    ...options(modelSwitch),
                     isCacheBustingPass: busting,
                 });
                 return {
@@ -982,7 +984,7 @@ describe("S6 review probes: projection (passed at dafaede1)", () => {
                 f.gate.allowDashboardPayloads = false;
             }
             expect(f.gate.blocked).toEqual([]);
-            // A genuine HARD trigger (provider cache expiry) shows the edit.
+            // A genuine HARD trigger (a model switch) shows the edit.
             const hard = pass(true, true);
             expect(hard.materialized).toBe(true);
             expect(hard.m0).toContain("New rule. Keep rule.");

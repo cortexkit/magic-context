@@ -225,8 +225,11 @@ for (const order of ["system-first", "messages-first"] as const) {
     });
 }
 
+// Since 0.49.44 the date moves only on a real rebuild. An idle expiry is not
+// one, whether or not the request's messages kept signed thinking: the provider
+// only forgot its cache, and the request resends the same bytes.
 for (const keptSignedThinking of [true, false]) {
-    it(`an idle-expired request ${keptSignedThinking ? "keeps" : "advances"} the date when its messages ${keptSignedThinking ? "kept" : "kept no"} signed thinking`, async () => {
+    it(`an idle-expired request keeps the date when its messages ${keptSignedThinking ? "kept" : "kept no"} signed thinking`, async () => {
         const db = setup();
         const signals = promptHandler(db, () => true);
         registerSystemDateRefresh(signals.historyRefreshSessions);
@@ -251,9 +254,7 @@ for (const keptSignedThinking of [true, false]) {
             keptSignedThinking,
         );
         await signals.handler({ sessionID: sessionId, dateRefreshRequest: output }, output);
-        expect(output.system.join("\n")).toContain(
-            `Today's date: ${keptSignedThinking ? "2026-10-12" : "2026-10-13"}`,
-        );
+        expect(output.system.join("\n")).toContain("Today's date: 2026-10-12");
     });
 }
 

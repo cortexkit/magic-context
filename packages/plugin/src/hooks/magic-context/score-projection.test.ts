@@ -276,7 +276,6 @@ for (const runtime of ["TS", "Pi"] as const) {
         for (const reason of [
             "first_render",
             "missing_cache",
-            "ttl_idle",
             "model_change",
             "system_hash",
             "m0_mutation",
@@ -298,10 +297,6 @@ for (const runtime of ["TS", "Pi"] as const) {
                 if (reason === "missing_cache") {
                     patchSessionMeta(db, SESSION, { cached_m0_bytes: null });
                     h.restart();
-                }
-                if (reason === "ttl_idle") {
-                    signals.cacheExpired = true;
-                    signals.lastResponseTime = time + 1;
                 }
                 if (reason === "model_change") signals.modelKey = "anthropic/claude-sonnet-4-5";
                 if (reason === "system_hash") signals.systemHash = "changed-system";
@@ -329,6 +324,26 @@ for (const runtime of ["TS", "Pi"] as const) {
             });
         }
 
+        // An expired provider cache used to be a HARD reason (ttl_idle). Since
+        // 0.49.44 it is not: the request resends the same bytes, so a pending
+        // selection keeps waiting for a real HARD.
+        it("an expired provider cache alone neither decides HARD nor commits the pending selection", () => {
+            const db = makeDb();
+            const h = harness(runtime, db);
+            const before = h.inject();
+            selectScore(db, 0, 100);
+            const time = getOrCreateSessionMeta(db, SESSION).cachedM0MaterializedAt ?? 0;
+            h.signal({
+                systemHash: "",
+                modelKey: "",
+                cacheExpired: true,
+                lastResponseTime: time + 1,
+            });
+            expect(h.decide().value).toBe(false);
+            expect(h.inject()).toEqual({ ...before, committed: false });
+            expect(readAppliedScoreWatermark(db, SESSION)).toBe(0);
+        });
+
         it("project memory epoch holds pending scores until a natural HARD", () => {
             const db = makeDb();
             const h = harness(runtime, db);
@@ -338,12 +353,12 @@ for (const runtime of ["TS", "Pi"] as const) {
             expect(h.decide().value).toBe(false);
             expect(h.inject()).toEqual({ ...before, committed: false });
             expect(readAppliedScoreWatermark(db, SESSION)).toBe(0);
-            const time = getOrCreateSessionMeta(db, SESSION).cachedM0MaterializedAt ?? 0;
+            // A model switch is a natural HARD: the new model has its own cache.
             h.signal({
                 systemHash: "",
-                modelKey: "",
-                cacheExpired: true,
-                lastResponseTime: time + 1,
+                modelKey: "anthropic/claude-sonnet-4-5",
+                cacheExpired: false,
+                lastResponseTime: 0,
             });
             expect(h.decide().value).toBe(true);
             const hard = h.inject();

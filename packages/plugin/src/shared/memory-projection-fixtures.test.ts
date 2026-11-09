@@ -145,8 +145,33 @@ export function createProjectionFixture(
 export interface ProjectionOptions {
     memoryBudget?: number;
     historyBudget?: number;
-    /** Report the provider cache TTL as expired: a genuine HARD trigger. */
-    cacheExpired?: boolean;
+    /**
+     * Report a model switch on this pass: a genuine HARD trigger, since the new
+     * model has its own provider cache. An expired provider cache is not one.
+     */
+    genuineHard?: boolean;
+}
+
+const modelGenerations = new WeakMap<ProjectionFixture, Map<string, number>>();
+
+/**
+ * The model key a driver reports for one session's pass. A `genuineHard` pass
+ * switches the session to a new model, and later passes keep reporting it, so
+ * the switch folds once, as a real switch does.
+ */
+export function projectionModelKey(
+    f: ProjectionFixture,
+    sessionId: string,
+    render: ProjectionOptions = {},
+): string {
+    let sessions = modelGenerations.get(f);
+    if (!sessions) {
+        sessions = new Map();
+        modelGenerations.set(f, sessions);
+    }
+    let generation = sessions.get(sessionId) ?? 0;
+    if (render.genuineHard) sessions.set(sessionId, ++generation);
+    return generation === 0 ? "anthropic/claude" : `anthropic/claude-${generation}`;
 }
 
 export interface ServedPair {
@@ -468,7 +493,7 @@ export function registerMemoryProjectionRegressions(driver: ProjectionDriver): v
                 expect(soft.materialized).toBe(false);
                 expect(soft.m0).toBe(before.m0);
                 expect(soft.m1).toBe(before.m1);
-                const hard = driver.pass(f, session, true, { cacheExpired: true });
+                const hard = driver.pass(f, session, true, { genuineHard: true });
                 expect(hard.materialized).toBe(true);
                 expect(hard.m0 + hard.m1).not.toContain(target.content);
                 if (!operation.endsWith("archive")) expect(hard.m0 + hard.m1).toContain(corrected);
@@ -500,7 +525,7 @@ export function registerMemoryProjectionRegressions(driver: ProjectionDriver): v
                 expect(admitted.m0).toBe(hard.m0);
                 expect(admitted.m1).toContain(target.content);
                 expect(driver.pass(f, session, false)).toEqual(admitted);
-                const restoredHard = driver.pass(f, session, true, { cacheExpired: true });
+                const restoredHard = driver.pass(f, session, true, { genuineHard: true });
                 expect(restoredHard.materialized).toBe(true);
                 expect(restoredHard.m0).toContain(target.content);
                 const epoch = f.db
@@ -739,9 +764,9 @@ export function registerMemoryProjectionRegressions(driver: ProjectionDriver): v
             expect(soft.materialized).toBe(false);
             expect(soft.m0).toContain("Build uses tool version one.");
             expect(`${soft.m0}${soft.m1}`).not.toContain("version two");
-            const expired = driver.pass(f, a, true, { cacheExpired: true });
-            expect(expired.materialized).toBe(true);
-            expect(expired.m0).toContain("Build uses tool version two.");
+            const switched = driver.pass(f, a, true, { genuineHard: true });
+            expect(switched.materialized).toBe(true);
+            expect(switched.m0).toContain("Build uses tool version two.");
         } finally {
             f.close();
         }
@@ -764,7 +789,7 @@ export function registerMemoryProjectionRegressions(driver: ProjectionDriver): v
             );
             bumpProjectMemoryEpoch(f.db, f.projectPath);
             expect(driver.pass(f, a, true)).toEqual(before);
-            const repaired = driver.pass(f, a, true, { cacheExpired: true });
+            const repaired = driver.pass(f, a, true, { genuineHard: true });
             expect(repaired.materialized).toBe(true);
             expect(repaired.m0).toContain("Repaired claim after repair.");
         } finally {
@@ -931,7 +956,7 @@ export function registerMemoryProjectionRegressions(driver: ProjectionDriver): v
                         f,
                         f.sessions[0],
                         step !== "defer",
-                        step === "genuine-hard" ? { cacheExpired: true } : {},
+                        step === "genuine-hard" ? { genuineHard: true } : {},
                     ),
                 );
                 passes += 1;

@@ -4,6 +4,7 @@ import {
     type ProjectionDriver,
     type ProjectionFixture,
     type ProjectionOptions,
+    projectionModelKey,
     registerMemoryProjectionRegressions,
 } from "../../shared/memory-projection-fixtures.test";
 import { injectM0M1, materializeM0 } from "./inject-compartments";
@@ -20,10 +21,9 @@ function options(f: ProjectionFixture, sessionId: string, render: ProjectionOpti
         historyBudgetTokens: render.historyBudget,
         hardSignals: {
             systemHash: "system",
-            modelKey: "anthropic/claude",
-            cacheExpired: render.cacheExpired ?? false,
-            // An idle expiry folds only for a response newer than the last fold.
-            lastResponseTime: render.cacheExpired ? Date.now() + 60_000 : 1,
+            modelKey: projectionModelKey(f, sessionId, render),
+            cacheExpired: false,
+            lastResponseTime: 1,
         },
     };
 }
