@@ -42,6 +42,9 @@ mod head_bytes_tests;
 #[path = "summary_sharing_tests.rs"]
 mod summary_sharing_tests;
 
+#[path = "head_cache_differential_tests.rs"]
+mod head_cache_differential_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
