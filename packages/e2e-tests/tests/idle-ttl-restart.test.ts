@@ -1,7 +1,17 @@
 /**
- * Issue 610 investigation: measure the first expired request and every request
- * after it on a real host. The long tool-loop probe is opt-in because it sends
- * about 240k tokens of history; the ordinary restart regression runs in CI.
+ * Issue 610 investigation, revised for the rule that an expired provider
+ * cache is not a reason to rebuild: measure the first expired request
+ * and every request after it on a real host. That request must be the previous
+ * request plus the newly appended messages, with queued drops still queued and
+ * the frozen system date unchanged. A real rebuild (`/ctx-flush` here) is then
+ * where the drops land and the date moves. The long tool-loop probe is opt-in
+ * because it sends about 240k tokens of history; the ordinary restart
+ * regression runs in CI.
+ *
+ * Rust mode is the one exception: the experimental Rust transform still folds
+ * an expired head and drains queued drops into that fold. Its cases assert that
+ * fold, while the sticky date stays frozen there too, because the TypeScript
+ * system hook owns the date in both modes.
  */
 import { expect, it } from "bun:test";
 import { createHash } from "node:crypto";
@@ -14,6 +24,7 @@ import {
 	createFreshSession,
 	createScenarioHarness,
 	forEachHost,
+	requestCtxFlush,
 	type ScenarioHarness,
 } from "../src/scenario-hosts";
 import { openTestDb } from "../src/test-db";
@@ -207,6 +218,19 @@ function pendingCount(h: ScenarioHarness, session: string): number {
 	}
 }
 
+/** A tag's status in the TypeScript tag ledger (context.db). */
+function tagStatus(h: ScenarioHarness, session: string, tag: number): string | undefined {
+	const db = openTestDb(h.contextDbPath(), { readonly: true });
+	try {
+		return (
+			db
+				.query("SELECT status FROM tags WHERE session_id = ? AND tag_number = ?")
+				.get(session, tag) as { status: string } | null
+		)?.status;
+	} finally {
+		db.close();
+	}
+}
 function expire(h: ScenarioHarness, session: string, acrossMidnight = false) {
 	const today = new Date();
 	today.setUTCHours(0, 0, 0, 0);
@@ -412,7 +436,20 @@ export default async (ctx) => {
 			for (let i = 0; i < 3; i++) await turn(`history-${i}`);
 			h.mock.setDefault({ text: "answer", usage: LONG_USAGE });
 		} else {
+			if (queued) {
+				// A large first reply pushes tag 1, the first prompt, out of the
+				// protected tail, so the drop queued for it below can land on a
+				// rebuild instead of being held as protected.
+				h.mock.setDefault({
+					content: Array.from({ length: 24 }, (_, index) => ({
+						type: "text",
+						text: `initial block ${index + 1}: ${harness.ballast(200)}`,
+					})),
+					usage: LOW_USAGE,
+				});
+			}
 			await turn("initial");
+			h.mock.setDefault({ text: "answer", usage: LOW_USAGE });
 		}
 		const warm = await turn("warm");
 		if (abortAndChange)
@@ -420,9 +457,14 @@ export default async (ctx) => {
 				"Today's date: Fri Oct 02 2026",
 			);
 		inventories.push(assertContained(h));
+		// The last request served before the idle gap, and the tags whose drops
+		// are queued while the cache is warm or during the gap.
+		let lastBeforeIdle = warm;
+		const queuedTags: number[] = [];
 		if (queued) {
 			await queueDrop(h, session, 1);
-			await turn("warm with queued drop");
+			queuedTags.push(1);
+			lastBeforeIdle = await turn("warm with queued drop");
 			expect(pendingCount(h, session)).toBe(1);
 		}
 		expire(h, session, abortAndChange);
@@ -493,6 +535,7 @@ export default async (ctx) => {
 			expect(reverted.ok).toBe(true);
 			writeFileSync(systemEpochPath, "new");
 			await queueDrop(h, session, 2);
+			queuedTags.push(2);
 		}
 		if (long) {
 			// Two real bash tool calls in the returning turn. New provider usage
@@ -523,10 +566,30 @@ export default async (ctx) => {
 		const first = await turn("resume after idle");
 		const second = await turn("next warm turn");
 		inventories.push(assertContained(h));
+		const pendingAfterIdle = pendingCount(h, session);
+		const statusAfterIdle = RUST_MODE
+			? []
+			: queuedTags.map((tag) => tagStatus(harness, session, tag));
+		// Taken before the rebuild below, which is allowed to change both.
+		const afterIdleModuleMeta = RUST_MODE ? moduleMeta(h, session) : undefined;
+		const afterIdleHostSystemHash = (
+			h
+				.contextDb()
+				.query(
+					"SELECT system_prompt_hash FROM session_meta WHERE session_id = ? AND harness = ?",
+				)
+				.get(session, h.harnessId) as { system_prompt_hash: string } | null
+		)?.system_prompt_hash;
+		// A real rebuild: `/ctx-flush`, one rebuilt turn, then a warm turn that
+		// must replay what the rebuild served.
+		await requestCtxFlush(h, session);
+		const rebuilt = await turn("after the flush");
+		const settled = await turn("warm after the flush");
+		inventories.push(assertContained(h));
 		// Pi binds a pending decision at the NEXT context pass, once the host's
 		// branch includes the assistant. The row can be persisted after the provider
-		// reply and after the context pass is logged, so wait for the expired pass's
-		// durable row, not network idle.
+		// reply and after the context pass is logged, so wait for durable rows, not
+		// network idle.
 		const readDecisions = () =>
 			harness
 				.contextDb()
@@ -534,25 +597,44 @@ export default async (ctx) => {
 					"SELECT * FROM transform_decisions WHERE session_id = ? AND harness = ? ORDER BY ts_ms",
 				)
 				.all(session, host === "omp" ? "pi" : harness.harnessId) as Decision[];
-		if (host !== "opencode2") {
+		const inTurn = (row: Decision, entry: Turn) =>
+			row.ts_ms >= entry.start && row.ts_ms <= entry.end;
+		const idleReason = (row: Decision) =>
+			["ttl_idle", "ttl_expiry"].includes(row.materialize_reason ?? "");
+		// OpenCode 1 records the expired pass on its assistant for the cache
+		// diagnostics, and the Rust transform records its fold there.
+		if (host === "opencode") {
 			await h.waitFor(
-				() =>
-					readDecisions().some(
-						(row) =>
-							row.ts_ms >= first.start &&
-							row.ts_ms <= first.end &&
-							["ttl_idle", "ttl_expiry"].includes(row.materialize_reason ?? ""),
-					),
+				() => readDecisions().some((row) => inTurn(row, first) && idleReason(row)),
 				{
 					timeoutMs: 5_000,
 					label: `persisted idle TTL decision for ${session} in ${first.start}..${first.end}`,
 				},
 			);
 		}
+		// The flush pass rebuilds, so every host that binds rows records it. Its
+		// row also shows that rows were being written for the idle turns before it.
+		if (host !== "opencode2") {
+			await h.waitFor(() => readDecisions().some((row) => inTurn(row, rebuilt)), {
+				timeoutMs: 5_000,
+				label: `persisted flush decision for ${session} in ${rebuilt.start}..${rebuilt.end}`,
+			});
+		}
 		const decisions = readDecisions();
-		const expiredDecision = decisions.find(
-			(row) => row.ts_ms >= first.start && row.ts_ms <= first.end,
+		const expiredDecision = decisions.find((row) => inTurn(row, first));
+		const idleDecisions = decisions.filter(
+			(row) => row.ts_ms >= first.start && row.ts_ms <= second.end,
 		);
+		// Logs flush asynchronously, so read each turn's lines again now that
+		// later turns have run: a line logged during a turn carries its timestamp.
+		const turnLog = (entry: Turn) =>
+			logs()
+				.split("\n")
+				.filter((line) => {
+					const at = Date.parse(line.slice(1, 25));
+					return line.includes(session) && at >= entry.start && at <= entry.end;
+				});
+		const idleLog = [...turnLog(first), ...turnLog(second)];
 		const afterExpiry = [...first.requests, ...second.requests];
 		const comparisons = afterExpiry
 			.slice(1)
@@ -565,6 +647,7 @@ export default async (ctx) => {
 			abortAndChange,
 			responseClockAfterAbort,
 			preparedModuleMeta,
+			afterIdleModuleMeta,
 			finalModuleMeta: RUST_MODE ? moduleMeta(h, session) : undefined,
 			release: process.env.IDLE_TTL_RELEASE ?? "worktree",
 			mode: process.env.MC_E2E_MODE ?? "ts",
@@ -572,8 +655,8 @@ export default async (ctx) => {
 			decisions,
 			turns: turns.map((entry) => ({
 				label: entry.label,
-				passLog: entry.passLog.filter((line) =>
-					/scheduler|rematerialized|HARD fold|rust pass:|decision=|nudge|caveman|auto-search/.test(
+				passLog: turnLog(entry).filter((line) =>
+					/scheduler|rematerialized|HARD fold|rust pass:|decision=|pending ops|date|nudge|caveman|auto-search/.test(
 						line,
 					),
 				),
@@ -584,6 +667,8 @@ export default async (ctx) => {
 				})),
 			})),
 			comparisons,
+			acrossIdle: prefixComparison(lastBeforeIdle.requests.at(-1)!, first.requests[0]!),
+			acrossRebuild: prefixComparison(rebuilt.requests.at(-1)!, settled.requests[0]!),
 		};
 		console.log("IDLE_TTL_REPLAY", JSON.stringify(summary));
 		const evidence = process.env.IDLE_TTL_EVIDENCE;
@@ -596,21 +681,13 @@ export default async (ctx) => {
 			);
 			writeFileSync(join(evidence, `${name}.log`), logs());
 		}
-		if (host === "opencode2") {
-			// The native v2 usage hook does not bind the v1 delegate's pending
-			// decision row. Verify its actual fold log and bytes without claiming
-			// that the absent telemetry row exists in this harness.
-			expect(
-				first.passLog.some((line) =>
-					/reason=ttl_idle executed=true/.test(line),
-				),
-			).toBe(true);
-			expect(
-				second.passLog.some((line) =>
-					/reason=ttl_idle executed=true/.test(line),
-				),
-			).toBe(false);
-		} else {
+		if (abortAndChange) writeFileSync(systemEpochPath, "aborted");
+		expect(first.requests).toHaveLength(long ? 3 : 1);
+		for (let i = 1; i < afterExpiry.length; i++)
+			assertReplay(afterExpiry[i - 1]!, afterExpiry[i]!, host === "omp");
+		if (RUST_MODE) {
+			// The experimental Rust transform still folds the expired head once and
+			// drains the queued drops into that fold (see the header comment).
 			expect(expiredDecision).toMatchObject({
 				decision: "execute",
 				materialized: abortAndChange ? 0 : 1,
@@ -618,45 +695,82 @@ export default async (ctx) => {
 			expect(["ttl_idle", "ttl_expiry"]).toContain(
 				expiredDecision!.materialize_reason ?? "",
 			);
+			expect(idleDecisions.filter(idleReason)).toHaveLength(1);
+			expect(pendingAfterIdle).toBe(0);
+		} else {
+			// The request after the idle gap is the request before it plus the
+			// newly appended messages: nothing folded and no queued drop landed.
+			assertReplay(lastBeforeIdle.requests.at(-1)!, first.requests[0]!, host === "omp");
+			expect(idleLog.filter((line) => /HARD fold decision: .*executed=true/.test(line))).toEqual([]);
+			expect(idleLog.filter((line) => /pending ops WILL APPLY/.test(line))).toEqual([]);
+			expect(pendingAfterIdle).toBe(queuedTags.length);
+			expect(statusAfterIdle).toEqual(queuedTags.map(() => "active"));
 			expect(
-				decisions.filter(
-					(row) =>
-						row.ts_ms >= first.start &&
-						["ttl_idle", "ttl_expiry"].includes(row.materialize_reason ?? ""),
-				),
-			).toHaveLength(1);
+				idleDecisions.filter((row) => row.materialized === 1 || row.decision === "execute"),
+			).toEqual([]);
+			if (host === "opencode") {
+				// OpenCode 1 still names the expiry on the expired request's own
+				// row for the cache diagnostics, next to the scheduler's defer.
+				expect(expiredDecision).toMatchObject({
+					decision: "defer",
+					materialized: 0,
+					materialize_reason: "ttl_idle",
+				});
+				expect(idleDecisions.filter(idleReason)).toHaveLength(1);
+			} else if (host !== "opencode2") {
+				// Pi and Oh My Pi record rows only for passes that rebuild.
+				expect(idleDecisions).toEqual([]);
+			}
 		}
-		expect(first.requests).toHaveLength(long ? 3 : 1);
-		for (let i = 1; i < afterExpiry.length; i++)
-			assertReplay(afterExpiry[i - 1]!, afterExpiry[i]!, host === "omp");
 		if (abortAndChange) {
-			writeFileSync(systemEpochPath, "aborted");
+			// The host's prompt now carries the next day, but the idle request
+			// rebuilds nothing, so the frozen date stays in front of it.
 			expect(JSON.stringify(first.requests[0]!.body.system)).toContain(
-				"Today's date: Sat Oct 03 2026",
+				"Today's date: Fri Oct 02 2026",
 			);
+			expect(
+				idleLog.some((line) =>
+					/system prompt date frozen: real=.*Sat Oct 03 2026.*using=.*Fri Oct 02 2026/.test(line),
+				),
+			).toBe(true);
+			// The aborted attempt served nothing, so the idle clock stayed old.
 			expect(
 				(responseClockAfterAbort as { last_response_time: number })
 					.last_response_time,
 			).toBeLessThan(Date.now() - IDLE + 60_000);
 			expect(
-				first.passLog.some((line) =>
-					/adopting on idle-expired request/.test(line),
-				),
-			).toBe(true);
-			expect(
-				first.passLog.filter((line) =>
-					/reason=system_hash executed=true/.test(line),
-				),
+				idleLog.filter((line) => /reason=system_hash executed=true/.test(line)),
 			).toHaveLength(0);
 		}
-		if (queued || abortAndChange) {
-			expect(pendingCount(h, session)).toBe(0);
-		}
 		if (RUST_MODE && abortAndChange) {
-			const meta = moduleMeta(h, session);
+			const meta = afterIdleModuleMeta!;
 			expect(meta.expiry_cutoff_ms).toBe((preparedModuleMeta as typeof meta).expiry_cutoff_ms);
+			expect(meta.last_system_prompt_hash).toBe(afterIdleHostSystemHash);
+		}
+		// The real rebuild: the flush pass may rewrite the prefix, every queued
+		// drop lands on it, and the next warm turn replays what it served. The
+		// abort cases do not check the date here: the plugin above never runs the
+		// system hook for the aborted request, so that request's unpaired entry in
+		// the system-date request pairing makes every later pairing in this
+		// process ambiguous, and the date stays frozen even on this rebuild. The
+		// midnight cases check that /ctx-flush moves the date.
+		if (!RUST_MODE)
+			expect(turnLog(rebuilt).some((line) => /pending ops WILL APPLY/.test(line))).toBe(true);
+		expect(pendingCount(h, session)).toBe(0);
+		if (!RUST_MODE) {
+			expect(queuedTags.map((tag) => tagStatus(harness, session, tag))).toEqual(
+				queuedTags.map(() => "dropped"),
+			);
+			// The landed drop rewrote bytes the previous request had served.
+			if (queuedTags.length > 0)
+				expect(
+					prefixComparison(second.requests.at(-1)!, rebuilt.requests[0]!).identicalMessages,
+				).toBe(false);
+		}
+		assertReplay(rebuilt.requests.at(-1)!, settled.requests[0]!, host === "omp");
+		if (RUST_MODE && abortAndChange) {
 			const hostMeta = h.contextDb().query("SELECT system_prompt_hash FROM session_meta WHERE session_id = ? AND harness = ?").get(session, h.harnessId) as { system_prompt_hash: string };
-			expect(meta.last_system_prompt_hash).toBe(hostMeta.system_prompt_hash);
+			expect(moduleMeta(h, session).last_system_prompt_hash).toBe(hostMeta.system_prompt_hash);
 		}
 	} finally {
 		await h?.dispose();
@@ -667,7 +781,7 @@ export default async (ctx) => {
 }
 
 forEachHost(import.meta.url, "idle TTL head replay", (host) => {
-	it("completed replies without usage spend one expiry after a reporting/model switch, but failures do not", async () => {
+	it("completed replies without usage move the idle clock after a reporting/model switch, but failures do not", async () => {
 		const oldLogPath = process.env.MAGIC_CONTEXT_LOG_PATH;
 		const logPath = join(createE2ETempDir("no-usage-clock-"), "pass.log");
 		process.env.MAGIC_CONTEXT_LOG_PATH = logPath;
@@ -728,12 +842,12 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 			await send("one expired request with no usage");
 			await h.waitFor(() => clock() > expiredClock, {
 				timeoutMs: 5_000,
-				label: "usage-less completion spends expiry",
+				label: "usage-less completion moves the idle clock",
 			});
 			await send("warm request with no usage");
 			await h.waitForMockQuiescence();
-			// Wait for the two scheduler lines asserted below (the expired execute and
-			// the warm defer). Other `decision=` lines, such as a HARD pass's todo
+			// Wait for the two scheduler lines asserted below (the expired pass and
+			// the warm pass). Other `decision=` lines, such as a HARD pass's todo
 			// permission probe, can satisfy a looser count while the warm pass's line is
 			// still in the plugin's buffered log.
 			const schedulerLine = RUST_MODE
@@ -759,12 +873,19 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 						Date.parse(line.slice(1, 25)) >= start &&
 						/decision=|rematerialized/.test(line),
 				);
+			// The expiry moves the idle clock's diagnostics only. In TypeScript
+			// both passes defer; the experimental Rust transform still executes the
+			// expired pass once (see the header comment).
 			expect(
 				passLog.filter((line) =>
 					(RUST_MODE ? /rust pass:.*scheduler=execute/ : /(?:scheduler:|transform: usage=).*decision=execute/).test(line),
 				),
-			).toHaveLength(1);
-			expect(passLog.some((line) => (RUST_MODE ? /scheduler=defer/ : /decision=defer/).test(line))).toBe(true);
+			).toHaveLength(RUST_MODE ? 1 : 0);
+			expect(
+				passLog.filter((line) =>
+					(RUST_MODE ? /rust pass:.*scheduler=defer/ : /(?:scheduler:|transform: usage=).*decision=defer/).test(line),
+				).length,
+			).toBeGreaterThanOrEqual(RUST_MODE ? 1 : 2);
 			const beforeAbort = clock();
 			const count = h.requests().length;
 			// Hold an active stream so the abort precedes any clean terminal reply.
@@ -890,7 +1011,7 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 	}, 120_000);
 	for (const expired of [false, true])
 		it.skipIf(host !== "opencode")(
-			`a ${expired ? "genuinely expired" : "normal warm"} turn across midnight ${expired ? "releases the date only on the rebuild" : "keeps the frozen date and prefix"}`,
+			`a ${expired ? "genuinely expired" : "normal warm"} turn across midnight keeps the frozen date until /ctx-flush rebuilds the prompt`,
 			async () => {
 				const root = createE2ETempDir("warm-midnight-");
 				const datePath = join(root, "date.txt");
@@ -931,15 +1052,26 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 					writeFileSync(datePath, "Sat Oct 03 2026");
 					if (expired) expire(h, session, true);
 					const after = await turn("after midnight");
+					// Warm or idle-expired, this request rebuilds nothing, so the date
+					// the session froze before midnight stays in front of it.
 					expect(JSON.stringify(after.body.system)).toContain(
-						expired
-							? "Today's date: Sat Oct 03 2026"
-							: "Today's date: Fri Oct 02 2026",
+						"Today's date: Fri Oct 02 2026",
 					);
-					if (expired) {
+					if (expired && RUST_MODE) {
+						// The experimental Rust transform still folds the expired head
+						// (see the header comment); the request after that fold replays it.
 						const next = await turn("next warm after midnight");
 						assertReplay(after, next);
 					} else assertReplay(before, after);
+					// `/ctx-flush` is a real rebuild: the date moves to the host's
+					// current one there, and the next warm turn replays it.
+					await requestCtxFlush(h, session);
+					const rebuilt = await turn("after the flush");
+					expect(JSON.stringify(rebuilt.body.system)).toContain(
+						"Today's date: Sat Oct 03 2026",
+					);
+					const settled = await turn("warm after the flush");
+					assertReplay(rebuilt, settled);
 					const inventory = assertContained(h);
 					const evidence = process.env.IDLE_TTL_EVIDENCE;
 					if (evidence) {
@@ -950,6 +1082,7 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 								{
 									before,
 									after,
+									rebuilt,
 									inventory,
 									comparison: prefixComparison(before, after),
 								},
@@ -967,8 +1100,11 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 	for (const restart of [false, true]) {
 		const suffix = `${restart ? "with" : "without"} a host restart`;
 		it(
-			`folds the expired head once ${suffix}`,
-			() => probe(host, restart, false, false),
+			`replays the expired head and keeps a queued drop until /ctx-flush ${suffix}`,
+			// Rust mode queues no drop here: the experimental Rust module does not
+			// keep a drop of this short session's first prompt queued across a warm
+			// turn, and its cases assert only the fold (see the header comment).
+			() => probe(host, restart, false, !RUST_MODE),
 			120_000,
 		);
 		for (const queued of [false, true]) {
@@ -979,7 +1115,7 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 			);
 		}
 		it.skipIf(host !== "opencode")(
-			`an aborted idle attempt and late system change do not rewrite the next step ${suffix}`,
+			`an aborted idle attempt and late date change rewrite nothing until /ctx-flush ${suffix}`,
 			() => probe(host, restart, true, false, true),
 			240_000,
 		);
