@@ -31,6 +31,7 @@ import { basename, dirname, join } from "node:path";
 let enforcePrivateStoragePermissions = true;
 const STORAGE_PERMISSIONS_POLICY_VERSION = 1;
 const STORAGE_PERMISSIONS_MARKER = `.storage-permissions-v${STORAGE_PERMISSIONS_POLICY_VERSION}`;
+const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
 
 function invalidateStoragePermissionMarkers(directory: string): void {
     for (let current = directory; ; current = dirname(current)) {
@@ -275,7 +276,12 @@ export function tightenStorageTreeSync(
         if (stat.isSymbolicLink()) return;
         if (!certified && dirname(entryPath) === fenceDirectory) {
             const name = basename(entryPath);
-            if (stat.isFile() && /^.+\.json\..+\.tmp$/.test(name)) {
+            // A legacy publisher can use a recent temp file.
+            if (
+                stat.isFile() &&
+                /^.+\.json\..+\.tmp$/.test(name) &&
+                Date.now() - stat.mtimeMs > LEGACY_FENCE_TEMP_MIN_AGE_MS
+            ) {
                 try {
                     rmSync(entryPath, { force: true });
                 } catch {
