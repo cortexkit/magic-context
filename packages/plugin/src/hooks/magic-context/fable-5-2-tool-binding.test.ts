@@ -87,12 +87,7 @@ function user(sessionId: string, id: string, text: string): Message {
 }
 
 /** An assistant step; `reasoningTokens` above the hold threshold makes it heavy. */
-function assistant(
-    sessionId: string,
-    id: string,
-    parts: Part[],
-    reasoningTokens = 0,
-): Message {
+function assistant(sessionId: string, id: string, parts: Part[], reasoningTokens = 0): Message {
     return {
         info: {
             id,
@@ -181,7 +176,8 @@ async function completedTurnAcrossChange(
     change: () => void,
 ): Promise<{ kept: string; unchanged: string; changed: string }> {
     const raw: Message[] = [user(f.sessionId, "p1", "first task")];
-    // Cache m[0]/m[1] before any signed thinking exists.
+    // Render the synthetic history head (m[0]/m[1]) before any signed thinking
+    // exists, so later passes replay it instead of rendering it for the first time.
     await f.pass(raw);
     raw.push(
         assistant(f.sessionId, "a1", [signed(THINKING), { type: "text", text: "first done" }]),
@@ -203,8 +199,8 @@ async function completedTurnAcrossChange(
 }
 
 test("OpenCode 1, claude-fable-5-2: a system prompt change strips the kept signed thinking", async () => {
-    // Control for the fixture below: a change the transform already treats as
-    // a prefix rebuild removes the kept block.
+    // Control for the fixture below: a system prompt change, which the
+    // transform already rebuilds the request head for, removes the kept block.
     recordToolDefinition(MODEL.providerID, MODEL.modelID, AGENT, "read", "Read a file", {
         type: "object",
     });
@@ -222,9 +218,10 @@ test("OpenCode 1, claude-fable-5-2: a system prompt change strips the kept signe
 });
 
 // Known gap: OpenCode 1 has no per-request tool signal. Its names-only hash is
-// route-wide and only attributes a bust; it never triggers one, and MCP tools
-// never reach the tool.definition hook at all. Remove `.failing` when a tool
-// change strips the kept thinking.
+// shared by every session on the same provider, model and agent, and is only
+// logged to explain a cache loss; it never makes the transform rebuild
+// anything. MCP tools never reach the tool.definition hook at all. Remove
+// `.failing` when a tool change strips the kept thinking.
 test.failing("OpenCode 1, claude-fable-5-2: a tool added mid-session strips the kept signed thinking", async () => {
     recordToolDefinition(MODEL.providerID, MODEL.modelID, AGENT, "read", "Read a file", {
         type: "object",
@@ -267,9 +264,10 @@ test("OpenCode 2 signals, claude-fable-5-2: a tool added mid-session strips the 
     }
 });
 
-// Known gap: the tool-definition change is only a fold trigger, and a
-// subagent never folds (it renders no m[0]/m[1] history), so its kept thinking
-// survives the change. Remove `.failing` when it is stripped.
+// Known gap: the tool-definition change is only a reason to fold (rebuild the
+// synthetic history messages at the head of the request), and a subagent has
+// no such history head, so it never folds and its kept thinking survives the
+// change. Remove `.failing` when it is stripped.
 test.failing("OpenCode 2 signals, claude-fable-5-2 subagent: a tool added mid-session strips the kept signed thinking", async () => {
     const tools: RequestTools = { read: { description: "Read a file", input: { type: "object" } } };
     const f = setup("oc2-subagent", openCode2Signals(tools), true);
@@ -285,10 +283,11 @@ test.failing("OpenCode 2 signals, claude-fable-5-2 subagent: a tool added mid-se
     }
 });
 
-// Known gap: a pass held for recent heavy signed reasoning freezes m[0]/m[1]
-// and never asks whether a fold is due, so a tool change between two steps of
-// the held turn leaves that turn's thinking on the wire. Remove `.failing`
-// when the held turn's thinking is stripped.
+// Known gap: a pass held for recent heavy signed reasoning keeps the two
+// synthetic history messages at the head of the request (m[0]/m[1]) frozen and
+// never asks whether a fold (a rebuild of that head) is due, so a tool change
+// between two steps of the held turn leaves that turn's thinking on the wire.
+// Remove `.failing` when the held turn's thinking is stripped.
 test.failing("OpenCode 2 signals, claude-fable-5-2: a tool added between two held steps strips the turn's signed thinking", async () => {
     const tools: RequestTools = { read: { description: "Read a file", input: { type: "object" } } };
     const f = setup("oc2-held", openCode2Signals(tools));

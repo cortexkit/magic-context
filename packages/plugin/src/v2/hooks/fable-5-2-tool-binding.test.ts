@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { getThinkingBindingRecoveryTarget } from "../../features/magic-context/storage-meta-persisted";
 import { LATEST_THINKING_RESTORE } from "../../hooks/magic-context/latest-thinking-recovery";
-import type { SessionContext } from "./types";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import type { SessionContext } from "./types";
 
 // Claude 5.1 and later models bind every signed thinking block to the `system`
 // prompt, the `tools` array and the messages sent before it. Anthropic's edit

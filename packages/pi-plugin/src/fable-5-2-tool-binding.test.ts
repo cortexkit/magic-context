@@ -71,7 +71,11 @@ function fixture(name: string, harness: "pi" | "omp" = "pi") {
 		cacheTtl: "never",
 	});
 	const tools: Tool[] = [
-		{ name: "read", description: "Read a file", parameters: { type: "object" } },
+		{
+			name: "read",
+			description: "Read a file",
+			parameters: { type: "object" },
+		},
 	];
 	const active = ["read"];
 	const fake = createFakePi();
@@ -106,8 +110,10 @@ function fixture(name: string, harness: "pi" | "omp" = "pi") {
 	};
 	/** A completed reply, then the next user prompt. */
 	const turn = (reply: unknown[], prompt: string) => {
-		add(`a${ids.length}`, assistantMessage("", (clock += 10), anthropic(reply)));
-		add(`p${ids.length}`, userMessage(prompt, (clock += 10)));
+		clock += 10;
+		add(`a${ids.length}`, assistantMessage("", clock, anthropic(reply)));
+		clock += 10;
+		add(`p${ids.length}`, userMessage(prompt, clock));
 	};
 	/** One provider request: the system-prompt step, then the context pass. */
 	const serve = async (systemText: string) => {
@@ -166,10 +172,7 @@ function fixture(name: string, harness: "pi" | "omp" = "pi") {
 			turn([{ type: "text", text: "second done" }], "third task");
 			const unchanged = await serve("base instruction");
 			const systemText = change();
-			turn(
-				[{ type: "text", text: "third done" }],
-				"a task after the change",
-			);
+			turn([{ type: "text", text: "third done" }], "a task after the change");
 			const changed = await serve(systemText);
 			return { kept, unchanged, changed };
 		},
@@ -183,8 +186,8 @@ function fixture(name: string, harness: "pi" | "omp" = "pi") {
 
 for (const harness of ["pi", "omp"] as const) {
 	it(`${harness}, claude-fable-5-2: a system prompt change strips the kept signed thinking`, async () => {
-		// Control for the fixtures below: a change Pi and OMP already treat as
-		// a prefix rebuild removes the kept block.
+		// Control for the fixtures below: changing the system prompt removes the
+		// kept block in Pi and OMP.
 		const f = fixture(`${harness}-system`, harness);
 		try {
 			const served = await f.acrossChange(() => "changed instruction");
@@ -233,11 +236,15 @@ it.failing("OMP, claude-fable-5-2: a changed tool schema strips the kept signed 
 	const f = fixture("omp-schema", "omp");
 	try {
 		const served = await f.acrossChange(() => {
-			f.tools[0]!.parameters = {
-				type: "object",
-				properties: { path: { type: "string" } },
-				required: ["path"],
-			};
+			f.tools.splice(0, 1, {
+				name: "read",
+				description: "Read a file",
+				parameters: {
+					type: "object",
+					properties: { path: { type: "string" } },
+					required: ["path"],
+				},
+			});
 			return "base instruction";
 		});
 		expect(served.kept).toContain(THINKING);
