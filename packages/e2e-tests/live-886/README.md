@@ -44,8 +44,15 @@ Defaults (all numeric options accept overrides):
 ```sh
 nice -n 10 bun packages/e2e-tests/live-886/run.ts \
   --step-cap 400 --dollar-cap 8 --batch-steps 220 --batch-count 4 --timeout-minutes 120 \
-  --input-limit 302222 --context-limit 1000000 --output-limit 32768
+  --input-limit 302222 --context-limit 1000000 --output-limit 32768 \
+  --threshold-tokens 250000 --mcp-every 0
 ```
+
+`--threshold-tokens` sets Magic Context's `execute_threshold_tokens.default`. A fresh
+session grows by roughly 700 tokens per step, so the reporter's 250K needs far more steps
+than the default caps allow. A lower threshold reaches the near-limit state cheaply.
+`--mcp-every N` also toggles the MCP server every N head steps after step 6, so Code Mode
+catalog and MCP-guidance rows keep accumulating through the run.
 
 The provider is `deepseek`, base URL `https://api.deepseek.com`, model
 `deepseek-flash`. The secret is read from `DEEPSEEK_API_KEY` only and written only

@@ -19,6 +19,10 @@ const { values } = parseArgs({ options: {
     "context-limit": { type: "string", default: "1000000" }, "output-limit": { type: "string", default: "32768" },
     "batch-steps": { type: "string", default: "220" }, "timeout-minutes": { type: "string", default: "120" },
     "batch-count": { type: "string", default: "4" },
+    // The reporter's threshold. A lower one reaches the near-limit state in fewer, cheaper steps.
+    "threshold-tokens": { type: "string", default: "250000" },
+    // Toggle the MCP server every N head steps for the whole run (0 = only steps 2, 4, 6 and batch boundaries).
+    "mcp-every": { type: "string", default: "0" },
     cli: { type: "string" }, "ai-root": { type: "string" },
     "evidence-dir": { type: "string" },
 } });
@@ -35,6 +39,9 @@ const outputLimit = positive("output-limit");
 const batchSteps = positive("batch-steps");
 const batchCount = positive("batch-count");
 const timeout = positive("timeout-minutes") * 60000;
+const thresholdTokens = positive("threshold-tokens");
+const mcpEvery = Number(values["mcp-every"]);
+if (!Number.isInteger(mcpEvery) || mcpEvery < 0) throw new Error("Invalid --mcp-every");
 if (![stepCap, inputLimit, contextLimit, outputLimit, batchSteps, batchCount].every(Number.isInteger)) throw new Error("Steps and token limits must be integers");
 if (contextLimit <= outputLimit || inputLimit > contextLimit) throw new Error("Invalid model geometry");
 if (values["evidence-dir"] && !values.fake) throw new Error("--evidence-dir is only available for fake proofs; live artifacts stay private");
@@ -130,7 +137,8 @@ const controller = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 255,
             midTurnChanged = true;
             changeInstructions("mid-turn");
         }
-        if (event.kind === "primary" && event.sessionID === guard.mainID && midTurnMcpSteps.delete(guard.mainPasses)) {
+        if (event.kind === "primary" && event.sessionID === guard.mainID
+            && (midTurnMcpSteps.delete(guard.mainPasses) || (mcpEvery > 0 && guard.mainPasses > 6 && guard.mainPasses % mcpEvery === 0))) {
             mcpPending = mcpPending.then(() => churnMcp("mid-turn")).catch((error) => {
                 guard.reason = "mcp_error";
                 console.error(redact(String(error)));
@@ -179,7 +187,7 @@ try {
         providerSettings: { baseURL: fake ? fixture.env.MC886_CONTROL_URL : "https://api.deepseek.com", apiKey: key },
         ...(fake ? { existingMock: { mock: fake.mock, baseURL: fixture.env.MC886_CONTROL_URL! } } : {}),
         preserveMagicContextDefaults: true,
-        magicContextConfig: { execute_threshold_tokens: { default: 250000 }, execute_threshold_percentage: 80,
+        magicContextConfig: { execute_threshold_tokens: { default: thresholdTokens }, execute_threshold_percentage: 80,
             protected_tokens: 16000, history_budget_percentage: 0.1,
             historian: { opencode: { model: "deepseek/deepseek-flash" } } },
         probePlugin: join(import.meta.dir, "probe"),
@@ -233,8 +241,21 @@ try {
         turns++;
         let idle = false;
         let waitError: unknown;
-        const waiting = client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(timeout) })
-            .then(() => { idle = true; }).catch((error) => { waitError = error; idle = true; });
+        // The client's transport ends a long wait with its own timeout while the turn is still
+        // running, so a transport timeout before the run's deadline means "wait again".
+        const waiting = (async () => {
+            while (!idle && !guard.reason && Date.now() < deadline) {
+                try {
+                    await client.session.wait({ sessionID: session.id },
+                        { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+                    idle = true;
+                } catch (error) {
+                    if (/timed out/i.test(String(error)) && !guard.reason && Date.now() < deadline) continue;
+                    waitError = error;
+                    idle = true;
+                }
+            }
+        })();
         while (!idle && !guard.reason && Date.now() < deadline) await Bun.sleep(100);
         if (!idle) {
             stopReason = guard.reason || "timeout";
