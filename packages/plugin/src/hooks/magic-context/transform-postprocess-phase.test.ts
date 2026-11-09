@@ -13837,6 +13837,7 @@ describe("signed-prefix hold review", () => {
             flush: Set<string>;
             deferred?: Set<string>;
             fromEstimate?: boolean;
+            subagent?: boolean;
         },
     ) => {
         const messages = heldSource();
@@ -13860,6 +13861,7 @@ describe("signed-prefix hold review", () => {
                     inputTokens: options.percentage * 1000,
                 },
                 contextUsageFromEstimate: options.fromEstimate,
+                fullFeatureMode: options.subagent !== true,
                 emergencyCeilingTokens: 65_000,
                 pendingMaterializationSessions: options.flush,
                 deferredMaterializationSessions: options.deferred ?? new Set(),
@@ -13920,7 +13922,7 @@ describe("signed-prefix hold review", () => {
         }
     });
 
-    it("a held pass that only a local count puts in the force band keeps its hold below 95%", async () => {
+    it("a held subagent execute pass that only a local count puts in the force band keeps its hold below 95%", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "hold-review-local-count";
@@ -13929,22 +13931,34 @@ describe("signed-prefix hold review", () => {
             percentage: 20,
             execute: false,
             flush: new Set(),
+            subagent: true,
         });
         for (const tag of oldTags(sessionId)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
         const queued = getPendingOps(db, sessionId).length;
         expect(queued).toBeGreaterThan(0);
         const drain = spyOn(operations, "applyPendingOperations");
+        const log = spyOn(loggerModule, "sessionLog");
         try {
-            // A local count can overstate the provider, so below 95% it is not
-            // the emergency pressure that lifts the hold: the flush waits, as it
-            // does below the force band, and the pass replays the same bytes.
+            // Every subagent execute pass is a ride, so only the hold can
+            // refuse this one.
             const held = await runHeld(sessionId, {
                 held: true,
                 percentage: 90,
                 execute: true,
-                flush: new Set([sessionId]),
+                flush: new Set(),
                 fromEstimate: true,
+                subagent: true,
             });
+            expect(
+                log.mock.calls.some((call) =>
+                    String(call[1]).startsWith(
+                        "rewrite permission: allowed=false ride=subagentExecute",
+                    ),
+                ),
+            ).toBe(true);
+            // A local count can overstate the provider, so below 95% it is not
+            // the emergency pressure that lifts the hold: the drops wait and the
+            // pass replays the same bytes.
             expect(drain).not.toHaveBeenCalled();
             expect(held.messages).toBe(baseline.messages);
             expect(getPendingOps(db, sessionId)).toHaveLength(queued);
@@ -13953,12 +13967,14 @@ describe("signed-prefix hold review", () => {
                 held: true,
                 percentage: 96,
                 execute: true,
-                flush: new Set([sessionId]),
+                flush: new Set(),
                 fromEstimate: true,
+                subagent: true,
             });
             expect(drain).toHaveBeenCalledTimes(1);
         } finally {
             drain.mockRestore();
+            log.mockRestore();
         }
     });
 
