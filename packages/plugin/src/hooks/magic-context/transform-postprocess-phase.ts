@@ -190,6 +190,18 @@ import {
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
 import {
+    forceRide,
+    forgetRoutinePressureEpisode,
+    heuristicsAlreadyRanThisTurn,
+    heuristicsRunOnPass,
+    markRoutinePressureApplied,
+    pressureBands,
+    routineCleanupRunsOnPass,
+    routinePressureAlreadyApplied,
+    safeReasoningCutoff as sharedSafeReasoningCutoff,
+    updateRoutinePressureEpisode,
+} from "./routine-cleanup-decision";
+import {
     isAnthropicFamilyRoute,
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
@@ -264,11 +276,10 @@ const SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES = 40;
 // Bounded (LRU, max 100) so a crashed/never-reset session can't leak an entry
 // forever in a long-running process — matches the other per-session caches.
 const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
-const routinePressureAppliedBySession = new BoundedSessionMap<boolean>(100);
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
-    routinePressureAppliedBySession.delete(sessionId);
+    forgetRoutinePressureEpisode(sessionId);
 }
 
 export type DeferredCompactionMarkerClearOutcome =
@@ -2188,44 +2199,41 @@ export async function runPostTransformPhase(
     );
     let isExplicitFlush = pendingMaterializationAtPassStart;
     const deferredMaterializationWasPending = deferredMaterializationAtPassStart;
-    const alreadyRanThisTurn =
-        args.currentTurnId !== null &&
-        args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
-    const forceMaterialization =
-        args.fullFeatureMode &&
-        !compactionOff &&
-        args.contextUsage.percentage >= args.forceMaterializationPercentage;
+    const alreadyRanThisTurn = heuristicsAlreadyRanThisTurn(
+        args.lastHeuristicsTurnId,
+        args.sessionId,
+        args.currentTurnId,
+    );
     // Tiered emergency drop eligibility (Phase 2). Unlike `forceMaterialization`
     // (primary-only — it also forces m[0] materialization), the emergency tool
     // floor fires at the derived force band for BOTH primary AND subagent: it's the only tool
     // floor subagents have now that routine age-drops are gone. It's still a
     // cache-busting-pass operation (selection persisted, defer passes replay),
     // so it only runs when heuristics run (see shouldRunHeuristics) AND usage is
-    // ≥ the force-materialize threshold.
-    const emergencyDropEligible =
-        !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
-    // A reading that only a local count put in the force band can overstate
-    // the provider, and a provider that reports no usage never sends the
-    // measurement that would confirm it. Below 95% such a reading is therefore
-    // not force-band pressure: it takes no force ride, lifts no signed-thinking
-    // hold and runs no tiered emergency tool drop. A rebuild the pass makes for
-    // another reason (such as the execute pass's own bounded rebuild below)
-    // carries only queued drops and routine cleanup.
-    const forceRideWaitsOnLocalCount =
-        args.contextUsageFromEstimate === true && args.contextUsage.percentage < 95;
-    const forceBandConfirmed = emergencyDropEligible && !forceRideWaitsOnLocalCount;
-    const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
-    if (!executePressureEligible) {
-        routinePressureAppliedBySession.delete(args.sessionId);
-    } else if (args.fullFeatureMode && alreadyRanThisTurn) {
-        // The shared once-per-turn map proves an earlier pass in this pressure
-        // episode already ran even when this process-local episode map is cold.
-        routinePressureAppliedBySession.set(args.sessionId, true);
-    }
-    const routinePressureAlreadyApplied =
-        args.fullFeatureMode &&
-        executePressureEligible &&
-        routinePressureAppliedBySession.get(args.sessionId) === true;
+    // ≥ the force-materialize threshold. A reading that only a local count put
+    // in the force band confirms it only at 95% (see `forceRideWaitsOnLocalCount`).
+    const bands = pressureBands({
+        percentage: args.contextUsage.percentage,
+        fromEstimate: args.contextUsageFromEstimate === true,
+        forceMaterializationPercentage: args.forceMaterializationPercentage,
+        compactionOff,
+        fullFeatureMode: args.fullFeatureMode,
+        schedulerDecision: args.schedulerDecision,
+    });
+    const {
+        forceMaterialization,
+        emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed,
+        executePressureEligible,
+    } = bands;
+    const episode = {
+        fullFeatureMode: args.fullFeatureMode,
+        executePressureEligible,
+        alreadyRanThisTurn,
+    };
+    updateRoutinePressureEpisode(args.sessionId, episode);
+    const routinePressureApplied = routinePressureAlreadyApplied(args.sessionId, episode);
     // Require five points below the force band so a batch-induced dip cannot
     // immediately rearm another cache rewrite as the tail regrows. Only a
     // provider-measured reading may end the episode: a local count can read
@@ -2301,14 +2309,10 @@ export async function runPostTransformPhase(
         retainedThinking,
         args.thinkingBindingRecoveryEnabledForModel === true,
     );
-    let maxReasoningTag = 0;
-    for (const tag of args.messageTagNumbers.values())
-        maxReasoningTag = Math.max(maxReasoningTag, tag);
-    let safeReasoningCutoff = maxReasoningTag;
-    for (const message of protectedThinkingMessages) {
-        const tag = args.messageTagNumbers.get(message);
-        if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
-    }
+    const safeReasoningCutoff = sharedSafeReasoningCutoff(
+        args.messageTagNumbers,
+        protectedThinkingMessages,
+    );
     // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
     // model it holds only right after heavy reasoning and below the cap. Any
     // other pass of a signed turn busts like a pass of any other model, and
@@ -2700,16 +2704,12 @@ export async function runPostTransformPhase(
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
-        // A reading that only a local count put in the force band is not
-        // evidence the session is there: the count can overstate the provider.
-        // Below 95% it waits for the provider's next measurement instead of
-        // rewriting the cache on its own. At 95% or more it still rides, since
-        // waiting there risks the next request not fitting.
-        force:
-            emergencyDropEligible &&
-            (args.contextUsage.percentage >= 95 ||
-                (args.contextUsageFromEstimate !== true &&
-                    getEmergencyInputSample(args.db, args.sessionId) === 0)),
+        force: forceRide({
+            bands,
+            percentage: args.contextUsage.percentage,
+            fromEstimate: args.contextUsageFromEstimate === true,
+            emergencySample: () => getEmergencyInputSample(args.db, args.sessionId),
+        }),
         explicitFlush:
             isExplicitFlush &&
             hasPendingMaterializationOrigin(
@@ -2780,26 +2780,18 @@ export async function runPostTransformPhase(
             emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
-    const shouldRunHeuristics =
-        !compactionOff &&
-        publishedWorkDrainAllowed &&
-        (rideSignals.publishedHistory ||
-            rideSignals.executeReclaim ||
-            rideSignals.servedShapeRepair ||
-            materializationRequested ||
-            forceMaterialization ||
-            // The off-wire fold changed the served prefix, so the prefix already
-            // busted. Heuristics may ride it and bypass the once-per-turn guard
-            // without creating an independent prefix rewrite.
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            // the derived force band emergency floor for BOTH primary and subagent. For a primary
-            // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
-            // for a subagent (no forceMaterialization) it's the only path that
-            // fires the tiered drop even when the ordinary scheduler defers.
-            emergencyDropEligible ||
-            (args.schedulerDecision === "execute" &&
-                (!alreadyRanThisTurn || !args.fullFeatureMode)));
+    const shouldRunHeuristics = heuristicsRunOnPass({
+        compactionOff,
+        drainAllowed: publishedWorkDrainAllowed,
+        rides: rideSignals,
+        materializationRequested,
+        bands,
+        foldBustsServedPrefix: foldBustsServedPrefixThisPass,
+        firstRender: firstRenderBust,
+        schedulerDecision: args.schedulerDecision,
+        alreadyRanThisTurn,
+        fullFeatureMode: args.fullFeatureMode,
+    });
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
@@ -3273,13 +3265,15 @@ export async function runPostTransformPhase(
             // Force-originated tool and text rewrites share the durable episode.
             // A small pressure dip or a process restart cannot rearm just the text lane.
             // Independent work and the absolute emergency arm still admit all lanes.
-            let routineCleanupApplied =
-                (forceBandConfirmed
-                    ? args.contextUsage.percentage >= 95 ||
-                      getEmergencyInputSample(args.db, args.sessionId) === 0
-                    : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
-                materializationRequested ||
-                emergencyRewriteAlreadyPriced;
+            let routineCleanupApplied = routineCleanupRunsOnPass({
+                bands,
+                percentage: args.contextUsage.percentage,
+                emergencySample: () => getEmergencyInputSample(args.db, args.sessionId),
+                fullFeatureMode: args.fullFeatureMode,
+                routinePressureAlreadyApplied: routinePressureApplied,
+                materializationRequested,
+                rewriteAlreadyPriced: emergencyRewriteAlreadyPriced,
+            });
             // Pending ops run just before heuristics and can drop active tags.
             // Emergency floor math must see that post-op active set; otherwise
             // already-reclaimed tags stay in floorTags and the planner over-evicts.
@@ -3350,7 +3344,7 @@ export async function runPostTransformPhase(
                 routineCleanupApplied = true;
             }
             if (routineCleanupApplied && args.fullFeatureMode && executePressureEligible) {
-                routinePressureAppliedBySession.set(args.sessionId, true);
+                markRoutinePressureApplied(args.sessionId);
             }
             logTransformTiming(
                 args.sessionId,

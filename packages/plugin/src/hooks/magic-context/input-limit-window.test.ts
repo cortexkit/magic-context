@@ -4,9 +4,10 @@
  * OpenCode 1 runs the same transform as OpenCode 2 and resolves its window
  * through the same shared geometry. For a model whose declared input limit
  * (302,222) is below its context window (1,000,000), a pass sized from a local
- * count reads it against the input limit, as a provider reading does, and the
- * 95% fail-closed line sits at 95% of the input limit. Read against the context
- * less the 32,000-token output cap (968,000), both read about a third as full.
+ * count reads it against the window a provider reading does (the input limit,
+ * less any configured output reserve), and the 95% fail-closed line sits at 95%
+ * of the input limit. Read against the context less the 32,000-token output cap
+ * (968,000), both read about a third as full.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
@@ -21,7 +22,11 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import * as logger from "../../shared/logger";
-import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    clearModelsDevCache,
+    refreshModelLimitsFromApi,
+    setOutputReserveConfig,
+} from "../../shared/models-dev-cache";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { resolveContextLimit, resolveContextWindowGeometry } from "./event-resolvers";
 import { requestPendingMaterialization } from "./pending-materialization";
@@ -30,6 +35,7 @@ import { createTransform } from "./transform";
 const MODEL = { providerID: "opencode-go", modelID: "deepseek-v4.1-flash" };
 const MODEL_KEY = `${MODEL.providerID}/${MODEL.modelID}`;
 const INPUT_LIMIT = 302_222;
+const RESERVE = 100_000;
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -63,6 +69,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+    setOutputReserveConfig(undefined);
     resetEmergencyRecoveryRegistryForTest();
     clearModelsDevCache();
     closeDatabase();
@@ -164,10 +171,21 @@ describe("OpenCode 1: a declared input limit is the window of every pressure rea
         );
     });
 
-    it("reads a pass sized from a local count against the input limit", async () => {
+    it("reads a pass sized from a local count against the window provider readings use, not the hard wall", async () => {
         const sessionId = "ses-input-limit-local-count";
         const db = openDatabase();
         const pending = new Set<string>();
+        // A configured output reserve narrows the window provider readings are a
+        // share of (the input limit less the reserve) but not the hard wall (the
+        // input limit), so a count read against the wrong one reads differently.
+        setOutputReserveConfig(RESERVE);
+        const ctx = { db, sessionID: sessionId };
+        expect(resolveContextLimit(MODEL.providerID, MODEL.modelID, ctx)).toBe(
+            INPUT_LIMIT - RESERVE,
+        );
+        expect(resolveContextWindowGeometry(MODEL.providerID, MODEL.modelID, ctx)?.usableHard).toBe(
+            INPUT_LIMIT,
+        );
         // A /ctx-flush makes the pass priced; the provider has reported no usage.
         requestPendingMaterialization(pending, sessionId, "user_flush");
         const lines = await passLogs(sessionId, () =>
@@ -180,8 +198,10 @@ describe("OpenCode 1: a declared input limit is the window of every pressure rea
                 lines.join("\n"),
             );
         if (!sized) throw new Error(`no local count:\n${lines.join("\n")}`);
-        const expected = (Number(sized[1]) / INPUT_LIMIT) * 100;
-        expect(Math.abs(Number(sized[2]) - expected)).toBeLessThan(0.1);
+        const tokens = Number(sized[1]);
+        const percentage = Number(sized[2]);
+        expect(Math.abs(percentage - (tokens / (INPUT_LIMIT - RESERVE)) * 100)).toBeLessThan(0.1);
+        expect(Math.abs(percentage - (tokens / INPUT_LIMIT) * 100)).toBeGreaterThan(0.5);
     });
 
     it("refuses a provider overflow at 95% of the input limit", async () => {
