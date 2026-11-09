@@ -206,7 +206,7 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-test.failing("MCP servers that connect and disconnect leave only the newest catalog row across rebuilds and folds", async () => {
+test("MCP servers that connect and disconnect leave only the newest catalog row across rebuilds and folds", async () => {
     const fixture = isolation();
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const script = join(fixture.root, "toy-mcp.mjs");

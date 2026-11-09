@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { retiredLiveInstructionIDs } from "../fold/instruction-supersession";
 import {
+    changedDate,
     instructionRow,
     type McpServerFixture,
     replaceCodeModeCatalog,
@@ -10,6 +11,11 @@ import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
 const options = { area: "issue-886", instructions: false, temporal: false, cacheTtl: "never" };
 const both = { notice: "instructions", instructionSources: ["core/codemode", "core/mcp-guidance"] };
+const dated = { notice: "instructions", instructionSources: ["core/date"] };
+const bothDated = {
+    notice: "instructions",
+    instructionSources: ["core/codemode", "core/mcp-guidance", "core/date"],
+};
 const docs: McpServerFixture = { server: "docs", instructions: "DOCS_SERVER_GUIDANCE" };
 const github: McpServerFixture = {
     server: "github",
@@ -38,7 +44,7 @@ const catalogRow = (
         updateMcpGuidance(previous, current, "2.2.3"),
     );
 
-test.failing("an MCP server that keeps disconnecting and reconnecting leaves only the newest catalog row after a rebuild", async () => {
+test("an MCP server that keeps disconnecting and reconnecting leaves only the newest catalog row after a rebuild", async () => {
     const f = await oc2ContextFixture(30886, options);
     const pass = () =>
         f.pass((draft) => {
@@ -65,7 +71,7 @@ test.failing("an MCP server that keeps disconnecting and reconnecting leaves onl
     }
 }, 60000);
 
-test.failing("an older server's addition stays while no newer row mentions that server", async () => {
+test("an older server's addition stays while no newer row mentions that server", async () => {
     const f = await oc2ContextFixture(31886, options);
     try {
         await f.pass();
@@ -75,6 +81,70 @@ test.failing("an older server's addition stays while no newer row mentions that 
         for (const text of [addedSearch, githubGone, githubBack]) f.instruction(text, both);
         f.respond(1, 900000);
         expect(instructionTexts(await f.pass())).toEqual([addedSearch, githubBack]);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+test("a rebuilt request drops only the superseded rows and keeps the newest restatement of each source", async () => {
+    const f = await oc2ContextFixture(32886, options);
+    const pass = () =>
+        f.pass((draft) => {
+            draft.model.limit = { context: 302000 };
+        });
+    try {
+        await pass();
+        const day = (offset: number) =>
+            changedDate(new Date(Date.UTC(2026, 10, 7 + offset, 12)));
+        const githubGone = catalogRow("CATALOG_0", [docs, github], [docs]);
+        const searchAdded = catalogRow("CATALOG_1", [docs], [docs, search]);
+        const githubBack = catalogRow("CATALOG_2", [docs, search], [docs, github, search]);
+        const firstDay = day(0);
+        const githubGoneNextDay = instructionRow(
+            replaceCodeModeCatalog([`CATALOG_3 ${"tool description ".repeat(300)}`], "2.2.3"),
+            updateMcpGuidance([docs, github, search], [docs, search], "2.2.3"),
+            day(1),
+        );
+        const githubBackAgain = catalogRow("CATALOG_4", [docs, search], [docs, github, search]);
+        const latestDay = day(2);
+        const all: [string, Record<string, unknown>][] = [
+            [githubGone, both],
+            [searchAdded, both],
+            [githubBack, both],
+            [firstDay, dated],
+            [githubGoneNextDay, bothDated],
+            [githubBackAgain, both],
+            [latestDay, dated],
+        ];
+        for (const [text, metadata] of all) f.instruction(text, metadata);
+        const held = await pass();
+        expect(instructionTexts(held)).toEqual(all.map(([text]) => text));
+        f.respond(1, 260000);
+        const rebuilt = await pass();
+        // The newest catalog and github mention, the only search mention (its
+        // row is atomic, so its older catalog stays with it) and the newest date.
+        const kept = [searchAdded, githubBackAgain, latestDay];
+        expect(instructionTexts(rebuilt)).toEqual(kept);
+        const superseded = new Set(
+            all.map(([text]) => text).filter((text) => !kept.includes(text)),
+        );
+        const expected = held.draft.messages.filter(
+            (message) =>
+                message.role !== "system" ||
+                !message.content.some((part) => superseded.has(part.text ?? "")),
+        );
+        expect(JSON.stringify(rebuilt.draft.system)).toBe(JSON.stringify(held.draft.system));
+        // Everything else the held request carried is unchanged, byte for byte;
+        // the rebuilt request only appends the new reply.
+        expect(JSON.stringify(rebuilt.draft.messages.slice(0, expected.length))).toBe(
+            JSON.stringify(expected),
+        );
+        expect(rebuilt.draft.messages.slice(expected.length).map((m) => m.role)).toEqual([
+            "assistant",
+        ]);
+        expect((await pass()).bytes).toBe(rebuilt.bytes);
+        await f.restart();
+        expect((await pass()).bytes).toBe(rebuilt.bytes);
     } finally {
         await f.cleanup();
     }
