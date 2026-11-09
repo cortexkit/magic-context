@@ -345,9 +345,10 @@ export interface PiNativeDropExpectation {
 /**
  * Every dropped part whose turn Oh My Pi may replay from stored native items,
  * with the native text that would go out in its place if the drop never
- * reached that item. A signed block finds its item by id and phase, as the
- * signed mirror does; an unsigned block pairs in order, as `nativeTextSlots`
- * pairs it. Reads only; turns without a placeholder are never listed.
+ * reached that item. A signed block finds its item by id and phase, the way
+ * `rewriteNativeAssistantTexts` writes a signed edit; an unsigned block pairs
+ * in order, as `nativeTextSlots` pairs it. Reads only; turns without a
+ * placeholder are never listed.
  */
 export function piNativeDropExpectations(
 	messages: readonly unknown[],
