@@ -862,6 +862,69 @@ mod tests {
         store.save(&key, &state).unwrap();
         assert_eq!(store.load(&key), Some(state));
     }
+
+    /// A save writes a baseline's summary attribution by copying the JSON
+    /// made with its list, not by serializing the items again; those bytes
+    /// are what a full serialization of the state writes, after the items
+    /// change and after the state is loaded back.
+    #[test]
+    fn a_save_copies_the_summary_items_json_that_a_full_serialization_writes() {
+        use crate::summary::head::{SummaryItem, SummaryItems};
+        let dir = tempfile::tempdir().unwrap();
+        let key = SessionRef::new("runner", "pi", "session");
+        let saved = |path: &Path| -> String {
+            Connection::open(path)
+                .unwrap()
+                .query_row("SELECT state FROM sessions", [], |row| row.get(0))
+                .unwrap()
+        };
+        let items = |count: u64| -> Vec<SummaryItem> {
+            (1..=count)
+                .map(|id| SummaryItem {
+                    compartment_id: id.to_string(),
+                    tier: (id % 4 + 1) as u8,
+                    tokens: id * 17,
+                })
+                .collect()
+        };
+        let with_items = |summary_items: SummaryItems| Durable {
+            baseline: Some(Arc::new(Baseline {
+                summary_items,
+                through_sequence: 5,
+                m0: "<session-history>\nshort\n</session-history>".into(),
+                ..Default::default()
+            })),
+            version: 3,
+            ..Default::default()
+        };
+
+        // The save copies the list's JSON as it was made.
+        let path = dir.path().join("copied.db");
+        Store::open(&path)
+            .unwrap()
+            .save(
+                &key,
+                &with_items(SummaryItems::with_json(items(2), "[\"copied\"]")),
+            )
+            .unwrap();
+        assert!(saved(&path).contains(r#""summary_items":["copied"]"#));
+
+        let path = dir.path().join("mode3.db");
+        let store = Store::open(&path).unwrap();
+        let mut state = with_items(SummaryItems::new(items(3)));
+        store.save(&key, &state).unwrap();
+        assert_eq!(saved(&path), serde_json::to_string(&state).unwrap());
+        Arc::make_mut(state.baseline.as_mut().unwrap()).summary_items = SummaryItems::new(items(5));
+        store.save(&key, &state).unwrap();
+        let written = saved(&path);
+        assert_eq!(written, serde_json::to_string(&state).unwrap());
+
+        let loaded = store.load(&key).unwrap();
+        assert_eq!(loaded, state);
+        let again = dir.path().join("again.db");
+        Store::open(&again).unwrap().save(&key, &loaded).unwrap();
+        assert_eq!(saved(&again), written);
+    }
     #[test]
     fn version_three_migration_preserves_baselines_pending_views_and_rollback_state() {
         use cortexkit_role_compaction::read::Role;

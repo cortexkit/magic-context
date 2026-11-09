@@ -36,6 +36,12 @@ mod move_floor_tests;
 #[path = "restart_offer_tests.rs"]
 mod restart_offer_tests;
 
+#[path = "head_bytes_tests.rs"]
+mod head_bytes_tests;
+
+#[path = "summary_sharing_tests.rs"]
+mod summary_sharing_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

@@ -188,6 +188,14 @@ impl SummaryItems {
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+
+    /// A list whose saved JSON is `json` whatever the items say, to show
+    /// that a store save writes the JSON made with the list.
+    #[cfg(test)]
+    pub(crate) fn with_json(items: Vec<SummaryItem>, json: &str) -> Self {
+        let json = serde_json::value::RawValue::from_string(json.to_owned()).expect("JSON");
+        Self(Arc::new(SummaryItemList { items, json }))
+    }
 }
 
 impl Default for SummaryItems {
@@ -646,8 +654,12 @@ pub fn newer_summaries(
         )
     };
     NewerSummaries {
-        block: (!texts.is_empty())
-            .then(|| format!("<new-compartments>\n{}\n</new-compartments>", texts.join("\n\n"))),
+        block: (!texts.is_empty()).then(|| {
+            format!(
+                "<new-compartments>\n{}\n</new-compartments>",
+                texts.join("\n\n")
+            )
+        }),
         items,
     }
 }
@@ -964,6 +976,31 @@ mod tests {
             memory_budget_tokens: 4_000,
             profile_budget_tokens: 4_000,
         }
+    }
+
+    /// Building `m[1]` again with no newer summary copies no summary
+    /// attribution: the next baseline shares the list `m[0]`'s fold made.
+    /// A newer summary makes one new list, which `m[1]`'s next build with
+    /// the same summaries makes again item for item.
+    #[test]
+    fn m1_with_no_newer_summary_shares_the_baselines_summary_items() {
+        let summaries = [summary(1, 1, 4), summary(2, 5, 8), summary(3, 9, 12)];
+        let base = fold(&inputs(&summaries[..2], &[]), None);
+        assert_eq!(base.summary_items.len(), 2);
+        let (_, next, _) = delta(&base, &inputs(&summaries[..2], &[]));
+        assert!(next.summary_items.same(&base.summary_items));
+
+        let (m1, shown, _) = delta(&base, &inputs(&summaries, &[]));
+        assert!(m1.contains("Body 3"), "{m1}");
+        assert!(!shown.summary_items.same(&base.summary_items));
+        let ids: Vec<_> = shown
+            .summary_items
+            .iter()
+            .map(|item| item.compartment_id.as_str())
+            .collect();
+        assert_eq!(ids, ["1", "2", "3"]);
+        let again = newer_summaries(&shown, &summaries, inputs(&[], &[]).counter);
+        assert_eq!(again.items(), &shown.summary_items);
     }
 
     #[test]

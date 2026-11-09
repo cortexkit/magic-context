@@ -20,7 +20,9 @@ fn fixture() -> Snapshot {
         newest: 3,
         ready: true,
         meta: json!({"compartment_count":1,"newest_compartment_at_ms":40,"queued_stamp_count":0,"compartment_in_progress":false,"historian_failure_count":0,"historian_last_error":null,"memory_block_count":0,"cache_ttl":null,"last_response_time_ms":30}),
-        breakdown: Breakdown::from_value(json!({"managed":{"value":true},"as_of":{"step_ref":"m3","at_ms":30},"total":{"tokens":80,"source":"provider"},"context_window":{"tokens":100000,"source":"usage"},"parts":[{"part":"history_raw","tokens":10,"estimate":true,"count":2}],"unattributed":70,"estimation_source":"legacy_estimate"})),
+        breakdown: Breakdown::from_value(
+            json!({"managed":{"value":true},"as_of":{"step_ref":"m3","at_ms":30},"total":{"tokens":80,"source":"provider"},"context_window":{"tokens":100000,"source":"usage"},"parts":[{"part":"history_raw","tokens":10,"estimate":true,"count":2}],"unattributed":70,"estimation_source":"legacy_estimate"}),
+        ),
         compartments: vec![
             json!({"compartment_id":"1","ordinal":1,"title":"Earlier work","first_message_id":"m1","last_message_id":"m1","first_message_ordinal":1,"last_message_ordinal":1,"first_at_ms":10,"last_at_ms":10,"message_count":1,"importance":70,"summary_markdown":"A summary","tiers":{"p1":"detail","p2":"short","p3":"tiny","p4":"cue"}}),
         ],
@@ -905,4 +907,66 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
             .unwrap(),
         2
     );
+}
+
+/// A breakdown keeps its summary items apart, yet reads, compares and
+/// serializes as the one object it stands for. A checkpoint header copies
+/// the items' JSON and writes the bytes a full serialization writes.
+#[test]
+fn a_breakdown_reads_and_serializes_as_the_whole_object() {
+    #[derive(Serialize)]
+    struct Whole<'a> {
+        base: u64,
+        newest: u64,
+        ready: bool,
+        meta: &'a Value,
+        breakdown: &'a Value,
+    }
+    let summary = |id: &str, tier: u8| json!({"item":"summary","compartment_id":id,"tier":tier,"tokens":40,"source":"counted"});
+    let leading = json!({"item":"memory","tokens":2,"source":"counted"});
+    let meta = json!({"session_id":"s\u{1}\"é","compartment_count":2});
+    for whole in [
+        json!({"as_of":{"step_ref":"m\"3","at_ms":30},"items":[leading.clone(), summary("1", 2), summary("2", 1)],"managed":{"value":true},"total":{"tokens":80},"zz":"é\n"}),
+        json!({"items":[summary("1", 3)],"total":null}),
+        json!({"items":[leading.clone()],"total":1}),
+        json!({"items":[],"total":null}),
+        json!({"total":{"tokens":123}}),
+        Value::Null,
+    ] {
+        let breakdown = Breakdown::from_value(whole.clone());
+        assert_eq!(breakdown.to_value(), whole);
+        assert_eq!(serde_json::to_value(&breakdown).unwrap(), whole);
+        assert_eq!(
+            serde_json::to_string(&breakdown).unwrap(),
+            serde_json::to_string(&whole).unwrap()
+        );
+        let header = Header {
+            base: 3,
+            newest: 9,
+            ready: true,
+            meta: meta.clone(),
+            breakdown,
+        };
+        let full = serde_json::to_string(&Whole {
+            base: 3,
+            newest: 9,
+            ready: true,
+            meta: &meta,
+            breakdown: &whole,
+        })
+        .unwrap();
+        assert_eq!(header.json(), full);
+        assert_eq!(serde_json::to_string(&header).unwrap(), full);
+        let loaded: Header = serde_json::from_str(&header.json()).unwrap();
+        assert!(loaded == header);
+        assert!(Breakdown::from_value(whole.clone()) == header.breakdown);
+        if let Some(items) = whole
+            .get("items")
+            .filter(|items| !items.as_array().unwrap().is_empty())
+        {
+            let mut other = whole.clone();
+            other["items"].as_array_mut().unwrap().pop();
+            assert!(Breakdown::from_value(other) != header.breakdown, "{items}");
+        }
+    }
 }

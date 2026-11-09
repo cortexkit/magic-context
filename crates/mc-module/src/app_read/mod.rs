@@ -167,6 +167,12 @@ impl Breakdown {
         &self.value
     }
 
+    /// Whether both hold the one summary list a single update made.
+    #[cfg(test)]
+    pub(crate) fn shares_summaries(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.summaries, &other.summaries)
+    }
+
     /// Append the bytes serde_json writes for this breakdown to `out`,
     /// copying the summary items' JSON as it was made with them. JSON objects
     /// keep their members in key order, so this follows the same order.
@@ -466,16 +472,18 @@ impl Replica {
     }
 
     fn publish(&mut self, mut snapshot: Snapshot) {
-        if snapshot.breakdown.without_summaries().get("items").is_none() {
+        if snapshot
+            .breakdown
+            .without_summaries()
+            .get("items")
+            .is_none()
+        {
             // Older snapshots retain block totals, but not summary tiers or
             // part identities. Upgrade only the attribution they can prove.
             // Without an `items` list a breakdown keeps no summary items
             // apart, so its value is the whole breakdown.
             let mut breakdown = snapshot.breakdown.to_value();
-            let parts = breakdown["parts"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+            let parts = breakdown["parts"].as_array().cloned().unwrap_or_default();
             breakdown["items"] = json!(["system_prompt", "tool_definitions", "memory", "project_docs", "user_profile"].into_iter().filter_map(|name| {
                 let part = parts.iter().find(|part| part["part"] == name)?;
                 Some(json!({"item":name,"tokens":part["tokens"],"source":if matches!(name, "system_prompt" | "tool_definitions") {
