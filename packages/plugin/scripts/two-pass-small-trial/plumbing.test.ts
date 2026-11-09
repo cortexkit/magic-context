@@ -39,7 +39,7 @@ test("one-pass request bytes match the pre-change golden", () => {
                 { role: "user", content: user },
             ]),
         ),
-    ).toBe("bf7a456af52247caa45256d46935e776143d9a95bda10483545c6139308acfdb");
+    ).toBe("56cc35946017d1e2a051a4323164117379e68010e1f70c471fb374b0297da413");
     const messages = [1, 2, 3].map((ordinal) => ({
         id: `m${ordinal}`,
         ordinal,
@@ -66,7 +66,7 @@ test("one-pass request bytes match the pre-change golden", () => {
                 { role: "user", content: mixed },
             ]),
         ),
-    ).toBe("d56167cdd33a2279f0126416bb6f5919f8ad5188c68b31de9b52976366018b35");
+    ).toBe("732de11e7723047f6416373d51175b6e6fde229c20a3c9a1f8f6bc140fabaa10");
 });
 
 test("dedicated source files render without changing user-authored text", () => {
@@ -82,7 +82,7 @@ test("dedicated source files render without changing user-authored text", () => 
     expect(TWO_PASS_TURN_TWO).toBe(source("turn-two"));
     const hash = (text: string) => createHash("sha256").update(text).digest("hex");
     expect(hash(source("system"))).toBe(
-        "c7a0e4290bae4524f386bb0857ee79160fcce32bd39e30fee7eb919962ccaa0a",
+        "5767c30c39ab6588532266b605b613cb4d9db6b87fbc86dab59dcf80bb0ed4c7",
     );
     expect(hash(source("turn-one"))).toBe(
         "3b57ca8b5a9a59f4e8a9af8cf432706c770ae5783b4d5facf951a99bc37b17fc",

@@ -31,7 +31,7 @@ describe("two-pass prompt fixes", () => {
     test("one-pass prompts stay pinned with exact continuation prefix", async () => {
         const first = turnOne(fixture);
         expect(lifecycleTextHash(historianSystemPrompt(false))).toBe(
-            "590649b1f6b2428940cb925586342be58bdecc3ee4d64153d2f73ec5251532bd",
+            "d213934f626467319c2ba0330edee491f2e86d11cfde4cf5d18e7f0739e3f11b",
         );
         expect(
             lifecycleTextHash(

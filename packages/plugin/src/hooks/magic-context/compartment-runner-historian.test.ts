@@ -435,11 +435,11 @@ test("32k historian reaches the provider without a configured output cap and sur
                         {
                             id: "google",
                             models: {
-                                // Unknown calibration doubles the estimate: the system prompt alone
-                                // costs 30,108 tokens. This reserve leaves a 30,170-token input limit,
-                                // barely enough for the tiny chunk. Keep the fixture near the 32k
-                                // boundary to catch the old implicit 32,768-token output cap.
-                                "fixture-model": { limit: { context: 32_000, output: 896 } },
+                                // Unknown calibration doubles the estimate: the system prompt and
+                                // the tiny chunk cost about 30,220 tokens. This reserve leaves a
+                                // 30,266-token input limit, barely enough. Keep the fixture near the
+                                // 32k boundary to catch the old implicit 32,768-token output cap.
+                                "fixture-model": { limit: { context: 32_000, output: 800 } },
                             },
                         },
                     ],
