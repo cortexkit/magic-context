@@ -320,6 +320,35 @@ mod tests {
                 }
                 entries.push(entry);
             }
+            // Two relayed messages after the dropped notice: `m4` is another
+            // agent's brief with no notice mark, and `m5` is core's notice
+            // relaying one agent's post. Neither is the person's message.
+            for (ordinal, text, notice, agent) in [
+                (4, "Rerun the cost check", false, ("agent_brief", "BROCA")),
+                (5, "Pair confirmed", true, ("agent_post", "SUBC")),
+            ] {
+                let mut part = Part::new("p", PartBody::Text { text: text.into() });
+                part.tag = Some(ordinal);
+                let mut entry = Entry::new(
+                    ordinal,
+                    format!("m{ordinal}"),
+                    Role::User,
+                    ordinal * 10,
+                    vec![part],
+                );
+                if notice {
+                    entry.notice = Some(
+                        serde_json::from_value(json!({
+                            "sender":"prefrontal", "template":"room_post"
+                        }))
+                        .unwrap(),
+                    );
+                }
+                entry.speaks_for = Some(
+                    serde_json::from_value(json!({"agent_id": agent.0, "name": agent.1})).unwrap(),
+                );
+                entries.push(entry);
+            }
             session.index.extend_counted(entries, Some("claude-v5/1"));
             session.surface_tokens = (
                 Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(

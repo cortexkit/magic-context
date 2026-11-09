@@ -1,0 +1,141 @@
+{
+  "name": "token-breakdown",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "session_data.read",
+      "row": {
+        "as_of": {
+          "at_ms": 30,
+          "step_ref": "m3"
+        },
+        "context_window": {
+          "source": "usage",
+          "tokens": 99000
+        },
+        "estimation_source": "runner",
+        "items": [
+          {
+            "item": "system_prompt",
+            "source": "runner",
+            "tokens": 120
+          },
+          {
+            "item": "tool_definitions",
+            "source": "estimate",
+            "tokens": null
+          },
+          {
+            "item": "memory",
+            "source": "counted",
+            "tokens": 0
+          },
+          {
+            "item": "project_docs",
+            "source": "counted",
+            "tokens": 12
+          },
+          {
+            "item": "user_profile",
+            "source": "counted",
+            "tokens": 0
+          },
+          {
+            "compartment_id": "1",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 9
+          }
+        ],
+        "last_user_message_in_history_raw": false,
+        "managed": {
+          "value": true
+        },
+        "parts": [
+          {
+            "estimate": false,
+            "part": "system_prompt",
+            "tokens": 120
+          },
+          {
+            "estimate": true,
+            "part": "tool_definitions",
+            "tokens": null
+          },
+          {
+            "count": 0,
+            "estimate": false,
+            "part": "memory",
+            "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "project_docs",
+            "tokens": 12
+          },
+          {
+            "estimate": false,
+            "part": "user_profile",
+            "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "history_summaries",
+            "tokens": 44
+          },
+          {
+            "estimate": false,
+            "part": "history_raw",
+            "tokens": 3
+          },
+          {
+            "estimate": false,
+            "part": "tool_calls_results",
+            "tokens": 712
+          },
+          {
+            "estimate": false,
+            "part": "reasoning",
+            "tokens": 1001
+          },
+          {
+            "estimate": false,
+            "part": "last_user_message",
+            "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "user_messages",
+            "tokens": 3
+          },
+          {
+            "estimate": false,
+            "part": "notices",
+            "tokens": 9
+          }
+        ],
+        "total": {
+          "source": "provider",
+          "tokens": 80
+        },
+        "unattributed": 0
+      },
+      "schema": 1,
+      "section": "token_breakdown",
+      "state": "ready",
+      "version": "mca1:8a4c2ec6d9c3b4006f65ebd3de7cbcb785bd9093cfee82f3ea2ef9f8d45fd3b2"
+    }
+  }
+}
