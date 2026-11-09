@@ -30,6 +30,7 @@ fn request() -> Request {
         harness: "pi".into(),
         sessions: vec!["head-one".into(), "head-two".into()],
         dry_run: false,
+        ignore_pids: Default::default(),
     }
 }
 
@@ -571,6 +572,11 @@ fn rekey_parse_requires_complete_unambiguous_arguments() {
         vec!["--from"],
         vec!["--wat"],
         vec!["--from", "a", "--from", "b"],
+        vec!["--ignore-pid"],
+        vec!["--ignore-pid", "0"],
+        vec!["--ignore-pid", "-1"],
+        vec!["--ignore-pid", "abc"],
+        vec!["--ignore-pid", "4294967296"],
     ] {
         assert!(parse(&args).unwrap_err().starts_with("invalid_arguments"));
     }
@@ -590,4 +596,32 @@ fn rekey_parse_requires_complete_unambiguous_arguments() {
     .unwrap();
     assert_eq!(request.sessions, ["one", "two"]);
     assert!(request.dry_run);
+}
+
+#[test]
+fn rekey_parse_ignore_pid_is_repeatable_and_linux_only() {
+    let result = Request::parse(
+        [
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--harness",
+            "pi",
+            "--session",
+            "one",
+            "--ignore-pid",
+            "12",
+            "--ignore-pid",
+            "34",
+            "--ignore-pid",
+            "12",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(result.unwrap().ignore_pids, [12, 34].into_iter().collect());
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().contains("Linux-only"));
 }
