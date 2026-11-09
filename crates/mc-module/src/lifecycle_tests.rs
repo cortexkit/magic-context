@@ -45,6 +45,9 @@ mod summary_sharing_tests;
 #[path = "head_cache_differential_tests.rs"]
 mod head_cache_differential_tests;
 
+#[path = "embedding_search_tests.rs"]
+mod embedding_search_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

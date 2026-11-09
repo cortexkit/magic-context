@@ -13,16 +13,24 @@
 //!
 //! The request matches `embedding-openai.ts`: one POST to `<endpoint>/embeddings`
 //! with `model`, `input`, and `input_type`/`truncate` when set; no redirects;
-//! a 30-second limit; a response for another model is refused. A failed query
-//! embed only drops the semantic scores.
+//! a 30-second background limit and a 5-second explicit-search limit; a response
+//! for another model is refused. A failed query embed only drops semantic scores.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const QUERY_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(5);
+
+mod circuit;
+use circuit::{Attempt, Circuit};
+
+#[cfg(test)]
+pub(crate) mod circuit_tests;
 /// History chunks are sized for this many input tokens when the user names
 /// no limit; it is part of the chunk vectors' identity.
 const DEFAULT_CHUNK_MAX_INPUT_TOKENS: u64 = 512;
@@ -45,6 +53,9 @@ pub struct Provider {
     document_prefix: Option<String>,
     truncate: Option<String>,
     max_input_tokens: Option<u64>,
+    circuit: Arc<Mutex<Circuit>>,
+    fetch_timeout: Duration,
+    query_timeout: Duration,
 }
 
 impl std::fmt::Debug for Provider {
@@ -101,6 +112,9 @@ impl Provider {
             return None;
         }
         Some(Self {
+            circuit: Circuit::for_endpoint(&endpoint),
+            fetch_timeout: FETCH_TIMEOUT,
+            query_timeout: QUERY_EMBEDDING_TIMEOUT,
             endpoint,
             model,
             api_key: text(&merged, "api_key"),
@@ -130,6 +144,9 @@ impl Provider {
     #[cfg(test)]
     pub(crate) fn for_test(endpoint: &str, model: &str) -> Self {
         Self {
+            circuit: Circuit::for_endpoint(endpoint),
+            fetch_timeout: FETCH_TIMEOUT,
+            query_timeout: QUERY_EMBEDDING_TIMEOUT,
             endpoint: endpoint.to_owned(),
             model: model.to_owned(),
             api_key: None,
@@ -216,6 +233,23 @@ impl Provider {
     /// rate limited or answers for another model; the caller then searches
     /// by words only.
     pub async fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.query_with_timeout(query, self.fetch_timeout).await
+    }
+
+    /// Explicit search has a shorter semantic budget; expiry is an endpoint
+    /// timeout, not cancellation of the keyword search.
+    pub async fn embed_search_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.query_with_timeout(query, self.query_timeout).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_timeouts_for_test(mut self, fetch: Duration, query: Duration) -> Self {
+        self.fetch_timeout = fetch;
+        self.query_timeout = query;
+        self
+    }
+
+    async fn query_with_timeout(&self, query: &str, timeout: Duration) -> Option<Vec<f32>> {
         let mut input = format!(
             "{}{}",
             self.query_prefix(),
@@ -230,7 +264,12 @@ impl Provider {
         cap_input(&mut input, budget);
         let input_type = self.query_input_type.as_ref().or(self.input_type.as_ref());
         let mut vectors = self
-            .request(vec![input], input_type.map(String::as_str), "search query")
+            .request(
+                vec![input],
+                input_type.map(String::as_str),
+                "search query",
+                timeout,
+            )
             .await?;
         vectors.swap_remove(0)
     }
@@ -259,8 +298,13 @@ impl Provider {
                 input
             })
             .collect();
-        self.request(inputs, self.input_type.as_deref(), "document")
-            .await
+        self.request(
+            inputs,
+            self.input_type.as_deref(),
+            "document",
+            self.fetch_timeout,
+        )
+        .await
     }
 
     /// One `/embeddings` request, without redirects or proxies.
@@ -269,7 +313,36 @@ impl Provider {
         inputs: Vec<String>,
         input_type: Option<&str>,
         what: &str,
+        timeout: Duration,
     ) -> Option<Vec<Option<Vec<f32>>>> {
+        let attempt = Attempt::claim(&self.circuit)?;
+        // Bound headers and body together. Dropping this future for caller
+        // cancellation only releases the probe; an internal expiry counts once.
+        let result = tokio::time::timeout(timeout, self.send(inputs, input_type, timeout)).await;
+        match result {
+            Ok(Ok(vectors)) => {
+                if vectors.iter().any(Option::is_some) {
+                    attempt.success();
+                } else {
+                    attempt.failure();
+                }
+                Some(vectors)
+            }
+            Ok(Err(RequestFailure::RateLimited)) => None,
+            Ok(Err(RequestFailure::Unavailable)) | Err(_) => {
+                tracing::warn!("ck-mc: {what} embedding failed or timed out");
+                attempt.failure();
+                None
+            }
+        }
+    }
+
+    async fn send(
+        &self,
+        inputs: Vec<String>,
+        input_type: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Vec<Option<Vec<f32>>>, RequestFailure> {
         let count = inputs.len();
         let mut body = json!({"model": self.model, "input": inputs});
         if let Some(input_type) = input_type {
@@ -281,30 +354,39 @@ impl Provider {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
-            .timeout(FETCH_TIMEOUT)
+            .timeout(timeout)
             .build()
-            .ok()?;
+            .map_err(|_| RequestFailure::Unavailable)?;
         let mut request = client
             .post(format!("{}/embeddings", self.endpoint))
             .header("content-type", "application/json");
         if let Some(key) = &self.api_key {
             request = request.header("authorization", format!("Bearer {key}"));
         }
-        let response = match request.body(body.to_string()).send().await {
-            Ok(response) => response,
-            Err(_) => {
-                tracing::warn!("ck-mc: {what} embedding failed: the endpoint did not answer");
-                return None;
-            }
-        };
+        let response = request
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|_| RequestFailure::Unavailable)?;
         let status = response.status().as_u16();
-        let raw = response.bytes().await.ok()?;
-        if status != 200 {
-            tracing::warn!("ck-mc: {what} embedding failed: HTTP {status}");
-            return None;
+        // A 429 is healthy backpressure, even if its body never finishes.
+        if status == 429 {
+            return Err(RequestFailure::RateLimited);
         }
-        parse_response(&raw, &self.model, count)
+        if status != 200 {
+            return Err(RequestFailure::Unavailable);
+        }
+        let raw = response
+            .bytes()
+            .await
+            .map_err(|_| RequestFailure::Unavailable)?;
+        parse_response(&raw, &self.model, count).ok_or(RequestFailure::Unavailable)
     }
+}
+
+enum RequestFailure {
+    RateLimited,
+    Unavailable,
 }
 
 /// Cut `input` to about `budget` tokens at a character boundary, keeping its
@@ -320,7 +402,7 @@ fn cap_input(input: &mut String, budget: u64) {
 }
 
 /// The vectors in an embeddings response, one slot per input in order (an
-/// item without `index` takes its position). `None` when the envelope is
+/// unindexed response keeps array order). `None` when the envelope is
 /// malformed or names a different model than the one requested; a `None`
 /// slot when that input's vector is missing, empty or not finite.
 fn parse_response(raw: &[u8], requested: &str, count: usize) -> Option<Vec<Option<Vec<f32>>>> {
@@ -333,11 +415,20 @@ fn parse_response(raw: &[u8], requested: &str, count: usize) -> Option<Vec<Optio
             return None;
         }
     }
+    let items = body["data"].as_array()?;
+    let indexed = items.iter().any(|item| item.get("index").is_some());
+    let mut seen = std::collections::HashSet::new();
     let mut slots = vec![None; count];
-    for (position, item) in body["data"].as_array()?.iter().enumerate() {
-        let index = item["index"]
-            .as_u64()
-            .map_or(position, |index| index as usize);
+    for (position, item) in items.iter().enumerate() {
+        let index = if indexed {
+            let index = usize::try_from(item["index"].as_u64()?).ok()?;
+            if index >= count || !seen.insert(index) {
+                return None;
+            }
+            index
+        } else {
+            position
+        };
         let Some(slot) = slots.get_mut(index) else {
             continue;
         };

@@ -2298,7 +2298,7 @@ impl Session {
                         ) =>
                     {
                         provider
-                            .embed_query(query.trim())
+                            .embed_search_query(query.trim())
                             .await
                             .map(|vector| (vector, provider.model_id(), provider.chunk_model_id()))
                     }
