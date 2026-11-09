@@ -14,12 +14,14 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { __setPiHarnessKindForTesting } from "./src/pi-harness-kind";
 import { __setLocalEmbeddingPoolingTestFallback } from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
+import { getHarness, setHarness } from "@magic-context/core/shared/harness";
 import { resetReusableWorkersForTests } from "@magic-context/core/shared/reusable-worker";
 import {
 	createTestTempDir,
 	installTestTempDirCleanup,
 	sweepStaleTestTempDirs,
 } from "@magic-context/core/shared/test-temp-dir";
+import { __setPiHarnessKindForTesting } from "./src/pi-harness-kind";
 
 // Pooled threads and idle timers must not outlive the test that created them.
 afterEach(resetReusableWorkersForTests);
@@ -41,6 +43,12 @@ process.env.XDG_CONFIG_HOME = isolatedDataHome;
 process.env.XDG_STATE_HOME = isolatedDataHome;
 // Installing both host SDKs must not make fixture sessions boot as Oh My Pi.
 // Host-detection tests clear this override when they exercise real detection.
+__setPiHarnessKindForTesting("pi");
+
+// Oh My Pi (OMP) compatibility dependencies can expose pi-utils beside the test
+// runner. Select Pi before index.ts captures host detection at module load.
+// Tests simulating OMP can override detection; the cleanup guard still rejects
+// any file that leaves a non-Pi harness lock or detection memo.
 __setPiHarnessKindForTesting("pi");
 
 // Provider fixtures in this package use fake model IDs and retain the legacy mean path.
@@ -71,6 +79,34 @@ afterAll(() => {
 	if (violations.length > 0) {
 		throw new Error(
 			`Test storage leaked into the package directory:\n${violations.join("\n")}`,
+		);
+	}
+});
+
+// Preload afterAll hooks run after each file's own cleanup. Do not reset leaked
+// state here: the file that selected another host must restore Pi itself.
+afterAll(() => {
+	const violations: string[] = [];
+	try {
+		// An unused harness is unlocked and may still have the OpenCode default.
+		// Selecting Pi accepts that case but rejects any conflicting locked host.
+		setHarness("pi");
+	} catch {
+		violations.push(`harness locked to "${getHarness()}"`);
+	}
+	const detection = (
+		globalThis as typeof globalThis & {
+			[key: symbol]: { kind: string } | undefined;
+		}
+	)[Symbol.for("magic-context.pi.harness-detection")];
+	if (detection !== undefined && detection.kind !== "pi") {
+		violations.push(`detection memo is "${detection.kind}"`);
+	}
+	if (violations.length > 0) {
+		throw new Error(
+			`Pi test harness isolation leak after file cleanup: ${violations.join("; ")}. ` +
+				'Restore the harness with _resetHarnessForTesting() and setHarness("pi"), ' +
+				"and clear detection with __setPiHarnessKindForTesting(undefined).",
 		);
 	}
 });

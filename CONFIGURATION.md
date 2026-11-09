@@ -277,7 +277,7 @@ cap. Lowering this setting is not a process-memory limit.
 
 LLM providers cache conversation prefixes server-side. The cache window depends on your provider and subscription tier — Claude Pro offers 5 minutes, Max offers 1 hour, and pricing for cached vs. uncached tokens differs between API and subscription usage.
 
-Magic Context defers all mutations until the cached prefix expires. `cache_ttl` is how long Magic Context *assumes* a provider's cached prefix stays valid — it is MC's own deferral gate, not a control over the provider's cache. It does not change the provider's actual cache lifetime. The generic fallback is `"5m"`. GPT-5.6 and later (including every `gpt-6*` model) instead default to **30m**, including through `openai/`, `openai-codex/`, `openrouter/openai/`, and `azure/` prefixes. [OpenAI documents](https://developers.openai.com/api/docs/guides/prompt-caching) at least 30 minutes since the latest write or reuse (see “Cache lifetime” and “Summary of model differences”). Earlier models retain the generic fallback. You can tune it:
+Magic Context replays the cached prefix byte for byte and batches its changes into occasional rebuilds. `cache_ttl` is how long Magic Context *assumes* a provider's cached prefix stays valid. It does not change the provider's actual cache lifetime, and it does not trigger rebuilds or folds: when only the provider forgot its cache, the next request sends the same bytes, which keeps signed thinking valid and costs the same re-read. Queued changes land at the execute threshold or on a real rebuild (a model, system-prompt or tool change, or `/ctx-flush`). Magic Context uses `cache_ttl` for diagnostics (`/ctx-status`, logs) and, on OpenCode 2, to time an idle checkpoint in the host's own session store, which does not change what is sent. The experimental Rust transform (`transform_mode: "rust"`) still rebuilds on it. The generic fallback is `"5m"`. GPT-5.6 and later (including every `gpt-6*` model) instead default to **30m**, including through `openai/`, `openai-codex/`, `openrouter/openai/`, and `azure/` prefixes. [OpenAI documents](https://developers.openai.com/api/docs/guides/prompt-caching) at least 30 minutes since the latest write or reuse (see “Cache lifetime” and “Summary of model differences”). Earlier models retain the generic fallback. You can tune it:
 
 ```jsonc
 {
@@ -303,17 +303,14 @@ Precedence: explicit per-model entry → built-in known-model lifetime → objec
 
 Supported formats: `"30s"`, `"5m"`, `"1h"`.
 
-**`"never"` sentinel:** set `cache_ttl` to `"never"` to mean Magic Context *never assumes* the cached prefix expires — it disables the idle-TTL heuristic entirely. Both consumers —
-the scheduler (which converts defer passes to execute after TTL expiry) and the HARD-fold trigger (which folds
-m[1] into m[0] on a "free" prefix rebuild) — no longer act on idle time. Use this on lanes kept warm by an
-external keepwarm mechanism (prewarm proxies, dedicated cache-keep tools) where the idle heuristic false-positives
-and causes paid full-prefix cache-writes. After a genuine cold start (e.g. the keepwarm process died), MC
-won't detect the free-fold window on that lane — mutations then apply only at the execute threshold.
+**`"never"` sentinel:** set `cache_ttl` to `"never"` to mean Magic Context *never assumes* the cached prefix expires:
+`/ctx-status` shows no expiry, and OpenCode 2 schedules no idle checkpoint. Use this when an external keepwarm
+mechanism (prewarm proxies, dedicated cache-keep tools) keeps the provider's cache warm.
 
 `"never"` only changes MC's assumption; it does not extend the provider's cache lifetime. Provider-side extended
 TTL is a separate request-level concern (`cache_control: { ttl: "1h" }` in the request body).
 
-Higher-tier models with longer cache windows benefit from a longer TTL. Setting it too low wastes cache hits. Setting it too high delays reduction on long sessions.
+Set it to your provider's real cache lifetime so the diagnostics match what the provider does. It does not change when queued changes land.
 
 ---
 
@@ -326,7 +323,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `auto_update` | `boolean` | `true` | User-config-only plugin self-update toggle; project configs cannot disable it. |
 | `fail_closed_blocking` | `boolean` | `true` | User-config-only. When Magic Context cannot operate (schema fence mismatch, storage open/migration failure), block the primary-session prompt with a loud recovery error instead of silently degrading to native compaction. Set `false` only to restore the old degrade-silently behavior (not recommended). Project configs cannot set this. |
 | `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, as a 2-letter ISO 639-1 code, for example `"tr"`, `"es"`, or `"pt"`. Structural tokens stay in English. |
-| `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
+| `cache_ttl` | `string` or `object` | `"5m"` | How long Magic Context assumes the provider keeps its cache. Used for diagnostics; it triggers no rebuild. String or per-model map. |
 | `output_reserve` | `number` or `object` | automatic | User-config-only output-token reservation override. `0` disables reservation; supports per-model maps. See below. |
 | `protected_tokens` | absolute integer (4,000–1,000,000) | derived | Token floor protected from automatic reclaim. This is a token count, not a tag count — values below 4,000 are rejected with a pointer message. When omitted, derives as `clamp(round(0.05 × usableSoft), min(16,000, round(0.08 × usableSoft)), 64,000)`. Project config may only raise the resolved user-or-derived floor. |
 | `toast_duration_ms` | `number` (0–60000) | `5000` | TUI toast lifetime for Magic Context notifications in milliseconds. Increase this if toasts disappear too quickly, or set to `0` to disable Magic Context toasts entirely. |

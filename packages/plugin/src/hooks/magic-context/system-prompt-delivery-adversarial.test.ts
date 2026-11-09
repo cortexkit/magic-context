@@ -609,13 +609,19 @@ async function independentCause(edited: boolean, cause: IndependentCause) {
     }
 }
 
-for (const cause of ["ttl", "model"] as const)
-    for (const edited of [false, true] as const)
-        test(`system delivery: v1 ${edited ? "accepted held edit" : "no edit"} leaves queued drop for one independent ${cause} rebuild`, async () => {
-            // Idle expiry or a model change is a rebuild cause unrelated to the system
-            // edit, so the queued drop must be applied on this pass.
-            expect((await independentCause(edited, cause)).pending).toBe(0);
-        });
+for (const edited of [false, true] as const)
+    test(`system delivery: v1 ${edited ? "accepted held edit" : "no edit"} leaves queued drop for one independent model rebuild`, async () => {
+        // A model change is a rebuild cause unrelated to the system edit, so the
+        // queued drop must be applied on this pass.
+        expect((await independentCause(edited, "model")).pending).toBe(0);
+    });
+
+for (const edited of [false, true] as const)
+    test(`system delivery: v1 ${edited ? "accepted held edit" : "no edit"} keeps the queued drop through an idle expiry`, async () => {
+        // An idle expiry only means the provider forgot the cache. The request
+        // replays byte-identically, so the queued drop waits for a real rebuild.
+        expect((await independentCause(edited, "ttl")).pending).toBe(1);
+    });
 
 // This fixture's pressure passes do not drain the queued drop even without an
 // edit, so the claim checked here is equivalence with that baseline. The one

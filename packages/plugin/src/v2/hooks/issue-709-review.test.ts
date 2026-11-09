@@ -545,7 +545,9 @@ scaleTest(
                             seed,
                             hard: first.logs.filter((line) => /HARD.*executed=true/.test(line)),
                         });
-                    if (previous && ![5, 7, 9, 11].includes(step)) {
+                    // An idle expiry (step 7) replays the previous bytes like any
+                    // warm pass: only the provider forgot the cache.
+                    if (previous && ![5, 9, 11].includes(step)) {
                         if (!fresh)
                             expect(first.bytes, `same input seed ${seed} step ${step}`).toBe(
                                 previous.bytes,
@@ -569,7 +571,7 @@ scaleTest(
                         expect(
                             first.logs.some(
                                 (line) =>
-                                    /first_render|ttl_idle|bustsServedPrefix=true/.test(line) ||
+                                    /first_render|bustsServedPrefix=true/.test(line) ||
                                     (step === 11 && line.includes("HARD reason=boot_recovery")),
                             ),
                             `compression first-apply seed ${seed} step ${step}: ${JSON.stringify({ newCompression, hard: first.logs.filter((line) => line.includes("HARD")) })}`,
@@ -595,14 +597,13 @@ scaleTest(
                     expect(f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0])).toEqual(
                         depthsBeforeReplay,
                     );
-                    if (step !== 7)
-                        expect(
-                            second.logs.some((line) =>
-                                /transform scheduler: .*decision=defer/.test(line),
-                            ),
-                            `seed ${seed} step ${step}: ${second.logs.join("\n")}`,
-                        ).toBe(true);
-                    if (step === 7) expect(first.logs.join("\n")).toContain("ttl_idle");
+                    expect(
+                        second.logs.some((line) =>
+                            /transform scheduler: .*decision=defer/.test(line),
+                        ),
+                        `seed ${seed} step ${step}: ${second.logs.join("\n")}`,
+                    ).toBe(true);
+                    if (step === 7) expect(first.logs.join("\n")).not.toContain("ttl_idle");
                     if (second.bytes !== first.bytes)
                         changes.push({ seed, step, logs: second.logs });
                     previous = second;

@@ -706,8 +706,14 @@ beforeAll(async () => {
     await promptV1("cooldown turn after the 1.x historian caught up.");
 
     // A real tool arc, so the flip carries tool tags and a tool-shaped message as
-    // well as plain text.
-    writeFileSync(join(fixture.cwd, "conversion-notes.txt"), `${ballast(200)}\n`);
+    // well as plain text. The file is several thousand tokens long, more than the
+    // protected tail of this 64k window, so the earlier turns leave that tail and
+    // the reduction below can land on one of them. Many short lines, because the
+    // read tool truncates long lines.
+    writeFileSync(
+        join(fixture.cwd, "conversion-notes.txt"),
+        `${Array.from({ length: 120 }, () => ballast(100)).join("\n")}\n`,
+    );
     let readIssued = false;
     mock.addMatcher((body) => {
         if (isHistorianRequest(body) || readIssued) return null;
@@ -761,13 +767,15 @@ beforeAll(async () => {
 
     // A reduction driven through the real tool rather than inserted, because the
     // part-tag fold the rebase performs only has to respect drops the agent
-    // actually asked for.
+    // actually asked for. It targets the oldest message the agent can still see:
+    // older tags already left the request with the historian's own drops or
+    // behind the compaction marker, and ctx_reduce queues nothing for them.
     const firstTag = contextRows<{ tagNumber: number }>(
         fixture,
-        "SELECT tag_number AS tagNumber FROM tags WHERE session_id = ? AND type = 'message' ORDER BY tag_number LIMIT 1",
+        "SELECT tag_number AS tagNumber FROM tags WHERE session_id = ? AND type = 'message' AND status = 'active' ORDER BY tag_number LIMIT 1",
         sessionId,
     )[0];
-    if (!firstTag) throw new Error("no message tag to reduce");
+    if (!firstTag) throw new Error("no active message tag to reduce");
     let reduceIssued = false;
     mock.addMatcher((body) => {
         if (isHistorianRequest(body) || reduceIssued) return null;
@@ -786,6 +794,29 @@ beforeAll(async () => {
         };
     });
     await promptV1("reduce the oldest tag so the ledger carries a real reduction.");
+    await until(
+        () =>
+            contextRows<{ tagId: number }>(
+                fixture,
+                "SELECT tag_id AS tagId FROM pending_ops WHERE session_id = ? AND tag_id = ?",
+                sessionId,
+                firstTag.tagNumber,
+            ).length > 0,
+        "the ctx_reduce drop to be queued",
+        30_000,
+    );
+    // At this quiet usage a queued drop waits for a real rebuild of the request.
+    // Ask for one with /ctx-flush, as a user would, and send the prompt it lands on.
+    const flushed = await fetch(
+        `${v1.url}/session/${sessionId}/command?directory=${encodeURIComponent(fixture.cwd)}`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ command: "ctx-flush", arguments: "" }),
+        },
+    );
+    if (!flushed.ok) throw new Error(`1.x /ctx-flush failed: ${flushed.status} ${await flushed.text()}`);
+    await promptV1("continue after the flush so the queued reduction lands.");
     await until(
         () =>
             contextRows<{ status: string }>(

@@ -97,21 +97,21 @@ export function contextUsagePassSnapshot(sessionMeta: SessionMeta): ContextUsage
 /**
  * The provider's last usage reading, saved in session_meta, when it still
  * describes this pass's request: the same model, the same context limit, and a
- * last response recent enough that the provider cache is still warm. A pass
- * whose in-memory reading was reset (the first pass after a process restart)
- * reads its pressure from this before falling back to a local estimate.
+ * served response behind it. A pass whose in-memory reading was reset (the
+ * first pass after a process restart) reads its pressure from this before
+ * falling back to a local estimate.
  *
  * Both the model key and the limit must be known and equal. A reading taken
  * on another model or against another limit is a different percentage basis,
- * so it is not used. The TTL check mirrors the scheduler's idle clock: once the
- * TTL has elapsed the prefix is rebuilt anyway and the reading may be stale.
+ * so it is not used. The age of the reading is deliberately not checked: an
+ * expired provider cache rebuilds nothing, so the last request the provider
+ * measured is still the best basis for this one.
  */
 export function savedProviderReadingForPass(input: {
     persisted: PersistedUsageState | null | undefined;
     currentModelKey: string | undefined;
     contextLimit: number | undefined;
     lastResponseTime: number;
-    cacheExpired: boolean;
 }): ContextUsage | null {
     const persisted = input.persisted;
     if (!persisted) return null;
@@ -124,7 +124,72 @@ export function savedProviderReadingForPass(input: {
     ) {
         return null;
     }
-    if (!(input.lastResponseTime > 0) || input.cacheExpired) return null;
+    if (!(input.lastResponseTime > 0)) return null;
+    if (
+        persisted.lastObservedModelKey === null ||
+        input.currentModelKey === undefined ||
+        input.currentModelKey.length === 0 ||
+        piModelRefToCanonical(persisted.lastObservedModelKey) !==
+            piModelRefToCanonical(input.currentModelKey)
+    ) {
+        return null;
+    }
+    if (
+        typeof input.contextLimit !== "number" ||
+        !(input.contextLimit > 0) ||
+        persisted.lastUsageContextLimit !== input.contextLimit
+    ) {
+        return null;
+    }
+    return { percentage, inputTokens };
+}
+
+/**
+ * The saved provider reading that the first pass after a process restart uses
+ * for its scheduler decision, and for nothing else.
+ *
+ * That pass clears the saved reading, so the force band, overflow recovery,
+ * the 95% emergency, refusals and nudges never act on a measurement taken
+ * before the restart. Clearing it for the execute decision too would only
+ * delay work the session already owes: a reading at or above the execute
+ * threshold means the next measured pass decides "execute" anyway. When the
+ * provider cache went cold while the host was down, that one-pass delay costs
+ * a second full prefix write.
+ *
+ * The reading counts when it was taken on the same model and against the same
+ * context limit (another limit makes it a percentage of a different window),
+ * is at or above the threshold, and the pass's own reading is below it.
+ * Otherwise this returns null and the scheduler sees the cleared reading, as
+ * before.
+ *
+ * An expired cache does not disqualify the reading: idle time says nothing
+ * about how large the request is. An expired cache is also when deferring
+ * matters most: the provider must write the whole cached prompt prefix again
+ * on this request anyway, and an execute pass postponed to the next request
+ * rewrites it a second time.
+ */
+export function firstPassExecuteReading(input: {
+    persisted: PersistedUsageState | null | undefined;
+    currentModelKey: string | undefined;
+    contextLimit: number | undefined;
+    lastResponseTime: number;
+    executeThresholdPercentage: number;
+    passPercentage: number;
+}): ContextUsage | null {
+    if (!(input.passPercentage < input.executeThresholdPercentage)) return null;
+    const persisted = input.persisted;
+    if (!persisted) return null;
+    const { percentage, inputTokens } = persisted.usage;
+    if (
+        !Number.isFinite(percentage) ||
+        percentage < input.executeThresholdPercentage ||
+        !Number.isFinite(inputTokens) ||
+        inputTokens <= 0
+    ) {
+        return null;
+    }
+    // A reading with no recorded provider reply was not measured for this session.
+    if (!(input.lastResponseTime > 0)) return null;
     if (
         persisted.lastObservedModelKey === null ||
         input.currentModelKey === undefined ||

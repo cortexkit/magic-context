@@ -1862,9 +1862,9 @@ export async function registerContext(context: V2Context) {
                 ),
                 toolDefinitionsHash: toolDefinitionsHashes.get(draft.sessionID),
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
-                // materializeM0 does not read cacheExpired. mustMaterialize owns
-                // expiry decisions on the transform path; this fold always renders
-                // fresh bytes and keys its markers from the system and model hashes.
+                // materializeM0 does not read cacheExpired, and no fold decision
+                // does: this fold always renders fresh bytes and keys its markers
+                // from the system and model hashes.
                 cacheExpired: false,
                 lastResponseTime: state.lastResponseTime,
             },
@@ -3244,7 +3244,8 @@ export async function registerContext(context: V2Context) {
                         const meta = getOrCreateSessionMeta(db, draft.sessionID);
                         // Timers do not survive reloads. Recover an expired window
                         // only after the shared transform has actually rebuilt the
-                        // cold request. A pass that only replays a still-cached
+                        // request for some other reason (an expired cache alone
+                        // never rebuilds). A pass that only replays the served
                         // request must never queue a host compaction.
                         if (
                             computeHardCacheExpired(

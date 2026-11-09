@@ -181,17 +181,18 @@ function evaluate(id: string, input: Input) {
                 { providerID: "anthropic", budgetCutoff: 0 },
                 { hardFold: false, force: input.usage >= force && (input.usage >= 95 || !input.emergency_latched),
                     explicitFlush: false, publishedHistory: false,
-                    permission: { signedThinkingHold: signed, firstRender: false, idleExpiry: false, emergency: input.usage >= force } },
+                    permission: { signedThinkingHold: signed, firstRender: false, emergency: input.usage >= force } },
                 undefined, execute).shouldFire);
             if (summary_may_start) meta.compartmentInProgress = true;
         }
         let sample = input.emergency_latched ? 1 : 0;
+        // An expired provider cache is no input here: it is not a ride, so a
+        // cache_expired row decides exactly as the same row with a warm cache.
         const decision = decidePassMutation({ fullFeatureMode: input.primary, compactionOff: false,
             schedulerDecision: execute ? "execute" : "defer", contextPercentage: input.usage,
             forceMaterializationPercentage: force, contextUsageFromEstimate: false,
             emergencyInputSample: () => sample, forceTriggerPermitted: true, servedShapeRepair: false,
             rewritingSignedPrefix: false, foldBustsServedPrefix: false, firstRenderBust: false,
-            idleExpiryRebuild: input.cache_expired, heldIdleExpiryRebuild: signed && input.cache_expired,
             explicitFlush: false, publishedHistory: false, historyRebuiltThisPass: false,
             materializationRequested: false, alreadyRanThisTurn: input.routine_already_applied,
             signedThinkingHold: signed,
@@ -199,18 +200,18 @@ function evaluate(id: string, input: Input) {
             heldPasses: input.held_passes, summaryCanCome: meta.compartmentInProgress || summary_may_start || readExecuteReclaimState(db, id).floorOrdinal !== null,
             reclaimableTokens: input.queued_tokens, usableWindow: usable }).admitted);
         const priced = emergencyRewriteAlreadyPriced({ pendingOpsDidMutate: decision.shouldApplyPendingOps && input.queued_tokens > 0,
-            foldBustsServedPrefix: false, firstRenderBust: false, heldIdleExpiryRebuild: signed && input.cache_expired,
+            foldBustsServedPrefix: false, firstRenderBust: false,
             historyRebuiltThisPass: false, compartmentInjectionRebuiltFromDb: false, rebuiltHistoryFromInitialPrepare: false });
-        if (emergencyEpisodeRearms({ emergencyDropEligible: decision.emergencyDropEligible, rewriteAlreadyPriced: priced,
+        if (emergencyEpisodeRearms({ forceBandConfirmed: decision.forceBandConfirmed, rewriteAlreadyPriced: priced,
             emergencyInputSample: () => sample })) sample = 0;
-        const emergency_drop = decision.shouldRunHeuristics && decision.emergencyDropEligible && !emergencyEpisodeLatched(sample > 0, input.usage);
+        const emergency_drop = decision.shouldRunHeuristics && decision.forceBandConfirmed && !emergencyEpisodeLatched(sample > 0, input.usage);
         const routine = decision.shouldRunHeuristics && (emergency_drop || routineCleanupAdmitted({
-            emergencyDropEligible: decision.emergencyDropEligible, contextPercentage: input.usage, emergencyInputSample: () => sample,
+            forceBandConfirmed: decision.forceBandConfirmed, contextPercentage: input.usage, emergencyInputSample: () => sample,
             fullFeatureMode: input.primary, routinePressureAlreadyApplied: input.routine_already_applied,
             materializationRequested: false, rewriteAlreadyPriced: priced }));
         return { threshold, execute, force: decision.emergencyDropEligible,
             hold: !prefixMutationPermitted({ signedThinkingHold: signed, firstRender: false,
-                idleExpiry: input.cache_expired, emergency: decision.emergencyDropEligible }),
+                emergency: decision.forceBandConfirmed }),
             rebuild: decision.publishedWorkDrainAllowed, floor_marked: readExecuteReclaimState(db, id).floorOrdinal !== null, queued_drops: decision.shouldApplyPendingOps,
             heuristics: routine, reasoning: routine && !input.prefix_bound, emergency_drop, summary_may_start };
     } finally { closeDatabase(); }

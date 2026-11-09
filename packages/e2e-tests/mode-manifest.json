@@ -213,7 +213,7 @@
             "path": "tests/cache-ttl-live-config.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Issue 624: real OpenCode 1 reloads edited user TTL before the next idle decision, preserves provider prefix bytes on a raise, and lowers only through ttl_idle; PID lsof proves throwaway-store containment",
+            "rationale": "Issue 624, revised for the rule that an expired provider cache is not a rebuild reason: real OpenCode 1 reloads an edited user TTL live; raising it above the idle or lowering it below changes neither the provider prefix bytes nor the scheduler's defer, and the expiry shows only as the ttl_idle diagnostic row; PID lsof proves throwaway-store containment",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
         },
@@ -261,7 +261,7 @@
             "path": "tests/idle-ttl-restart.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "The Rust invocation is retired with transform_mode, so this file now runs only in the TypeScript lanes. Before: Shared served-completion idle clock and OpenCode 1 late-system abort/resend byte replay, including Rust module frozen identity, consumed-fold watermark and idle attribution; Pi/OMP and native OpenCode 2 cover the TS portable idle behavior (v2 lacks the v1 decision-row binding)",
+            "rationale": "The Rust invocation is retired with transform_mode, so this file now runs only in the TypeScript lanes. Before: Shared served-completion idle clock and OpenCode 1 late-system abort/resend byte replay: the request after an idle gap replays the one before it, queued drops and the frozen system date wait for /ctx-flush, which lands them; Rust mode still folds the expired head and keeps the module's frozen identity, consumed-fold watermark and idle attribution; Pi/OMP and native OpenCode 2 cover the TS portable idle behavior (v2 lacks the v1 decision-row binding)",
             "contract_refs": ["S2-MIGRATION"],
             "hosts": ["opencode", "pi", "omp", "opencode2"],
             "behavior": true
@@ -755,7 +755,7 @@
                 "ts": true,
                 "rust": false
             },
-            "rationale": "the idle clock is stamped by each host's own event delivery (Pi message_end for prompts, tool results and failed requests; OpenCode message.updated for assistant messages); the scenario waits past a short cache TTL on a real host and checks that queued drops apply on the next pass, including after a refused request",
+            "rationale": "the idle clock is stamped by each host's own event delivery (Pi message_end for prompts, tool results and failed requests; OpenCode message.updated for assistant messages); the scenario waits past a short cache TTL on a real host and checks that the next request replays the previous one with the queued drop still pending, that a refused request leaves the idle clock alone, and that the drop lands on /ctx-flush",
             "contract_refs": [
                 "TS-HARNESS"
             ],

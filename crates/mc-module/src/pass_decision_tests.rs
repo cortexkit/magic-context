@@ -262,46 +262,6 @@ const DIFFERENCES: &[Difference] = &[
         rust: true,
     },
     Difference {
-        rows: &["cache-true-true-false", "cache-true-true-true", "cache-false-true-false", "cache-false-true-true"],
-        fields: &["execute"],
-        rule: "PD7",
-        reason: "Cache expiry is a runner ride in mode 3, not a TTL-induced execute classification.",
-        typescript: true,
-        rust: false,
-    },
-    // The three entries below come from the forgotten-cache ride rule: a ride
-    // whose causes only say the provider forgot its cache (expiry, a chain
-    // reset, a tier or account switch) is no rebuild permission and lifts no
-    // signed-thinking hold. The checked-in table still encodes the plugin's
-    // older rule, under which an expiry permits a rebuild and lifts the hold.
-    // Once the table is regenerated from a plugin with the same rule, these
-    // entries go stale, and this test fails until they are removed or
-    // restated.
-    Difference {
-        rows: &["cache-true-true-false", "cache-false-true-false"],
-        fields: &["rebuild", "queued_drops", "heuristics", "reasoning"],
-        rule: "PD7",
-        reason: "A forgotten-cache ride below the execute threshold answers nothing in mode 3; the table predates that rule and still lands every lane on expiry.",
-        typescript: true,
-        rust: false,
-    },
-    Difference {
-        rows: &["cache-true-true-true", "cache-false-true-true"],
-        fields: &["rebuild", "queued_drops", "heuristics"],
-        rule: "PD7",
-        reason: "A forgotten-cache ride below the execute threshold answers nothing in mode 3; the table predates that rule and still lands every lane on expiry.",
-        typescript: true,
-        rust: false,
-    },
-    Difference {
-        rows: &["cache-true-true-true", "cache-false-true-true"],
-        fields: &["hold"],
-        rule: "PD7",
-        reason: "A forgotten-cache ride keeps the signed-thinking hold in mode 3, since resending the same bytes keeps the thinking valid; the table predates that rule and lifts the hold on expiry.",
-        typescript: false,
-        rust: true,
-    },
-    Difference {
         rows: &["latch-true-85-0", "latch-true-94.9-0"],
         fields: &["rebuild", "queued_drops", "heuristics", "reasoning"],
         rule: "PD5, PD9",
@@ -318,10 +278,29 @@ const DIFFERENCES: &[Difference] = &[
         rust: true,
     },
     Difference {
-        rows: &["latch-false-85-0", "latch-false-94.9-0", "routine-true"],
+        rows: &["latch-false-85-0", "latch-false-94.9-0"],
         fields: &["heuristics", "reasoning"],
         rule: "PD9",
         reason: "Mode 3 runs ordinary cleanup on every permitted rebuild instead of applying the plugin's turn and pressure-episode limits.",
+        typescript: false,
+        rust: true,
+    },
+    // This row's only TypeScript rebuild used to come from the idle-expiry
+    // ride. An expired provider cache is no ride any more, so the row now shows
+    // the same bounded queued-work rule as the queue rows above.
+    Difference {
+        rows: &["routine-true"],
+        fields: &["rebuild", "queued_drops"],
+        rule: "PD9",
+        reason: "Mode 3 removes the bounded queued-work exception: an execute with no summary admits every lane even below 2% and before the third held pass.",
+        typescript: false,
+        rust: true,
+    },
+    Difference {
+        rows: &["routine-true"],
+        fields: &["heuristics", "reasoning"],
+        rule: "PD9",
+        reason: "TypeScript's execute pass does not rebuild here (no queued work, first held pass), so no cleanup runs; Mode 3 rebuilds and runs ordinary cleanup on every permitted rebuild instead of applying the plugin's turn and pressure-episode limits.",
         typescript: false,
         rust: true,
     },

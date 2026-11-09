@@ -536,7 +536,7 @@ for (const cause of ["first render", "idle expiry"] as const) {
 	test(
 		cause === "first render"
 			? "Pi rewriting first render strips all thinking and admits queued work"
-			: "Pi idle expiry admits suffix work while keeping every signed block",
+			: "Pi idle expiry admits no work on a held pass and keeps every signed block",
 		async () => {
 			const db = createTestDb();
 			const sessionId = `pi-held-priced-${cause}`;
@@ -644,13 +644,19 @@ for (const cause of ["first render", "idle expiry"] as const) {
 					});
 				queuePendingOp(db, sessionId, late.tagNumber, "drop");
 				const priced = await pass();
-				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+				// A first render rebuilds the prefix anyway, so the queued drop rides
+				// it. An idle expiry only means the provider forgot the cache: the
+				// hold stands and the queued drop waits.
+				const firstRender = cause === "first render";
+				expect(getPendingOps(db, sessionId)).toHaveLength(firstRender ? 0 : 1);
 				expect(
 					getTagsBySession(db, sessionId).find(
 						(tag) => tag.tagNumber === late.tagNumber,
 					)?.status,
-				).toBe("dropped");
-				expect(JSON.stringify(priced)).not.toContain("SAFE-LATE-CONTENT");
+				).toBe(firstRender ? "dropped" : "active");
+				expect(JSON.stringify(priced).includes("SAFE-LATE-CONTENT")).toBe(
+					!firstRender,
+				);
 				if (cause === "first render") {
 					expect(JSON.stringify(priced)).not.toContain("thinkingSignature");
 					expect([...getMergedReasoningStrippedIds(db, sessionId)]).toContain(

@@ -882,14 +882,14 @@ export async function persistPiPressureFromMessageEnd(args: {
 		cacheAlertSent: boolean;
 	}> = {};
 	// last_response_time is the idle clock for the provider cache: the
-	// scheduler's TTL execute and the ttl_idle HARD fold both measure from it.
+	// cache-expiry status and the system date refresh measure from it.
 	// Usage or successful terminal completion proves a served response. Pi's
 	// timestamp is the message start, so stamp at message_end, not at that start.
 	// Pi also emits message_end for the user's own prompt (before that
 	// prompt's context pass), for tool results, and for failed requests (a
 	// quota error arrives as an assistant message with zero usage). Stamping
 	// on those made a pass after a long idle look like it followed a fresh
-	// response, so it deferred and queued drops never applied.
+	// response.
 	const assistant =
 		args.message && typeof args.message === "object"
 			? (args.message as {

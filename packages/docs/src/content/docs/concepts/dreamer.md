@@ -9,6 +9,8 @@ The dreamer is an optional background agent that runs during idle time to mainta
 
 Each dreamer task runs on its **own cron schedule** — there is no single dreamer "run." A process-wide timer checks every task's schedule and runs the ones that are due. You can also trigger a run manually at any time with `/ctx-dream` (all enabled tasks) or `/ctx-dream <task>` (one specific task, run immediately).
 
+The timer runs inside the host (OpenCode or Pi), and only for projects that a running host has open. A project with no host open is not dreamed. A task whose time passed while nothing was open runs at the timer's next check after a host opens that project again.
+
 Schedules are standard 5-field cron expressions, or `""` to disable a task:
 
 | Cron | Meaning |
@@ -20,7 +22,7 @@ Schedules are standard 5-field cron expressions, or `""` to disable a task:
 | `""` | Disabled (still runnable manually via `/ctx-dream <task>`) |
 
 :::tip
-The dreamer pairs well with local or inexpensive models. Nobody is waiting — it runs while you sleep or work on something else.
+The dreamer pairs well with local or inexpensive models. Nobody is waiting — it runs in the background while you work on something else, or overnight if the host stays open.
 :::
 
 ## The tasks
@@ -81,4 +83,4 @@ The dreamer aborts remaining tasks after three consecutive identical-error failu
 
 ## How it connects
 
-The dreamer maintains the [project memory](/concepts/memory/) that the [historian](/concepts/historian/) builds. It runs on a schedule independent of your sessions. Its output feeds back into the [context pipeline](/concepts/overview/) — better memories mean better recall, and maintained docs mean the agent always has current architecture context.
+The dreamer maintains the [project memory](/concepts/memory/) that the [historian](/concepts/historian/) builds. It runs on its own schedule, separate from your conversations, while a host has the project open. Its output feeds back into the [context pipeline](/concepts/overview/) — better memories mean better recall, and maintained docs mean the agent always has current architecture context.

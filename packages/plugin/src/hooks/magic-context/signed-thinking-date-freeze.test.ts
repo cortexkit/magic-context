@@ -599,17 +599,17 @@ for (const host of HOSTS)
 // is the intended trade: a stale date only costs the model accuracy about
 // today, while a moved date in front of served signed thinking invalidates
 // that thinking and the provider rejects the request. So compaction-off
-// asserts the first day's date on every day. Managed mode is run alongside:
-// its idle-expired request rebuilds the prefix and strips the earlier
-// thinking, so its date follows the calendar and the case asserts the current
-// date by the last day.
+// asserts the first day's date on every day. Managed mode is run alongside: an
+// idle expiry only means the provider forgot its cache, so the pass replays
+// the same bytes and keeps the earlier thinking, and the date stays frozen
+// through every idle day as well. It moves on the next real rebuild (here a
+// /ctx-flush that lands a queued drop on the last day), which changes bytes in
+// front of the signed thinking, strips it, and so frees the date.
 for (const host of HOSTS)
     for (const compactionOff of [true, false])
-        it(`${host}: ${compactionOff ? "compaction-off" : "managed"}: one idle-expired turn a day for five days serves ${compactionOff ? "the first day's frozen date throughout" : "the current date by the last day"}`, async () => {
-            const s = session(host, `sdf-date-days-${host}-${compactionOff}`, {
-                compactionOff,
-                memory: true,
-            });
+        it(`${host}: ${compactionOff ? "compaction-off" : "managed"}: one idle-expired turn a day for five days serves the first day's frozen date throughout${compactionOff ? "" : ", then the current date after a real rebuild"}`, async () => {
+            const sessionId = `sdf-date-days-${host}-${compactionOff}`;
+            const s = session(host, sessionId, { compactionOff, memory: true });
             const days = ["2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24", "2026-10-25"];
             const served: string[] = [];
             let n = 0;
@@ -627,10 +627,23 @@ for (const host of HOSTS)
                     if (k === 2) served.push(out.prompt?.match(/Date: (\S+)/)?.[1] ?? "?");
                 }
             }
+            expect(served).toEqual(days.map(() => days[0]));
+            if (!compactionOff) {
+                const today = days.at(-1)!;
+                s.dropOldestTool();
+                // /ctx-flush queues two things: a forced rebuild of m[0]/m[1],
+                // which lands the queued drop and strips the earlier signed
+                // thinking, and a system-prompt refresh, which lets that
+                // rebuilding pass move the date.
+                s.flush();
+                s.systemPromptRefreshSessions.add(sessionId);
+                s.step(++n, 200);
+                const rebuilt = await s.pass(today);
+                served.push(rebuilt.prompt?.match(/Date: (\S+)/)?.[1] ?? "?");
+                expect(served.at(-1)).toBe(today);
+            }
             report(`${host} off=${compactionOff} five days`, s, { served });
             expect(s.problems).toEqual([]);
-            if (compactionOff) expect(served).toEqual(days.map(() => days[0]));
-            else expect(served.at(-1)).toBe(days.at(-1));
         }, 60_000);
 
 // ── A store-generation rebase clears the saved prompt hash before the system

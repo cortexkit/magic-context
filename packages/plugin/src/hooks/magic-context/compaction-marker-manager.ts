@@ -289,6 +289,10 @@ export function applyDeferredCompactionMarker(
     pending: PendingCompactionMarker,
     directory?: string,
     trustedBoundary?: TrustedMaterializedCompactionBoundary,
+    /** validateOnly: run only the checks that need no summary discovery and stop
+     * before the cut. A stale or already-covered target is then reported as
+     * usual; every other outcome means the cut is still to be done. */
+    options: { validateOnly?: boolean } = {},
 ): MarkerUpdateOutcome {
     let cut: "definitely-no-cut" | "uncertain" = "uncertain";
     // Step timings for the applied-drain log line. The drain reads both stores
@@ -387,6 +391,7 @@ export function applyDeferredCompactionMarker(
             return { kind: "stale-skip", reason: "partial-message-boundary" };
         }
         endStep("discardCheck");
+        if (options.validateOnly) return { kind: "deferred", reason: "candidate-preparation" };
 
         // Replace both host-store row sets under one BEGIN IMMEDIATE. A busy
         // store fails before deletion; any later failure rolls the deletion back.

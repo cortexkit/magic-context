@@ -13,7 +13,7 @@ import {
     __resetMessageIndexAsyncForTests,
     isSessionReconciled,
 } from "../../features/magic-context/message-index-async";
-import { createScheduler } from "../../features/magic-context/scheduler";
+import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     seedRetainedSession,
@@ -1261,27 +1261,24 @@ describe("createEventHandler", () => {
             },
         ])
             await emit(info);
-        const scheduler = createScheduler({ executeThresholdPercentage: 90 });
-        const usage = { inputTokens: 1_000, percentage: 1 };
+        // The idle clock decides whether the provider cache counts as expired.
+        const expired = (at: number) => {
+            const meta = getOrCreateSessionMeta(deps.db, sessionID);
+            return computeHardCacheExpired(meta.cacheTtl, meta.lastResponseTime, at);
+        };
         expect(getOrCreateSessionMeta(deps.db, sessionID).lastResponseTime).toBe(previous);
-        expect(
-            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now),
-        ).toBe("execute");
+        expect(expired(now)).toBe(true);
         await emit({ id: "msg_05", finish: "stop", time: { completed: now } });
         expect(getOrCreateSessionMeta(deps.db, sessionID).lastResponseTime).toBe(now);
         expect(getOrCreateSessionMeta(deps.db, sessionID).lastInputTokens).toBe(1_000);
-        expect(
-            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now + 1_000),
-        ).toBe("defer");
+        expect(expired(now + 1_000)).toBe(false);
         await emit({
             id: "msg_06",
             finish: "stop",
             time: { completed: now + 2_000 },
             tokens: { input: 0 },
         });
-        expect(
-            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now + 3_000),
-        ).toBe("defer");
+        expect(expired(now + 3_000)).toBe(false);
         await emit({
             id: "msg_01",
             modelID: "usage-bearing",

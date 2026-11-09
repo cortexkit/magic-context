@@ -7,6 +7,14 @@
  * environment; each `new*` function is the ac7b8c0b call site copied verbatim.
  * Both run over the same environment, and every output, every persisted write
  * and every live read (with its order) is compared.
+ *
+ * Release 0.49.44 (master 9d4fb56b) then changed the same inline lines: an
+ * expired provider cache stopped being a ride (`idleExpiryRebuild` and
+ * `heldIdleExpiryRebuild` went away), and a reading that only a local count put
+ * in the force band below 95% stopped counting as force-band pressure
+ * (`forceBandConfirmed`, `forceRideWaitsOnLocalCount`). Those edits are applied
+ * to both sides, each marked "0.49.44", so the witness still compares the
+ * inline rule master ships with the extracted one.
  */
 import { describe, expect, test } from "bun:test";
 import { reclaimRidePermitted } from "./cache-busting-signals";
@@ -43,8 +51,6 @@ interface Env {
     rewritingSignedPrefix: boolean;
     foldBustsServedPrefixThisPass: boolean;
     firstRenderBust: boolean;
-    idleExpiryRebuild: boolean;
-    heldIdleExpiryRebuild: boolean;
     isExplicitFlush: boolean;
     hasUserFlushOrigin: boolean;
     prefixPreflightFailed: boolean;
@@ -223,18 +229,34 @@ function prelude(env: Env) {
         args.contextUsage.percentage >= args.forceMaterializationPercentage;
     const emergencyDropEligible =
         !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
-    return { args, compactionOff, forceMaterialization, emergencyDropEligible };
+    // 0.49.44 (9d4fb56b transform-postprocess-phase.ts:2214-2216).
+    const forceRideWaitsOnLocalCount =
+        args.contextUsageFromEstimate === true && args.contextUsage.percentage < 95;
+    const forceBandConfirmed = emergencyDropEligible && !forceRideWaitsOnLocalCount;
+    return {
+        args,
+        compactionOff,
+        forceMaterialization,
+        emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed,
+    };
 }
 
-/** f2ec1c94 transform-postprocess-phase.ts:2981-3081 and :4010, verbatim. */
+/** f2ec1c94 transform-postprocess-phase.ts:2981-3081 and :4010, verbatim, plus the 0.49.44 edits. */
 function oldGate(env: Env, w: World) {
-    const { args, compactionOff, forceMaterialization, emergencyDropEligible } = prelude(env);
+    const {
+        args,
+        compactionOff,
+        forceMaterialization,
+        emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed,
+    } = prelude(env);
     const servedShapeRepair = { needsRebuild: env.needsRebuild };
     const rewritingSignedPrefix = env.rewritingSignedPrefix;
     const foldBustsServedPrefixThisPass = env.foldBustsServedPrefixThisPass;
     const firstRenderBust = env.firstRenderBust;
-    const idleExpiryRebuild = env.idleExpiryRebuild;
-    const heldIdleExpiryRebuild = env.heldIdleExpiryRebuild;
     const triggerPermissions = { force: env.triggerForce };
     const isExplicitFlush = env.isExplicitFlush;
     const prefixPreflightFailed = env.prefixPreflightFailed;
@@ -260,11 +282,8 @@ function oldGate(env: Env, w: World) {
         servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold:
-            rewritingSignedPrefix ||
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            idleExpiryRebuild,
+        // 0.49.44: an expired provider cache is no longer part of hardFold.
+        hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
@@ -294,7 +313,9 @@ function oldGate(env: Env, w: World) {
             primaryExecute:
                 args.fullFeatureMode &&
                 args.schedulerDecision === "execute" &&
-                args.contextUsage.percentage < args.forceMaterializationPercentage,
+                // 0.49.44: a local count in the force band keeps the execute rebuild.
+                (args.contextUsage.percentage < args.forceMaterializationPercentage ||
+                    forceRideWaitsOnLocalCount),
             alreadyBusting: Object.values(rideSignals).some(Boolean) || args.historyRebuiltThisPass,
             summaryCanCome:
                 compartmentRunning ||
@@ -319,8 +340,8 @@ function oldGate(env: Env, w: World) {
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
-            idleExpiry: idleExpiryRebuild,
-            emergency: emergencyDropEligible,
+            // 0.49.44: no idleExpiry; a local count lifts the hold only at 95%.
+            emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
     const shouldRunHeuristics =
@@ -333,7 +354,7 @@ function oldGate(env: Env, w: World) {
             forceMaterialization ||
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
-            heldIdleExpiryRebuild ||
+            // 0.49.44: heldIdleExpiryRebuild removed.
             emergencyDropEligible ||
             (args.schedulerDecision === "execute" &&
                 (!alreadyRanThisTurn || !args.fullFeatureMode)));
@@ -351,18 +372,18 @@ function oldGate(env: Env, w: World) {
         toolReclaimAdmitted,
         forceMaterialization,
         emergencyDropEligible,
+        forceBandConfirmed,
     };
 }
 
-/** ac7b8c0b transform-postprocess-phase.ts:2988-3055 and :3989, verbatim. */
+/** ac7b8c0b transform-postprocess-phase.ts:2988-3055 and :3989, verbatim, plus the 0.49.44 edits. */
 function newGate(env: Env, w: World) {
-    const { args, compactionOff, forceMaterialization, emergencyDropEligible } = prelude(env);
+    const { args, compactionOff, forceMaterialization, emergencyDropEligible, forceBandConfirmed } =
+        prelude(env);
     const servedShapeRepair = { needsRebuild: env.needsRebuild };
     const rewritingSignedPrefix = env.rewritingSignedPrefix;
     const foldBustsServedPrefixThisPass = env.foldBustsServedPrefixThisPass;
     const firstRenderBust = env.firstRenderBust;
-    const idleExpiryRebuild = env.idleExpiryRebuild;
-    const heldIdleExpiryRebuild = env.heldIdleExpiryRebuild;
     const triggerPermissions = { force: env.triggerForce };
     const isExplicitFlush = env.isExplicitFlush;
     const prefixPreflightFailed = env.prefixPreflightFailed;
@@ -399,8 +420,6 @@ function newGate(env: Env, w: World) {
             rewritingSignedPrefix,
             foldBustsServedPrefix: foldBustsServedPrefixThisPass,
             firstRenderBust,
-            idleExpiryRebuild,
-            heldIdleExpiryRebuild,
             explicitFlush:
                 isExplicitFlush &&
                 hasPendingMaterializationOrigin(
@@ -459,8 +478,10 @@ function newGate(env: Env, w: World) {
         // The live phase keeps its inline locals; the decision recomputes them.
         forceMaterialization,
         emergencyDropEligible,
+        forceBandConfirmed,
         decisionForceMaterialization: passDecision.forceMaterialization,
         decisionEmergencyDropEligible: passDecision.emergencyDropEligible,
+        decisionForceBandConfirmed: passDecision.forceBandConfirmed,
     };
 }
 
@@ -468,7 +489,6 @@ interface CleanupEnv {
     pendingOpsDidMutate: boolean;
     foldBustsServedPrefixThisPass: boolean;
     firstRenderBust: boolean;
-    heldIdleExpiryRebuild: boolean;
     historyRebuiltThisPass: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -476,16 +496,15 @@ interface CleanupEnv {
     materializationRequested: boolean;
 }
 
-/** f2ec1c94 transform-postprocess-phase.ts:3662-3689 (and :3708-3712), verbatim. */
+/** f2ec1c94 transform-postprocess-phase.ts:3662-3689 (and :3708-3712), verbatim, plus the 0.49.44 edits. */
 function oldCleanupGate(env: Env, c: CleanupEnv, w: World) {
-    const { args, emergencyDropEligible } = prelude(env);
+    const { args, forceBandConfirmed } = prelude(env);
     const getEmergencyInputSample = w.getEmergencyInputSample;
     const clearEmergencyDropSample = w.clearEmergencyDropSample;
     const {
         pendingOpsDidMutate,
         foldBustsServedPrefixThisPass,
         firstRenderBust,
-        heldIdleExpiryRebuild,
         routinePressureAlreadyApplied,
         materializationRequested,
     } = c;
@@ -502,19 +521,21 @@ function oldCleanupGate(env: Env, c: CleanupEnv, w: World) {
             pendingOpsDidMutate ||
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
-            heldIdleExpiryRebuild ||
+            // 0.49.44: heldIdleExpiryRebuild removed.
             args.historyRebuiltThisPass ||
             args.compartmentInjectionRebuiltFromDb ||
             args.rebuiltHistoryFromInitialPrepare;
         if (
-            emergencyDropEligible &&
+            // 0.49.44: forceBandConfirmed replaces emergencyDropEligible.
+            forceBandConfirmed &&
             emergencyRewriteAlreadyPriced &&
             getEmergencyInputSample(args.db, args.sessionId) > 0
         ) {
             clearEmergencyDropSample(args.db, args.sessionId);
         }
         const routineCleanupApplied =
-            (emergencyDropEligible
+            // 0.49.44: forceBandConfirmed replaces emergencyDropEligible.
+            (forceBandConfirmed
                 ? args.contextUsage.percentage >= 95 ||
                   getEmergencyInputSample(args.db, args.sessionId) === 0
                 : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
@@ -525,16 +546,15 @@ function oldCleanupGate(env: Env, c: CleanupEnv, w: World) {
     }
 }
 
-/** ac7b8c0b transform-postprocess-phase.ts:3636-3668 (and :3694), verbatim. */
+/** ac7b8c0b transform-postprocess-phase.ts:3636-3668 (and :3694), verbatim, plus the 0.49.44 edits. */
 function newCleanupGate(env: Env, c: CleanupEnv, w: World) {
-    const { args, emergencyDropEligible } = prelude(env);
+    const { args, forceBandConfirmed } = prelude(env);
     const getEmergencyInputSample = w.getEmergencyInputSample;
     const clearEmergencyDropSample = w.clearEmergencyDropSample;
     const {
         pendingOpsDidMutate,
         foldBustsServedPrefixThisPass,
         firstRenderBust,
-        heldIdleExpiryRebuild,
         routinePressureAlreadyApplied,
         materializationRequested,
     } = c;
@@ -551,14 +571,13 @@ function newCleanupGate(env: Env, c: CleanupEnv, w: World) {
             pendingOpsDidMutate,
             foldBustsServedPrefix: foldBustsServedPrefixThisPass,
             firstRenderBust,
-            heldIdleExpiryRebuild,
             historyRebuiltThisPass: args.historyRebuiltThisPass === true,
             compartmentInjectionRebuiltFromDb: args.compartmentInjectionRebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare: args.rebuiltHistoryFromInitialPrepare === true,
         });
         if (
             emergencyEpisodeRearms({
-                emergencyDropEligible,
+                forceBandConfirmed,
                 rewriteAlreadyPriced,
                 emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
             })
@@ -566,7 +585,7 @@ function newCleanupGate(env: Env, c: CleanupEnv, w: World) {
             clearEmergencyDropSample(args.db, args.sessionId);
         }
         const routineCleanupApplied = routineCleanupAdmitted({
-            emergencyDropEligible,
+            forceBandConfirmed,
             contextPercentage: args.contextUsage.percentage,
             emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
             fullFeatureMode: args.fullFeatureMode,
@@ -593,8 +612,6 @@ const BOOL_KEYS = [
     "rewritingSignedPrefix",
     "foldBustsServedPrefixThisPass",
     "firstRenderBust",
-    "idleExpiryRebuild",
-    "heldIdleExpiryRebuild",
     "isExplicitFlush",
     "hasUserFlushOrigin",
     "prefixPreflightFailed",
@@ -679,7 +696,8 @@ function compareGate(env: Env): string | null {
         diffs.push(`outputs old=${JSON.stringify(out(o))} new=${JSON.stringify(out(n))}`);
     if (
         n.decisionForceMaterialization !== n.forceMaterialization ||
-        n.decisionEmergencyDropEligible !== n.emergencyDropEligible
+        n.decisionEmergencyDropEligible !== n.emergencyDropEligible ||
+        n.decisionForceBandConfirmed !== n.forceBandConfirmed
     )
         diffs.push("pressure bands differ from the live locals");
     if (JSON.stringify(wOld.state) !== JSON.stringify(wNew.state))
@@ -704,7 +722,7 @@ function readOrderDiffers(env: Env): boolean {
 
 describe("pass mutation gate extraction is behaviour-preserving (review witness)", () => {
     test("exhaustive over the core boolean inputs, randomized percentages", () => {
-        // The 18 inputs that reach decidePassMutation directly are enumerated
+        // The 16 inputs that reach decidePassMutation directly are enumerated
         // exhaustively; sub-expression inputs are held to values that make each
         // derived input pass straight through.
         const CORE = [
@@ -715,8 +733,6 @@ describe("pass mutation gate extraction is behaviour-preserving (review witness)
             "rewritingSignedPrefix",
             "foldBustsServedPrefixThisPass",
             "firstRenderBust",
-            "idleExpiryRebuild",
-            "heldIdleExpiryRebuild",
             "isExplicitFlush",
             "publishedM1RefreshedThisPass",
             "historyRebuiltThisPass",
@@ -768,7 +784,6 @@ describe("pass mutation gate extraction is behaviour-preserving (review witness)
             "pendingOpsDidMutate",
             "foldBustsServedPrefixThisPass",
             "firstRenderBust",
-            "heldIdleExpiryRebuild",
             "historyRebuiltThisPass",
             "compartmentInjectionRebuiltFromDb",
             "rebuiltHistoryFromInitialPrepare",

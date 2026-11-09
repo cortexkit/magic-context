@@ -10,12 +10,29 @@ export function pressureBands(args: {
     compactionOff: boolean;
     contextPercentage: number;
     forceMaterializationPercentage: number;
-}): { forceMaterialization: boolean; emergencyDropEligible: boolean } {
+    /** The usage reading came from a local count, not from the provider. */
+    contextUsageFromEstimate: boolean;
+}): {
+    forceMaterialization: boolean;
+    emergencyDropEligible: boolean;
+    forceRideWaitsOnLocalCount: boolean;
+    forceBandConfirmed: boolean;
+} {
     const emergencyDropEligible =
         !args.compactionOff && args.contextPercentage >= args.forceMaterializationPercentage;
+    // A reading that only a local count put in the force band can overstate
+    // the provider, and a provider that reports no usage never sends the
+    // measurement that would confirm it. Below 95% such a reading is therefore
+    // not force-band pressure: it takes no force ride, lifts no signed-thinking
+    // hold and runs no tiered emergency tool drop. A rebuild the pass makes for
+    // another reason (such as the execute pass's own bounded rebuild) carries
+    // only queued drops and routine cleanup.
+    const forceRideWaitsOnLocalCount = args.contextUsageFromEstimate && args.contextPercentage < 95;
     return {
         forceMaterialization: args.fullFeatureMode && emergencyDropEligible,
         emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed: emergencyDropEligible && !forceRideWaitsOnLocalCount,
     };
 }
 
@@ -42,10 +59,6 @@ export interface PassMutationInput {
     foldBustsServedPrefix: boolean;
     /** No complete cached m[0]/m[1] pair exists, so this pass renders the head for the first time. */
     firstRenderBust: boolean;
-    /** The provider cache expired and the pass may rebuild for it. */
-    idleExpiryRebuild: boolean;
-    /** The same expiry on a pass held for recent signed thinking. */
-    heldIdleExpiryRebuild: boolean;
     /** A user `/ctx-flush` is pending. */
     explicitFlush: boolean;
     /** Freshly published history changed the served m[1] bytes. */
@@ -60,6 +73,12 @@ export interface PassMutationInput {
 export interface PassMutationDecision {
     forceMaterialization: boolean;
     emergencyDropEligible: boolean;
+    /**
+     * The force band, unless only a local count below 95% put the reading there
+     * (see `pressureBands`). It lifts the signed-thinking hold, runs the tiered
+     * emergency tool drop and counts against the force episode.
+     */
+    forceBandConfirmed: boolean;
     rideSignals: Required<ReclaimRideSignals>;
     /** The one permission every first-application lane and the m[1] refresh consult. */
     publishedWorkDrainAllowed: boolean;
@@ -82,16 +101,21 @@ export function decidePassMutation(
     input: PassMutationInput,
     executeReclaim: (args: { primaryExecute: boolean; alreadyBusting: boolean }) => boolean,
 ): PassMutationDecision {
-    const { forceMaterialization, emergencyDropEligible } = pressureBands(input);
+    const {
+        forceMaterialization,
+        emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed,
+    } = pressureBands(input);
+    // An expired provider cache is not a ride: when only the provider forgot
+    // the cache, the pass replays byte-identically like a warm one, so queued
+    // drops, cleanup and signed thinking all wait for a real ride.
     const rideSignals: Required<ReclaimRideSignals> = {
         servedShapeRepair: input.servedShapeRepair,
         executeReclaim: false,
         subagentExecute: !input.fullFeatureMode && input.schedulerDecision === "execute",
         hardFold:
-            input.rewritingSignedPrefix ||
-            input.foldBustsServedPrefix ||
-            input.firstRenderBust ||
-            input.idleExpiryRebuild,
+            input.rewritingSignedPrefix || input.foldBustsServedPrefix || input.firstRenderBust,
         // A reading that only a local count put in the force band is not
         // evidence the session is there: the count can overstate the provider.
         // Below 95% it waits for the provider's next measurement instead of
@@ -106,26 +130,40 @@ export function decidePassMutation(
         explicitFlush: input.explicitFlush,
         publishedHistory: input.publishedHistory,
     };
+    // From the force band up, the force ride normally takes over from the
+    // execute pass's own rebuild. A reading that only a local count put there
+    // gets no force ride below 95%, so cutting the execute rebuild off at the
+    // force band would leave a session whose provider reports no usage with no
+    // rebuild at all until 95%: it stays available there. Its own bounds still
+    // apply: the 2% queued-work bound, the third held pass and the hold while
+    // a summary can come.
     rideSignals.executeReclaim =
         !input.compactionOff &&
         executeReclaim({
             primaryExecute:
                 input.fullFeatureMode &&
                 input.schedulerDecision === "execute" &&
-                input.contextPercentage < input.forceMaterializationPercentage,
+                (input.contextPercentage < input.forceMaterializationPercentage ||
+                    forceRideWaitsOnLocalCount),
             alreadyBusting:
                 Object.values(rideSignals).some(Boolean) || input.historyRebuiltThisPass,
         });
-    // Warm-cache thinking holds defer every new prefix edit. First render, idle
-    // expiry and pressure relief can admit work, but the target guards still
-    // forbid changes before any retained signature.
+    // Thinking holds defer every new prefix edit, whether or not the provider
+    // cache is still warm. First render and pressure relief can admit work,
+    // but the target guards still forbid changes before any retained
+    // signature. The historian trigger (compartment-trigger.ts) asks
+    // reclaimRidePermitted the same question before it skips a historian run
+    // on the grounds that queued drops will land, so both agree on whether
+    // those drops can land on this pass.
     const publishedWorkDrainAllowed =
         (!input.compactionOff || input.servedShapeRepair) &&
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: input.signedThinkingHold,
             firstRender: input.firstRenderBust,
-            idleExpiry: input.idleExpiryRebuild,
-            emergency: emergencyDropEligible,
+            // A reading that only a local count put in the force band lifts the
+            // signed-thinking hold only at 95% or more, by the same rule as the
+            // force ride.
+            emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !input.compactionOff && publishedWorkDrainAllowed;
     const shouldRunHeuristics =
@@ -141,7 +179,6 @@ export function decidePassMutation(
             // without creating an independent prefix rewrite.
             input.foldBustsServedPrefix ||
             input.firstRenderBust ||
-            input.heldIdleExpiryRebuild ||
             // The force band's emergency floor, for primary and subagent alike. For a
             // primary it coincides with forceMaterialization; for a subagent it is the
             // only path that fires the tiered drop even when the scheduler defers.
@@ -151,6 +188,7 @@ export function decidePassMutation(
     return {
         forceMaterialization,
         emergencyDropEligible,
+        forceBandConfirmed,
         rideSignals,
         publishedWorkDrainAllowed,
         shouldApplyPendingOps,
@@ -173,7 +211,6 @@ export function emergencyRewriteAlreadyPriced(args: {
     pendingOpsDidMutate: boolean;
     foldBustsServedPrefix: boolean;
     firstRenderBust: boolean;
-    heldIdleExpiryRebuild: boolean;
     historyRebuiltThisPass: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -182,7 +219,6 @@ export function emergencyRewriteAlreadyPriced(args: {
         args.pendingOpsDidMutate ||
         args.foldBustsServedPrefix ||
         args.firstRenderBust ||
-        args.heldIdleExpiryRebuild ||
         args.historyRebuiltThisPass ||
         args.compartmentInjectionRebuiltFromDb ||
         args.rebuiltHistoryFromInitialPrepare
@@ -192,15 +228,15 @@ export function emergencyRewriteAlreadyPriced(args: {
 /**
  * An independent mutation already prices this pass, so a spent force episode
  * re-arms and every candidate accumulated during sustained pressure rides it.
+ * A reading that only a local count put in the force band below 95% is not
+ * force-band pressure (see `pressureBands`), so it re-arms nothing.
  */
 export function emergencyEpisodeRearms(args: {
-    emergencyDropEligible: boolean;
+    forceBandConfirmed: boolean;
     rewriteAlreadyPriced: boolean;
     emergencyInputSample: () => number;
 }): boolean {
-    return (
-        args.emergencyDropEligible && args.rewriteAlreadyPriced && args.emergencyInputSample() > 0
-    );
+    return args.forceBandConfirmed && args.rewriteAlreadyPriced && args.emergencyInputSample() > 0;
 }
 
 /**
@@ -208,9 +244,12 @@ export function emergencyEpisodeRearms(args: {
  * first-apply when heuristics run. Force-originated rewrites share one durable
  * episode; a primary runs routine cleanup once per execute-pressure stretch; a
  * requested materialization or an already priced rewrite admits it outright.
+ * A reading that only a local count put in the force band below 95% is not
+ * force-band pressure (see `pressureBands`), so it follows the execute-pressure
+ * rule instead of the force episode.
  */
 export function routineCleanupAdmitted(args: {
-    emergencyDropEligible: boolean;
+    forceBandConfirmed: boolean;
     contextPercentage: number;
     emergencyInputSample: () => number;
     fullFeatureMode: boolean;
@@ -219,7 +258,7 @@ export function routineCleanupAdmitted(args: {
     rewriteAlreadyPriced: boolean;
 }): boolean {
     return (
-        (args.emergencyDropEligible
+        (args.forceBandConfirmed
             ? args.contextPercentage >= 95 || args.emergencyInputSample() === 0
             : !args.fullFeatureMode || !args.routinePressureAlreadyApplied) ||
         args.materializationRequested ||

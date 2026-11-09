@@ -24,7 +24,7 @@ Injection is gated on all of the following:
 3. Enough memories have **current compressed cues** (coverage gate — see below).
 4. There is a non-empty **overflow set** after the normal memory text budget trim.
 
-The image is resolved and attached only when the cached context baseline is **rebuilt** (a hard fold: model change, system-prompt change, idle past cache TTL, and similar). Ordinary defer turns **replay the same baked-in image bytes** so a background cue update cannot silently swap the picture mid-session and bust the prompt cache. There is no scheduled `render-mural` task; rendering is deterministic and happens on demand at the fold.
+The image is resolved and attached only when the cached context baseline is **rebuilt** (a hard fold: model change, system-prompt change, and similar; an idle expiry is not one). Ordinary defer turns **replay the same baked-in image bytes** so a background cue update cannot silently swap the picture mid-session and bust the prompt cache. There is no scheduled `render-mural` task; rendering is deterministic and happens on demand at the fold.
 
 ## Compress-cues (dreamer task)
 

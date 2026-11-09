@@ -172,6 +172,7 @@ import {
     lkgInputIdentity,
     releaseWithheldServedCapture,
 } from "./lkg-slot";
+import { createLocalWireReadings } from "./local-wire-reading";
 import { onNoteTrigger } from "./note-nudger";
 import { logNudgeEvaluation } from "./nudge-evaluation-log";
 import {
@@ -230,6 +231,7 @@ import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-s
 import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform-compartment-phase";
 import {
     contextUsagePassSnapshot,
+    firstPassExecuteReading,
     loadContextUsage,
     recordUsageRefusal,
     resolveSchedulerDecision,
@@ -823,6 +825,9 @@ export function createTransform(deps: TransformDeps) {
     // window, because the usage reading such a pass sees is not this request's:
     // it is missing, or on an OpenCode 2 fork it is the parent's last reply.
     const unmanagedOverWindowSessions = new Set<string>();
+    // The local count of the last served request, for the execute decision of
+    // a session whose provider reports no usage (see local-wire-reading.ts).
+    const localWireReadings = createLocalWireReadings();
     let entryReuse: { reused: number; retained: number; retainedBytes: number } | undefined;
     const pendingDropEligibility = createPendingDropEligibilityCache();
     const projectEntry = createLkgEntryProjector({
@@ -1562,6 +1567,8 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             contextUsagePassSnapshot(sessionMeta),
         );
+        const providerReadingMissing =
+            !(contextUsageEarly.inputTokens > 0) && !(contextUsageEarly.percentage > 0);
 
         let recoveryNoHeadEscapeActive = false;
         let emergencyRecoveryArmed = false;
@@ -1927,7 +1934,7 @@ export function createTransform(deps: TransformDeps) {
               })
             : null;
         // Compaction-off has no bust permission, so nothing could strip a turn
-        // whose prefix changes (an idle-expiry or memory fold still re-renders
+        // whose prefix changes (a memory fold still re-renders
         // m[0] there). It keeps the blanket hold for every open signed turn, as
         // before the hold was bounded; it has no history reclaim for the hold to
         // delay.
@@ -2030,20 +2037,107 @@ export function createTransform(deps: TransformDeps) {
             Number.isFinite(emergencyCeilingLimit) && emergencyCeilingLimit > 0
                 ? Math.floor(emergencyCeilingLimit * (effectiveExecuteThresholdPercentage / 100))
                 : undefined;
+        // A session whose provider reports no usage has no reading here, so its
+        // execute decision reads the local count of the last request it served.
+        // The count is a percentage of the same limit a provider reading uses
+        // (the trusted context limit, which reserves room for output), so such a
+        // session reaches the execute threshold at the same request size as one
+        // that reports usage.
+        //
+        // Only the scheduler reads this count, but an execute decision has a
+        // further effect: with no provider reading, the priced-pass sizing below
+        // counts this pass's own request, and every later pressure check on the
+        // pass reads that sized reading. A reading that only a local count
+        // produced takes the force ride, runs the tiered emergency tool drop and
+        // lifts the signed-thinking hold only at 95% or more. Below 95% the
+        // execute pass keeps its own bounded rebuild (see the postprocess
+        // phase), so queued drops are not stranded until then.
+        const localReadingWindow = resolvedContextLimit ?? windowGeometry?.usableSoft;
+        const localReadingModelKey = modelForBudget
+            ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
+            : undefined;
+        const schedulerUsage = localWireReadings.schedulerUsage({
+            sessionId,
+            providerUsage: contextUsageEarly,
+            providerReadingMissing,
+            modelKey: localReadingModelKey,
+            usableWindow: localReadingWindow,
+        });
+        if (schedulerUsage !== contextUsageEarly && !compactionOff) {
+            sessionLog(
+                sessionId,
+                `transform: no provider usage reading; the execute decision reads the local count of the last served request percentage=${schedulerUsage.percentage.toFixed(1)} inputTokens=${schedulerUsage.inputTokens}`,
+            );
+        }
         // Compaction-off: drop scheduling is gated off — the scheduler never
         // approves an execute pass, so no pending-op drain, heuristic cleanup,
         // age sweep or smart drop can fire, and the execute-only
         // lastResponseTime watermark write below stays quiet too.
+        //
+        // The first pass after a process restart cleared the saved reading
+        // above. When that reading was taken on this model and window and is at
+        // or above the execute threshold, the scheduler decides from it instead:
+        // the work is already owed (see firstPassExecuteReading). Only the
+        // scheduler sees it; every other check on this pass keeps the cleared
+        // reading, and the priced-pass sizing below does not adopt it.
+        const liveModelForSavedReading = deps.liveModelBySession?.get(sessionId);
+        const savedReadingForExecute =
+            isFirstTransformPassForSession && !usageResetAfterRefusal && !compactionOff
+                ? firstPassExecuteReading({
+                      persisted: persistedUsageBeforeResets,
+                      currentModelKey:
+                          currentModelKeyForBoundary ??
+                          (liveModelForSavedReading
+                              ? `${liveModelForSavedReading.providerID}/${liveModelForSavedReading.modelID}`
+                              : undefined),
+                      contextLimit: resolvedContextLimit,
+                      lastResponseTime: sessionMeta.lastResponseTime,
+                      executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+                      passPercentage: contextUsageEarly.percentage,
+                  })
+                : null;
+        // The saved reading is needed only when the reading the scheduler would
+        // otherwise see defers. When that reading already executes, the pass is
+        // an ordinary execute pass, decided and logged exactly as before. This
+        // extra call is unlogged; an error here leaves the saved reading unused,
+        // and the call below logs it.
+        let clearedReadingDefers = false;
+        if (savedReadingForExecute) {
+            try {
+                clearedReadingDefers =
+                    deps.scheduler.shouldExecute(
+                        sessionMeta,
+                        schedulerUsage,
+                        undefined,
+                        sessionId,
+                        deps.getModelKey?.(sessionId),
+                        resolvedContextLimit,
+                    ) === "defer";
+            } catch {
+                clearedReadingDefers = false;
+            }
+        }
+        const schedulerReadsSavedReading = savedReadingForExecute !== null && clearedReadingDefers;
+        if (schedulerReadsSavedReading) {
+            sessionLog(
+                sessionId,
+                `transform: first pass after restart: saved reading ${savedReadingForExecute.percentage.toFixed(1)}% is at or above the ${effectiveExecuteThresholdPercentage}% execute threshold; the scheduler decides from it, every other pressure check keeps the cleared reading`,
+            );
+        }
         const schedulerDecision = compactionOff
             ? ("defer" as const)
             : resolveSchedulerDecision(
                   deps.scheduler,
                   sessionMeta,
-                  contextUsageEarly,
+                  schedulerReadsSavedReading ? savedReadingForExecute : schedulerUsage,
                   sessionId,
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
+        // True only when the saved reading turned a deferred pass into an
+        // execute pass.
+        const executeFromSavedReading =
+            schedulerReadsSavedReading && schedulerDecision === "execute";
         const schedulerDeferReason =
             schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
         // Capture explicit history refresh immediately before the first
@@ -2476,13 +2570,12 @@ export function createTransform(deps: TransformDeps) {
                             "user_flush",
                         ),
                         publishedHistory: isCacheBusting,
-                        // The same gate postprocess applies. First render and idle
-                        // expiry are not known yet, so a held pass is credited no
-                        // ride here unless it is under emergency pressure.
+                        // The same gate postprocess applies. First render is not
+                        // known yet, so a held pass is credited no ride here
+                        // unless it is under emergency pressure.
                         permission: {
                             signedThinkingHold: activeThinkingPrefixHold,
                             firstRender: false,
-                            idleExpiry: false,
                             emergency:
                                 contextUsageEarly.percentage >= forceMaterializationPercentage,
                         },
@@ -3002,7 +3095,8 @@ export function createTransform(deps: TransformDeps) {
 
         // HARD-bust signals for the m[0]/m[1] materialization decision capture
         // provider-side cache eviction, such as a model switch or system-block
-        // change, plus the TTL idle window. Only OpenCode 2 supplies a definition
+        // change. The TTL idle window is passed along for logs only: an expired
+        // cache with unchanged bytes never folds. Only OpenCode 2 supplies a definition
         // hash from the session's request; the process-global names fingerprint
         // stays attribution-only on OpenCode 1. When system.transform
         // follows messages.transform (OpenCode 1), systemHash is the persisted
@@ -3062,14 +3156,31 @@ export function createTransform(deps: TransformDeps) {
                 ...renderOptions,
                 hardSignals: m0HardSignals,
             }).value;
+        const pricedBeyondExecute = (canConsumeDeferred: boolean) =>
+            isCacheBusting ||
+            contextUsage.percentage >= forceMaterializationPercentage ||
+            deps.pendingMaterializationSessions.has(sessionId) ||
+            (canConsumeDeferred && deferredMaterializationSessions.has(sessionId)) ||
+            protectionFoldWillBust;
         const protectionCacheBustingPass =
             !compactionOff &&
-            (schedulerDecision === "execute" ||
-                isCacheBusting ||
-                contextUsage.percentage >= forceMaterializationPercentage ||
-                deps.pendingMaterializationSessions.has(sessionId) ||
-                (canConsumeDeferredLate && deferredMaterializationSessions.has(sessionId)) ||
-                protectionFoldWillBust);
+            (schedulerDecision === "execute" || pricedBeyondExecute(canConsumeDeferredLate));
+        // An execute decision that only the first pass's saved reading produced
+        // prices this pass like any execute pass, but the pass is not sized from
+        // that reading below: the sizing feeds the force band and the emergency
+        // drop, which must not act on a reading taken before the restart. A pass
+        // also priced for another reason is sized exactly as before.
+        const sizeAsPricedPass = executeFromSavedReading
+            ? pricedBeyondExecute(
+                  canConsumeDeferredOnThisPass({
+                      schedulerDecision: "defer",
+                      contextPercentage: contextUsageEarly.percentage,
+                      justAwaitedPublication: compartmentPhase.justAwaitedPublication,
+                      activeRunBlocksMaterialization: lateActiveRunBlocksMaterialization,
+                      forceMaterializationPercentage,
+                  }),
+              )
+            : protectionCacheBustingPass;
         const calibrationBustReason = protectionFoldWillBust
             ? "fold"
             : contextUsage.percentage >= forceMaterializationPercentage
@@ -3088,11 +3199,12 @@ export function createTransform(deps: TransformDeps) {
             onAdopt: (message) => sessionLog(sessionId, message),
         });
         // A cache-busting pass can lack input-token usage for the selected model:
-        // the first pass after a process restart resets the reading, and a model
-        // switch clears it. Emergency tool-output reclaim needs a reading, so
-        // size the pass here. This is a pressure reading, not a fit check: the
-        // over-window first-pass check, the overflow-recovery bump and the final
-        // refusal check stay the fit guards.
+        // the first pass after a process restart resets the reading, a model
+        // switch clears it, and a provider that reports no usage never sends
+        // one. Emergency tool-output reclaim needs a reading, so size the pass
+        // here. This is a pressure reading, not a fit check: the over-window
+        // first-pass check, the overflow-recovery bump and the final refusal
+        // check stay the fit guards.
         //
         // The request is counted with calibrated ratios (`pressureTokens`): an
         // unseeded model counts neutrally. The fit envelope (`tokens`) doubles
@@ -3100,13 +3212,13 @@ export function createTransform(deps: TransformDeps) {
         // in the force band after a restart.
         //
         // The provider's own last reading, saved in session_meta, is preferred
-        // when it is for this model and limit and the cache is still warm. The
+        // when it is for this model and limit, however long ago it was taken. The
         // one exception is a count at or past the 95% emergency line while the
         // saved reading is lower: the request grew after that reading was taken
         // (a long paste or tool output while the host was down), and waiting for
         // the provider would send a request that may not fit.
         let contextUsageFromEstimate = hostOverWindow;
-        if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
+        if (contextUsage.inputTokens <= 0 && sizeAsPricedPass) {
             // Overflow recovery sizes the request the provider just rejected, so
             // the saved reading (the last accepted request, which predates it) is
             // never used here, and the request is counted with the fit envelope
@@ -3122,7 +3234,6 @@ export function createTransform(deps: TransformDeps) {
                               currentModelKeyForBoundary ?? (hardModelKey || undefined),
                           contextLimit: resolvedContextLimit,
                           lastResponseTime: sessionMeta.lastResponseTime,
-                          cacheExpired: hardCacheExpired,
                       });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
@@ -3482,6 +3593,37 @@ export function createTransform(deps: TransformDeps) {
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
                 );
             }
+            // Count the request this pass serves, for the next pass's execute
+            // decision while the provider still reports no usage. A pass with a
+            // provider reading only clears the local one.
+            let servedPressureTokens: number | undefined;
+            if (providerReadingMissing) {
+                servedPressureTokens = finalWireEstimate?.pressureTokens;
+                if (servedPressureTokens === undefined) {
+                    try {
+                        servedPressureTokens = estimateFinalWireInputTokens({
+                            messages,
+                            systemPromptTokens: sessionMeta.systemPromptTokens,
+                            providerID: modelForBudget?.providerID,
+                            modelID: modelForBudget?.modelID,
+                            agentName: notificationParams.agent,
+                            sessionId,
+                        }).pressureTokens;
+                    } catch (error) {
+                        sessionLog(
+                            sessionId,
+                            `transform: local count of the served request unavailable: ${getErrorMessage(error)}`,
+                        );
+                    }
+                }
+            }
+            localWireReadings.record({
+                sessionId,
+                providerReadingMissing,
+                modelKey: localReadingModelKey,
+                usableWindow: localReadingWindow,
+                pressureTokens: servedPressureTokens,
+            });
             if (
                 (finalWireEstimate?.refusalGrade ||
                     (finalWireEstimate?.refusalBasis === "byte-bound" &&
@@ -3801,8 +3943,8 @@ export function createTransform(deps: TransformDeps) {
         // system prompt in front of it, whether the bust kept it (it edited
         // nothing in front of it) or a hold did. The served array, after every
         // strip and any recovered prefix, is what decides. The last argument
-        // carries the same fact to an idle-expired request, whose date would
-        // otherwise advance without asking for permission.
+        // reports that fact to the system hook as well, which keeps the date
+        // frozen on a permitted pass that still serves signed thinking.
         const signedThinkingServed =
             isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID) &&
             servesThinkingBlock(messages, resolvedProviderID, modelForBudget?.modelID);
@@ -3954,9 +4096,9 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        // An idle-expired retry can replay a fold prepared by an aborted attempt.
-        // The provider still rebuilds the whole prefix, so record the expiry on
-        // the retry's own assistant even when this pass changed no message bytes.
+        // An idle-expired request makes the provider re-read the whole prefix
+        // even when this pass changed no message bytes, so record the expiry on
+        // its own assistant for the cache diagnostics.
         if (postTransformResult.bustedThisPass || hardCacheExpired) {
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),

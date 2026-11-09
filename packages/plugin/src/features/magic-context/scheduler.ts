@@ -1,5 +1,4 @@
 import { resolveExecuteThreshold } from "../../hooks/magic-context/event-resolvers";
-import { log, sessionLog } from "../../shared/logger";
 import type { ContextUsage, SchedulerDecision, SessionMeta } from "./types";
 
 const TTL_PATTERN = /^(\d+)([smh])$/;
@@ -57,13 +56,13 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
         shouldExecute(
             sessionMeta: SessionMeta,
             contextUsage: ContextUsage,
-            currentTime: number = Date.now(),
+            _currentTime?: number,
             sessionId?: string,
             modelKey?: string,
             contextLimit?: number,
         ): SchedulerDecision {
-            // Brand-new sessions (no usage, no baseline) have nothing to execute.
-            // Skip the TTL check that would always fire due to lastResponseTime=0.
+            // Brand-new sessions (no usage, no baseline) have nothing to execute,
+            // even under a threshold that resolves to zero.
             if (contextUsage.percentage === 0 && sessionMeta.lastResponseTime === 0) {
                 return "defer";
             }
@@ -93,29 +92,11 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
                 return "execute";
             }
 
-            let ttlMs: number;
-            try {
-                ttlMs = parseCacheTtl(sessionMeta.cacheTtl);
-            } catch (error) {
-                if (sessionId) {
-                    sessionLog(
-                        sessionId,
-                        `invalid cache_ttl "${sessionMeta.cacheTtl}"; falling back to default 5m`,
-                        error,
-                    );
-                } else {
-                    log(
-                        `[magic-context] invalid cache_ttl "${sessionMeta.cacheTtl}"; falling back to default 5m`,
-                        error,
-                    );
-                }
-                ttlMs = parseCacheTtl("5m");
-            }
-            const elapsedTime = currentTime - sessionMeta.lastResponseTime;
-            if (elapsedTime > ttlMs) {
-                return "execute";
-            }
-
+            // An expired provider cache is deliberately not an execute pass.
+            // When only the provider forgot the cache, resending the same bytes
+            // keeps every signed thinking block valid, and the re-read costs the
+            // same either way, so rebuilding then would only land queued drops
+            // and cleanup before the execute threshold the agent was promised.
             return "defer";
         },
     };

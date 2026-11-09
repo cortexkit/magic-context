@@ -1120,6 +1120,37 @@ export function applyRustModeDeferredCompactionMarker(args: {
                   endMessageId: boundary.endMessageId,
               }
             : undefined;
+    // Summary discovery runs on a worker and the pass never waits for it. While it
+    // runs, the checks that need no discovery still retire a stale or already-
+    // covered target; the cut itself waits, with no fence armed and no retry
+    // spent. A host store that cannot be opened starts no discovery; the drain
+    // below reports that as a retryable failure, as before.
+    if (
+        (args.applyDeferred ?? applyDeferredCompactionMarker) === applyDeferredCompactionMarker &&
+        startCompactionMarkerCandidatePreparation(args.sessionId) === "preparing"
+    ) {
+        const settled = applyDeferredCompactionMarker(
+            args.db,
+            args.sessionId,
+            pending,
+            args.sessionDirectory,
+            trustedBoundary,
+            { validateOnly: true },
+        );
+        if (settled.kind === "stale-skip" || settled.kind === "already-current") {
+            if (!clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending))
+                sessionLog(
+                    args.sessionId,
+                    `rust compaction-marker drain: CAS lost${boundary ? ` after module row ${boundary.rowVersion}` : ""}; newer pending target retained`,
+                );
+            return;
+        }
+        sessionLog(
+            args.sessionId,
+            "rust compaction-marker drain: candidate preparation deferred; pending target retained",
+        );
+        return;
+    }
     args.beforeApply?.();
     const outcome = (args.applyDeferred ?? applyDeferredCompactionMarker)(
         args.db,
@@ -1798,8 +1829,11 @@ interface RunPostTransformPhaseArgs {
     /**
      * True when `contextUsage` was raised by a local count of the request, not
      * by a provider measurement or an overflow latch (the first pass after a
-     * restart, or after a model switch). Such a reading below 95% may not by
-     * itself grant the force ride.
+     * restart or a model switch, or any priced pass of a session whose provider
+     * reports no usage). Such a reading below 95% may not by itself grant the
+     * force ride, lift the signed-thinking hold or run the tiered emergency
+     * tool drop, and it leaves the execute pass's own bounded rebuild
+     * available.
      */
     contextUsageFromEstimate?: boolean;
     /** Usable tokens available for soft scheduling thresholds and usage-ratio calculation. */
@@ -2316,11 +2350,14 @@ export async function runPostTransformPhase(
     // cache-busting-pass operation (selection persisted, defer passes replay),
     // so it only runs when heuristics run (see shouldRunHeuristics) AND usage is
     // ≥ the force-materialize threshold.
-    const { forceMaterialization, emergencyDropEligible } = pressureBands({
+    // A reading that only a local count put in the force band below 95% is not
+    // force-band pressure (`forceBandConfirmed`; see `pressureBands`).
+    const { forceMaterialization, emergencyDropEligible, forceBandConfirmed } = pressureBands({
         fullFeatureMode: args.fullFeatureMode,
         compactionOff,
         contextPercentage: args.contextUsage.percentage,
         forceMaterializationPercentage: args.forceMaterializationPercentage,
+        contextUsageFromEstimate: args.contextUsageFromEstimate === true,
     });
     const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
     if (!executePressureEligible) {
@@ -3030,16 +3067,9 @@ export async function runPostTransformPhase(
         return depth === null ? "not loaded (deferred pass)" : String(depth);
     };
     // All first applications share an independently priced cache-bust permission.
-    // A retry after an aborted idle fold is still provider-cold even though its
-    // persisted pair needs no second fold. Any newly queued work belongs on that
-    // retry, not on the warm tool step after the provider finally answers.
-    const heldIdleExpiryRebuild =
-        activeThinkingPrefixHold && args.m0M1?.hardSignals?.cacheExpired === true;
-    // An expired timer alone cannot authorize cleanup when an unresolved project
-    // directory requires replaying cached m[0]/m[1]. Unfinished signed turns
-    // retain their separately protected opportunity to edit the suffix.
-    const idleExpiryRebuild =
-        (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
+    // An expired provider cache is not one of them: when only the provider forgot
+    // the cache, the pass replays byte-identically like a warm one, so queued
+    // drops, cleanup and signed thinking all wait for a real ride.
     const protectedToolTags = protectedToolTagNumbers(args.tags, args.protectedTools);
     // The ride signals, the per-pass mutation permission and the lane gates come
     // from `decidePassMutation`; the shared decision vectors
@@ -3058,8 +3088,6 @@ export async function runPostTransformPhase(
             rewritingSignedPrefix,
             foldBustsServedPrefix: foldBustsServedPrefixThisPass,
             firstRenderBust,
-            idleExpiryRebuild,
-            heldIdleExpiryRebuild,
             explicitFlush:
                 isExplicitFlush &&
                 hasPendingMaterializationOrigin(
@@ -3119,7 +3147,7 @@ export async function runPostTransformPhase(
     // - a pass whose head changed (fold, first render, m[1] refresh) strips
     //   now, before any lane edits, through the same persisted freeze a held
     //   pass's release uses;
-    // - any other bust (flush, pressure, idle expiry, subagent execute) strips
+    // - any other bust (flush, pressure, subagent execute) strips
     //   at the end of the pass through the proactive strip, only if one of its
     //   edits lies before newer thinking, so a bust with nothing to apply keeps
     //   the turn's thinking.
@@ -3167,7 +3195,7 @@ export async function runPostTransformPhase(
         isCacheBustingPass && !activeThinkingPrefixHold && recoveredShapeRewriteProof !== null;
     sessionLog(
         args.sessionId,
-        `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} idle_expiry=${idleExpiryRebuild} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
+        `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} cache_expired=${args.m0M1?.hardSignals?.cacheExpired === true} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
     );
     let recoveryTailNormalizedThisPass = false;
     if (args.normalizeRecoveryTail && canNormalizeRecoveredShape) {
@@ -3729,7 +3757,6 @@ export async function runPostTransformPhase(
                     pendingOpsDidMutate,
                     foldBustsServedPrefix: foldBustsServedPrefixThisPass,
                     firstRenderBust,
-                    heldIdleExpiryRebuild,
                     historyRebuiltThisPass: args.historyRebuiltThisPass === true,
                     compartmentInjectionRebuiltFromDb:
                         args.compartmentInjectionRebuiltFromDb === true,
@@ -3741,7 +3768,7 @@ export async function runPostTransformPhase(
                 // force pressure can ride it instead of waiting for another episode.
                 if (
                     emergencyEpisodeRearms({
-                        emergencyDropEligible,
+                        forceBandConfirmed,
                         rewriteAlreadyPriced,
                         emergencyInputSample: () =>
                             getEmergencyInputSample(args.db, args.sessionId),
@@ -3753,7 +3780,7 @@ export async function runPostTransformPhase(
                 // A small pressure dip or a process restart cannot rearm just the text lane.
                 // Independent work and the absolute emergency arm still admit all lanes.
                 let routineCleanupApplied = routineCleanupAdmitted({
-                    emergencyDropEligible,
+                    forceBandConfirmed,
                     contextPercentage: args.contextUsage.percentage,
                     emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
                     fullFeatureMode: args.fullFeatureMode,
@@ -3778,8 +3805,10 @@ export async function runPostTransformPhase(
                         // ceiling (cold start) or below-threshold usage → no
                         // emergency arg → routine pass does dedup/injection-strip
                         // only (Phase 2 removed need-blind routine tool drops).
+                        // A reading that only a local count put in the band runs
+                        // it only at 95% or more (see `forceBandConfirmed`).
                         emergency:
-                            emergencyDropEligible &&
+                            forceBandConfirmed &&
                             args.emergencyCeilingTokens !== undefined &&
                             args.emergencyCeilingTokens > 0
                                 ? {
@@ -4071,11 +4100,13 @@ export async function runPostTransformPhase(
             }
             // A prepared request has not refreshed the provider cache. In particular,
             // an aborted request may never report usage. Keep the response clock until
-            // the provider answers; cachedM0MaterializedAt already consumes the idle
-            // fold, so an expired retry can replay it without folding a second time.
+            // the provider answers. An expired retry then replays the same bytes: an
+            // expired provider cache grants no fold of its own.
 
             // Consume only after the shared tool/text batch actually changed bytes.
-            if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
+            // A local count below 95% ran no emergency batch (see
+            // `forceBandConfirmed`), so it leaves the episode unconsumed.
+            if (forceBandConfirmed && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
                 setEmergencyDropSample(args.db, args.sessionId, args.contextUsage.inputTokens);
             }
             const toolReclaimApplicationOpportunity = isCacheBustingPass;
@@ -4840,6 +4871,15 @@ export async function runPostTransformPhase(
     // the same summary representation that this pass will emit.
     let suppressV12HistoryDrain = false;
     let persistedCompactionMarkerState = replaySnapshot?.compactionMarker ?? null;
+    // The drain never waits for summary discovery. Start it, without waiting, on
+    // every pass while a target is pending, so it has usually finished by the
+    // pass that consumes the rebuilt history; Rust mode does the same.
+    if (
+        replaySnapshot?.pendingCompactionMarker &&
+        (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy).applyDeferred ===
+            applyDeferredCompactionMarker
+    )
+        startCompactionMarkerCandidatePreparation(args.sessionId);
     if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
         const pending = replaySnapshot?.pendingCompactionMarker ?? null;
         if (pending) {
@@ -4891,9 +4931,12 @@ export async function runPostTransformPhase(
             } else {
                 const tMarkerDrain = performance.now();
                 const strategy = args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy;
+                // Discovery reads the whole session on a worker and can take tens of
+                // seconds on a large one. The pass never waits for it: without a
+                // prepared basis this starts discovery in the background and defers.
                 const candidatesReady =
                     strategy.applyDeferred !== applyDeferredCompactionMarker ||
-                    (await prepareCompactionMarkerCandidates(args.sessionId));
+                    startCompactionMarkerCandidatePreparation(args.sessionId) === "ready";
                 const outcome: MarkerUpdateOutcome = candidatesReady
                     ? pair(
                           () =>
@@ -4914,9 +4957,10 @@ export async function runPostTransformPhase(
                 );
                 switch (outcome.kind) {
                     case "deferred":
-                        // Summary discovery may observe a new summary or fail to load
-                        // its worker. Only marker replacement waits: serve the rebuilt
-                        // request now and retry replacement on a later history rebuild.
+                        // Summary discovery may still be running, observe a new summary
+                        // or fail to load its worker. Only marker replacement waits: serve
+                        // the rebuilt request now and retry replacement on a later history
+                        // rebuild.
                         suppressV12HistoryDrain = true;
                         sessionLog(
                             args.sessionId,
@@ -6181,7 +6225,7 @@ export function checkM0MutationDriftAndSignal(args: {
     return false;
 }
 
-import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
+import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
     clearSystemPromptEdit,

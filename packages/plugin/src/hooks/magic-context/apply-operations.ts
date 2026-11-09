@@ -192,16 +192,16 @@ export type ConvertedToolDropMode = "skeleton_real" | "full";
 /**
  * HARD fold reasons whose trigger already loses the provider's cached prefix
  * whatever bytes Magic Context serves: a different model has its own cache, a
- * changed system prompt or request tool definitions precede every message, an idle TTL expiry means the
- * cache was evicted, and a native host compaction replaced the conversation
- * after the prefix. Other reasons only bust when the fold changes the served
- * bytes (see foldChangesServedPrefix).
+ * changed system prompt or request tool definitions precede every message, and
+ * a native host compaction replaced the conversation after the prefix. An idle
+ * TTL expiry is not one: it never triggers a fold, since resending the same
+ * bytes keeps signed thinking valid. Other reasons only bust when the fold
+ * changes the served bytes (see foldChangesServedPrefix).
  */
 export const CACHE_LOSING_FOLD_REASONS: ReadonlySet<string> = new Set([
     "model_change",
     "system_hash",
     "tool_definitions",
-    "ttl_idle",
     "host_compaction",
 ]);
 

@@ -300,10 +300,16 @@ test("idle recovery queues at most one compaction for one expired response windo
         await f.pass();
         await f.restart();
         f.idle(1);
+        // An expired cache alone rebuilds nothing, so this replay queues nothing.
+        await f.pass();
+        await settle();
+        expect(compact).toHaveBeenCalledTimes(0);
+        // A real rebuild inside the expired window recovers the idle fold once.
+        f.setSystem("The host changed its system prefix, but no response completed.");
         await f.pass();
         await settle();
         expect(compact).toHaveBeenCalledTimes(1);
-        f.setSystem("The host changed its system prefix, but no response completed.");
+        f.setSystem("The host changed its system prefix again, still with no response.");
         await f.pass();
         await settle();
         expect(compact).toHaveBeenCalledTimes(1);

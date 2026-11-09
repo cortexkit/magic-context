@@ -9,7 +9,7 @@ const text = (messages: Array<{ content: Array<Record<string, unknown>> }>) =>
         .map((part) => part.text ?? "")
         .join("\n");
 
-test("a V2 upgrade preserves warm bytes and converts only on an independently expired pass", async () => {
+test("a V2 upgrade preserves warm and expired bytes and converts only on an independently rebuilding pass", async () => {
     const f = await oc2ContextFixture(8631, {
         area: "native-v2-upgrade",
         instructions: false,
@@ -30,6 +30,11 @@ test("a V2 upgrade preserves warm bytes and converts only on an independently ex
             await f.hostStorage.get(`native-fold/v3/${encodeURIComponent(f.session)}`),
         ).toBeUndefined();
         f.idle(1);
+        // An expired cache alone replays the warm bytes and converts nothing.
+        const expired = await f.pass();
+        expect(expired.bytes).toBe(before.bytes);
+        expect(expired.logs.some((line) => line.includes("upgrade-state HARD"))).toBe(false);
+        f.setSystem("A changed system prefix rebuilds the request.");
         const upgraded = await f.pass();
         expect(
             upgraded.logs.filter((line) => line.includes("upgrade-state HARD mode=source-repair")),
@@ -73,6 +78,8 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
         f.user("continue after the completed host checkpoint", 1000);
         await f.restart();
         f.idle(1);
+        // The repair needs a pass that may replace the prefix; an expiry alone is not one.
+        f.setModel("second-model");
         const repaired = await f.pass();
         const sent = text(repaired.draft.messages);
         expect(sent).toContain("<session-history>");
@@ -94,8 +101,13 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
             repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])?.content[0]?.text,
         ).toBe(summary);
         expect(sent).not.toContain("<conversation-checkpoint>");
+        // The permitted rebuild is now a model-change fold, which merges the new
+        // summary into m[0]; the published compartment is served there.
+        expect(summary).toContain("Review history 0");
         const delta = repaired.draft.messages.find((message) => message.id === HEAD_IDS[1]);
-        expect(JSON.stringify(delta?.content)).toContain("Review history 0");
+        expect(JSON.stringify(delta?.content)).toContain(
+            "no new content since last materialization",
+        );
         expect((await f.pass()).bytes).toBe(repaired.bytes);
     } finally {
         await f.cleanup();
@@ -119,6 +131,8 @@ test("a legacy source repair preserves the unsummarized gap before keepID and ad
         f.user("continue after repairing the legacy source gap", 1000);
         await f.restart();
         f.idle(1);
+        // The repair needs a pass that may replace the prefix; an expiry alone is not one.
+        f.setSystem("A changed system prefix rebuilds the request.");
         const repaired = await f.pass();
         const body = text(repaired.draft.messages);
         expect(body).toContain("<session-history>");

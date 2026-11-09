@@ -10,6 +10,7 @@ import {
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { computeHardCacheExpired } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -23,6 +24,7 @@ import {
 	clearContextHandlerSession,
 	__test as contextHandlerInternals,
 	registerPiContextHandler,
+	signalPiPendingMaterialization,
 } from "./context-handler";
 import {
 	persistPiMessageEndModelMeta,
@@ -40,11 +42,13 @@ import {
 } from "./test-utils.test";
 
 // Issue 545: a Pi session with a 30m cache TTL and queued ctx_reduce drops sat
-// idle for 1h42m. The first pass after the pause logged decision=defer and the
-// drops did not apply, although the provider cache was long gone. Pi emits
-// message_end for the user's new prompt before it runs the context pass, and
-// that message_end used to stamp last_response_time as if a provider response
-// had just arrived, so every idle check saw an elapsed time of a few ms.
+// idle for 1h42m. Pi emits message_end for the user's new prompt before it runs
+// the context pass, and that message_end used to stamp last_response_time as if
+// a provider response had just arrived, so every idle check saw an elapsed time
+// of a few ms. The idle clock must still read the expiry correctly (the status
+// views and the system date use it), but an expired cache no longer applies the
+// queued drops: when only the provider forgot the cache, the pass replays the
+// same bytes and the drops wait for a real rebuild.
 
 const T0 = Date.parse("2026-09-26T15:31:18.000Z");
 const MINUTE = 60_000;
@@ -177,6 +181,15 @@ async function turnBeforePause(
 	return target.id;
 }
 
+function cacheExpired(ctx: ReturnType<typeof setup>, sessionId: string) {
+	const meta = getOrCreateSessionMeta(ctx.db, sessionId);
+	return computeHardCacheExpired(
+		meta.cacheTtl,
+		meta.lastResponseTime,
+		Date.now(),
+	);
+}
+
 function tagStatus(
 	ctx: ReturnType<typeof setup>,
 	sessionId: string,
@@ -186,7 +199,7 @@ function tagStatus(
 		?.status;
 }
 
-describe("Pi idle past the cache TTL applies queued drops (issue 545)", () => {
+describe("Pi idle past the cache TTL keeps queued drops queued (issue 545)", () => {
 	afterEach(() => {
 		setSystemTime();
 		mock.restore();
@@ -218,17 +231,17 @@ describe("Pi idle past the cache TTL applies queued drops (issue 545)", () => {
 			ctx.logs.length = 0;
 			setSystemTime(new Date(T0 + 10 * MINUTE));
 			await ctx.runPass([user1, answer, userMessage("continue", 3)], 20);
+			// gpt-6 keeps its 30m built-in TTL warm; the unknown model's 5m expired.
 			const known = id === "gpt-6";
-			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(known ? 1 : 0);
+			expect(cacheExpired(ctx, sessionId)).toBe(!known);
+			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(1);
 			expect(
 				ctx.logs.some((line) =>
 					line.startsWith("pi m[0] HARD fold decision: reason=ttl_idle "),
 				),
-			).toBe(!known);
+			).toBe(false);
 			expect(
-				ctx.lines.some((line) =>
-					line.includes(known ? "reason=scheduler_defer" : "scheduler=execute"),
-				),
+				ctx.lines.some((line) => line.includes("reason=scheduler_defer")),
 			).toBe(true);
 		} finally {
 			ctx.cleanup();
@@ -331,7 +344,7 @@ describe("Pi idle past the cache TTL applies queued drops (issue 545)", () => {
 		}
 	});
 
-	it("applies queued drops on the first pass after the user returns from an idle past the TTL", async () => {
+	it("keeps queued drops on the first pass after the user returns from an idle past the TTL", async () => {
 		const sessionId = "ses-545-user-returns";
 		const ctx = setup(sessionId);
 		try {
@@ -344,24 +357,25 @@ describe("Pi idle past the cache TTL applies queued drops (issue 545)", () => {
 			await ctx.messageEnd(resume);
 			await ctx.runPass([user1, assistant1, resume], 20);
 
-			// The cache is dead, so the scheduler executes and the ttl_idle HARD
-			// fold rebuilds the prefix; the queued drop rides that fold.
+			// The idle clock sees the cache as expired, but only the provider
+			// forgot it: no fold, and the queued drop waits for a real rebuild.
+			expect(cacheExpired(ctx, sessionId)).toBe(true);
 			expect(ctx.lines).toContain(
-				"pending ops WILL APPLY — reason=ride=hardFold (scheduler=execute), pendingOps=1 context=20.0%",
+				"pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=1 context=20.0%",
 			);
 			expect(
 				ctx.logs.some((line) =>
 					line.startsWith("pi m[0] HARD fold decision: reason=ttl_idle "),
 				),
-			).toBe(true);
-			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(0);
-			expect(tagStatus(ctx, sessionId, target)).toBe("dropped");
+			).toBe(false);
+			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(1);
+			expect(tagStatus(ctx, sessionId, target)).toBe("active");
 		} finally {
 			ctx.cleanup();
 		}
 	});
 
-	it("applies queued drops when the last request before the pause failed", async () => {
+	it("keeps queued drops when the last request before the pause failed", async () => {
 		const sessionId = "ses-545-error-before-pause";
 		const ctx = setup(sessionId);
 		try {
@@ -388,8 +402,11 @@ describe("Pi idle past the cache TTL applies queued drops (issue 545)", () => {
 			setSystemTime(new Date(T0 + 31 * MINUTE));
 			await ctx.runPass([user1, assistant1, retry], 20);
 
-			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(0);
-			expect(tagStatus(ctx, sessionId, target)).toBe("dropped");
+			// The failed request did not refresh the idle clock, so the cache
+			// reads as expired; the expiry alone still applies nothing.
+			expect(cacheExpired(ctx, sessionId)).toBe(true);
+			expect(getPendingOps(ctx.db, sessionId)).toHaveLength(1);
+			expect(tagStatus(ctx, sessionId, target)).toBe("active");
 		} finally {
 			ctx.cleanup();
 		}
@@ -425,7 +442,7 @@ describe("Pi/Oh My Pi distance-based age bookmark", () => {
 
 	it.each([
 		2, 3, 5,
-	])("keeps current-task outputs through %i TTL rebuilds and a model switch", async (rebuilds) => {
+	])("keeps current-task outputs through %i flush rebuilds and a model switch", async (rebuilds) => {
 		const sessionId = `ses-pi-distance-${rebuilds}`;
 		const ctx = setup(sessionId, MODEL, "5m", 4000);
 		const messages: PiMessage[] = [userMessage("implement the feature")];
@@ -456,7 +473,22 @@ describe("Pi/Oh My Pi distance-based age bookmark", () => {
 			);
 			for (let pass = 1; pass <= rebuilds; pass++) {
 				setSystemTime(new Date(T0 + pass * 6 * MINUTE));
-				await ctx.runPass([...messages], 2);
+				// An expired cache rebuilds nothing, so each rebuild is a user flush.
+				signalPiPendingMaterialization(sessionId, "user_flush");
+				let rebuilt = false;
+				const restoreObserver =
+					contextHandlerInternals.setPipelineResultObserverForTests(
+						(id, result) => {
+							if (id === sessionId && result.prefixBustPermitted)
+								rebuilt = true;
+						},
+					);
+				try {
+					await ctx.runPass([...messages], 2);
+				} finally {
+					restoreObserver();
+				}
+				expect(rebuilt).toBe(true);
 				expect(
 					getTagsBySession(ctx.db, sessionId).filter(
 						(tag) => tag.type === "tool" && tag.status === "active",
@@ -469,7 +501,7 @@ describe("Pi/Oh My Pi distance-based age bookmark", () => {
 					ctx.logs.filter((line) =>
 						line.startsWith("pi m[0] HARD fold firing: reason=ttl_idle"),
 					),
-				).toHaveLength(pass);
+				).toHaveLength(0);
 				setSystemTime(new Date(T0 + pass * 6 * MINUTE + 1000));
 				await ctx.messageEnd(
 					assistantMessage("still working", 100 + pass, {
@@ -546,6 +578,8 @@ describe("Pi/Oh My Pi distance-based age bookmark", () => {
 				assistantMessage("still working", 100, { ...providerUsage(2000) }),
 			);
 			setSystemTime(new Date(T0 + 6 * MINUTE));
+			// An expired cache rebuilds nothing; a user flush is the rebuild here.
+			signalPiPendingMaterialization(sessionId, "user_flush");
 			await ctx.runPass([...messages], 2);
 			expect(
 				getTagsBySession(ctx.db, sessionId)
@@ -625,6 +659,8 @@ describe("Pi/Oh My Pi distance-based age bookmark", () => {
 				assistantMessage("done", 100, { ...providerUsage(2000) }),
 			);
 			setSystemTime(new Date(T0 + 6 * MINUTE));
+			// An expired cache rebuilds nothing; a user flush is the rebuild here.
+			signalPiPendingMaterialization(sessionId, "user_flush");
 			await ctx.runPass([...messages], 2);
 			const after = getTagsBySession(ctx.db, sessionId).filter(
 				(tag) => tag.type === "tool",

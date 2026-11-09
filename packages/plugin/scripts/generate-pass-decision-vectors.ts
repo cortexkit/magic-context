@@ -41,7 +41,8 @@ type Lane = (typeof LANES)[number];
 
 /**
  * What permitted a prefix change, in the priority order used when several hold:
- * - `cacheLoss`: a first render or an expired provider cache rebuilds the head anyway;
+ * - `cacheLoss`: a first render rebuilds the head anyway (an expired provider cache
+ *   is an input but never a ride: the pass resends the same bytes);
  * - `executedFold`: a fold changed the served prefix;
  * - `signedPrefixRewrite`: signed thinking was released so the prefix can be rewritten;
  * - `servedShapeRepair`: a previously served array shape must be repaired;
@@ -97,7 +98,11 @@ interface VectorInputs {
     flush: boolean;
     /** Freshly published history changes the served m[1] on this pass. */
     publishedHistory: boolean;
-    /** Why the provider cache is already lost on this pass, if it is. */
+    /**
+     * Why the provider cache is already lost on this pass, if it is. An idle
+     * expiry is kept as an input to show it grants nothing: the pass decides as
+     * the same pass with a warm cache.
+     */
     cacheLoss: "none" | "idleExpiry" | "firstRender";
     /** A fold ran but reproduced the served prefix byte for byte (no rewrite). */
     refoldKeepsPrefix: boolean;
@@ -257,7 +262,7 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "subagent-force-band-estimate-only",
-        note: "An estimate-only force reading takes no force ride, but the subagent execute pass still admits its lanes.",
+        note: "An estimate-only force reading below 95% takes no force ride and runs no emergency drop, but the subagent execute pass still admits its routine lanes.",
         inputs: base({
             preset: "worker",
             usagePercent: 88,
@@ -360,7 +365,7 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "primary-idle-expiry",
-        note: "The provider cache expired: the idle fold rebuilds the head anyway and eligible work rides it.",
+        note: "The provider cache expired, which is no ride by itself; a fold that ran for another reason rebuilds the head and eligible work rides it.",
         inputs: base({ cacheLoss: "idleExpiry", executedFold: true, pendingWork: ALL_ROUTINE }),
     },
     {
@@ -439,12 +444,12 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "primary-held-idle-expiry",
-        note: "An expired cache on a held pass is a priced rebuild: queued work and cleanup ride it.",
+        note: "An expired cache on a held pass is no ride: the hold stands and queued work waits.",
         inputs: base({ signedThinkingHold: true, cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
     },
     {
         name: "primary-held-idle-expiry-spent-force-episode",
-        note: "A held idle expiry prices the pass, so it re-arms a spent force episode.",
+        note: "A held idle expiry prices nothing, so a spent force episode stays spent and no ride lands.",
         inputs: base({ signedThinkingHold: true, cacheLoss: "idleExpiry", usagePercent: 88, emergencyEpisodeSpent: true, pendingWork: ALL_WORK }),
     },
     {
@@ -464,12 +469,12 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "primary-idle-expiry-without-fold",
-        note: "An expired cache whose refold keeps the bytes is still a ride below the force band.",
+        note: "An expired cache is no ride: the execute pass holds its small queued drop as it would with a warm cache.",
         inputs: base({ cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
     },
     {
         name: "primary-idle-expiry-routine-already-applied",
-        note: "Routine cleanup runs once per execute-pressure stretch on a primary; an idle expiry later in the stretch carries only the tool lanes.",
+        note: "An idle expiry later in an execute-pressure stretch is no ride, so nothing first-applies.",
         inputs: base({ cacheLoss: "idleExpiry", alreadyRanThisTurn: true, routinePressureAlreadyApplied: true, pendingWork: ALL_ROUTINE }),
     },
     {
@@ -484,7 +489,7 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "subagent-idle-expiry",
-        note: "An expired cache on a subagent execute pass: the cache is rewritten anyway and every lane rides.",
+        note: "An expired cache on a subagent execute pass is no ride of its own; the execute pass itself admits every lane.",
         inputs: base({ preset: "worker", cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
     },
     {
@@ -554,13 +559,11 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
     // (`freezeM0M1`), so it cannot fold, refresh m[1] or take a parked flush
     // (`isExplicitFlush` and `materializationRequested` are cleared). Only primary and
     // compaction-off sessions render m[0]/m[1] (`m0M1EnabledForFold`), so only they can
-    // first-render; the strict hold parks that render too. Every session sees an expired
-    // cache (`idleExpiryRebuild`); while the hold is on it is the held expiry.
+    // first-render; the strict hold parks that render too. An expired provider cache
+    // reaches no gate: it is not a ride, so it has no input here.
     const hold = inputs.signedThinkingHold;
     const rendersHead = primary || inputs.compactionOff;
     const firstRenderBust = inputs.cacheLoss === "firstRender" && rendersHead && !hold;
-    const idleExpiryRebuild = inputs.cacheLoss === "idleExpiry";
-    const heldIdleExpiryRebuild = hold && idleExpiryRebuild;
     const foldBustsServedPrefix = inputs.executedFold && !hold;
     const flush = inputs.flush && !hold;
     const publishedHistory = inputs.publishedHistory && !hold;
@@ -581,8 +584,6 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
             rewritingSignedPrefix: inputs.signedPrefixRewrite,
             foldBustsServedPrefix,
             firstRenderBust,
-            idleExpiryRebuild,
-            heldIdleExpiryRebuild,
             explicitFlush: flush,
             publishedHistory,
             historyRebuiltThisPass,
@@ -611,28 +612,27 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
             pendingOpsDidMutate: lanes.has("queuedDrops"),
             foldBustsServedPrefix,
             firstRenderBust,
-            heldIdleExpiryRebuild,
             historyRebuiltThisPass,
             compartmentInjectionRebuiltFromDb: false,
             rebuiltHistoryFromInitialPrepare: false,
         });
         if (
             emergencyEpisodeRearms({
-                emergencyDropEligible: decision.emergencyDropEligible,
+                forceBandConfirmed: decision.forceBandConfirmed,
                 rewriteAlreadyPriced,
                 emergencyInputSample: () => emergencySample,
             })
         )
             emergencySample = 0;
         const emergencyDrops =
-            decision.emergencyDropEligible &&
+            decision.forceBandConfirmed &&
             inputs.pendingWork.emergencyDrop &&
             !emergencyEpisodeLatched(emergencySample > 0, inputs.usagePercent);
         // A batch the emergency selector applies is the episode's one pressure
         // rebuild; routine cleanup drains into that same pass.
         const routine =
             routineCleanupAdmitted({
-                emergencyDropEligible: decision.emergencyDropEligible,
+                forceBandConfirmed: decision.forceBandConfirmed,
                 contextPercentage: inputs.usagePercent,
                 emergencyInputSample: () => emergencySample,
                 fullFeatureMode: primary,
@@ -649,7 +649,7 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
     }
     const { rideSignals } = decision;
     const active: Record<Origin, boolean> = {
-        cacheLoss: rideSignals.hardFold && (firstRenderBust || idleExpiryRebuild),
+        cacheLoss: rideSignals.hardFold && firstRenderBust,
         executedFold: rideSignals.hardFold && foldBustsServedPrefix,
         signedPrefixRewrite: rideSignals.hardFold && inputs.signedPrefixRewrite,
         servedShapeRepair: rideSignals.servedShapeRepair,

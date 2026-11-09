@@ -9,7 +9,6 @@
  */
 
 import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
-import { computeHardCacheExpired } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	type ContextDatabase,
 	getOrCreateSessionMeta,
@@ -163,18 +162,11 @@ export function processSystemPromptForCache(args: {
 	);
 	const contentOrPresetChanged =
 		!isFirstHash && stableCandidateHash !== previousHash;
-	// before_agent_start precedes the context scheduler. Read the provider's
-	// response clock here too, so the date advances on the already-expired
-	// request rather than staying frozen until an unrelated explicit refresh.
-	const idleCacheExpired =
-		sessionMeta !== undefined &&
-		computeHardCacheExpired(
-			sessionMeta.cacheTtl,
-			sessionMeta.lastResponseTime,
-			Date.now(),
-		);
-	const dateMayAdvance =
-		isCacheBusting || idleCacheExpired || contentOrPresetChanged;
+	// An expired provider cache is not a reason to move the date: the provider
+	// only forgot its cache, and a moved date would rewrite the bytes in front
+	// of the whole conversation (and of any signed thinking it carries). The
+	// date waits for a real rebuild, as on a warm cache.
+	const dateMayAdvance = isCacheBusting || contentOrPresetChanged;
 
 	if (liveDate && !stickyDate) {
 		stickyDateBySession.set(sessionId, liveDate);

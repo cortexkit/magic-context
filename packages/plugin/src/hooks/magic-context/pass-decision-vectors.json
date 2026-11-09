@@ -602,7 +602,7 @@
     },
     {
       "name": "subagent-force-band-estimate-only",
-      "note": "An estimate-only force reading takes no force ride, but the subagent execute pass still admits its lanes.",
+      "note": "An estimate-only force reading below 95% takes no force ride and runs no emergency drop, but the subagent execute pass still admits its routine lanes.",
       "inputs": {
         "preset": "worker",
         "compactionOff": false,
@@ -640,7 +640,6 @@
         "busts": true,
         "origin": "subagentExecute",
         "lanes": [
-          "emergencyDrop",
           "dedup"
         ],
         "heldPassesAfter": 0
@@ -1276,7 +1275,7 @@
     },
     {
       "name": "primary-idle-expiry",
-      "note": "The provider cache expired: the idle fold rebuilds the head anyway and eligible work rides it.",
+      "note": "The provider cache expired, which is no ride by itself; a fold that ran for another reason rebuilds the head and eligible work rides it.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -1312,7 +1311,7 @@
       },
       "expected": {
         "busts": true,
-        "origin": "cacheLoss",
+        "origin": "executedFold",
         "lanes": [
           "dedup",
           "ageSweep",
@@ -1858,7 +1857,7 @@
     },
     {
       "name": "primary-held-idle-expiry",
-      "note": "An expired cache on a held pass is a priced rebuild: queued work and cleanup ride it.",
+      "note": "An expired cache on a held pass is no ride: the hold stands and queued work waits.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -1893,20 +1892,15 @@
         }
       },
       "expected": {
-        "busts": true,
-        "origin": "cacheLoss",
-        "lanes": [
-          "queuedDrops",
-          "dedup",
-          "ageSweep",
-          "supersession"
-        ],
-        "heldPassesAfter": 0
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
       }
     },
     {
       "name": "primary-held-idle-expiry-spent-force-episode",
-      "note": "A held idle expiry prices the pass, so it re-arms a spent force episode.",
+      "note": "A held idle expiry prices nothing, so a spent force episode stays spent and no ride lands.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -1941,12 +1935,9 @@
         }
       },
       "expected": {
-        "busts": true,
-        "origin": "cacheLoss",
-        "lanes": [
-          "emergencyDrop",
-          "dedup"
-        ],
+        "busts": false,
+        "origin": null,
+        "lanes": [],
         "heldPassesAfter": 0
       }
     },
@@ -2090,7 +2081,7 @@
     },
     {
       "name": "primary-idle-expiry-without-fold",
-      "note": "An expired cache whose refold keeps the bytes is still a ride below the force band.",
+      "note": "An expired cache is no ride: the execute pass holds its small queued drop as it would with a warm cache.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -2125,20 +2116,15 @@
         }
       },
       "expected": {
-        "busts": true,
-        "origin": "cacheLoss",
-        "lanes": [
-          "queuedDrops",
-          "dedup",
-          "ageSweep",
-          "supersession"
-        ],
-        "heldPassesAfter": 0
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
       }
     },
     {
       "name": "primary-idle-expiry-routine-already-applied",
-      "note": "Routine cleanup runs once per execute-pressure stretch on a primary; an idle expiry later in the stretch carries only the tool lanes.",
+      "note": "An idle expiry later in an execute-pressure stretch is no ride, so nothing first-applies.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -2173,12 +2159,9 @@
         }
       },
       "expected": {
-        "busts": true,
-        "origin": "cacheLoss",
-        "lanes": [
-          "ageSweep",
-          "supersession"
-        ],
+        "busts": false,
+        "origin": null,
+        "lanes": [],
         "heldPassesAfter": 0
       }
     },
@@ -2275,7 +2258,7 @@
     },
     {
       "name": "subagent-idle-expiry",
-      "note": "An expired cache on a subagent execute pass: the cache is rewritten anyway and every lane rides.",
+      "note": "An expired cache on a subagent execute pass is no ride of its own; the execute pass itself admits every lane.",
       "inputs": {
         "preset": "worker",
         "compactionOff": false,
@@ -2311,7 +2294,7 @@
       },
       "expected": {
         "busts": true,
-        "origin": "cacheLoss",
+        "origin": "subagentExecute",
         "lanes": [
           "queuedDrops",
           "dedup",

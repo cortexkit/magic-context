@@ -35,14 +35,26 @@ function createContextUsage(percentage: number): ContextUsage {
 }
 
 describe("createScheduler", () => {
-    it("returns execute when cache is expired", () => {
+    it("returns defer when the cache has expired below the execute threshold", () => {
+        // An expired provider cache is not an execute pass: resending the same
+        // bytes keeps signed thinking valid and queued drops wait for the threshold.
         const scheduler = createScheduler({ executeThresholdPercentage: 65 });
         const sessionMeta = createSessionMeta({ lastResponseTime: BASE_TIME - 400_000 });
         const contextUsage = createContextUsage(50);
 
         const decision = scheduler.shouldExecute(sessionMeta, contextUsage, BASE_TIME);
 
-        expect(decision).toBe("execute");
+        expect(decision).toBe("defer");
+    });
+
+    it("returns execute at the threshold whether or not the cache has expired", () => {
+        const scheduler = createScheduler({ executeThresholdPercentage: 65 });
+        for (const lastResponseTime of [BASE_TIME - 400_000, BASE_TIME - 10_000]) {
+            const sessionMeta = createSessionMeta({ lastResponseTime });
+            expect(scheduler.shouldExecute(sessionMeta, createContextUsage(65), BASE_TIME)).toBe(
+                "execute",
+            );
+        }
     });
 
     it("returns execute when context usage is at or above the configured threshold", () => {
@@ -94,7 +106,7 @@ describe("createScheduler", () => {
         ).toBe("execute");
     });
 
-    it("falls back to 5m default when cacheTtl is invalid", () => {
+    it("returns defer below the threshold when cacheTtl is invalid and the cache looks expired", () => {
         const scheduler = createScheduler({ executeThresholdPercentage: 65 });
         const sessionMeta = createSessionMeta({
             cacheTtl: "bad-format",
@@ -104,7 +116,7 @@ describe("createScheduler", () => {
 
         const decision = scheduler.shouldExecute(sessionMeta, contextUsage, BASE_TIME);
 
-        expect(decision).toBe("execute");
+        expect(decision).toBe("defer");
     });
 
     it("falls back to 5m default when cacheTtl is invalid and cache would be warm", () => {

@@ -1757,7 +1757,7 @@ export interface PiInjectionOptions {
 	muralEnabled?: boolean;
 }
 
-/** Scheduler config — gates cache-busting stages on TTL + threshold. */
+/** Scheduler config — gates cache-busting stages on the execute threshold. */
 export interface PiSchedulerOptions {
 	executeThresholdPercentage:
 		| number
@@ -1792,8 +1792,9 @@ export interface PiContextHandlerOptions {
 	 */
 	injection?: PiInjectionOptions;
 	/**
-	 * Scheduler config — gates heuristic cleanup on TTL/threshold.
-	 * When omitted, defaults to 65% threshold + 5m TTL behavior.
+	 * Scheduler config — gates heuristic cleanup on the execute threshold.
+	 * When omitted, defaults to a 65% threshold and a 5m TTL (the TTL is read
+	 * for diagnostics only).
 	 */
 	scheduler?: PiSchedulerOptions;
 	/**
@@ -5095,8 +5096,8 @@ export function registerPiContextHandler(
 			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
 			const tPressureResolution = performance.now();
 
-			// Resolve scheduler decision: execute-vs-defer based on TTL
-			// + threshold. Drives whether heuristic cleanup runs on this
+			// Resolve scheduler decision: execute-vs-defer based on the
+			// execute threshold. Drives whether heuristic cleanup runs on this
 			// pass. Read live context usage from Pi (tokens/percent) and
 			// the persisted session-meta record (last_response_time,
 			// cache_ttl).
@@ -8568,7 +8569,6 @@ function maybeFireHistorian(args: {
 				permission: {
 					signedThinkingHold: args.signedThinkingHeld === true,
 					firstRender: false,
-					idleExpiry: false,
 					emergency:
 						usage.percentage >= historianForceMaterializationPercentage,
 				},
@@ -10208,7 +10208,7 @@ function runSynchronousPipeline(
 		? (() => {
 				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
 				// derive from freshly-read session_meta; modelKey from the volatile live
-				// map.
+				// map. The TTL idle flag is recorded only; it never triggers a fold.
 				const hardMeta = args.sessionMeta;
 				let piTtlMs = 5 * 60 * 1000;
 				try {
@@ -10688,11 +10688,9 @@ function runSynchronousPipeline(
 	}
 	// Subagents have no history fold to ride. Their execute pass admits every
 	// eligible cleanup lane together, without rewriting bytes when none acts.
-	// Idle expiry admits eligible edits after kept thinking only while a signed
-	// turn is unfinished. Otherwise, expiry adds no cleanup permission beyond
-	// the existing history rebuild, explicit flush and pressure-relief rules.
-	const heldIdleExpiryRebuild =
-		protectedSignedPrefix && piHardSignals?.cacheExpired === true;
+	// An expired provider cache admits nothing: when only the provider forgot
+	// the cache, the pass replays byte-identically, keeping signed thinking and
+	// queued drops until a real ride.
 	const systemPrefixChangedThisPass =
 		!prefixPreflightContended && effectiveSystemChangedThisPass;
 	const userFlushRequested =
@@ -10713,7 +10711,6 @@ function runSynchronousPipeline(
 			foldBustsServedPrefixThisPass ||
 			systemPrefixChangedThisPass ||
 			firstRenderBust ||
-			heldIdleExpiryRebuild ||
 			isCacheBustingPass,
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
@@ -10723,16 +10720,15 @@ function runSynchronousPipeline(
 		explicitFlush: !protectedSignedPrefix && userFlushRequested,
 		publishedHistory: !prefixPreflightContended && publishedM1RefreshedThisPass,
 	};
-	// Warm-cache thinking holds defer every new prefix edit. First render, idle
-	// expiry and pressure relief can admit work, but target guards still forbid
-	// edits before retained signatures. A genuine rewrite omits all signed blocks;
-	// expiry alone leaves them and their preceding bytes intact.
+	// Thinking holds defer every new prefix edit, whether or not the provider
+	// cache is still warm. First render and pressure relief can admit work, but
+	// target guards still forbid edits before retained signatures. A genuine
+	// rewrite omits all signed blocks.
 	// The same predicate as OpenCode's postprocess and the historian's
 	// redundancy skip.
 	const ridePermissionGate = {
 		signedThinkingHold: protectedSignedPrefix,
 		firstRender: firstRenderBust,
-		idleExpiry: heldIdleExpiryRebuild,
 		emergency: emergencyDropEligible,
 	};
 	let prefixMutationAllowed = prefixMutationPermitted(ridePermissionGate);
@@ -10770,7 +10766,6 @@ function runSynchronousPipeline(
 			// reductions may ride it without causing an independent bust.
 			foldBustsServedPrefixThisPass ||
 			firstRenderBust ||
-			heldIdleExpiryRebuild ||
 			(args.recoveryRebuildReason !== undefined && isCacheBustingPass) ||
 			rideSignals.subagentExecute ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
@@ -12112,9 +12107,8 @@ function runSynchronousPipeline(
 				systemPrefixChangedThisPass ||
 				foldBustsServedPrefixThisPass ||
 				identityRebuild ||
-				firstRenderBust ||
-				heldIdleExpiryRebuild;
-			// Applied work, new identity numbers or a missing/cold cache already
+				firstRenderBust;
+			// Applied work, new identity numbers or a missing cache already
 			// cost a rebuild. Under force pressure, reset the saved emergency
 			// sample so accumulated cleanup joins this pass. Restoring previously
 			// served drops is not new work and must not start another batch.
@@ -13561,9 +13555,7 @@ function runSynchronousPipeline(
 		strictThinkingKept: protectedSignedPrefix,
 		signedPrefixRewritten: rewritingSignedPrefix,
 		prefixRebuildAlreadyPriced:
-			firstRenderBust ||
-			heldIdleExpiryRebuild ||
-			(!!args.recoveryRebuildReason && isCacheBustingPass),
+			firstRenderBust || (!!args.recoveryRebuildReason && isCacheBustingPass),
 		identityRebuilt: identityRebuild,
 		historyRefreshPermitted,
 		servedTagNumbers,

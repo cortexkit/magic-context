@@ -261,8 +261,7 @@ function retire(history: Set<string>, current: RequestState): void {
  * Records the messages pass's decision. `permitted` lets a queued date refresh
  * ride this pass's rebuild. `signedThinkingKept` says the pass served signed
  * thinking, so nothing in front of it, the system
- * date included, may change on this request even when the provider cache
- * expired; omit it when the pass cannot tell.
+ * date included, may change on this request; omit it when the pass cannot tell.
  */
 export function finishSystemDateRefresh(
     history: Set<string>,

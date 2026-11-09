@@ -39,22 +39,19 @@ test("execute differential: 300 deterministic randomized passes per host", async
 			publishedHistory: random() < 0.2,
 			subagentExecute: random() < 0.2,
 		};
-		const gate = {
-			signedThinkingHold: random() < 0.5,
-			firstRender: random() < 0.2,
-			idleExpiry: random() < 0.2,
-			emergency: random() < 0.2,
-		};
+		const signedThinkingHold = random() < 0.5;
+		const firstRender = random() < 0.2;
+		// An idle expiry never lifts the hold; drawing it keeps the later flags'
+		// sequence unchanged.
+		random();
+		const gate = { signedThinkingHold, firstRender, emergency: random() < 0.2 };
 		const baseAllowed =
 			(existing.hardFold ||
 				existing.force ||
 				existing.explicitFlush ||
 				existing.publishedHistory ||
 				existing.subagentExecute) &&
-			(!gate.signedThinkingHold ||
-				gate.firstRender ||
-				gate.idleExpiry ||
-				gate.emergency);
+			(!gate.signedThinkingHold || gate.firstRender || gate.emergency);
 		expect(
 			!baseAllowed ||
 				reclaimRidePermitted(
