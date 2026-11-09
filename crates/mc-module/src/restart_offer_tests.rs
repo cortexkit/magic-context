@@ -40,7 +40,8 @@ fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
     (output, tracing::subscriber::set_default(subscriber))
 }
 
-/// A head session on a Claude model whose runner declares `view_anchor`,
+/// A session on the `head` preset (the one that gets a history head and a
+/// cut) on a Claude model whose runner declares `view_anchor`,
 /// with a store, its transcript read, and two views handed over: view 1,
 /// which the runner applied, and view 2, which it accepted but has not
 /// applied yet. View 2 carries the history head (large enough that the store
