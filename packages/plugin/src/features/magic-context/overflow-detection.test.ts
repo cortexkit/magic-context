@@ -334,12 +334,32 @@ describe("overflow-detection / isPrefixBoundThinkingModel", () => {
                 "claude-haiku-5.5-20261001",
                 "us.anthropic.claude-haiku-5-5-v1:0",
                 "claude-haiku-5-5@20261001",
+                // Claude Fable 5.2 and Claude Mythos 5.1/5.2 on the Claude API,
+                // Vertex `@date`, Bedrock and OpenRouter-style ids.
+                "claude-fable-5-2",
+                "claude-fable-5-2@20261109",
+                "anthropic.claude-fable-5-2",
+                "us.anthropic.claude-fable-5-2-v1:0",
+                "anthropic/claude-fable-5.2",
+                "claude-mythos-5-1",
+                "claude-mythos-5-1@20261001",
+                "us.anthropic.claude-mythos-5-1-v1:0",
+                "anthropic/claude-mythos-5.1",
+                "claude-mythos-5-2",
+                "claude-mythos-5-2@20261109",
+                "us.anthropic.claude-mythos-5-2-v1:0",
+                "anthropic/claude-mythos-5.2",
             ]) {
                 expect(isPrefixBoundThinkingModel(providerID, modelID)).toBe(true);
             }
             for (const modelID of [
                 "fable-5-0",
                 "claude-fable-5-5",
+                "claude-fable-5-20",
+                "claude-mythos-5",
+                "claude-mythos-5-0",
+                "claude-mythos-5-21",
+                "notmythos-5-2",
                 "claude-opus-5",
                 "claude-opus-5-4",
                 "claude-opus-4-5",

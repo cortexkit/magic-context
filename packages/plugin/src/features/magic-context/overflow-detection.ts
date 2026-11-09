@@ -252,10 +252,21 @@ export function detectLatestTurnThinkingMismatch(error: unknown): boolean {
  * prefix, as `[family, major, minor]`. The source of truth is Anthropic's
  * preserved-thinking page
  * (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
- * "Keeping the prefix unchanged"); add a row when it names a new model.
+ * "Keeping the prefix unchanged": "On Claude 5.1 and later models, a thinking
+ * block stays valid only while everything you sent before it is unchanged"),
+ * plus each new model's own "What's new" page; add a row when a new Claude
+ * model ships. Claude Fable 5.2 and Claude Mythos 5.2 enforce the check on
+ * every account (https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2,
+ * "Editing earlier turns invalidates thinking blocks on every account"), and
+ * Claude Mythos 5.1 returns the 400 on every account on the Claude API.
+ * Keep this list in sync with `is_prefix_bound_thinking_model` in
+ * crates/mc-module/src/transform.rs.
  */
 export const PREFIX_BOUND_THINKING_MODELS: ReadonlyArray<readonly [string, number, number]> = [
     ["fable", 5, 1],
+    ["fable", 5, 2],
+    ["mythos", 5, 1],
+    ["mythos", 5, 2],
     ["opus", 5, 5],
     ["sonnet", 5, 5],
     ["haiku", 5, 5],
@@ -274,7 +285,8 @@ const PREFIX_BOUND_THINKING_PATTERN = new RegExp(
 /**
  * True for a model in PREFIX_BOUND_THINKING_MODELS on any route. Accounts
  * created on or after 2026-08-31 enforce the binding on the Claude API, Vertex
- * and Bedrock, so the provider is deliberately ignored. Proactive stripping
+ * and Bedrock, and Fable 5.2 and Mythos 5.2 enforce it on every account, so
+ * neither the provider nor the account's age is considered. Proactive stripping
  * runs only when a pass already rebuilds the cached prefix: a false positive
  * costs reasoning on those passes, a false negative risks a binding 400.
  */
@@ -288,10 +300,11 @@ export function isPrefixBoundThinkingModel(
 
 /**
  * True only for canonical Anthropic Fable 5.1 model identifiers. Binding
- * recovery uses isPrefixBoundThinkingModel instead, which also covers Opus 5.5,
- * Sonnet 5.5 and cloud routes. The variant-cache policy uses this narrower
- * check to recognize Fable 5.1, whose cached prefix survives effort changes;
- * that measured cache behavior is separate from prefix binding.
+ * recovery uses isPrefixBoundThinkingModel instead, which covers every
+ * prefix-bound model and cloud route. The variant-cache policy uses this
+ * narrower check to recognize Fable 5.1, whose cached prefix was measured to
+ * survive effort changes; that cache behavior is separate from prefix binding,
+ * so a newer prefix-bound model (Fable 5.2) is not included until measured.
  */
 export function isFable51ThinkingBindingModel(
     providerID: string | null | undefined,
