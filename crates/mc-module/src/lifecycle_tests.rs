@@ -33,6 +33,9 @@ mod reminder_delivery_tests;
 #[path = "move_floor_tests.rs"]
 mod move_floor_tests;
 
+#[path = "restart_offer_tests.rs"]
+mod restart_offer_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

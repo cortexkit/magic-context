@@ -130,13 +130,26 @@ pub(crate) fn view<S: Serializer>(view: &View, serializer: S) -> Result<S::Ok, S
         return view.serialize(serializer);
     }
     use serde::ser::SerializeStruct;
-    let mut state = serializer.serialize_struct("View", 3)?;
+    // Write every member the checksum covers, in `View`'s own order. A view
+    // saved without its policy members (`built_through`, `new_signed`) loads
+    // with a checksum that no longer matches it, and a runner refuses it
+    // when ck-mc offers it again after a restart. An absent member stays
+    // absent, as it is on the wire.
+    let fields =
+        3 + usize::from(view.built_through.is_some()) + usize::from(view.new_signed.is_some());
+    let mut state = serializer.serialize_struct("View", fields)?;
     state.serialize_field("version", &view.version)?;
     state.serialize_field("checksum", &view.checksum)?;
     state.serialize_field(
         "edits",
         &view.edits.iter().map(StoredEdit).collect::<Vec<_>>(),
     )?;
+    if let Some(anchor) = &view.built_through {
+        state.serialize_field("built_through", anchor)?;
+    }
+    if let Some(policy) = &view.new_signed {
+        state.serialize_field("new_signed", policy)?;
+    }
     state.end()
 }
 

@@ -352,6 +352,19 @@ struct NoticePass {
     head_stale: bool,
 }
 
+/// The policy members a view carries, as a log line names them.
+fn policy_members(view: &View) -> String {
+    format!(
+        "built_through {}, new_signed {}",
+        if view.built_through.is_some() {
+            "present"
+        } else {
+            "absent"
+        },
+        view.new_signed.as_deref().unwrap_or("absent")
+    )
+}
+
 /// Whether the runner reports applying `view`.
 fn same(applied: &AppliedView, view: &View) -> bool {
     applied.version == view.version && applied.checksum == view.checksum
@@ -3627,6 +3640,26 @@ impl Session {
             return;
         };
         let oldest = self.unconfirmed[0].view.version;
+        // An older ck-mc saved views without their policy members
+        // (`built_through`, `new_signed`), which their checksum covers. Such
+        // a view can't be repaired, since nothing else records the message
+        // it was built through, and the runner would refuse it for its
+        // checksum. It goes back as undelivered: its parts did nothing
+        // wrong, so the rebuild may carry them again.
+        if !view.verify() {
+            let why = if view.built_through.is_none() && view.new_signed.is_none() {
+                "saved without its policy members"
+            } else {
+                "no longer matches its checksum as saved"
+            };
+            tracing::warn!(
+                "ck-mc: session {}: view {} {why}; rebuilding instead of offering it again",
+                self.key.session,
+                view.version
+            );
+            self.roll_back(oldest, false, None);
+            return;
+        }
         // Saved by a build from before the move floor was known, a view may
         // cut before it. Such a view is not offered again: ck-mc puts back
         // what accepting it changed, as when its fate is unknown, and takes
@@ -3654,9 +3687,10 @@ impl Session {
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 tracing::warn!(
-                    "ck-mc: session {}: runner refused view {} offered again: {refusal:?}",
+                    "ck-mc: session {}: runner refused view {} offered again: {refusal:?} ({})",
                     self.key.session,
-                    view.version
+                    view.version,
+                    policy_members(&view)
                 );
                 self.roll_back(oldest, true, None);
                 self.reset_transcript_retry();
@@ -3949,6 +3983,13 @@ impl Session {
             .collect();
         let cut_moved = self.cut != before.cut;
         self.latest = before.latest;
+        // A view saved by an older ck-mc may lack the policy members its
+        // checksum covers. It can't stand for the view the runner applies:
+        // the next view would differ from it in policy alone and be built
+        // for nothing. Read the runner's own copy back before building.
+        if self.latest.as_ref().is_some_and(|view| !view.verify()) {
+            self.latest_unknown = true;
+        }
         self.queued = before.queued;
         self.refused_once = before.refused_once;
         self.transcript_retry = before.transcript_retry;
