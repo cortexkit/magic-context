@@ -64,7 +64,201 @@ pub(crate) struct Header {
     pub newest: u64,
     pub ready: bool,
     pub meta: Value,
-    pub breakdown: Value,
+    pub breakdown: Breakdown,
+}
+
+impl Header {
+    /// This header as compact JSON: the bytes `serde_json::to_string` writes
+    /// for it, with the breakdown's summary items copied from the JSON made
+    /// with them instead of serialized again ([`Breakdown::write_json`]).
+    pub(crate) fn json(&self) -> String {
+        let mut out = format!(
+            "{{\"base\":{},\"newest\":{},\"ready\":{},\"meta\":{},\"breakdown\":",
+            self.base, self.newest, self.ready, self.meta
+        );
+        self.breakdown.write_json(&mut out);
+        out.push('}');
+        out
+    }
+}
+
+/// The summary items that end a token breakdown's `items` list, one per
+/// summary the history head renders, with their compact JSON.
+#[derive(Debug, Default)]
+pub(crate) struct BreakdownSummaries {
+    items: Vec<Value>,
+    /// `items` as serde_json writes them, separated by commas, without the
+    /// list's brackets.
+    json: String,
+}
+
+impl BreakdownSummaries {
+    pub(crate) fn new(items: Vec<Value>) -> Self {
+        let json = items
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        Self { items, json }
+    }
+}
+
+/// A session's token breakdown, as `session_data.read` returns it in
+/// `token_breakdown`. Every step changes some of its members, but its
+/// summary items change only with the history head's baseline, and there is
+/// one per summary. So they are kept apart, in one list that updates share:
+/// otherwise copying and comparing the breakdown on each step would cost
+/// more the more summaries a session has. It compares, reads and serializes
+/// as the one JSON object it stands for ([`Breakdown::to_value`]).
+///
+/// The summary items kept apart are exactly the `"item":"summary"` items
+/// that end the `items` list, so two breakdowns are equal exactly when the
+/// objects they stand for are.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Breakdown {
+    /// Every member, except that `items` stops before the summary items.
+    value: Value,
+    summaries: Arc<BreakdownSummaries>,
+}
+
+impl Breakdown {
+    /// `value`'s `items` list must not end with a summary item: those are
+    /// `summaries`, which need `value` to have an `items` list.
+    pub(crate) fn new(value: Value, summaries: Arc<BreakdownSummaries>) -> Self {
+        debug_assert!(summaries.items.is_empty() || value["items"].is_array());
+        debug_assert!(value["items"]
+            .as_array()
+            .and_then(|items| items.last())
+            .is_none_or(|last| last["item"] != "summary"));
+        Self { value, summaries }
+    }
+
+    /// The breakdown that `value` is, with the summary items ending its
+    /// `items` list kept apart.
+    pub(crate) fn from_value(mut value: Value) -> Self {
+        let summaries = match value.get_mut("items").and_then(Value::as_array_mut) {
+            Some(items) => {
+                let trailing = items
+                    .iter()
+                    .rev()
+                    .take_while(|item| item["item"] == "summary")
+                    .count();
+                items.split_off(items.len() - trailing)
+            }
+            None => Vec::new(),
+        };
+        Self {
+            value,
+            summaries: Arc::new(BreakdownSummaries::new(summaries)),
+        }
+    }
+
+    /// The whole breakdown as one JSON object.
+    pub(crate) fn to_value(&self) -> Value {
+        let mut value = self.value.clone();
+        if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
+            items.extend(self.summaries.items.iter().cloned());
+        }
+        value
+    }
+
+    /// Every member but the summary items: `items` stops before them.
+    pub(crate) fn without_summaries(&self) -> &Value {
+        &self.value
+    }
+
+    /// Append the bytes serde_json writes for this breakdown to `out`,
+    /// copying the summary items' JSON as it was made with them. JSON objects
+    /// keep their members in key order, so this follows the same order.
+    fn write_json(&self, out: &mut String) {
+        let Some(members) = self
+            .value
+            .as_object()
+            .filter(|_| !self.summaries.items.is_empty())
+        else {
+            out.push_str(&self.value.to_string());
+            return;
+        };
+        out.push('{');
+        for (index, (key, value)) in members.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&Value::from(key.as_str()).to_string());
+            out.push(':');
+            if key == "items" {
+                out.push('[');
+                for item in value.as_array().map(Vec::as_slice).unwrap_or_default() {
+                    out.push_str(&item.to_string());
+                    out.push(',');
+                }
+                out.push_str(&self.summaries.json);
+                out.push(']');
+            } else {
+                out.push_str(&value.to_string());
+            }
+        }
+        out.push('}');
+    }
+}
+
+impl PartialEq for Breakdown {
+    fn eq(&self, other: &Self) -> bool {
+        // Updates share one summary list until the baseline changes, so the
+        // items are compared only when the lists differ.
+        self.value == other.value
+            && (Arc::ptr_eq(&self.summaries, &other.summaries)
+                || self.summaries.items == other.summaries.items)
+    }
+}
+
+/// A member other than `items`, whose summary items are kept apart: read
+/// the whole list from [`Breakdown::to_value`].
+impl std::ops::Index<&str> for Breakdown {
+    type Output = Value;
+    fn index(&self, key: &str) -> &Value {
+        assert_ne!(key, "items", "a breakdown's items are read from to_value()");
+        &self.value[key]
+    }
+}
+
+impl Serialize for Breakdown {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        struct Items<'a>(&'a Value, &'a [Value]);
+        impl Serialize for Items<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let leading = self.0.as_array().map(Vec::as_slice).unwrap_or_default();
+                let mut list = serializer.serialize_seq(Some(leading.len() + self.1.len()))?;
+                for item in leading.iter().chain(self.1) {
+                    list.serialize_element(item)?;
+                }
+                list.end()
+            }
+        }
+        let Some(members) = self
+            .value
+            .as_object()
+            .filter(|_| !self.summaries.items.is_empty())
+        else {
+            return self.value.serialize(serializer);
+        };
+        let mut map = serializer.serialize_map(Some(members.len()))?;
+        for (key, value) in members {
+            if key == "items" {
+                map.serialize_entry(key, &Items(value, &self.summaries.items))?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Breakdown {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Value::deserialize(deserializer).map(Self::from_value)
+    }
 }
 
 pub(crate) struct Update {
@@ -99,7 +293,7 @@ pub(crate) struct Snapshot {
     pub newest: u64,
     pub ready: bool,
     pub meta: Value,
-    pub breakdown: Value,
+    pub breakdown: Breakdown,
     pub compartments: Vec<Value>,
     pub messages: BTreeMap<String, Message>,
     pub decisions: Vec<Value>,
@@ -272,19 +466,23 @@ impl Replica {
     }
 
     fn publish(&mut self, mut snapshot: Snapshot) {
-        if snapshot.breakdown.get("items").is_none() {
+        if snapshot.breakdown.without_summaries().get("items").is_none() {
             // Older snapshots retain block totals, but not summary tiers or
             // part identities. Upgrade only the attribution they can prove.
-            let parts = snapshot.breakdown["parts"]
+            // Without an `items` list a breakdown keeps no summary items
+            // apart, so its value is the whole breakdown.
+            let mut breakdown = snapshot.breakdown.to_value();
+            let parts = breakdown["parts"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            snapshot.breakdown["items"] = json!(["system_prompt", "tool_definitions", "memory", "project_docs", "user_profile"].into_iter().filter_map(|name| {
+            breakdown["items"] = json!(["system_prompt", "tool_definitions", "memory", "project_docs", "user_profile"].into_iter().filter_map(|name| {
                 let part = parts.iter().find(|part| part["part"] == name)?;
                 Some(json!({"item":name,"tokens":part["tokens"],"source":if matches!(name, "system_prompt" | "tool_definitions") {
                     if part["tokens"].is_null() {"estimate"} else {"runner"}
                 } else {"counted"}}))
             }).collect::<Vec<_>>());
+            snapshot.breakdown = Breakdown::from_value(breakdown);
         }
         if let Some(previous) = self
             .snapshots
@@ -341,7 +539,7 @@ impl Replica {
             newest: 0,
             ready: false,
             meta: Value::Null,
-            breakdown: Value::Null,
+            breakdown: Breakdown::default(),
             compartments: Vec::new(),
             messages: BTreeMap::new(),
             decisions: Vec::new(),
@@ -464,9 +662,13 @@ impl Replica {
         let mut fields = match method {
             "session_data.read" => {
                 let section = string(p, "section")?;
+                let breakdown;
                 let row = match section {
                     "meta" => &snapshot.meta,
-                    "token_breakdown" if snapshot.ready => &snapshot.breakdown,
+                    "token_breakdown" if snapshot.ready => {
+                        breakdown = snapshot.breakdown.to_value();
+                        &breakdown
+                    }
                     "token_breakdown" => {
                         return Err(error(
                             "store_unavailable",
@@ -541,7 +743,7 @@ impl Replica {
                 // Compaction entries expose mid and generated_under, but not
                 // llm-runner's run_id/step_id/attempt_id. None can be derived
                 // from an ordinal or notice sequence, including after reverts.
-                json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "session_kind":"mode3", "managed":{"value":snapshot.breakdown["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
+                json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "session_kind":"mode3", "managed":{"value":snapshot.breakdown.without_summaries()["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
             }
             _ => unreachable!(),
         };

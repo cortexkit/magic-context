@@ -218,7 +218,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
             newest: 21,
             ready: true,
             meta: json!({"model":"test"}),
-            breakdown: json!({"total":{"tokens":123}}),
+            breakdown: crate::app_read::Breakdown::from_value(json!({"total":{"tokens":123}})),
             compartments: vec![json!({"compartment_id":"1","summary_markdown":"summary"})],
             messages,
             decisions: decisions.clone(),

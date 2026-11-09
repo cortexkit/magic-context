@@ -14,6 +14,7 @@
 //! reads the same in both.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 
 use cortexkit_role_compaction::read::Role;
 use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedImage, InsertedMessage};
@@ -112,7 +113,7 @@ pub struct Baseline {
     /// Per-summary attribution for the frozen baseline and its current delta.
     /// Older baselines have no attribution until the next head rebuild.
     #[serde(default)]
-    pub summary_items: Vec<SummaryItem>,
+    pub summary_items: SummaryItems,
     /// The highest summary sequence in `m[0]`.
     pub through_sequence: i64,
     /// The highest memory id that existed at the fold. Only read for a
@@ -159,6 +160,79 @@ pub struct SummaryItem {
     pub compartment_id: String,
     pub tier: u8,
     pub tokens: u64,
+}
+
+/// A baseline's per-summary attribution, one item per summary the head
+/// renders. A session copies, compares and saves its baseline on every step,
+/// while these items change only when the head is rendered again with other
+/// summaries; holding them behind one shared pointer keeps those steps from
+/// costing more as summaries accumulate. Their JSON is made once, when the
+/// list is made, and a store save writes that copy.
+#[derive(Clone)]
+pub struct SummaryItems(Arc<SummaryItemList>);
+
+struct SummaryItemList {
+    items: Vec<SummaryItem>,
+    /// `items` as serde_json writes them.
+    json: Box<serde_json::value::RawValue>,
+}
+
+impl SummaryItems {
+    pub fn new(items: Vec<SummaryItem>) -> Self {
+        let json = serde_json::value::to_raw_value(&items).expect("summary items serialize");
+        Self(Arc::new(SummaryItemList { items, json }))
+    }
+
+    /// Whether both are the one list a single [`SummaryItems::new`] made,
+    /// which needs no look at the items.
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Default for SummaryItems {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl std::ops::Deref for SummaryItems {
+    type Target = [SummaryItem];
+    fn deref(&self) -> &[SummaryItem] {
+        &self.0.items
+    }
+}
+
+impl std::fmt::Debug for SummaryItems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.items.fmt(f)
+    }
+}
+
+impl PartialEq for SummaryItems {
+    fn eq(&self, other: &Self) -> bool {
+        self.same(other) || self.0.items == other.0.items
+    }
+}
+
+impl Eq for SummaryItems {}
+
+impl Serialize for SummaryItems {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // A store save copies the JSON made with the list. Any other
+        // serializer may not be serde_json's, which alone copies it verbatim.
+        if crate::store_text::encoding() {
+            self.0.json.serialize(serializer)
+        } else {
+            self.0.items.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SummaryItems {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<SummaryItem>::deserialize(deserializer).map(Self::new)
+    }
 }
 
 /// The settings that decide what `m[0]` may hold. The plugin folds `m[0]` on
@@ -292,15 +366,17 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
         sections.push(crate::mural::BLOCK.to_owned());
     }
     Baseline {
-        summary_items: rendered_items
-            .into_inner()
-            .into_iter()
-            .map(|(i, tier, text)| SummaryItem {
-                compartment_id: inputs.summaries[i].sequence.to_string(),
-                tier,
-                tokens: inputs.counter.count(&text),
-            })
-            .collect(),
+        summary_items: SummaryItems::new(
+            rendered_items
+                .into_inner()
+                .into_iter()
+                .map(|(i, tier, text)| SummaryItem {
+                    compartment_id: inputs.summaries[i].sequence.to_string(),
+                    tier,
+                    tokens: inputs.counter.count(&text),
+                })
+                .collect(),
+        ),
         through_sequence: inputs
             .summaries
             .last()
@@ -499,6 +575,83 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
     )
 }
 
+/// What newer summaries add to `m[1]`, and the baseline's summary
+/// attribution with them: the items `m[0]` renders, then one per newer
+/// summary at full detail. It depends only on the baseline's items and
+/// `through_sequence`, the summaries and the counter, so a session keeps it
+/// between view builds instead of rendering and counting newer summaries on
+/// every build ([`newer_summaries`]).
+#[derive(Clone, Debug)]
+pub struct NewerSummaries {
+    /// The `<new-compartments>` block, when a newer summary has content.
+    block: Option<String>,
+    items: SummaryItems,
+}
+
+impl NewerSummaries {
+    /// The attribution a baseline carries once `m[1]` shows these summaries.
+    pub fn items(&self) -> &SummaryItems {
+        &self.items
+    }
+}
+
+/// The summaries newer than `baseline`'s `m[0]`, rendered for `m[1]`, and
+/// the attribution that goes with them. A baseline that already carries the
+/// returned items gives the same result again.
+pub fn newer_summaries(
+    baseline: &Baseline,
+    summaries: &[StoredCompartment],
+    counter: crate::count::Counter,
+) -> NewerSummaries {
+    // Summaries are kept in sequence order, so the newer ones are found by a
+    // binary search rather than a look at every summary.
+    debug_assert!(summaries
+        .windows(2)
+        .all(|pair| pair[0].sequence <= pair[1].sequence));
+    let first = summaries.partition_point(|summary| summary.sequence <= baseline.through_sequence);
+    let mut texts = Vec::new();
+    let mut newer = Vec::new();
+    for summary in &summaries[first..] {
+        let rendered = DecayRenderCompartment::from(summary);
+        if rendered.is_no_content() {
+            continue;
+        }
+        let text = render_compartment_at_tier(&rendered, 1);
+        newer.push(SummaryItem {
+            compartment_id: summary.sequence.to_string(),
+            tier: 1,
+            tokens: counter.count(&text),
+        });
+        texts.push(text);
+    }
+    // The items `m[0]` renders; an earlier `m[1]`'s items are replaced.
+    let in_m0 = |item: &&SummaryItem| {
+        item.compartment_id
+            .parse::<i64>()
+            .is_ok_and(|id| id <= baseline.through_sequence)
+    };
+    let items = if newer.is_empty()
+        && baseline.summary_items.iter().filter(in_m0).count() == baseline.summary_items.len()
+    {
+        baseline.summary_items.clone()
+    } else {
+        SummaryItems::new(
+            baseline
+                .summary_items
+                .iter()
+                .filter(in_m0)
+                .cloned()
+                .chain(newer)
+                .collect(),
+        )
+    };
+    NewerSummaries {
+        block: (!texts.is_empty())
+            .then(|| format!("<new-compartments>\n{}\n</new-compartments>", texts.join("\n\n"))),
+        items,
+    }
+}
+
 /// `m[1]`, and the baseline that records what it shows, for a pass that
 /// builds a view.
 ///
@@ -512,40 +665,26 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
 /// Also returns `m[1]`'s size without its memory changes, which is what the
 /// refold backstop measures ([`needs_refold`]).
 pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
+    delta_with(
+        baseline,
+        inputs,
+        &newer_summaries(baseline, inputs.summaries, inputs.counter),
+    )
+}
+
+/// [`delta`], given what [`newer_summaries`] returns for the same baseline,
+/// summaries and counter.
+pub fn delta_with(
+    baseline: &Baseline,
+    inputs: &Inputs,
+    newer: &NewerSummaries,
+) -> (String, Baseline, u64) {
     let _timing = crate::notice_cost_timing::span("head.delta");
     let tokens = |text: &str| inputs.counter.count(text);
     let line_tokens = |lines: &[String]| line_tokens(lines, inputs.counter);
     let mut next = baseline.clone();
-    next.summary_items.retain(|item| {
-        item.compartment_id
-            .parse::<i64>()
-            .is_ok_and(|id| id <= baseline.through_sequence)
-    });
-    let mut blocks = Vec::new();
-    let newer_summaries: Vec<String> = inputs
-        .summaries
-        .iter()
-        .filter(|summary| summary.sequence > baseline.through_sequence)
-        .filter_map(|summary| {
-            let rendered = DecayRenderCompartment::from(summary);
-            if rendered.is_no_content() {
-                return None;
-            }
-            let text = render_compartment_at_tier(&rendered, 1);
-            next.summary_items.push(SummaryItem {
-                compartment_id: summary.sequence.to_string(),
-                tier: 1,
-                tokens: tokens(&text),
-            });
-            Some(text)
-        })
-        .collect();
-    if !newer_summaries.is_empty() {
-        blocks.push(format!(
-            "<new-compartments>\n{}\n</new-compartments>",
-            newer_summaries.join("\n\n")
-        ));
-    }
+    next.summary_items = newer.items.clone();
+    let mut blocks: Vec<String> = newer.block.iter().cloned().collect();
     let profile_changed = match &baseline.profile_digest {
         Some(digest) => *digest != profile_digest(inputs.profile),
         None => inputs.profile_max_id != baseline.profile_max_id,

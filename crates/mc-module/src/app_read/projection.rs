@@ -552,7 +552,7 @@ mod tests {
         session
             .index
             .extend([Entry::new(202, "m202", Role::Assistant, 202, vec![])]);
-        session.summaries[0].content = "updated summary".into();
+        session.summaries.edit()[0].content = "updated summary".into();
         session.app_projection.summaries_dirty = true;
         session.app_age_snapshot();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
@@ -1012,11 +1012,12 @@ mod tests {
         session.accept(view.clone());
         session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
         let snapshot = session.app_snapshot();
-        let items: Vec<_> = snapshot.breakdown["items"]
+        let items: Vec<_> = snapshot.breakdown.to_value()["items"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|item| item["item"] == "summary")
+            .cloned()
             .collect();
         assert_eq!(items.len(), 4);
         assert!(items.iter().any(|item| item["tier"].as_u64().unwrap() > 1));

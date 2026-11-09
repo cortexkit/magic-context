@@ -19,7 +19,8 @@ cortexkit-role-compaction = { workspace = true }
 cortexkit-role-llm-runner = { workspace = true }
 cortexkit-compaction-view = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` lets a store save write cached JSON as is (`summary::head::SummaryItems`).
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 subc-client-rs = { workspace = true }
 subc-protocol = { workspace = true }

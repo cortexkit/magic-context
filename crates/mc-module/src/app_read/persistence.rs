@@ -38,7 +38,7 @@ impl Checkpoint {
         reset: bool,
     ) -> Self {
         Self {
-            header: serde_json::to_string(header).expect("header JSON"),
+            header: header.json(),
             messages: messages
                 .map(|(mid, m)| (mid.to_owned(), m.ordinal, m.at_ms, m.row.to_string()))
                 .collect(),

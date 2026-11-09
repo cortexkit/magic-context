@@ -2,7 +2,7 @@
 //! Ordinary notices touch changed transcript ordinals only. View and summary
 //! publications refresh their cached effects; unchanged payloads are shared.
 use super::*;
-use crate::app_read::{Header, IndexRow, Update};
+use crate::app_read::{Breakdown, BreakdownSummaries, Header, IndexRow, Update};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Token-weighted provenance, in increasing order of uncertainty. Keeping it
@@ -112,7 +112,10 @@ pub(crate) struct Projection {
     replacements: BTreeMap<lanes::PartKey, Replacement>,
     head: [u64; 4],
     head_slots: HashMap<String, HeadSlot>,
-    head_items: Vec<Value>,
+    /// The breakdown's summary items, and the baseline items they were made
+    /// from: they are made again only for a baseline with other items.
+    head_items: Arc<BreakdownSummaries>,
+    head_items_from: Option<crate::summary::head::SummaryItems>,
     base: u64,
     initialized: bool,
     header: Option<Arc<Header>>,
@@ -159,7 +162,8 @@ impl Default for Projection {
             replacements: BTreeMap::new(),
             head: [0; 4],
             head_slots: HashMap::new(),
-            head_items: Vec::new(),
+            head_items: Default::default(),
+            head_items_from: None,
             base: 0,
             initialized: false,
             header: None,
@@ -538,25 +542,36 @@ impl Session {
             // head composer counts it against its budgets.
             let (head, rebuilt) = head_counts(view, &mut p.head_slots, counter);
             p.head = head;
-            p.head_items = self
+            let source = self
                 .unconfirmed
                 .first()
                 .map_or(self.baseline.as_ref(), |pending| {
                     pending.before.baseline.as_ref()
                 })
-                .map(|baseline| {
-                    baseline
-                        .summary_items
-                        .iter()
-                        .map(|item| {
-                            json!({
-                                "item":"summary", "compartment_id":item.compartment_id,
-                                "tier":item.tier, "tokens":item.tokens, "source":"counted"
-                            })
+                .map(|baseline| &baseline.summary_items);
+            let made = match (&p.head_items_from, source) {
+                (Some(from), Some(items)) => from.same(items),
+                (None, None) => true,
+                _ => false,
+            };
+            if !made {
+                p.head_items = Arc::new(BreakdownSummaries::new(
+                    source
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|item| {
+                                    json!({
+                                        "item":"summary", "compartment_id":item.compartment_id,
+                                        "tier":item.tier, "tokens":item.tokens, "source":"counted"
+                                    })
+                                })
+                                .collect()
                         })
-                        .collect()
-                })
-                .unwrap_or_default();
+                        .unwrap_or_default(),
+                ));
+                p.head_items_from = source.cloned();
+            }
             #[cfg(test)]
             {
                 p.head_rebuilds = rebuilt;
@@ -697,13 +712,16 @@ impl Session {
         {
             items.push(json!({"item":item,"tokens":tokens,"source":"counted"}));
         }
-        items.extend(p.head_items.iter().cloned());
+        // The summary items follow these, shared from one list rather than
+        // copied into each update ([`Breakdown`]).
         breakdown["items"] = json!(items);
+        let mut summaries = p.head_items.clone();
         if self.tools_only || self.suspended {
             breakdown["total"] = Value::Null;
             breakdown["context_window"] = Value::Null;
             breakdown["parts"] = json!([]);
             breakdown["items"] = json!([]);
+            summaries = Default::default();
             breakdown["unattributed"] = Value::Null;
             breakdown["estimation_source"] = Value::Null;
         }
@@ -713,7 +731,7 @@ impl Session {
             newest,
             ready: self.index_ready,
             meta,
-            breakdown,
+            breakdown: Breakdown::new(breakdown, summaries),
         };
         let header = if let Some(old) = p.header.as_ref().filter(|old| old.as_ref() == &header) {
             old.clone()

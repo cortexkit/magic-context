@@ -20,7 +20,7 @@ fn fixture() -> Snapshot {
         newest: 3,
         ready: true,
         meta: json!({"compartment_count":1,"newest_compartment_at_ms":40,"queued_stamp_count":0,"compartment_in_progress":false,"historian_failure_count":0,"historian_last_error":null,"memory_block_count":0,"cache_ttl":null,"last_response_time_ms":30}),
-        breakdown: json!({"managed":{"value":true},"as_of":{"step_ref":"m3","at_ms":30},"total":{"tokens":80,"source":"provider"},"context_window":{"tokens":100000,"source":"usage"},"parts":[{"part":"history_raw","tokens":10,"estimate":true,"count":2}],"unattributed":70,"estimation_source":"legacy_estimate"}),
+        breakdown: Breakdown::from_value(json!({"managed":{"value":true},"as_of":{"step_ref":"m3","at_ms":30},"total":{"tokens":80,"source":"provider"},"context_window":{"tokens":100000,"source":"usage"},"parts":[{"part":"history_raw","tokens":10,"estimate":true,"count":2}],"unattributed":70,"estimation_source":"legacy_estimate"})),
         compartments: vec![
             json!({"compartment_id":"1","ordinal":1,"title":"Earlier work","first_message_id":"m1","last_message_id":"m1","first_message_ordinal":1,"last_message_ordinal":1,"first_at_ms":10,"last_at_ms":10,"message_count":1,"importance":70,"summary_markdown":"A summary","tiers":{"p1":"detail","p2":"short","p3":"tiny","p4":"cue"}}),
         ],

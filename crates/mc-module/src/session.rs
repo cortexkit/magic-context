@@ -155,7 +155,10 @@ pub struct Session {
     /// The highest notice number handled.
     seq: u64,
     /// The session's summaries, oldest first.
-    summaries: Vec<StoredCompartment>,
+    summaries: Summaries,
+    /// What newer summaries add to the history head, kept from the last view
+    /// build until the summaries or the baseline's summary items change.
+    head_summaries: Option<HeadSummaries>,
     /// What the head's baseline (`m[0]`, see the crate docs) holds; `None`
     /// until the first summary reaches a view.
     /// Immutable between accepted views: saved-state comparisons and snapshots
@@ -352,6 +355,101 @@ struct NoticePass {
     head_stale: bool,
 }
 
+/// A session's summaries, oldest first (in sequence order), with a revision
+/// that every change moves on. Values derived from the summaries are kept
+/// against the revision they were derived at, instead of being derived again
+/// on every step or compared summary by summary. Changes go through the
+/// methods below, so none can leave the revision behind.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Summaries {
+    list: Vec<StoredCompartment>,
+    revision: u64,
+}
+
+impl Summaries {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn replace(&mut self, list: Vec<StoredCompartment>) {
+        self.list = list;
+        self.revision += 1;
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.list.truncate(len);
+        self.revision += 1;
+    }
+
+    pub(crate) fn extend(&mut self, summaries: impl IntoIterator<Item = StoredCompartment>) {
+        self.list.extend(summaries);
+        self.revision += 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push(&mut self, summary: StoredCompartment) {
+        self.extend([summary]);
+    }
+
+    /// Edit the summaries in place.
+    #[cfg(test)]
+    pub(crate) fn edit(&mut self) -> &mut Vec<StoredCompartment> {
+        self.revision += 1;
+        &mut self.list
+    }
+}
+
+impl std::ops::Deref for Summaries {
+    type Target = [StoredCompartment];
+    fn deref(&self) -> &[StoredCompartment] {
+        &self.list
+    }
+}
+
+/// [`head::newer_summaries`] as the last view build computed it, and what it
+/// was computed from.
+struct HeadSummaries {
+    /// The baseline items it was computed from. A baseline holding these, or
+    /// the items it returned, gives the same result again.
+    from: head::SummaryItems,
+    through_sequence: i64,
+    summaries_revision: u64,
+    /// The model whose tokenizer counted the newer summaries.
+    model: String,
+    newer: head::NewerSummaries,
+}
+
+impl HeadSummaries {
+    /// [`head::newer_summaries`] for `base`: kept in `cache` from an earlier
+    /// call with the same summaries, model and baseline items, or computed
+    /// now and kept there.
+    fn for_base(
+        cache: &mut Option<Self>,
+        base: &Baseline,
+        summaries: &Summaries,
+        model: &str,
+        counter: crate::count::Counter,
+    ) -> head::NewerSummaries {
+        if let Some(kept) = cache.as_ref().filter(|kept| {
+            (kept.from.same(&base.summary_items) || kept.newer.items().same(&base.summary_items))
+                && kept.through_sequence == base.through_sequence
+                && kept.summaries_revision == summaries.revision()
+                && kept.model == model
+        }) {
+            return kept.newer.clone();
+        }
+        let newer = head::newer_summaries(base, summaries, counter);
+        *cache = Some(Self {
+            from: base.summary_items.clone(),
+            through_sequence: base.through_sequence,
+            summaries_revision: summaries.revision(),
+            model: model.to_owned(),
+            newer: newer.clone(),
+        });
+        newer
+    }
+}
+
 /// The policy members a view carries, as a log line names them.
 fn policy_members(view: &View) -> String {
     format!(
@@ -440,7 +538,8 @@ impl Session {
             keep_requested: false,
             pending_keep: None,
             seq: 0,
-            summaries: Vec::new(),
+            summaries: Summaries::default(),
+            head_summaries: None,
             baseline: None,
             next_baseline: None,
             caveman: lanes::CavemanState::default(),
@@ -725,7 +824,7 @@ impl Session {
         };
         match db.compartments(&self.key.harness, &self.key.session) {
             Ok(summaries) => {
-                self.summaries = summaries;
+                self.summaries.replace(summaries);
                 self.app_projection.summaries_dirty = true;
             }
             Err(error) => tracing::warn!(
@@ -1439,7 +1538,7 @@ impl Session {
             project_root: self.workdir.clone(),
             project: self.project.as_ref().map(|project| project.id.clone()),
             two_pass: settings.turn_two && !settings.editor_pass,
-            summaries: self.summaries.clone(),
+            summaries: self.summaries.to_vec(),
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),
             memory_enabled,
@@ -2765,6 +2864,9 @@ impl Session {
             "{}/{}",
             self.conditions.model.provider, self.conditions.model.model
         );
+        // Put back below; a head that stays as shown leaves it unset, so the
+        // next build computes it again.
+        let mut head_summaries = self.head_summaries.take();
         let history_budget_tokens = shape.history_budget_tokens;
         let fold_inputs = head::Inputs {
             counter: crate::count::Counter::for_model(Some(&model_key)),
@@ -2823,12 +2925,20 @@ impl Session {
             Ok(gone) => gone,
             Err(error) => return self.head_as_shown(&format!("reading memory rows: {error}")),
         };
-        let (mut m1, mut next, pressure) = head::delta(
+        let newer = HeadSummaries::for_base(
+            &mut head_summaries,
+            &base,
+            &self.summaries,
+            &model_key,
+            fold_inputs.counter,
+        );
+        let (mut m1, mut next, pressure) = head::delta_with(
             &base,
             &head::Inputs {
                 gone: &gone,
                 ..fold_inputs
             },
+            &newer,
         );
         if self.baseline.is_some()
             && !self.fold_due
@@ -2836,9 +2946,17 @@ impl Session {
         {
             base = folded(&fold_inputs);
             fresh_fold = true;
+            let newer = HeadSummaries::for_base(
+                &mut head_summaries,
+                &base,
+                &self.summaries,
+                &model_key,
+                fold_inputs.counter,
+            );
             // A fresh fold shows every current memory, so none is gone.
-            (m1, next, _) = head::delta(&base, &fold_inputs);
+            (m1, next, _) = head::delta_with(&base, &fold_inputs, &newer);
         }
+        self.head_summaries = head_summaries;
         if let Some(Some(mural)) = drawn {
             self.keep_mural(mural);
         }

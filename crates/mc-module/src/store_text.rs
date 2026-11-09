@@ -76,6 +76,13 @@ pub(crate) fn encode(
     (text, encoding.added, encoding.used)
 }
 
+/// Whether a store save is serializing on this thread ([`encode`]). Only
+/// then may a value write JSON it cached earlier instead of serializing
+/// itself: that writer is serde_json's, which copies such JSON verbatim.
+pub(crate) fn encoding() -> bool {
+    ENCODER.with(|encoder| encoder.borrow().is_some())
+}
+
 pub(crate) fn text<S: Serializer>(text: &str, serializer: S) -> Result<S::Ok, S::Error> {
     match reference(text) {
         Some(value) => value.serialize(serializer),
