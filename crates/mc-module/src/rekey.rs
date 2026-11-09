@@ -10,7 +10,7 @@ use crate::store::{lock_store, session_tables, SCHEMA_VERSION};
 
 mod process_check;
 
-pub const HELP: &str = "Usage: ck-mc rekey-runner --from <module> --to <module> --harness <h> --session <id> [--session <id> ...] [--dry-run]
+pub const HELP: &str = "Usage: ck-mc rekey-runner --from <module> --to <module> --harness <h> --session <id> [--session <id> ...] [--dry-run] [--ignore-pid <pid> ...]
 
 Re-key existing sessions in mode3.db without migrating either database.
 ck-mc must be stopped, with automatic restarts disabled: this command refuses a
@@ -18,6 +18,12 @@ store held open by another process.
 Linux checks /proc for open files; macOS requires lsof. MAGIC_CONTEXT_MODE3_STORE
 overrides the store path, as for move-in. context.db (MAGIC_CONTEXT_DB) is checked read-only:
 summary_in_flight means historian stage attempts must finish before re-keying.
+On Linux, store_check_incomplete lists same-user processes whose files cannot be
+inspected, with their pid, comm and cmdline. Check each process before repeating
+--ignore-pid <pid> for unrelated processes only. This waives an unreadable-process
+check, not a readable holder: store_in_use always refuses, even for an ignored pid.
+Never ignore a process that could hold the store. Pids can be reused; check again
+before each invocation. --ignore-pid is Linux-only.
 --dry-run reports the same row counts without writes.";
 
 #[derive(Clone, Debug)]
@@ -27,6 +33,7 @@ pub struct Request {
     pub harness: String,
     pub sessions: Vec<String>,
     pub dry_run: bool,
+    pub ignore_pids: BTreeSet<u32>,
 }
 
 impl Request {
@@ -35,9 +42,18 @@ impl Request {
         let (mut from, mut to, mut harness) = (None, None, None);
         let mut sessions = Vec::new();
         let mut dry_run = false;
+        let mut ignore_pids = BTreeSet::new();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--dry-run" => dry_run = true,
+                "--ignore-pid" => {
+                    let pid = args
+                        .next()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .filter(|pid| *pid > 0)
+                        .ok_or("invalid_arguments: --ignore-pid needs a positive pid")?;
+                    ignore_pids.insert(pid);
+                }
                 "--from" | "--to" | "--harness" | "--session" => {
                     let value = args
                         .next()
@@ -65,12 +81,20 @@ impl Request {
             harness: harness.ok_or("invalid_arguments: missing --harness")?,
             sessions,
             dry_run,
+            ignore_pids,
         };
         request.validate()?;
         Ok(request)
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.ignore_pids.contains(&0) {
+            return Err("invalid_arguments: --ignore-pid needs a positive pid".into());
+        }
+        #[cfg(not(target_os = "linux"))]
+        if !self.ignore_pids.is_empty() {
+            return Err("invalid_arguments: --ignore-pid is Linux-only".into());
+        }
         if self.from == self.to {
             return Err("same_runner: --from and --to must differ".into());
         }
@@ -147,12 +171,9 @@ pub fn rekey_runner(
     context_path: &Path,
     request: &Request,
 ) -> Result<Summary, String> {
-    rekey_with_check(
-        path,
-        context_path,
-        request,
-        process_check::refuse_open_store,
-    )
+    rekey_with_check(path, context_path, request, |path| {
+        process_check::refuse_open_store(path, &request.ignore_pids)
+    })
 }
 
 fn rekey_with_check(
