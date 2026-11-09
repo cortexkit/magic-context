@@ -278,7 +278,7 @@ First line is the title (under 80 chars), followed by detail. Operations:
 }
 ```
 
-### ctx_memory — description ~278 tokens, params ~175 tokens (total ~453)
+### ctx_memory — description ~278 tokens, params ~198 tokens (total ~476)
 
 **Description:**
 
@@ -312,11 +312,11 @@ Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/op
     ]
   },
   "content": {
-    "description": "The memory text — one standalone fact (write, update, merge).",
+    "description": "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string.",
     "type": "string"
   },
   "category": {
-    "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
+    "description": "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
     "type": "string",
     "enum": [
       "PROJECT_RULES",
@@ -327,7 +327,7 @@ Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/op
     ]
   },
   "ids": {
-    "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
+    "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
     "type": "array",
     "items": {
       "type": "number"

@@ -20,6 +20,7 @@ import {
 } from "../../features/magic-context";
 import { takeCurateSafetyRefusalCount } from "../../features/magic-context/dreamer/curate-memory-safety";
 import { writeTaskStateJson } from "../../features/magic-context/dreamer/storage-task-schedule";
+import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
@@ -408,6 +409,38 @@ describe("createCtxMemoryTools", () => {
         closeQuietly(db);
         _setTestProviderFactoryForProject(null);
         _resetProjectEmbeddingRegistryForTests();
+    });
+
+    it("accepts required placeholder arguments for write, get and archive", async () => {
+        for (const category of V2_MEMORY_CATEGORIES) {
+            const content = `Placeholder arguments preserve the fact for ${category}.`;
+            const write = await tools.ctx_memory.execute(
+                { action: "write", content, category: "PROJECT_RULES", ids: [] },
+                toolContext(),
+            );
+            expect(write).toContain("Saved memory [ID:");
+            const memory = getMemoriesByProject(db, "/repo/project").find(
+                (row) => row.content === content,
+            );
+            expect(memory).toBeDefined();
+            if (!memory) throw new Error("expected saved memory");
+            const id = memory.id;
+            const get = await tools.ctx_memory.execute(
+                { action: "get", content: "", category, ids: [id] },
+                toolContext(),
+            );
+            expect(get).toContain(content);
+            expect(getMemoryById(db, id)?.category).toBe("PROJECT_RULES");
+            expect(getMemoryById(db, id)?.content).toBe(content);
+            const archive = await tools.ctx_memory.execute(
+                { action: "archive", content: "", category, ids: [id] },
+                toolContext(),
+            );
+            expect(archive).toContain("Archived");
+            expect(getMemoryById(db, id)?.status).toBe("archived");
+            expect(getMemoryById(db, id)?.category).toBe("PROJECT_RULES");
+            expect(getMemoryById(db, id)?.content).toBe(content);
+        }
     });
 
     it("names the invalid embedding field when an untrusted first load disables memory", async () => {
