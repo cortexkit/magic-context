@@ -35,6 +35,7 @@ import {
 } from "./native-replay-v3";
 import { foldDigest, stripCheckpointRecentContext } from "./owner";
 import { restoreRow } from "./restore";
+import { CHECKPOINT_NOTE } from "./summary";
 
 interface NativeTail {
     model: string;
@@ -58,7 +59,12 @@ interface DurableSnapshot {
 interface SupplyArgs {
     draft: SessionContext;
     reader: V2StoreReader;
+    /** Magic Context's history head this checkpoint stands for. */
     summary: string;
+    /** The text the host stores for the checkpoint; the head itself when absent.
+     * Admission proofs bind this stored text, because later passes compare them
+     * with the host's checkpoint row. */
+    checkpointText?: string;
     previousCut?: StoreRow<"compaction">;
     manual?: { replay: ReplayStateV3; commit: () => void };
 }
@@ -1403,6 +1409,7 @@ export class NativeFoldReplay {
     }
     private async supplyHeld(args: SupplyArgs): Promise<boolean> {
         const { draft, reader, summary } = args;
+        const stored = args.checkpointText ?? summary;
         if (this.options.protocol === 3) {
             if (this.unprovenControls.has(draft.sessionID)) return false;
             if (
@@ -1473,7 +1480,7 @@ export class NativeFoldReplay {
                         source: this.storage.sourceID,
                         sessionID: draft.sessionID,
                         admissionID: running.id,
-                        summary,
+                        summary: stored,
                     }),
                 );
             const value: AdmissionV3 = {
@@ -1483,7 +1490,7 @@ export class NativeFoldReplay {
                     sourceDigest: foldDigest(reader.hostIdentity()),
                     sessionID: draft.sessionID,
                     admissionID: running.id,
-                    summaryDigest: foldDigest(summary),
+                    summaryDigest: foldDigest(stored),
                     historyDigest: historyDigest(
                         reader,
                         draft.sessionID,
@@ -1541,7 +1548,7 @@ export class NativeFoldReplay {
                         source: this.storage.sourceID,
                         sessionID: draft.sessionID,
                         admissionID: running.id,
-                        summary,
+                        summary: stored,
                     }),
                 );
                 return true;
@@ -1586,7 +1593,7 @@ export class NativeFoldReplay {
             source: this.storage.sourceID,
             sessionID: draft.sessionID,
             admissionID: id,
-            summary,
+            summary: stored,
         };
         await this.storage.supply(draft.sessionID, id, JSON.stringify(snapshot));
         if (this.admissions) {
@@ -1594,7 +1601,7 @@ export class NativeFoldReplay {
                 sourceDigest: foldDigest(reader.hostIdentity()),
                 sessionID: draft.sessionID,
                 admissionID: id,
-                summaryDigest: foldDigest(summary),
+                summaryDigest: foldDigest(stored),
                 historyDigest: historyDigest(
                     reader,
                     draft.sessionID,
@@ -1742,7 +1749,17 @@ export class NativeFoldReplay {
                     JSON.stringify({
                         model,
                         sourceSeq: through,
-                        baseline: tail?.baseline ?? cut.data.summary,
+                        // A checkpoint that stores the note carries no history head.
+                        // Seed the served head from Magic Context's own frozen m[0]
+                        // instead; older checkpoints stored the head itself.
+                        baseline:
+                            tail?.baseline ??
+                            (cut.data.summary === CHECKPOINT_NOTE
+                                ? readSessionMeta(
+                                      this.storage.db,
+                                      sessionID,
+                                  ).cachedM0Bytes?.toString("utf8")
+                                : cut.data.summary),
                     }),
                     [],
                 );

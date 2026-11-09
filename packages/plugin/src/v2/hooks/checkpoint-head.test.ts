@@ -11,14 +11,20 @@ import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { FoldOwner } from "../fold/owner";
+import { type FoldIdentity, FoldOwner } from "../fold/owner";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import * as readerModule from "../store-reader";
 import { registerContext } from "./context";
 import { HEAD_IDS } from "./payload";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
 
-async function fixture() {
+/**
+ * `stored` is the text the host stored for the checkpoint, when it is not the
+ * head itself (the checkpoint note); `head: false` leaves the transform's
+ * output without history head messages.
+ */
+async function fixture(options: { stored?: string; head?: boolean } = {}) {
     const parent = join(tmpdir(), "magic-context", "checkpoint-head");
     mkdirSync(parent, { recursive: true });
     const dir = createTestTempDirFromPath(join(parent, "fixture-"));
@@ -30,9 +36,10 @@ async function fixture() {
         time_created INTEGER, time_updated INTEGER, data TEXT
     ); INSERT INTO session_message VALUES ('u1','s','user',1,100,100,'{"text":"unarchived source"}');`);
     const summary = "<session-history>summary</session-history>";
+    const stored = options.stored ?? summary;
     source
         .prepare("INSERT INTO session_message VALUES ('cut','s','compaction',2,200,200,?)")
-        .run(JSON.stringify({ status: "completed", summary, mode: "local" }));
+        .run(JSON.stringify({ status: "completed", summary: stored, mode: "local" }));
     const config = MagicContextConfigSchema.parse({
         historian: { disable: true },
         dreamer: { disable: true },
@@ -67,14 +74,18 @@ async function fixture() {
                 "<recent-context>",
             );
             insideHostEstimate = deps.hostInputEstimate?.("s");
-            output.messages.unshift(
-                ...HEAD_IDS.map((id) => ({
-                    info: { id, role: "user", sessionID: "s", syntheticHead: true },
-                    parts: [
-                        { type: "text", text: id === HEAD_IDS[0] ? "current baseline" : "delta" },
-                    ],
-                })),
-            );
+            if (options.head !== false)
+                output.messages.unshift(
+                    ...HEAD_IDS.map((id) => ({
+                        info: { id, role: "user", sessionID: "s", syntheticHead: true },
+                        parts: [
+                            {
+                                type: "text",
+                                text: id === HEAD_IDS[0] ? "current baseline" : "delta",
+                            },
+                        ],
+                    })),
+                );
             deps.onPassPermission?.("s", permission);
         };
         return Object.assign(handler, {
@@ -107,7 +118,7 @@ async function fixture() {
         content: [
             {
                 type: "text",
-                text: `<conversation-checkpoint>\n<summary>\n${summary}\n</summary>\n<recent-context>RAW-HOST-TRANSCRIPT</recent-context>\n</conversation-checkpoint>`,
+                text: `<conversation-checkpoint>\n<summary>\n${stored}\n</summary>\n<recent-context>RAW-HOST-TRANSCRIPT</recent-context>\n</conversation-checkpoint>`,
             },
         ],
     };
@@ -125,6 +136,7 @@ async function fixture() {
         watermark: 1,
         runningCut: 2,
         materialize: () => summary,
+        ...(options.stored === undefined ? {} : { checkpointText: options.stored }),
     });
     return {
         db,
@@ -211,12 +223,43 @@ test("compaction summary overrides the host keepID with an own undefined key", a
         ]);
         const draft = f.draft();
         await f.hooks.get("compaction")!(draft);
-        expect(draft.result?.summary).toContain("session-history");
+        // The host stores the fixed note; Magic Context's own fold record keeps
+        // the history head the checkpoint stands for.
+        expect(draft.result?.summary).toBe(CHECKPOINT_NOTE);
+        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).head).toContain(
+            "session-history",
+        );
         expect(Object.hasOwn(draft.result?.metadata ?? {}, "keepID")).toBe(true);
         expect({ keepID: "host-default", ...draft.result?.metadata }.keepID).toBeUndefined();
         expect(JSON.parse(JSON.stringify(draft.result)).metadata).toEqual({});
     } finally {
         await f.close();
+    }
+});
+
+test("a checkpoint that stores the note is served and measured with the head its owner recorded", async () => {
+    // One pass over a checkpoint that stores the head itself, as every checkpoint
+    // did before the note, and one over a checkpoint that stores the note: the
+    // served messages and the checkpoint estimate the scheduler reads must match.
+    const served = async (options: { stored?: string; head: boolean }) => {
+        const f = await fixture(options);
+        try {
+            const draft = f.draft();
+            await f.hooks.get("context")!(draft);
+            return { messages: JSON.stringify(draft.messages), estimate: f.insideHostEstimate() };
+        } finally {
+            await f.close();
+        }
+    };
+    // With a history head message the checkpoint's summary is replaced by it;
+    // without one the checkpoint itself is the only account of earlier history.
+    for (const head of [true, false]) {
+        const before = await served({ head });
+        const note = await served({ stored: CHECKPOINT_NOTE, head });
+        expect(before.estimate).toBeDefined();
+        expect(note.messages).not.toContain("Magic Context added a compaction marker");
+        expect(note.messages).toBe(before.messages);
+        expect(note.estimate).toEqual(before.estimate);
     }
 });
 

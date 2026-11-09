@@ -30,6 +30,7 @@ import { scaleTest } from "../../shared/slow-test";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
+import type { FoldIdentity } from "../fold/owner";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context, V2Message } from "./types";
@@ -463,7 +464,10 @@ async function fixture(
                 role: "user",
                 content: [{ type: "text", text: `<summary>\n${draft.result.summary}\n</summary>` }],
             };
-            return draft.result.summary;
+            // The host stores the fixed checkpoint note; the history head this fold
+            // answered with is in Magic Context's own fold record.
+            const owned = storage.get(`fold/v1/${session}`) as FoldIdentity | undefined;
+            return owned?.head ?? draft.result.summary;
         },
         freshTurn() {
             const n = source.length;

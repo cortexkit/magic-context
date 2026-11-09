@@ -232,3 +232,34 @@ test("stripping the host suffix preserves summary tags and other message parts",
     expect(message.content[1]).toEqual({ type: "image", data: "untouched" });
     expect(ownerModule.stripCheckpointRecentContext(message, summary)).toBe(false);
 });
+
+test("a checkpoint answered with the note keeps its head in the fold record", async () => {
+    const f = fixture();
+    const note = "fixed checkpoint note";
+    const answered = await f.owner.supply({
+        sessionID: "s",
+        watermark: 12,
+        runningCut: 13,
+        materialize: () => "frozen history head",
+        checkpointText: note,
+    });
+    // The host stores the note, so the identity a later pass compares with the
+    // host's checkpoint row is the note's; the head stays in Magic Context's record.
+    expect(answered.submitted).toBe(note);
+    expect(answered.submittedSha).toBe(foldDigest(note));
+    expect((await f.owner.read("s"))?.head).toBe("frozen history head");
+    const observed = await new FoldOwner(f.storage).observe({
+        sessionID: "s",
+        cutSeq: 13,
+        summary: note,
+        rendered: f.rendered(note),
+        onHard: () => {
+            throw new Error("the stored note matches the submitted identity");
+        },
+    });
+    expect(observed.head).toBe("frozen history head");
+    // Without a separate stored text, the record stays in its earlier shape.
+    const plain = await fixture().supply(12, 13);
+    expect(plain.submitted).toBe("baseline 1");
+    expect("head" in plain).toBe(false);
+});

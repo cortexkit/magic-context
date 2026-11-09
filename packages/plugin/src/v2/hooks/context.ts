@@ -169,7 +169,13 @@ import { controlKey, effortPart, rememberedControlKey } from "../fold/native-rep
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
-import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import {
+    CHECKPOINT_NOTE,
+    hasFoldSummary,
+    isHistoryHead,
+    RAW_HISTORY_ACCOUNT,
+    withRecordedHead,
+} from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
@@ -254,8 +260,9 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     if (typeof baseline !== "string") {
         // A migrated host window may contain only its checkpoint. With no raw
         // tail the shared transform has no head to replace, but the checkpoint
-        // is still the only account of the earlier conversation.
-        draft.messages.unshift(checkpoint);
+        // is still the only account of the earlier conversation. One that
+        // stores the note serves the head recorded for it, as before the note.
+        draft.messages.unshift(withRecordedHead(checkpoint, submitted, head.head));
         return true;
     }
     for (const part of checkpoint.content)
@@ -1561,11 +1568,10 @@ export async function registerContext(context: V2Context) {
                           servedModuleM0Text(sessionID),
                           await nativeFoldReplay.baseline(sessionID),
                           meta.cachedM0Bytes?.toString("utf8"),
-                      ].find((value) => value !== RAW_HISTORY_ACCOUNT && hasFoldSummary(value));
+                      ].find(isHistoryHead);
                       return (
                           !meta.isSubagent &&
-                          summary !== RAW_HISTORY_ACCOUNT &&
-                          hasFoldSummary(summary) &&
+                          isHistoryHead(summary) &&
                           nativeFoldReplay.canFold(sessionID, reader)
                       );
                   },
@@ -1904,15 +1910,19 @@ export async function registerContext(context: V2Context) {
                     // those bytes. If history is only in the incremental update
                     // (M1), keep the frozen baseline and replay the update unchanged.
                     // With no history, use the fixed raw-history account without
-                    // replacing either provider history head.
+                    // replacing either provider history head. Every candidate is
+                    // Magic Context's own state: the host's stored checkpoint text
+                    // is the fixed note, never a history head.
+                    const owned = await folds.read(draft.sessionID);
                     const candidate = [
                         moduleBaseline,
                         await nativeFoldReplay.baseline(draft.sessionID),
                         state.cachedM0Bytes?.toString("utf8"),
-                        (await folds.read(draft.sessionID))?.submitted,
+                        owned?.head ?? owned?.submitted,
                     ].find(
                         (value) =>
                             value !== RAW_HISTORY_ACCOUNT &&
+                            value !== CHECKPOINT_NOTE &&
                             ((publishedHistory && value?.includes("<session-history>")) ||
                                 hasFoldSummary(value)),
                     );
@@ -1946,6 +1956,7 @@ export async function registerContext(context: V2Context) {
                             reader,
                             previousCut: reader.latestCompaction(draft.sessionID),
                             summary,
+                            checkpointText: CHECKPOINT_NOTE,
                             manual: manualReplay
                                 ? { replay: manualReplay, commit: () => staged?.commit() }
                                 : undefined,
@@ -1962,7 +1973,10 @@ export async function registerContext(context: V2Context) {
                                 "host_compaction",
                             );
                         }
-                        draft.result = { summary, metadata: { keepID: undefined } };
+                        draft.result = {
+                            summary: CHECKPOINT_NOTE,
+                            metadata: { keepID: undefined },
+                        };
                         return;
                     }
                     if (manual)
@@ -1988,6 +2002,9 @@ export async function registerContext(context: V2Context) {
                     const summary = moduleBaseline ?? materialize(draft);
                     return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
                 },
+                // The host stores the note; the owner keeps the head it stands for,
+                // which the checkpoint carrier serves and measures in its place.
+                checkpointText: CHECKPOINT_NOTE,
             });
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
@@ -2746,6 +2763,8 @@ export async function registerContext(context: V2Context) {
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
+            // The head Magic Context recorded for a checkpoint that stores the note.
+            let recordedHead: string | undefined;
             let upgradeCheckpointSequence: number | undefined;
             try {
                 const candidates = syntheticCandidates(
@@ -2922,6 +2941,9 @@ export async function registerContext(context: V2Context) {
                         submitted = identity.rendered
                             ? (identity.renderedSummary ?? identity.submitted)
                             : (cut.data.summary ?? "");
+                        // This owner record answered this very cut, so its head
+                        // is the account the stored note stands for.
+                        recordedHead = identity.head;
                     }
                     draft.messages.splice(
                         0,
@@ -2991,10 +3013,14 @@ export async function registerContext(context: V2Context) {
                     // The checkpoint replaces the frozen history-head message
                     // after the shared transform. Measure it with the restored
                     // tail now so the scheduler can reduce an over-window
-                    // request before it is sent.
+                    // request before it is sent. A checkpoint that stores the note
+                    // is measured with the head it stands for, as before the note.
                     const estimate = estimateCheckpointRequest({
                         ...draft,
-                        messages: [checkpoint, ...draft.messages],
+                        messages: [
+                            withRecordedHead(checkpoint, submitted, recordedHead),
+                            ...draft.messages,
+                        ],
                     });
                     checkpointInputEstimates.set(draft.sessionID, {
                         tokens: estimate.tokens,
@@ -3077,7 +3103,11 @@ export async function registerContext(context: V2Context) {
                 replayHead !== undefined
                     ? replayHead
                     : checkpoint && submitted !== undefined
-                      ? { checkpoint, submitted }
+                      ? {
+                            checkpoint,
+                            submitted,
+                            ...(recordedHead === undefined ? {} : { head: recordedHead }),
+                        }
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;

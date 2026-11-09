@@ -75,6 +75,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/checkpoint-note.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host automatic and manual checkpoints store the fixed note, and every provider request matches a no-checkpoint control byte for byte across the fold and a host restart.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/processed-images.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

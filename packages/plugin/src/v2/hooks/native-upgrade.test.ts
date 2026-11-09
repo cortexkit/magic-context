@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import { HEAD_IDS } from "./payload";
@@ -95,15 +96,17 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
             data: string;
         };
         const summary = JSON.parse(data.data).summary as string;
-        expect(summary).toContain("<session-history>");
-        expect(sent).toContain(summary);
-        expect(
-            repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])?.content[0]?.text,
-        ).toBe(summary);
+        // The host stores the fixed note; the fold stands for the head Magic
+        // Context served, which the pass after the fold serves unchanged.
+        expect(summary).toBe(CHECKPOINT_NOTE);
+        const head = repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])
+            ?.content[0]?.text;
+        expect(head).toContain("<session-history>");
+        expect(sent).toContain(head!);
         expect(sent).not.toContain("<conversation-checkpoint>");
         // The permitted rebuild is now a model-change fold, which merges the new
         // summary into m[0]; the published compartment is served there.
-        expect(summary).toContain("Review history 0");
+        expect(head).toContain("Review history 0");
         const delta = repaired.draft.messages.find((message) => message.id === HEAD_IDS[1]);
         expect(JSON.stringify(delta?.content)).toContain(
             "no new content since last materialization",

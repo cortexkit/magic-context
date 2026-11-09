@@ -7,6 +7,10 @@ export interface FoldIdentity {
     cutSeq?: number;
     submitted: string;
     submittedSha: string;
+    /** Magic Context's history head this checkpoint stands for, when the host
+     * stores other text (the checkpoint note). Records written before the note
+     * have no head: their submitted text is the head itself. */
+    head?: string;
     rendered?: V2Message;
     renderedSha?: string;
     renderedSummary?: string;
@@ -43,7 +47,10 @@ export class FoldOwner {
         sessionID: string;
         watermark: number;
         runningCut?: number;
+        /** Magic Context's history head for this checkpoint. */
         materialize: () => string;
+        /** The text the host stores for the checkpoint; the head itself when absent. */
+        checkpointText?: string;
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             const previous = await this.read(args.sessionID);
@@ -53,12 +60,14 @@ export class FoldOwner {
                     ? previous.cutSeq === args.runningCut
                     : previous.cutSeq === undefined && previous.watermark === args.watermark);
             if (same) return previous;
-            const submitted = args.materialize();
+            const head = args.materialize();
+            const submitted = args.checkpointText ?? head;
             const next: FoldIdentity = {
                 watermark: args.watermark,
                 cutSeq: args.runningCut,
                 submitted,
                 submittedSha: foldDigest(submitted),
+                ...(submitted === head ? {} : { head }),
             };
             await this.storage.set(this.key(args.sessionID), next);
             return next;
