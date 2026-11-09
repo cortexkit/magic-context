@@ -44,7 +44,7 @@ subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece
 cortexkit-role-compaction = "=0.3.3"
 # Applies views and checks them against the provider rules; runners use the
 # same library, so both sides render a view the same way.
-cortexkit-compaction-view = "=0.2.1"
+cortexkit-compaction-view = "=0.2.2"
 # session.send and run.result, which the compaction contract reuses.
 cortexkit-role-llm-runner = "=0.8.34"
 
