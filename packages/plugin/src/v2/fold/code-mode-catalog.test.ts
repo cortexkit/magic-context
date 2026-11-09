@@ -293,9 +293,8 @@ test.failing("an unkeyed row keeps its MCP guidance when a later part does not p
     // The older row is github's only mention and the only copy of the API
     // context; a newer catalog restates neither.
     const newer = replaceCodeModeCatalog(["NEW"]);
-    expect([...supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]))]).toEqual(
-        [],
-    );
+    const ids = supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]));
+    expect([...ids]).toEqual([]);
 });
 
 test.failing("an unkeyed row keeps project instructions that sit between its catalog and its MCP guidance", () => {
@@ -310,9 +309,8 @@ test.failing("an unkeyed row keeps project instructions that sit between its cat
         replaceCodeModeCatalog(["NEW"]),
         updateMcpGuidance([docs, github], [docs], "2.1.4"),
     );
-    expect([...supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]))]).toEqual(
-        [],
-    );
+    const ids = supersededInstructionIDs(unkeyed(["older", older], ["newer", newer]));
+    expect([...ids]).toEqual([]);
 });
 
 test.failing("removing a server whose name contains a comma does not count as a mention of a different server", () => {
