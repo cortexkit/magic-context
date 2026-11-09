@@ -21,6 +21,9 @@ mod stale_reading_tests;
 #[path = "stale_reading_review_tests.rs"]
 mod stale_reading_review_tests;
 
+#[path = "stale_reading_accepted_tests.rs"]
+mod stale_reading_accepted_tests;
+
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
@@ -41,6 +44,9 @@ struct Client {
     /// The refusal a refused view gets; `bad_since`, which names no part,
     /// when unset.
     refusal: Mutex<Option<ViewRefusal>>,
+    /// `session.apply_view` fails as a call does when the connection to the
+    /// runner drops.
+    fail_apply: Mutex<bool>,
     capabilities: crate::runner_capabilities::RunnerCapabilities,
     descriptions: Mutex<VecDeque<Result<Value, crate::client::ClientError>>>,
 }
@@ -100,6 +106,9 @@ impl RunnerClient for Client {
         request: ApplyViewRequest,
     ) -> Result<ApplyViewAnswer, crate::client::ClientError> {
         self.offered.lock().unwrap().push(request.view);
+        if *self.fail_apply.lock().unwrap() {
+            return Err(crate::client::ClientError::new("connection lost"));
+        }
         Ok(if *self.refuse.lock().unwrap() {
             ApplyViewAnswer::Refused {
                 refusal: self
