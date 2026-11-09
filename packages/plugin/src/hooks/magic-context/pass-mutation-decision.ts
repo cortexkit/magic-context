@@ -150,11 +150,11 @@ export function decidePassMutation(
         });
     // Thinking holds defer every new prefix edit, whether or not the provider
     // cache is still warm. First render and pressure relief can admit work,
-    // but the target guards still forbid changes before any retained
-    // signature. The historian trigger (compartment-trigger.ts) asks
-    // reclaimRidePermitted the same question before it skips a historian run
-    // on the grounds that queued drops will land, so both agree on whether
-    // those drops can land on this pass.
+    // but edit admission (`edit-admission.ts`) still forbids any change in
+    // front of a signed thinking block the request keeps. The historian trigger
+    // (compartment-trigger.ts) asks reclaimRidePermitted the same question
+    // before it skips a historian run on the grounds that queued drops will
+    // land, so both agree on whether those drops can land on this pass.
     const publishedWorkDrainAllowed =
         (!input.compactionOff || input.servedShapeRepair) &&
         reclaimRidePermitted(rideSignals, {
