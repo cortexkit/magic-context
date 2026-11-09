@@ -728,7 +728,12 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
             </span>
           </div>
           <div class="bulk-action-right">
-            <button type="button" class="btn sm" onClick={handleBulkArchive}>
+            <button
+              type="button"
+              class="btn sm"
+              onClick={handleBulkArchive}
+              disabled={!listsSettled()}
+            >
               Archive
             </button>
             <button
@@ -747,7 +752,12 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
             >
               Make permanent
             </button>
-            <button type="button" class="btn sm danger" onClick={handleBulkDelete}>
+            <button
+              type="button"
+              class="btn sm danger"
+              onClick={handleBulkDelete}
+              disabled={!listsSettled()}
+            >
               Delete
             </button>
             <button type="button" class="btn sm ghost" onClick={clearSelection}>
