@@ -30,7 +30,7 @@ function hash(value: string): string {
  */
 const TOOL_BYTES_SHA256 = {
 	omp: "76a6eb5bf46e2fc43a9ab84640ed7257bc5d1c63b2242f3f464cf3cec8a8280b",
-	pi: "d421ab31332486cb3e6448c2e46ed267d24d00d59a589caeb0fda7237e4264c2",
+	pi: "c23f77b95fb2e52ab4d30d645b79a800ee2a87862ed4813584d6a07edf149a1b",
 } as const;
 
 const CONTEXT_TOOL_NAMES = [

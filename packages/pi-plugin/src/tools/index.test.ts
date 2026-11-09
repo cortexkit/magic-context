@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { V2_MEMORY_CATEGORIES } from "@magic-context/core/features/magic-context/memory/constants";
 import { getMemoryById } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	A1_HASH_BASELINE_HEADING,
@@ -21,6 +22,88 @@ import { createTestDb, fakeContext } from "../test-utils.test";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./index";
 
 describe("registerMagicContextTools", () => {
+	it("accepts required placeholder arguments for write, get and archive", async () => {
+		const db = createTestDb();
+		try {
+			const tools = new Map<string, ToolDefinition>();
+			registerMagicContextTools(
+				{
+					registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+				} as never,
+				{
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					resolveProjectIdentity: () => "dir:placeholder-test",
+				},
+			);
+			const memory = tools.get("ctx_memory");
+			if (!memory) throw new Error("ctx_memory was not registered");
+			const execute = (args: Record<string, unknown>) =>
+				memory.execute(
+					"placeholder-call",
+					args,
+					new AbortController().signal,
+					undefined,
+					fakeContext("ses-placeholder") as never,
+				);
+			for (const category of V2_MEMORY_CATEGORIES) {
+				const content = `Placeholder arguments preserve the Pi fact for ${category}.`;
+				const write = await execute({
+					action: "write",
+					content,
+					category: "PROJECT_RULES",
+					ids: [],
+				});
+				expect(write.isError).toBeUndefined();
+				const text = write.content[0];
+				const id = Number(
+					text?.type === "text"
+						? text.text.match(/ID:\s*(\d+)/)?.[1]
+						: undefined,
+				);
+				expect(Number.isInteger(id)).toBe(true);
+				const get = await execute({
+					action: "get",
+					content: "",
+					category,
+					ids: [id],
+				});
+				expect(get.isError).toBeUndefined();
+				expect(get.content).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({
+							type: "text",
+							text: expect.stringContaining(content),
+						}),
+					]),
+				);
+				expect(getMemoryById(db, id)?.category).toBe("PROJECT_RULES");
+				expect(getMemoryById(db, id)?.content).toBe(content);
+				const archive = await execute({
+					action: "archive",
+					content: "",
+					category,
+					ids: [id],
+				});
+				expect(archive.isError).toBeUndefined();
+				expect(archive.content).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({
+							type: "text",
+							text: expect.stringContaining("Archived"),
+						}),
+					]),
+				);
+				expect(getMemoryById(db, id)?.status).toBe("archived");
+				expect(getMemoryById(db, id)?.category).toBe("PROJECT_RULES");
+				expect(getMemoryById(db, id)?.content).toBe(content);
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	for (const [kind, hidden] of [
 		["omp", true],
 		["omp", false],

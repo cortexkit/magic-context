@@ -310,6 +310,60 @@ fn mutate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_required_placeholder_arguments_for_write_get_and_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let who = Writer {
+            harness: "mode3",
+            session: "placeholder-session",
+            project: "dir:placeholder-project",
+            authority: None,
+        };
+        for category in CATEGORIES {
+            let content = format!("Placeholder arguments preserve the Rust fact for {category}.");
+            let write = run(
+                &mut conn,
+                &who,
+                &json!({"action": "write", "content": content, "category": "PROJECT_RULES", "ids": []}),
+            )
+            .unwrap();
+            assert!(write.starts_with("Saved memory [ID:"), "{write}");
+            let id: i64 = conn
+                .query_row(
+                    "SELECT id FROM memories WHERE content=?",
+                    [&content],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let before = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+            let get = run(
+                &mut conn,
+                &who,
+                &json!({"action": "get", "content": "", "category": category, "ids": [id]}),
+            )
+            .unwrap();
+            assert!(get.contains(&content), "{get}");
+            let after_get = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+            assert_eq!(after_get.content, before.content);
+            assert_eq!(after_get.category, before.category);
+            let archive = run(
+                &mut conn,
+                &who,
+                &json!({"action": "archive", "content": "", "category": category, "ids": [id]}),
+            )
+            .unwrap();
+            assert!(archive.starts_with("Archived memory [ID:"), "{archive}");
+            let archived = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+            assert_eq!(archived.status, "archived");
+            assert_eq!(archived.content, before.content);
+            assert_eq!(archived.category, before.category);
+        }
+    }
 
     #[test]
     fn dates_print_as_javascript_iso_strings() {

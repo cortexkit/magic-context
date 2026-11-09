@@ -1,6 +1,6 @@
 {
-  "generation": "66ef87b503752760e3bfe52568a86c76427048179831ef5c64eda72efe3ea62e",
-  "catalog_digest": "66ef87b503752760e3bfe52568a86c76427048179831ef5c64eda72efe3ea62e",
+  "generation": "ed290c4e3cb739067fb613216c5973bba533ea984ce8547e0300de263ecebe89",
+  "catalog_digest": "ed290c4e3cb739067fb613216c5973bba533ea984ce8547e0300de263ecebe89",
   "presets": [
     "head",
     "worker",
@@ -106,7 +106,7 @@
           },
           "content": {
             "type": "string",
-            "description": "The memory text — one standalone fact (write, update, merge)."
+            "description": "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string."
           },
           "category": {
             "type": "string",
@@ -117,14 +117,14 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it)."
+            "description": "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it."
           },
           "ids": {
             "type": "array",
             "items": {
               "type": "number"
             },
-            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get."
+            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
           },
           "reason": {
             "type": "string",
