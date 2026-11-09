@@ -62,8 +62,8 @@ const aliases = [
 	"omp-coding-agent-18132",
 ];
 await pinOmpLoggerFiles(root, aliases);
-// 18.18.3, the version in the report, has the same Codex message conversion and
-// text phase handling as 18.18.1; its encoder changes only add tool namespaces.
+// 18.18.3 has the same Codex message conversion and text phase handling as
+// 18.18.1; its encoder changes only add tool namespaces.
 const encoders = [
 	{ version: "18.13.2", alias: "omp-pi-ai-18132" },
 	{ version: "18.18.1", alias: "omp-pi-ai-18181" },
@@ -218,7 +218,7 @@ async function hookRewritten(phase: Phase, echoed = `§41§ ${ORIGINAL}`) {
 	return saved;
 }
 
-/** Apply a drop of the reply's text block the way the transform pass does. */
+/** Replace the reply's text with the placeholder through the transcript, as a drop does. */
 function dropText(messages: unknown[], text = PLACEHOLDER) {
 	const transcript = createPiTranscript(messages, undefined);
 	expect(transcript.messages[1].parts[1].kind).toBe("text");

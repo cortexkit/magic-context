@@ -150,7 +150,7 @@ function request(reply: unknown, unmodeled: boolean): any[] {
 	];
 }
 
-/** Drop the reply's text the way the transform pass does, then dispatch it. */
+/** Replace the reply's text with the placeholder through the transcript, then dispatch it. */
 function dropAndSend(messages: any[], convert: any) {
 	const index = messages.findIndex((message) => message.api === model.api);
 	const transcript = createPiTranscript(messages, undefined);
