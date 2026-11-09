@@ -247,11 +247,12 @@ pub fn heavy_signed_turn(entries: &[Entry], conditions: &Conditions) -> bool {
         .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
 }
 
-/// Where the current turn starts: after the last message a person wrote.
+/// Where the current turn starts: after the latest non-notice user input,
+/// whether a person's prompt or instructions from another agent.
 /// Notices a module or the runner delivered do not end it, and neither does
 /// a user-role record that only carries tool results (it has no text or
 /// file part; the plugin's turn boundary skips those too). `None` when no
-/// message a person wrote is held.
+/// non-notice user input is held.
 pub fn current_turn_start(entries: &[Entry]) -> Option<usize> {
     entries
         .iter()

@@ -474,13 +474,12 @@ impl State {
     }
 }
 
-/// How many messages a person wrote, for the reminder cadence.
+/// Non-notice user inputs, including instructions from another agent, for the
+/// reminder cadence. Whose words they carry does not change the turn count.
 pub fn person_turns(entries: &[Entry]) -> u64 {
     entries
         .iter()
-        .filter(|entry| {
-            entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none()
-        })
+        .filter(|entry| entry.role == Role::User && entry.notice.is_none())
         .count() as u64
 }
 

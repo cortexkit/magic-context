@@ -518,12 +518,12 @@ pub fn normalize_tool_name(name: &str) -> String {
         .unwrap_or(lower)
 }
 
-/// Whether an entry starts a user turn: a message the user wrote, not a
-/// notice or another agent's words a module or the runner delivered.
+/// Whether an entry starts an actionable user turn: a person's message or
+/// another agent's task instructions. Attribution does not make an instruction
+/// a notice.
 pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
-        && entry.speaks_for.is_none()
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
@@ -921,9 +921,9 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .index
         .entries()
         .iter()
-        // A notice or relay is already a distinct instruction, not
+        // A notice is already a distinct instruction from the runner, not
         // injected framing inside a person's prompt. Keep it actionable.
-        .filter(|entry| entry.notice.is_none() && entry.speaks_for.is_none())
+        .filter(|entry| entry.notice.is_none())
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
@@ -1437,7 +1437,8 @@ pub fn emergency_drop(
 }
 
 /// The parts a `ctx_keep` view drops: everything before the message holding
-/// the `ctx_keep` call, except messages from the person, the session's first
+/// the `ctx_keep` call, except non-notice user inputs (including instructions
+/// from another agent), the session's first
 /// message when it keeps it, the selected parts, and the protected tail. The call's
 /// message and everything after it stay, so the model sees its own note.
 pub fn keep_drops(
@@ -1457,7 +1458,7 @@ pub fn keep_drops(
     let mut drops = Vec::new();
     for (position, entry) in entries[..call_at].iter().enumerate() {
         if (position == 0 && context.keep_first_message)
-            || (entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none())
+            || (entry.role == Role::User && entry.notice.is_none())
         {
             continue;
         }
@@ -1583,16 +1584,35 @@ mod tests {
     }
 
     #[test]
-    fn speaks_for_relays_are_not_person_turns_and_only_notice_marks_allow_age_sweeping() {
+    fn speaks_for_worker_briefs_define_the_current_turn() {
+        let brief = |ordinal| {
+            let mut brief = entry(
+                ordinal,
+                Role::User,
+                vec![Part::new(
+                    "text",
+                    PartBody::Text {
+                        text: "Head instruction".into(),
+                    },
+                )],
+            );
+            brief.speaks_for = Some(serde_json::from_value(json!({"agent_id":"head"})).unwrap());
+            brief
+        };
+        let entries = [
+            brief(1),
+            entry(2, Role::Assistant, vec![]),
+            brief(3),
+            entry(4, Role::Assistant, vec![]),
+        ];
+        assert_eq!(crate::pass::current_turn_start(&entries), Some(3));
+    }
+
+    #[test]
+    fn speaks_for_briefs_keep_turn_protection_while_notices_remain_sweepable() {
         let agent = serde_json::from_value(json!({"agent_id":"peer", "name":"Mason"})).unwrap();
         let mut brief = notice_text(1, 4_000);
         brief.notice = None;
-        brief.parts[0].body = PartBody::Text {
-            text: format!(
-                "<system-reminder>{}</system-reminder>",
-                "head instruction ".repeat(300)
-            ),
-        };
         brief.speaks_for = Some(agent);
         let mut notice = brief.clone();
         notice.ordinal = 2;
@@ -1618,13 +1638,25 @@ mod tests {
             kept.notice.as_ref(),
             &kept.parts,
         );
-        assert!(!starts_user_turn(&brief));
+        let mut historical_relay = brief.clone();
+        historical_relay.ordinal = 4;
+        historical_relay.mid = "m4".into();
+        historical_relay.parts[0].id = "p4".into();
+        historical_relay.parts[0].tag = Some(4);
+        historical_relay.parts[0].body = PartBody::Text {
+            text: format!(
+                "<system-reminder>{}</system-reminder>",
+                "peer update ".repeat(300)
+            ),
+        };
+        assert!(starts_user_turn(&brief));
+        assert!(!starts_user_turn(&notice));
         assert_eq!(
             crate::nudges::person_turns(&[brief.clone(), notice.clone()]),
-            0
+            1
         );
         let mut index = Index::default();
-        index.extend([brief, notice, kept]);
+        index.extend([brief, notice, kept, historical_relay]);
         let edited = Edited::default();
         let none = BTreeMap::new();
         let ctx = context(&index, &edited, &none);
@@ -1632,13 +1664,16 @@ mod tests {
             age_sweep(&ctx, 100, 100, None),
             vec![(key("m2", "p2"), Shape::Default)]
         );
-        assert!(injected_text(&ctx, None).is_empty());
+        assert_eq!(
+            injected_text(&ctx, None),
+            vec![(key("m4", "p4"), Shape::StripInjection)]
+        );
         index.extend([entry(
-            4,
+            5,
             Role::Assistant,
             vec![part(
                 "keep",
-                Some(4),
+                Some(5),
                 Seal::None,
                 PartBody::Tool(ToolPart::new(
                     "keep",
@@ -1648,11 +1683,10 @@ mod tests {
                 )),
             )],
         )]);
-        assert!(
-            keep_drops(&context(&index, &edited, &none), &BTreeSet::new(), None)
-                .iter()
-                .any(|(part, _)| part == &key("m1", "p1"))
-        );
+        let drops = keep_drops(&context(&index, &edited, &none), &BTreeSet::new(), None);
+        assert!(!drops.iter().any(|(part, _)| part == &key("m1", "p1")));
+        assert!(!drops.iter().any(|(part, _)| part == &key("m4", "p4")));
+        assert!(drops.iter().any(|(part, _)| part == &key("m2", "p2")));
     }
 
     #[test]
