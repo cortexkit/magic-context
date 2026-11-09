@@ -10,7 +10,7 @@ import { TestHarness } from "../src/harness";
 // system instruction and tool definition, excluding only those moving annotations.
 const bytes = (value: unknown) => JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item);
 
-test("OpenCode 1 live cache_ttl edits affect the next idle check without changing prompt identity", async () => {
+test("OpenCode 1 live cache_ttl edits reach the idle diagnostics without changing the prompt or the scheduler decision", async () => {
     const startedAt = new Date().toISOString();
     const previousTmp = process.env.TMPDIR;
     const taskRoot = join(tmpdir(), "magic-context", "issue-624");
@@ -79,40 +79,65 @@ test("OpenCode 1 live cache_ttl edits affect the next idle check without changin
             // real-time waits and saved-policy edits so the live loader must choose the new lifetime.
             writer!.query("UPDATE session_meta SET last_response_time = ? WHERE session_id = ?").run(Date.now() - 2 * 60 * 60 * 1000, session);
         };
-        const decision = (messageId: string) => h.contextDb().query("SELECT ts_ms, decision, materialize_reason FROM transform_decisions WHERE session_id = ? AND harness = 'opencode' AND message_id = ?").get(session, messageId) as { ts_ms: number; decision: string; materialize_reason: string | null } | null;
+        const decision = (messageId: string) => h.contextDb().query("SELECT ts_ms, decision, materialized, materialize_reason FROM transform_decisions WHERE session_id = ? AND harness = 'opencode' AND message_id = ?").get(session, messageId) as { ts_ms: number; decision: string; materialized: number; materialize_reason: string | null } | null;
+        // An unchanged defer pass may have no durable decision row, so read each
+        // pass's scheduler line. The plugin buffers log writes for up to half a
+        // second, so the previous turn's line can also land after the offset. Only
+        // a pass after an edit sees that edit's lifetime, so select by it, and wait
+        // for it to be flushed. A missing line still fails on the assertions below.
+        const schedulerLines = (offset: number, ttl: string) => readFileSync(pluginLogPath, "utf8").slice(offset).split("\n")
+            .filter(line => line.includes(`[magic-context][${session}] transform scheduler:`) && line.includes(`cacheTtl=${ttl} `));
+        const passSchedulers = async (offset: number, ttl: string) => {
+            await h.waitFor(() => schedulerLines(offset, ttl).length > 0, { timeoutMs: 5000, label: `${ttl} pass scheduler log line` }).catch(() => undefined);
+            return schedulerLines(offset, ttl);
+        };
+        const lastSessionRequest = () => h.requests().filter(r => !bytes(r.body.system).includes("title generator")).at(-1)!;
+        // Every request after an edit must be the previous request plus the newly
+        // appended messages: the same system, tools and message bytes.
+        const expectAppendOnly = (before: typeof prior, after: typeof prior) => {
+            expect(bytes(after.body.system)).toBe(bytes(before.body.system));
+            expect(bytes(after.body.tools)).toBe(bytes(before.body.tools));
+            expect(bytes(after.body.messages?.slice(0, before.body.messages?.length))).toBe(bytes(before.body.messages));
+        };
+        // Raising the lifetime above the two-hour idle keeps the cache warm.
         edit("13h");
         const warmLogOffset = readFileSync(pluginLogPath, "utf8").length;
-        await completedPrompt("The two-hour idle cache should stay warm.");
+        const warm = await completedPrompt("The two-hour idle cache should stay warm.");
         expect(JSON.parse(readFileSync(configPath, "utf8")).cache_ttl["mock-anthropic/mock-sonnet"]).toBe("13h");
         expect(meta().cache_ttl).toBe("13h");
-        // An unchanged warm defer has no durable decision row, so read this pass's
-        // scheduler line. The plugin buffers log writes for up to half a second,
-        // so the previous turn's line can also land after `warmLogOffset`. Only a
-        // pass after the edit sees the 13h lifetime, so select by that, and wait
-        // for it to be flushed. A missing line still fails on the assertion below.
-        const readWarmSchedulers = () => readFileSync(pluginLogPath, "utf8").slice(warmLogOffset).split("\n")
-            .filter(line => line.includes(`[magic-context][${session}] transform scheduler:`) && line.includes("cacheTtl=13h "));
-        await h.waitFor(() => readWarmSchedulers().length > 0, { timeoutMs: 5000, label: "warm pass scheduler log line" }).catch(() => undefined);
-        const warmSchedulers = readWarmSchedulers();
+        const warmSchedulers = await passSchedulers(warmLogOffset, "13h");
         expect(warmSchedulers).toHaveLength(1);
         expect(warmSchedulers[0]).toMatch(/cacheTtl=13h .*decision=defer\b/);
-        const raised = h.requests().filter(r => !bytes(r.body.system).includes("title generator")).at(-1)!;
-        expect(bytes(raised.body.system)).toBe(bytes(prior.body.system));
-        expect(bytes(raised.body.tools)).toBe(bytes(prior.body.tools));
-        expect(bytes(raised.body.messages?.slice(0, prior.body.messages?.length))).toBe(bytes(prior.body.messages));
+        const raised = lastSessionRequest();
+        expectAppendOnly(prior, raised);
+        // Lowering it below the same idle makes the provider cache expired. An
+        // expired cache is not a reason to rebuild, so the live edit reaches the
+        // diagnostics and changes nothing else: the scheduler still defers, and
+        // the request is the previous one plus the new prompt.
         edit("1h");
+        const expiredLogOffset = readFileSync(pluginLogPath, "utf8").length;
         const expired = await completedPrompt("Now the same idle interval is expired.");
         expect(JSON.parse(readFileSync(configPath, "utf8")).cache_ttl["mock-anthropic/mock-sonnet"]).toBe("1h");
         expect(meta().cache_ttl).toBe("1h");
-        // ts_ms is sampled at the transform tail, before the provider request.
-        // The deferred telemetry write binds to the completed assistant's id;
-        // that identity, not a wall-clock cutoff, selects this turn's row.
+        const expiredSchedulers = await passSchedulers(expiredLogOffset, "1h");
+        expect(expiredSchedulers).toHaveLength(1);
+        expect(expiredSchedulers[0]).toMatch(/cacheTtl=1h .*decision=defer\b/);
+        expectAppendOnly(raised, lastSessionRequest());
+        // The expired pass still records the expiry for the cache diagnostics: a
+        // row naming ttl_idle, with the scheduler's own defer and nothing
+        // materialized. ts_ms is sampled at the transform tail, before the provider
+        // request. The deferred telemetry write binds to the completed assistant's
+        // id; that identity, not a wall-clock cutoff, selects this turn's row.
         const expiredDecision = await h.waitFor(() => decision(expired.id), { timeoutMs: 5000, label: "expired turn transform decision" });
-        expect(expiredDecision).toMatchObject({ decision: "execute", materialize_reason: "ttl_idle" });
+        expect(expiredDecision).toMatchObject({ decision: "defer", materialized: 0, materialize_reason: "ttl_idle" });
+        // The warm pass staged no row. A row for it would have been written when
+        // its reply completed, before the expired turn's row found above, so its
+        // absence here is settled.
+        expect(decision(warm.id)).toBeNull();
         const policy = JSON.parse(meta().trailing_blank_decisions).cacheTtlPolicy;
         expect(policy).toMatchObject({ value: "1h", source: "config" });
         containment();
-        console.log(`OpenCode ${health.version}: TTL 1h -> 13h/defer -> 1h/ttl_idle; PID ${h.opencode.pid} databases contained in ${root}`);
+        console.log(`OpenCode ${health.version}: TTL 1h -> 13h/defer -> 1h/defer (ttl_idle diagnostic row); PID ${h.opencode.pid} databases contained in ${root}`);
     } finally {
         writer?.close();
         try {
