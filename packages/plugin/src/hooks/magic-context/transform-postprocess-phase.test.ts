@@ -4109,7 +4109,7 @@ describe("emergency fail-closed decision", () => {
         ).toEqual({ shouldAbort: false, reason: "proceed" });
     });
 
-    it("never aborts proactive model-shrink recovery", () => {
+    it("does not abort proactive model-shrink recovery without a served-request count over the line", () => {
         expect(
             evaluateEmergencyFailClosed({
                 usagePercentage: 112,
@@ -4118,6 +4118,77 @@ describe("emergency fail-closed decision", () => {
                 foldMaterializedThisPass: false,
             }),
         ).toEqual({ shouldAbort: false, reason: "proceed" });
+    });
+
+    it("refuses a proactive model-shrink pass whose served request is still over the 95% line after a partial fold", () => {
+        expect(
+            evaluateEmergencyFailClosed({
+                usagePercentage: 95,
+                emergencyRecoveryArmed: true,
+                emergencyRecoveryOrigin: "proactive_model_shrink",
+                foldMaterializedThisPass: true,
+                recoveryServedRequest: { tokens: 504_495, lineTokens: 159_600 },
+            }),
+        ).toEqual({ shouldAbort: true, reason: "recovery-request-over-limit" });
+    });
+
+    it("refuses a provider-overflow pass whose partial history refresh still leaves the request over the line", () => {
+        expect(
+            evaluateEmergencyFailClosed({
+                usagePercentage: 95,
+                emergencyRecoveryArmed: true,
+                emergencyRecoveryOrigin: "provider_overflow",
+                foldMaterializedThisPass: true,
+                recoveryServedRequest: { tokens: 207_602, lineTokens: 159_600 },
+            }),
+        ).toEqual({ shouldAbort: true, reason: "recovery-request-over-limit" });
+    });
+
+    it("sends a recovery request that fits under the 95% line", () => {
+        for (const origin of ["provider_overflow", "proactive_model_shrink"] as const)
+            expect(
+                evaluateEmergencyFailClosed({
+                    usagePercentage: 95,
+                    emergencyRecoveryArmed: true,
+                    emergencyRecoveryOrigin: origin,
+                    foldMaterializedThisPass: true,
+                    recoveryServedRequest: { tokens: 108_655, lineTokens: 159_600 },
+                }),
+            ).toEqual({ shouldAbort: false, reason: "proceed" });
+    });
+
+    it("applies the served-request line only to a pass in recovery at the emergency band", () => {
+        const over = { tokens: 300_000, lineTokens: 159_600 };
+        // No recovery latch: the pass is served exactly as before.
+        expect(
+            evaluateEmergencyFailClosed({
+                usagePercentage: 97,
+                emergencyRecoveryArmed: false,
+                emergencyRecoveryOrigin: null,
+                foldMaterializedThisPass: true,
+                recoveryServedRequest: over,
+            }),
+        ).toEqual({ shouldAbort: false, reason: "proceed" });
+        // Below the band (the no-eligible-head escape) recovery still sends.
+        expect(
+            evaluateEmergencyFailClosed({
+                usagePercentage: 60,
+                emergencyRecoveryArmed: true,
+                emergencyRecoveryOrigin: "proactive_model_shrink",
+                foldMaterializedThisPass: false,
+                recoveryServedRequest: over,
+            }),
+        ).toEqual({ shouldAbort: false, reason: "below-emergency-band" });
+        // A provider overflow with no fold keeps its own refusal.
+        expect(
+            evaluateEmergencyFailClosed({
+                usagePercentage: 95,
+                emergencyRecoveryArmed: true,
+                emergencyRecoveryOrigin: "provider_overflow",
+                foldMaterializedThisPass: false,
+                recoveryServedRequest: { tokens: 1_000, lineTokens: 159_600 },
+            }),
+        ).toEqual({ shouldAbort: true, reason: "provider-overflow-abort" });
     });
 
     it("does not abort below the emergency band", () => {

@@ -7,7 +7,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import {
+    appendCompartments,
+    getCompartments,
+    getLastCompartmentEndMessage,
+} from "../../features/magic-context/compartment-storage";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -734,5 +738,263 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
 
         expect(getActiveCompartmentRun(sessionId)).toBeUndefined();
         expect(promptMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("runCompartmentPhase - recovery keeps summarizing until the request fits", () => {
+    // On a pass in overflow or model-shrink recovery, one historian run can
+    // leave the request far over the window. The blocking join keeps starting
+    // the historian on the next eligible chunk while the request it would send
+    // is over the line, within the one inline join budget.
+    type RunBehavior = "publish" | "nothing" | "hang";
+
+    function recoveryHarness(sessionId: string, behaviors: RunBehavior[], tokens: number[]) {
+        createOpenCodeDb(
+            sessionId,
+            Array.from({ length: 12 }, (_, i) => ({
+                id: `m${i + 1}`,
+                role: i % 2 === 0 ? "user" : "assistant",
+                text: `message ${i + 1}`,
+            })),
+        );
+        const db = openDatabase();
+        const lastEnd = () => Math.max(0, getLastCompartmentEndMessage(db, sessionId));
+        const publish = (run: { published: boolean }) => {
+            const end = lastEnd();
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: getCompartments(db, sessionId).length,
+                    startMessage: end + 1,
+                    endMessage: end + 2,
+                    startMessageId: `m${end + 1}`,
+                    endMessageId: `m${end + 2}`,
+                    title: `chunk ${end / 2}`,
+                    content: "Summarized chunk.",
+                },
+            ]);
+            run.published = true;
+        };
+        const hanging: Array<() => void> = [];
+        const started: number[] = [];
+        const start = spyOn(runner, "startCompartmentAgent").mockImplementation((deps) => {
+            started.push(deps.boundarySnapshot?.offset ?? -1);
+            const behavior = behaviors[started.length - 1] ?? "nothing";
+            let finish!: () => void;
+            const run = registerActiveCompartmentRun(
+                deps.sessionId,
+                new Promise<void>((resolve) => {
+                    finish = resolve;
+                }),
+            );
+            if (behavior === "publish") publish(run);
+            if (behavior === "hang") hanging.push(finish);
+            else finish();
+        });
+        const projected: number[] = [];
+        const projectRecoveryRequest = mock(() => {
+            const next = tokens[projected.length] ?? tokens.at(-1)!;
+            projected.push(next);
+            return { tokens: next, lineTokens: 9_500 };
+        });
+        const resolveRecoveryBoundary = mock(() => ({
+            ...createDefaultBoundarySnapshotForTests(sessionId),
+            mode: "transform-force" as const,
+            offset: lastEnd() + 1,
+            protectedTailStart: 11,
+            eligibleEndOrdinal: 11,
+            rawMessageCountAtTrigger: 12,
+            usagePercentage: 97,
+            executeThresholdPercentage: 65,
+        }));
+        // The run the pass first joins publishes the first chunk.
+        let finishFirst!: () => void;
+        const first = registerActiveCompartmentRun(
+            sessionId,
+            new Promise<void>((resolve) => {
+                finishFirst = resolve;
+            }),
+        );
+        publish(first);
+        const args = (historianTimeoutMs: number) => ({
+            canRunCompartments: true,
+            fullFeatureMode: true,
+            sessionMeta: { compartmentInProgress: true },
+            contextUsage: { percentage: 97 },
+            boundaryContextLimit: 10_000,
+            boundaryExecuteThresholdPercentage: 65,
+            boundaryUsage: { percentage: 97, inputTokens: 9_700 },
+            boundaryUsageSource: "live" as const,
+            db,
+            sessionId,
+            resolvedSessionId: sessionId,
+            historianChunkTokens: 25_000,
+            historianTimeoutMs,
+            compartmentDirectory: "/tmp",
+            messages: Array.from({ length: 12 }, (_, i) => ({
+                info: { id: `m${i + 1}`, role: i % 2 === 0 ? "user" : "assistant" },
+                parts: [],
+            })),
+            coveredInstructions: [],
+            pendingCompartmentInjection: null,
+            deferredHistoryRefreshSessions: new Set([sessionId]),
+            projectRecoveryRequest,
+            resolveRecoveryBoundary,
+        });
+        return {
+            run(historianTimeoutMs = 600_000) {
+                const pass = runCompartmentPhase(args(historianTimeoutMs));
+                finishFirst();
+                return pass;
+            },
+            started,
+            projected,
+            cleanup() {
+                start.mockRestore();
+                for (const finish of hanging) finish();
+            },
+        };
+    }
+
+    it("starts the historian on the next chunk until the request fits, then folds once", async () => {
+        const sessionId = "ses-recovery-chain-fits";
+        const log = spyOn(logger, "sessionLog");
+        const harness = recoveryHarness(sessionId, ["publish", "publish"], [30_000, 20_000, 9_000]);
+        try {
+            const result = await harness.run();
+            // Two more runs, each on the chunk after the last publication.
+            expect(harness.started).toEqual([3, 5]);
+            expect(harness.projected).toEqual([30_000, 20_000, 9_000]);
+            expect(result.chainedRecoveryRuns).toBe(2);
+            expect(result.awaitedCompartmentRun).toBe(true);
+            expect(result.justAwaitedPublication).toBe(true);
+            expect(result.historianJoinTimedOut).toBe(false);
+            // The history injection is prepared once, after the chain, with all three chunks.
+            const lines = log.mock.calls.map((call) => String(call[1]));
+            expect(
+                lines.filter((line) => line.includes("refreshing compartment coverage")),
+            ).toHaveLength(1);
+            expect(result.pendingCompartmentInjection?.compartmentCount).toBe(3);
+            expect(
+                lines.some((line) =>
+                    line.includes("recovery chain done: the request is about 9000 tokens"),
+                ),
+            ).toBe(true);
+        } finally {
+            harness.cleanup();
+            log.mockRestore();
+        }
+    });
+
+    it("stops when a run makes no progress", async () => {
+        const sessionId = "ses-recovery-chain-no-progress";
+        const log = spyOn(logger, "sessionLog");
+        const harness = recoveryHarness(sessionId, ["publish", "nothing", "publish"], [30_000]);
+        try {
+            const result = await harness.run();
+            expect(harness.started).toEqual([3, 5]);
+            expect(result.chainedRecoveryRuns).toBe(2);
+            expect(result.historianJoinTimedOut).toBe(false);
+            expect(result.justAwaitedPublication).toBe(true);
+            expect(
+                log.mock.calls.some(([, text]) =>
+                    String(text).includes(
+                        "recovery chain stops: the last historian run published nothing",
+                    ),
+                ),
+            ).toBe(true);
+        } finally {
+            harness.cleanup();
+            log.mockRestore();
+        }
+    });
+
+    it("stops at the inline join budget and keeps the timed-out run in the background", async () => {
+        const sessionId = "ses-recovery-chain-budget";
+        const harness = recoveryHarness(sessionId, ["publish", "hang"], [30_000]);
+        try {
+            const started = performance.now();
+            const result = await harness.run(80);
+            // One budget for the whole chain, not one per run.
+            expect(performance.now() - started).toBeLessThan(1_000);
+            expect(harness.started).toEqual([3, 5]);
+            expect(result.historianJoinTimedOut).toBe(true);
+            expect(result.historianJoinBudgetMs).toBe(80);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(80);
+            // The chunks already published are still adopted on this pass.
+            expect(result.awaitedCompartmentRun).toBe(true);
+            expect(result.pendingCompartmentInjection?.compartmentCount).toBe(2);
+        } finally {
+            harness.cleanup();
+        }
+    });
+
+    it("stops when no eligible history is left before the protected tail", async () => {
+        const sessionId = "ses-recovery-chain-no-history";
+        const harness = recoveryHarness(sessionId, [], [30_000]);
+        try {
+            // Everything up to the protected tail is already summarized.
+            const db = openDatabase();
+            for (let i = 0; i < 4; i++) {
+                appendCompartments(db, sessionId, [
+                    {
+                        sequence: i + 1,
+                        startMessage: 3 + i * 2,
+                        endMessage: 4 + i * 2,
+                        startMessageId: `m${3 + i * 2}`,
+                        endMessageId: `m${4 + i * 2}`,
+                        title: `older ${i}`,
+                        content: "Summarized chunk.",
+                    },
+                ]);
+            }
+            const result = await harness.run();
+            expect(harness.started).toEqual([]);
+            expect(result.chainedRecoveryRuns).toBe(0);
+            expect(result.awaitedCompartmentRun).toBe(true);
+        } finally {
+            harness.cleanup();
+        }
+    });
+
+    it("joins one run, as before, on a pass that is not in recovery", async () => {
+        const sessionId = "ses-recovery-chain-not-offered";
+        const start = spyOn(runner, "startCompartmentAgent");
+        const db = openDatabase();
+        let finishHistorian!: () => void;
+        const activeRun = registerActiveCompartmentRun(
+            sessionId,
+            new Promise<void>((resolve) => {
+                finishHistorian = resolve;
+            }),
+        );
+        activeRun.published = true;
+        try {
+            const pass = runCompartmentPhase({
+                canRunCompartments: true,
+                fullFeatureMode: true,
+                sessionMeta: { compartmentInProgress: true },
+                contextUsage: { percentage: 97 },
+                boundaryContextLimit: 100_000,
+                boundaryExecuteThresholdPercentage: 65,
+                boundaryUsage: { percentage: 97, inputTokens: 97_000 },
+                boundaryUsageSource: "live",
+                db,
+                sessionId,
+                resolvedSessionId: sessionId,
+                historianChunkTokens: 25_000,
+                compartmentDirectory: "/tmp",
+                messages: [],
+                coveredInstructions: [],
+                pendingCompartmentInjection: null,
+                deferredHistoryRefreshSessions: new Set([sessionId]),
+            });
+            finishHistorian();
+            const result = await pass;
+            expect(result.awaitedCompartmentRun).toBe(true);
+            expect(result.chainedRecoveryRuns).toBe(0);
+            expect(start).not.toHaveBeenCalled();
+        } finally {
+            start.mockRestore();
+        }
     });
 });
