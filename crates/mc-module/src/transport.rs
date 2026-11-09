@@ -125,6 +125,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         .capabilities(Some(CapabilityDeclarations {
             provides: vec![
                 COMPACTION_PROVIDES.to_owned(),
+                cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
                 "mc-app-read/v1".to_owned(),
                 "mc-context-read/v1".to_owned(),
                 // Core finds tool providers and step-transform providers in
@@ -1613,6 +1614,7 @@ mod manifest_tests {
             .collect();
         for claim in [
             "compaction-provider/v2",
+            "compaction-entry-speaks-for/v1",
             "tool-provider/v1",
             "step-transform-provider/v2",
         ] {

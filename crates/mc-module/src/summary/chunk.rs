@@ -132,9 +132,10 @@ pub fn build_with(
     build_counted(entries, token_budget, mode, |_, text| counter.count(text))
 }
 
-/// The trigger revisits held history on notices. Exact vocabularies cache each
-/// message by digest and family, so a growing assistant turn never re-tokenizes
-/// its old text. Headers and separators are added separately: token merges at
+/// The trigger revisits held history on notices. For models with an exact
+/// tokenizer, message counts are cached by digest, attribution and tokenizer
+/// family, so a growing assistant turn never re-tokenizes its old text.
+/// Headers and separators are added separately: token merges at
 /// message joins may differ slightly, which is sufficient for a trigger decision.
 /// Estimated models retain their merged-line counts for compatibility.
 #[derive(Default, Debug)]
@@ -187,7 +188,7 @@ impl CountCache {
                 });
                 retained_headers.insert(header, tokens);
                 for entry in &entries[low..high] {
-                    let key = (entry.ordinal, entry.digest.clone());
+                    let key = (entry.ordinal, count_identity(entry));
                     let count = self.entry_counts.remove(&key).unwrap_or_else(|| {
                         render_entry(entry, false).map(|(_, parts, _, _)| {
                             #[cfg(test)]
@@ -208,10 +209,7 @@ impl CountCache {
             let key = (
                 block.start,
                 block.end,
-                entries[low..high]
-                    .iter()
-                    .map(|entry| entry.digest.clone())
-                    .collect(),
+                entries[low..high].iter().map(count_identity).collect(),
             );
             let count = self.counts.remove(&key).unwrap_or_else(|| {
                 #[cfg(test)]
@@ -228,6 +226,16 @@ impl CountCache {
         self.headers = retained_headers;
         chunk
     }
+}
+
+/// Attribution changes summary labels but is deliberately outside the wire
+/// digest. Include it only in the local token-count cache's identity.
+fn count_identity(entry: &Entry) -> String {
+    let mut identity = entry.digest.clone();
+    if let Some(agent) = &entry.speaks_for {
+        identity.push_str(&serde_json::to_string(agent).expect("agent attribution serializes"));
+    }
+    identity
 }
 
 fn build_counted(
@@ -475,6 +483,24 @@ fn render_entry(entry: &Entry, verbatim: bool) -> Option<(char, Vec<String>, Vec
                 let parts = relayed_wake::lines(&whole_text);
                 return (!parts.is_empty()).then(|| ('R', parts, Vec::new(), true));
             }
+            if let Some(agent) = &entry.speaks_for {
+                let text = normalize(&whole_text);
+                if text.is_empty() {
+                    return None;
+                }
+                // One bounded line preserves the carried words without treating
+                // them as the person's decision.
+                let line = format!(
+                    "Message from {}: {text}",
+                    agent.name.as_deref().unwrap_or("another agent")
+                );
+                return Some((
+                    'R',
+                    vec![line.chars().take(1_500).collect()],
+                    Vec::new(),
+                    true,
+                ));
+            }
             // A notice's own text is never the user's words, but an answer
             // notice carries the user's decision.
             let mut parts: Vec<String> = if entry.notice.is_some() {
@@ -719,6 +745,72 @@ mod tests {
     }
 
     #[test]
+    fn speaks_for_backfill_refreshes_scan_counts_without_a_digest_change() {
+        for model in [None, Some("anthropic/claude-opus-5-5")] {
+            let counter = crate::count::Counter::for_model(model);
+            assert_eq!(counter.family().is_some(), model.is_some());
+            let mut cache = CountCache::default();
+            let mut relay = entry(1, Role::User, false, vec![text("Read the retry contract.")]);
+            let digest = relay.digest.clone();
+            cache
+                .build(std::slice::from_ref(&relay), 10_000, counter)
+                .unwrap();
+            let misses = cache.misses;
+            relay.speaks_for =
+                Some(serde_json::from_value(json!({"agent_id":"head", "name":"Alfonso"})).unwrap());
+            let actual = cache
+                .build(std::slice::from_ref(&relay), 10_000, counter)
+                .unwrap();
+            assert_eq!(relay.digest, digest);
+            assert_eq!(cache.misses, misses + 1);
+            let fresh = CountCache::default()
+                .build(std::slice::from_ref(&relay), 10_000, counter)
+                .unwrap();
+            assert_eq!(actual, fresh);
+        }
+    }
+
+    #[test]
+    fn speaks_for_vectors_label_one_bounded_line_never_user_evidence() {
+        let vectors: Value =
+            serde_json::from_str(include_str!("../../testdata/agent-relays.json")).unwrap();
+        for vector in vectors.as_array().unwrap() {
+            for notice in [false, true] {
+                let mut relay = entry(
+                    1,
+                    Role::User,
+                    notice,
+                    vec![text(vector["text"].as_str().unwrap())],
+                );
+                relay.speaks_for =
+                    Some(serde_json::from_value(vector["speaks_for"].clone()).unwrap());
+                for mode in [Lines::Merged, Lines::PerMessage] {
+                    let chunk = build_with(
+                        std::slice::from_ref(&relay),
+                        100_000,
+                        mode,
+                        crate::count::Counter::for_model(None),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        chunk.input,
+                        format!("Messages 1-1:\n\n[1] {}", vector["line"].as_str().unwrap()),
+                        "{}",
+                        vector["name"]
+                    );
+                    assert!(!chunk.input.contains("U:"));
+                }
+            }
+        }
+        let mut long = entry(1, Role::User, false, vec![text(&"é".repeat(2_000))]);
+        long.speaks_for = Some(serde_json::from_value(json!({"agent_id":"head"})).unwrap());
+        let (role, lines, _, _) = render_entry(&long, true).unwrap();
+        assert_eq!(role, 'R');
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].chars().count(), 1_500);
+    }
+
+    #[test]
     fn relayed_wake_vectors_retain_attribution_without_creating_user_evidence() {
         let vectors: Value =
             serde_json::from_str(include_str!("../../testdata/relayed-wakes.json")).unwrap();
@@ -763,6 +855,17 @@ mod tests {
                         );
                     } else {
                         assert!(!super::super::trigger::is_meaningful_user(&wake));
+                        let mut attributed = wake.clone();
+                        attributed.speaks_for = Some(
+                            serde_json::from_value(json!({"agent_id":"peer", "name":"Mason"}))
+                                .unwrap(),
+                        );
+                        if is_relayed_wake(&raw) {
+                            assert_eq!(
+                                render_entry(&attributed, false),
+                                render_entry(&wake, false)
+                            );
+                        }
                         if expected.is_empty() {
                             assert!(chunk.is_none(), "{}", vector["name"]);
                         } else {

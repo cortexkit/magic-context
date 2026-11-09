@@ -430,6 +430,13 @@ fn call_error(error: ModuleError) -> CallError {
 }
 
 impl Provider for InProcess {
+    async fn compaction_provides(&self) -> Result<Vec<String>, CallError> {
+        Ok(mc_module::transport::manifest("ck-mc")
+            .capabilities
+            .unwrap()
+            .provides)
+    }
+
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
         self.module()
             .setup(self.route.clone(), request)
@@ -1230,6 +1237,108 @@ async fn notice_keep_omitted_preserves_notices_while_tool_outputs_sweep() {
 #[tokio::test]
 async fn notice_keep_declared_sweeps_only_unkept_notices() {
     notice_keep_scenario(true).await;
+}
+
+#[tokio::test]
+async fn speaks_for_flows_to_the_context_map_without_becoming_a_prompt_or_sweeping_a_brief() {
+    use cortexkit_role_compaction::read::{Detail, Select};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config("worker", Kind::OpenAi, free());
+    let key = cfg.session.clone();
+    let mut runner = start_full(
+        cfg,
+        Settings {
+            keep_min_recovery_percentage: 0.0,
+            ..Settings::default()
+        },
+        Some(dir.path().to_owned()),
+    )
+    .await;
+    runner.host().declare_notice_keep(true);
+    runner
+        .play(&[
+            Step::RestartRunner,
+            user("Review the module."),
+            read_file(30),
+        ])
+        .await;
+    let agent = json!({"agent_id":"head", "name":"Alfonso"});
+    runner.host().append_relay(
+        &"head brief ".repeat(1_000),
+        serde_json::from_value(agent.clone()).unwrap(),
+        false,
+    );
+    let brief = runner.host().entries().last().unwrap().clone();
+    runner.host().append_relay(
+        &"peer update ".repeat(1_000),
+        serde_json::from_value(agent.clone()).unwrap(),
+        true,
+    );
+    let notice = runner.host().entries().last().unwrap().clone();
+    runner.play(&[answer()]).await;
+    let projected = runner
+        .host()
+        .read(&ReadRequest::new(
+            Select::After {
+                after_ordinal: None,
+                limit: None,
+            },
+            Detail::Full,
+        ))
+        .unwrap()
+        .entries;
+    assert_eq!(
+        projected
+            .iter()
+            .rev()
+            .find(|entry| mc_module::summary::trigger::is_meaningful_user(entry))
+            .unwrap()
+            .ordinal,
+        1
+    );
+    let app = runner.provider().module().app_read().clone();
+    let states = app
+        .read(
+            "context.states",
+            json!({"session":key,"message_ids":[brief.mid, notice.mid]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        states["messages"][0]["items"][0]["origin"],
+        json!({"kind":"agent","agent_id":"head","name":"Alfonso"})
+    );
+    assert_eq!(
+        states["messages"][1]["items"][0]["origin"],
+        json!({"kind":"notice","sender":"prefrontal","speaks_for":agent})
+    );
+    let breakdown = app
+        .read(
+            "session_data.read",
+            json!({"session":key,"section":"token_breakdown"}),
+        )
+        .await
+        .unwrap();
+    let categories = breakdown["row"]["parts"].as_array().unwrap();
+    let tokens = |name| {
+        categories.iter().find(|part| part["part"] == name).unwrap()["tokens"]
+            .as_u64()
+            .unwrap()
+    };
+    assert!(tokens("user_messages") < 100);
+    assert!(tokens("notices") > 1_000);
+    for prompt in ["Review a.rs.", "Review b.rs.", "Review c.rs."] {
+        runner.play(&[user(prompt), read_file(1)]).await;
+    }
+    for _ in 0..4 {
+        runner.play(&[Step::Wait { ms: 300_001 }, answer()]).await;
+    }
+    assert_clean(&runner);
+    assert!(seen(runner.host(), brief.parts[0].tag.unwrap())
+        .unwrap()
+        .contains("head brief"));
+    let tag = notice.parts[0].tag.unwrap();
+    assert_eq!(seen(runner.host(), tag).unwrap(), placeholder(tag));
 }
 
 #[tokio::test]

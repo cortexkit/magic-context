@@ -100,6 +100,26 @@ impl Transcript {
         &self.entries
     }
 
+    /// Store carried agent words with attribution fixed at write time. The
+    /// runner decides separately whether a provider may see that metadata.
+    pub fn append_relay(
+        &mut self,
+        text: &str,
+        agent: cortexkit_role_compaction::read::SpeaksFor,
+        notice: Option<NoticeOrigin>,
+        written_at: u64,
+    ) {
+        self.append(
+            Role::User,
+            notice,
+            vec![(Seal::None, PartBody::Text { text: text.into() })],
+            None,
+            None,
+            written_at,
+        );
+        self.entries.last_mut().expect("just pushed").speaks_for = Some(agent);
+    }
+
     pub fn cursor(&self) -> Option<Cursor> {
         self.entries
             .last()

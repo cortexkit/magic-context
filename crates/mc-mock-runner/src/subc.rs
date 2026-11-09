@@ -246,6 +246,23 @@ impl SubcProvider {
 }
 
 impl Provider for SubcProvider {
+    async fn compaction_provides(&self) -> Result<Vec<String>, CallError> {
+        let catalog = self
+            .consumer
+            .catalog_list()
+            .await
+            .map_err(|error| CallError::new(format!("provider catalog: {error:?}")))?;
+        let provider = catalog
+            .modules
+            .into_iter()
+            .find(|entry| entry.module_id == self.provider)
+            .ok_or_else(|| CallError::new("provider missing from catalog"))?;
+        Ok(provider
+            .capabilities
+            .map(|caps| caps.provides)
+            .unwrap_or_default())
+    }
+
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
         self.call(Role::Compaction, ops::COMPACTION_SETUP, &request)
             .await
@@ -606,6 +623,7 @@ impl Handler {
                     .filter(|entry| {
                         entry.role == cortexkit_role_compaction::read::Role::User
                             && entry.notice.is_none()
+                            && entry.speaks_for.is_none()
                     })
                     .flat_map(|entry| &entry.parts)
                     .filter_map(|part| match &part.body {

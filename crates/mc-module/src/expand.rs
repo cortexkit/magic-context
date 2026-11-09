@@ -113,13 +113,20 @@ pub fn mode(input: &Value) -> Result<Mode, String> {
     Err("Error: provide either message=<ordinal>, or start and end (positive integers, start <= end).".into())
 }
 
-fn role_label(entry: &Entry) -> &'static str {
+fn role_label(entry: &Entry) -> String {
+    if let Some(agent) = &entry.speaks_for {
+        return format!(
+            "R (agent: {})",
+            agent.name.as_deref().unwrap_or(&agent.agent_id)
+        );
+    }
     match entry.role {
         Role::Assistant => "A (assistant)",
         Role::User => "U (user)",
         Role::System => "S (system)",
         _ => "? (other)",
     }
+    .to_owned()
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -237,7 +244,7 @@ fn render_part_preview(body: &PartBody, counter: crate::count::Counter) -> Optio
     }
 }
 
-fn verbose_label(entry: &Entry) -> &'static str {
+fn verbose_label(entry: &Entry) -> String {
     let only_results = entry.role == Role::User
         && !entry.parts.is_empty()
         && entry
@@ -245,7 +252,7 @@ fn verbose_label(entry: &Entry) -> &'static str {
             .iter()
             .all(|part| matches!(&part.body, PartBody::Tool(tool) if tool.output.is_some()));
     if only_results {
-        "tool results"
+        "tool results".into()
     } else {
         role_label(entry)
     }
@@ -451,6 +458,22 @@ fn entry_bytes(entry: &Entry) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speaks_for_expansion_labels_the_agent_instead_of_the_person() {
+        let mut entry = cortexkit_role_compaction::read::Entry::new(
+            1,
+            "relay",
+            cortexkit_role_compaction::read::Role::User,
+            0,
+            vec![],
+        );
+        entry.speaks_for = Some(
+            serde_json::from_value(serde_json::json!({"agent_id":"peer", "name":"Mason"})).unwrap(),
+        );
+        assert_eq!(super::role_label(&entry), "R (agent: Mason)");
+        entry.speaks_for.as_mut().unwrap().name = None;
+        assert_eq!(super::role_label(&entry), "R (agent: peer)");
+    }
     use super::*;
     use serde_json::json;
 

@@ -64,11 +64,12 @@ pub fn protected_tail_tokens(
     ceiling.min(floor.min(ceiling).max(raw))
 }
 
-/// Whether a user message carries the user's own words: not a notice, and
+/// Whether a user message carries the person's own words: not a notice or relay, and
 /// with text left once injected regions (reminders, directives) are stripped.
 pub fn is_meaningful_user(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
+        && entry.speaks_for.is_none()
         && !super::chunk::is_relayed_wake(
             &entry
                 .parts
@@ -184,7 +185,7 @@ fn semantic_snap(
         .map(weight)
         .sum();
     let allowed = ((1.5 * tail_tokens as f64).round() as u64).min(SNAP_MAX_EXTRA_TOKENS);
-    let huge_prompt = snapped.role == Role::User
+    let huge_prompt = is_meaningful_user(snapped)
         && weight(snapped) > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS);
     if extra > allowed || huge_prompt {
         boundary
@@ -337,6 +338,21 @@ mod tests {
         } else {
             entry
         }
+    }
+
+    #[test]
+    fn speaks_for_is_neither_the_newest_prompt_nor_a_semantic_prompt_floor() {
+        let mut entries: Vec<_> = (1..=10)
+            .map(|n| entry(n, Role::Assistant, false, "work"))
+            .collect();
+        entries[6] = entry(7, Role::User, false, "head brief");
+        entries[6].speaks_for =
+            Some(serde_json::from_value(serde_json::json!({"agent_id":"head"})).unwrap());
+        assert!(!is_meaningful_user(&entries[6]));
+        assert_eq!(tail_start(&entries, |_| 1_000, 1, 2_000, false), 9);
+        assert_eq!(tail_start(&entries, |_| 1_000, 1, 2_000, true), 9);
+        entries[6].speaks_for = None;
+        assert_eq!(tail_start(&entries, |_| 1_000, 1, 2_000, false), 7);
     }
 
     /// A user message holding only an injected reminder is not the person's

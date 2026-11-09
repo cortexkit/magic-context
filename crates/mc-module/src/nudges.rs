@@ -478,7 +478,9 @@ impl State {
 pub fn person_turns(entries: &[Entry]) -> u64 {
     entries
         .iter()
-        .filter(|entry| entry.role == Role::User && entry.notice.is_none())
+        .filter(|entry| {
+            entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none()
+        })
         .count() as u64
 }
 

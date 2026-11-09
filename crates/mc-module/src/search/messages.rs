@@ -4,7 +4,7 @@
 //! Rows are keyed by host session id and message number (the runner's
 //! ordinal plus one), as the plugin keys them, so a moved session keeps
 //! searching the rows the plugin wrote before the move. Only user and
-//! assistant text is indexed; tool output, reasoning and notices are not.
+//! assistant text is indexed; tool output, reasoning, notices and agent relays are not.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -41,7 +41,7 @@ fn role_name(role: &Role) -> &str {
 
 /// What `entry` adds to the index, or empty.
 fn content_of(entry: &Entry) -> String {
-    if entry.notice.is_some() {
+    if entry.notice.is_some() || entry.speaks_for.is_some() {
         return String::new();
     }
     let texts: Vec<&str> = entry
@@ -53,6 +53,31 @@ fn content_of(entry: &Entry) -> String {
         })
         .collect();
     indexable_content(entry.role == Role::User, &texts)
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    #[test]
+    fn speaks_for_words_are_not_indexed_as_a_persons_message() {
+        use cortexkit_role_compaction::part::{Part, PartBody};
+        use cortexkit_role_compaction::read::{Entry, Role};
+        let mut entry = Entry::new(
+            1,
+            "brief",
+            Role::User,
+            0,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "Find the retry implementation".into(),
+                },
+            )],
+        );
+        assert!(!super::content_of(&entry).is_empty());
+        entry.speaks_for =
+            Some(serde_json::from_value(serde_json::json!({"agent_id":"head"})).unwrap());
+        assert!(super::content_of(&entry).is_empty());
+    }
 }
 
 fn content_hash(content: &str) -> String {

@@ -220,6 +220,12 @@ impl Index {
                     held.completed_at = entry.completed_at;
                     self.app_changed.insert(entry.ordinal);
                 }
+                // Attribution may be backfilled without changing a digest. Once
+                // stored, its write-time identity and display name stay frozen.
+                if held.speaks_for.is_none() && entry.speaks_for.is_some() {
+                    held.speaks_for = entry.speaks_for.clone();
+                    self.app_changed.insert(entry.ordinal);
+                }
                 if refresh_counts(held, &entry) {
                     self.app_changed.insert(entry.ordinal);
                 }
@@ -353,6 +359,67 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaks_for_backfills_without_divergence_and_keeps_the_write_time_identity() {
+        let original = entry(1, "m1", "relayed words");
+        let mut marked = original.clone();
+        marked.speaks_for = Some(
+            serde_json::from_value(serde_json::json!({"agent_id":"peer", "name":"Mason"})).unwrap(),
+        );
+        // The same planned next view must serialize identically after metadata
+        // appears on an existing entry, including its content preconditions.
+        let next_view = |entry: &Entry| {
+            use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+            use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedMessage};
+            let op = EditOp::Insert {
+                at: InsertAt::Start,
+                message: InsertedMessage::new("history", Role::User, vec!["summary".into()]),
+            };
+            let replace = EditOp::Replace {
+                mid: entry.mid.clone(),
+                part: entry.parts[0].id.clone(),
+                field: "text".into(),
+                value: serde_json::json!("shortened relay"),
+                expect: entry.parts[0].digest.clone(),
+            };
+            crate::view_builder::next_view(
+                None,
+                std::slice::from_ref(entry),
+                vec![op, replace],
+                &ProviderRules::new(SignedParts::None, EditCost::Suffix),
+                2,
+                |_| false,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(
+            cortexkit_role_compaction::read::entry_digest(
+                original.role.clone(),
+                original.notice.as_ref(),
+                &original.parts
+            ),
+            cortexkit_role_compaction::read::entry_digest(
+                marked.role.clone(),
+                marked.notice.as_ref(),
+                &marked.parts
+            )
+        );
+        assert_eq!(
+            serde_json::to_vec(&next_view(&original)).unwrap(),
+            serde_json::to_vec(&next_view(&marked)).unwrap()
+        );
+        let mut index = Index::default();
+        index.extend([original.clone()]);
+        index.app_changes();
+        assert_eq!(index.extend([marked.clone()]), Extend::Continued);
+        assert_eq!(index.entries()[0].speaks_for, marked.speaks_for);
+        assert_eq!(index.entries()[0].digest, original.digest);
+        assert_eq!(index.app_changes().1, vec![1]);
+        index.extend([original]);
+        assert_eq!(index.entries()[0].speaks_for, marked.speaks_for);
+    }
 
     #[test]
     fn shared_window_snapshots_are_zero_copy_and_survive_later_mutation() {

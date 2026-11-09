@@ -699,6 +699,71 @@ mod tests {
     }
 
     #[test]
+    fn speaks_for_origins_preserve_notice_shape_and_backfill_person_totals() {
+        let mut session = session();
+        let mut brief = Entry::new(
+            201,
+            "brief",
+            Role::User,
+            201,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "person words".into(),
+                },
+            )],
+        );
+        let mut notice = Entry::new(
+            202,
+            "notice",
+            Role::User,
+            202,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: "person words".into(),
+                },
+            )],
+        )
+        .with_notice(cortexkit_role_compaction::read::NoticeOrigin::new(
+            "prefrontal",
+        ));
+        session.index.extend([brief.clone(), notice.clone()]);
+        session.app_snapshot();
+        let agent = json!({"agent_id":"peer", "name":"Mason"});
+        brief.speaks_for = Some(serde_json::from_value(agent.clone()).unwrap());
+        notice.speaks_for = brief.speaks_for.clone();
+        session.index.extend([brief, notice]);
+        let snapshot = session.app_snapshot();
+        assert_eq!(
+            snapshot.messages["brief"].row["items"][0]["origin"],
+            json!({"kind":"agent", "agent_id":"peer", "name":"Mason"})
+        );
+        assert_eq!(
+            snapshot.messages["notice"].row["items"][0]["origin"],
+            json!({"kind":"notice", "sender":"prefrontal", "speaks_for":agent})
+        );
+        for (category, expected) in [("user_messages", 0), ("notices", 6)] {
+            let part = snapshot.breakdown["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part["part"] == category)
+                .unwrap();
+            assert_eq!(part["tokens"], expected);
+        }
+        let mut unnamed = session.index.at(201).unwrap().clone();
+        unnamed.ordinal = 203;
+        unnamed.mid = "unnamed".into();
+        unnamed.speaks_for.as_mut().unwrap().name = None;
+        session.index.extend([unnamed]);
+        assert_eq!(
+            session.app_snapshot().messages["unnamed"].row["items"][0]["origin"],
+            json!({"kind":"agent", "agent_id":"peer"})
+        );
+    }
+
+    #[test]
     fn app_read_user_text_origins_split_person_and_notice_totals() {
         let mut session = session();
         let before = session.app_snapshot();

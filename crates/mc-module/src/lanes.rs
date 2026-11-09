@@ -519,10 +519,11 @@ pub fn normalize_tool_name(name: &str) -> String {
 }
 
 /// Whether an entry starts a user turn: a message the user wrote, not a
-/// notice a module or the runner delivered.
+/// notice or another agent's words a module or the runner delivered.
 pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
+        && entry.speaks_for.is_none()
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
@@ -920,9 +921,9 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .index
         .entries()
         .iter()
-        // A notice is already a distinct instruction from the runner, not
+        // A notice or relay is already a distinct instruction, not
         // injected framing inside a person's prompt. Keep it actionable.
-        .filter(|entry| entry.notice.is_none())
+        .filter(|entry| entry.notice.is_none() && entry.speaks_for.is_none())
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
@@ -1456,7 +1457,7 @@ pub fn keep_drops(
     let mut drops = Vec::new();
     for (position, entry) in entries[..call_at].iter().enumerate() {
         if (position == 0 && context.keep_first_message)
-            || (entry.role == Role::User && entry.notice.is_none())
+            || (entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none())
         {
             continue;
         }
@@ -1579,6 +1580,79 @@ mod tests {
             .unwrap(),
         );
         entry
+    }
+
+    #[test]
+    fn speaks_for_relays_are_not_person_turns_and_only_notice_marks_allow_age_sweeping() {
+        let agent = serde_json::from_value(json!({"agent_id":"peer", "name":"Mason"})).unwrap();
+        let mut brief = notice_text(1, 4_000);
+        brief.notice = None;
+        brief.parts[0].body = PartBody::Text {
+            text: format!(
+                "<system-reminder>{}</system-reminder>",
+                "head instruction ".repeat(300)
+            ),
+        };
+        brief.speaks_for = Some(agent);
+        let mut notice = brief.clone();
+        notice.ordinal = 2;
+        notice.mid = "m2".into();
+        notice.parts[0].id = "p2".into();
+        notice.parts[0].tag = Some(2);
+        notice.notice = Some(cortexkit_role_compaction::read::NoticeOrigin::new(
+            "prefrontal",
+        ));
+        notice.digest = cortexkit_role_compaction::read::entry_digest(
+            notice.role.clone(),
+            notice.notice.as_ref(),
+            &notice.parts,
+        );
+        let mut kept = notice.clone();
+        kept.ordinal = 3;
+        kept.mid = "m3".into();
+        kept.parts[0].id = "p3".into();
+        kept.parts[0].tag = Some(3);
+        kept.notice.as_mut().unwrap().keep = true;
+        kept.digest = cortexkit_role_compaction::read::entry_digest(
+            kept.role.clone(),
+            kept.notice.as_ref(),
+            &kept.parts,
+        );
+        assert!(!starts_user_turn(&brief));
+        assert_eq!(
+            crate::nudges::person_turns(&[brief.clone(), notice.clone()]),
+            0
+        );
+        let mut index = Index::default();
+        index.extend([brief, notice, kept]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let ctx = context(&index, &edited, &none);
+        assert_eq!(
+            age_sweep(&ctx, 100, 100, None),
+            vec![(key("m2", "p2"), Shape::Default)]
+        );
+        assert!(injected_text(&ctx, None).is_empty());
+        index.extend([entry(
+            4,
+            Role::Assistant,
+            vec![part(
+                "keep",
+                Some(4),
+                Seal::None,
+                PartBody::Tool(ToolPart::new(
+                    "keep",
+                    "ctx_keep",
+                    json!({}),
+                    ToolStatus::Completed,
+                )),
+            )],
+        )]);
+        assert!(
+            keep_drops(&context(&index, &edited, &none), &BTreeSet::new(), None)
+                .iter()
+                .any(|(part, _)| part == &key("m1", "p1"))
+        );
     }
 
     #[test]

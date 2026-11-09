@@ -314,10 +314,21 @@ impl Session {
             let measure = lanes::reasoning_measure(entry, &reasoning);
             let user_origin =
                 (entry.role == cortexkit_role_compaction::read::Role::User).then(|| {
-                    entry.notice.as_ref().map_or_else(
-                        || json!({"kind":"person"}),
-                        |notice| json!({"kind":"notice", "sender":notice.sender}),
-                    )
+                    if let Some(notice) = &entry.notice {
+                        let mut origin = json!({"kind":"notice", "sender":notice.sender});
+                        if let Some(agent) = &entry.speaks_for {
+                            origin["speaks_for"] = json!(agent);
+                        }
+                        origin
+                    } else if let Some(agent) = &entry.speaks_for {
+                        let mut origin = json!({"kind":"agent", "agent_id":agent.agent_id});
+                        if let Some(name) = &agent.name {
+                            origin["name"] = json!(name);
+                        }
+                        origin
+                    } else {
+                        json!({"kind":"person"})
+                    }
                 });
             let row = p.live.entry(ordinal).or_insert_with(|| Cached {
                 mid: entry.mid.clone(),
@@ -967,7 +978,7 @@ fn message(
                 reasoning += tokens;
                 sources[2].add(tokens, source);
             } else if let Some(origin) = &part.origin {
-                let category = usize::from(origin["kind"] == "notice");
+                let category = usize::from(origin["kind"] != "person");
                 user_text[category] += part.tokens;
                 sources[3 + category].add(part.tokens, source);
             } else {

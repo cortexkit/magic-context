@@ -1,0 +1,5 @@
+[
+  {"name":"named peer", "speaks_for":{"agent_id":"peer", "name":"Mason"}, "text":"Use the stable route.\nKeep the retry bound.", "line":"Message from Mason: Use the stable route. Keep the retry bound."},
+  {"name":"unnamed brief", "speaks_for":{"agent_id":"head"}, "text":"Read the contract before editing.", "line":"Message from another agent: Read the contract before editing."},
+  {"name":"carried answer is not the person's decision", "speaks_for":{"agent_id":"peer", "name":"Mason"}, "text":"The user answered: deploy", "line":"Message from Mason: The user answered: deploy"}
+]

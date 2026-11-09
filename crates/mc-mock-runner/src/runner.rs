@@ -142,6 +142,11 @@ pub struct UserEdit {
 /// routes calls between module processes) binds its routes to it, and an
 /// in-process provider is built for it.
 pub trait Provider {
+    /// The provider's current catalog declarations, reread on every Setup.
+    fn compaction_provides(&self) -> impl Future<Output = Result<Vec<String>, CallError>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
     fn setup(&self, request: SetupRequest) -> impl Future<Output = Result<SetupAnswer, CallError>>;
     fn notice(
         &self,
@@ -324,6 +329,7 @@ impl Report {
 
 struct State {
     notice_keep: bool,
+    provider_entry_speaks_for: bool,
     observations: Option<ObservationLog>,
     config: SessionConfig,
     transcript: Transcript,
@@ -485,6 +491,23 @@ pub struct Host {
 }
 
 impl Host {
+    /// Store the agent's text with attribution, optionally marking it as a notice.
+    pub fn append_relay(
+        &self,
+        text: &str,
+        agent: cortexkit_role_compaction::read::SpeaksFor,
+        notice: bool,
+    ) {
+        let mut state = self.lock();
+        let now = state.now;
+        state.transcript.append_relay(
+            text,
+            agent,
+            notice.then(|| NoticeOrigin::new("prefrontal")),
+            now,
+        );
+    }
+
     /// Change the optional declaration before the next Setup, as a runner
     /// upgrade would. Existing sessions keep their transcript marks.
     pub fn declare_notice_keep(&self, declared: bool) {
@@ -524,10 +547,13 @@ impl Host {
     /// `session.read`.
     pub fn read(&self, request: &ReadRequest) -> Result<ReadPage, Refusal> {
         let state = self.lock();
-        let (entries, next_after) =
+        let (mut entries, next_after) =
             state
                 .transcript
                 .read(&request.select, request.detail, request.max_bytes)?;
+        if !state.provider_entry_speaks_for {
+            entries.iter_mut().for_each(|entry| entry.speaks_for = None);
+        }
         let mut head = Head::new();
         head.newest = state.transcript.cursor();
         head.applied_view = state.applied.as_ref().map(View::applied);
@@ -755,6 +781,7 @@ impl<P: Provider> Runner<P> {
         }
         let state = State {
             notice_keep: false,
+            provider_entry_speaks_for: false,
             observations: observe.then(|| ObservationLog {
                 started: Instant::now(),
                 values: Observations::default(),
@@ -813,10 +840,13 @@ impl<P: Provider> Runner<P> {
 
     /// Setup, which restarts the notice count on both sides (compaction contract S3).
     async fn setup(&self) -> Result<SetupAnswer, CallError> {
+        let provides = self.provider.compaction_provides().await?;
         let request = {
             let mut state = self.host.lock();
             state.seq = 0;
             state.setup_due = false;
+            state.provider_entry_speaks_for =
+                cortexkit_role_compaction::provides_entry_speaks_for(&provides);
             let mut request = SetupRequest::new(
                 state.config.preset.clone(),
                 state.config.model.clone(),
@@ -1488,6 +1518,9 @@ impl<P: Provider> Runner<P> {
                 .map(|entry| {
                     let mut compact = entry.clone();
                     compact.parts = entry.parts.iter().map(Part::compact).collect();
+                    if !state.provider_entry_speaks_for {
+                        compact.speaks_for = None;
+                    }
                     compact
                 })
                 .collect();

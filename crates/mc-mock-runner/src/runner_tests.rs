@@ -38,6 +38,7 @@ fn once(mut decide: impl FnMut(&Host) -> Option<Vec<Edit>> + Send + 'static) -> 
 /// publishes whatever `on_notice` returns after each notice, and answers a
 /// ride with whatever `on_ride` returns.
 struct TestProvider {
+    entry_speaks_for: Mutex<bool>,
     host: Mutex<Option<Host>>,
     on_notice: Mutex<Option<Decide>>,
     on_ride: Mutex<Option<Decide>>,
@@ -51,6 +52,7 @@ struct TestProvider {
 impl TestProvider {
     fn new() -> Self {
         Self {
+            entry_speaks_for: Mutex::new(false),
             host: Mutex::new(None),
             on_notice: Mutex::new(None),
             on_ride: Mutex::new(None),
@@ -78,6 +80,14 @@ impl TestProvider {
 }
 
 impl Provider for TestProvider {
+    async fn compaction_provides(&self) -> Result<Vec<String>, CallError> {
+        Ok(if *self.entry_speaks_for.lock().unwrap() {
+            vec![cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.into()]
+        } else {
+            Vec::new()
+        })
+    }
+
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
         self.setups.lock().unwrap().push(request);
         Ok(SetupAnswer::Ready)
@@ -166,6 +176,91 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
     let runner = Runner::start(config, TestProvider::new()).await.unwrap();
     runner.provider().attach(runner.host().clone());
     runner
+}
+
+#[tokio::test]
+async fn speaks_for_projection_is_gated_until_the_next_setup_for_reads_and_notices() {
+    use cortexkit_role_compaction::read::{Detail, ReadRequest, Select};
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    let agent = json!({"agent_id":"peer", "name":"Mason"});
+    runner.host().append_relay(
+        "carried words",
+        serde_json::from_value(agent.clone()).unwrap(),
+        false,
+    );
+    let read = |detail| {
+        runner
+            .host()
+            .read(&ReadRequest::new(
+                Select::After {
+                    after_ordinal: None,
+                    limit: None,
+                },
+                detail,
+            ))
+            .unwrap()
+            .entries
+    };
+    let digest = runner.host().entries()[0].digest.clone();
+    for detail in [Detail::Full, Detail::Compact] {
+        assert!(read(detail)[0].speaks_for.is_none());
+    }
+    runner.play(&[Step::Model(Turn::default())]).await;
+    assert!(runner
+        .provider()
+        .notices
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|notice| &notice.entries)
+        .all(|entry| entry.speaks_for.is_none()));
+    *runner.provider().entry_speaks_for.lock().unwrap() = true;
+    assert!(runner
+        .host()
+        .read(&ReadRequest::new(
+            Select::After {
+                after_ordinal: None,
+                limit: None
+            },
+            Detail::Full
+        ))
+        .unwrap()
+        .entries[0]
+        .speaks_for
+        .is_none());
+    runner.play(&[Step::RestartRunner]).await;
+    for detail in [Detail::Full, Detail::Compact] {
+        let entries = runner
+            .host()
+            .read(&ReadRequest::new(
+                Select::After {
+                    after_ordinal: None,
+                    limit: None,
+                },
+                detail,
+            ))
+            .unwrap()
+            .entries;
+        assert_eq!(
+            serde_json::to_value(entries[0].speaks_for.as_ref().unwrap()).unwrap(),
+            agent
+        );
+        assert_eq!(entries[0].digest, digest);
+    }
+    runner
+        .host()
+        .append_relay("wake", serde_json::from_value(agent.clone()).unwrap(), true);
+    runner.play(&[Step::Model(Turn::default())]).await;
+    let notices = runner.provider().notices.lock().unwrap();
+    let relay = notices
+        .iter()
+        .flat_map(|notice| &notice.entries)
+        .find(|entry| entry.notice.is_some())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(relay.speaks_for.as_ref().unwrap()).unwrap(),
+        agent
+    );
 }
 
 #[tokio::test]
