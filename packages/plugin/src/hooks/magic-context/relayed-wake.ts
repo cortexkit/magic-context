@@ -67,7 +67,8 @@ function rooms(lines: string[]): string[] | null {
         const others = room.posts.filter((post) => !post.addressed);
         if (others.length) {
             const names = [...new Set(others.map((post) => post.name))];
-            output.push(`Room ${room.title}: ${others.length} posts (${names.join(", ")})`);
+            const noun = others.length === 1 ? "post" : "posts";
+            output.push(`Room ${room.title}: ${others.length} ${noun} (${names.join(", ")})`);
         }
     }
     return output;

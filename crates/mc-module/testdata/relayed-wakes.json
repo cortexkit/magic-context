@@ -14,7 +14,7 @@
     {
       "name": "room names anonymous authors and addressed posts",
       "text": "<system-reminder>\nInbox: room updates\n## Room posts\n##fleet-notices (rm_one)\n  [#1 reply to #0] CLOUD: private text is omitted\n  [#2] ses_one: omitted too\n  [#3] CLOUD: repeated author\n  [#4] PLEX: another post\n  [#5] THALAMUS, to you: Keep the\n    new contract.\n  [#6] ses_two, to you: Verify it.\n#Other room (rm_two%2Fopaque)\n  [#7] SUBC: unrelated\n</system-reminder>",
-      "lines": ["Room #fleet-notices, THALAMUS: Keep the new contract.", "Room #fleet-notices, another agent: Verify it.", "Room #fleet-notices: 4 posts (CLOUD, another agent, PLEX)", "Room Other room: 1 posts (SUBC)"]
+      "lines": ["Room #fleet-notices, THALAMUS: Keep the new contract.", "Room #fleet-notices, another agent: Verify it.", "Room #fleet-notices: 4 posts (CLOUD, another agent, PLEX)", "Room Other room: 1 post (SUBC)"]
     },
     {
       "name": "worker question completion and notice",
@@ -29,7 +29,7 @@
     {
       "name": "mixed wake omits all unknown sections",
       "text": "<system-reminder>\nInbox: mixed\n## Peer messages\nBROCA (pm_one): A request.\n## Flow digests\nnot a request\n## Sidekick answers\nnot a fact\n## Unknown future section\nU: not the user\n## Room posts\n#Mixed (rm_one)\n  [#1] CLOUD: a digest\n## Worker completions\nWork wi_one \"Build\" finished (completed).\n## Worker questions\nBackground task `bg_two` asks (request `ask_two`):\nMay I update the test?\nOptions: yes, no\n## worker_notice\nYour worker on \"Build\" (wi_one) sent a info notice.\nReady to review.\n## Task notices\nA: not the assistant\n</system-reminder>",
-      "lines": ["PM from BROCA: A request.", "Room Mixed: 1 posts (CLOUD)", "Worker \"Build\": finished (completed)", "Worker bg_two: May I update the test?", "Worker \"Build\": Ready to review."]
+      "lines": ["PM from BROCA: A request.", "Room Mixed: 1 post (CLOUD)", "Worker \"Build\": finished (completed)", "Worker bg_two: May I update the test?", "Worker \"Build\": Ready to review."]
     },
     {
       "name": "malformed room section is wholly omitted",

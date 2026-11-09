@@ -143,8 +143,9 @@ fn rooms(lines: &[&str]) -> Option<Vec<String>> {
             }
         }
         if count > 0 {
+            let noun = if count == 1 { "post" } else { "posts" };
             output.push(format!(
-                "Room {title}: {count} posts ({})",
+                "Room {title}: {count} {noun} ({})",
                 names.join(", ")
             ));
         }
