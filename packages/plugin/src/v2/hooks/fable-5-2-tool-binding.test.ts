@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { getThinkingBindingRecoveryTarget } from "../../features/magic-context/storage-meta-persisted";
+import { LATEST_THINKING_RESTORE } from "../../hooks/magic-context/latest-thinking-recovery";
 import type { SessionContext } from "./types";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
@@ -16,8 +18,50 @@ import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 const THINKING = "SIGNED_AGAINST_THE_FIRST_TOOL_LIST";
 
 type Tools = SessionContext["tools"];
+type HostEvent = { type: string; data: Record<string, unknown> };
 
-async function serveAcrossToolChange(seed: number, change: (tools: Tools) => void) {
+/** A host event stream the test feeds; `emit` resolves once the hook took the event. */
+function eventBus() {
+    const queue: Array<{ event: HostEvent; handled: () => void }> = [];
+    let wake: (() => void) | undefined;
+    return {
+        emit(event: HostEvent) {
+            return new Promise<void>((handled) => {
+                queue.push({ event, handled });
+                wake?.();
+            });
+        },
+        async *stream({ signal }: { signal: AbortSignal }) {
+            while (!signal.aborted) {
+                const next = queue.shift();
+                if (next) {
+                    yield next.event;
+                    next.handled();
+                    continue;
+                }
+                await new Promise<void>((resolve) => {
+                    wake = () => resolve();
+                    signal.addEventListener("abort", wake, { once: true });
+                });
+                if (wake) signal.removeEventListener("abort", wake);
+                wake = undefined;
+            }
+        },
+    };
+}
+
+/**
+ * Serve a completed turn's signed thinking across two requests with the same
+ * tools, apply `change` to every later request's tools, and serve one more.
+ * With `rejection`, the host then reports that request's 400 as a
+ * `session.error` and the user sends one more prompt.
+ */
+async function serveAcrossToolChange(
+    seed: number,
+    change: (tools: Tools) => void,
+    rejection?: { error: unknown },
+) {
+    const events = eventBus();
     const f = await oc2ContextFixture(seed, {
         area: "fable-5-2-tool-binding",
         instructions: false,
@@ -25,6 +69,7 @@ async function serveAcrossToolChange(seed: number, change: (tools: Tools) => voi
         cacheTtl: "never",
         provider: "anthropic",
         model: "claude-fable-5-2",
+        eventStream: events.stream,
     });
     try {
         await f.pass();
@@ -41,6 +86,10 @@ async function serveAcrossToolChange(seed: number, change: (tools: Tools) => voi
                     native: { anthropic: { signature: "signed-block" } },
                 });
         };
+        const afterChange = (draft: SessionContext) => {
+            withThinking(draft);
+            change(draft.tools);
+        };
         f.user("Next task.", 1000);
         const kept = await f.pass(withThinking);
         f.respond();
@@ -48,11 +97,22 @@ async function serveAcrossToolChange(seed: number, change: (tools: Tools) => voi
         const unchanged = await f.pass(withThinking);
         f.respond();
         f.user("A task after the tool list changed.", 1000);
-        const changed = await f.pass((draft) => {
-            withThinking(draft);
-            change(draft.tools);
-        });
-        return { kept: kept.bytes, unchanged: unchanged.bytes, changed: changed.bytes };
+        const changed = await f.pass(afterChange);
+        let retried: string | undefined;
+        if (rejection) {
+            await events.emit({
+                type: "session.error",
+                data: { sessionID: f.session, error: rejection.error },
+            });
+            f.user("Please continue.", 1000);
+            retried = (await f.pass(afterChange)).bytes;
+        }
+        return {
+            kept: kept.bytes,
+            unchanged: unchanged.bytes,
+            changed: changed.bytes,
+            retried,
+        };
     } finally {
         await f.cleanup();
     }
@@ -94,4 +154,76 @@ test.failing("OpenCode 2, claude-fable-5-2: a schema-only tool change strips the
     expect(served.kept).toContain(THINKING);
     expect(served.unchanged).toContain(THINKING);
     expect(served.changed).not.toContain(THINKING);
+}, 60000);
+
+// Control for the recovery case below: a host `session.error` reaches the
+// OpenCode 2 recovery arm, which recognises the latest-turn thinking error.
+test("OpenCode 2, claude-fable-5-2: a session.error with the latest-turn thinking error arms its restore", async () => {
+    const events = eventBus();
+    const f = await oc2ContextFixture(52005, {
+        area: "fable-5-2-tool-binding",
+        instructions: false,
+        temporal: false,
+        cacheTtl: "never",
+        provider: "anthropic",
+        model: "claude-fable-5-2",
+        eventStream: events.stream,
+    });
+    try {
+        await f.pass();
+        expect(getThinkingBindingRecoveryTarget(f.db, f.session)).toBeNull();
+        await events.emit({
+            type: "session.error",
+            data: {
+                sessionID: f.session,
+                error: {
+                    name: "APIError",
+                    data: {
+                        message:
+                            "messages.3.content.0: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.",
+                        statusCode: 400,
+                        isRetryable: false,
+                    },
+                },
+            },
+        });
+        expect(getThinkingBindingRecoveryTarget(f.db, f.session)).toStartWith(
+            LATEST_THINKING_RESTORE,
+        );
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// Known gap: OpenCode 2's event loop arms only the latest-turn thinking
+// restore (armLatestThinkingRecoveryFromError; the control above shows that
+// path receives host errors). The binding 400 ("The block is bound to a
+// different conversation") is recognised only by the OpenCode 1 event
+// handler, so on OpenCode 2 the next prompt resends the same invalid block.
+// Remove `.failing` when that prompt goes out without it.
+test.failing("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 goes out without the rejected thinking", async () => {
+    const served = await serveAcrossToolChange(
+        52004,
+        (tools) => {
+            tools.read!.input = {
+                type: "object",
+                properties: { path: { type: "string" } },
+                required: ["path"],
+            };
+        },
+        {
+            error: {
+                name: "APIError",
+                data: {
+                    message:
+                        'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". That setting requires the `thinking-binding-controls-2026-08-01` value in the `anthropic-beta` header.',
+                    statusCode: 400,
+                    isRetryable: false,
+                },
+            },
+        },
+    );
+    expect(served.changed).toContain(THINKING);
+    expect(served.retried).toBeDefined();
+    expect(served.retried).not.toContain(THINKING);
 }, 60000);
