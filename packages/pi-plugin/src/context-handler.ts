@@ -122,6 +122,7 @@ import {
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
 	pruneNoteNudgeAnchors,
+	recordOverflowDetected,
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -247,6 +248,7 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
+import { recoveryLineTokens } from "@magic-context/core/hooks/magic-context/recovery-fit";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
@@ -430,6 +432,7 @@ import {
 	resolvePiOrdinalAlignmentForContext,
 } from "./pi-ordinal-alignment";
 import {
+	estimatePiOverflowRecoveryInputTokens,
 	piRecoveryFitCalibration,
 	piRecoveryToolImageTokens,
 	resolvePiOverflowRecoveryUsage,
@@ -555,6 +558,9 @@ import { createPiTranscript } from "./transcript-pi";
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
+/** Shown when the emergency band is reached, and as the refusal of a recovery request that still does not fit. */
+const PI_EMERGENCY_REFUSAL_NOTICE =
+	"Context full — /ctx-flush or /clear to continue.";
 
 /**
  * Returns every row whose `tagNumber` equals `number`, from a list sorted by
@@ -5456,10 +5462,7 @@ export function registerPiContextHandler(
 				const now = Date.now();
 				if (now - lastNotifiedAt >= EMERGENCY_NOTIFICATION_COOLDOWN_MS) {
 					lastEmergencyNotificationAtMs.set(sessionId, now);
-					sendPiIgnoredNotification(
-						ctx,
-						"Context full — /ctx-flush or /clear to continue.",
-					);
+					sendPiIgnoredNotification(ctx, PI_EMERGENCY_REFUSAL_NOTICE);
 					sessionLog(
 						sessionId,
 						`EMERGENCY: usage=${usagePercentage.toFixed(1)}% — notified user, evaluating available emergency reclaim`,
@@ -6953,6 +6956,51 @@ export function registerPiContextHandler(
 						"over-window-proof"
 				)
 					throw new PiDegradedPassError("outgoing-over-window");
+			}
+			// A pass in overflow recovery whose request is still over 95% of the
+			// model's usable window is not sent, whatever it reclaimed. The check
+			// above refuses only a request whose byte count proves it is over the
+			// whole context window, and text with many tokens per byte can be far
+			// over the window without that proof. The count is the served-request
+			// count OpenCode uses: calibrated, neutral for an unseeded model.
+			const recoveryOrigin = historianStateForPass.emergencyRecoveryOrigin;
+			const recoveryWindow = windowGeometry?.usableHard;
+			if (
+				!options.compactionOff &&
+				isEmergency &&
+				emergencyRecoveryArmed &&
+				recoveryOrigin !== null &&
+				typeof recoveryWindow === "number" &&
+				recoveryWindow > 0
+			) {
+				const served = estimatePiOverflowRecoveryInputTokens(
+					outputMessages,
+					readPiLkgFitEnvelope(
+						ctx,
+						pi,
+						resolvePiContextModelKey(ctx),
+						sessionDecisionCalibration(options.db, sessionId),
+						toolWireSchema,
+					),
+					{ fitEnvelope: false },
+				);
+				const line = recoveryLineTokens(recoveryWindow);
+				if (served !== undefined && served > line) {
+					sessionLog(
+						sessionId,
+						`transform: recovery request still over the window: about ${served} tokens against the 95% line ${line} of ${recoveryWindow}; not sending it, recovery stays armed for the next turn`,
+					);
+					// A historian publication clears the latch; the request still does
+					// not fit, so keep it armed (flag only) for the next turn.
+					recordOverflowDetected(
+						options.db,
+						sessionId,
+						undefined,
+						currentModelKey,
+						recoveryOrigin,
+					);
+					throw contextRefusalError(PI_EMERGENCY_REFUSAL_NOTICE);
+				}
 			}
 			publishFinalRequestAccounting();
 			let serializedOutput: PiLkgSerializedOutput | undefined;
