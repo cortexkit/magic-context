@@ -42,6 +42,8 @@ export interface LogLineRecord {
      */
     bound: Record<string, string>;
     message: string;
+    /** Decoded message and event fields, before the parser separates trailing k=v tokens. */
+    rawMessage: string;
     kv: Record<string, string>;
 }
 
@@ -219,7 +221,7 @@ interface MessageSplitOptions {
 function splitMessageAndFields(
     input: string,
     { decodeMessage, allowEmptyMessage }: MessageSplitOptions,
-): { message: string; kv: Record<string, string> } {
+): { message: string; rawMessage: string; kv: Record<string, string> } {
     // Message prose is opaque: only consume a well-formed field suffix from the right.
     // An unmatched quote earlier in the message must not hide the entire record.
     let messageEnd = input.trimEnd().length;
@@ -236,7 +238,7 @@ function splitMessageAndFields(
     const message = decodeMessage ? (decodeEscapes(rawMessage) ?? rawMessage) : rawMessage;
     const kv: Record<string, string> = {};
     for (const [key, value] of fields.reverse()) kv[key] = value;
-    return { message, kv };
+    return { message, rawMessage: decodeMessage ? (decodeEscapes(input) ?? input) : input, kv };
 }
 
 function rawSessionId(value: string): string | null {

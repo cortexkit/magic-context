@@ -115,7 +115,9 @@ describe("parseLogLine", () => {
                 ? bound.session.slice(bound.session.indexOf(":") + 1)
                 : null;
 
-            expect(parseLogLine(fixture.line), fixture.name).toEqual({
+            const { rawMessage, ...parsed } = parseLogLine(fixture.line)!;
+            expect(typeof rawMessage).toBe("string");
+            expect(parsed, fixture.name).toEqual({
                 ts: new Date(fixture.event.at_ms).toISOString(),
                 level: fixture.event.level.toUpperCase(),
                 logger: fixture.event.logger,
@@ -177,6 +179,7 @@ describe("parseLogLine", () => {
             tags: ["perf"],
             bound: { harness: "opencode", session: "opencode:ses_00fc88222ffe" },
             message: "transform stage folded",
+            rawMessage: "transform stage folded ms=412 retry=2",
             kv: { ms: "412", retry: "2" },
             grammar: "fleet-r2",
         });
@@ -191,6 +194,7 @@ describe("parseLogLine", () => {
             tags: ["perf"],
             bound: { session: "opencode:ses_00fc88222ffe" },
             message: "transform stage folded",
+            rawMessage: "transform stage folded ms=412 retry=2",
             kv: { ms: "412", retry: "2" },
             grammar: "fleet-r1",
         });
@@ -205,6 +209,7 @@ describe("parseLogLine", () => {
             tags: [],
             bound: {},
             message: "transform stage folded",
+            rawMessage: "transform stage folded ms=412 retry=2",
             kv: { ms: "412", retry: "2" },
             grammar: "legacy",
         });
