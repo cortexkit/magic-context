@@ -252,6 +252,134 @@ function hookRewrittenSlot(
 	return target;
 }
 
+/** Whether an item is an assistant message with no visible text, which Oh My Pi does not replay. */
+function emptyAssistantMessage(item: Record<string, unknown>): boolean {
+	if (item.type !== "message" || item.role !== "assistant") return false;
+	if (typeof item.content === "string") return !/\S/u.test(item.content);
+	return (
+		Array.isArray(item.content) &&
+		!item.content.some(
+			(part) =>
+				isRecord(part) &&
+				((part.type === "output_text" &&
+					typeof part.text === "string" &&
+					/\S/u.test(part.text)) ||
+					(part.type === "refusal" &&
+						typeof part.refusal === "string" &&
+						/\S/u.test(part.refusal))),
+		)
+	);
+}
+
+/**
+ * The stored native items Oh My Pi sends in place of this assistant turn, or
+ * undefined when it rebuilds the turn from its typed blocks instead. It
+ * replays only a turn from the target's own api and model whose payload
+ * belongs to the target provider and still holds some visible output
+ * (openai-codex-responses.ts:4361-4416 and utils.ts:363-383, 681-692 in
+ * 18.18.1). The OpenAI and Azure Responses lanes can also rebuild a turn
+ * from its blocks when a request does not replay native history (Oh My Pi's
+ * `nativeHistory.replay` is false) and the turn holds server state bound to
+ * an earlier connection; this treats those turns as replayed too.
+ */
+function replayedNativeItems(
+	message: Record<string, unknown>,
+	model: { api?: unknown; id?: unknown; provider?: unknown },
+): unknown[] | undefined {
+	const payload = message.providerPayload;
+	if (
+		message.api !== model.api ||
+		message.model !== model.id ||
+		!isRecord(payload) ||
+		payload.type !== "openaiResponsesHistory" ||
+		!Array.isArray(payload.items) ||
+		(payload.provider ?? message.provider ?? model.provider) !== model.provider
+	)
+		return undefined;
+	return payload.items.some(
+		(item) =>
+			!isRecord(item) ||
+			(item.type !== "reasoning" && !emptyAssistantMessage(item)),
+	)
+		? payload.items
+		: undefined;
+}
+
+/** Whether a signed block's own native item, found by id and phase, holds this exact text. */
+function signedItemHolds(
+	block: Record<string, unknown>,
+	items: readonly unknown[],
+	text: string,
+): boolean {
+	const identity = textIdentity(block);
+	if (!identity) return false;
+	const matches = items.filter(
+		(item) =>
+			isRecord(item) &&
+			item.type === "message" &&
+			item.role === "assistant" &&
+			item.id === identity.id &&
+			item.phase === identity.phase,
+	) as Record<string, unknown>[];
+	const outputs =
+		matches.length === 1 && Array.isArray(matches[0].content)
+			? matches[0].content.filter(
+					(output) => isRecord(output) && output.type === "output_text",
+				)
+			: [];
+	return (
+		outputs.length === 1 && (outputs[0] as { text?: unknown }).text === text
+	);
+}
+
+/**
+ * Name the first assistant turn whose dropped part would reach the provider
+ * as its original text: Oh My Pi replays the turn's stored native items, and
+ * the native output that pairs with a `[dropped §N§]` block does not hold
+ * that placeholder. Blocks pair in order as `nativeTextSlots` pairs them; when
+ * they cannot, a signed block is looked up by its id and phase, the way the
+ * signed mirror finds it. This only reads the prepared messages, so it can run
+ * when the turn structure itself cannot be compared, and a turn with no
+ * placeholder is never named.
+ */
+export function piNativeDropMismatch(
+	messages: readonly unknown[],
+	model: { api?: unknown; id?: unknown; provider?: unknown } | undefined,
+): string | undefined {
+	if (!model || !RESPONSES_APIS.has(String(model.api))) return undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (
+			!isRecord(message) ||
+			message.role !== "assistant" ||
+			!Array.isArray(message.content) ||
+			!message.content.some(
+				(block) =>
+					isRecord(block) &&
+					block.type === "text" &&
+					typeof block.text === "string" &&
+					isPiDropPlaceholder(block.text),
+			)
+		)
+			continue;
+		const items = replayedNativeItems(message, model);
+		if (!items) continue;
+		const slots = nativeTextSlots(message.content, items);
+		let ordinal = 0;
+		for (const block of message.content) {
+			if (!isRecord(block) || block.type !== "text") continue;
+			const slot = slots?.[ordinal++];
+			if (typeof block.text !== "string" || !isPiDropPlaceholder(block.text))
+				continue;
+			const reached = slots
+				? slot?.text === block.text
+				: signedItemHolds(block, items, block.text);
+			if (!reached) return `message=${index} comparison=native_drop`;
+		}
+	}
+	return undefined;
+}
+
 /**
  * Mirror prepared text edits without converting or discarding opaque native history.
  *

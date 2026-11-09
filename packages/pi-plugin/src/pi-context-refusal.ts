@@ -90,6 +90,9 @@ interface Operation {
 	cursorRoots?: readonly string[];
 	refusalMessage?: string;
 	preparedStructure?: PiPreparedStructure;
+	// Why a dropped part of the latest pass would reach the provider as its
+	// original text through Oh My Pi's native replay; see piNativeDropMismatch.
+	nativeDrop?: string;
 	// Recorded only for serializers that can chain through previous_response_id.
 	preparedHistory?: PiPreparedHistory;
 	retainedAfterEnd: boolean;
@@ -149,6 +152,7 @@ function releasePiOperationPayloads(operation: Operation): void {
 	operation.managedSignature = undefined;
 	operation.cursorRoots = undefined;
 	operation.preparedStructure = undefined;
+	operation.nativeDrop = undefined;
 	operation.preparedHistory = undefined;
 }
 
@@ -706,6 +710,13 @@ export function registerPiGuardedContext(
 					throw new Error(
 						"provider conversation identity could not be established",
 					);
+				// A dropped part whose native item Oh My Pi replays unchanged would go
+				// out as its original text. The check reads only the prepared messages,
+				// so it holds even when the turn structure below cannot be compared.
+				if (active.nativeDrop)
+					throw new Error(
+						`provider request does not match this pass's managed dispatch (prepared turn structure); ${active.nativeDrop}`,
+					);
 				// Compare turns and tool IDs only when we can predict the provider's
 				// serialization. Comparing one row per original message with Responses
 				// items, for example, would always refuse legitimate requests. Skipping
@@ -945,6 +956,7 @@ export function registerPiGuardedContext(
 						ctx.cwd,
 					);
 				active.preparedStructure = prepared.structure;
+				active.nativeDrop = prepared.nativeDrop;
 				if (
 					fenceEnabled &&
 					!budget.sideTurn &&

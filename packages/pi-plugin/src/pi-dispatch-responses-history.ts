@@ -132,6 +132,22 @@ export function piResponsesAssistantTexts(
 			texts.push(textIdentity(text, undefined));
 			continue;
 		}
+		// Oh My Pi's transformMessages drops these blocks for every Responses
+		// target before it encodes a turn, so they add no row and no text: an
+		// assistant image, an Anthropic server-tool block, a server-side fallback
+		// marker, and redacted thinking from any other model. It keeps redacted
+		// thinking from the target model itself, so that block stays unmodeled.
+		// The rule is the same in every pinned version: transform-messages.ts
+		// 17.1.7:721-775, 18.8.9:928-982, 18.11.3:1109-1159,
+		// 18.12.3-18.13.2:1138-1188, 18.18.0-18.18.1:1200-1250.
+		if (
+			host === "omp" &&
+			(block?.type === "image" ||
+				block?.type === "anthropicServerTool" ||
+				block?.type === "fallback" ||
+				(block?.type === "redactedThinking" && !sameModel))
+		)
+			continue;
 		if (block?.type !== "text" || typeof block.text !== "string")
 			return undefined;
 		units += block.text.length;
