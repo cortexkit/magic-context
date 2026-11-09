@@ -118,10 +118,10 @@ export interface PricedPassPlanInput {
  * are known before it runs.
  *
  * Three rides are known only once the postprocess phase runs: a history refresh
- * that changes m[1] bytes, invariant 3's execute rebuild (it counts the queued
- * drops) and a repair of the served shape. They count as absent here, so a pass
- * that takes only one of them is sized with the reasoning it then clears, as a
- * provider reading of the previous request would be.
+ * that changes m[1] bytes, the execute pass's own bounded rebuild (it counts
+ * the queued drops) and a repair of the served shape. They count as absent here,
+ * so a pass that takes only one of them is sized with the reasoning it then
+ * clears, as a provider reading of the previous request would be.
  *
  * The force ride depends on the reading the sizing produces, so the caller plans
  * from the reading it has before sizing, counts the request that plan serves,
