@@ -305,11 +305,7 @@ function sizedPercentage(logs: string[]): number | undefined {
  * band is first reached on an ordinary pass rather than on the first render.
  * Returns the session and the second served request.
  */
-async function grownSession(
-    host: (typeof HOSTS)[number],
-    sessionId: string,
-    usage: number | null,
-) {
+async function grownSession(host: (typeof HOSTS)[number], sessionId: string, usage: number | null) {
     const s = session(host, sessionId, usage, USAGELESS_MODEL);
     // After `session` points the data home at its own temporary directory,
     // where the catalog refresh saves its copy.
@@ -350,9 +346,9 @@ for (const host of HOSTS) {
         // The execute decision reads the calibrated count of the served request
         // (what the provider would likely report), and the provider never says
         // otherwise. The grown request is in the force band by that count.
-        expect(
-            calibratedTokens(s, sessionId, grown.messages),
-        ).toBeGreaterThanOrEqual(0.85 * USAGELESS_USABLE);
+        expect(calibratedTokens(s, sessionId, grown.messages)).toBeGreaterThanOrEqual(
+            0.85 * USAGELESS_USABLE,
+        );
         const tag = s.dropOldestTool();
         const passes: Array<{
             sized: number | undefined;
@@ -389,9 +385,9 @@ for (const host of HOSTS) {
         const sessionId = `review-usage-${host}`;
         // The provider measures this session at 30%.
         const { s, grown } = await grownSession(host, sessionId, 30);
-        expect(
-            calibratedTokens(s, sessionId, grown.messages),
-        ).toBeGreaterThanOrEqual(0.85 * USAGELESS_USABLE);
+        expect(calibratedTokens(s, sessionId, grown.messages)).toBeGreaterThanOrEqual(
+            0.85 * USAGELESS_USABLE,
+        );
         const tag = s.dropOldestTool();
         await s.pass();
         await s.pass();

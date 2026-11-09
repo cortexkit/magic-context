@@ -225,9 +225,10 @@ function usagelessSession(sessionId: string, model: typeof MODEL = MODEL) {
                 await handler({}, { messages });
                 updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
                 const localLine = logs.find((line) => line.includes("reads the local count"));
-                const local = /reads the local count of the last served request percentage=([\d.]+) inputTokens=([\d.]+)/.exec(
-                    localLine ?? "",
-                );
+                const local =
+                    /reads the local count of the last served request percentage=([\d.]+) inputTokens=([\d.]+)/.exec(
+                        localLine ?? "",
+                    );
                 const sized = /using wire estimate for priced pass .*percentage=([\d.]+)/
                     .exec(logs.find((line) => line.includes("using wire estimate")) ?? "")
                     ?.at(1);
