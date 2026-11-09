@@ -75,7 +75,10 @@ import {
 } from "../../hooks/magic-context/hook-handlers";
 import { markCoveredInstructionRow } from "../../hooks/magic-context/host-served-rows";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
-import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
+import {
+    armLatestThinkingRecoveryFromError,
+    armThinkingBindingRecoveryFromError,
+} from "../../hooks/magic-context/latest-thinking-recovery";
 import {
     beginV2LkgRequest,
     clearLkgMeasuredRequest,
@@ -1576,6 +1579,32 @@ export async function registerContext(context: V2Context) {
     const hostFoldIdle = hostFolds
         ? new HostFoldIdle((sessionID, eligible) => hostFolds.idle(sessionID, eligible))
         : undefined;
+    /**
+     * Arm thinking-binding recovery when a host failure event carries the
+     * binding 400, so the next pass strips the rejected thinking instead of
+     * resending it. Same conditions as OpenCode 1's event handler: managed
+     * mode (compaction on) and a prefix-bound model.
+     */
+    const armBindingRecoveryFromEvent = (
+        sessionID: string,
+        error: unknown,
+        source: string | undefined,
+    ): void => {
+        if (error === undefined || !db || compactionOff) return;
+        const model = liveModels.get(sessionID);
+        try {
+            armThinkingBindingRecoveryFromError({
+                db,
+                sessionId: sessionID,
+                error,
+                providerID: model?.providerID,
+                modelID: model?.modelID,
+                source: source ?? "session event",
+            });
+        } catch (armError) {
+            log("[magic-context] v2 thinking binding recovery arm failed", armError);
+        }
+    };
     const usageController = new AbortController();
     const usageDone = (async () => {
         let retry = 0;
@@ -1647,6 +1676,14 @@ export async function registerContext(context: V2Context) {
                             if (typeof messageID === "string")
                                 messageTimesCache.deleteMessage(sessionID, messageID);
                         }
+                        // A failed step carries the provider error itself; a
+                        // binding 400 may reach this loop only that way.
+                        if (event.type === "session.step.failed")
+                            armBindingRecoveryFromEvent(
+                                sessionID,
+                                event.data.error,
+                                "session.step.failed",
+                            );
                         if (
                             event.type === "session.error" ||
                             event.type === "session.execution.failed"
@@ -1656,8 +1693,9 @@ export async function registerContext(context: V2Context) {
                             if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                             if (error !== undefined && db && !compactionOff) {
                                 const model = liveModels.get(sessionID);
+                                let latestTurnRejection = false;
                                 try {
-                                    armLatestThinkingRecoveryFromError({
+                                    latestTurnRejection = armLatestThinkingRecoveryFromError({
                                         db,
                                         sessionId: sessionID,
                                         error,
@@ -1670,6 +1708,8 @@ export async function registerContext(context: V2Context) {
                                         armError,
                                     );
                                 }
+                                if (!latestTurnRejection)
+                                    armBindingRecoveryFromEvent(sessionID, error, event.type);
                             }
                             continue;
                         }

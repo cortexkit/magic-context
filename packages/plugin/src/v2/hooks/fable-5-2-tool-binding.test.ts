@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { getThinkingBindingRecoveryTarget } from "../../features/magic-context/storage-meta-persisted";
+import {
+    getThinkingBindingRecoveryTarget,
+    THINKING_BINDING_RECOVERY_ALL_ASSISTANTS,
+} from "../../features/magic-context/storage-meta-persisted";
 import { LATEST_THINKING_RESTORE } from "../../hooks/magic-context/latest-thinking-recovery";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import type { SessionContext } from "./types";
@@ -16,6 +19,8 @@ import type { SessionContext } from "./types";
 // after the tool change is an ordinary request of a new turn.
 
 const THINKING = "SIGNED_AGAINST_THE_FIRST_TOOL_LIST";
+const BINDING_400 =
+    'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". That setting requires the `thinking-binding-controls-2026-08-01` value in the `anthropic-beta` header.';
 
 type Tools = SessionContext["tools"];
 type HostEvent = { type: string; data: Record<string, unknown> };
@@ -195,13 +200,11 @@ test("OpenCode 2, claude-fable-5-2: a session.error with the latest-turn thinkin
     }
 }, 60000);
 
-// Known gap: OpenCode 2's event loop arms only the latest-turn thinking
-// restore (armLatestThinkingRecoveryFromError; the control above shows that
-// path receives host errors). The binding 400 ("The block is bound to a
-// different conversation") is recognised only by the OpenCode 1 event
-// handler, so on OpenCode 2 the next prompt resends the same invalid block.
-// Remove `.failing` when that prompt goes out without it.
-test.failing("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 goes out without the rejected thinking", async () => {
+// OpenCode 2's event loop arms thinking-binding recovery from the binding 400
+// ("The block is bound to a different conversation"), as OpenCode 1's event
+// handler does, so the next prompt goes out without the rejected block
+// instead of resending it.
+test("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 goes out without the rejected thinking", async () => {
     const served = await serveAcrossToolChange(
         52004,
         (tools) => {
@@ -215,8 +218,7 @@ test.failing("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 
             error: {
                 name: "APIError",
                 data: {
-                    message:
-                        'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". That setting requires the `thinking-binding-controls-2026-08-01` value in the `anthropic-beta` header.',
+                    message: BINDING_400,
                     statusCode: 400,
                     isRetryable: false,
                 },
@@ -226,4 +228,42 @@ test.failing("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 
     expect(served.changed).toContain(THINKING);
     expect(served.retried).toBeDefined();
     expect(served.retried).not.toContain(THINKING);
+}, 60000);
+
+// A failed step carries the provider error on the event itself; a binding 400
+// reported only that way arms the same recovery.
+test("OpenCode 2, claude-fable-5-2: a session.step.failed with the binding 400 arms binding recovery", async () => {
+    const events = eventBus();
+    const f = await oc2ContextFixture(52006, {
+        area: "fable-5-2-tool-binding",
+        instructions: false,
+        temporal: false,
+        cacheTtl: "never",
+        provider: "anthropic",
+        model: "claude-fable-5-2",
+        eventStream: events.stream,
+    });
+    try {
+        await f.pass();
+        expect(getThinkingBindingRecoveryTarget(f.db, f.session)).toBeNull();
+        await events.emit({
+            type: "session.step.failed",
+            data: {
+                sessionID: f.session,
+                error: {
+                    name: "APIError",
+                    data: {
+                        message: BINDING_400,
+                        statusCode: 400,
+                        isRetryable: false,
+                    },
+                },
+            },
+        });
+        expect(getThinkingBindingRecoveryTarget(f.db, f.session)).toBe(
+            THINKING_BINDING_RECOVERY_ALL_ASSISTANTS,
+        );
+    } finally {
+        await f.cleanup();
+    }
 }, 60000);
