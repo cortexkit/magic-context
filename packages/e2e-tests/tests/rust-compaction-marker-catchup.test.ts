@@ -9,7 +9,7 @@ import { closeCompactionMarkerDb, injectCompactionMarker, prepareCompactionMarke
 import { MARKER_SUMMARY_TEXT } from "../../plugin/src/hooks/magic-context/compaction-marker-manager";
 import { RustTestHarness } from "../src/rust-harness";
 import { PLUGIN_ENTRY } from "../src/opencode-runner/spawn";
-import { assertHermeticStores, FOLD_CONFIG } from "../src/rust-marker-test-support";
+import { assertHermeticStores, driveDeferredMarkerMove, FOLD_CONFIG, markerDiscoveryDeferrals } from "../src/rust-marker-test-support";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identity", () => {
@@ -184,6 +184,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         };
         const sampling = setInterval(sample,100);
         const before = h.readRustPasses().length;
+        const deferralsBeforeHard = markerDiscoveryDeferrals(h, sessionId);
         try { await h.sendPrompt(sessionId,"rebuild this prefix below execute pressure"); sample(); } finally { clearInterval(sampling); }
         const hard = (await h.waitForRustPasses(before+1)).at(-1)!;
         expect(hard.decision).toBe("HARD");
@@ -193,6 +194,19 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         expect(hard.applied).toBe(true);
         expect(JSON.stringify(h.mainRequests().at(-1)!.body.tools)).not.toBe(previousTools);
         const marker = () => JSON.parse((context.query("SELECT compaction_marker_state AS marker FROM session_meta WHERE session_id=?").get(sessionId) as {marker:string}).marker) as {boundaryOrdinal:number;boundaryMessageId:string};
+        // This HARD is the first pass of a freshly restarted plugin, and the
+        // summary discovery a marker move needs starts on that same pass, in the
+        // background. The pass serves the rebuilt history without waiting for it
+        // and records the 16940 target as pending; a later cache-busting pass
+        // moves the marker. Ordinary SOFT+ passes never move it, so ask for one
+        // rebuild here. The smaller-input checks below start after that move.
+        if (marker().boundaryOrdinal !== 16940) {
+            expect(markerDiscoveryDeferrals(h, sessionId)).toBe(deferralsBeforeHard + 1);
+            const pending = JSON.parse((context.query("SELECT pending_compaction_marker_state AS pending FROM session_meta WHERE session_id=?").get(sessionId) as {pending:string}).pending) as {ordinal:number;endMessageId:string};
+            expect(pending.ordinal).toBe(16940);
+            expect(pending.endMessageId).toBe(raw[16939]!.id);
+            await driveDeferredMarkerMove(h, sessionId, () => marker().boundaryOrdinal !== 50, "move the caught-up marker on a requested rebuild");
+        }
         expect(marker().boundaryOrdinal).toBe(16940);
         expect(marker().boundaryMessageId).toBe(raw[16938]!.id);
         const retained = await h.listMessages(sessionId);
