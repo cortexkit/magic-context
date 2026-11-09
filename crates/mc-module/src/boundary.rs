@@ -1921,8 +1921,20 @@ fn extract_key_arg(input: &Value) -> Option<String> {
             return Some(value.to_string());
         }
     }
+    // A shell call's command, on one line: the summarizer never sees tool output,
+    // so without it the call says nothing about the work.
+    if let Some(command) = object.get("command").and_then(Value::as_str) {
+        let command = truncate_utf16(&normalize_text(command), COMMAND_ARG_MAX_UNITS);
+        return (!command.is_empty()).then_some(command);
+    }
     None
 }
+
+/// Longest command a `TC:` line keeps, counted in UTF-16 units like the TypeScript
+/// formatter (`extractKeyArg` in read-session-formatting.ts). A shell command often
+/// opens with `cd <absolute path> &&`, which alone can fill the 60 units other key
+/// arguments keep.
+pub(crate) const COMMAND_ARG_MAX_UNITS: usize = 200;
 
 fn truncate_arg(value: &str) -> String {
     truncate_utf16(value, 60)
@@ -2150,6 +2162,26 @@ mod tests {
         // A cut that would split a surrogate pair leaves the whole character out.
         let odd = format!("a{}", "😀".repeat(40));
         assert_eq!(truncate_arg(&odd), format!("a{}…", "😀".repeat(29)));
+    }
+
+    /// A shell call with no description keeps its command, collapsed to one line and cut at
+    /// 200 UTF-16 units, as the TypeScript formatter does. A blank command adds nothing.
+    #[test]
+    fn shell_calls_without_a_description_keep_their_command() {
+        let short = serde_json::json!({ "command": "git status\n  --short" });
+        assert_eq!(
+            extract_key_arg(&short).as_deref(),
+            Some("git status --short")
+        );
+        let long = serde_json::json!({ "command": "a".repeat(201) });
+        assert_eq!(
+            extract_key_arg(&long),
+            Some(format!("{}…", "a".repeat(200)))
+        );
+        assert_eq!(
+            extract_key_arg(&serde_json::json!({ "command": " \n " })),
+            None
+        );
     }
 
     /// Commit detection uses ASCII word boundaries and ASCII case folding, as JavaScript's

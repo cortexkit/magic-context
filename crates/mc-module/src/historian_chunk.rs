@@ -1926,6 +1926,15 @@ fn extract_key_arg(input: &Value) -> Option<String> {
             return Some(value.to_string());
         }
     }
+    // A shell call's command, on one line: the summarizer never sees tool output,
+    // so without it the call says nothing about the work.
+    if let Some(command) = object.get("command").and_then(Value::as_str) {
+        let command = crate::boundary::truncate_utf16(
+            &normalize_text(command),
+            crate::boundary::COMMAND_ARG_MAX_UNITS,
+        );
+        return (!command.is_empty()).then_some(command);
+    }
     None
 }
 
@@ -2264,6 +2273,27 @@ mod tests {
         assert_eq!(
             truncate_arg(&"😀".repeat(40)),
             format!("{}…", "😀".repeat(30))
+        );
+    }
+
+    /// A shell call with no description is summarized with its command, on one line; a
+    /// description still comes first, as in the TypeScript formatter.
+    #[test]
+    fn shell_call_summaries_keep_the_command_when_no_description_is_given() {
+        assert_eq!(
+            format_tool_summary("shell", &json!({"command": "cat PLAYBOOK.md\n| head"})),
+            "TC: shell(cat PLAYBOOK.md | head)"
+        );
+        assert_eq!(
+            format_tool_summary(
+                "shell",
+                &json!({"command": "cat PLAYBOOK.md", "description": "Read the playbook"})
+            ),
+            "TC: Read the playbook"
+        );
+        assert_eq!(
+            format_tool_summary("bash", &json!({"command": "x".repeat(250)})),
+            format!("TC: bash({}…)", "x".repeat(200))
         );
     }
 
