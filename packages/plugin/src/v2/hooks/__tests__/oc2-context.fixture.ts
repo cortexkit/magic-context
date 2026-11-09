@@ -19,7 +19,8 @@ import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../shared/t
 import { resetHostMediaForTests } from "../../fold/host-media";
 import { nativeFoldCache } from "../../fold/memory-cache";
 import { NativeFoldReplay } from "../../fold/native-replay";
-import { V2StoreReader } from "../../store-reader";
+import { restoreRow } from "../../fold/restore";
+import { type StoreRow, V2StoreReader } from "../../store-reader";
 import { registerContext } from "../context";
 import { HEAD_IDS } from "../payload";
 import * as storageGate from "../storage-gate";
@@ -41,6 +42,8 @@ type Row = {
     /** The model an assistant row was answered by, when not the fixture's first model. */
     model?: string;
     metadata?: Record<string, unknown>;
+    /** A completed tool call this assistant row made, rendered as the host renders tool steps. */
+    tool?: { name: string; input: Record<string, unknown>; output: string };
 };
 
 /**
@@ -70,6 +73,7 @@ export async function oc2ContextFixture(
         instructions = true,
         temporal = true,
         host = "2.0.22" as HostVersion,
+        protectedTokens = 4000,
         eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
             (async function* () {})(),
     } = {},
@@ -117,7 +121,7 @@ export async function oc2ContextFixture(
         memory: { enabled: false, git_commit_indexing: { enabled: false } },
         temporal_awareness: temporal,
         mural: { enabled: false },
-        protected_tokens: 4000,
+        protected_tokens: protectedTokens,
         commit_cluster_trigger: { enabled: false },
         cache_ttl: cacheTtl,
     });
@@ -173,29 +177,46 @@ export async function oc2ContextFixture(
         addRow("user", `${seed}/${turn}: ${prose.repeat(1 + ((seed + turn) % 3))}`);
         turn++;
     };
+    const storeData = (row: Row) =>
+        row.type === "assistant"
+            ? {
+                  content: [
+                      { type: "text", text: row.text },
+                      ...(row.tool
+                          ? [
+                                {
+                                    type: "tool",
+                                    id: `call-${row.id}`,
+                                    name: row.tool.name,
+                                    state: {
+                                        status: "completed",
+                                        input: row.tool.input,
+                                        content: [{ type: "text", text: row.tool.output }],
+                                    },
+                                },
+                            ]
+                          : []),
+                  ],
+                  model: { providerID: provider, id: row.model ?? model },
+                  time: { created: row.created, completed: row.created + 1000 },
+                  tokens: {
+                      input: row.inputTokens ?? 10000,
+                      output: 50,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                  },
+              }
+            : {
+                  text: row.text,
+                  time: { created: row.created },
+                  ...(row.metadata ? { metadata: row.metadata } : {}),
+              };
     const persist = () => {
         raw.prepare(
             "DELETE FROM session_message WHERE session_id = ? AND type != 'compaction'",
         ).run(session);
         for (const row of rows) {
-            const data =
-                row.type === "assistant"
-                    ? {
-                          content: [{ type: "text", text: row.text }],
-                          model: { providerID: provider, id: row.model ?? model },
-                          time: { created: row.created, completed: row.created + 1000 },
-                          tokens: {
-                              input: row.inputTokens ?? 10000,
-                              output: 50,
-                              reasoning: 0,
-                              cache: { read: 0, write: 0 },
-                          },
-                      }
-                    : {
-                          text: row.text,
-                          time: { created: row.created },
-                          ...(row.metadata ? { metadata: row.metadata } : {}),
-                      };
+            const data = storeData(row);
             raw.prepare(
                 "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
             ).run(
@@ -209,17 +230,30 @@ export async function oc2ContextFixture(
             );
         }
     };
-    const render = (row: Row): V2Message =>
-        row.type === "system"
-            ? { role: "system", content: [{ type: "text", text: row.text }] }
-            : {
-                  id: row.id,
-                  role: row.type,
-                  content: [{ type: "text", text: row.text }],
-                  // OpenCode merges user metadata and agents into an object even
-                  // when both source fields are absent.
-                  ...(row.type === "user" ? { metadata: {} } : {}),
-              };
+    const render = (row: Row): V2Message[] =>
+        row.tool
+            ? restoreRow(
+                  {
+                      id: row.id,
+                      session_id: session,
+                      type: "assistant",
+                      seq: row.seq,
+                      data: storeData(row),
+                  } as unknown as StoreRow,
+                  { providerID: provider, id: row.model ?? model },
+              )
+            : [
+                  row.type === "system"
+                      ? { role: "system", content: [{ type: "text", text: row.text }] }
+                      : {
+                            id: row.id,
+                            role: row.type,
+                            content: [{ type: "text", text: row.text }],
+                            // OpenCode merges user metadata and agents into an object even
+                            // when both source fields are absent.
+                            ...(row.type === "user" ? { metadata: {} } : {}),
+                        },
+              ];
     let checkpoint: V2Message | undefined;
     let hostWindowStart = 0;
     let lastDraft: SessionContext | undefined;
@@ -234,7 +268,7 @@ export async function oc2ContextFixture(
         options: {},
         messages: structuredClone([
             ...(checkpoint ? [checkpoint] : []),
-            ...rows.slice(hostWindowStart).map(render),
+            ...rows.slice(hostWindowStart).flatMap(render),
         ]),
     });
     addRow("user", `${seed}: start ${prose.repeat(2)}`);
@@ -478,6 +512,17 @@ export async function oc2ContextFixture(
         /** The provider answers the last request: a new assistant row completes now. */
         respond(repeat = 1, inputTokens?: number) {
             addRow("assistant", `${seed}/reply ${rows.length}: ${prose.repeat(repeat)}`, 5000);
+            if (modelId !== model) rows[rows.length - 1]!.model = modelId;
+            if (inputTokens !== undefined) rows[rows.length - 1]!.inputTokens = inputTokens;
+            persist();
+        },
+        /** A tool step: an assistant row with a short note and one completed tool call. */
+        respondWithTool(
+            tool: { name: string; input: Record<string, unknown>; output: string },
+            inputTokens?: number,
+        ) {
+            addRow("assistant", `${seed}/step ${rows.length}`, 5000);
+            rows[rows.length - 1]!.tool = tool;
             if (modelId !== model) rows[rows.length - 1]!.model = modelId;
             if (inputTokens !== undefined) rows[rows.length - 1]!.inputTokens = inputTokens;
             persist();
