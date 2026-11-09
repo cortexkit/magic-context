@@ -144,11 +144,10 @@ test("OpenCode 2, claude-fable-5-2: a changed tool description strips the kept s
     expect(served.changed).not.toContain(THINKING);
 }, 60000);
 
-// Known gap: the OpenCode 2 tool identity hashes names and descriptions only
-// (request-tool-definitions.ts), so a request whose only change is a tool's
-// input schema keeps the signed thinking, and Claude Fable 5.2 rejects it.
-// Remove `.failing` when a schema change strips that thinking.
-test.failing("OpenCode 2, claude-fable-5-2: a schema-only tool change strips the kept signed thinking", async () => {
+// The fold identity hashes names and descriptions only (request-tool-
+// definitions.ts), so a schema-only change never folds the history head. The
+// release fingerprint counts schemas, so the kept thinking is stripped anyway.
+test("OpenCode 2, claude-fable-5-2: a schema-only tool change strips the kept signed thinking", async () => {
     const served = await serveAcrossToolChange(52003, (tools) => {
         tools.read!.input = {
             type: "object",
@@ -203,28 +202,20 @@ test("OpenCode 2, claude-fable-5-2: a session.error with the latest-turn thinkin
 // OpenCode 2's event loop arms thinking-binding recovery from the binding 400
 // ("The block is bound to a different conversation"), as OpenCode 1's event
 // handler does, so the next prompt goes out without the rejected block
-// instead of resending it.
+// instead of resending it. The tools stay the same here: the 400 stands for an
+// edit Magic Context cannot see (a later plugin hook, say), which leaves the
+// thinking on the rejected request.
 test("OpenCode 2, claude-fable-5-2: the next prompt after a binding 400 goes out without the rejected thinking", async () => {
-    const served = await serveAcrossToolChange(
-        52004,
-        (tools) => {
-            tools.read!.input = {
-                type: "object",
-                properties: { path: { type: "string" } },
-                required: ["path"],
-            };
-        },
-        {
-            error: {
-                name: "APIError",
-                data: {
-                    message: BINDING_400,
-                    statusCode: 400,
-                    isRetryable: false,
-                },
+    const served = await serveAcrossToolChange(52004, () => {}, {
+        error: {
+            name: "APIError",
+            data: {
+                message: BINDING_400,
+                statusCode: 400,
+                isRetryable: false,
             },
         },
-    );
+    });
     expect(served.changed).toContain(THINKING);
     expect(served.retried).toBeDefined();
     expect(served.retried).not.toContain(THINKING);

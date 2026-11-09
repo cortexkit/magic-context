@@ -4,6 +4,7 @@ import {
     normalizeProtectedToolName,
     protectedToolTagNumbers,
 } from "../../features/magic-context/reclaim-protection";
+import type { RequestToolsChange } from "../../features/magic-context/request-tool-definitions";
 import {
     HYGIENE_PROVIDER_UNITS_VERSION,
     sessionDecisionCalibration,
@@ -1739,6 +1740,12 @@ interface RunPostTransformPhaseArgs {
      * thinking block on the wire sits behind changed bytes.
      */
     compactionModeTransition?: boolean;
+    /**
+     * What changed in the request's tools since the session's last pass on this
+     * prefix-bound model, or null. Signed thinking is bound to the tools, so
+     * every block on the wire is invalid on this pass.
+     */
+    requestToolsChange?: RequestToolsChange | null;
     readLastServedMessages?: () => readonly unknown[] | null;
     structuralSentinelUpgradeFailed?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
@@ -2368,6 +2375,15 @@ export async function runPostTransformPhase(
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
         sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
+        releaseThinkingForRewrite(false, true);
+    }
+    // The request's tools changed (the caller logged what changed and lifted any
+    // hold). Tools come first in the request, so this pass already loses the
+    // whole provider cache: strip every signed block, compaction-off included,
+    // and let the queued work ride the rewrite. Only the m[0] fold decision
+    // below is unaffected: a name or description change still folds through
+    // its own trigger, and a schema-only change never does.
+    if (args.requestToolsChange && args.thinkingBindingRecoveryEnabledForModel === true) {
         releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =

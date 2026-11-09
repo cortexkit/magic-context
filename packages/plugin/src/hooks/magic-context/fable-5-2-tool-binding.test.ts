@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
-import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
+import {
+    v2RequestToolsFingerprint,
+    v2ToolDefinitionsHash,
+} from "../../features/magic-context/request-tool-definitions";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -40,7 +43,8 @@ import { createTransform } from "./transform";
 // These tests run the shared transform with the tool signals each OpenCode
 // adapter wires into it: OpenCode 1 passes only the names-only, route-wide
 // hash its `tool.definition` hook records (hook.ts), and OpenCode 2 also
-// passes the request's own name-and-description identity (v2/hooks/context.ts).
+// passes the request's own name-and-description identity and its full tool
+// fingerprint (v2/hooks/context.ts).
 
 const MODEL = { providerID: "anthropic", modelID: "claude-fable-5-2" } as const;
 const AGENT = "build";
@@ -109,8 +113,12 @@ function setup(
     signals: {
         getToolSetHash?: (sessionId: string) => string;
         getToolDefinitionsHash?: (sessionId: string) => string | undefined;
+        getRequestToolsFingerprint?: (
+            sessionId: string,
+        ) => ReturnType<typeof v2RequestToolsFingerprint> | undefined;
     },
     subagent = false,
+    compactionOff = false,
 ) {
     process.env.XDG_DATA_HOME = tempDir(`${name}-data-`);
     process.env.XDG_CACHE_HOME = process.env.XDG_DATA_HOME;
@@ -143,6 +151,7 @@ function setup(
         historyRefreshSessions: new Set(),
         pendingMaterializationSessions: new Set(),
         lastHeuristicsTurnId: new Map(),
+        compactionOff,
         ...signals,
     });
     const pass = async (messages: Message[]) => {
@@ -161,9 +170,15 @@ function openCode1Signals() {
     };
 }
 
-/** OpenCode 2's tool signals: the request's own name-and-description identity. */
+/**
+ * OpenCode 2's tool signals: the request's own name-and-description identity
+ * and the fingerprint of its whole tool list, schemas included.
+ */
 function openCode2Signals(tools: RequestTools) {
-    return { getToolDefinitionsHash: () => v2ToolDefinitionsHash(tools) };
+    return {
+        getToolDefinitionsHash: () => v2ToolDefinitionsHash(tools),
+        getRequestToolsFingerprint: () => v2RequestToolsFingerprint(tools),
+    };
 }
 
 /**
@@ -217,11 +232,13 @@ test("OpenCode 1, claude-fable-5-2: a system prompt change strips the kept signe
     }
 });
 
-// Known gap: OpenCode 1 has no per-request tool signal. Its names-only hash is
-// shared by every session on the same provider, model and agent, and is only
-// logged to explain a cache loss; it never makes the transform rebuild
-// anything. MCP tools never reach the tool.definition hook at all. Remove
-// `.failing` when a tool change strips the kept thinking.
+// Known limit, kept as a failing test on purpose: OpenCode 1 has no
+// per-request tool signal. Its tool.definition hook carries no session id, so
+// what it records is shared by every session on the same provider, model and
+// agent; releasing on it would strip thinking from sessions whose tools never
+// changed, and MCP tools never reach that hook at all. OpenCode 1 therefore
+// relies on reactive recovery: the binding 400 arms a strip, and the next
+// prompt goes out without the rejected thinking.
 test.failing("OpenCode 1, claude-fable-5-2: a tool added mid-session strips the kept signed thinking", async () => {
     recordToolDefinition(MODEL.providerID, MODEL.modelID, AGENT, "read", "Read a file", {
         type: "object",
@@ -264,11 +281,9 @@ test("OpenCode 2 signals, claude-fable-5-2: a tool added mid-session strips the 
     }
 });
 
-// Known gap: the tool-definition change is only a reason to fold (rebuild the
-// synthetic history messages at the head of the request), and a subagent has
-// no such history head, so it never folds and its kept thinking survives the
-// change. Remove `.failing` when it is stripped.
-test.failing("OpenCode 2 signals, claude-fable-5-2 subagent: a tool added mid-session strips the kept signed thinking", async () => {
+// A subagent renders no history head, so it never folds on a tool change; the
+// tool-list release strips its kept thinking all the same.
+test("OpenCode 2 signals, claude-fable-5-2 subagent: a tool added mid-session strips the kept signed thinking", async () => {
     const tools: RequestTools = { read: { description: "Read a file", input: { type: "object" } } };
     const f = setup("oc2-subagent", openCode2Signals(tools), true);
     try {
@@ -283,12 +298,32 @@ test.failing("OpenCode 2 signals, claude-fable-5-2 subagent: a tool added mid-se
     }
 });
 
-// Known gap: a pass held for recent heavy signed reasoning keeps the two
-// synthetic history messages at the head of the request (m[0]/m[1]) frozen and
-// never asks whether a fold (a rebuild of that head) is due, so a tool change
-// between two steps of the held turn leaves that turn's thinking on the wire.
-// Remove `.failing` when the held turn's thinking is stripped.
-test.failing("OpenCode 2 signals, claude-fable-5-2: a tool added between two held steps strips the turn's signed thinking", async () => {
+// Compaction-off has no rebuild permission, and a tool-only change re-renders
+// no head bytes there; the tool-list release strips the kept thinking anyway.
+test("OpenCode 2 signals, claude-fable-5-2 compaction-off: a changed tool schema strips the kept signed thinking", async () => {
+    const tools: RequestTools = { read: { description: "Read a file", input: { type: "object" } } };
+    const f = setup("oc2-compaction-off", openCode2Signals(tools), false, true);
+    try {
+        const served = await completedTurnAcrossChange(f, () => {
+            tools.read = {
+                description: "Read a file",
+                input: { type: "object", properties: { path: { type: "string" } } },
+            };
+        });
+        expect(served.kept).toContain(THINKING);
+        expect(served.unchanged).toContain(THINKING);
+        expect(served.changed).not.toContain(THINKING);
+    } finally {
+        closeQuietly(f.db);
+    }
+});
+
+// A pass held for recent heavy signed reasoning keeps the two synthetic
+// history messages at the head of the request (m[0]/m[1]) frozen and never
+// asks whether a fold is due. A tool change between two steps of the held turn
+// lifts the hold instead: the turn's thinking is already invalid behind the
+// new tools, so every signed block is stripped on that pass.
+test("OpenCode 2 signals, claude-fable-5-2: a tool added between two held steps strips the turn's signed thinking", async () => {
     const tools: RequestTools = { read: { description: "Read a file", input: { type: "object" } } };
     const f = setup("oc2-held", openCode2Signals(tools));
     const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});

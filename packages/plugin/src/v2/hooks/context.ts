@@ -26,7 +26,12 @@ import {
     setHomeProjectPermission,
 } from "../../features/magic-context/memory/project-identity";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
-import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
+import {
+    type RequestToolsFingerprint,
+    v2RequestToolsFingerprint,
+    v2ToolDefinitionsHash,
+} from "../../features/magic-context/request-tool-definitions";
 import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
@@ -789,6 +794,16 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
 }
 
 /**
+ * Fingerprint the tools this draft sends, for the signed-thinking release on
+ * prefix-bound models (request-tools-release.ts). It reads the draft after
+ * Magic Context's own description edits, like the measurement above, so only a
+ * later plugin hook or a host filter can change the wire without changing it.
+ */
+export function v2DraftRequestToolsFingerprint(draft: SessionContext): RequestToolsFingerprint {
+    return v2RequestToolsFingerprint(draft.tools ?? {}, draft.messages);
+}
+
+/**
  * Run the system-prompt handler over one context draft and write its result back.
  *
  * The handler only compares and records the system-prompt hash once the session's
@@ -949,6 +964,7 @@ export async function registerContext(context: V2Context) {
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const toolDefinitionsHashes = new BoundedSessionMap<string>(1000);
+    const requestToolsFingerprints = new BoundedSessionMap<RequestToolsFingerprint>(1000);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode2",
         directory,
@@ -2294,6 +2310,7 @@ export async function registerContext(context: V2Context) {
                 );
             },
             getToolDefinitionsHash: (sessionId) => toolDefinitionsHashes.get(sessionId),
+            getRequestToolsFingerprint: (sessionId) => requestToolsFingerprints.get(sessionId),
             channel1StateBySession: channel1,
             historyRefreshSessions,
             pendingMaterializationSessions,
@@ -2661,6 +2678,13 @@ export async function registerContext(context: V2Context) {
             if (admissionDb) hideSubagentTools(draft, admissionDb);
             recordV2ToolDefinitions(draft);
             toolDefinitionsHashes.set(draft.sessionID, v2ToolDefinitionsHash(draft.tools));
+            // Only a prefix-bound model's signed thinking is bound to the tools.
+            if (isPrefixBoundThinkingModel(draft.model.providerID, draft.model.id))
+                requestToolsFingerprints.set(
+                    draft.sessionID,
+                    v2DraftRequestToolsFingerprint(draft),
+                );
+            else requestToolsFingerprints.delete(draft.sessionID);
             // Only a failure to read or record usage refuses here. A high reading is
             // left to the transform below: its force band and emergency path are what
             // reduce an over-limit session, and refusing ahead of them would refuse
