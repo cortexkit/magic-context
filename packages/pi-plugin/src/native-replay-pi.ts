@@ -1,7 +1,21 @@
+import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 
 import { isPiSystemEntry } from "./system-entry-pi";
+
+const DROP_PLACEHOLDER = /^\[dropped §\d+§\]$/u;
+const TAG_LABEL = /^§\d+§ /u;
+const RESPONSES_APIS = new Set([
+	"openai-responses",
+	"azure-openai-responses",
+	"openai-codex-responses",
+]);
+
+/** The exact text a dropped part is sent as: `[dropped §N§]` and nothing else. */
+export function isPiDropPlaceholder(text: string): boolean {
+	return DROP_PLACEHOLDER.test(text);
+}
 
 type NativeEnvelope = {
 	message: Record<string, unknown>;
@@ -145,11 +159,295 @@ function textIdentity(
 	return undefined;
 }
 
-/** Mirror prepared text edits without converting or discarding opaque native history. */
+type NativeTextSlot = { itemIndex: number; outputIndex: number; text: string };
+
+/**
+ * Pair every typed text block with the native output text that Oh My Pi
+ * replays in its place, in order, as the dispatch check pairs them
+ * (`piResponsesAssistantTexts`). Undefined unless they pair one to one.
+ */
+function nativeTextSlots(
+	content: readonly unknown[],
+	items: readonly unknown[],
+): NativeTextSlot[] | undefined {
+	const slots: NativeTextSlot[] = [];
+	for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+		const item = items[itemIndex];
+		if (!isRecord(item)) return undefined;
+		if (
+			item.type === "reasoning" ||
+			item.type === "function_call" ||
+			item.type === "custom_tool_call"
+		)
+			continue;
+		if (
+			item.type !== "message" ||
+			item.role !== "assistant" ||
+			!Array.isArray(item.content)
+		)
+			return undefined;
+		for (
+			let outputIndex = 0;
+			outputIndex < item.content.length;
+			outputIndex++
+		) {
+			const output = item.content[outputIndex];
+			if (
+				!isRecord(output) ||
+				output.type !== "output_text" ||
+				typeof output.text !== "string"
+			)
+				return undefined;
+			slots.push({ itemIndex, outputIndex, text: output.text });
+		}
+	}
+	const blocks = content.filter(
+		(block) => isRecord(block) && block.type === "text",
+	).length;
+	return slots.length === blocks ? slots : undefined;
+}
+
+/**
+ * The native output that an unsigned text block replays as, when Oh My Pi's
+ * assistant-message hook explains the missing signature. The hook removes a
+ * block's signature only when it rewrites that block's text, and leaves the
+ * native item as the provider returned it. So the native text must differ
+ * from its own cleanup, and that cleanup must equal the text the block had
+ * before this pass. Every other text block must also fit its positional
+ * item, so the pairing cannot shift onto another item: a signed block by its
+ * id and phase, an unsigned one by the same hook relation. (The dispatch
+ * check also compares a signed block's text, so it can still refuse a turn
+ * this pairing accepts.)
+ */
+function hookRewrittenSlot(
+	previous: readonly unknown[],
+	partIndex: number,
+	items: readonly unknown[],
+): NativeTextSlot | undefined {
+	const slots = nativeTextSlots(previous, items);
+	if (!slots) return undefined;
+	let ordinal = 0;
+	let target: NativeTextSlot | undefined;
+	for (let index = 0; index < previous.length; index++) {
+		const block = previous[index];
+		if (!isRecord(block) || block.type !== "text") continue;
+		const slot = slots[ordinal++];
+		const item = items[slot.itemIndex] as Record<string, unknown>;
+		if (typeof block.text !== "string") return undefined;
+		if ("textSignature" in block) {
+			const identity = textIdentity(block);
+			if (
+				index === partIndex ||
+				!identity ||
+				item.id !== identity.id ||
+				item.phase !== identity.phase
+			)
+				return undefined;
+			continue;
+		}
+		const stripped = stripPersistedAssistantText(slot.text);
+		if (stripped !== block.text.replace(TAG_LABEL, "")) return undefined;
+		if (index !== partIndex) continue;
+		if (stripped === slot.text || (item.content as unknown[]).length !== 1)
+			return undefined;
+		target = slot;
+	}
+	return target;
+}
+
+/** Whether an item is an assistant message with no visible text, which Oh My Pi does not replay. */
+function emptyAssistantMessage(item: Record<string, unknown>): boolean {
+	if (item.type !== "message" || item.role !== "assistant") return false;
+	if (typeof item.content === "string") return !/\S/u.test(item.content);
+	return (
+		Array.isArray(item.content) &&
+		!item.content.some(
+			(part) =>
+				isRecord(part) &&
+				((part.type === "output_text" &&
+					typeof part.text === "string" &&
+					/\S/u.test(part.text)) ||
+					(part.type === "refusal" &&
+						typeof part.refusal === "string" &&
+						/\S/u.test(part.refusal))),
+		)
+	);
+}
+
+/**
+ * The stored native items Oh My Pi can send in place of this assistant turn,
+ * or undefined when it always rebuilds the turn from its typed blocks. It
+ * replays only a turn from the target's own api and model whose payload
+ * belongs to the target provider and still holds some visible output
+ * (openai-codex-responses.ts:4361-4416 and utils.ts:363-383, 681-692 in
+ * 18.18.1). The OpenAI Responses lane can still rebuild such a turn when a
+ * request does not replay native history, so only the request itself shows
+ * which form went out; see `piNativeDropWireMismatch`.
+ */
+function replayableNativeItems(
+	message: Record<string, unknown>,
+	model: { api?: unknown; id?: unknown; provider?: unknown },
+): unknown[] | undefined {
+	const payload = message.providerPayload;
+	if (
+		message.api !== model.api ||
+		message.model !== model.id ||
+		!isRecord(payload) ||
+		payload.type !== "openaiResponsesHistory" ||
+		!Array.isArray(payload.items) ||
+		(payload.provider ?? message.provider ?? model.provider) !== model.provider
+	)
+		return undefined;
+	return payload.items.some(
+		(item) =>
+			!isRecord(item) ||
+			(item.type !== "reasoning" && !emptyAssistantMessage(item)),
+	)
+		? payload.items
+		: undefined;
+}
+
+/** The one output text of a signed block's own native item, found by id and phase. */
+function signedItemText(
+	block: Record<string, unknown>,
+	items: readonly unknown[],
+): string | undefined {
+	const identity = textIdentity(block);
+	if (!identity) return undefined;
+	const matches = items.filter(
+		(item) =>
+			isRecord(item) &&
+			item.type === "message" &&
+			item.role === "assistant" &&
+			item.id === identity.id &&
+			item.phase === identity.phase,
+	) as Record<string, unknown>[];
+	const outputs =
+		matches.length === 1 && Array.isArray(matches[0].content)
+			? matches[0].content.filter(
+					(output) => isRecord(output) && output.type === "output_text",
+				)
+			: [];
+	const text = (outputs[0] as { text?: unknown } | undefined)?.text;
+	return outputs.length === 1 && typeof text === "string" ? text : undefined;
+}
+
+/** A dropped part in a turn whose native items Oh My Pi may replay. */
+export interface PiNativeDropExpectation {
+	/** Position of the assistant message in the prepared messages. */
+	message: number;
+	/** The `[dropped §N§]` text the request must carry for this part. */
+	placeholder: string;
+	/** Text the part's own native output still holds instead, if any. */
+	stale?: string;
+}
+
+/**
+ * Every dropped part whose turn Oh My Pi may replay from stored native items,
+ * with the native text that would go out in its place if the drop never
+ * reached that item. A signed block finds its item by id and phase, as the
+ * signed mirror does; an unsigned block pairs in order, as `nativeTextSlots`
+ * pairs it. Reads only; turns without a placeholder are never listed.
+ */
+export function piNativeDropExpectations(
+	messages: readonly unknown[],
+	model: { api?: unknown; id?: unknown; provider?: unknown } | undefined,
+): PiNativeDropExpectation[] {
+	const expectations: PiNativeDropExpectation[] = [];
+	if (!model || !RESPONSES_APIS.has(String(model.api))) return expectations;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (
+			!isRecord(message) ||
+			message.role !== "assistant" ||
+			!Array.isArray(message.content) ||
+			!message.content.some(
+				(block) =>
+					isRecord(block) &&
+					block.type === "text" &&
+					typeof block.text === "string" &&
+					isPiDropPlaceholder(block.text),
+			)
+		)
+			continue;
+		const items = replayableNativeItems(message, model);
+		if (!items) continue;
+		const slots = nativeTextSlots(message.content, items);
+		let ordinal = 0;
+		for (const block of message.content) {
+			if (!isRecord(block) || block.type !== "text") continue;
+			const slot = slots?.[ordinal++];
+			if (typeof block.text !== "string" || !isPiDropPlaceholder(block.text))
+				continue;
+			const native =
+				"textSignature" in block ? signedItemText(block, items) : slot?.text;
+			expectations.push({
+				message: index,
+				placeholder: block.text,
+				...(native !== undefined && native !== block.text
+					? { stale: native }
+					: {}),
+			});
+		}
+	}
+	return expectations;
+}
+
+/** Every assistant output text in a Responses request body, or undefined without input items. */
+function wireAssistantTexts(payload: unknown): Set<string> | undefined {
+	const input = isRecord(payload) ? payload.input : undefined;
+	if (!Array.isArray(input)) return undefined;
+	const texts = new Set<string>();
+	for (const item of input) {
+		if (!isRecord(item) || item.role !== "assistant") continue;
+		if (typeof item.content === "string") texts.add(item.content);
+		else if (Array.isArray(item.content))
+			for (const part of item.content)
+				if (isRecord(part) && typeof part.text === "string")
+					texts.add(part.text);
+	}
+	return texts;
+}
+
+/**
+ * Name the first dropped part that the request about to be sent does not
+ * carry as its placeholder, or that still carries its stale native text.
+ * Oh My Pi sends a turn either as its stored native items or rebuilt from its
+ * typed blocks, and either form must hold the placeholder; only the request
+ * shows which form it took. A placeholder names one tag, so it cannot stand
+ * in for another part. This holds whether or not the turn structure itself
+ * could be compared, and with no expectations it never refuses.
+ */
+export function piNativeDropWireMismatch(
+	payload: unknown,
+	expectations: readonly PiNativeDropExpectation[] | undefined,
+): string | undefined {
+	if (!expectations?.length) return undefined;
+	const texts = wireAssistantTexts(payload);
+	for (const expected of expectations)
+		if (
+			!texts?.has(expected.placeholder) ||
+			(expected.stale !== undefined && texts.has(expected.stale))
+		)
+			return `message=${expected.message} comparison=native_drop`;
+	return undefined;
+}
+
+/**
+ * Mirror prepared text edits without converting or discarding opaque native history.
+ *
+ * A signed block finds its native item by the signature's id and phase. With
+ * `unsignedDrops` (Oh My Pi only), a dropped block whose signature the host's
+ * assistant-message hook removed also gets its placeholder mirrored, into the
+ * native item that hook left behind (see `hookRewrittenSlot`). Without that,
+ * the host would replay the dropped text itself, and the dispatch check would
+ * refuse every later turn of the session.
+ */
 export function rewriteNativeAssistantTexts(
 	message: unknown,
 	previous: unknown,
 	sessionId?: string,
+	options: { unsignedDrops?: boolean } = {},
 ): void {
 	const envelope = getNativeEnvelope(message);
 	if (
@@ -160,6 +458,13 @@ export function rewriteNativeAssistantTexts(
 	)
 		return;
 	const content = envelope.message.content;
+	// Pair unsigned blocks against the items as they arrived; the signed
+	// rewrites below replace text only, so positions stay valid.
+	const arrivedItems = envelope.items;
+	const unsignedDrops =
+		options.unsignedDrops === true &&
+		RESPONSES_APIS.has(String(envelope.message.api)) &&
+		envelope.payload.dt === true;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		const before = previous.content[index];
@@ -180,6 +485,30 @@ export function rewriteNativeAssistantTexts(
 		)
 			continue;
 		const identity = textIdentity(part);
+		if (
+			identity === undefined &&
+			unsignedDrops &&
+			isPiDropPlaceholder(part.text) &&
+			!("textSignature" in part)
+		) {
+			const slot = hookRewrittenSlot(previous.content, index, arrivedItems);
+			if (slot) {
+				// Keep the item's id, phase and every other field; only its one
+				// output text becomes the placeholder the typed block now holds.
+				const item = envelope.items[slot.itemIndex] as Record<string, unknown>;
+				const outputs = (item.content as unknown[]).slice();
+				outputs[slot.outputIndex] = {
+					...(outputs[slot.outputIndex] as Record<string, unknown>),
+					text: part.text,
+				};
+				const items = envelope.items.slice();
+				items[slot.itemIndex] = { ...item, content: outputs };
+				envelope.items = items;
+				envelope.payload = { ...envelope.payload, items };
+				envelope.message.providerPayload = envelope.payload;
+				continue;
+			}
+		}
 		const sameIdentity = (value: unknown) => {
 			const other = textIdentity(value);
 			return (
