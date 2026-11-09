@@ -65,6 +65,62 @@ async function configure272kWindow(): Promise<void> {
 }
 
 describe("persistV2UsageReading", () => {
+    it("records last-iteration pressure instead of billed usage and accepts the next normal reply", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-per-run-usage-");
+        const db = openDatabase();
+        const sessionID = "v2-per-run-usage";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const draftModel = { providerID: "anthropic", id: "claude-opus-5-5" };
+        const tokens = { input: 963_300 };
+        const persist = (completed: number, content: unknown) => {
+            const reading = resolveUsageReading({
+                draftModel,
+                tokens,
+                completed,
+                finish: "stop",
+                content,
+                limitFor: () => 872_000,
+            })!;
+            persistV2UsageReading({ db, sessionID, draftModel, reading, contextUsageMap });
+        };
+        persist(1000, [
+            {
+                type: "reasoning",
+                native: {
+                    signature: `cortexkit-server-fallback-usage-v1:${JSON.stringify({
+                        iterations: [
+                            {
+                                type: "message",
+                                model: "primary",
+                                input_tokens: 453_300,
+                                output_tokens: 50,
+                            },
+                            {
+                                type: "fallback_message",
+                                model: "fallback",
+                                input_tokens: 100_000,
+                                output_tokens: 50,
+                                cache_read_input_tokens: 400_000,
+                                cache_creation_input_tokens: 10_000,
+                            },
+                        ],
+                    })}`,
+                },
+            },
+        ]);
+        const meta = getOrCreateSessionMeta(db, sessionID);
+        expect(meta.lastInputTokens).toBe(510_000);
+        expect(meta.lastContextPercentage).toBeCloseTo(58.4862, 3);
+        expect(meta.lastResponseTime).toBe(1000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(510_000);
+        expect(contextUsageMap.get(sessionID)?.usage.percentage).toBeCloseTo(58.4862, 3);
+        expect(tokens.input).toBe(963_300);
+        tokens.input = 520_000;
+        persist(2000, []);
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(520_000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(520_000);
+    });
+
     it("keeps pressure and the map entry for a server-fallback reply but moves completion time", () => {
         process.env.XDG_DATA_HOME = makeTempDir("v2-fallback-usage-");
         const db = openDatabase();

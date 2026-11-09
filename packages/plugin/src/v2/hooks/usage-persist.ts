@@ -68,12 +68,12 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         !providerResponseFailed(completion) &&
         (reading.inputTokens > 0 || isSuccessfulProviderCompletion(completion));
     const responseTime = served && reading.completed;
-    // Server fallback sums two runs. It does not measure one context size.
+    // Without usage for each run, the server sum does not measure one context size.
     if (reading.serverFallback) {
         if (responseTime) updateSessionMeta(db, sessionID, { lastResponseTime: responseTime });
         sessionLog(
             sessionID,
-            `v2 usage: ignored server-fallback reply inputTokens=${reading.inputTokens} (sum of two server runs); keeping previous reading`,
+            `v2 usage: ignored server-fallback reply inputTokens=${reading.inputTokens} (${reading.serverFallbackInvalidUsage ? "invalid server-fallback usage marker" : "sum of two server runs"}); keeping previous reading`,
         );
         return;
     }

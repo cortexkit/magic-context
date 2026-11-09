@@ -1,6 +1,6 @@
 import {
-    hasServerFallbackUsage,
     isSuccessfulProviderCompletion,
+    readServerFallbackUsage,
 } from "../../shared/provider-response-completion";
 
 export interface UsageReadingInput {
@@ -28,6 +28,7 @@ export interface UsageReading {
     /** Absent when a legacy row carries no model metadata. */
     modelKey?: string;
     serverFallback?: boolean;
+    serverFallbackInvalidUsage?: boolean;
     completed?: number;
     finish?: string;
     error?: unknown;
@@ -63,8 +64,11 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
     const rowModelID = typeof input.rowModel?.id === "string" ? input.rowModel.id : undefined;
     const measuredProviderID = rowProviderID ?? input.draftModel.providerID;
     const measuredModelID = rowModelID ?? input.draftModel.id;
+    const fallback = readServerFallbackUsage(input.content);
     const inputTokens =
-        numeric(tokens?.input) + numeric(tokens?.cache?.read) + numeric(tokens?.cache?.write);
+        fallback?.kind === "usage"
+            ? fallback.inputTokens
+            : numeric(tokens?.input) + numeric(tokens?.cache?.read) + numeric(tokens?.cache?.write);
     const limit = input.limitFor(measuredProviderID, measuredModelID);
     if ((!Number.isFinite(limit) || limit <= 0) && !successfulCompletion) return undefined;
     const sameModel =
@@ -85,6 +89,11 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
             : {}),
         ...(input.finish !== undefined ? { finish: input.finish } : {}),
         ...(input.error !== undefined ? { error: input.error } : {}),
-        ...(hasServerFallbackUsage(input.content) ? { serverFallback: true } : {}),
+        ...(fallback?.kind === "boundary"
+            ? {
+                  serverFallback: true,
+                  ...(fallback.invalidUsage ? { serverFallbackInvalidUsage: true } : {}),
+              }
+            : {}),
     };
 }

@@ -1,6 +1,21 @@
 import { expect, test } from "bun:test";
 import * as completion from "./provider-response-completion";
 
+for (const location of ["native", "state"]) {
+    test(`detects usage and boundary markers in ${location}.signature`, () => {
+        for (const signature of [
+            'cortexkit-server-fallback-usage-v1:{"iterations":[]}',
+            "cortexkit-server-fallback-v1:primary|fallback",
+        ]) {
+            expect(
+                completion.hasServerFallbackUsage([
+                    { type: "reasoning", [location]: { signature } },
+                ]),
+            ).toBe(true);
+        }
+    });
+}
+
 test("detects server-fallback usage only in the marked reasoning part", () => {
     const content = [
         { type: "reasoning", text: "thinking", native: { signature: "real-signature" } },
