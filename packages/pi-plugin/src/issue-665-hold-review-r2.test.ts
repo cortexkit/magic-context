@@ -1002,8 +1002,11 @@ test("Pi held drivers: m[0]/m[1] is never re-rendered while signed thinking is k
 // and optionally a carried tag-identity repair) before the held passes, then
 // checks the cached pair and the served head. The release pass at the end is
 // the positive control: once the turn ends the same inputs do rebuild the pair.
-async function piRulingFixture(withCarriedRepair: boolean) {
-	const sessionId = `r2-pi-ruling-${withCarriedRepair ? "carried" : "plain"}`;
+async function piRulingFixture(
+	withCarriedRepair: boolean,
+	model: string = PREFIX_BOUND,
+) {
+	const sessionId = `r2-pi-ruling-${withCarriedRepair ? "carried" : "plain"}-${model}`;
 	const db = createTestDb();
 	getOrCreateSessionMeta(db, sessionId);
 	updateSessionMeta(db, sessionId, {
@@ -1039,7 +1042,7 @@ async function piRulingFixture(withCarriedRepair: boolean) {
 	});
 	const extra = (content: unknown[]) => ({
 		provider: "anthropic",
-		model: PREFIX_BOUND,
+		model,
 		api: "anthropic-messages",
 		content,
 	});
@@ -1068,7 +1071,7 @@ async function piRulingFixture(withCarriedRepair: boolean) {
 				"You are a coding agent. Use read to inspect files for the current task.",
 			model: {
 				provider: "anthropic",
-				id: PREFIX_BOUND,
+				id: model,
 				api: "anthropic-messages",
 				contextWindow: 100000,
 			},
@@ -1170,17 +1173,26 @@ function keptActiveSignatures(
 	);
 }
 
-for (const withCarriedRepair of [false, true]) {
+// Claude Fable 5.2 and Claude Mythos 5.1 and 5.2 run the same prefix check as
+// Opus 5.5, so they get the same bounded hold and the same strip above the cap.
+const RULING_ROUTES = [
+	{ model: PREFIX_BOUND, withCarriedRepair: false },
+	{ model: PREFIX_BOUND, withCarriedRepair: true },
+	...["claude-fable-5-2", "claude-mythos-5-1", "claude-mythos-5-2"].map(
+		(model) => ({ model, withCarriedRepair: false }),
+	),
+];
+for (const { model, withCarriedRepair } of RULING_ROUTES) {
 	for (const cause of [
 		"idle expiry",
 		"force band 86%",
 		"emergency 96%",
 	] as const) {
 		const held = cause === "idle expiry";
-		const name = `Pi ruling${withCarriedRepair ? " with a carried identity repair" : ""}: ${held ? `a held ${cause} pass keeps m[0]/m[1] frozen while signed thinking is kept` : `a ${cause} pass is above the hold cap: it rebuilds m[0]/m[1] mid-turn and strips every signed block`}`;
+		const name = `Pi ruling${model === PREFIX_BOUND ? "" : ` on ${model}`}${withCarriedRepair ? " with a carried identity repair" : ""}: ${held ? `a held ${cause} pass keeps m[0]/m[1] frozen while signed thinking is kept` : `a ${cause} pass is above the hold cap: it rebuilds m[0]/m[1] mid-turn and strips every signed block`}`;
 		const body = async () => {
 			const logs = spyOn(logger, "sessionLog").mockImplementation(() => {});
-			const fixture = await piRulingFixture(withCarriedRepair);
+			const fixture = await piRulingFixture(withCarriedRepair, model);
 			try {
 				fixture.heldStep();
 				const previous = await fixture.serve();

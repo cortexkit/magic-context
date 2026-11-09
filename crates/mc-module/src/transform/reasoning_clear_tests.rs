@@ -814,6 +814,56 @@ fn opencode_removal_stops_at_the_first_ineligible_message_on_prefix_bound_models
     )));
 }
 
+/// Claude Fable 5.2 and Claude Mythos 5.1 and 5.2 run the same prefix check as Fable 5.1
+/// (https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2, "Editing
+/// earlier turns invalidates thinking blocks on every account"), so on every route their
+/// removal walk also stops at the first message it may not remove instead of leaving a gap.
+#[test]
+fn opencode_removal_stops_at_the_first_ineligible_message_on_fable_5_2_and_mythos() {
+    for (provider, model) in [
+        ("anthropic", "claude-fable-5-2"),
+        ("google-vertex-anthropic", "claude-fable-5-2@20261109"),
+        ("amazon-bedrock", "us.anthropic.claude-fable-5-2-v1:0"),
+        ("anthropic", "claude-mythos-5-1"),
+        ("amazon-bedrock", "us.anthropic.claude-mythos-5-1-v1:0"),
+        ("anthropic", "claude-mythos-5-2"),
+        ("google-vertex-anthropic", "claude-mythos-5-2@20261109"),
+    ] {
+        let mut request = opencode_openai_removal_request(6, provider, model);
+        // a2 keeps only its reasoning, so removing it would leave no content.
+        request.messages[3].ck.content.retain(is_reasoning_block);
+        let tags: BTreeMap<String, u64> = request
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| (message.mid.clone(), index as u64 + 1))
+            .collect();
+        assert_eq!(
+            opencode_reasoning_removal_mids(
+                &request,
+                &tags,
+                Some(6),
+                &HashSet::new(),
+                ReasoningBudgetScope::default()
+            ),
+            HashSet::from(["a0", "a1"]),
+            "{provider}/{model}"
+        );
+    }
+    assert!(is_prefix_bound_thinking_model(Some(
+        "openrouter/anthropic/claude-fable-5.2"
+    )));
+    assert!(is_prefix_bound_thinking_model(Some(
+        "openrouter/anthropic/claude-mythos-5.2"
+    )));
+    assert!(!is_prefix_bound_thinking_model(Some(
+        "anthropic/claude-fable-5-20"
+    )));
+    assert!(!is_prefix_bound_thinking_model(Some(
+        "anthropic/claude-mythos-5"
+    )));
+}
+
 /// The same scenarios as the TypeScript and Pi lanes, from one shared golden file.
 #[test]
 fn opencode_prefix_bound_removal_matches_the_shared_golden() {
