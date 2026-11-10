@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -137,7 +137,7 @@ function compartmentEndAt(sessionId: string, at: number): string | null {
 function hostSummaryRow(
     sessionId: string,
 ): { id: string; parentId: string; completedAt: number } | null {
-    const db = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+    const db = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
     try {
         const row = db
             .prepare(

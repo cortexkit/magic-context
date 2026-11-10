@@ -2046,9 +2046,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				queuePreparedCompartmentDrops(db, preparedDrops);
 
 				clearHistorianFailureState(db, sessionId);
-				// Healthy historian progress clears the drain-failure backoff. Normal
-				// runs also clear overflow recovery; wrapup keeps it armed until the loop
-				// reaches the keep watermark.
+				// Healthy historian progress clears the drain-failure backoff. A
+				// publication is progress, not proof that the next request fits, so
+				// the overflow recovery flag stays armed until a recovery pass counts
+				// its request under the line (context-handler.ts) or another disarm
+				// proves it stale. The floor below also resets the no-eligible-head
+				// count, since the run made progress.
 				clearHistorianDrainFailure(db, sessionId);
 				recordProtectedTailPublicationFloor(db, sessionId, lastNewEnd + 1);
 				acknowledgePiHistoryRetirement(
@@ -2059,8 +2062,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						provider.readMessages().find((message) => message.id === id)
 							?.ordinal,
 				);
-				if (!isWrapupInProgress(db, sessionId))
-					clearEmergencyRecovery(db, sessionId);
 				// userObservations are inserted POST-COMMIT
 				// (best-effort, below), not inside this publish transaction. An
 				// auxiliary user_memory_candidates failure must never roll back

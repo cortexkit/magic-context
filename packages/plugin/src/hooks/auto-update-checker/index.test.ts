@@ -187,6 +187,44 @@ describe("auto-update-checker/index", () => {
         // Even after waiting longer than initDelayMs would be, no check fires
         await new Promise((r) => setTimeout(r, 50));
         expect(showToast).not.toHaveBeenCalled();
+        expect(checkerMocks.getLatestVersion).not.toHaveBeenCalled();
+    });
+
+    test("auto_update: false makes no npm request (#854)", async () => {
+        checkerMocks.findPluginEntry.mockImplementation(() => ({
+            entry: "@cortexkit/opencode-magic-context",
+            pinnedVersion: null,
+            isPinned: false,
+            configPath: "/config/opencode.jsonc",
+        }));
+        checkerMocks.getCachedVersion.mockImplementation(() => "0.15.5");
+        checkerMocks.getLatestVersion.mockImplementation(async () => "0.15.6");
+        const { autoUpdateCheckerOptionsFromConfig, createAutoUpdateCheckerHook } =
+            await freshIndexImport();
+        const { ctx, showToast } = createCtx();
+
+        createAutoUpdateCheckerHook(ctx as Parameters<typeof createAutoUpdateCheckerHook>[0], {
+            ...autoUpdateCheckerOptionsFromConfig(false),
+            showStartupToast: false,
+            initDelayMs: 0,
+            storageDir: makeTempStorageDir(),
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(checkerMocks.getLatestVersion).not.toHaveBeenCalled();
+        expect(showToast).not.toHaveBeenCalled();
+    });
+
+    test("auto_update unset or true keeps the check enabled", async () => {
+        const { autoUpdateCheckerOptionsFromConfig } = await freshIndexImport();
+        expect(autoUpdateCheckerOptionsFromConfig(undefined)).toEqual({
+            enabled: true,
+            autoUpdate: true,
+        });
+        expect(autoUpdateCheckerOptionsFromConfig(true)).toEqual({
+            enabled: true,
+            autoUpdate: true,
+        });
     });
 
     test("on-disk timestamp dedupes concurrent plugin instances", async () => {

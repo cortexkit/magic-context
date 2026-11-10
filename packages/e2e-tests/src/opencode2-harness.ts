@@ -1,5 +1,5 @@
+import type { Database } from "bun:sqlite";
 import { openTestDb } from "./test-db";
-import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";

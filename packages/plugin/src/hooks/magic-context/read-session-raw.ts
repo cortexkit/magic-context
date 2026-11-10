@@ -396,6 +396,7 @@ const RAW_SUMMARY_TOOL_INPUT_KEYS = [
     "symbol",
     "module",
     "action",
+    "command",
 ] as const;
 
 function summaryStringField(jsonPath: string): string {

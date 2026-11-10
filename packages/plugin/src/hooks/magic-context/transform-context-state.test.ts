@@ -59,7 +59,7 @@ describe("resolveUnknownUsageFromWireEstimate", () => {
                 usage: { percentage: 95, inputTokens: 0 },
                 pricedPass: true,
                 wireEstimateTokens: 1_087_566,
-                usableHardLimit: 1_048_576,
+                windowTokens: 1_048_576,
             }),
         ).toEqual({ percentage: (1_087_566 / 1_048_576) * 100, inputTokens: 1_087_566 });
     });
@@ -73,7 +73,7 @@ describe("resolveUnknownUsageFromWireEstimate", () => {
                 wireEstimateTrusted: false,
                 providerProvenInputTokens: 1_091_002,
                 providerProvenLimitTokens: 1_048_576,
-                usableHardLimit: 1_048_576,
+                windowTokens: 1_048_576,
             }),
         ).toEqual({ percentage: (1_091_002 / 1_048_576) * 100, inputTokens: 1_091_002 });
     });
@@ -84,7 +84,7 @@ describe("resolveUnknownUsageFromWireEstimate", () => {
                 usage: { percentage: 50, inputTokens: 500_000 },
                 pricedPass: true,
                 wireEstimateTokens: 1_087_566,
-                usableHardLimit: 1_048_576,
+                windowTokens: 1_048_576,
             }),
         ).toEqual({ percentage: 50, inputTokens: 500_000 });
         expect(
@@ -92,7 +92,7 @@ describe("resolveUnknownUsageFromWireEstimate", () => {
                 usage: { percentage: 0, inputTokens: 0 },
                 pricedPass: false,
                 wireEstimateTokens: 1_087_566,
-                usableHardLimit: 1_048_576,
+                windowTokens: 1_048_576,
             }),
         ).toEqual({ percentage: 0, inputTokens: 0 });
     });

@@ -584,8 +584,13 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 	for (const [provider, model] of [
 		["google-vertex-anthropic", "claude-sonnet-5-5@20260930"],
 		["amazon-bedrock", "anthropic.claude-opus-5-5-v1:0"],
+		// Fable 5.2 and Mythos 5.1/5.2 bind thinking to the prefix like Fable 5.1.
+		["anthropic", "claude-fable-5-2"],
+		["amazon-bedrock", "us.anthropic.claude-fable-5-2-v1:0"],
+		["anthropic", "claude-mythos-5-1"],
+		["google-vertex-anthropic", "claude-mythos-5-2@20261109"],
 	]) {
-		it(`recovers a binding 400 via ${provider}`, () => {
+		it(`recovers a binding 400 via ${provider}/${model}`, () => {
 			const database = db();
 			const sessionId = `pi-cloud-recovery-${provider}`;
 			expect(
@@ -618,7 +623,7 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 			]);
 		});
 
-		it(`strips on rebuild and replays byte-identically via ${provider}`, () => {
+		it(`strips on rebuild and replays byte-identically via ${provider}/${model}`, () => {
 			const database = db();
 			const sessionId = `pi-cloud-${provider}`;
 			const first = session();

@@ -1,10 +1,14 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import {
+    measureAgentSurface,
+    measurePromptSurfaceText,
+} from "../../scripts/prompt-surface-measurement";
 import type { MagicContextPluginConfig } from "../config";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import { resetCtxReduceRegisteredGloballyForTest } from "../hooks/magic-context/ctx-reduce-availability";
@@ -229,8 +233,7 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
 
 type GoldenTool = { description: string; parameters: Record<string, unknown> };
 
-function readA1GoldenTools(): Record<string, GoldenTool> {
-    const document = readA1GoldenDocument();
+function readA1GoldenTools(document = readA1GoldenDocument()): Record<string, GoldenTool> {
     const toolSection = document.slice(
         a1GoldenSectionOffset(document, A1_TOOL_SECTION_HEADING),
         a1GoldenSectionOffset(document, A1_HASH_BASELINE_HEADING),
@@ -281,6 +284,35 @@ function providerParameters(definition: ToolDefinition): Record<string, unknown>
 }
 
 describe("createToolRegistry — prompt-surface registration", () => {
+    it("surface generators serialize the registered parameter descriptions", () => {
+        isolateDb();
+        const registered = buildRegistry(RUNNABLE_DREAMER);
+        const dir = createTestTempDirFromPath(join(tmpdir(), "agent-surface-export-"));
+        tempDirs.push(dir);
+        const output = join(dir, "surface.md");
+        const exported = Bun.spawnSync({
+            cmd: [
+                process.execPath,
+                join(import.meta.dir, "../../scripts/export-agent-surface.ts"),
+                output,
+            ],
+            env: process.env,
+            windowsHide: true,
+        });
+        expect(exported.exitCode).toBe(0);
+        const tools = readA1GoldenTools(readFileSync(output, "utf8"));
+        const measured = measureAgentSurface();
+        for (const id of ACTIVE_TOOL_IDS) {
+            const definition = registered[id];
+            if (!definition) throw new Error(`Missing registered tool ${id}`);
+            const parameters = providerParameters(definition);
+            expect(tools[id]?.parameters).toEqual(parameters);
+            expect(measured.tools[id].serializedParameterSchema).toEqual(
+                measurePromptSurfaceText(JSON.stringify(parameters)),
+            );
+        }
+    });
+
     it("links canonical prompt-surface IDs to light descriptions and registration", () => {
         isolateDb();
         const registeredCtxToolIds = Object.keys(buildRegistry({})).filter((id) =>

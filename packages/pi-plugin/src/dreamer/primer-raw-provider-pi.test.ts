@@ -14,9 +14,11 @@ import {
 	insertPrimerCandidates,
 } from "@magic-context/core/features/magic-context/storage-primers";
 import {
+	readSessionChunk,
 	visitRawSessionMessages,
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { extractToolCallSummaries } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { convertEntriesToRawMessages } from "../read-session-pi";
@@ -298,4 +300,47 @@ test("Pi streaming ranges equal paged rows through folded tool results and close
 		visitRawSessionMessages("origin", 1, 400, () => false),
 	);
 	expect(closed).toBe(true);
+});
+
+// Pi's bash tool takes no description, so its command is the only thing a
+// summary line can say about the call. Both the historian chunk (full entries)
+// and the bounded primer pages must keep it.
+test("Pi bash calls keep their command in historian chunks and primer pages", async () => {
+	const entries: unknown[] = [
+		entry("u", { role: "user", content: "check the case" }),
+		entry("a", {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "c1",
+					name: "bash",
+					arguments: { command: "cat PLAYBOOK.md" },
+				},
+			],
+		}),
+		entry("t", {
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "bash",
+			content: [{ type: "text", text: "rule 1" }],
+		}),
+	];
+	const full = convertEntriesToRawMessages(entries);
+	const chunk = withRawMessageProvider(
+		"pi-bash-command",
+		{ readMessages: () => full },
+		() => readSessionChunk("pi-bash-command", 10_000, 1),
+	);
+	expect(chunk.text).toContain("TC: bash(cat PLAYBOOK.md)");
+
+	const provider = await createPiPrimerRawProviderFactory({
+		sessionDir: store(entries),
+	})("origin");
+	if (!provider?.readMessagePage) throw new Error("Missing bounded provider");
+	const summaries = (messages: Array<{ parts: unknown[] }>) =>
+		messages.flatMap((message) => extractToolCallSummaries(message.parts));
+	const paged = summaries(provider.readMessagePage(0, 50, 100));
+	expect(paged).toContain("TC: bash(cat PLAYBOOK.md)");
+	expect(paged).toEqual(summaries(full));
 });

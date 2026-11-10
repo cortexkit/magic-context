@@ -88,7 +88,8 @@ export function extractToolResultBodyTokens(parts: unknown[]): number {
 }
 
 /** Extract compact tool-call summaries from message parts.
- *  Returns lines like "TC: Fix lint errors" or "TC: read(src/index.ts)". */
+ *  Returns lines like "TC: Fix lint errors", "TC: read(src/index.ts)" or
+ *  "TC: shell(git status --short)". */
 export function extractToolCallSummaries(parts: unknown[]): string[] {
     const summaries: string[] = [];
     for (const part of parts) {
@@ -101,7 +102,8 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
         const input = state.input as Record<string, unknown> | null;
         const metadata = state.metadata as Record<string, unknown> | null;
 
-        // Prefer explicit description (bash tool always has one)
+        // Prefer the call's own description. A shell call does not always have
+        // one (Pi's bash tool takes none), so extractKeyArg falls back to its command.
         const description =
             (input && typeof input.description === "string" && input.description) ||
             (metadata && typeof metadata.description === "string" && metadata.description);
@@ -118,6 +120,13 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
     return summaries;
 }
 
+/**
+ * Longest command a `TC:` line keeps. Agents usually open a shell command with
+ * `cd <absolute path> &&`, which alone can fill the 60 characters other key
+ * arguments keep, so a command gets room for what runs after that prefix.
+ */
+const COMMAND_ARG_MAX_CHARS = 200;
+
 function extractKeyArg(_toolName: string, input: Record<string, unknown> | null): string | null {
     if (!input) return null;
     // File-oriented tools: show the path
@@ -132,6 +141,11 @@ function extractKeyArg(_toolName: string, input: Record<string, unknown> | null)
     if (typeof input.module === "string") return input.module;
     // Memory/note tools: show the action
     if (typeof input.action === "string") return input.action;
+    // Shell tools: show the command on one line. The summarizer never sees tool
+    // output, so a shell call without its command tells it nothing about the work.
+    if (typeof input.command === "string") {
+        return truncateArg(normalizeText(input.command), COMMAND_ARG_MAX_CHARS);
+    }
     return null;
 }
 

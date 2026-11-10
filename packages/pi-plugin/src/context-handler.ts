@@ -67,6 +67,7 @@ import {
 	protectedToolTagNumbers,
 	protectedToolTokenCount,
 } from "@magic-context/core/features/magic-context/reclaim-protection";
+import type { RequestToolsChange } from "@magic-context/core/features/magic-context/request-tool-definitions";
 import {
 	createScheduler,
 	parseCacheTtl,
@@ -124,6 +125,7 @@ import {
 	getEmergencyInputSample,
 	getHistorianFailureState,
 	getNoteNudgeAnchors,
+	getOverflowState,
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
@@ -271,6 +273,11 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
+import {
+	recoveryAdmissionLimitTokens,
+	recoveryRefusalNotice,
+} from "@magic-context/core/hooks/magic-context/recovery-fit";
+import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
@@ -472,6 +479,7 @@ import {
 	resolvePiOrdinalAlignmentForContext,
 } from "./pi-ordinal-alignment";
 import {
+	estimatePiOverflowRecoveryInputTokens,
 	piRecoveryFitCalibration,
 	piRecoveryToolImageTokens,
 	resolvePiOverflowRecoveryUsage,
@@ -495,6 +503,7 @@ import {
 	PiStorageBusyError,
 	piFallbackRefusal,
 } from "./pi-raw-fallback";
+import { readPiRequestToolsFingerprint } from "./pi-request-tools";
 import {
 	notePiPublicationIssue,
 	PiServedEnvelopeUnavailable,
@@ -529,6 +538,7 @@ import {
 	piMessageHasThinking,
 	planPiProactiveThinkingStrip,
 	preparePiThinkingStripWrite,
+	recordPiBindingStripEndOrder,
 	resolvePiBindingStripOrder,
 } from "./provider-error-recovery-pi";
 import {
@@ -876,6 +886,11 @@ const PI_STABLE_ID_SCHEME = 1;
  */
 const lastEmergencyNotificationAtMs = new Map<string, number>();
 const EMERGENCY_NOTIFICATION_COOLDOWN_MS = 60_000;
+/**
+ * Sessions already told that a recovery request went out uncounted because the
+ * fit envelope was untrusted, so the log says it once per session.
+ */
+const untrustedRecoveryCountLoggedSessions = new Set<string>();
 
 /**
  * Per-session "saw a commit on the previous pass" tracker for the
@@ -4892,6 +4907,53 @@ export function registerPiContextHandler(
 			const lkgInputIdByRef = new Map<unknown, string>();
 			for (const input of lkgPassSnapshot.inputs)
 				lkgInputIdByRef.set(event.messages[input.messageIndex], input.id);
+			// A prefix-bound model binds every signed thinking block to the request's
+			// tools. Pi builds the request from the session's active tools, so a
+			// change there since the session's last pass on this model makes the
+			// kept thinking invalid: the pipeline releases it (no hold, every signed
+			// block stripped) and rides the cache loss the changed tools cause.
+			const requestToolsRelease = isPrefixBoundThinkingModel(
+				ctx.model?.provider,
+				ctx.model?.id,
+			)
+				? (() => {
+						const fingerprint = readPiRequestToolsFingerprint(
+							pi,
+							toolWireSchema,
+							event.messages as unknown[],
+							{
+								host: getHarness() === "omp" ? "omp" : "pi",
+								model: ctx.model,
+								oauth: (() => {
+									try {
+										const registry = (
+											ctx as {
+												modelRegistry?: {
+													isUsingOAuth?: (model: unknown) => unknown;
+												};
+											}
+										).modelRegistry;
+										return ctx.model &&
+											typeof registry?.isUsingOAuth === "function"
+											? registry.isUsingOAuth(ctx.model) === true
+											: false;
+									} catch {
+										return false;
+									}
+								})(),
+							},
+						);
+						return fingerprint
+							? evaluateRequestToolsRelease({
+									db: options.db,
+									sessionId,
+									modelKey: `${ctx.model?.provider}/${ctx.model?.id}`,
+									fingerprint,
+								})
+							: undefined;
+					})()
+				: undefined;
+			const requestToolsChange = requestToolsRelease?.change ?? null;
 			// Binding-mismatch strips normally run on the final array at the end of
 			// the pass, so every stage sees the same thinking on every pass. A
 			// session whose strips predate that order keeps stripping here, before
@@ -4902,6 +4964,7 @@ export function registerPiContextHandler(
 				messages: event.messages as unknown[],
 				entryIds: lkgEntryIds ?? [],
 				bustPermittedAtStart: hasPendingMaterialization(sessionId),
+				releasesAllThinking: requestToolsChange !== null,
 			});
 			const startOfPassBindingRecovery = applyPiThinkingBindingRecovery({
 				db: options.db,
@@ -5265,8 +5328,9 @@ export function registerPiContextHandler(
 			//      fires regardless of pressure math.
 			//
 			// Mirrors OpenCode's transform.ts wiring. The recovery flag is
-			// cleared by the historian publication path on success (see
-			// signalPiHistoryRefresh), so we won't keep bumping forever.
+			// cleared when a recovery pass's request is counted within its limit
+			// (the recovery check before serving), or by the stale-flag disarms,
+			// so we won't keep bumping forever.
 			const tEmergencyRecovery = performance.now();
 			let needsEmergencyBump = false;
 			let emergencyRecoveryArmed = false;
@@ -5866,17 +5930,20 @@ export function registerPiContextHandler(
 				// when the configured force percentage has not been reached.
 				forceMaterialization: forceMaterialization || isEmergency,
 				forceMaterializationPercentage,
-				signedThinkingHold: resolvePiSignedThinkingHold({
-					sessionId,
-					db: options.db,
-					messages: event.messages,
-					prefixBound: isPrefixBoundThinkingModel(
-						ctx.model?.provider,
-						ctx.model?.id,
-					),
-					usagePercentage,
-					executeThresholdPercentage: effectiveExecuteThresholdPercentage,
-				}),
+				signedThinkingHold:
+					requestToolsChange === null &&
+					resolvePiSignedThinkingHold({
+						sessionId,
+						db: options.db,
+						messages: event.messages,
+						prefixBound: isPrefixBoundThinkingModel(
+							ctx.model?.provider,
+							ctx.model?.id,
+						),
+						usagePercentage,
+						executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+					}),
+				requestToolsChange,
 				contextUsage: {
 					percentage: usagePercentage,
 					inputTokens: usageInputTokens,
@@ -7054,6 +7121,83 @@ export function registerPiContextHandler(
 				)
 					throw new PiDegradedPassError("outgoing-over-window");
 			}
+			// A pass in overflow recovery whose request is over its limit is not
+			// sent, whatever it reclaimed. The limit is the 95% line of the model's
+			// usable window while a historian run can still summarize older history,
+			// and the whole usable window once none can: the line could not be
+			// reached then, and a request within the window fits. The check above
+			// refuses only a request whose byte count proves it is over the whole
+			// context window, and text with many tokens per byte can be far over
+			// the window without that proof. The count is the served-request count
+			// OpenCode uses: calibrated, neutral for an unseeded model.
+			// The recovery flag is read again here, because this pass may have
+			// cleared it (the no-eligible-history disarm above), and that clear
+			// holds for the rest of the pass.
+			const recoveryWindow = windowGeometry?.usableHard;
+			const recoveryLatch =
+				!options.compactionOff &&
+				isEmergency &&
+				emergencyRecoveryArmed &&
+				typeof recoveryWindow === "number" &&
+				recoveryWindow > 0
+					? getOverflowState(options.db, sessionId)
+					: undefined;
+			if (
+				recoveryLatch?.needsEmergencyRecovery === true &&
+				recoveryLatch.emergencyRecoveryOrigin !== null &&
+				typeof recoveryWindow === "number"
+			) {
+				const served = estimatePiOverflowRecoveryInputTokens(
+					outputMessages,
+					readPiLkgFitEnvelope(
+						ctx,
+						pi,
+						resolvePiContextModelKey(ctx),
+						sessionDecisionCalibration(options.db, sessionId),
+						toolWireSchema,
+					),
+					{ fitEnvelope: false },
+				);
+				// The historian was scheduled earlier in this pass; a run in flight
+				// now is summarizing history this request still carries. With none
+				// in flight there was nothing it could start on.
+				const historyRemains = inFlightHistorian.has(sessionId);
+				const limit = recoveryAdmissionLimitTokens(
+					recoveryWindow,
+					historyRemains,
+				);
+				if (served !== undefined && served > limit) {
+					sessionLog(
+						sessionId,
+						historyRemains
+							? `transform: recovery request still over the window: about ${served} tokens against the 95% line ${limit} of ${recoveryWindow}; not sending it, recovery stays armed for the next turn`
+							: `transform: recovery request still over the window: about ${served} tokens against the whole window ${limit}, with no older history left to summarize; not sending it`,
+					);
+					throw contextRefusalError(recoveryRefusalNotice(historyRemains));
+				}
+				if (served === undefined) {
+					// Sent without this check (only the byte-count check above
+					// applies). Recovery stays armed for the existing disarms, which
+					// need real pressure below the force-materialization threshold
+					// and nothing left to summarize.
+					if (!untrustedRecoveryCountLoggedSessions.has(sessionId)) {
+						untrustedRecoveryCountLoggedSessions.add(sessionId);
+						sessionLog(
+							sessionId,
+							"transform: recovery request not counted: the fit envelope is untrusted (system prompt or tool definitions not measured yet), so only the byte-count check above applies",
+						);
+					}
+				} else {
+					// The request was counted within its limit, so it fits. This is
+					// where a recovery pass ends its recovery; a historian run that
+					// publishes a summary does not.
+					clearEmergencyRecovery(options.db, sessionId);
+					sessionLog(
+						sessionId,
+						`transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`,
+					);
+				}
+			}
 			const prefixStableId = (message: unknown): string | undefined =>
 				result.prefixStableIds?.get(message as object) ??
 				result.postCommitEntryIdByRef.get(message as object) ??
@@ -7282,10 +7426,27 @@ export function registerPiContextHandler(
 			budget.assertOutcome();
 			publishTransformDecision?.();
 			options.onPostprocess?.({ bustedThisPass: result.bustedThisPass });
+			// The pass succeeded, and the pipeline persisted the strip a tools
+			// release required (or refused the pass), so the new tool list becomes
+			// the one later passes compare with. A release pass is served in the end
+			// strip order, which is recorded only now, so a release pass that fails
+			// leaves a start-order session unchanged; if that record cannot be
+			// written, the release is not recorded either and the next pass
+			// releases again.
+			if (
+				requestToolsChange === null ||
+				recordPiBindingStripEndOrder(options.db, sessionId)
+			)
+				requestToolsRelease?.commit();
+			else
+				sessionLog(
+					sessionId,
+					"request tools release not recorded: the end strip order could not be written",
+				);
 			if (
 				!budget.sideTurn &&
-				result.strictThinkingKept &&
-				!result.signedPrefixRewritten &&
+				((result.strictThinkingKept && !result.signedPrefixRewritten) ||
+					result.heldHeadReleasedForSystemChange === true) &&
 				!result.materialized
 			)
 				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
@@ -8688,6 +8849,12 @@ interface RunPipelineArgs {
 	forceSignedRebuildForFit?: boolean;
 	signedThinkingHold?: boolean | "off" | "on";
 	signedThinkingHoldPolicy?: "off" | "on";
+	/**
+	 * What changed in the request's tools since the session's last pass on this
+	 * prefix-bound model, or null. Signed thinking is bound to the tools, so the
+	 * pass strips every signed block and the caller passes no hold.
+	 */
+	requestToolsChange?: RequestToolsChange | null;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	providerApi?: string;
@@ -8866,6 +9033,12 @@ interface RunPipelineResult {
 	editAdmission?: EditAdmission;
 	strictThinkingKept: boolean;
 	signedPrefixRewritten: boolean;
+	/**
+	 * A held turn's system prompt changed: its signed thinking was stripped, but
+	 * the head the hold prepared was served unchanged, so the caller records
+	 * it as delivered with the new prompt, as for a held pass.
+	 */
+	heldHeadReleasedForSystemChange?: boolean;
 	/** A missing or cold cache already costs a rebuild; further eligible edits add no extra bust. */
 	prefixRebuildAlreadyPriced: boolean;
 	identityRebuilt?: boolean;
@@ -9072,8 +9245,10 @@ async function runCompactionOffPipeline(
 		// Compaction-off has no bust permission. An open signed turn on a
 		// prefix-bound model keeps replaying its cached m[0]/m[1] until it ends,
 		// so a fold (a project memory change, for example) cannot re-render the
-		// head in front of its kept thinking.
+		// head in front of its kept thinking. A pass whose request tools changed
+		// strips that thinking anyway (below), so nothing holds the head.
 		const signedTurnHoldsHead =
+			!args.requestToolsChange &&
 			args.reasoningClearing?.prefixBound === true &&
 			hasActiveAnthropicThinkingTurn(
 				args.messages,
@@ -9155,11 +9330,11 @@ async function runCompactionOffPipeline(
 		}
 	}
 	// The head changed in front of signed thinking (an open signed turn's, or
-	// an earlier turn's): strip every signed block on the wire, the open turn's
-	// included (removing every block is always accepted). The entries are
-	// persisted first; the binding-mismatch replay at the end of every pass,
-	// compaction-off included, keeps them stripped.
-	if (headChangedUnderSignedThinking)
+	// an earlier turn's), or the request's tools did: strip every signed block
+	// on the wire, the open turn's included (removing every block is always
+	// accepted). The entries are persisted first; the binding-mismatch replay
+	// at the end of every pass, compaction-off included, keeps them stripped.
+	if (headChangedUnderSignedThinking || args.requestToolsChange)
 		applyPiProactiveThinkingStrip({
 			db: args.db,
 			sessionId: args.sessionId,
@@ -9567,7 +9742,10 @@ const UNPAIRED_PREFIX_REWRITE_SITE = "pi-unpaired-prefix-rewrite";
  * which omits every signed block and so must commit inside the companion
  * transaction. These are the pipeline's rewrite causes known before it runs: a
  * recovery or fit rebuild, a carried tag-identity repair, a missing served-prefix
- * anchor, and, with the hold off, a first render without a cached pair or the 95% wall.
+ * anchor, a changed request tool list (it releases every signed block), a
+ * system prompt change under a held signed turn (it releases that turn's
+ * thinking), and, with the hold off, a first render without a cached pair or
+ * the 95% wall.
  */
 function piPassMayRewritePrefix(args: RunPipelineArgs): boolean {
 	const policy = resolveSignedThinkingHoldPolicy(
@@ -9578,6 +9756,31 @@ function piPassMayRewritePrefix(args: RunPipelineArgs): boolean {
 	);
 	if (args.recoveryRebuildReason || args.forceSignedRebuildForFit) return true;
 	if (readPiIdentityRebuilds(args.db, args.sessionId).length > 0) return true;
+	const carriesThinking = (args.messages as unknown[]).some(
+		piMessageHasThinking,
+	);
+	if (args.requestToolsChange && carriesThinking) return true;
+	// The same hash comparison (effectiveSystemChangedThisPass) and held-turn
+	// test (protectedSignedPrefix) the pipeline makes before it releases.
+	if (
+		carriesThinking &&
+		args.effectiveSystemHash !== undefined &&
+		lastServedSystemHashBySession.has(args.sessionId) &&
+		lastServedSystemHashBySession.get(args.sessionId) !==
+			args.effectiveSystemHash &&
+		policy.holdsPrefix(
+			args.reasoningClearing?.prefixBound === true &&
+				(hasActiveAnthropicThinkingTurn(
+					args.messages,
+					args.resolvedProviderID,
+					args.resolvedModelID,
+				) ||
+					activeAnthropicTurnStart(args.messages, true) === undefined),
+			false,
+			args.signedThinkingHold === true,
+		)
+	)
+		return true;
 	if (
 		policy.strict &&
 		args.injection &&
@@ -9919,6 +10122,12 @@ function runSynchronousPipeline(
 			signedTurnOnPrefixBoundModel)
 	)
 		stripForPrefixRewrite(isCacheBustingPass);
+	// The request's tools changed (the caller logged what changed and passed
+	// no hold). Tools come first in the request, so this pass already loses the
+	// whole provider cache: strip every signed block, completed turns included,
+	// and let queued work ride the rewrite. The m[0] fold decision is unaffected.
+	if (args.requestToolsChange && !rewritingSignedPrefix)
+		stripForPrefixRewrite();
 	// An unheld bust invalidates the signed thinking still kept in the turn.
 	// Strip every block before any lane edits, so latest-turn protection is
 	// lifted and queued drops and cleanup land on this bust as on any other
@@ -10473,6 +10682,26 @@ function runSynchronousPipeline(
 			args.sessionId,
 			`pi m[0] HARD fold decision: reason=${preFoldInjectionResult?.m0Reason ?? foldDueDecision.reason ?? "soft_refresh"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
 		);
+	}
+	// A held signed turn whose system prompt changed (mid-turn, as Pi's
+	// setActiveTools rebuilds it) is invalid behind the new prompt, and the
+	// changed prompt already loses the provider cache. The head stays as the
+	// hold prepared it: it is delivered with the new prompt and acknowledged
+	// once the provider accepts the request (recordPiHeldSystemHead), so no
+	// later fold is needed for this change. But every signed block is
+	// stripped, and queued drops and cleanup ride this pass instead of a
+	// second rewrite later.
+	let heldHeadReleasedForSystemChange = false;
+	if (effectiveSystemChangedThisPass && protectedSignedPrefix) {
+		sessionLog(
+			args.sessionId,
+			"system prompt changed under a held signed turn: releasing signed thinking",
+		);
+		// The hold prepared a replay of the cached head unless this is its first
+		// render, which the fold block above rendered (and stripped for).
+		heldHeadReleasedForSystemChange =
+			!firstRenderBust && piM0State !== undefined;
+		stripForPrefixRewrite();
 	}
 	// Observe candidates before any history cut. Replay only durable decisions
 	// until the independently priced rebuild permission below is known.
@@ -12951,18 +13180,22 @@ function runSynchronousPipeline(
 			// retries the rebuild. Deferred-history is NOT drained
 			// here; Pi-native compaction marker application happens at
 			// the end of runPipeline after materializing work succeeds.
-			if (historyRefreshPermitted && prefixMutationAllowed) {
-				// While the current turn keeps signed thinking, the cached m[0]/m[1]
-				// head was replayed unchanged, so neither the history rebuild nor the
-				// placeholder discovery that rides it happened. Keep the signal, parked,
-				// for the first pass after the next real user message instead of
-				// draining it here.
-				if (materializationHeld) parkedTriggers?.holdHistory();
-				else historyRefreshSessions.delete(args.sessionId);
-				historyWasConsumedThisPass = true;
-			}
-			if (deferredHistoryRefresh && prefixMutationAllowed) {
-				historyWasConsumedThisPass = true;
+			// A head held for signed thinking and then released for a system
+			// change was replayed, not rebuilt, so it consumes no refresh.
+			if (!heldHeadReleasedForSystemChange) {
+				if (historyRefreshPermitted && prefixMutationAllowed) {
+					// While the current turn keeps signed thinking, the cached m[0]/m[1]
+					// head was replayed unchanged, so neither the history rebuild nor the
+					// placeholder discovery that rides it happened. Keep the signal, parked,
+					// for the first pass after the next real user message instead of
+					// draining it here.
+					if (materializationHeld) parkedTriggers?.holdHistory();
+					else historyRefreshSessions.delete(args.sessionId);
+					historyWasConsumedThisPass = true;
+				}
+				if (deferredHistoryRefresh && prefixMutationAllowed) {
+					historyWasConsumedThisPass = true;
+				}
 			}
 			logTransformTiming(
 				args.sessionId,
@@ -13553,6 +13786,7 @@ function runSynchronousPipeline(
 		prefixMutationAllowed,
 		editAdmission,
 		strictThinkingKept: protectedSignedPrefix,
+		heldHeadReleasedForSystemChange,
 		signedPrefixRewritten: rewritingSignedPrefix,
 		prefixRebuildAlreadyPriced:
 			firstRenderBust || (!!args.recoveryRebuildReason && isCacheBustingPass),
@@ -14165,6 +14399,7 @@ export function clearContextHandlerSession(
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);
+	untrustedRecoveryCountLoggedSessions.delete(sessionId);
 	historyRefreshSessions.delete(sessionId);
 	clearPendingMaterialization(pendingMaterializationSessions, sessionId);
 	systemPromptRefreshSessions.delete(sessionId);

@@ -4,6 +4,7 @@ import {
     normalizeProtectedToolName,
     protectedToolTagNumbers,
 } from "../../features/magic-context/reclaim-protection";
+import type { RequestToolsChange } from "../../features/magic-context/request-tool-definitions";
 import {
     HYGIENE_PROVIDER_UNITS_VERSION,
     sessionDecisionCalibration,
@@ -148,6 +149,12 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
+import {
+    beginHostCheckpointPass,
+    completeHostCheckpointPass,
+    hostCheckpointHeadChange,
+    stageServedHead,
+} from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
@@ -186,7 +193,6 @@ import {
     decidePassMutation,
     emergencyEpisodeRearms,
     emergencyRewriteAlreadyPriced,
-    pressureBands,
     routineCleanupAdmitted,
 } from "./pass-mutation-decision";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
@@ -209,6 +215,16 @@ import {
     selectReasoningRemovals,
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
+import {
+    forgetRoutinePressureEpisode,
+    heuristicsAlreadyRanThisTurn,
+    markRoutinePressureApplied,
+    pressureBands,
+    routinePressureAlreadyApplied,
+    safeReasoningCutoff as sharedSafeReasoningCutoff,
+    snapshotRoutinePressureEpisode,
+    updateRoutinePressureEpisode,
+} from "./routine-cleanup-decision";
 import {
     isAnthropicFamilyRoute,
     isNeutralizedReasoningPart,
@@ -298,7 +314,6 @@ const SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES = 40;
 // Bounded (LRU, max 100) so a crashed/never-reset session can't leak an entry
 // forever in a long-running process — matches the other per-session caches.
 const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
-const routinePressureAppliedBySession = new BoundedSessionMap<boolean>(100);
 const parkedBustTriggersBySession = new Map<string, ParkedBustTriggers>();
 
 export function hasParkedBustTrigger(sessionId: string): boolean {
@@ -307,7 +322,7 @@ export function hasParkedBustTrigger(sessionId: string): boolean {
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
-    routinePressureAppliedBySession.delete(sessionId);
+    forgetRoutinePressureEpisode(sessionId);
     parkedBustTriggersBySession.delete(sessionId);
 }
 
@@ -1807,6 +1822,8 @@ interface RunPostTransformPhaseArgs {
         sessionId: string,
         messages: MessageLike[],
         permitted: boolean,
+        /** Covered host instruction rows this pass serves ahead of `messages`. */
+        covered: MessageLike[],
     ) => HostRowReclaim;
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
@@ -1872,6 +1889,12 @@ interface RunPostTransformPhaseArgs {
      * thinking block on the wire sits behind changed bytes.
      */
     compactionModeTransition?: boolean;
+    /**
+     * What changed in the request's tools since the session's last pass on this
+     * prefix-bound model, or null. Signed thinking is bound to the tools, so
+     * every block on the wire is invalid on this pass.
+     */
+    requestToolsChange?: RequestToolsChange | null;
     readLastServedMessages?: () => readonly unknown[] | null;
     structuralSentinelUpgradeFailed?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
@@ -2071,6 +2094,7 @@ export interface EmergencyFailClosedDecision {
         | "below-emergency-band"
         | "provider-overflow-abort"
         | "proceed"
+        | "recovery-request-over-limit"
         | "refusal-grade-final-wire-over-limit"
         | "trusted-final-wire-disarm";
     /** Trusted current-pass wire evidence that lets the caller clear its durable latch. */
@@ -2093,6 +2117,14 @@ export function evaluateEmergencyFailClosed(input: {
     providerProvenLimitTokens?: number;
     contextLimitTokens?: number;
     protectedToolTokens?: number;
+    /**
+     * The request this pass will send, counted the way the served-request
+     * sizing counts it, and the most it may be: the 95% line of the current
+     * model's usable window while older history remains to summarize, else the
+     * whole usable window (see recoveryAdmissionLimitTokens). Only a pass in
+     * overflow or model-shrink recovery supplies it.
+     */
+    recoveryServedRequest?: { tokens: number; lineTokens: number };
 }): EmergencyFailClosedDecision {
     const estimate = input.finalWireEstimate;
     const limit = input.providerProvenLimitTokens;
@@ -2126,14 +2158,25 @@ export function evaluateEmergencyFailClosed(input: {
     // Without route-specific proof that the final request does not fit, retain
     // the existing rule based on a provider-reported overflow. A conservative
     // estimate used to decide whether to send is not enough to refuse.
-    const shouldAbort =
-        input.emergencyRecoveryArmed &&
-        input.emergencyRecoveryOrigin === "provider_overflow" &&
-        !input.foldMaterializedThisPass;
-    return {
-        shouldAbort,
-        reason: shouldAbort ? "provider-overflow-abort" : "proceed",
-    };
+    const recoveryOrigin = input.emergencyRecoveryArmed ? input.emergencyRecoveryOrigin : null;
+    if (recoveryOrigin === "provider_overflow" && !input.foldMaterializedThisPass) {
+        return { shouldAbort: true, reason: "provider-overflow-abort" };
+    }
+    // Recovery that summarized or folded part of the history is progress, not
+    // proof that the request now fits: after a switch to a much smaller model a
+    // single historian run can leave the request several times over the new
+    // window. Whatever this pass reclaimed, a recovery request over its limit
+    // is not sent, so the provider never rejects it.
+    const served = input.recoveryServedRequest;
+    if (
+        recoveryOrigin !== null &&
+        served !== undefined &&
+        served.lineTokens > 0 &&
+        (!Number.isFinite(served.tokens) || served.tokens > served.lineTokens)
+    ) {
+        return { shouldAbort: true, reason: "recovery-request-over-limit" };
+    }
+    return { shouldAbort: false, reason: "proceed" };
 }
 
 export interface FinalizeMessageRepresentationOptions {
@@ -2332,6 +2375,7 @@ export async function runPostTransformPhase(
     const pendingMaterializationAtPassStart = args.pendingMaterializationSessions.has(
         args.sessionId,
     );
+    beginHostCheckpointPass(args.sessionId, args.pendingMaterializationSessions);
     const pendingOrigin =
         parkedTriggers?.reason("materialization") ??
         pendingMaterializationOrigin(args.pendingMaterializationSessions, args.sessionId);
@@ -2340,9 +2384,11 @@ export async function runPostTransformPhase(
     );
     let isExplicitFlush = pendingMaterializationAtPassStart;
     const deferredMaterializationWasPending = deferredMaterializationAtPassStart;
-    const alreadyRanThisTurn =
-        args.currentTurnId !== null &&
-        args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
+    const alreadyRanThisTurn = heuristicsAlreadyRanThisTurn(
+        args.lastHeuristicsTurnId,
+        args.sessionId,
+        args.currentTurnId,
+    );
     // Tiered emergency drop eligibility (Phase 2). Unlike `forceMaterialization`
     // (primary-only — it also forces m[0] materialization), the emergency tool
     // floor fires at the derived force band for BOTH primary AND subagent: it's the only tool
@@ -2352,25 +2398,27 @@ export async function runPostTransformPhase(
     // ≥ the force-materialize threshold.
     // A reading that only a local count put in the force band below 95% is not
     // force-band pressure (`forceBandConfirmed`; see `pressureBands`).
-    const { forceMaterialization, emergencyDropEligible, forceBandConfirmed } = pressureBands({
-        fullFeatureMode: args.fullFeatureMode,
-        compactionOff,
-        contextPercentage: args.contextUsage.percentage,
+    const bands = pressureBands({
+        percentage: args.contextUsage.percentage,
+        fromEstimate: args.contextUsageFromEstimate === true,
         forceMaterializationPercentage: args.forceMaterializationPercentage,
-        contextUsageFromEstimate: args.contextUsageFromEstimate === true,
+        compactionOff,
+        fullFeatureMode: args.fullFeatureMode,
+        schedulerDecision: args.schedulerDecision,
     });
-    const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
-    if (!executePressureEligible) {
-        routinePressureAppliedBySession.delete(args.sessionId);
-    } else if (args.fullFeatureMode && alreadyRanThisTurn) {
-        // The shared once-per-turn map proves an earlier pass in this pressure
-        // episode already ran even when this process-local episode map is cold.
-        routinePressureAppliedBySession.set(args.sessionId, true);
-    }
-    const routinePressureAlreadyApplied =
-        args.fullFeatureMode &&
-        executePressureEligible &&
-        routinePressureAppliedBySession.get(args.sessionId) === true;
+    const {
+        forceMaterialization,
+        emergencyDropEligible,
+        forceBandConfirmed,
+        executePressureEligible,
+    } = bands;
+    const episode = {
+        fullFeatureMode: args.fullFeatureMode,
+        executePressureEligible,
+        alreadyRanThisTurn,
+    };
+    updateRoutinePressureEpisode(args.sessionId, episode);
+    const routinePressureApplied = routinePressureAlreadyApplied(args.sessionId, episode);
     // Require five points below the force band so a batch-induced dip cannot
     // immediately rearm another cache rewrite as the tail regrows. Only a
     // provider-measured reading may end the episode: a local count can read
@@ -2611,14 +2659,10 @@ export async function runPostTransformPhase(
             () => openCodeToolBatchCoordinates(args.messages),
         );
     let newTargets = protectTargets();
-    let maxReasoningTag = 0;
-    for (const tag of args.messageTagNumbers.values())
-        maxReasoningTag = Math.max(maxReasoningTag, tag);
-    let safeReasoningCutoff = maxReasoningTag;
-    for (const message of protectedThinkingMessages) {
-        const tag = args.messageTagNumbers.get(message);
-        if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
-    }
+    const safeReasoningCutoff = sharedSafeReasoningCutoff(
+        args.messageTagNumbers,
+        protectedThinkingMessages,
+    );
     // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
     // model it holds only right after heavy reasoning and below the cap. Any
     // other pass of a signed turn busts like a pass of any other model, and
@@ -2691,6 +2735,54 @@ export async function runPostTransformPhase(
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
         sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
+        releaseThinkingForRewrite(false, true);
+    }
+    // OpenCode 2 can replace the history head outside any pass: its compaction
+    // hook commits a new m[0]/m[1] for a manual /compact and asks for a
+    // `host_compaction` materialization. When that proves the head this request
+    // serves differs from the one the provider cached, the cache is already
+    // lost, so this pass is the hardFold ride every queued lane lands on. The
+    // request stays pending until a pass settles it (see the end of this phase).
+    const hostCheckpointRequested = hasPendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
+        args.sessionId,
+        "host_compaction",
+    );
+    const hostCheckpointProof =
+        hostCheckpointRequested && m0M1EnabledForFold
+            ? hostCheckpointHeadChange(args.sessionId, () => {
+                  hydrateCachedM0Mural(args.db, args.sessionId, args.sessionMeta as M0M1State);
+                  return {
+                      m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                      m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                      muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                  };
+              })
+            : undefined;
+    const hostCheckpointRide = hostCheckpointProof?.changed === true;
+    if (hostCheckpointRequested) {
+        sessionLog(
+            args.sessionId,
+            `host checkpoint head: changed=${hostCheckpointRide} proof=${hostCheckpointProof?.source ?? "none"}`,
+        );
+    }
+    // A held pass replays the persisted head, and the hook already replaced
+    // it: the hold keeps nothing unchanged. As on a first render, the new head
+    // goes out, so the open turn's signed thinking leaves the wire with it.
+    if (hostCheckpointRide && activeThinkingPrefixHold) {
+        sessionLog(
+            args.sessionId,
+            "host checkpoint head changed under a signed-thinking hold: stripping signed thinking",
+        );
+        releaseThinkingForRewrite(false, true);
+    }
+    // The request's tools changed (the caller logged what changed and lifted any
+    // hold). Tools come first in the request, so this pass already loses the
+    // whole provider cache: strip every signed block, compaction-off included,
+    // and let the queued work ride the rewrite. Only the m[0] fold decision
+    // below is unaffected: a name or description change still folds through
+    // its own trigger, and a schema-only change never does.
+    if (args.requestToolsChange && args.thinkingBindingRecoveryEnabledForModel === true) {
         releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =
@@ -3088,6 +3180,7 @@ export async function runPostTransformPhase(
             rewritingSignedPrefix,
             foldBustsServedPrefix: foldBustsServedPrefixThisPass,
             firstRenderBust,
+            hostCheckpointHead: hostCheckpointRide,
             explicitFlush:
                 isExplicitFlush &&
                 hasPendingMaterializationOrigin(
@@ -3158,7 +3251,12 @@ export async function runPostTransformPhase(
         activeThinkingTurn &&
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
-        if (foldBustsServedPrefixThisPass || firstRenderBust || publishedM1RefreshedThisPass)
+        if (
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            publishedM1RefreshedThisPass ||
+            hostCheckpointRide
+        )
             releaseThinkingForRewrite();
         else {
             unheldSignedTurnBust = true;
@@ -3180,6 +3278,7 @@ export async function runPostTransformPhase(
     const recoveryHeadChangedThisPass =
         !prefixPreflightFailed &&
         (foldChangesHeadThisPass ||
+            hostCheckpointRide ||
             (!firstRenderBust && publishedM1RefreshedThisPass) ||
             (!m0M1EnabledForFold && legacyPublishedHeadChanged(args)));
     const recoveryHeadlessRebuild =
@@ -3588,7 +3687,7 @@ export async function runPostTransformPhase(
             snapshotPendingMaterialization(args.deferredMaterializationSessions, args.sessionId),
             snapshotSessionFlag(args.deferredHistoryRefreshSessions, args.sessionId),
             snapshotSessionValue(args.lastHeuristicsTurnId, args.sessionId),
-            snapshotSessionValue(routinePressureAppliedBySession, args.sessionId),
+            snapshotRoutinePressureEpisode(args.sessionId),
         ];
         return pairedThinkingEdit({
             db: args.db,
@@ -3606,10 +3705,44 @@ export async function runPostTransformPhase(
     };
     for (const { message, block } of temporalFirstApplications)
         recordFirstApplicationAt(message, block);
+    // OpenCode 2 instruction rows are served even once the history summary
+    // covers them; the delivery trim below already keeps every one still in
+    // the array. The switch that extends this to the earlier trims is turned
+    // on by the first pass that may rewrite the whole prefix
+    // (canEditWholePrefix), so a session served before it never changes bytes
+    // on any other pass. Every pass after that serves the same rows, whichever
+    // pass moved the history boundary. Decided before the host-row reclaim,
+    // which applies instruction supersession to the covered rows this pass
+    // serves as well; the switch itself is persisted once the pass's
+    // signed-thinking omissions are durable (next to the reclaim's commit).
+    const coveredHostInstructions = args.coveredHostInstructions ?? [];
+    let coveredRetentionOn = false;
+    let retainCoveredInstructions = false;
+    if (
+        m0M1EnabledForFold &&
+        args.m0M1 &&
+        !compactionOff &&
+        args.opencode2 &&
+        (coveredHostInstructions.length > 0 || canEditWholePrefix) &&
+        hostInstructionRetentionEnabled()
+    ) {
+        try {
+            coveredRetentionOn = isHostInstructionRetentionOn(args.db, args.sessionId);
+        } catch (error) {
+            failPass("host-instruction-retention-read-failure", error);
+        }
+        retainCoveredInstructions = coveredRetentionOn || canEditWholePrefix;
+    }
+    // Instruction rows retire only where the whole prefix may be rewritten. A
+    // pass held for recent signed thinking may still rebuild once context
+    // usage reaches the force band (the forced-rebuild range just below the
+    // hold cap), but every byte in front of the held block must stay as it
+    // was, so such a pass only replays decisions already persisted.
     const hostRowReclaim = args.reclaimHostRows?.(
         args.sessionId,
         args.messages,
-        !compactionOff && isCacheBustingPass && !activeThinkingPrefixHold,
+        !compactionOff && canEditWholePrefix,
+        retainCoveredInstructions ? coveredHostInstructions : [],
     );
     for (const message of hostRowReclaim?.edits ?? []) {
         const index = args.messages.indexOf(message);
@@ -3757,6 +3890,7 @@ export async function runPostTransformPhase(
                     pendingOpsDidMutate,
                     foldBustsServedPrefix: foldBustsServedPrefixThisPass,
                     firstRenderBust,
+                    hostCheckpointHead: hostCheckpointRide,
                     historyRebuiltThisPass: args.historyRebuiltThisPass === true,
                     compartmentInjectionRebuiltFromDb:
                         args.compartmentInjectionRebuiltFromDb === true,
@@ -3784,7 +3918,7 @@ export async function runPostTransformPhase(
                     contextPercentage: args.contextUsage.percentage,
                     emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
                     fullFeatureMode: args.fullFeatureMode,
-                    routinePressureAlreadyApplied,
+                    routinePressureAlreadyApplied: routinePressureApplied,
                     materializationRequested,
                     rewriteAlreadyPriced,
                 });
@@ -3860,7 +3994,7 @@ export async function runPostTransformPhase(
                     routineCleanupApplied = true;
                 }
                 if (routineCleanupApplied && args.fullFeatureMode && executePressureEligible) {
-                    routinePressureAppliedBySession.set(args.sessionId, true);
+                    markRoutinePressureApplied(args.sessionId);
                 }
                 logTransformTiming(
                     args.sessionId,
@@ -4438,31 +4572,13 @@ export async function runPostTransformPhase(
 
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
-    if (m0M1Enabled && args.m0M1 && !compactionOff && args.opencode2) {
-        // OpenCode 2 instruction rows are served even once the history summary
-        // covers them; the delivery trim below already keeps every one still in
-        // the array. The switch that extends this to the earlier trims is set on
-        // the first pass allowed to rewrite the whole prefix, so a session served
-        // before it never changes bytes on a defer pass. Every pass after that
-        // serves the same rows, whichever pass moved the history boundary.
-        const covered = args.coveredHostInstructions ?? [];
-        if (covered.length > 0 || canEditWholePrefix) {
-            let retain = false;
-            if (hostInstructionRetentionEnabled()) {
-                try {
-                    retain = isHostInstructionRetentionOn(args.db, args.sessionId);
-                } catch (error) {
-                    failPass("host-instruction-retention-read-failure", error);
-                }
-                if (!retain && canEditWholePrefix) {
-                    if (!markHostInstructionRetention(args.db, args.sessionId))
-                        failPass("host-instruction-retention-persistence-failure");
-                    retain = true;
-                }
-            }
-            // The covered rows are older than everything left in the array.
-            if (retain && covered.length > 0) args.messages.unshift(...covered);
-        }
+    // The covered rows are older than everything left in the array. The pass
+    // that turns retention on puts them back in front of every signed block,
+    // which is a first application like any other edit there.
+    if (retainCoveredInstructions && coveredHostInstructions.length > 0) {
+        if (!coveredRetentionOn && coveredHostInstructions.some((m) => m.parts.length > 0))
+            recordFirstApplicationWireEdit(true);
+        args.messages.unshift(...coveredHostInstructions);
     }
     if (m0M1Enabled && args.m0M1) {
         // Replay saved history/knowledge messages and resume raw host history
@@ -4645,6 +4761,17 @@ export async function runPostTransformPhase(
                 if (result.m0RematerializedThisPass) {
                     m0ComparisonDecision = result.decision;
                 }
+                stageServedHead(
+                    args.sessionId,
+                    {
+                        m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                        m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                        muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                    },
+                    args.sessionMeta.cachedM0Bytes == null
+                        ? -1
+                        : args.sessionMeta.cachedM0MaxCompartmentSeq,
+                );
                 sessionLog(
                     args.sessionId,
                     `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
@@ -5315,6 +5442,7 @@ export async function runPostTransformPhase(
     let bustedThisPass =
         firstApplicationEdits.any ||
         firstRenderBust ||
+        hostCheckpointRide ||
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||
@@ -5768,6 +5896,15 @@ export async function runPostTransformPhase(
         // Host retirements and their required thinking omissions share the final
         // representation transaction, so neither decision survives a failed write.
         hostRowReclaim?.commit();
+        // Likewise the retention switch: a pass that fails before this point must
+        // not leave covered rows served on a following pass that may not rewrite
+        // the prefix.
+        if (
+            retainCoveredInstructions &&
+            !coveredRetentionOn &&
+            !markHostInstructionRetention(args.db, args.sessionId)
+        )
+            failPass("host-instruction-retention-persistence-failure");
         for (const id of committedCompanions) {
             if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
             frozenThinkingBindingMessageIds.add(
@@ -6157,8 +6294,40 @@ export async function runPostTransformPhase(
             return lateStrip;
         };
         if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
+        if (hostCheckpointRide && isCacheBustingPass) {
+            // The hook's head can cover newer compartments than the head the
+            // provider saw, exactly as an executed fold that advances coverage.
+            try {
+                rearmChannel2AfterCoverageAdvancingHardFold({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    foldExecuted: true,
+                    compactionOff,
+                    previousCoverage: hostCheckpointProof?.previousCoverage ?? null,
+                    currentCoverage:
+                        args.sessionMeta.cachedM0Bytes == null
+                            ? null
+                            : args.sessionMeta.cachedM0MaxCompartmentSeq,
+                });
+            } catch (error) {
+                sessionLog(
+                    args.sessionId,
+                    "channel2 host-checkpoint reset failed (ignored):",
+                    error,
+                );
+            }
+        }
         parkedTriggers?.persist(args.db, args.sessionId);
         if (!parkedTriggers?.pending) parkedBustTriggersBySession.delete(args.sessionId);
+        // The pass completed. A `host_compaction` request is settled when its proof
+        // showed no change or an allowed pass rode it; a pass that could not take
+        // the ride keeps it for the next one. Compaction-off never takes it, so a
+        // pass there settles it rather than keep it pending for good.
+        completeHostCheckpointPass(
+            args.sessionId,
+            args.pendingMaterializationSessions,
+            hostCheckpointRequested && (!hostCheckpointRide || isCacheBustingPass || compactionOff),
+        );
         return {
             finalizeServedPrefix: prefixRecordEnabled ? finalizeServedPrefix : undefined,
             prefixChanged:

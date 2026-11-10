@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -108,7 +108,7 @@ export default { id: 'overflow-error-probe', async setup(context) {
         });
         await waitForPluginActive(client, host.cwd);
         const readState = (sessionID: string) => {
-            const db = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+            const db = openTestDb(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
                 readonly: true,
             });
             try {

@@ -185,7 +185,7 @@ test("OC2 arms thinking recovery for the rejected turn from its event stream and
 
 		// OpenCode 2 reports the failure only on its event stream; recovery is armed
 		// there, bound to the real user message that started the rejected turn.
-		const store = new Database(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
+		const store = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
 			readonly: true,
 		});
 		let userID: string;

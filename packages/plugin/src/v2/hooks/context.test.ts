@@ -48,6 +48,7 @@ import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import * as hostMedia from "../fold/host-media";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { gaDatabasePath } from "../store-reader";
 import { registerContext } from "./context";
 import * as manualDream from "./dream-manual";
@@ -503,8 +504,9 @@ test("v2 compaction materializes the session decision instead of the launch dire
         projectDirectory: directory,
         memoryEnabled: true,
     });
+    // The host stores Magic Context's fixed checkpoint note, not the history head.
     expect(input.result).toEqual({
-        summary: "session checkpoint",
+        summary: CHECKPOINT_NOTE,
         metadata: { keepID: undefined },
     });
     expect(fake.calls).toHaveLength(0);

@@ -62,10 +62,24 @@ function useTempDataHome(prefix: string): void {
     process.env.XDG_DATA_HOME = dir;
 }
 
+/**
+ * Take the store's write lock on a second connection. The busy timeout lets
+ * it wait out a background writer the previous pass scheduled (for example a
+ * deferred decision write); without it `BEGIN IMMEDIATE` fails at once with
+ * SQLITE_BUSY whenever such a write is still in progress.
+ */
+function holdWriteLock(path: string): void {
+    heldLock = new Database(path);
+    heldLock.exec("PRAGMA busy_timeout = 5000");
+    heldLock.exec("BEGIN IMMEDIATE");
+}
+
 function releaseLock(): void {
     if (!heldLock) return;
     try {
-        heldLock.exec("ROLLBACK");
+        // A lock that was never taken has nothing to roll back; rolling back
+        // anyway would hide the test's own failure behind a second error.
+        if (heldLock.inTransaction) heldLock.exec("ROLLBACK");
     } finally {
         heldLock.close();
         heldLock = null;
@@ -172,8 +186,7 @@ async function sessionWithPersistedDrop(
                 lockDuringTagging = false;
                 const path = getDatabasePath(db);
                 if (!path) throw new Error("test database has no file path");
-                heldLock = new Database(path);
-                heldLock.exec("BEGIN IMMEDIATE");
+                holdWriteLock(path);
             }
             return baseTagger.initFromDb(...args);
         },
@@ -363,8 +376,7 @@ describe("a degraded transform pass is never served", () => {
             const path = getDatabasePath(session.db);
             if (!path) throw new Error("Expected throwaway database");
             const before = getTagsBySession(session.db, sessionId);
-            heldLock = new Database(path);
-            heldLock.exec("BEGIN IMMEDIATE");
+            holdWriteLock(path);
             const busy = await session.serve(nextTurn(sessionId));
             expect(JSON.stringify(busy.slice(-2))).toBe(
                 JSON.stringify(nextTurn(sessionId).slice(-2)),
@@ -451,8 +463,7 @@ describe("a degraded transform pass is never served", () => {
                 },
             ];
             session.db.exec("PRAGMA busy_timeout=0");
-            heldLock = new Database(path);
-            heldLock.exec("BEGIN IMMEDIATE");
+            holdWriteLock(path);
             await expect(session.serve(structuredClone(raw))).rejects.toThrow(STORAGE_BUSY_MESSAGE);
             releaseLock();
         }, 30_000);
@@ -472,8 +483,7 @@ describe("a degraded transform pass is never served", () => {
                 const path = getDatabasePath(session.db);
                 if (!path) throw new Error("Expected throwaway database");
                 session.db.exec("PRAGMA busy_timeout=0");
-                heldLock = new Database(path);
-                heldLock.exec("BEGIN IMMEDIATE");
+                holdWriteLock(path);
                 const busy = await session.serve(nextTurn(sessionId));
                 expect(String(busy.at(-1)?.parts[0].text)).toBe("follow-up");
                 let next = nextTurn(sessionId);

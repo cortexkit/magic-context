@@ -1,12 +1,12 @@
 import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { getPendingOps, queuePendingOp } from "../../../plugin/src/features/magic-context/storage";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { isCheckpointNote } from "../../../plugin/src/v2/fold/summary";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { rawMessages } from "../../../plugin/src/v2/hooks/store";
 import { spawnOpencode2, waitForPluginActive, waitForPluginLog } from '../../src/opencode2-runner/spawn';
@@ -56,7 +56,9 @@ for (const mode of ["local", "provider"] as const) {
             const cut = reader.latestCompaction(session.id);
             expect(cut?.data.status).toBe("completed");
             expect(cut?.data.summary).toBe(compactions[0].result.summary);
-            expect(cut?.data.summary).toContain("<session-history>");
+            // The host stores a short note; the history head reaches the model
+            // from Magic Context's own state (the wire checks below).
+            expect(isCheckpointNote(cut?.data.summary)).toBe(true);
             // In provider mode, the host saves messages not yet included in
             // the summary in `recent`; the next request includes those messages.
             if (mode === "provider") expect(cut?.data.recent).toContain(markers[2]);
@@ -139,7 +141,7 @@ for (const mode of ["local", "provider"] as const) {
             writeSessionMetaField(hardDb, session.id, "cached_m0_upgrade_state", upgradeState == null ? null : `old-upgrade${upgradeState.includes("|") ? upgradeState.slice(upgradeState.indexOf("|")) : upgradeState}`);
             await turn("HARD upgrade state");
             expect(snapshot().stamp).toBeGreaterThan(beforeUpgrade);
-            const hostTimes = new Database(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
+            const hostTimes = openTestDb(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
             const idleTime = Date.now() - 3600000;
             hostTimes.prepare("UPDATE session_message SET data = json_set(data, '$.time.completed', ?) WHERE session_id = ? AND type = 'assistant'").run(idleTime, session.id);
             hostTimes.close();
@@ -159,7 +161,7 @@ for (const mode of ["local", "provider"] as const) {
             await turn("Defer after pressure backstop");
             expect(sha(frames().filter(frame => frame.kind === "context").at(-1).messages[0])).toBe(sha(pressureHead));
             hardDb.close();
-            const hostDb = new Database(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
+            const hostDb = openTestDb(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
             hostDb.prepare("UPDATE session_message SET data = json_set(data, '$.summary', ?) WHERE id = ?").run("CORRUPTED-PERSISTED-SUMMARY", cut!.id);
             hostDb.close();
             await turn("Detect persisted checkpoint divergence");

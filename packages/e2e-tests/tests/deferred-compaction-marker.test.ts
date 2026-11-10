@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
+import { isCheckpointNote } from '../../plugin/src/v2/fold/summary';
 import { V2StoreReader, gaDatabasePath } from '../../plugin/src/v2/store-reader';
 import { TestHarness } from "../src/harness";
 import { OpenCode2TestHarness } from '../src/opencode2-harness';
@@ -198,7 +199,10 @@ forEachHost(import.meta.url, "deferred compaction marker (plan v6)", (host) => {
             try {
                 const checkpoint = reader.latestCompaction(sessionId);
                 expect(checkpoint?.data.status).toBe("completed");
-                expect(checkpoint?.data.summary).toContain("<session-history>");
+                // The host stores a short note; Magic Context keeps the history
+                // head itself and still sends it (checked on the next request).
+                expect(isCheckpointNote(checkpoint?.data.summary)).toBe(true);
+                expect(checkpoint?.data.summary).not.toContain("<session-history>");
             } finally { reader.close(); }
             expectNativeAdmission(h, sessionId);
             await h.sendPrompt(sessionId, "small defer turn — native checkpoint remains visible");

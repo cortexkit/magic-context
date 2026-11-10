@@ -9,9 +9,10 @@ import { HEAD_IDS } from "../hooks/payload";
 import type { SessionContext, V2Message } from "../hooks/types";
 import type { StoreRow, V2StoreReader } from "../store-reader";
 import { type NativeFoldBudget, nativeFoldCache } from "./memory-cache";
-import { NativeFoldReplay } from "./native-replay";
+import { isAdmittedLocalCheckpoint, NativeFoldReplay } from "./native-replay";
 import { encodeAdmissionV3, IMPORTED_MC_SUMMARY, validAdmissionV3 } from "./native-replay-v3";
 import { foldDigest } from "./owner";
+import { CHECKPOINT_NOTE } from "./summary";
 
 const databases: Database[] = [];
 afterEach(() => {
@@ -910,4 +911,32 @@ test("V3 readers and writers reject conversation fields at every metadata level"
         f.kv.set("native-fold/v3/s", { payload, digest: foldDigest(payload) });
         expect(await f.make().admits("s", cut, f.reader)).toBe(false);
     }
+});
+
+test("v3 admission binds the stored checkpoint note, and a restart takes the head from Magic Context's m[0]", async () => {
+    const f = fixture(3);
+    const head = "<session-history>frozen history head</session-history>";
+    patchSessionMeta(f.db, "s", { cached_m0_bytes: Buffer.from(head) });
+    const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+    await f.replay.capture(context([message(HEAD_IDS[0], head), ...raw]), raw);
+    f.begin();
+    expect(
+        await f.replay.supply({
+            draft: context([]),
+            reader: f.reader,
+            summary: head,
+            checkpointText: CHECKPOINT_NOTE,
+        }),
+    ).toBe(true);
+    const cut = f.finish(CHECKPOINT_NOTE);
+    // The proofs are compared with the host's stored row, which holds the note.
+    expect(isAdmittedLocalCheckpoint(f.cache, "s", cut)).toBe(true);
+    const cold = f.make();
+    expect(await cold.replayAdmission("s", cut, f.reader)).toBe("native");
+    expect(await cold.admits("s", cut, f.reader)).toBe(true);
+    const restored = await cold.restore("s", cut, "p/m", { bounded: true });
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(raw));
+    // A restored checkpoint is never read back as the served history head.
+    expect(await cold.baseline("s")).toBe(head);
+    expect(JSON.stringify([...f.kv.values()])).not.toContain("frozen history head");
 });

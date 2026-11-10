@@ -15,7 +15,7 @@
  * reproduces the production stamp-to-persist latency deterministically. The
  * host, provider conversion and Magic Context run unmodified.
  */
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../test-db";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TestHarness } from "../harness";
@@ -180,7 +180,7 @@ try {
     }
     result.comparisons = comparisons;
 
-    const db = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+    const db = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
     result.storedOrder = db
         .query(
             "SELECT id, time_created, json_extract(data,'$.role') AS role, json_extract(data,'$.parentID') AS parent FROM message WHERE session_id = ? ORDER BY time_created, id",
