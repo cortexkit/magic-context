@@ -263,6 +263,37 @@ test("a checkpoint that stores the note is served and measured with the head its
     }
 });
 
+test("a rebuilt fold record still never serves the checkpoint note as history in a window without a head message", async () => {
+    // After a revert the host can give a new checkpoint the sequence number of
+    // a checkpoint Magic Context already recorded. FoldOwner.supply then reuses
+    // that record for the new checkpoint, and FoldOwner.observe discards it on
+    // the first pass because its saved rendered message has another id. The
+    // record observe rebuilds holds only the text the host stored. A checkpoint
+    // that stores the head itself still serves that head; one that stores the
+    // note must not serve the note as the account of earlier history.
+    const served = async (stored?: string) => {
+        const f = await fixture({ ...(stored === undefined ? {} : { stored }), head: false });
+        try {
+            const record = (await f.storage.get("fold/v1/s")) as FoldIdentity;
+            await f.storage.set("fold/v1/s", {
+                ...record,
+                rendered: {
+                    id: "reverted-cut",
+                    role: "user",
+                    content: [{ type: "text", text: "checkpoint removed by a revert" }],
+                },
+            });
+            const draft = f.draft();
+            await f.hooks.get("context")!(draft);
+            return JSON.stringify(draft.messages);
+        } finally {
+            await f.close();
+        }
+    };
+    expect(await served()).toContain("<session-history>summary</session-history>");
+    expect(await served(CHECKPOINT_NOTE)).not.toContain("Magic Context added a compaction marker");
+});
+
 test("an oversized deferred checkpoint is refused, then an overflow permission repairs it before egress", async () => {
     const f = await fixture();
     const logs = spyOn(logger, "sessionLog");
