@@ -4,6 +4,89 @@ import { resolveUsageReading, usageReadingMatchesDraft } from "./usage-reading";
 const windows: Record<string, number> = { old: 200_000, new: 1_000_000 };
 const limitFor = (_providerID: string, modelID: string) => windows[modelID] ?? 0;
 
+for (const location of ["native", "state"]) {
+    for (const cache of [true, false]) {
+        test(`reads the last fallback iteration from ${location} with cache=${cache}`, () => {
+            const tokens = { input: 963_300, output: 100, cache: { read: 1, write: 2 } };
+            const reading = resolveUsageReading({
+                draftModel: { providerID: "p", id: "new" },
+                tokens,
+                completed: 123,
+                content: [
+                    {
+                        type: "reasoning",
+                        [location]: {
+                            signature: `cortexkit-server-fallback-usage-v1:${JSON.stringify({
+                                iterations: [
+                                    {
+                                        type: "message",
+                                        model: "primary",
+                                        input_tokens: 400_000,
+                                        output_tokens: 10,
+                                    },
+                                    {
+                                        type: "fallback_message",
+                                        model: "fallback",
+                                        input_tokens: 500_000,
+                                        output_tokens: 20,
+                                    },
+                                    {
+                                        type: "fallback_message",
+                                        model: "fallback",
+                                        input_tokens: 100_000,
+                                        output_tokens: 30,
+                                        ...(cache
+                                            ? {
+                                                  cache_read_input_tokens: 400_000,
+                                                  cache_creation_input_tokens: 10_000,
+                                              }
+                                            : {}),
+                                    },
+                                    {
+                                        type: "message",
+                                        model: "primary",
+                                        input_tokens: 900_000,
+                                        output_tokens: 40,
+                                    },
+                                ],
+                            })}`,
+                        },
+                    },
+                ],
+                limitFor,
+            });
+            expect(reading?.inputTokens).toBe(cache ? 510_000 : 100_000);
+            expect(reading?.serverFallback).not.toBe(true);
+            expect(tokens).toEqual({ input: 963_300, output: 100, cache: { read: 1, write: 2 } });
+        });
+    }
+}
+
+for (const payload of [
+    "{",
+    "null",
+    '{"iterations":[]}',
+    '{"iterations":[{"type":"message"}]}',
+    '{"iterations":[{"type":"fallback_message","input_tokens":"bad"}]}',
+]) {
+    test(`invalid usage marker keeps the boundary-only path: ${payload}`, () => {
+        const reading = resolveUsageReading({
+            draftModel: { providerID: "p", id: "new" },
+            tokens: { input: 963_300 },
+            completed: 123,
+            content: [
+                {
+                    type: "reasoning",
+                    state: { signature: `cortexkit-server-fallback-usage-v1:${payload}` },
+                },
+            ],
+            limitFor,
+        });
+        expect(reading?.inputTokens).toBe(963_300);
+        expect(reading?.serverFallback).toBe(true);
+    });
+}
+
 test("a same-model reading uses one window for attribution and admission", () => {
     const reading = resolveUsageReading({
         rowModel: { providerID: "p", id: "old" },
