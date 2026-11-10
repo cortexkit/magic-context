@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
+import { isCheckpointNote } from "../../../plugin/src/v2/fold/summary";
 import { MockProvider } from "../../src/mock-provider/server";
 import { buildMockHistorianPayload, historianRangeInRequest } from "../../src/mock-historian";
 import { inspectOpenFiles, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
@@ -141,12 +142,14 @@ test("records the switch and whether the host wrote a compaction", () => {
     expect(final.hasCheckpoint).toBe(false);
 });
 
-test("a manual host checkpoint uses Magic Context's history without calling a summarizer", () => {
+test("a manual host checkpoint is answered by Magic Context without calling a summarizer", () => {
     expect(manualControl.rows).toHaveLength(1);
     const row = JSON.parse(manualControl.rows[0]!.data);
     expect(row.status).toBe("completed");
-    expect(row.summary).toContain("<session-history>");
-    expect(row.summary).toContain("The earlier fixture work is complete.");
+    // The host stores Magic Context's short note; Magic Context keeps the
+    // history head itself and sends it to the model.
+    expect(isCheckpointNote(row.summary)).toBe(true);
+    expect(row.summary).not.toContain("<session-history>");
     expect(manualControl.providerCalls).toBe(0);
 });
 
