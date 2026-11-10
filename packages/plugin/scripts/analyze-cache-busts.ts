@@ -39,8 +39,11 @@
  *   For OpenAI and Gemini the previous request's uncached tail may not be cached
  *   yet when the next request arrives, so the floor is the previous read, not the
  *   previous prompt.
- * Any request kind, including a continuation: a short read more than --cache-ttl
- * (default 5m) after the prefix was last read in full or written is `idle_cache_expiry`.
+ * Any request kind, including a continuation: a short read after the cache lifetime
+ * is `idle_cache_expiry`. --cache-ttl overrides the previous same-route body's
+ * longest stated cache_control TTL. Without a stated TTL, the fallback is 1h for
+ * runners and 5m for plugin-host dumps. Unstated breakpoint TTLs do not override
+ * those defaults. The clock starts when the prefix was last read in full or written.
  *
  * Usage:
  *   bun scripts/analyze-cache-busts.ts <sessionIdPrefix> [options]
@@ -53,7 +56,8 @@
  *   --since <time>   created at/after ISO time or duration ago (for example 30m)
  *   --until <time>   created at/before ISO time or duration ago
  *   --limit <N>      only the last N requests in range
- *   --cache-ttl <d>  cache lifetime (default 1h for runners, 5m for legacy dumps)
+ *   --cache-ttl <d>  override prior same-route body's stated breakpoint TTL
+ *                    (fallback: 1h for runners, 5m for plugin-host dumps)
  *   --source <kind> auto (default), dumps (OC1/Broca), oc2, or pi
  *   --dump-dir <p>  override the runner's dump directory
  *   --runner-data-dir <p> override the CortexKit data root (for offline fixtures)
@@ -163,6 +167,7 @@ interface Snapshot {
     bytesMissing?: boolean;
     threadType?: "create" | "continue";
     tools?: Segment;
+    statedCacheTtlMs?: number;
 }
 
 /**
@@ -239,7 +244,7 @@ export interface OpenCodeCacheBustAnalysisOptions {
     scanCursor?: string;
     scanDeadlineMs?: number;
     scanNow?: () => number;
-    /** Idle time after which the provider prefix counts as expired; default 5 min. */
+    /** Override the prior body's stated cache lifetime; fallback without one is 5 min. */
     cacheTtlMs?: number;
 }
 
@@ -394,6 +399,27 @@ function wireModel(body: Json): string | undefined {
 function threadType(body: Json, meta: Json): Snapshot["threadType"] {
     const type = asJson(body.thread ?? asJson(meta.body)?.thread)?.type;
     return type === "continue" || type === "create" ? type : undefined;
+}
+
+/** Read TTLs before normalization removes cache_control from comparable bytes. */
+function requestCacheTtlMs(body: Json): number | undefined {
+    let longest = 0;
+    const visit = (value: unknown): void => {
+        if (Array.isArray(value)) {
+            for (const child of value) visit(child);
+            return;
+        }
+        const object = asJson(value);
+        if (!object) return;
+        const control = asJson(object.cache_control);
+        if (control?.type === "ephemeral") {
+            if (control.ttl === "1h") longest = Math.max(longest, 3_600_000);
+            else if (control.ttl === "5m") longest = Math.max(longest, DEFAULT_CACHE_TTL_MS);
+        }
+        for (const child of Object.values(object)) visit(child);
+    };
+    visit(body);
+    return longest || undefined;
 }
 
 function sameRoute(left: Snapshot, right: Snapshot): boolean {
@@ -759,6 +785,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
                 wireModel: wireModel(body),
                 sourceDir: candidate.source.dir,
                 segments: normalized.segments,
+                statedCacheTtlMs: normalized.provider === "anthropic" ? requestCacheTtlMs(body) : undefined,
                 threadType: normalized.provider === "anthropic" ? threadType(body, meta) : undefined,
                 tools: normalized.provider === "anthropic" && body.tools !== undefined
                     ? { ...buildSegments({ system: body.tools }, "anthropic").segments[0], id: "tools role=system" }
@@ -1247,7 +1274,7 @@ export function analyzeSnapshots(
     decisionsAndMarkers: readonly CacheBustDecisionAttribution[] = [],
     options: { cacheTtlMs?: number; precedingRequestTimestampsMs?: readonly number[]; runnerEvidence?: RunnerEvidence; cacheTouches?: readonly number[] } = {},
 ): AnalysisRow[] {
-    const cacheTtlMs = options.cacheTtlMs ?? (snaps[0]?.runnerRequest ? 3_600_000 : DEFAULT_CACHE_TTL_MS);
+    const previousRequestByRoute = new Map<string, Snapshot>();
     const renders = joinRequestsToViews(snaps.map((snapshot) => snapshot.requestTimestampMs), options.runnerEvidence?.renders ?? []);
     // When the reusable prefix was last read in full or written; see
     // refreshesCachedPrefix for which requests move it.
@@ -1290,6 +1317,12 @@ export function analyzeSnapshots(
     const rows: AnalysisRow[] = [];
     for (let index = 0; index < snaps.length; index += 1) {
         const current = snaps[index];
+        const routeKey = JSON.stringify([current.session, current.provider, current.sourceDir]);
+        const previousRouteRequest = previousRequestByRoute.get(routeKey);
+        previousRequestByRoute.set(routeKey, current);
+        const cacheTtlMs = options.cacheTtlMs ??
+            (previousRouteRequest?.bytesMissing ? undefined : previousRouteRequest?.statedCacheTtlMs) ??
+            (current.runnerRequest ? 3_600_000 : DEFAULT_CACHE_TTL_MS);
         const render = renders[index];
         const joinedAt = render?.at ?? current.requestTimestampMs;
         const previousAt = renders[index - 1]?.at ?? snaps[index - 1]?.requestTimestampMs ?? joinedAt;
@@ -1655,8 +1688,8 @@ Options:
   --meter <kind>        force the anthropic, openai, or gemini meter for every request
   --since/--until <t>   ISO timestamp or duration ago (for example 2h)
   --limit <N>           keep the last N requests in range
-  --cache-ttl <dur>     idle time after which the provider prefix counts as
-                         expired (default 1h for runners, 5m for legacy dumps)
+  --cache-ttl <dur>     override the previous same-route body's longest stated
+                         breakpoint ttl (fallback: 1h for runners, 5m for dumps)
   --show-diff           print both versions of the first-diverging message
   --all-busts           list every diverging message
   --all-rows            also print STABLE and UNMETERED rows`;
@@ -1734,7 +1767,7 @@ function main(): void {
     const describeMeterChoice = wireFamilies.length > 0 || opts.meter !== undefined;
     console.log(`Session:  ${snaps[0].session}`);
     if (runner) console.log(`Source: ${runner.kind}; files read: ${[...runner.files, ...(evidence?.files ?? []), ...touches.map((touch) => touch.file)].join(", ")}; dump directories: ${opts.sources.map((source) => source.dir).join(", ")}`);
-    if (runner) console.log(`Runner: ${runner.requests.length} metered step(s); ${touches.length} keep-warm cache touch(es), never steps or byte baselines. Request/view join: nearest time within 60s, once per render. Cache lifetime: ${opts.cacheTtl ?? "1h"}.`);
+    if (runner) console.log(`Runner: ${runner.requests.length} metered step(s); ${touches.length} keep-warm cache touch(es), never steps or byte baselines. Request/view join: nearest time within 60s, once per render. Cache lifetime: ${opts.cacheTtl ?? "previous same-route body's longest stated breakpoint TTL (fallback: 1h)"}.`);
     if (runner) console.log(`Models: ${[...new Set(snaps.map((snapshot) => `${snapshot.runnerRequest?.provider}/${snapshot.runnerRequest?.model}${snapshot.runnerRequest?.variant ? ` (variant=${snapshot.runnerRequest.variant})` : ""}`))].join(", ")}`);
     console.log(
         wireFamilies.length > 0
@@ -1902,7 +1935,7 @@ function main(): void {
     const expiryCount = rows.filter((row) => row.divergenceClass === "idle_cache_expiry").length;
     if (expiryCount > 0) {
         console.log(
-            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? (runner ? "1h" : "5m")} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
+            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? "the previous same-route body's stated cache lifetime (fallback: 1h for runners, 5m for plugin dumps)"} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
         );
     }
     if (unmeteredBustCount > 0) {

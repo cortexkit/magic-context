@@ -44,7 +44,13 @@ function fixture() {
         index: number,
         type: "create" | "continue" | undefined,
         messages: unknown[],
-        options: { system?: string; tools?: string; read?: number; write?: number } = {},
+        options: {
+            system?: string;
+            tools?: string;
+            read?: number;
+            write?: number;
+            systemTtl?: "1h" | "5m";
+        } = {},
     ) {
         const createdAt = new Date(epoch + index * 1000).toISOString();
         const stem = `${createdAt.replace(/[:.]/g, "-")}-${index}-${sessionId}`;
@@ -60,7 +66,10 @@ function fixture() {
                     {
                         type: "text",
                         text: options.system ?? "system",
-                        cache_control: { type: "ephemeral" },
+                        cache_control: {
+                            type: "ephemeral",
+                            ...(options.systemTtl ? { ttl: options.systemTtl } : {}),
+                        },
                     },
                 ],
                 tools: [{ name: options.tools ?? "tool", input_schema: { type: "object" } }],
@@ -90,7 +99,7 @@ function fixture() {
         );
     }
     const snapshots = () => __test.loadSnapshots(args);
-    const rows = () => __test.analyzeSnapshots(snapshots());
+    const rows = (cacheTtlMs?: number) => __test.analyzeSnapshots(snapshots(), [], { cacheTtlMs });
     const analyze = (sinceExclusiveMs?: number, bounded = false) =>
         analyzeOpenCodeCacheBustSession({
             sessionId,
@@ -556,4 +565,145 @@ test("thread-only token threshold excludes accounted folds and sums thread rows 
     ])[0];
     expect(eventForWindow(threads, "fixture", state)?.payload.rewritten_tokens).toBe(24_000);
     expect(eventForWindow(threads, "fixture", state)).toBeNull();
+});
+
+for (const type of ["continue", "create"] as const) {
+    for (const scenario of [
+        { name: "1h breakpoint survives 12 minutes", ttl: "1h", gapSeconds: 720, expired: false },
+        {
+            name: "unstated lifetime expires after 12 minutes",
+            ttl: undefined,
+            gapSeconds: 720,
+            expired: true,
+        },
+        {
+            name: "1h breakpoint expires after 61 minutes",
+            ttl: "1h",
+            gapSeconds: 3660,
+            expired: true,
+        },
+        {
+            name: "explicit 5m overrides a stated 1h",
+            ttl: "1h",
+            gapSeconds: 720,
+            expired: true,
+            overrideMs: 300_000,
+        },
+    ] as const)
+        test(`request cache lifetime for ${type}: ${scenario.name}`, () => {
+            const f = fixture();
+            f.dump(0, "create", [user("baseline")], { systemTtl: scenario.ttl });
+            f.dump(1, "continue", [user("delta")], { systemTtl: scenario.ttl });
+            f.dump(
+                1 + scenario.gapSeconds,
+                type,
+                type === "continue"
+                    ? [user("next delta")]
+                    : [user("baseline"), assistant("reply"), user("delta")],
+                { systemTtl: "1h" },
+            );
+            const overrideMs = "overrideMs" in scenario ? scenario.overrideMs : undefined;
+            const expected = scenario.expired
+                ? "idle_cache_expiry"
+                : type === "continue"
+                  ? "continuation_short_read"
+                  : "thread_break_unchanged_client_bytes";
+            expect(f.rows(overrideMs)[2].divergenceClass).toBe(expected);
+            const result = analyzeOpenCodeCacheBustSession({
+                sessionId,
+                anthropicDir: f.root,
+                openaiDir: join(f.root, "missing"),
+                mcLogPath: null,
+                cacheTtlMs: overrideMs,
+            });
+            expect(result.requests[2].divergenceClass).toBe(expected);
+        });
+}
+
+for (const longBreakpoint of ["system", "message"] as const)
+    test(`request cache lifetime uses the longest stated breakpoint (${longBreakpoint})`, () => {
+        const f = fixture();
+        const message = user("baseline");
+        const withTtl = {
+            ...message,
+            content: message.content.map((part) => ({
+                ...part,
+                cache_control: {
+                    type: "ephemeral",
+                    ttl: longBreakpoint === "message" ? "1h" : "5m",
+                },
+            })),
+        };
+        f.dump(0, "create", [withTtl], { systemTtl: longBreakpoint === "system" ? "1h" : "5m" });
+        f.dump(720, "continue", [user("delta")]);
+        expect(f.rows()[1].divergenceClass).toBe("continuation_short_read");
+    });
+
+for (const stated of [false, true])
+    test(`request cache lifetime for runner joined bodies (stated 5m=${stated})`, () => {
+        const f = fixture();
+        f.dump(0, "create", [user("baseline")], { systemTtl: stated ? "5m" : undefined });
+        f.dump(360, "continue", [user("delta")]);
+        const dumps = f.snapshots();
+        for (const kind of ["oc2", "pi"] as const) {
+            const snapshots = __test.runnerSnapshots(
+                {
+                    kind,
+                    session: sessionId,
+                    files: [],
+                    requests: dumps.map((dump) => ({
+                        id: dump.file,
+                        at: dump.requestTimestampMs,
+                        sequence: dump.sequence,
+                        model: "claude-opus",
+                        provider: "anthropic",
+                        usage: {
+                            input: dump.usage!.input,
+                            output: 10,
+                            cacheRead: dump.usage!.cacheRead,
+                            cacheWrite: dump.usage!.cacheCreation ?? 0,
+                        },
+                    })),
+                },
+                dumps,
+            );
+            expect(__test.analyzeSnapshots(snapshots)[1].divergenceClass).toBe(
+                stated ? "idle_cache_expiry" : "continuation_short_read",
+            );
+        }
+    });
+
+test("request cache lifetime comes from the previous request of the same route", () => {
+    const f = fixture();
+    f.dump(0, "create", [user("baseline")], { systemTtl: "1h" });
+    f.dump(1, "create", [user("other route")], { systemTtl: "5m" });
+    f.dump(721, "continue", [user("delta")]);
+    const snapshots = f.snapshots();
+    snapshots[1].sourceDir = join(f.root, "another-route");
+    expect(__test.analyzeSnapshots(snapshots)[2].divergenceClass).toBe("continuation_short_read");
+});
+
+test("request cache lifetime explicit --cache-ttl overrides the dump lifetime", () => {
+    const f = fixture();
+    f.dump(0, "create", [user("baseline")], { systemTtl: "1h" });
+    f.dump(720, "continue", [user("delta")], { systemTtl: "1h" });
+    const result = Bun.spawnSync(
+        [
+            process.execPath,
+            join(import.meta.dir, "analyze-cache-busts.ts"),
+            "--source",
+            "dumps",
+            "--session",
+            sessionId,
+            "--dir",
+            f.root,
+            "--mc-log",
+            join(f.root, "missing.log"),
+            "--cache-ttl",
+            "5m",
+        ],
+        { cwd: join(import.meta.dir, ".."), windowsHide: true },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("divergence-class: idle_cache_expiry");
 });

@@ -1535,11 +1535,9 @@ describe("analyze-cache-bust rotating billing header", () => {
     test("a short read over an unchanged reusable prefix is provider-side latency", () => {
         const { dir, session } = billingHeaderSession();
 
-        // The fixture's third request came 6 min after the second. A 1 h TTL keeps
-        // this about the identical-bytes provider class, not idle expiry.
-        const row = __test.analyzeSnapshots(snapshotsFor(dir, session), [], {
-            cacheTtlMs: 3_600_000,
-        })[2];
+        // The fixture's previous body declares a 1 h TTL, so its six-minute gap
+        // still tests the identical-bytes provider class rather than idle expiry.
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[2];
 
         expect(row.verdict).toBe("LATENCY");
         expect(row.byteVerdict).toBe("STABLE");
@@ -1551,10 +1549,12 @@ describe("analyze-cache-bust rotating billing header", () => {
         expect(row.current.usage?.cacheRead).toBe(285_161);
     });
 
-    test("the same short read 6 min after the last refresh is idle expiry under the default 5 min TTL", () => {
+    test("the same short read 6 min after the last refresh is idle expiry with an explicit 5 min TTL", () => {
         const { dir, session } = billingHeaderSession();
 
-        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[2];
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session), [], {
+            cacheTtlMs: 300_000,
+        })[2];
 
         expect(row.verdict).toBe("LATENCY");
         expect(row.idleGapMs).toBe(361_502);
