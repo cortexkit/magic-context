@@ -9742,9 +9742,10 @@ const UNPAIRED_PREFIX_REWRITE_SITE = "pi-unpaired-prefix-rewrite";
  * which omits every signed block and so must commit inside the companion
  * transaction. These are the pipeline's rewrite causes known before it runs: a
  * recovery or fit rebuild, a carried tag-identity repair, a missing served-prefix
- * anchor, a changed request tool list or system prompt (either releases every
- * signed block, held or not), and, with the hold off, a first render without a
- * cached pair or the 95% wall.
+ * anchor, a changed request tool list (it releases every signed block), a
+ * system prompt change under a held signed turn (it releases that turn's
+ * thinking), and, with the hold off, a first render without a cached pair or
+ * the 95% wall.
  */
 function piPassMayRewritePrefix(args: RunPipelineArgs): boolean {
 	const policy = resolveSignedThinkingHoldPolicy(
@@ -9755,14 +9756,29 @@ function piPassMayRewritePrefix(args: RunPipelineArgs): boolean {
 	);
 	if (args.recoveryRebuildReason || args.forceSignedRebuildForFit) return true;
 	if (readPiIdentityRebuilds(args.db, args.sessionId).length > 0) return true;
-	if (args.requestToolsChange) return true;
-	// The pipeline compares the same two hashes (effectiveSystemChangedThisPass).
+	const carriesThinking = (args.messages as unknown[]).some(
+		piMessageHasThinking,
+	);
+	if (args.requestToolsChange && carriesThinking) return true;
+	// The same hash comparison (effectiveSystemChangedThisPass) and held-turn
+	// test (protectedSignedPrefix) the pipeline makes before it releases.
 	if (
+		carriesThinking &&
 		args.effectiveSystemHash !== undefined &&
 		lastServedSystemHashBySession.has(args.sessionId) &&
 		lastServedSystemHashBySession.get(args.sessionId) !==
 			args.effectiveSystemHash &&
-		(args.messages as unknown[]).some(piMessageHasThinking)
+		policy.holdsPrefix(
+			args.reasoningClearing?.prefixBound === true &&
+				(hasActiveAnthropicThinkingTurn(
+					args.messages,
+					args.resolvedProviderID,
+					args.resolvedModelID,
+				) ||
+					activeAnthropicTurnStart(args.messages, true) === undefined),
+			false,
+			args.signedThinkingHold === true,
+		)
 	)
 		return true;
 	if (
