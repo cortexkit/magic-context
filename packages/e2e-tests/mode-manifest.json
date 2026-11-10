@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/opencode2/issue-889-model-switch.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 shrinking-model recovery with a context-enforcing fake provider; passing trace guards and an assertion that no smaller-model request exceeds the provider window. PID lsof proves throwaway stores.",
+            "contract_refs": ["OC2-S1", "FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/overflow-terminal-errors.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

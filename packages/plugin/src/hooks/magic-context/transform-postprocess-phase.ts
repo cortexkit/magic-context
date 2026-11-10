@@ -1944,6 +1944,7 @@ export interface EmergencyFailClosedDecision {
         | "below-emergency-band"
         | "provider-overflow-abort"
         | "proceed"
+        | "recovery-request-over-limit"
         | "refusal-grade-final-wire-over-limit"
         | "trusted-final-wire-disarm";
     /** Trusted current-pass wire evidence that lets the caller clear its durable latch. */
@@ -1966,6 +1967,14 @@ export function evaluateEmergencyFailClosed(input: {
     providerProvenLimitTokens?: number;
     contextLimitTokens?: number;
     protectedToolTokens?: number;
+    /**
+     * The request this pass will send, counted the way the served-request
+     * sizing counts it, and the most it may be: the 95% line of the current
+     * model's usable window while older history remains to summarize, else the
+     * whole usable window (see recoveryAdmissionLimitTokens). Only a pass in
+     * overflow or model-shrink recovery supplies it.
+     */
+    recoveryServedRequest?: { tokens: number; lineTokens: number };
 }): EmergencyFailClosedDecision {
     const estimate = input.finalWireEstimate;
     const limit = input.providerProvenLimitTokens;
@@ -1999,14 +2008,25 @@ export function evaluateEmergencyFailClosed(input: {
     // Without route-specific proof that the final request does not fit, retain
     // the existing rule based on a provider-reported overflow. A conservative
     // estimate used to decide whether to send is not enough to refuse.
-    const shouldAbort =
-        input.emergencyRecoveryArmed &&
-        input.emergencyRecoveryOrigin === "provider_overflow" &&
-        !input.foldMaterializedThisPass;
-    return {
-        shouldAbort,
-        reason: shouldAbort ? "provider-overflow-abort" : "proceed",
-    };
+    const recoveryOrigin = input.emergencyRecoveryArmed ? input.emergencyRecoveryOrigin : null;
+    if (recoveryOrigin === "provider_overflow" && !input.foldMaterializedThisPass) {
+        return { shouldAbort: true, reason: "provider-overflow-abort" };
+    }
+    // Recovery that summarized or folded part of the history is progress, not
+    // proof that the request now fits: after a switch to a much smaller model a
+    // single historian run can leave the request several times over the new
+    // window. Whatever this pass reclaimed, a recovery request over its limit
+    // is not sent, so the provider never rejects it.
+    const served = input.recoveryServedRequest;
+    if (
+        recoveryOrigin !== null &&
+        served !== undefined &&
+        served.lineTokens > 0 &&
+        (!Number.isFinite(served.tokens) || served.tokens > served.lineTokens)
+    ) {
+        return { shouldAbort: true, reason: "recovery-request-over-limit" };
+    }
+    return { shouldAbort: false, reason: "proceed" };
 }
 
 export interface FinalizeMessageRepresentationOptions {

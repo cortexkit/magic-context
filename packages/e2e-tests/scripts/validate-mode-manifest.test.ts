@@ -57,6 +57,7 @@ describe("mode manifest validator", () => {
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
+            "tests/opencode2/issue-889-model-switch.test.ts",
             "tests/opencode2/overflow-terminal-errors.test.ts",
             "tests/opencode2/message-index-continuity.test.ts",
             "tests/opencode2/error-result-compaction.test.ts",

@@ -4174,6 +4174,24 @@ export function headMessagesForSizing(options: M0M1RenderOptions, folds = false)
     return head;
 }
 
+/**
+ * The messages a fold on this pass would keep raw: everything after the end of
+ * the newest compartment that has an end id, the same cut the fold makes. When
+ * that row is not in the array (the host already cut it away, or no compartment
+ * has an end id), the whole array is returned. For counting only.
+ */
+export function rawTailAfterNewestCompartment(
+    db: Database,
+    sessionId: string,
+    messages: readonly MessageLike[],
+): readonly MessageLike[] {
+    const boundary = newestCompartmentEndId(getCompartments(db, sessionId));
+    if (!boundary) return messages;
+    const index = findBoundaryIndex(sessionId, messages, boundary);
+    if (index < 0) return messages;
+    return messages.slice(index + (isPartialCompartmentEnd(db, sessionId, boundary) ? 0 : 1));
+}
+
 export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean {
     const row = db
         .prepare(

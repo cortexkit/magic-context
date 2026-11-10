@@ -1350,11 +1350,13 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             // Healthy historian progress — clear the drain-failure backoff so the
             // emergency catch-up latch can bypass the budget freely again.
             clearHistorianDrainFailure(db, sessionId);
-            // Normal historian publication resolves overflow recovery. A manual
-            // wrapup can publish several chunks before reaching its keep watermark,
-            // so it leaves the recovery flag armed until the orchestrator finishes.
+            // A publication is progress, not proof that the next request fits:
+            // after a switch to a much smaller model one summary can leave it
+            // several times over the window. The overflow recovery flag stays
+            // armed until a recovery pass counts its request under the line
+            // (transform.ts) or another disarm proves it stale. This floor also
+            // resets the no-eligible-head count, since the run made progress.
             recordProtectedTailPublicationFloor(db, sessionId, lastCompartmentEnd + 1);
-            if (!isWrapupInProgress(db, sessionId)) clearEmergencyRecovery(db, sessionId);
             drainReservation = null;
             if (deferMarkerApplication && lastNewEndMessageId) {
                 (deps.compactionMarkerStrategy?.setPending ?? setPendingCompactionMarkerState)(

@@ -117,6 +117,7 @@ import {
 	getEmergencyInputSample,
 	getHistorianFailureState,
 	getNoteNudgeAnchors,
+	getOverflowState,
 	getPersistedTodoSyntheticAnchor,
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
@@ -247,6 +248,10 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
+import {
+	recoveryAdmissionLimitTokens,
+	recoveryRefusalNotice,
+} from "@magic-context/core/hooks/magic-context/recovery-fit";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
@@ -430,6 +435,7 @@ import {
 	resolvePiOrdinalAlignmentForContext,
 } from "./pi-ordinal-alignment";
 import {
+	estimatePiOverflowRecoveryInputTokens,
 	piRecoveryFitCalibration,
 	piRecoveryToolImageTokens,
 	resolvePiOverflowRecoveryUsage,
@@ -824,6 +830,11 @@ const PI_STABLE_ID_SCHEME = 1;
  */
 const lastEmergencyNotificationAtMs = new Map<string, number>();
 const EMERGENCY_NOTIFICATION_COOLDOWN_MS = 60_000;
+/**
+ * Sessions already told that a recovery request went out uncounted because the
+ * fit envelope was untrusted, so the log says it once per session.
+ */
+const untrustedRecoveryCountLoggedSessions = new Set<string>();
 
 /**
  * Per-session "saw a commit on the previous pass" tracker for the
@@ -5144,8 +5155,9 @@ export function registerPiContextHandler(
 			//      fires regardless of pressure math.
 			//
 			// Mirrors OpenCode's transform.ts wiring. The recovery flag is
-			// cleared by the historian publication path on success (see
-			// signalPiHistoryRefresh), so we won't keep bumping forever.
+			// cleared when a recovery pass's request is counted within its limit
+			// (the recovery check before serving), or by the stale-flag disarms,
+			// so we won't keep bumping forever.
 			const tEmergencyRecovery = performance.now();
 			let needsEmergencyBump = false;
 			let emergencyRecoveryArmed = false;
@@ -6953,6 +6965,83 @@ export function registerPiContextHandler(
 						"over-window-proof"
 				)
 					throw new PiDegradedPassError("outgoing-over-window");
+			}
+			// A pass in overflow recovery whose request is over its limit is not
+			// sent, whatever it reclaimed. The limit is the 95% line of the model's
+			// usable window while a historian run can still summarize older history,
+			// and the whole usable window once none can: the line could not be
+			// reached then, and a request within the window fits. The check above
+			// refuses only a request whose byte count proves it is over the whole
+			// context window, and text with many tokens per byte can be far over
+			// the window without that proof. The count is the served-request count
+			// OpenCode uses: calibrated, neutral for an unseeded model.
+			// The recovery flag is read again here, because this pass may have
+			// cleared it (the no-eligible-history disarm above), and that clear
+			// holds for the rest of the pass.
+			const recoveryWindow = windowGeometry?.usableHard;
+			const recoveryLatch =
+				!options.compactionOff &&
+				isEmergency &&
+				emergencyRecoveryArmed &&
+				typeof recoveryWindow === "number" &&
+				recoveryWindow > 0
+					? getOverflowState(options.db, sessionId)
+					: undefined;
+			if (
+				recoveryLatch?.needsEmergencyRecovery === true &&
+				recoveryLatch.emergencyRecoveryOrigin !== null &&
+				typeof recoveryWindow === "number"
+			) {
+				const served = estimatePiOverflowRecoveryInputTokens(
+					outputMessages,
+					readPiLkgFitEnvelope(
+						ctx,
+						pi,
+						resolvePiContextModelKey(ctx),
+						sessionDecisionCalibration(options.db, sessionId),
+						toolWireSchema,
+					),
+					{ fitEnvelope: false },
+				);
+				// The historian was scheduled earlier in this pass; a run in flight
+				// now is summarizing history this request still carries. With none
+				// in flight there was nothing it could start on.
+				const historyRemains = inFlightHistorian.has(sessionId);
+				const limit = recoveryAdmissionLimitTokens(
+					recoveryWindow,
+					historyRemains,
+				);
+				if (served !== undefined && served > limit) {
+					sessionLog(
+						sessionId,
+						historyRemains
+							? `transform: recovery request still over the window: about ${served} tokens against the 95% line ${limit} of ${recoveryWindow}; not sending it, recovery stays armed for the next turn`
+							: `transform: recovery request still over the window: about ${served} tokens against the whole window ${limit}, with no older history left to summarize; not sending it`,
+					);
+					throw contextRefusalError(recoveryRefusalNotice(historyRemains));
+				}
+				if (served === undefined) {
+					// Sent without this check (only the byte-count check above
+					// applies). Recovery stays armed for the existing disarms, which
+					// need real pressure below the force-materialization threshold
+					// and nothing left to summarize.
+					if (!untrustedRecoveryCountLoggedSessions.has(sessionId)) {
+						untrustedRecoveryCountLoggedSessions.add(sessionId);
+						sessionLog(
+							sessionId,
+							"transform: recovery request not counted: the fit envelope is untrusted (system prompt or tool definitions not measured yet), so only the byte-count check above applies",
+						);
+					}
+				} else {
+					// The request was counted within its limit, so it fits. This is
+					// where a recovery pass ends its recovery; a historian run that
+					// publishes a summary does not.
+					clearEmergencyRecovery(options.db, sessionId);
+					sessionLog(
+						sessionId,
+						`transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`,
+					);
+				}
 			}
 			publishFinalRequestAccounting();
 			let serializedOutput: PiLkgSerializedOutput | undefined;
@@ -12625,6 +12714,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);
+	untrustedRecoveryCountLoggedSessions.delete(sessionId);
 	historyRefreshSessions.delete(sessionId);
 	clearPendingMaterialization(pendingMaterializationSessions, sessionId);
 	systemPromptRefreshSessions.delete(sessionId);

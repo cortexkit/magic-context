@@ -57,10 +57,14 @@ export function piRecoveryToolImageTokens(
 }
 
 /** Recovery must share the planner's serialized-content units. Some Pi routes
- * charge inline image payloads as input text, unlike OpenCode's pixel-based images. */
+ * charge inline image payloads as input text, unlike OpenCode's pixel-based images.
+ * `fitEnvelope: false` counts with calibrated ratios only (an unseeded model
+ * counts neutrally), the way OpenCode counts a served request; the default
+ * applies the fit envelope's margin for unseeded models. */
 export function estimatePiOverflowRecoveryInputTokens(
 	messages: readonly unknown[],
 	envelope: PiFitEnvelope | undefined,
+	options: { fitEnvelope?: boolean } = {},
 ): number | undefined {
 	if (!envelope || !estimatePiOutgoingInputTokens([], envelope).trusted) return;
 	const raw = tokenizePiMessages([...messages]);
@@ -111,7 +115,7 @@ export function estimatePiOverflowRecoveryInputTokens(
 			prose: raw.conversation,
 		},
 		envelope.calibration ?? calibrationForModelKey(envelope.modelKey),
-		true,
+		options.fitEnvelope ?? true,
 	);
 }
 
