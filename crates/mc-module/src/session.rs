@@ -4295,8 +4295,10 @@ impl Session {
             }) {
                 if rebuilt {
                     tracing::info!(
-                        "ck-mc: session {}: transcript keeps changing under a read",
-                        self.key.session
+                        "ck-mc: session {}: transcript keeps changing under a read (runner's newest {:?} is before the cut {:?})",
+                        self.key.session,
+                        page.head.newest,
+                        self.cut
                     );
                     return false;
                 }
@@ -4309,6 +4311,12 @@ impl Session {
                 self.restart_index(&mut rebuilt, &mut after);
                 continue;
             }
+            // Which ordinals this page carried, for the give-up log below.
+            let page_span = (
+                page.entries.first().map(|entry| entry.ordinal),
+                page.entries.last().map(|entry| entry.ordinal),
+            );
+            let read_from = after;
             match self
                 .index
                 .extend_counted(page.entries, page.token_family.as_deref())
@@ -4322,8 +4330,10 @@ impl Session {
                                 continue;
                             }
                             tracing::info!(
-                                "ck-mc: session {}: transcript keeps changing under a read",
-                                self.key.session
+                                "ck-mc: session {}: transcript keeps changing under a read (the last page ends at {:?}, but its head says {:?})",
+                                self.key.session,
+                                self.index.cursor(),
+                                page.head.newest
                             );
                             return false;
                         }
@@ -4333,10 +4343,15 @@ impl Session {
                 Extend::Gap | Extend::Diverged if !rebuilt => {
                     self.restart_index(&mut rebuilt, &mut after)
                 }
-                Extend::Gap | Extend::Diverged => {
+                outcome @ (Extend::Gap | Extend::Diverged) => {
                     tracing::info!(
-                        "ck-mc: session {}: transcript keeps changing under a read",
-                        self.key.session
+                        "ck-mc: session {}: transcript keeps changing under a read ({:?} in the page after {:?}, ordinals {:?}..{:?}; index ends at {:?})",
+                        self.key.session,
+                        outcome,
+                        read_from,
+                        page_span.0,
+                        page_span.1,
+                        self.index.cursor()
                     );
                     return false;
                 }
