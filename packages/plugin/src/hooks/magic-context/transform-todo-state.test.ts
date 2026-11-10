@@ -954,8 +954,7 @@ describe("todo state synthesis — captured snapshot changes wait for a rebuild"
             return messages;
         };
         const servedTodos = (messages: MessageLike[]): unknown =>
-            (findSyntheticPart(messages)?.part as SyntheticTodoPart | undefined)?.state.input
-                .todos;
+            (findSyntheticPart(messages)?.part as SyntheticTodoPart | undefined)?.state.input.todos;
 
         const firstTodos = [{ content: "Plan", status: "in_progress", priority: "high" }];
         await capture({ tool: "todowrite", sessionID: sessionId, args: { todos: firstTodos } });

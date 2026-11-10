@@ -164,7 +164,9 @@ describe("Pi todowrite capture compatibility", () => {
 		const db = createTestDb();
 		const previousState =
 			'[{"content":"Keep","status":"pending","priority":"medium"}]';
-		const todos = [{ content: "Hotfix", status: "pending", priority: "urgent" }];
+		const todos = [
+			{ content: "Hotfix", status: "pending", priority: "urgent" },
+		];
 		let overlayUpdates = 0;
 		try {
 			updateSessionMeta(db, "ses-priority", { lastTodoState: previousState });

@@ -69,7 +69,9 @@ describe("normalizeTodoStateJson", () => {
             normalizeTodoStateJson([{ content: "Bad priority", status: "pending", priority: 7 }]),
         ).toBeNull();
         expect(
-            normalizeTodoStateJson([{ content: "Null priority", status: "pending", priority: null }]),
+            normalizeTodoStateJson([
+                { content: "Null priority", status: "pending", priority: null },
+            ]),
         ).toBeNull();
         expect(normalizeTodoStateJson(["not an object"])).toBeNull();
     });
