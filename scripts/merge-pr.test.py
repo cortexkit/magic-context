@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("merge-pr.sh").resolve()
 SHIM = SCRIPT.with_name("merge-pr-test-fixtures") / "command-shim.py"
@@ -92,6 +93,24 @@ class MergeTests(unittest.TestCase):
         self.git("commit", "-m", message)
         self.scenario["head"] = self.git("rev-parse", "HEAD").strip()
         self.git("checkout", "master")
+
+    def prepare_remote_trial(self, parents=None, tree=None, message=None):
+        remote = self.root / "origin.git"
+        self.git("clone", "--bare", ".", str(remote))
+        parents = parents if parents is not None else [self.master, self.scenario["head"]]
+        tree = tree or self.git("rev-parse", self.scenario["head"] + "^{tree}").strip()
+        if message is None:
+            message = 'Merge PR #123: ' + self.scenario.get("title", 'A safe "quoted" title; $(touch SHOULD_NOT_EXIST)')
+        parent_args = [arg for parent in parents for arg in ("-p", parent)]
+        # A fixed old timestamp keeps the remote candidate distinct from the
+        # script's fresh merge even when both are created in the same second.
+        with patch.dict(self.env, GIT_COMMITTER_DATE="2001-01-01T00:00:00Z"):
+            trial = self.git("--git-dir", str(remote), "-c", "user.name=Merge Fixture",
+                             "-c", "user.email=fixture@example.invalid", "commit-tree", tree,
+                             *parent_args, "-m", message).strip()
+        self.git("--git-dir", str(remote), "update-ref", "refs/heads/train/check-pr-123", trial)
+        self.scenario["remote_trial"] = trial
+        return trial
 
     def run_script(self, *args, workflow=False):
         (self.root / "scenario.json").write_text(json.dumps(self.scenario))
@@ -478,6 +497,85 @@ class MergeTests(unittest.TestCase):
         run = self.run_script("--ci-gate", "--dry-run")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("Would push", run.stdout)
+        self.assert_no_merge_or_push()
+        self.assert_cleaned()
+
+    def test_ci_gate_reuses_matching_remote_trial(self):
+        trial = self.prepare_remote_trial()
+        absent = subprocess.run([str(REAL_GIT), "cat-file", "-e", trial], cwd=self.repo,
+                                env=self.env, capture_output=True, timeout=15)
+        self.assertNotEqual(absent.returncode, 0, "Trial should exist only on the remote before fetching")
+        run = self.run_script("--ci-gate")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"Reusing trial merge {trial} already on train/check-pr-123; waiting for its CI.", run.stdout)
+        pushes = [item["args"] for item in self.commands("git") if item["args"][0] == "push"]
+        self.assertEqual(pushes, [["push", "origin", trial + ":refs/heads/master"]])
+        self.assertEqual(self.git("rev-parse", "master").strip(), trial)
+        self.assertIn(["fetch", "origin", "refs/heads/train/check-pr-123"],
+                      [item["args"] for item in self.commands("git")])
+        self.assertTrue(any(f"head_sha={trial}" in arg for item in self.commands("gh") for arg in item["args"]))
+        self.assertIn("completed/success for " + trial, run.stdout)
+        self.assert_cleaned()
+
+    def assert_fresh_trial(self, remote_trial):
+        run = self.run_script("--ci-gate")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        pushes = [item["args"] for item in self.commands("git") if item["args"][0] == "push"]
+        self.assertEqual(len(pushes), 2)
+        tested = pushes[0][-1].split(":")[0]
+        self.assertNotEqual(tested, remote_trial)
+        self.assertEqual(pushes[0], ["push", "--force", "origin", tested + ":refs/heads/train/check-pr-123"])
+        self.assertEqual(pushes[1], ["push", "origin", tested + ":refs/heads/master"])
+        self.assertEqual(self.git("rev-parse", "master").strip(), tested)
+        self.assertNotIn("Reusing trial merge", run.stdout)
+        self.assertIn("completed/success for " + tested, run.stdout)
+        self.assert_cleaned()
+
+    def test_ci_gate_does_not_reuse_when_master_moved(self):
+        trial = self.prepare_remote_trial()
+        self.git("commit", "--allow-empty", "-m", "Master advanced")
+        self.master = self.git("rev-parse", "master").strip()
+        self.scenario["master"] = self.master
+        self.assert_fresh_trial(trial)
+
+    def test_ci_gate_does_not_reuse_when_pr_head_moved(self):
+        trial = self.prepare_remote_trial()
+        self.git("checkout", "fixture-pr")
+        self.git("commit", "--allow-empty", "-m", "PR advanced")
+        self.scenario["head"] = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "master")
+        self.assert_fresh_trial(trial)
+
+    def test_ci_gate_does_not_reuse_when_tree_differs(self):
+        tree = self.git("rev-parse", "master^{tree}").strip()
+        self.assert_fresh_trial(self.prepare_remote_trial(tree=tree))
+
+    def test_ci_gate_does_not_reuse_when_message_differs(self):
+        self.assert_fresh_trial(self.prepare_remote_trial(message="A different merge message"))
+
+    def test_ci_gate_does_not_reuse_when_message_has_extra_trailing_newlines(self):
+        message = 'Merge PR #123: A safe "quoted" title; $(touch SHOULD_NOT_EXIST)\n\n\n'
+        self.assert_fresh_trial(self.prepare_remote_trial(message=message))
+
+    def test_ci_gate_does_not_reuse_non_merge(self):
+        self.assert_fresh_trial(self.prepare_remote_trial(parents=[self.master]))
+
+    def test_ci_gate_dry_run_names_reused_trial_without_push_or_wait(self):
+        trial = self.prepare_remote_trial()
+        run = self.run_script("--ci-gate", "--dry-run")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"Would reuse trial merge {trial} already on train/check-pr-123", run.stdout)
+        self.assertNotIn("Would push", run.stdout)
+        self.assert_no_merge_or_push()
+        self.assertFalse(any("/actions/runs" in arg for item in self.commands("gh") for arg in item["args"]))
+        self.assert_cleaned()
+
+    def test_ci_gate_dry_run_names_fresh_trial_when_remote_does_not_match(self):
+        self.prepare_remote_trial(message="An outdated title")
+        run = self.run_script("--ci-gate", "--dry-run")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Would push", run.stdout)
+        self.assertNotIn("Would reuse", run.stdout)
         self.assert_no_merge_or_push()
         self.assert_cleaned()
 

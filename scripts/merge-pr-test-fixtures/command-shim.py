@@ -73,11 +73,11 @@ if name == "gh":
         print(json.dumps(scenario.get("check_pages", [{"check_runs": []}])))
     elif args[:1] == ["api"] and any("/actions/runs?head_sha=" in arg for arg in args):
         pushes = [entry for entry in previous if entry["name"] == "git" and entry["args"][:2] == ["push", "--force"]]
-        if not pushes or "--paginate" not in args or "--slurp" not in args:
-            sys.exit("CI query must follow the trial push and paginate")
-        trial = pushes[-1]["args"][-1].split(":")[0]
+        trial = pushes[-1]["args"][-1].split(":")[0] if pushes else scenario.get("remote_trial")
+        if not trial or "--paginate" not in args or "--slurp" not in args:
+            sys.exit("CI query must use an existing or pushed trial and paginate")
         if not any(f"head_sha={trial}" in arg for arg in args):
-            sys.exit("CI query must use the pushed SHA")
+            sys.exit("CI query must use the existing or pushed SHA")
         print(json.dumps([{"workflow_runs": [{
             "id": 321, "name": "CI", "head_sha": scenario.get("ci_sha", trial),
             "head_branch": "train/check-pr-123", "event": "push",
@@ -93,12 +93,18 @@ if name == "gh":
     else:
         sys.exit("Unexpected gh command (all writes forbidden): " + repr(args))
 elif name == "git":
+    if args == ["ls-remote", "--heads", "origin", "refs/heads/train/check-pr-123"]:
+        if scenario.get("remote_trial"):
+            print(scenario["remote_trial"] + "\trefs/heads/train/check-pr-123")
+        sys.exit(0)
     if args[:2] == ["fetch", "origin"]:
         if args[2:] == ["master"]:
             sys.exit(real_git("update-ref", "refs/remotes/origin/master", scenario.get("origin_master", scenario["master"])))
         if args[2:] == ["pull/123/head"]:
             (cwd / ".git/FETCH_HEAD").write_text(scenario.get("fetched_head", scenario["head"]) + "\n")
             sys.exit(0)
+        if args[2:] == ["refs/heads/train/check-pr-123"] and scenario.get("remote_trial"):
+            sys.exit(real_git("fetch", str(root / "origin.git"), args[2]))
         sys.exit("Unexpected fetch")
     if args[:1] == ["push"]:
         trial = args[:3] == ["push", "--force", "origin"] and args[-1].endswith(":refs/heads/train/check-pr-123")

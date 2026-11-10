@@ -4,7 +4,7 @@
 # Usage: scripts/merge-pr.sh <number> [--ci-gate] [--dry-run | --findings-only]
 #                             [--workflow-change-reason=<text>]
 # --ci-gate certifies a trial merge on train/check-pr-<number>, then fast-forwards
-# master to that exact SHA. Without it, touched-package gates run locally.
+# master to that exact SHA, reusing matching trials. Without it, touched-package gates run locally.
 # Requires gh, jq, Python 3, GNU timeout (coreutils on macOS), git, and the touched runners.
 # AFT's gh shim may refuse read-only GraphQL until gh api graphql is declared;
 # this script reports that limitation and never bypasses the shim.
@@ -238,13 +238,38 @@ added=1
 if [ "$ci_gate" -eq 1 ]; then
   run git -C "$worktree" merge --no-ff -m "Merge PR #$number: $title" "$head"
   tested_sha=$(run git -C "$worktree" rev-parse HEAD)
+  check_branch="train/check-pr-$number"
+  check_ref="refs/heads/$check_branch"
+  reused_trial=0
+  remote_trial=$(run git ls-remote --heads origin "$check_ref")
+  if [ -n "$remote_trial" ]; then
+    run git fetch origin "$check_ref"
+    remote_sha=$(run git rev-parse FETCH_HEAD)
+    # The same parents and tree preserve the content CI tested; only the
+    # timestamp may differ. Require the exact message too before reusing it.
+    # A trailing marker preserves message newlines in command substitutions.
+    if [ "$(run git show -s --format=%P "$remote_sha")" = "$master_sha $head" ] &&
+       [ "$(run git show -s --format=%T "$remote_sha")" = "$(run git show -s --format=%T "$tested_sha")" ] &&
+       [ "$(run git show -s --format=%B. "$remote_sha")" = "$(run git show -s --format=%B. "$tested_sha")" ]; then
+      tested_sha=$remote_sha
+      reused_trial=1
+    fi
+  fi
   if [ "$dry_run" -eq 1 ]; then
-    printf 'Dry run passed. Would push %s to train/check-pr-%s, wait for CI, then fast-forward master and push that SHA.\n' "$tested_sha" "$number"
+    if [ "$reused_trial" -eq 1 ]; then
+      printf 'Dry run passed. Would reuse trial merge %s already on %s, wait for its CI, then fast-forward master and push that SHA.\n' "$tested_sha" "$check_branch"
+    else
+      printf 'Dry run passed. Would push %s to %s, wait for CI, then fast-forward master and push that SHA.\n' "$tested_sha" "$check_branch"
+    fi
     exit 0
   fi
-  # This disposable branch is replaced on retries; master is never force-pushed.
-  run git push --force origin "$tested_sha:refs/heads/train/check-pr-$number"
-  python3 "$SCRIPT_DIR/ci-gate.py" wait "$tested_sha" --branch "train/check-pr-$number"
+  if [ "$reused_trial" -eq 1 ]; then
+    printf 'Reusing trial merge %s already on %s; waiting for its CI.\n' "$tested_sha" "$check_branch"
+  else
+    # Replace only a missing or mismatched trial; master is never force-pushed.
+    run git push --force origin "$tested_sha:$check_ref"
+  fi
+  python3 "$SCRIPT_DIR/ci-gate.py" wait "$tested_sha" --branch "$check_branch"
 else
 run git -C "$worktree" merge --no-ff --no-edit "$head"
 
