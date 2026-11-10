@@ -70,10 +70,11 @@ test("control: a fold the transform executes for a system-prompt change applies 
     }
 }, 60000);
 
-// Fails today on every OpenCode 2 version (2.0.22 through 2.2.6 on real hosts):
-// the head changes but the pass logs `rewrite permission: allowed=false
-// ride=none` and the queued drop waits for a second, avoidable rebuild.
-test.failing("the pass after a manual host fold that rebuilt the served head applies the held drop", async () => {
+// Before the fix this failed on every OpenCode 2 version (2.0.22 through 2.2.6
+// on real hosts): the head changed but the pass logged `rewrite permission:
+// allowed=false ride=none`, and the queued drop waited for a second, avoidable
+// rebuild.
+test("the pass after a manual host fold that rebuilt the served head applies the held drop", async () => {
     const { f, seed, target, waiting, pending } = await heldDropWithNewerHistory(42886);
     try {
         expect(servedText(waiting, target)).toContain(`${seed}/6: `);
@@ -89,6 +90,41 @@ test.failing("the pass after a manual host fold that rebuilt the served head app
         );
         expect(servedText(afterFold, target)).not.toContain(`${seed}/6: `);
         expect(pending()).toBe(0);
+        // One ride: the next request replays the rebuilt request byte for byte.
+        const replay = await f.pass();
+        expect(replay.bytes).toBe(afterFold.bytes);
+        expect(replay.logs.some((line) => /rewrite permission: allowed=false/.test(line))).toBe(
+            true,
+        );
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+test("a manual host fold that leaves the served head unchanged keeps the cache and the held drop", async () => {
+    const f = await oc2ContextFixture(43886, options);
+    try {
+        f.compartment(10);
+        await f.pass();
+        const target = `r43886-13`;
+        const { tag } = f.db
+            .prepare("SELECT tag_number AS tag FROM tags WHERE session_id = ? AND message_id = ?")
+            .get(f.session, `${target}:p0`) as { tag: number };
+        queuePendingOp(f.db, f.session, tag, "drop");
+        const waiting = await f.pass();
+        // Every published compartment is already in the served head, so the
+        // manual fold re-renders the same head.
+        await f.nativeFold(3, 0, "", "manual");
+        const afterFold = await f.pass();
+        expect(head(afterFold)).toBe(head(waiting));
+        expect(afterFold.bytes).toBe(waiting.bytes);
+        expect(
+            afterFold.logs.some((line) => /host checkpoint head: changed=false/.test(line)),
+        ).toBe(true);
+        expect(afterFold.logs.some((line) => /rewrite permission: allowed=false/.test(line))).toBe(
+            true,
+        );
+        expect(servedText(afterFold, target)).toContain("43886/6: ");
     } finally {
         await f.cleanup();
     }

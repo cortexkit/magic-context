@@ -143,6 +143,7 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
+import { hostCheckpointChangedServedHead, rememberServedHead } from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
@@ -2691,6 +2692,38 @@ export async function runPostTransformPhase(
         const depth = getPendingOpsCount(args.db, args.sessionId);
         return depth === null ? "not loaded (deferred pass)" : String(depth);
     };
+    // OpenCode 2 can replace the history head outside any pass: its compaction
+    // hook commits a new m[0]/m[1] for a manual /compact and asks for a
+    // `host_compaction` materialization. When the head this request serves
+    // really differs from the one the previous pass injected, the provider
+    // cache is already lost on this request, so it is the hardFold ride every
+    // queued lane lands on. The request is withdrawn on this pass either way:
+    // the next pass serves the same head again and must not rebuild for it a
+    // second time.
+    const hostCheckpointRequested = hasPendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
+        args.sessionId,
+        "host_compaction",
+    );
+    const hostCheckpointRide =
+        hostCheckpointRequested &&
+        m0M1EnabledForFold &&
+        hostCheckpointChangedServedHead(args.sessionId, {
+            m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+            m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+            muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+        });
+    if (hostCheckpointRequested) {
+        clearPendingMaterializationOrigin(
+            args.pendingMaterializationSessions,
+            args.sessionId,
+            "host_compaction",
+        );
+        sessionLog(
+            args.sessionId,
+            `host checkpoint head: changed=${hostCheckpointRide} (one ride; request withdrawn)`,
+        );
+    }
     // All first applications share an independently priced cache-bust permission.
     // An expired provider cache is not one of them: when only the provider forgot
     // the cache, the pass replays byte-identically like a warm one, so queued
@@ -2699,7 +2732,11 @@ export async function runPostTransformPhase(
         servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
+        hardFold:
+            rewritingSignedPrefix ||
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            hostCheckpointRide,
         // A reading that only a local count put in the force band is not
         // evidence the session is there: the count can overstate the provider.
         // Below 95% it waits for the provider's next measurement instead of
@@ -2825,7 +2862,12 @@ export async function runPostTransformPhase(
         activeThinkingTurn &&
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
-        if (foldBustsServedPrefixThisPass || firstRenderBust || publishedM1RefreshedThisPass)
+        if (
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            publishedM1RefreshedThisPass ||
+            hostCheckpointRide
+        )
             releaseThinkingForRewrite();
         else {
             unheldSignedTurnBust = true;
@@ -2847,6 +2889,7 @@ export async function runPostTransformPhase(
     const recoveryHeadChangedThisPass =
         !prefixPreflightFailed &&
         (foldChangesHeadThisPass ||
+            hostCheckpointRide ||
             (!firstRenderBust && publishedM1RefreshedThisPass) ||
             (!m0M1EnabledForFold && legacyPublishedHeadChanged(args)));
     const recoveryHeadlessRebuild =
@@ -3976,6 +4019,11 @@ export async function runPostTransformPhase(
                 if (result.m0RematerializedThisPass) {
                     m0ComparisonDecision = result.decision;
                 }
+                rememberServedHead(args.sessionId, {
+                    m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                    m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                    muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                });
                 sessionLog(
                     args.sessionId,
                     `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
@@ -5387,6 +5435,7 @@ export function checkM0MutationDriftAndSignal(args: {
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
+    clearPendingMaterializationOrigin,
     hasPendingMaterializationOrigin,
     pendingMaterializationOrigin,
     requestPendingMaterialization,

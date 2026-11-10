@@ -295,6 +295,8 @@ interface ReaderConnection {
     retired: boolean;
     ordinalVersion?: number;
     ordinalSequences: Map<string, number[]>;
+    /** Whether this database has OpenCode's `session_part` table (2.2.2 and later). */
+    partTable?: boolean;
 }
 
 function connect(path: string, identity = ""): ReaderConnection {
@@ -518,6 +520,60 @@ export class V2StoreReader {
         }
         return statement;
     }
+
+    /** Whether this database has OpenCode's `session_part` table. Checked once per
+     * connection: the host creates it in a schema migration before plugins load. */
+    private hasPartTable(): boolean {
+        this.connection.partTable ??= Boolean(
+            this.prepare(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part'",
+            ).get(),
+        );
+        return this.connection.partTable;
+    }
+
+    /**
+     * Give assistant rows the content OpenCode itself reads. With
+     * `experimental.part_rows` (OpenCode 2.2.6) an assistant message's content is
+     * stored in `session_part`, one row per part, and its `session_message` row
+     * keeps `content: []`. OpenCode then uses those part rows, in ordinal order,
+     * as the message content (`SessionHistory.withParts`), so this reader does
+     * the same. A row without part rows is returned unchanged, so sessions that
+     * never used part rows read exactly the bytes they did before.
+     */
+    private withParts(rows: StoreRow[]): StoreRow[] {
+        const ids = rows.flatMap((row) => (row.type === "assistant" ? [row.id] : []));
+        if (ids.length === 0 || !this.hasPartTable()) return rows;
+        const parts = new Map<string, unknown[]>();
+        for (let offset = 0; offset < ids.length; offset += 500) {
+            const chunk = ids.slice(offset, offset + 500);
+            const partRows = this.prepare(
+                `SELECT message_id, ordinal, data FROM session_part
+                     WHERE message_id IN (${chunk.map(() => "?").join(", ")})
+                     ORDER BY message_id ASC, ordinal ASC`,
+            ).all(...chunk) as Array<{ message_id: string; ordinal: number; data: string }>;
+            for (const part of partRows) {
+                let data: unknown;
+                try {
+                    data = JSON.parse(part.data);
+                } catch {
+                    throw new Error(
+                        `Invalid session_part data for ${part.message_id} at ordinal ${part.ordinal}`,
+                    );
+                }
+                const list = parts.get(part.message_id);
+                if (list) list.push(data);
+                else parts.set(part.message_id, [data]);
+            }
+        }
+        if (parts.size === 0) return rows;
+        return rows.map((row) => {
+            const content = parts.get(row.id);
+            return content && row.type === "assistant" && "content" in row.data
+                ? { ...row, data: { ...row.data, content: content as MessageData["content"] } }
+                : row;
+        });
+    }
     close(): void {
         if (this.closed) return;
         this.closed = true;
@@ -553,11 +609,13 @@ export class V2StoreReader {
                 predicates.push("type = ?");
                 parameters.push(options.type);
             }
-            const rows = (
-                this.prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
+            const rows = this.withParts(
+                (
+                    this.prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                         WHERE ${predicates.join(" AND ")}
                         ORDER BY seq ASC LIMIT ?`).all(...parameters, limit) as RawRow[]
-            ).map(decode);
+                ).map(decode),
+            );
             return { rows, cursor: rows.at(-1)?.seq };
         });
     }
@@ -590,16 +648,18 @@ export class V2StoreReader {
                     "SELECT seq FROM session_message WHERE session_id = ? AND id = ?",
                 ).get(sessionID, after.id) as { seq: number } | undefined;
                 if (anchor) {
-                    return (
-                        this.prepare(`SELECT id, session_id, type, seq, time_created, data
+                    return this.withParts(
+                        (
+                            this.prepare(`SELECT id, session_id, type, seq, time_created, data
                         FROM session_message WHERE session_id = ? AND seq > ?
                         AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS}) ORDER BY seq ASC LIMIT ?`).all(
-                            sessionID,
-                            anchor.seq,
-                            ...RAW_MESSAGE_TYPES,
-                            pageSize,
-                        ) as RawRow[]
-                    ).map(decode);
+                                sessionID,
+                                anchor.seq,
+                                ...RAW_MESSAGE_TYPES,
+                                pageSize,
+                            ) as RawRow[]
+                        ).map(decode),
+                    );
                 }
             }
             const maximumSeq = Number.MAX_SAFE_INTEGER;
@@ -619,7 +679,7 @@ export class V2StoreReader {
                 ...RAW_MESSAGE_TYPES,
                 pageSize,
             ) as RawRow[];
-            return rows.map(decode);
+            return this.withParts(rows.map(decode));
         });
     }
 
@@ -852,7 +912,7 @@ export class V2StoreReader {
                 `SELECT id, session_id, type, seq, time_created, data FROM session_message
                      WHERE session_id = ? AND id = ? AND type IN (${rawTypes}) LIMIT 1`,
             ).get(sessionID, id, ...RAW_MESSAGE_TYPES) as RawRow | undefined;
-            return row ? decode(row) : null;
+            return row ? (this.withParts([decode(row)])[0] ?? null) : null;
         });
     }
 
@@ -1072,24 +1132,44 @@ export class V2StoreReader {
      * decoding any row: the row id, its update time and the byte length of its data.
      * A row deleted, added, or rewritten in place to a different size or with a new
      * update time changes its stamp; comparing stamps row by row, not an aggregate,
-     * means two such changes cannot cancel out.
+     * means two such changes cannot cancel out. An assistant whose content OpenCode
+     * keeps in `session_part` (see withParts) also stamps its part rows: their
+     * count, newest update time and total size. An edit to a part rewrites only
+     * its part row, so the message row alone would not show it. Rows without part
+     * rows keep the stamp they had before part rows existed.
      */
     spanRowStamps(sessionID: string, after: number, through: number): Map<number, string> {
         if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through))
             throw new Error("Invalid seq span");
+        const partColumns = this.hasPartTable()
+            ? `, (SELECT COUNT(*) FROM session_part p WHERE p.message_id = m.id) AS parts,
+               (SELECT MAX(p.time_updated) FROM session_part p WHERE p.message_id = m.id) AS partsUpdated,
+               (SELECT SUM(length(CAST(p.data AS BLOB))) FROM session_part p WHERE p.message_id = m.id) AS partsBytes`
+            : "";
         const rows = this.prepare(
-            `SELECT seq, id, time_updated AS updated, length(CAST(data AS BLOB)) AS bytes
-                 FROM session_message WHERE session_id = ? AND seq > ? AND seq <= ?
-                 ORDER BY seq ASC`,
+            `SELECT m.seq AS seq, m.id AS id, m.time_updated AS updated,
+                    length(CAST(m.data AS BLOB)) AS bytes${partColumns}
+                 FROM session_message m WHERE m.session_id = ? AND m.seq > ? AND m.seq <= ?
+                 ORDER BY m.seq ASC`,
         ).all(sessionID, after, through) as Array<{
             seq: number;
             id: string;
             updated: number | null;
             bytes: number | null;
+            parts?: number;
+            partsUpdated?: number | null;
+            partsBytes?: number | null;
         }>;
         const stamps = new Map<number, string>();
         for (const row of rows)
-            stamps.set(row.seq, `${row.id}\u0000${row.updated ?? ""}\u0000${row.bytes ?? ""}`);
+            stamps.set(
+                row.seq,
+                `${row.id}\u0000${row.updated ?? ""}\u0000${row.bytes ?? ""}${
+                    row.parts
+                        ? `\u0000${row.parts}\u0000${row.partsUpdated ?? ""}\u0000${row.partsBytes ?? ""}`
+                        : ""
+                }`,
+            );
         return stamps;
     }
 
@@ -1100,13 +1180,15 @@ export class V2StoreReader {
             if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
                 throw new Error("Invalid page limit");
             const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
-            return (
-                this.prepare(
-                    `SELECT id, session_id, type, seq, time_created, data FROM session_message
+            return this.withParts(
+                (
+                    this.prepare(
+                        `SELECT id, session_id, type, seq, time_created, data FROM session_message
                          WHERE session_id = ? AND type IN (${rawTypes}) AND seq <= ?
                          ORDER BY seq DESC LIMIT ?`,
-                ).all(sessionID, ...RAW_MESSAGE_TYPES, throughSeq, limit) as RawRow[]
-            ).map(decode);
+                    ).all(sessionID, ...RAW_MESSAGE_TYPES, throughSeq, limit) as RawRow[]
+                ).map(decode),
+            );
         });
     }
 
@@ -1270,7 +1352,7 @@ export class V2StoreReader {
                 this.prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                     WHERE session_id = ? AND type = 'assistant' AND seq > ?
                     ORDER BY seq ASC`).all(sessionID, afterSeq) as RawRow[];
-            return rows.map((row) => decode(row) as StoreRow<"assistant">);
+            return this.withParts(rows.map(decode)) as StoreRow<"assistant">[];
         });
     }
 
@@ -1280,7 +1362,7 @@ export class V2StoreReader {
                 this.prepare(`SELECT id, session_id, type, seq, time_created, data FROM session_message
                     WHERE session_id = ? AND type = 'assistant'
                     ORDER BY seq DESC LIMIT 1`).get(sessionID) as RawRow | undefined;
-            return row ? (decode(row) as StoreRow<"assistant">) : undefined;
+            return row ? (this.withParts([decode(row)])[0] as StoreRow<"assistant">) : undefined;
         });
     }
 

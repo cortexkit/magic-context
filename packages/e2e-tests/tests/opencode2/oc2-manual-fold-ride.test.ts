@@ -10,11 +10,11 @@ import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "../../src/o
 // answers with Magic Context's history and commits a new history head (the two
 // synthetic messages, m[0] and m[1], that start every request), so the next
 // request starts with different bytes and the provider's cached prefix is lost
-// on that pass whatever else happens. Measured on real 2.0.22, 2.1.0, 2.2.5 and
-// 2.2.6 hosts, that pass logs `rewrite permission: allowed=false ride=none`,
-// so work queued for the next rebuild (here a drop such as the agent's
-// ctx_reduce tool queues) waits for a second, avoidable rebuild instead of
-// landing with this one.
+// on that pass whatever else happens. Work queued for the next rebuild (here a
+// drop such as the agent's ctx_reduce tool queues) must land on that request.
+// Before the fix, real 2.0.22, 2.1.0, 2.2.5 and 2.2.6 hosts all logged
+// `rewrite permission: allowed=false ride=none` there, so the drop waited for a
+// second, avoidable rebuild.
 
 const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8" }).stdout.trim().replace(/^opencode\s+v?/, "");
 const [major = 0, minor = 0, patch = 0] = hostVersion.split(".").map(Number);
@@ -90,7 +90,7 @@ async function manualFoldSession(partRows: boolean) {
     };
 }
 
-test.failing("the request after a manual compaction that rebuilt the history head carries the queued drop", async () => {
+test("the request after a manual compaction that rebuilt the history head carries the queued drop", async () => {
     const s = await manualFoldSession(false);
     try {
         await s.turn("BEFORE_FOLD: continue");
@@ -120,11 +120,14 @@ test.failing("the request after a manual compaction that rebuilt the history hea
             // ...and the held drop must land with it.
             expect(text).not.toContain("MID_0:");
             expect(pending()).toBe(0);
+            // One rebuild: the next request keeps that request as its prefix.
+            const next = await s.turn("NEXT: continue");
+            expect(next.slice(0, after.length)).toEqual(after);
         } finally { db.close(); }
     } finally { await s.host().stop(); }
 }, 240000);
 
-(partRowsHost ? test.failing : test.skip)("with experimental part_rows, rows restored after a manual compaction keep their assistant replies", async () => {
+(partRowsHost ? test : test.skip)("with experimental part_rows, rows restored after a manual compaction keep their assistant replies", async () => {
     const s = await manualFoldSession(true);
     try {
         const before = await s.turn("BEFORE_FOLD: continue");
