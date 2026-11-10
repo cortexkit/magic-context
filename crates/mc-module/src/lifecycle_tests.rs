@@ -27,6 +27,9 @@ mod stale_reading_accepted_tests;
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
+#[path = "notes_tokens_tests.rs"]
+mod notes_tokens_tests;
+
 #[path = "reminder_delivery_tests.rs"]
 mod reminder_delivery_tests;
 

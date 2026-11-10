@@ -129,6 +129,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 // The runner sends its signed floor (reasoning it strips after
                 // a tool-set change) only to providers declaring this.
                 cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
+                cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
                 "mc-app-read/v1".to_owned(),
                 "mc-context-read/v1".to_owned(),
                 // Core finds tool providers and step-transform providers in
@@ -1619,6 +1620,7 @@ mod manifest_tests {
             "compaction-provider/v2",
             "compaction-entry-speaks-for/v1",
             "compaction-signed-floor/v1",
+            "compaction-notes-tokens/v1",
             "tool-provider/v1",
             "step-transform-provider/v2",
         ] {

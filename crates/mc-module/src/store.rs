@@ -58,6 +58,9 @@ pub struct Durable {
     /// are ignored until the next Setup.
     #[serde(default)]
     pub prompt_views_untrusted: bool,
+    /// Keep notice counts across restarts; rides never supply them.
+    #[serde(default, skip_serializing_if = "crate::prompt_notes::Notes::is_empty")]
+    pub notes: crate::prompt_notes::Notes,
     /// Parts the model asked to drop that no view carries yet.
     pub queued: BTreeSet<(String, String)>,
     pub reclaim_bookmark: u64,

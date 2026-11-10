@@ -1344,9 +1344,11 @@ pub fn emergency_tier(name: &str) -> u8 {
 
 /// What the emergency drop knows about the pass.
 pub struct Emergency {
-    /// The prompt size it reclaims from: the newest reported prompt, or the
-    /// runner's estimate of the request it is about to send.
+    /// The newest reported prompt, before pending note growth is added.
     pub prompt_tokens: u64,
+    /// A ride's next-request estimate already includes pending notes.
+    pub request_tokens: Option<u64>,
+    pub notes: crate::prompt_notes::Notes,
     /// The usable window times the execute threshold.
     pub ceiling_tokens: u64,
     /// The runner said the next request would not fit: the protected tail and
@@ -1362,13 +1364,16 @@ pub struct Emergency {
 /// tier 3 first, oldest first within a tier, until the prompt is down to the
 /// fixed part plus 30% of the room up to the ceiling. The fixed part is what
 /// the prompt holds besides the transcript (system prompt, tools), measured as
-/// the reported prompt minus the transcript's estimate.
+/// the reported prompt minus the transcript's estimate, adjusted for pending
+/// note growth. A ride's next-request estimate already includes that growth.
 pub fn emergency_drop(
     context: &Context,
     cutoff: Option<u64>,
     emergency: &Emergency,
 ) -> Vec<(PartKey, Shape)> {
-    if emergency.prompt_tokens == 0 || emergency.ceiling_tokens == 0 {
+    if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
+        || emergency.ceiling_tokens == 0
+    {
         return Vec::new();
     }
     let transcript: u64 = context
@@ -1379,14 +1384,20 @@ pub fn emergency_drop(
         .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
         .map(|(_, part)| tokens::part(part))
         .sum();
-    let fixed = emergency.prompt_tokens.saturating_sub(transcript) as f64;
+    let measured_fixed = emergency.prompt_tokens.saturating_sub(transcript) as f64;
+    let mut fixed = emergency.notes.fixed_part(measured_fixed);
+    let mut prompt = emergency.prompt_tokens as f64 + fixed - measured_fixed;
+    if let Some(request) = emergency.request_tokens.filter(|&n| n as f64 > prompt) {
+        prompt = request as f64;
+        fixed = request.saturating_sub(transcript) as f64;
+    }
     let ceiling = emergency.ceiling_tokens as f64;
     if fixed > ceiling {
         // Dropping tool output cannot reach the target.
         return Vec::new();
     }
     let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
-    let reclaim = (emergency.prompt_tokens as f64 - target).round();
+    let reclaim = (prompt - target).round();
     if reclaim <= EMERGENCY_MIN_TOKENS as f64 {
         return Vec::new();
     }

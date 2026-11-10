@@ -79,6 +79,7 @@ pub mod pass;
 pub mod pre_user;
 pub mod preset;
 pub mod project_docs;
+pub mod prompt_notes;
 pub mod reads;
 pub mod reduce;
 pub mod rekey;
