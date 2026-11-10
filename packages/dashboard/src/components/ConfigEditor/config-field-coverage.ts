@@ -132,6 +132,7 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   "embedding.document_prefix": "advanced stored-document prefix; raw JSONC",
   "embedding.truncate": "provider-specific truncate mode; raw JSONC",
   "embedding.max_input_tokens": "advanced embedding chunk limit; raw JSONC",
+  "embedding.dimensions": "Matryoshka output width; changing it re-embeds; raw JSONC",
   "embedding.local_runtime": "advanced ONNX runtime selection; raw JSONC",
   profile:
     "per-repository model-profile selector; deferred until the Alfonso Desktop profile editor is available",

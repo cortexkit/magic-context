@@ -328,3 +328,90 @@ describe("probeEmbeddingEndpoint", () => {
         }
     });
 });
+
+describe("probeEmbeddingEndpoint dimensions", () => {
+    const ORIGINAL_ENV = { ...process.env };
+
+    beforeEach(() => {
+        process.env = { ...ORIGINAL_ENV };
+    });
+
+    afterEach(() => {
+        process.env = { ...ORIGINAL_ENV };
+    });
+
+    function widthResponse(width: number): Response {
+        return new Response(
+            JSON.stringify({ data: [{ embedding: Array.from({ length: width }, () => 0.1) }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+        );
+    }
+
+    function bodyOf(capture: FetchCapture): Record<string, unknown> {
+        return JSON.parse(capture.init?.body as string) as Record<string, unknown>;
+    }
+
+    it("sends dimensions in the probe body when requested", async () => {
+        const capture: FetchCapture = {};
+        const fetch = mockFetch(widthResponse(768), capture);
+
+        const result = await probeEmbeddingEndpoint({
+            endpoint: "https://api.example.com/v1",
+            model: "qwen/qwen3-embedding-8b",
+            dimensions: 768,
+            fetch,
+        });
+
+        expect(bodyOf(capture).dimensions).toBe(768);
+        expect(result).toEqual({ kind: "ok", status: 200, dimensions: 768 });
+    });
+
+    it("omits dimensions from the probe body when unset (probe the same space as runtime)", async () => {
+        const capture: FetchCapture = {};
+        const fetch = mockFetch(widthResponse(4096), capture);
+
+        await probeEmbeddingEndpoint({
+            endpoint: "https://api.example.com/v1",
+            model: "qwen/qwen3-embedding-8b",
+            fetch,
+        });
+
+        expect("dimensions" in bodyOf(capture)).toBe(false);
+    });
+
+    it("reports dimensions_mismatch when the endpoint ignored the parameter", async () => {
+        const fetch = mockFetch(widthResponse(4096));
+
+        const result = await probeEmbeddingEndpoint({
+            endpoint: "https://api.example.com/v1",
+            model: "qwen/qwen3-embedding-8b",
+            dimensions: 768,
+            fetch,
+        });
+
+        // The runtime provider refuses these vectors, so a probe that answered
+        // "ok" here would green-light an endpoint that silently empties recall.
+        expect(result).toEqual({
+            kind: "dimensions_mismatch",
+            status: 200,
+            requested: 768,
+            returned: 4096,
+        });
+    });
+
+    it("ignores a non-positive / non-integer dimensions instead of sending it", async () => {
+        for (const bad of [0, -1, 1.5, Number.NaN]) {
+            const capture: FetchCapture = {};
+            const fetch = mockFetch(widthResponse(16), capture);
+
+            await probeEmbeddingEndpoint({
+                endpoint: "https://api.example.com/v1",
+                model: "m",
+                dimensions: bad,
+                fetch,
+            });
+
+            expect("dimensions" in bodyOf(capture)).toBe(false);
+        }
+    });
+});
