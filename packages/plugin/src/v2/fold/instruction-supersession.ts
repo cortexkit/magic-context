@@ -17,8 +17,8 @@ const namespace = "instructionSupersession";
 // the transform still serves at the head of the request) follow the persisted
 // decisions. Releases before this switch served every covered row, including
 // rows retired while they were live, so it is turned on only on a pass that
-// may rebuild, and every later pass reads it. Its own namespace in the
-// per-session replay document, so no schema change is needed.
+// may rewrite the whole prefix, and every later pass reads it. Its own
+// namespace in the per-session replay document, so no schema change is needed.
 const coveredNamespace = "coveredInstructionSupersession";
 
 function decode(value: unknown): Set<string> {
@@ -53,7 +53,9 @@ export type SupersessionRow = StoreRow;
  * instruction text. `covered` holds the instruction rows the history summary
  * covers that this pass serves at the head of the request; they are older
  * than every row in `messages` and follow the same decisions, once the
- * session's switch is on.
+ * session's switch is on. `permitted` is the transform's whole-prefix rewrite
+ * permission (canEditWholePrefix): only such a pass selects new retirements
+ * or turns the switch on; every other pass replays the persisted decisions.
  */
 export function reclaimInstructionRows(
     db: Database,
@@ -76,12 +78,12 @@ export function reclaimInstructionRows(
         rows.length > 0 &&
         (coveredRows.length > 0 || permitted) &&
         coveredInstructionSupersessionOn(db, sessionID);
-    // The first pass that may rebuild and carries instruction rows turns the
-    // switch on, whether or not they are covered yet: a row this pass retires
-    // while uncovered becomes a covered row on a later pass that may not
-    // rebuild, and must stay retired there. Until then covered rows are served
-    // as earlier releases served them, so a pass that may not rebuild changes
-    // no bytes.
+    // The first pass that may rewrite the whole prefix and carries instruction
+    // rows turns the switch on, whether or not they are covered yet: a row
+    // this pass retires while uncovered becomes a covered row on a later pass
+    // that may not, and must stay retired there. Until then covered rows are
+    // served as earlier releases served them, so no other pass changes their
+    // bytes.
     const switchCovered =
         permitted && rows.length > 0 && !coveredFollowed && coveredSupersessionEnabled;
     const selected = permitted

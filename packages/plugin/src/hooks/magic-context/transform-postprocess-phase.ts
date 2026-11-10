@@ -3135,13 +3135,14 @@ export async function runPostTransformPhase(
     };
     // OpenCode 2 instruction rows are served even once the history summary
     // covers them; the delivery trim below already keeps every one still in
-    // the array. The switch that extends this to the earlier trims is set on
-    // the first pass allowed to rewrite the whole prefix, so a session served
-    // before it never changes bytes on a defer pass. Every pass after that
-    // serves the same rows, whichever pass moved the history boundary.
-    // Decided before the host-row reclaim, which applies instruction
-    // supersession to the covered rows this pass serves as well; the switch
-    // itself is persisted below, where the covered rows are put back.
+    // the array. The switch that extends this to the earlier trims is turned
+    // on by the first pass that may rewrite the whole prefix
+    // (canEditWholePrefix), so a session served before it never changes bytes
+    // on any other pass. Every pass after that serves the same rows, whichever
+    // pass moved the history boundary. Decided before the host-row reclaim,
+    // which applies instruction supersession to the covered rows this pass
+    // serves as well; the switch itself is persisted once the pass's
+    // signed-thinking omissions are durable (next to the reclaim's commit).
     const coveredHostInstructions = args.coveredHostInstructions ?? [];
     let coveredRetentionOn = false;
     let retainCoveredInstructions = false;
@@ -3160,10 +3161,14 @@ export async function runPostTransformPhase(
         }
         retainCoveredInstructions = coveredRetentionOn || canEditWholePrefix;
     }
+    // Instruction rows retire only where the whole prefix may be rewritten. A
+    // pass held for recent signed thinking may still rebuild in the force
+    // band, but every byte in front of the held block must stay as it was, so
+    // such a pass only replays decisions already persisted.
     const hostRowReclaim = args.reclaimHostRows?.(
         args.sessionId,
         args.messages,
-        !compactionOff && isCacheBustingPass,
+        !compactionOff && canEditWholePrefix,
         retainCoveredInstructions ? coveredHostInstructions : [],
     );
     for (const message of hostRowReclaim?.edits ?? []) {
@@ -3898,15 +3903,14 @@ export async function runPostTransformPhase(
 
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
-    if (
-        retainCoveredInstructions &&
-        !coveredRetentionOn &&
-        !markHostInstructionRetention(args.db, args.sessionId)
-    )
-        failPass("host-instruction-retention-persistence-failure");
-    // The covered rows are older than everything left in the array.
-    if (retainCoveredInstructions && coveredHostInstructions.length > 0)
+    // The covered rows are older than everything left in the array. The pass
+    // that turns retention on puts them back in front of every signed block,
+    // which is a first application like any other edit there.
+    if (retainCoveredInstructions && coveredHostInstructions.length > 0) {
+        if (!coveredRetentionOn && coveredHostInstructions.some((m) => m.parts.length > 0))
+            recordFirstApplicationWireEdit(true);
         args.messages.unshift(...coveredHostInstructions);
+    }
     if (m0M1Enabled && args.m0M1) {
         // Serve the persisted pair and its trim boundary as they are. Marking
         // the replay contention-exhausted keeps this pass from counting as
@@ -5069,6 +5073,15 @@ export async function runPostTransformPhase(
     // Host retirements must not survive a failed required thinking-strip write.
     // The omission above is durable before its dependent row edit is committed.
     hostRowReclaim?.commit();
+    // Likewise the retention switch: a pass that fails before this point must
+    // not leave covered rows served on a following pass that may not rewrite
+    // the prefix.
+    if (
+        retainCoveredInstructions &&
+        !coveredRetentionOn &&
+        !markHostInstructionRetention(args.db, args.sessionId)
+    )
+        failPass("host-instruction-retention-persistence-failure");
 
     // Reasoning that a drop neutralized this pass. Canonical Anthropic keeps the
     // empty sentinel its adapter drops (its existing bytes). Elsewhere a drop

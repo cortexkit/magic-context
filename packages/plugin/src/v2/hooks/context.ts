@@ -277,15 +277,20 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     return true;
 }
 
-function bindKeptInstructionCoordinates(
+export function bindKeptInstructionCoordinates(
     messages: readonly V2Message[],
     incoming: V2Message | undefined,
-    reader: V2StoreReader,
+    reader: Pick<V2StoreReader, "instructionRowsThrough" | "latestSequence" | "sequenceForId">,
     sessionID: string,
 ): ReturnType<V2StoreReader["instructionRowsThrough"]> {
     const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
     let previous: number | undefined;
     let pending: V2Message[] = [];
+    const matches = (message: V2Message | undefined, row: (typeof rows)[number] | undefined) =>
+        message?.role === "system" &&
+        message.content.length === 1 &&
+        message.content[0]?.type === "text" &&
+        message.content[0].text === row?.data.text;
     const bind = (next?: number) => {
         if (!pending.length) return;
         const candidates = rows.filter(
@@ -304,20 +309,35 @@ function bindKeptInstructionCoordinates(
                   : candidates;
         if (
             selected.length === pending.length &&
-            selected.every((row, index) => {
-                const message = pending[index];
-                return (
-                    message?.role === "system" &&
-                    message.content.length === 1 &&
-                    message.content[0]?.type === "text" &&
-                    message.content[0].text === row.data.text
-                );
-            })
+            selected.every((row, index) => matches(pending[index], row))
         ) {
             selected.forEach((row, index) => {
                 const message = pending[index];
                 if (message) bindNativeRowID(message, row.id, row.seq);
             });
+        } else {
+            // A hole (rows a native fold retired) breaks that window. Then bind
+            // only a row every order-preserving text match places on the same
+            // candidate: its earliest and latest placements agree. Rows with
+            // equal text elsewhere in the window, or no match, stay unbound.
+            const earliest: number[] = [];
+            let at = 0;
+            for (const message of pending) {
+                while (at < candidates.length && !matches(message, candidates[at])) at++;
+                earliest.push(at++);
+            }
+            const latest: number[] = [];
+            at = candidates.length - 1;
+            for (let index = pending.length - 1; index >= 0; index--) {
+                while (at >= 0 && !matches(pending[index], candidates[at])) at--;
+                latest[index] = at--;
+            }
+            if (earliest.every((position) => position < candidates.length))
+                pending.forEach((message, index) => {
+                    const row = candidates[earliest[index]];
+                    if (row && earliest[index] === latest[index])
+                        bindNativeRowID(message, row.id, row.seq);
+                });
         }
         pending = [];
     };

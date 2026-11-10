@@ -325,3 +325,44 @@ test("after an upgrade, covered rows a release served are retired only on a pass
         await f.cleanup();
     }
 }, 60000);
+
+test("rows the OpenCode 2 hook restores after a host checkpoint go through the same supersession", async () => {
+    const f = await oc2ContextFixture(43886, options);
+    const pass = () =>
+        f.pass((draft) => {
+            draft.model.limit = { context: 302000 };
+        });
+    try {
+        await pass();
+        const githubGone = catalogRow("RESTORED_GONE", [docs, github], [docs]);
+        f.instruction(githubGone, both);
+        const restoredID = f.rows.at(-1)!.id;
+        f.user("First batch.", 1000);
+        f.respond();
+        // The summary covers the row before the host folds, so after the
+        // checkpoint the hook restores it as a covered row.
+        f.compartment(f.rows.length - 1);
+        f.user("Second batch.", 1000);
+        f.respond(1, 260000);
+        await pass();
+        f.respond();
+        await pass();
+        // The host folds and then sends only its short window.
+        await f.fold();
+        f.user("After the checkpoint.", 1000);
+        f.respond();
+        const folded = await pass();
+        expect(instructionTexts(folded)).toEqual([githubGone]);
+        const githubBack = catalogRow("AFTER_CHECKPOINT", [docs], [docs, github]);
+        f.instruction(githubBack, both);
+        f.user("Third batch.", 1000);
+        f.respond(1, 260000);
+        const rebuilt = await pass();
+        expect(instructionTexts(rebuilt)).toEqual([githubBack]);
+        expect(retiredLiveInstructionIDs(f.db, f.session).has(restoredID)).toBe(true);
+        f.respond();
+        sameBytes(await pass(), rebuilt);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);

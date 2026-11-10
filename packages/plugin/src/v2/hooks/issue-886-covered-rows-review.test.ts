@@ -79,10 +79,9 @@ async function heldForceBandFixture(seed: number) {
     };
 }
 
-// Witnesses: `test.failing` until fixed, then plain tests. Their hold and
-// permission preconditions are asserted too, so a plain run shows which part
-// fails.
-test.failing("a held force-band pass does not retire a covered row in front of the held signed thinking", async () => {
+// Witnesses. Their hold and permission preconditions are asserted too, so a
+// failing run shows which part fails.
+test("a held force-band pass does not retire a covered row in front of the held signed thinking", async () => {
     const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(37886);
     try {
         await pass();
@@ -128,7 +127,7 @@ test.failing("a held force-band pass does not retire a covered row in front of t
 // The same edit on a row after the cut. Unlike the covered case, this one
 // predates covered rows following supersession: it also fails when only rows
 // after the cut are reclaimed.
-test.failing("a held force-band pass does not retire an uncovered row in front of the held signed thinking", async () => {
+test("a held force-band pass does not retire an uncovered row in front of the held signed thinking", async () => {
     const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(38886);
     try {
         await pass();
@@ -259,7 +258,7 @@ test("the pass that turns covered supersession on strips the signed thinking aft
 // that as an edit, so a prefix-bound model keeps a signed block bound to the
 // bytes before the rows came back. Like the uncovered witness above, this
 // one predates covered rows following supersession.
-test.failing("the pass that turns host instruction retention on strips the signed thinking after the rows it puts back", async () => {
+test("the pass that turns host instruction retention on strips the signed thinking after the rows it puts back", async () => {
     const { f, pass, sign } = await signedFixture(41886);
     setHostInstructionRetentionEnabledForTests(false);
     try {
@@ -287,6 +286,54 @@ test.failing("the pass that turns host instruction retention on strips the signe
         expect(after.bytes).not.toContain("KEPT_SIGNED_REASONING");
     } finally {
         setHostInstructionRetentionEnabledForTests(true);
+        await f.cleanup();
+    }
+}, 60000);
+
+// A held force-band pass may rebuild, but it may not rewrite anything in front
+// of the held signed block, so it serves exactly the instruction rows of the
+// request before it. A retirement it would have selected waits for the next
+// pass that may rewrite the whole prefix.
+test("a held force-band pass serves the previous request's rows and leaves the retirement to the next whole-prefix pass", async () => {
+    const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(42886);
+    try {
+        await pass();
+        const githubGone = catalogRow("COVERED_GONE", [docs, github], [docs]);
+        f.instruction(githubGone, both);
+        f.user("First batch.", 1000);
+        f.respond();
+        f.compartment(f.rows.length - 1);
+        f.user("Second batch.", 1000);
+        f.respond(1, 260000);
+        await pass();
+        f.respond();
+        const previous = await pass();
+        expect(instructionTexts(previous.draft)).toEqual([githubGone]);
+        const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
+        f.instruction(githubBack, both);
+        f.user("Third batch.", 1000);
+        respondWithHeldThinking();
+        const held = await pass();
+        expect(held.logs.some((line) => line.includes("thinking_hold=true"))).toBe(true);
+        expect(held.logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(
+            true,
+        );
+        expect(instructionTexts(held.draft)).toEqual([githubGone, githubBack]);
+        expect(JSON.stringify(held.draft.system)).toBe(JSON.stringify(previous.draft.system));
+        expect(JSON.stringify(held.draft.messages.slice(0, previous.draft.messages.length))).toBe(
+            JSON.stringify(previous.draft.messages),
+        );
+        expect(held.bytes).toContain("HELD_SIGNED_REASONING");
+        // A later turn without heavy reasoning ends the hold; that pass may
+        // rewrite the whole prefix, retires the covered row and strips the
+        // older signed block in front of which it edits.
+        f.user("Fourth batch.", 1000);
+        f.respond(1, 260000);
+        const unheld = await pass();
+        expect(unheld.logs.some((line) => line.includes("thinking_hold=false"))).toBe(true);
+        expect(instructionTexts(unheld.draft)).toEqual([githubBack]);
+        expect(unheld.bytes).not.toContain("HELD_SIGNED_REASONING");
+    } finally {
         await f.cleanup();
     }
 }, 60000);
