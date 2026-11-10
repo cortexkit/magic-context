@@ -11580,20 +11580,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// the end of runPipeline after materializing work succeeds.
 			// A head held for signed thinking and then released for a system
 			// change was replayed, not rebuilt, so it consumes no refresh.
-			if (
-				args.isCacheBusting &&
-				prefixMutationAllowed &&
-				!heldHeadReleasedForSystemChange
-			) {
-				historyRefreshSessions.delete(args.sessionId);
-				historyWasConsumedThisPass = true;
-			}
-			if (
-				deferredHistoryRefresh &&
-				prefixMutationAllowed &&
-				!heldHeadReleasedForSystemChange
-			) {
-				historyWasConsumedThisPass = true;
+			if (!heldHeadReleasedForSystemChange) {
+				if (args.isCacheBusting && prefixMutationAllowed) {
+					historyRefreshSessions.delete(args.sessionId);
+					historyWasConsumedThisPass = true;
+				}
+				if (deferredHistoryRefresh && prefixMutationAllowed) {
+					historyWasConsumedThisPass = true;
+				}
 			}
 			logTransformTiming(
 				args.sessionId,
