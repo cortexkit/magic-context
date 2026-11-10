@@ -90,6 +90,7 @@ export interface SpawnOptions {
     mockProviderAPI?: "@ai-sdk/anthropic" | "@ai-sdk/openai";
     /** Model id exposed by the mock provider. Defaults to "mock-sonnet". */
     mockModelID?: string;
+    additionalModelIDs?: string[];
     /** Port for opencode serve. Default: random available */
     port?: number;
     /** magic-context.jsonc overrides. Defaults keep most features on. */
@@ -340,6 +341,8 @@ export function writeConfigs(
         },
         models: {
             [modelID]: mockModel(modelID, opts.modelContextLimit ?? 200000),
+            ...Object.fromEntries((opts.additionalModelIDs ?? []).map((id) =>
+                [id, mockModel(id, opts.modelContextLimit ?? 200000)])),
             ...(withHistorianModel && historianModel
                 ? { [historianModel.id]: mockModel(historianModel.id, historianModel.contextLimit) }
                 : {}),

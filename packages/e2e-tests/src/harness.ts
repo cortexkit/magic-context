@@ -28,6 +28,7 @@ export interface TestHarnessOptions {
     /** Preallocated private paths for fixture setup before the host starts; caller owns cleanup. */
     existingEnv?: SpawnOptions["existingEnv"];
     mockModelID?: string;
+    additionalModelIDs?: string[];
     thinkingScope?: (body: Record<string, unknown>) => string | undefined;
     prefixBinding?: boolean;
     /** Use a canonical provider id when testing provider-specific replay lanes. */
@@ -161,6 +162,7 @@ export class TestHarness implements HostHarness {
             mockProviderURL: baseURL,
             mockProviderID: options.mockProviderID,
             mockModelID: options.mockModelID,
+            additionalModelIDs: options.additionalModelIDs,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
             openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,

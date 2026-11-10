@@ -38,6 +38,23 @@ afterEach(() => {
 });
 
 describe("opencode configuration", () => {
+    it("registers extra mock models at the primary window without rerouting the historian", () => {
+        const env = createIsolatedEnv();
+        tempDirs.push(dirname(env.dataDir));
+        writeConfigs(env, "http://127.0.0.1:12345", {
+            mockProviderURL: "http://127.0.0.1:12345",
+            modelContextLimit: 100_000,
+            additionalModelIDs: ["mock-model-hard-fold"],
+        });
+        const config = JSON.parse(readFileSync(join(env.configDir, "opencode.json"), "utf8"));
+        const models = config.provider["mock-anthropic"].models;
+        expect(models["mock-model-hard-fold"].limit).toEqual({ context: 100_000, output: 8192 });
+        expect(models["mock-model-hard-fold"].limit).toEqual(models["mock-sonnet"].limit);
+        expect(config.model).toBe("mock-anthropic/mock-sonnet");
+        const policy = JSON.parse(readFileSync(join(env.configDir, "cortexkit", "magic-context.jsonc"), "utf8"));
+        expect(policy.historian.opencode.model).toBe("mock-anthropic/mock-sonnet");
+    });
+
     it("restart config edits replace the authoritative CortexKit user policy", () => {
         const env = createIsolatedEnv();
         tempDirs.push(dirname(env.dataDir));

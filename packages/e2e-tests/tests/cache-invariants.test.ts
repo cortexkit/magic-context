@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as pathResolve } from 'node:path';
+import { OpenCode } from "@opencode/client";
 import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import { runTurnTwo } from "../../plugin/src/features/magic-context/memory/turn-two";
@@ -47,6 +48,7 @@ import {
     mainAgentRequests,
 } from "../src/cache-analysis";
 import { TestHarness } from "../src/harness";
+import type { OpenCode2TestHarness } from "../src/opencode2-harness";
 import { findHistorianOrdinalRange } from '../src/mock-historian';
 import {
     createScenarioHarness,
@@ -273,7 +275,7 @@ function hostCompletionVisible(): boolean {
  * asynchronously. Aging the clock before that write lands does not stick: the
  * handler then stores a fresh clock for the reply (its completion time, or on
  * OpenCode 1 the handler's own time when the update carries none), which is
- * newer than the aged value, so the next pass sees a warm cache and never folds.
+ * newer than the aged value, so the next pass sees a warm cache instead of expiry.
  *
  * Where the host's stored completion time is visible, the clock must equal it
  * exactly. That excludes an earlier write for the same reply that stamped the
@@ -317,13 +319,9 @@ async function waitForResponseClock(sessionId: string): Promise<void> {
 }
 
 /**
- * Age the session past its prompt-cache TTL: the idle-expiry rebuild, a
- * genuine HARD trigger. An external (dashboard) memory change no longer forces
- * a HARD of its own; it waits for the next natural rebuild, and an expired
- * cache is one. The fold clock moves with the response clock, so the last
- * response stays newer than the last fold and the next pass treats the expiry
- * as unconsumed. The aging waits for the plugin to store the last reply's
- * response clock first, or that late write would undo it.
+ * Age the session past its prompt-cache TTL without changing request inputs.
+ * Expiry alone must replay the served bytes, not fold waiting memory changes.
+ * Wait for the plugin's response-clock write first so it cannot undo the aging.
  */
 async function expireCache(sessionId: string): Promise<void> {
     await waitForResponseClock(sessionId);
@@ -476,6 +474,7 @@ forEachHost(import.meta.url, null, (host) => {
     beforeEach(async () => {
         h = await createScenarioHarness(host, {
             modelContextLimit: MODEL_LIMIT,
+            additionalModelIDs: host === "opencode" || host === "opencode2" ? ["mock-model-hard-fold"] : undefined,
             magicContextConfig: {
                 execute_threshold_percentage: 20,
                 // These cache scenarios use the one-pass XML mock historian.
@@ -503,6 +502,54 @@ forEachHost(import.meta.url, null, (host) => {
             reloadedIsolationRoot = undefined;
         }
     });
+
+    async function changeSystemPrompt(): Promise<string> {
+        const instruction = "Cache-invariant HARD trigger: preserve the project rules when editing code.";
+        writeFileSync(join(h.workdir, "AGENTS.md"), instruction);
+        if (host === "pi" || host === "omp") {
+            // Pi loads project instructions when resources are reloaded.
+            reloadedIsolationRoot ??= dirname(h.workdir);
+            await h.reloadPlugin();
+        }
+        return instruction;
+    }
+
+    async function foldOnCacheKeyChange(sessionId: string, prompt: string): Promise<Record<string, unknown>> {
+        if (host === "opencode") {
+            setDefer("Changed model");
+            await (h as TestHarness).sendPrompt(sessionId, prompt, { modelID: "mock-model-hard-fold" });
+            const hard = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+            expect(hard.model).toBe("mock-model-hard-fold");
+            return hard;
+        }
+        if (host === "opencode2") {
+            const runner = (h as OpenCode2TestHarness).opencode;
+            const client = OpenCode.make({ baseUrl: runner.url,
+                headers: { authorization: `Basic ${btoa(`opencode:${runner.password}`)}` } });
+            await client.session.switchModel({ sessionID: sessionId,
+                model: { providerID: "anthropic", id: "mock-model-hard-fold" } });
+            setDefer("Changed model");
+            await h.sendPrompt(sessionId, prompt);
+            const hard = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+            expect(hard.model).toBe("mock-model-hard-fold");
+            return hard;
+        }
+        const instruction = await changeSystemPrompt();
+        setDefer("Changed instructions");
+        await h.sendPrompt(sessionId, prompt);
+        const observed = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+        expect(wireValueText(observed.system)).toContain(instruction);
+        return mainAgentRequests(h.mock.requests()).at(-1)!.body;
+    }
+
+    async function replayAfterHard(sessionId: string, prompt: string): Promise<void> {
+        if (host === "opencode") {
+            // OpenCode 1 selects the model on each prompt rather than on the session.
+            await (h as TestHarness).sendPrompt(sessionId, prompt, { modelID: "mock-model-hard-fold" });
+        } else {
+            await h.sendPrompt(sessionId, prompt);
+        }
+    }
 
     describe("cache invariants — replay class", () => {
     if (!RUST_MODE && (host === "opencode" || host === "opencode2")) {
@@ -636,13 +683,17 @@ forEachHost(import.meta.url, null, (host) => {
                 expect(extractM1(body)).toBe(extractM1(soft)!);
             }
             expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2)).length).toBe(0);
-            h.mock.setDefault({ text: "K1 hard pressure", usage: EXECUTE_USAGE });
-            await h.sendPrompt(sessionId, "K1 prepare natural rebuild.");
-            await waitForUsage(EXECUTE_USAGE);
             await expireCache(sessionId);
-            setDefer("K1 hard");
-            await h.sendPrompt(sessionId, "K1 expired cache rebuild.");
-            const hard = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)!;
+            setDefer("K1 idle replay");
+            await h.sendPrompt(sessionId, "K1 expired cache still replays the frozen prefix.");
+            const idle = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+            expect(extractM0(idle)).toBe(m0);
+            expect(extractM1(idle)).toBe(extractM1(soft)!);
+            for (const text of changed) expect(wireValueText(idle)).not.toContain(text);
+            expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2))).toEqual([]);
+
+            const hardBody = await foldOnCacheKeyChange(sessionId, "K1 changed cache key folds the waiting historian changes.");
+            const hard = extractM0(hardBody)!;
             for (const text of changed) expect(hard).toContain(text);
             expect(hard).not.toContain(original[0]!);
             expect(hard).not.toContain(original[3]!);
@@ -969,14 +1020,19 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 for (const request of replayPair)
                     expect(extractM1(request.body) ?? "").not.toContain("B10 fresh rule");
 
-                //#then — a genuine HARD trigger (an idle cache expiry) folds it into m[0].
-                h.mock.setDefault({ text: "B10 hard-pressure", usage: EXECUTE_USAGE });
-                await h.sendPrompt(sessionId, "B10 turn 8: high usage marks the next pass execute.");
+                // Idle expiry is not a rebuild: the foreign memory must still wait.
                 await expireCache(sessionId);
-                setDefer("B10 refold");
-                await h.sendPrompt(sessionId, "B10 turn 9: execute pass HARD-refolds m[0].");
-                requests = mainAgentRequests(h.mock.requests());
-                expect(extractM0(requests.at(-1)!.body)).toContain("B10 fresh rule");
+                setDefer("B10 idle replay");
+                await h.sendPrompt(sessionId, "B10 turn 8: idle expiry replays the frozen prefix.");
+                const idle = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+                expect(extractM0(idle)).toBe(m0Baseline!);
+                expect(extractM1(idle)).toBe(extractM1(replayPair.at(-1)!.body)!);
+                expect(wireValueText(idle)).not.toContain("B10 fresh rule");
+                expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2))).toEqual([]);
+
+                //#then — changed system/model inputs supply a genuine HARD trigger.
+                const hardBody = await foldOnCacheKeyChange(sessionId, "B10 turn 9: changed cache key HARD-refolds m[0].");
+                expect(extractM0(hardBody)).toContain("B10 fresh rule");
             }, 220_000);
         });
     });
@@ -1151,22 +1207,28 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 }
                 expect(busts.length).toBe(0);
 
-                //#then — a genuine HARD trigger (an idle cache expiry) shows the new text.
-                h.mock.setDefault({ text: "B11 hard-pressure", usage: EXECUTE_USAGE });
-                await h.sendPrompt(sessionId, "B11 turn 8: high usage marks the next pass execute.");
+                // Idle expiry preserves the old memory and both frozen message lanes.
                 await expireCache(sessionId);
-                setDefer("B11 refold");
-                await h.sendPrompt(sessionId, "B11 turn 9: execute pass HARD-refolds m[0].");
-                requests = mainAgentRequests(h.mock.requests());
-                const refoldM0 = extractM0(requests.at(-1)!.body)!;
+                setDefer("B11 idle replay");
+                await h.sendPrompt(sessionId, "B11 turn 8: idle expiry replays the frozen prefix.");
+                const idle = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+                expect(extractM0(idle)).toBe(m0Baseline!);
+                expect(extractM1(idle)).toBe(m1Baseline!);
+                expect(wireValueText(idle)).not.toContain("B11 revised rule");
+                expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2))).toEqual([]);
+
+                //#then — a changed cache key admits the canonical update into m[0].
+                const hardBody = await foldOnCacheKeyChange(sessionId, "B11 turn 9: changed cache key HARD-refolds m[0].");
+                const refoldM0 = extractM0(hardBody)!;
                 expect(refoldM0).toContain("B11 revised rule");
                 expect(refoldM0).not.toContain("B11 original rule");
             }, 220_000);
         });
     });
 
-    describe("#given a genuine HARD trigger — idle cache expiry (B12 — the fold direction)", () => {
-        describe("#when another writer's memory waited out a SOFT, then the cache expires", () => {
+    const hardTrigger = host === "opencode" || host === "opencode2" ? "model switch" : "system-prompt change";
+    describe(`#given a genuine HARD trigger — ${hardTrigger} (B12 — the fold direction)`, () => {
+        describe("#when another writer's memory waited out a SOFT and idle expiry, then the cache key changes", () => {
             it("#then m[0] re-materializes with the memory, m[1] stays the placeholder, and defer re-stabilizes", async () => {
                 //#given — materialize an empty m[0], add a memory from another writer,
                 // and run an execute (SOFT) pass: the memory stays out of the prompt.
@@ -1214,29 +1276,28 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
 
                 let requests = mainAgentRequests(h.mock.requests());
                 const surfaceReq = requests.at(-1)!;
-                // Before the expiry: the memory is neither in the empty m[0] nor in m[1].
+                // Before the HARD: the memory is neither in the empty m[0] nor in m[1].
                 expect(extractM0(surfaceReq.body)).toContain("<session-history></session-history>");
                 expect(extractM0(surfaceReq.body)).not.toContain("B12 delta rule");
                 expect(extractM1(surfaceReq.body) ?? "").not.toContain("B12 delta rule");
 
-                //#when — a HARD trigger fires (the prompt cache expired while idle).
-                // Turn 6 records high usage so turn 7 is cache-busting;
-                // mustMaterialize must re-materialize m[0] on the expiry.
-                h.mock.setDefault({ text: "B12 hard-pressure", usage: EXECUTE_USAGE });
-                await h.sendPrompt(sessionId, "B12 turn 6: high usage marks the next pass execute.");
+                // Expiry alone leaves both slots byte-identical and the memory out.
                 await expireCache(sessionId);
-                setDefer("B12 refold");
-                await h.sendPrompt(sessionId, "B12 turn 7: execute pass HARD-refolds m[0].");
+                setDefer("B12 idle replay");
+                await h.sendPrompt(sessionId, "B12 turn 6: idle expiry replays the frozen prefix.");
+                const idle = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+                expect(extractM0(idle)).toBe(extractM0(surfaceReq.body)!);
+                expect(extractM1(idle)).toBe(extractM1(surfaceReq.body)!);
+                expect(wireValueText(idle)).not.toContain("B12 delta rule");
+                expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2))).toEqual([]);
+
+                //#when — a system/model change already loses the provider prefix.
+                await foldOnCacheKeyChange(sessionId, "B12 turn 7: changed cache key HARD-refolds m[0].");
 
                 //#then — the memory has folded INTO the m[0] baseline, and m[1] is the
                 // empty placeholder.
                 requests = mainAgentRequests(h.mock.requests());
-                const refoldReq = requests.find(
-                    (r, i) =>
-                        i > requests.indexOf(surfaceReq) &&
-                        (extractM0(r.body)?.includes("B12 delta rule") ?? false),
-                );
-                expect(refoldReq).toBeDefined();
+                const refoldReq = requests.at(-1)!;
                 const m0 = extractM0(refoldReq!.body)!;
                 const m1 = extractM1(refoldReq!.body)!;
                 // Fold invariant: the memory is now in the m[0] baseline...
@@ -1249,11 +1310,12 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 // m[0]+m[1] replay byte-identical across the trailing defer pair.
                 const refoldIdx = requests.indexOf(refoldReq!);
                 setDefer("B12 replay 1");
-                await h.sendPrompt(sessionId, "B12 turn 8: defer replay after refold.");
+                await replayAfterHard(sessionId, "B12 turn 8: defer replay after refold.");
                 setDefer("B12 replay 2");
-                await h.sendPrompt(sessionId, "B12 turn 9: defer replay again.");
+                await replayAfterHard(sessionId, "B12 turn 9: defer replay again.");
                 const after = mainAgentRequests(h.mock.requests()).slice(refoldIdx);
                 expect(new Set(after.map((r) => extractM0(r.body))).size).toBe(1);
+                expect(new Set(after.map((r) => extractM1(r.body))).size).toBe(1);
                 const replayPair = mainAgentRequests(h.mock.requests()).slice(-2);
                 const busts = findBusts(replayPair);
                 if (busts.length > 0) {
