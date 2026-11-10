@@ -116,7 +116,7 @@ function sessionMessages(sessionId: string) {
                     state: {
                         status: "completed",
                         input: { command: `listing ${i}` },
-                        output: prose(33_900, i),
+                        output: prose(28_250, i),
                     },
                 },
             ],
@@ -184,6 +184,8 @@ describe("issue 797: first pass after a restart with stored tool rows of every t
                 estimateTokens(JSON.stringify(tool.parameters)),
             0,
         );
+        // A provider reading is a share of the usable window (`liveLimit`), not
+        // of the hard wall.
         const count = (toolDefinitionTokens: number) =>
             ((estimateFinalWireInputTokens({
                 messages: sessionMessages(sessionId) as never,
@@ -192,13 +194,19 @@ describe("issue 797: first pass after a restart with stored tool rows of every t
                 ...MODEL,
                 agentName: undefined,
             }).pressureTokens ?? 0) /
-                usableHard!) *
+                liveLimit) *
             100;
         const providerPercentage = count(liveToolTokens);
         const withPhantoms = count(liveToolTokens + PHANTOM_TOOLS * PHANTOM_TOKENS);
         console.log(
             "ISSUE_797_SHAPE",
-            JSON.stringify({ usableHard, liveToolTokens, providerPercentage, withPhantoms }),
+            JSON.stringify({
+                usableHard,
+                liveLimit,
+                liveToolTokens,
+                providerPercentage,
+                withPhantoms,
+            }),
         );
         // The report's shape: about 76% for real, past the 95% line with the
         // tools the route is no longer offered.
@@ -209,7 +217,7 @@ describe("issue 797: first pass after a restart with stored tool rows of every t
         const pending = new Set<string>();
         const liveUsage = {
             percentage: providerPercentage,
-            inputTokens: Math.round(((usableHard ?? 0) * providerPercentage) / 100),
+            inputTokens: Math.round((liveLimit * providerPercentage) / 100),
         };
         await newProcess(
             db,

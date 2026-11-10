@@ -11,7 +11,7 @@ import {
 } from "../../features/magic-context/storage-tags";
 import { resolveModelConfigValue } from "../../shared/prompt-surface";
 import { isRecord } from "../../shared/record-type-guard";
-import { hasAnthropicReasoning, isInActiveAnthropicTurn } from "./active-anthropic-turn";
+import { activeAnthropicTurnStart, hasAnthropicReasoning } from "./active-anthropic-turn";
 import { estimateTokens } from "./read-session-formatting";
 import { neutralizedReasoningSource } from "./sentinel";
 import {
@@ -208,6 +208,10 @@ export function opencodeReasoningBudgetCutoff(args: {
     const newest = assistants.at(-1);
     const exempt = findLatestAssistantReasoningMutationExemptMessage(args.messages);
     const anthropic = args.anthropic ?? hasAnthropicReasoning(args.messages);
+    // The active turn starts at the same message for every assistant, so find it
+    // once. Asking per assistant rescans the turn each time, which makes one
+    // long turn quadratic.
+    const activeTurnStart = activeAnthropicTurnStart(args.messages, anthropic);
     const indexOfMessage = new Map<MessageLike, number>();
     args.messages.forEach((message, index) => {
         // First occurrence, as indexOf would answer.
@@ -225,11 +229,8 @@ export function opencodeReasoningBudgetCutoff(args: {
             exempt:
                 message === newest ||
                 message === exempt ||
-                isInActiveAnthropicTurn(
-                    args.messages,
-                    indexOfMessage.get(message) ?? -1,
-                    anthropic,
-                ),
+                (activeTurnStart !== undefined &&
+                    (indexOfMessage.get(message) ?? -1) >= activeTurnStart),
             cost: () => {
                 const costMessage = { ...message, parts: [...message.parts] };
                 const id = message.info.id ?? "";

@@ -31,6 +31,11 @@ import type { MessageLike } from "./transform-operations";
 // GitHub Copilot's gpt-5-mini as OpenCode's catalog lists it: a 264k window, a
 // 128k prompt limit Copilot enforces, a 64k output limit.
 const COPILOT = { providerID: "github-copilot", modelID: "gpt-5-mini" };
+// A model without an input limit: a 272k window and 128k of output. Its trusted
+// limit reserves a quarter of the window for output (204k); its usable hard
+// limit is the window less the 32k of output a request asks for (240k).
+const CODEX = { providerID: "openai-codex", modelID: "fallback-model" };
+type Model = typeof COPILOT;
 
 const databases: ContextDatabase[] = [];
 const unregisters: Array<() => void> = [];
@@ -48,20 +53,18 @@ afterEach(() => {
 });
 
 async function registerCopilotRow(): Promise<void> {
+    await registerRow(COPILOT, { context: 264_000, input: 128_000, output: 64_000 });
+}
+
+async function registerRow(
+    model: Model,
+    limit: { context: number; input?: number; output: number },
+): Promise<void> {
     await refreshModelLimitsFromApi({
         config: {
             providers: async () => ({
                 data: {
-                    providers: [
-                        {
-                            id: COPILOT.providerID,
-                            models: {
-                                [COPILOT.modelID]: {
-                                    limit: { context: 264_000, input: 128_000, output: 64_000 },
-                                },
-                            },
-                        },
-                    ],
+                    providers: [{ id: model.providerID, models: { [model.modelID]: { limit } } }],
                 },
             }),
         },
@@ -82,7 +85,10 @@ function trustedEstimate(tokens: number): ReturnType<typeof estimateFinalWireInp
  * A compaction-off Rust session whose module is down, so every pass serves the
  * raw input when the raw fallback admits it and throws when it refuses.
  */
-function fallbackSession(estimate: () => ReturnType<typeof estimateFinalWireInputTokens>) {
+function fallbackSession(
+    estimate: () => ReturnType<typeof estimateFinalWireInputTokens>,
+    model: Model = COPILOT,
+) {
     sessionCounter += 1;
     const sessionId = `rust-raw-fallback-admission-${sessionCounter}-${Date.now()}`;
     const db = new Database(":memory:") as ContextDatabase;
@@ -122,7 +128,7 @@ function fallbackSession(estimate: () => ReturnType<typeof estimateFinalWireInpu
         directory: "/tmp/project",
         projectPath: "/tmp/project",
         memoryConfig: { enabled: false, injectionBudgetTokens: 1000, autoPromote: false },
-        liveModelBySession: new Map([[sessionId, { ...COPILOT }]]),
+        liveModelBySession: new Map([[sessionId, { ...model }]]),
         sessionDirectoryBySession: new Map(),
         transformMode: "rust",
         rustModeModuleClient: moduleClient,
@@ -146,9 +152,9 @@ function fallbackSession(estimate: () => ReturnType<typeof estimateFinalWireInpu
     return { sessionId, db, run };
 }
 
-function user(sessionId: string, id: string, text: string): MessageLike {
+function user(sessionId: string, id: string, text: string, model: Model = COPILOT): MessageLike {
     return {
-        info: { id, role: "user", sessionID: sessionId, model: { ...COPILOT } },
+        info: { id, role: "user", sessionID: sessionId, model: { ...model } },
         parts: [{ type: "text", text }],
     } as MessageLike;
 }
@@ -177,20 +183,37 @@ function editingAssistant(sessionId: string, id: string, fileBytes: number): Mes
 }
 
 describe("the raw fallback is admitted like a last-known-good replay", () => {
-    it("refuses a raw fallback between the trusted limit and the usable hard limit", async () => {
+    it("refuses a raw fallback over the prompt limit Copilot enforces", async () => {
         await registerCopilotRow();
-        // A 150k-token history: under the 232k usable hard limit, over the 128k
-        // prompt limit Copilot enforces.
+        // A 150k-token history, over the 128k prompt limit Copilot enforces. That
+        // declared limit caps the usable hard limit as well, so the history is
+        // over both.
         const s = fallbackSession(() => trustedEstimate(150_000));
         const ctx = { db: s.db, sessionID: s.sessionId };
         expect(resolveTrustedContextLimit(COPILOT.providerID, COPILOT.modelID, ctx)).toBe(128_000);
         expect(
             resolveContextWindowGeometry(COPILOT.providerID, COPILOT.modelID, ctx)?.usableHard,
-        ).toBeGreaterThan(150_000);
+        ).toBe(128_000);
         const input = [user(s.sessionId, "m1", "question")];
         const outcome = await s.run(input).catch((error: unknown) => error);
         expect(outcome).toBeInstanceOf(RawFallbackContextLimitError);
         expect((outcome as RawFallbackContextLimitError).contextLimitTokens).toBe(128_000);
+    });
+
+    it("refuses a raw fallback between the trusted limit and the usable hard limit", async () => {
+        await registerRow(CODEX, { context: 272_000, output: 128_000 });
+        // A 220k-token history: under the 240k usable hard limit, over the 204k
+        // trusted limit. A model without an input limit keeps the two apart.
+        const s = fallbackSession(() => trustedEstimate(220_000), CODEX);
+        const ctx = { db: s.db, sessionID: s.sessionId };
+        expect(resolveTrustedContextLimit(CODEX.providerID, CODEX.modelID, ctx)).toBe(204_000);
+        expect(resolveContextWindowGeometry(CODEX.providerID, CODEX.modelID, ctx)?.usableHard).toBe(
+            240_000,
+        );
+        const input = [user(s.sessionId, "m1", "question", CODEX)];
+        const outcome = await s.run(input).catch((error: unknown) => error);
+        expect(outcome).toBeInstanceOf(RawFallbackContextLimitError);
+        expect((outcome as RawFallbackContextLimitError).contextLimitTokens).toBe(204_000);
     });
 
     it("admits a raw fallback whose only bulk is tool metadata the wire never carries", async () => {

@@ -132,6 +132,6 @@ export function resolvePiOverflowRecoveryUsage(args: {
 			args.messages,
 			args.envelope,
 		),
-		usableHardLimit: args.usableHardLimit,
+		windowTokens: args.usableHardLimit,
 	});
 }
