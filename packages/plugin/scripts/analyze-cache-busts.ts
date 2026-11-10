@@ -96,6 +96,7 @@ import {
 } from "./cache-bust-body-sources";
 
 import { withSchedulerLogFallback } from "./cache-bust-scheduler-log";
+import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
 
@@ -1013,7 +1014,7 @@ function openCodeAnalyzerCommand(
 /** Analyze one exact OpenCode session without printing or mutating any source store. */
 export function analyzeOpenCodeCacheBustSession(
     options: OpenCodeCacheBustAnalysisOptions,
-): CacheBustSessionAnalysis & { filesExamined: number; scanBounded: boolean; scanCursor?: string } {
+): CacheBustSessionAnalysis & CacheBustScanProgress {
     const sources: DumpSource[] = [
         {
             provider: "anthropic",
@@ -1046,6 +1047,12 @@ export function analyzeOpenCodeCacheBustSession(
     let filesExamined = 0;
     let nextCursor: string | undefined;
     let scanBounded = false;
+    let pendingFiles = 0;
+    let oldestPendingTimestampMs: number | undefined;
+    let chosenKeys: Set<string> | undefined;
+    let cursor: ReturnType<typeof selectScanBatch>["cursor"];
+    let priorHighWaterMarkMs: number | null = null;
+    const snapshotKey = (snapshot: Snapshot) => `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}`;
     const precedingRequestTimestampsMs: number[] = [];
     const snapshots = options.scanDeadlineMs === undefined
         ? options.sinceExclusiveMs !== undefined || options.untilInclusiveMs !== undefined || options.scanCursor !== undefined
@@ -1054,8 +1061,8 @@ export function analyzeOpenCodeCacheBustSession(
             .filter((candidate) => candidate.session === options.sessionId)
             .flatMap((candidate) => loadCandidateSnapshots(candidate, args))
         : (() => {
-            // Filenames carry session and request time; only open new files and two
-            // preceding requests needed for the first comparison in the batch.
+            // Read the newest request group first, preserving chronological pairs
+            // within each group. New arrivals must not wait behind an old backlog.
             const indexed = sources.flatMap((source) => existsSync(source.dir)
                 ? readdirSync(source.dir).flatMap((file) => {
                     if (!file.endsWith(".meta.json")) return [];
@@ -1066,25 +1073,19 @@ export function analyzeOpenCodeCacheBustSession(
             indexed.sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence ||
                 a.file.localeCompare(b.file) || a.source.provider.localeCompare(b.source.provider));
             const key = (entry: typeof indexed[number]) => `${String(entry.timestamp).padStart(16, "0")}:${String(entry.sequence).padStart(8, "0")}:${entry.file}:${entry.source.provider}`;
-            const pending = indexed.filter((entry) => entry.timestamp <= (options.untilInclusiveMs ?? Infinity) &&
-                (options.scanCursor ? key(entry) > options.scanCursor : entry.timestamp > (options.sinceExclusiveMs ?? -Infinity)));
-            const chosen: typeof indexed = [];
-            for (const entry of pending) {
-                if (chosen.length && (chosen.length >= 32 || scanNow() >= options.scanDeadlineMs!)) {
-                    scanBounded = true;
-                    break;
-                }
-                chosen.push(entry);
-            }
-            filesExamined = chosen.length;
-            if (chosen.length) nextCursor = key(chosen.at(-1)!);
-            const first = indexed.indexOf(chosen[0]);
-            const selected = first < 0 ? [] : [...indexed.slice(Math.max(0, first - 2), first), ...chosen];
+            const batch = selectScanBatch(indexed, key, { ...options, scanDeadlineMs: options.scanDeadlineMs!, scanNow });
+            const { selected } = batch;
+            chosenKeys = batch.chosenKeys;
+            cursor = batch.cursor;
+            priorHighWaterMarkMs = cursor?.highWaterMarkMs ?? null;
+            filesExamined = batch.chosen.length;
+            pendingFiles = batch.remaining.length;
+            oldestPendingTimestampMs = batch.remaining[0]?.timestamp;
+            scanBounded = pendingFiles > 0;
             // Earlier dump filenames reserve their passes without reopening old bodies.
             // Otherwise a bounded scan could reuse a pass claimed in a previous batch.
             precedingRequestTimestampsMs.push(
-                ...indexed
-                    .slice(0, first < 0 ? 0 : Math.max(0, first - 2))
+                ...indexed.filter((entry) => !selected.includes(entry))
                     .map((entry) => entry.timestamp),
             );
             return sources.flatMap((source) => loadCandidateSnapshots(
@@ -1094,8 +1095,8 @@ export function analyzeOpenCodeCacheBustSession(
         })();
     const contextualSnapshots = withThreadContext(snapshots, args);
     const inWindow = (snapshot: Snapshot): boolean =>
-        (options.scanCursor
-            ? `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}` > options.scanCursor
+        (chosenKeys ? chosenKeys.has(snapshotKey(snapshot)) : options.scanCursor
+            ? snapshotKey(snapshot) > options.scanCursor
             : options.sinceExclusiveMs === undefined || Date.parse(snapshot.createdAt) > options.sinceExclusiveMs) &&
         (options.untilInclusiveMs === undefined || Date.parse(snapshot.createdAt) <= options.untilInclusiveMs);
     const boundedSnapshots = contextualSnapshots.filter((snapshot) => {
@@ -1154,13 +1155,17 @@ export function analyzeOpenCodeCacheBustSession(
         .filter((snapshot) => !isUsageMissing(snapshot))
         .filter(inWindow)
         .map((snapshot) => Date.parse(snapshot.createdAt));
+    const highWaterMarkMs = analyzedRequestTimestamps.length > 0
+        ? Math.max(priorHighWaterMarkMs ?? -Infinity, ...analyzedRequestTimestamps) : priorHighWaterMarkMs;
+    if (scanBounded && cursor) nextCursor = JSON.stringify({ ...cursor, highWaterMarkMs });
     return {
         requests,
-        highWaterMarkMs:
-            analyzedRequestTimestamps.length > 0 ? Math.max(...analyzedRequestTimestamps) : null,
+        highWaterMarkMs,
         filesExamined,
         scanBounded,
         scanCursor: scanBounded ? nextCursor : undefined,
+        pendingFiles,
+        oldestPendingTimestampMs,
     };
 }
 
@@ -1336,7 +1341,8 @@ export function analyzeSnapshots(
     // they stay out of every request join.
     const decisions = decisionsAndMarkers.filter((record) => record.disruption === undefined);
     const joinDecision = createCacheBustDecisionJoiner(decisions);
-    for (const timestampMs of options.precedingRequestTimestampsMs ?? []) joinDecision(timestampMs);
+    const reservations = [...(options.precedingRequestTimestampsMs ?? [])].sort((a, b) => a - b);
+    let reservationIndex = 0;
     const disruptions = decisionsAndMarkers.filter(
         (record) =>
             record.disruption !== undefined ||
@@ -1393,6 +1399,9 @@ export function analyzeSnapshots(
             ...(current.providerCacheMissReason ? { providerCacheMissReason: current.providerCacheMissReason } : {}),
         };
         // BASE, STABLE, and unmetered requests claim passes too, not just busts.
+        while (reservationIndex < reservations.length && reservations[reservationIndex] < current.requestTimestampMs) {
+            joinDecision(reservations[reservationIndex++]);
+        }
         const decision = joinDecision(current.requestTimestampMs);
         if (isUsageMissing(current)) {
             const previous = previousMetered;
@@ -1573,6 +1582,10 @@ export function analyzeSnapshots(
         const divergenceClass =
             verdict === "SHORT" || verdict === "BUST" || verdict === "LATENCY"
                 ? classifyCacheBust({
+                      hostMessagesRemoved: decisionsAndMarkers.some((record) =>
+                          record.disruption === "host_messages_removed" &&
+                          record.timestampMs > (previousSessionRequest?.requestTimestampMs ?? previous.requestTimestampMs) &&
+                          record.timestampMs <= current.requestTimestampMs),
                       threadEvidence: comparison.specialClass,
                       providerCacheMissReason: current.providerCacheMissReason?.type,
                       providerShortReadWithIdenticalPrefix: verdict === "LATENCY",

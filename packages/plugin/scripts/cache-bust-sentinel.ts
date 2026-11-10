@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite";
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
  * | cache_scope_changed | yes | the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache, so it never wakes and is not a second rewrite |
+ * | host_messages_removed | yes | the host logged message.removed for this session between requests; a user revert changes the prefix independently of Magic Context and never wakes, even after a reclaim |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
  * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
@@ -39,6 +40,11 @@ import { Database } from "bun:sqlite";
  * content: a fold, a flush or a batch of drops. A second rewrite right after one
  * means a single threshold crossing was billed twice.
  *
+ * Wakes expire after 30 minutes: older findings cannot guide a live repair. A
+ * resumed session starts no earlier than that wake-age horizon; unseen windows
+ * outside it are neither read nor summarized. Discovered windows that expire
+ * before delivery persist as stale observations instead of waking the operator.
+ *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. Without --send, each new event is printed
  * as one JSON line and nothing is sent. With --send, the sentinel connects to
@@ -67,6 +73,7 @@ import {
     isUnaccountedCacheBustClass,
     isThresholdedThreadClass,
 } from "./cache-bust-attribution";
+import { type CacheBustScanProgress, parseScanCursor } from "./cache-bust-scan";
 
 const STATE_VERSION = 1;
 const BUST_WINDOW_MS = 120_000;
@@ -74,6 +81,7 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 60_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_LOOKBACK_MS = 5 * 60_000;
+export const DEFAULT_MAX_WAKE_AGE_MS = 30 * 60_000;
 const DEFAULT_WAKE_MODULE_ID = "prefrontal-core";
 const DEFAULT_WAKE_AGENT_ID = "agent_b613e5cf2ee55b8c";
 const DEFAULT_WAKE_FROM_AGENT = "mc-cache-bust-sentinel";
@@ -89,6 +97,7 @@ export interface CacheBustSentinelOptions {
     send: boolean;
     intervalMs: number;
     lookbackMs: number;
+    maxWakeAgeMs?: number;
     maxRunMs?: number;
     stateFile: string;
     databasePath: string;
@@ -148,7 +157,7 @@ export interface AgentDeliverRequest {
         /** The sender is a script with no session, so replies cannot reach it. */
         one_way: true;
     };
-    urgency: "high";
+    urgency: "high" | "normal";
     expected_residence_epoch?: number;
 }
 
@@ -163,11 +172,14 @@ export type AgentDeliverOutcome =
 
 export interface CacheBustTransport {
     record(event: CacheBustEvent): Promise<unknown>;
+    recordLag?(notice: { deliveryId: string; content: string }): Promise<unknown>;
     close?(): void | Promise<void>;
 }
 
 interface OpenBustWindowState {
     startMs: number;
+    /** Stable delivery identity when backfill discovers an earlier window start. */
+    eventStartMs?: number;
     lastBustMs: number;
     /**
      * Class of the newest bust in the window. A bust in the next run that
@@ -182,9 +194,13 @@ interface OpenBustWindowState {
 interface SessionWatermarkState {
     lastAnalyzedRequestTimestampMs: number;
     openWindow?: OpenBustWindowState;
+    /** Earliest partial streak in a newest-first batch, used when backfilling its beginning. */
+    backfillWindow?: OpenBustWindowState;
     scanCursor?: string;
     /** When a run last analyzed this session; orders sessions so none is starved. */
     lastScannedAtMs?: number;
+    pendingFiles?: number;
+    oldestPendingTimestampMs?: number;
 }
 
 interface SentWindowState {
@@ -203,12 +219,14 @@ export interface CacheBustSentinelState {
     sessions: Record<string, SessionWatermarkState>;
     windows: Record<string, SentWindowState>;
     deliveries: Record<string, SentDeliveryState>;
-    suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number }>;
+    suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number; windowStartMs?: number; reason?: "stale" }>;
+    lag?: { startedAtMs: number; consecutiveRuns: number; notified: boolean; lagMs: number; pendingFiles: number };
 }
 
 export interface BustWindow {
     sessionId: string;
     startMs: number;
+    eventStartMs?: number;
     lastBustMs: number;
     rows: AnalyzedCacheRequest[];
     precedingThreadRewrittenTokens?: number;
@@ -241,7 +259,7 @@ interface SentinelRunDeps {
         sinceExclusiveMs: number,
         decisions: readonly CacheBustDecisionAttribution[],
         options: CacheBustSentinelOptions,
-    ) => Promise<CacheBustSessionAnalysis & { filesExamined?: number; scanBounded?: boolean; scanCursor?: string }>;
+    ) => Promise<CacheBustSessionAnalysis & CacheBustScanProgress>;
     loadDecisions?: (
         session: ActiveCacheBustSession,
         options: CacheBustSentinelOptions,
@@ -304,12 +322,16 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
         const lastBustClass =
             typeof open?.lastBustClass === "string" ? open.lastBustClass : undefined;
         const lastScannedAtMs = finiteNonnegative(row?.lastScannedAtMs);
+        const backfill = recordValue(row?.backfillWindow);
+        const backfillStart = finiteNonnegative(backfill?.startMs);
+        const backfillEnd = finiteNonnegative(backfill?.lastBustMs);
         state.sessions[sessionId] = {
             lastAnalyzedRequestTimestampMs: highWater,
             ...(open && startMs !== undefined && lastBustMs !== undefined
                 ? {
                       openWindow: {
-                          startMs,
+                           startMs,
+                           ...(finiteNonnegative(open.eventStartMs) !== undefined ? { eventStartMs: open.eventStartMs as number } : {}),
                           lastBustMs,
                           ...(lastBustClass ? { lastBustClass } : {}),
                            ...(finiteNonnegative(open.threadRewrittenTokens) !== undefined ? { threadRewrittenTokens: open.threadRewrittenTokens as number } : {}),
@@ -318,6 +340,13 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
                 : {}),
             ...(typeof row?.scanCursor === "string" ? { scanCursor: row.scanCursor } : {}),
             ...(lastScannedAtMs !== undefined ? { lastScannedAtMs } : {}),
+            ...(backfillStart !== undefined && backfillEnd !== undefined ? { backfillWindow: {
+                startMs: backfillStart, lastBustMs: backfillEnd,
+                ...(finiteNonnegative(backfill?.eventStartMs) !== undefined ? { eventStartMs: backfill!.eventStartMs as number } : {}),
+                ...(finiteNonnegative(backfill?.threadRewrittenTokens) !== undefined ? { threadRewrittenTokens: backfill!.threadRewrittenTokens as number } : {}),
+            } } : {}),
+            ...(finiteNonnegative(row?.pendingFiles) !== undefined ? { pendingFiles: row!.pendingFiles as number } : {}),
+            ...(finiteNonnegative(row?.oldestPendingTimestampMs) !== undefined ? { oldestPendingTimestampMs: row!.oldestPendingTimestampMs as number } : {}),
         };
     }
     for (const [key, raw] of Object.entries(windows)) {
@@ -339,10 +368,20 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
     for (const [key, raw] of Object.entries(suppressed)) {
         const row = recordValue(raw);
         const rewrittenTokens = finiteNonnegative(row?.rewrittenTokens);
-        if (typeof row?.divergenceClass !== "string" || !isThresholdedThreadClass(row.divergenceClass) || rewrittenTokens === undefined) {
+        const stale = row?.reason === "stale" && finiteNonnegative(row.windowStartMs) !== undefined;
+        if (typeof row?.divergenceClass !== "string" || (!stale && !isThresholdedThreadClass(row.divergenceClass)) || rewrittenTokens === undefined) {
             throw new CacheBustSentinelInputError(`invalid suppressed window state ${key} in ${path}`);
         }
-        state.suppressedWindows[key] = { divergenceClass: row.divergenceClass, rewrittenTokens };
+        state.suppressedWindows[key] = { divergenceClass: row.divergenceClass, rewrittenTokens,
+            ...(stale ? { reason: "stale", windowStartMs: row.windowStartMs as number } as const : {}) };
+    }
+    if (root.lag !== undefined) {
+        const lag = recordValue(root.lag);
+        if (!lag || finiteNonnegative(lag.startedAtMs) === undefined || finiteNonnegative(lag.consecutiveRuns) === undefined ||
+            typeof lag.notified !== "boolean" || finiteNonnegative(lag.lagMs) === undefined || finiteNonnegative(lag.pendingFiles) === undefined) {
+            throw new CacheBustSentinelInputError(`invalid lag state in ${path}`);
+        }
+        state.lag = lag as unknown as NonNullable<CacheBustSentinelState["lag"]>;
     }
     for (const [deliveryId, raw] of Object.entries(deliveries)) {
         const row = recordValue(raw);
@@ -381,6 +420,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
     const valueFlags = new Set([
         "--interval-ms",
         "--lookback-ms",
+        "--max-wake-age-ms",
         "--max-run-ms",
         "--state-file",
         "--db",
@@ -428,6 +468,9 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         send: args.includes("--send"),
         intervalMs,
         lookbackMs,
+        maxWakeAgeMs: values.has("--max-wake-age-ms")
+            ? parsePositiveInteger(values.get("--max-wake-age-ms"), "--max-wake-age-ms")
+            : DEFAULT_MAX_WAKE_AGE_MS,
         maxRunMs: values.has("--max-run-ms")
             ? parsePositiveInteger(values.get("--max-run-ms"), "--max-run-ms")
             : 30_000,
@@ -815,7 +858,7 @@ async function analyzeActiveSession(
     sinceExclusiveMs: number,
     decisions: readonly CacheBustDecisionAttribution[],
     options: CacheBustSentinelOptions & { scanCursor?: string; scanDeadlineMs?: number; scanNow?: () => number },
-): Promise<CacheBustSessionAnalysis & { filesExamined?: number; scanBounded?: boolean; scanCursor?: string }> {
+): Promise<CacheBustSessionAnalysis & CacheBustScanProgress> {
     if (session.harness === "opencode") {
         const analysis = analyzeOpenCodeCacheBustSession({
             sessionId: session.sessionId,
@@ -849,22 +892,25 @@ async function analyzeActiveSession(
 export function groupBustWindows(
     requests: readonly AnalyzedCacheRequest[],
     seed?: OpenBustWindowState,
+    backfillSeed?: OpenBustWindowState,
 ): BustWindow[] {
     const ordered = [...requests].sort(
         (left, right) => left.timestampMs - right.timestampMs || left.at.localeCompare(right.at),
     );
     const windows: BustWindow[] = [];
-    let current: BustWindow | undefined = seed
+    const forwardSeed = seed && ordered[0]?.timestampMs > seed.lastBustMs ? seed : undefined;
+    let current: BustWindow | undefined = forwardSeed
         ? {
               sessionId: ordered[0]?.session ?? "",
-              startMs: seed.startMs,
-              lastBustMs: seed.lastBustMs,
+              startMs: forwardSeed.startMs,
+              ...(forwardSeed.eventStartMs !== undefined ? { eventStartMs: forwardSeed.eventStartMs } : {}),
+              lastBustMs: forwardSeed.lastBustMs,
               rows: [],
-              precedingThreadRewrittenTokens: seed.threadRewrittenTokens,
+              precedingThreadRewrittenTokens: forwardSeed.threadRewrittenTokens,
           }
         : undefined;
-    let previousWasBust = Boolean(seed);
-    let previousBustClass: string | undefined = seed?.lastBustClass;
+    let previousWasBust = Boolean(forwardSeed);
+    let previousBustClass: string | undefined = forwardSeed?.lastBustClass;
     for (const original of ordered) {
         let request = original;
         if (request.divergenceClass === "usage_missing") {
@@ -914,6 +960,29 @@ export function groupBustWindows(
         previousBustClass = request.divergenceClass;
     }
     if (current?.rows.length) windows.push(current);
+    const reverseSeeds = [seed && !forwardSeed ? seed : undefined, backfillSeed]
+        .filter((value): value is OpenBustWindowState => value !== undefined);
+    const mergedSeeds = new Set<number>();
+    for (const reverseSeed of reverseSeeds) {
+        const seed = reverseSeed;
+        const identity = seed.eventStartMs ?? seed.startMs;
+        if (mergedSeeds.has(identity)) continue;
+        mergedSeeds.add(identity);
+        // A newest-first scan can discover the beginning of an already observed
+        // streak later. Keep its delivery identity instead of waking twice just
+        // because backfill moved the start. A stable request still splits it.
+        const joined = windows.find((window) => window.lastBustMs >= seed.startMs - BUST_WINDOW_MS &&
+            window.startMs <= seed.lastBustMs + BUST_WINDOW_MS && !ordered.some((row) =>
+                row.timestampMs >= Math.min(window.startMs, seed.startMs) &&
+                row.timestampMs <= Math.max(window.lastBustMs, seed.lastBustMs) &&
+                (row.divergenceClass === "usage_missing" || (row.verdict !== "BUST" && row.verdict !== "SHORT"))));
+        if (joined) {
+            joined.eventStartMs = seed.eventStartMs ?? seed.startMs;
+            joined.startMs = Math.min(joined.startMs, seed.startMs);
+            joined.lastBustMs = Math.max(joined.lastBustMs, seed.lastBustMs);
+            joined.precedingThreadRewrittenTokens = seed.threadRewrittenTokens;
+        }
+    }
     return windows;
 }
 
@@ -944,7 +1013,8 @@ export function eventForWindow(
     state: CacheBustSentinelState,
 ): CacheBustEvent | null {
     const rewrittenTokens = windowRewrittenTokens(window);
-    const key = windowKey(window.sessionId, window.startMs);
+    const eventStartMs = window.eventStartMs ?? window.startMs;
+    const key = windowKey(window.sessionId, eventStartMs);
     for (const row of window.rows) {
         if (isThresholdedThreadClass(row.divergenceClass as string) && rewrittenTokens < 20_000) {
             // Observations are distinct from sent-event IDs, so an accumulating
@@ -961,9 +1031,9 @@ export function eventForWindow(
     const divergenceClass = representative.divergenceClass as string;
     const prior = state.windows[key];
     if (prior?.divergenceClass === divergenceClass) return null;
-    const baseId = cacheBustWindowId(window.sessionId, window.startMs);
+    const baseId = cacheBustWindowId(window.sessionId, eventStartMs);
     const eventId = prior
-        ? revisedCacheBustWindowId(window.sessionId, window.startMs, divergenceClass)
+        ? revisedCacheBustWindowId(window.sessionId, eventStartMs, divergenceClass)
         : baseId;
     if (prior?.eventIds.includes(eventId)) return null;
     const event: CacheBustEvent = {
@@ -1151,6 +1221,19 @@ export class SubcWakeEventTransport implements CacheBustTransport {
         const client = await this.clientPromise.catch(() => null);
         client?.close();
     }
+
+    async recordLag(notice: { deliveryId: string; content: string }): Promise<unknown> {
+        const client = await this.client();
+        const request: AgentDeliverRequest = {
+            agent_id: this.agentId, delivery_id: notice.deliveryId, urgency: "normal",
+            body: { kind: "peer_message", from_agent: this.fromAgent, from_session_id: SENTINEL_FROM_SESSION_ID,
+                from_harness: SENTINEL_FROM_HARNESS, content: notice.content, one_way: true },
+        };
+        return await client.call(this.moduleId, AGENT_DELIVER_METHOD, request, {
+            identity: { project_root: process.cwd(), harness: SENTINEL_FROM_HARNESS, session: SENTINEL_FROM_SESSION_ID },
+            consumerIdentity: null, timeoutMs: 15_000,
+        });
+    }
 }
 
 function emptyCounters(): SentinelCounters {
@@ -1182,6 +1265,16 @@ function updateOpenWindowState(
 ): void {
     const latest = [...requests].sort((left, right) => right.timestampMs - left.timestampMs)[0];
     if (!latest) return;
+    if (sessionState.openWindow && latest.timestampMs < sessionState.openWindow.lastBustMs) {
+        const backfilled = windows.find((window) => window.eventStartMs ===
+            (sessionState.openWindow!.eventStartMs ?? sessionState.openWindow!.startMs));
+        if (backfilled) {
+            sessionState.openWindow.startMs = backfilled.startMs;
+            sessionState.openWindow.eventStartMs = backfilled.eventStartMs;
+            sessionState.openWindow.threadRewrittenTokens = windowRewrittenTokens(backfilled);
+        }
+        return;
+    }
     if (latest.verdict !== "BUST" && latest.verdict !== "SHORT") {
         delete sessionState.openWindow;
         return;
@@ -1193,6 +1286,7 @@ function updateOpenWindowState(
         const lastBustClass = window.rows.at(-1)?.divergenceClass;
         sessionState.openWindow = {
             startMs: window.startMs,
+            ...(window.eventStartMs !== undefined ? { eventStartMs: window.eventStartMs } : {}),
             lastBustMs: window.lastBustMs,
             ...(lastBustClass ? { lastBustClass } : {}),
             threadRewrittenTokens: windowRewrittenTokens(window),
@@ -1233,6 +1327,7 @@ export async function runSentinelOnce(
 ): Promise<SentinelCounters> {
     const clock = deps.now ?? Date.now;
     const nowMs = clock();
+    const maxWakeAgeMs = options.maxWakeAgeMs ?? DEFAULT_MAX_WAKE_AGE_MS;
     const deadlineMs = nowMs + (options.maxRunMs ?? 30_000);
     const stdout = deps.stdout ?? console.log;
     const stderr = deps.stderr ?? console.error;
@@ -1241,6 +1336,7 @@ export async function runSentinelOnce(
     const sessions = orderSessionsForScan(listSessions(state, nowMs, options), state);
     const counters = emptyCounters();
     counters.sessions = sessions.length;
+    let staleBacklog = false;
     stderr(JSON.stringify({ kind: "cache_bust_sentinel_start", at: new Date(nowMs).toISOString() }));
     const transport = options.send
         ? (deps.transport ??
@@ -1259,8 +1355,12 @@ export async function runSentinelOnce(
                 break;
             }
             const priorSession = state.sessions[session.sessionId];
+            const priorScanCursor = priorSession?.scanCursor;
             const sinceExclusiveMs =
-                priorSession?.lastAnalyzedRequestTimestampMs ?? nowMs - options.lookbackMs;
+                priorSession ? Math.max(priorSession.lastAnalyzedRequestTimestampMs, nowMs - maxWakeAgeMs)
+                    : nowMs - options.lookbackMs;
+            staleBacklog ||= Boolean(priorSession?.scanCursor && priorSession.oldestPendingTimestampMs !== undefined &&
+                priorSession.oldestPendingTimestampMs < sinceExclusiveMs);
             const decisions = (deps.loadDecisions ?? loadSessionDecisions)(session, options);
             const analysis = await (deps.analyzeSession ?? analyzeActiveSession)(
                 session,
@@ -1280,8 +1380,9 @@ export async function runSentinelOnce(
             const sessionState: SessionWatermarkState = priorSession ?? {
                 lastAnalyzedRequestTimestampMs: sinceExclusiveMs,
             };
+            sessionState.lastAnalyzedRequestTimestampMs = Math.max(sessionState.lastAnalyzedRequestTimestampMs, sinceExclusiveMs);
             sessionState.lastScannedAtMs = nowMs;
-            const windows = groupBustWindows(requests, sessionState.openWindow);
+            const windows = groupBustWindows(requests, sessionState.openWindow, sessionState.backfillWindow);
             counters.bustWindows += windows.length;
             for (const window of windows) {
                 for (const row of window.rows) {
@@ -1299,12 +1400,28 @@ export async function runSentinelOnce(
                 }
                 const hasUnaccounted = window.rows.some((row) =>
                     isUnaccountedCacheBustClass(row.divergenceClass as string, windowRewrittenTokens(window)));
-                if (!hasUnaccounted) {
-                    eventForWindow(window, analysis.directory ?? session.directory ?? session.projectPath, state);
-                    counters.accountedWindows += 1;
+                if (hasUnaccounted) counters.unaccountedWindows += 1;
+                else counters.accountedWindows += 1;
+                if (clock() - window.lastBustMs > maxWakeAgeMs) {
+                    const key = windowKey(window.sessionId, window.eventStartMs ?? window.startMs);
+                    const unaccounted = window.rows.filter((row) => isUnaccountedCacheBustClass(row.divergenceClass ?? "", windowRewrittenTokens(window)));
+                    const representative = unaccounted.find((row) => row.cause) ?? unaccounted[0] ?? window.rows[0];
+                    const observation = { divergenceClass: representative.divergenceClass as string,
+                        rewrittenTokens: isThresholdedThreadClass(representative.divergenceClass ?? "") ? windowRewrittenTokens(window)
+                            : (unaccounted.length ? unaccounted : window.rows).reduce((sum, row) => sum + Math.max(0, row.rewrittenTokens ?? 0), 0),
+                        windowStartMs: window.startMs, reason: "stale" as const };
+                    if (state.suppressedWindows[key]?.reason !== "stale") {
+                        state.suppressedWindows[key] = observation;
+                        stderr(JSON.stringify({ kind: "cache_bust_sentinel_observation", session_id: session.sessionId, ...observation }));
+                    }
+                    staleBacklog ||= Boolean(priorSession?.scanCursor || analysis.scanBounded);
+                    sessionState.lastAnalyzedRequestTimestampMs = Math.max(sessionState.lastAnalyzedRequestTimestampMs, window.lastBustMs);
                     continue;
                 }
-                counters.unaccountedWindows += 1;
+                if (!hasUnaccounted) {
+                    eventForWindow(window, analysis.directory ?? session.directory ?? session.projectPath, state);
+                    continue;
+                }
                 const event = eventForWindow(
                     window,
                     analysis.directory ?? session.directory ?? session.projectPath,
@@ -1384,16 +1501,55 @@ export async function runSentinelOnce(
                       : null;
             if (analysis.scanCursor) sessionState.scanCursor = analysis.scanCursor;
             else delete sessionState.scanCursor;
+            if (analysis.pendingFiles) sessionState.pendingFiles = analysis.pendingFiles;
+            else delete sessionState.pendingFiles;
+            if (analysis.oldestPendingTimestampMs !== undefined) sessionState.oldestPendingTimestampMs = analysis.oldestPendingTimestampMs;
+            else delete sessionState.oldestPendingTimestampMs;
             if (!analysis.scanBounded && highWater !== null && highWater > sessionState.lastAnalyzedRequestTimestampMs) {
                 sessionState.lastAnalyzedRequestTimestampMs = highWater;
             }
             updateOpenWindowState(sessionState, requests, windows);
+            const earliest = windows[0];
+            const movedBackfill = parseScanCursor(analysis.scanCursor)?.before !== parseScanCursor(priorScanCursor)?.before;
+            if (analysis.scanBounded && movedBackfill && earliest && requests[0]?.timestampMs === earliest.rows[0]?.timestampMs) {
+                sessionState.backfillWindow = { startMs: earliest.startMs, lastBustMs: earliest.lastBustMs,
+                    eventStartMs: earliest.eventStartMs ?? earliest.startMs, threadRewrittenTokens: windowRewrittenTokens(earliest) };
+            } else if (!analysis.scanBounded || movedBackfill) delete sessionState.backfillWindow;
             state.sessions[session.sessionId] = sessionState;
             if (analysis.scanBounded || clock() >= deadlineMs) {
                 counters.bounded = true;
                 break;
             }
         }
+        const pending = Object.values(state.sessions).filter((session) => session.pendingFiles);
+        const pendingFiles = pending.reduce((sum, session) => sum + (session.pendingFiles ?? 0), 0);
+        const oldest = Math.min(...pending.map((session) => session.oldestPendingTimestampMs ?? nowMs));
+        const lagMs = Math.max(0, clock() - oldest);
+        const lagging = staleBacklog || (counters.bounded && lagMs > maxWakeAgeMs / 2);
+        if (!counters.bounded && pendingFiles === 0) {
+            if (staleBacklog) stderr(JSON.stringify({ kind: "cache_bust_sentinel_lag", caughtUp: true, pendingFiles: 0 }));
+            delete state.lag;
+        } else if (lagging) {
+            state.lag = { startedAtMs: state.lag?.startedAtMs ?? nowMs,
+                consecutiveRuns: (state.lag?.consecutiveRuns ?? 0) + 1,
+                notified: state.lag?.notified ?? false, lagMs: Number.isFinite(lagMs) ? lagMs : maxWakeAgeMs, pendingFiles };
+            stderr(JSON.stringify({ kind: "cache_bust_sentinel_lag", ...state.lag }));
+            if (state.lag.consecutiveRuns >= 3 && !state.lag.notified) {
+                const notice = { deliveryId: `cache-bust-sentinel-lag:${state.lag.startedAtMs}`,
+                    content: `Cache-bust sentinel is behind by ${Math.ceil(state.lag.lagMs / 60_000)} minutes and ${pendingFiles} files.` };
+                state.lag.notified = true;
+                saveSentinelState(options.stateFile, state);
+                if (transport) {
+                    if (!transport.recordLag) throw new CacheBustSentinelInputError("transport does not support quiet lag notices");
+                    try {
+                        parseAgentDeliverReply(await transport.recordLag(notice));
+                        stderr(JSON.stringify({ kind: "cache_bust_sentinel_lag_delivery", urgency: "normal" }));
+                    } catch (error) {
+                        stderr(JSON.stringify({ kind: "cache_bust_sentinel_lag_delivery_refused", error: errorMessage(error) }));
+                    }
+                } else stdout(JSON.stringify({ kind: "cache_bust_sentinel_lag_notice", ...notice }));
+            }
+        } else if (state.lag) state.lag.consecutiveRuns = 0;
     } finally {
         // Session watermarks are not saved after each session; this end-of-run
         // write saves them, while alert sends still save the state before and

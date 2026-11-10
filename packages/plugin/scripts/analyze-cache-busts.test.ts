@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 import { stripSystemInjection } from "../src/hooks/magic-context/system-injection-stripper";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
-import { type CacheBustDecisionAttribution } from './cache-bust-attribution';
+import { type CacheBustDecisionAttribution, classifyCacheBust } from './cache-bust-attribution';
 import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
 import { loadRunnerSession, runnerDumpDirectory } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, parseRunnerDecision } from "./cache-bust-runner-log";
@@ -403,6 +403,35 @@ describe("analyze-cache-bust Thalamus runners", () => {
 });
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("host message.removed logs account only the same session's intervening request", () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "cache-host-removal-"));
+        tempDirs.push(dir);
+        const sessionId = "ses_hostRemoval";
+        const start = Date.parse("2026-11-10T12:55:38.000Z");
+        for (let index = 0; index < 3; index++) {
+            const at = new Date(start + index * 10_000).toISOString();
+            writeDump(dir, `${at.replaceAll(":", "-").replace(".", "-")}-00000${index + 1}-${sessionId}`,
+                at, sessionId, bodyWithBreakpointMessage(`prefix after revert ${index}`), responseUsage({ input_tokens: 100,
+                    cache_read_input_tokens: index === 0 ? 20_000 : 100, cache_creation_input_tokens: index === 0 ? 0 : 19_900 }));
+        }
+        const logPath = join(dir, "magic-context.log");
+        const line = (offset: number, id = sessionId) => `[${new Date(start + offset).toISOString()}] [magic-context][${id}] event message.removed: invalidating state for message msg_removed`;
+        const analyze = () => analyzeOpenCodeCacheBustSession({ sessionId, anthropicDir: dir,
+            openaiDir: join(dir, "missing"), mcLogPath: logPath });
+        writeFileSync(logPath, [line(5_000), line(5_001), line(5_000, "ses_other"), line(25_000)].join("\n"));
+        expect(analyze().requests.map((row) => row.divergenceClass)).toEqual([undefined, "host_messages_removed", "no_mc_pass_row"]);
+        writeFileSync(logPath, [line(0), line(5_000, "ses_other"), line(25_000),
+            `[not-a-date] [magic-context][${sessionId}] event message.removed: invalidating state for message msg_removed`].join("\n"));
+        expect(analyze().requests.map((row) => row.divergenceClass)).toEqual([undefined, "no_mc_pass_row", "no_mc_pass_row"]);
+        writeFileSync(logPath, line(10_000));
+        expect(analyze().requests.map((row) => row.divergenceClass)).toEqual([undefined, "host_messages_removed", "no_mc_pass_row"]);
+        const input = { divergenceIndex: 2, previousMessageCount: 10, hostMessagesRemoved: true,
+            previousBustClass: "accounted_hard_fold" as const };
+        expect(classifyCacheBust(input)).toBe("host_messages_removed");
+        expect(classifyCacheBust({ ...input, idleCacheExpiry: true })).toBe("idle_cache_expiry");
+        expect(classifyCacheBust({ ...input, idleCacheExpiry: true, cacheScopeChanged: true })).toBe("cache_scope_changed");
+    });
+
     test("claims slow passes once across consecutive requests, including BASE and UNMETERED", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-pass-claims-"));
         tempDirs.push(dir);
@@ -1855,8 +1884,8 @@ describe("analyze-cache-bust uncached input never counts as reuse", () => {
 });
 
 describe("bounded sentinel dump scans", () => {
-    test("skips old files and resumes a bounded scan without losing requests", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-sentinel-scan-"));
+    test("scans newest groups first with intact predecessors and backfills without losing requests", () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-sentinel-scan-"));
         tempDirs.push(dir);
         for (let i = 0; i < 400; i++) {
             writeFileSync(join(dir, `dump-2026-09-23T00-00-00-000Z-${String(i).padStart(5, "0")}-ses_scanfixture.meta.json`), "{}");
@@ -1866,7 +1895,8 @@ describe("bounded sentinel dump scans", () => {
         for (let i = 0; i < 40; i++) {
             const createdAt = new Date(base + i * 1_000).toISOString();
             const stem = `dump-${createdAt.replace(/:(\d\d):(\d\d)\.(\d\d\d)Z$/, "-$1-$2-$3Z")}-${i}-ses_scanfixture`;
-            writeDump(dir, stem, createdAt, sessionId, bodyWithBreakpointMessage(`request ${i}`));
+            writeDump(dir, stem, createdAt, sessionId, bodyWithBreakpointMessage(`request ${i}`),
+                responseUsage({ input_tokens: 100, cache_read_input_tokens: i === 0 ? 20_000 : 100, cache_creation_input_tokens: i === 0 ? 0 : 19_900 }));
         }
         const scan = (sinceExclusiveMs: number, scanCursor?: string) => analyzeOpenCodeCacheBustSession({
             sessionId,
@@ -1875,17 +1905,28 @@ describe("bounded sentinel dump scans", () => {
             sinceExclusiveMs,
             scanCursor,
             scanDeadlineMs: Date.now() + 60_000,
+            mcLogPath: join(dir, "missing.log"),
         });
         const first = scan(base - 1);
         expect(first.filesExamined).toBe(32);
         expect(first.scanBounded).toBe(true);
+        expect(first.pendingFiles).toBe(8);
+        expect(first.oldestPendingTimestampMs).toBe(base);
+        expect(first.requests[0]?.timestampMs).toBe(base + 8_000);
+        expect(first.requests[0]?.verdict).toBe("BUST");
+        expect(first.requests[0]?.divergenceClass).toBe("no_mc_pass_row");
+        const arrivalAt = new Date(base + 40_000).toISOString();
+        writeDump(dir, `dump-${arrivalAt.replaceAll(":", "-").replace(".", "-")}-40-${sessionId}`, arrivalAt,
+            sessionId, bodyWithBreakpointMessage("new arrival"), responseUsage({ input_tokens: 100, cache_read_input_tokens: 100, cache_creation_input_tokens: 19_900 }));
         const second = scan(base - 1, first.scanCursor);
-        expect(second.filesExamined).toBe(8);
+        expect(second.filesExamined).toBe(9);
         expect(second.scanBounded).toBe(false);
-        expect([...first.requests, ...second.requests].map((row) => row.timestampMs)).toEqual(
-            Array.from({ length: 40 }, (_, i) => base + i * 1_000),
+        expect(second.requests.at(-1)?.divergenceClass).toBe("no_mc_pass_row");
+        expect(second.highWaterMarkMs).toBe(base + 40_000);
+        expect([...first.requests, ...second.requests].map((row) => row.timestampMs).sort((a, b) => a - b)).toEqual(
+            Array.from({ length: 41 }, (_, i) => base + i * 1_000),
         );
-        expect(scan(base + 39_000).filesExamined).toBe(0);
+        expect(scan(base + 40_000).filesExamined).toBe(0);
     }, 30_000);
 });
 

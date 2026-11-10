@@ -1,5 +1,6 @@
 export type CacheBustDivergenceClass =
     | "cache_scope_changed"
+    | "host_messages_removed"
     | "no_mc_pass_row"
     | "system_row_shift"
     | "accounted_hard_model_change"
@@ -106,6 +107,8 @@ export interface CacheBustDecisionAttribution {
 
 export interface CacheBustAttributionInput {
     cacheScopeChanged?: boolean;
+    /** The host logged a message removal after the previous request and before this one. */
+    hostMessagesRemoved?: boolean;
     providerCacheMissReason?: string;
     threadEvidence?: "continuation_short_read" | "thread_break_unchanged_client_bytes" | "full_body_no_baseline";
     divergenceIndex: number;
@@ -173,6 +176,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "cache_scope_changed",
         accounted: true,
         rule: "the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even right after a reclaim bust",
+    },
+    {
+        divergenceClass: "host_messages_removed",
+        accounted: true,
+        rule: "the host logged message.removed for this session between requests; a revert changes the prefix independently of MC",
     },
     {
         divergenceClass: "system_row_shift",
@@ -453,6 +461,7 @@ export function isThresholdedThreadClass(divergenceClass: string): boolean {
  */
 const NOT_A_SECOND_REWRITE = new Set<string>([
     "cache_scope_changed",
+    "host_messages_removed",
     "usage_missing",
     "tail_shrink_no_rewrite",
     "system_row_shift",
@@ -542,6 +551,9 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";
+    // A host revert removes conversation bytes independently of MC, even when
+    // no transform pass was recorded or the preceding pass reclaimed content.
+    if (input.hostMessagesRemoved) return "host_messages_removed";
     if (input.threadEvidence) return input.threadEvidence;
     // A request that wrote nothing while most of its prompt went uncached had no
     // breakpoint to write at. That is the request's own shape, so it outranks the
