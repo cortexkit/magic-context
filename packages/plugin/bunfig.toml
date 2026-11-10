@@ -4,4 +4,4 @@
 # dormant unisolated test migrated the production DB to v26 and fail-closed every
 # running v25 binary). This is the structural guard; do not remove it.
 [test]
-preload = ["./test-preload.ts"]
+preload = ["./src/test-preload.ts"]

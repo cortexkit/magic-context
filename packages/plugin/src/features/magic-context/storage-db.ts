@@ -104,6 +104,29 @@ interface StartupBackfills {
     run?: () => void;
 }
 const startupBackfills = new WeakMap<Database, StartupBackfills>();
+let scheduleStartupMaintenanceOnOpen = true;
+
+/**
+ * Unit tests disable deferred startup writers because their separate connections
+ * can take the write lock during an otherwise uncontended transform fixture.
+ * Hosts keep the default; migrations and other synchronous open work are unchanged.
+ * Returns the previous policy so startup tests can opt in for a scoped open.
+ */
+export function __setScheduleStartupMaintenanceOnOpenForTests(enabled: boolean): boolean {
+    const previous = scheduleStartupMaintenanceOnOpen;
+    scheduleStartupMaintenanceOnOpen = enabled;
+    return previous;
+}
+
+/** Observe queued and running startup work without starting or joining it. */
+export function __getDatabaseStartupStateForTests(db: Database): {
+    timerScheduled: boolean;
+    running: Promise<void> | null;
+} {
+    const state = startupBackfills.get(db);
+    return { timerScheduled: state?.timer !== undefined, running: state?.running ?? null };
+}
+
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 const pathByDatabase = new WeakMap<Database, string>();
@@ -1058,7 +1081,7 @@ function finishDatabaseOpen(
     // message-time pass would also advance its shared durable cursor past rows
     // that the OpenCode process still has to fill. The rowid-map backfill reads
     // only context.db and runs in every harness.
-    if (!explicitDbPath) {
+    if (!explicitDbPath && scheduleStartupMaintenanceOnOpen) {
         const readsOpenCodeStore = harnessOwnsOpenCodeStore();
         const state: StartupBackfills = { controller: new AbortController() };
         startupBackfills.set(db, state);
