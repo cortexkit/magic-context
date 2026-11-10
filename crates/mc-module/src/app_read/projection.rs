@@ -359,6 +359,18 @@ mod tests {
             session.queued.insert(("m2".into(), "p".into()));
             session.app.stamps.insert(("m2".into(), "p".into()), 123);
             session.conditions.last_prompt_tokens = Some(80);
+            session.notes.notice(
+                Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(
+                    11, true,
+                )),
+                Some("claude-v5/1"),
+            );
+            session.notes.notice(
+                Some(cortexkit_role_compaction::tokens::SurfaceTokens::new(
+                    29, true,
+                )),
+                Some("claude-v5/1"),
+            );
             // ck-mc would no longer drop the only part of the newest message,
             // but these samples are pinned byte for byte by the apps and only
             // show how a dropped part reads, so the view skips ck-mc's checks.

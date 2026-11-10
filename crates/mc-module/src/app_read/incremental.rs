@@ -687,7 +687,9 @@ impl Session {
             tokens: Some(tokens),
             estimate: false,
         };
-        let parts = [
+        let notes = surface("notes", self.notes.measured);
+        let notes_known = !self.notes.is_empty();
+        let mut parts = vec![
             surface("system_prompt", self.surface_tokens.0),
             surface("tool_definitions", self.surface_tokens.1),
             counted("memory", p.head[0]),
@@ -701,6 +703,9 @@ impl Session {
             attributed("user_messages", p.user_text[0], p.sources[3]),
             attributed("notices", p.user_text[1], p.sources[4]),
         ];
+        if notes_known {
+            parts.push(notes);
+        }
         // The window the apps scale to is the usable one, as the standalone
         // plugin reports it: the model's window less the output reserve.
         let mut breakdown = breakdown(
@@ -713,9 +718,13 @@ impl Session {
             sources.adjust(Sources::default(), source);
         }
         sources.add(p.head.iter().sum(), "counted");
-        for surface in [self.surface_tokens.0, self.surface_tokens.1]
-            .into_iter()
-            .flatten()
+        for surface in [
+            self.surface_tokens.0,
+            self.surface_tokens.1,
+            self.notes.measured,
+        ]
+        .into_iter()
+        .flatten()
         {
             sources.add(surface.count, "runner");
         }
@@ -727,6 +736,9 @@ impl Session {
             json!({"item":"system_prompt","tokens":parts[0].tokens,"source":if self.surface_tokens.0.is_some() {"runner"} else {"estimate"}}),
             json!({"item":"tool_definitions","tokens":parts[1].tokens,"source":if self.surface_tokens.1.is_some() {"runner"} else {"estimate"}}),
         ];
+        if notes_known {
+            items.push(json!({"item":"notes","tokens":self.notes.measured.map(|counted|counted.count),"source":if self.notes.measured.is_some() {"runner"} else {"estimate"}}));
+        }
         for (item, tokens) in ["memory", "project_docs", "user_profile"]
             .into_iter()
             .zip(p.head)

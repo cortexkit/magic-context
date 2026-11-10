@@ -54,16 +54,16 @@ pub struct Session {
     /// Whether this session already logged that its runner's conditions
     /// leave out the prompt size while its steps report usage.
     warned_no_prompt: bool,
-    /// The runner's counts of its own system text and of the tool
-    /// definitions, from the newest notice that carried them. Rides never
-    /// carry them, so a ride's conditions don't clear them.
     /// The execute threshold the newest pass ran under, and which setting
     /// decided it, for the apps' session metadata.
     pub(crate) threshold: (f64, &'static str),
+    /// Fresh surface counts from the newest notice. Rides omit these counts
+    /// and must not clear them.
     pub(crate) surface_tokens: (
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
     ),
+    pub(crate) notes: crate::prompt_notes::Notes,
     index: Index,
     view_validation: crate::view_builder::ValidationCache,
     search_dirty_from: Option<u64>,
@@ -505,6 +505,7 @@ impl Session {
             reminder_counter: 0,
             conditions: conditions_of(request),
             warned_no_prompt: false,
+            notes: Default::default(),
             surface_tokens: (None, None),
             threshold: (
                 crate::pass::Settings::default().execute_threshold_percentage,
@@ -688,6 +689,7 @@ impl Session {
             reading_stale: self.reading_stale,
             ignored_reading: self.ignored_reading,
             prompt_views_untrusted: self.prompt_views_untrusted,
+            notes: self.notes.clone(),
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
             notice_reclaim_bookmark: self.notice_reclaim_bookmark,
@@ -732,6 +734,7 @@ impl Session {
         self.reading_stale = durable.reading_stale;
         self.ignored_reading = durable.ignored_reading;
         self.prompt_views_untrusted = durable.prompt_views_untrusted;
+        self.notes = durable.notes;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
         self.notice_reclaim_bookmark = durable.notice_reclaim_bookmark;
@@ -959,6 +962,11 @@ impl Session {
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         let previous = reading_of(&self.conditions);
+        let previous_notes = self.notes.measured;
+        self.notes.notice(
+            notice.conditions.notes_tokens,
+            notice.token_family.as_deref(),
+        );
         self.conditions = notice.conditions.clone();
         self.threshold = (
             settings.execute_threshold_percentage,
@@ -990,6 +998,11 @@ impl Session {
             .collect();
         self.settle_unconfirmed(notice.applied_view.as_ref(), &refused);
         self.judge_reading(previous, notice.applied_view.as_ref());
+        if self.reading_stale {
+            // The apps keep the last current reading; its notes attribution
+            // must stay with it while the newest notice's pending count advances.
+            self.notes.measured = previous_notes;
+        }
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
@@ -1628,7 +1641,18 @@ impl Session {
             .filter(|(entry, part)| !lanes::stripped_by_floor(context.signed_floor, entry, part))
             .map(|(_, part)| tokens::part(part))
             .sum();
-        (freed > 0 && total > 0).then(|| usage * (1.0 - (freed as f64 / total as f64).min(1.0)))
+        (freed > 0 && total > 0).then(|| {
+            let remaining = total.saturating_sub(freed) as f64;
+            let projected = usage * (1.0 - (freed as f64 / total as f64).min(1.0));
+            let window = usable as f64;
+            if window == 0.0 {
+                return projected;
+            }
+            // Keep the transcript-ratio projection, but don't let notes added
+            // since the measured request make the drops look sufficient.
+            let fixed = (projected * window / 100.0 - remaining).max(0.0);
+            projected + (self.notes.fixed_part(fixed) - fixed) / window * 100.0
+        })
     }
 
     /// Whether a run would read the same history a run before it failed to
@@ -3430,9 +3454,9 @@ impl Session {
         self.next_latch = false;
         if self.emergency_drop_allowed(settings, over_limit.is_some(), priced) {
             let emergency = lanes::Emergency {
-                prompt_tokens: over_limit
-                    .unwrap_or(0)
-                    .max(self.pressure().last_prompt_tokens.unwrap_or(0)),
+                prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
+                request_tokens: over_limit,
+                notes: self.notes.clone(),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
                 over_limit: over_limit.is_some(),
