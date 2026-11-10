@@ -73,6 +73,7 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { noteHostCheckpointCommit } from "../../hooks/magic-context/host-checkpoint-ride";
 import { markCoveredInstructionRow } from "../../hooks/magic-context/host-served-rows";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
@@ -2034,6 +2035,12 @@ export async function registerContext(context: V2Context) {
                             generateReplay.forget(draft.sessionID);
                             restoredRows.forget(draft.sessionID);
                             historyRefreshSessions.add(draft.sessionID);
+                            // The next pass rides only on proof that this
+                            // commit changed the head the provider cached.
+                            noteHostCheckpointCommit(
+                                draft.sessionID,
+                                staged?.headCommit() ?? { changed: false, previousCoverage: null },
+                            );
                             requestPendingMaterialization(
                                 pendingMaterializationSessions,
                                 draft.sessionID,
