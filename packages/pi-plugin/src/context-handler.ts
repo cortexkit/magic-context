@@ -249,11 +249,11 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
-import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
 	recoveryAdmissionLimitTokens,
 	recoveryRefusalNotice,
 } from "@magic-context/core/hooks/magic-context/recovery-fit";
+import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
