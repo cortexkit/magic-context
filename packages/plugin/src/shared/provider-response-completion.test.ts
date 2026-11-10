@@ -3,15 +3,19 @@ import * as completion from "./provider-response-completion";
 
 for (const location of ["native", "state"]) {
     test(`detects usage and boundary markers in ${location}.signature`, () => {
-        for (const signature of [
-            'cortexkit-server-fallback-usage-v1:{"iterations":[]}',
-            "cortexkit-server-fallback-v1:primary|fallback",
-        ]) {
-            expect(
-                completion.hasServerFallbackUsage([
-                    { type: "reasoning", [location]: { signature } },
-                ]),
-            ).toBe(true);
+        for (const [signature, expected] of [
+            [
+                'cortexkit-server-fallback-usage-v1:{"iterations":[{"type":"fallback_message","input_tokens":1}]}',
+                { kind: "usage", inputTokens: 1 },
+            ],
+            [
+                "cortexkit-server-fallback-v1:primary|fallback",
+                { kind: "boundary", invalidUsage: false },
+            ],
+        ] as const) {
+            const content = [{ type: "reasoning", [location]: { signature } }];
+            expect(completion.hasServerFallbackUsage(content)).toBe(true);
+            expect(completion.readServerFallbackUsage(content)).toEqual(expected);
         }
     });
 }

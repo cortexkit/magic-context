@@ -82,6 +82,7 @@ for (const payload of [
             ],
             limitFor,
         });
+        expect(reading?.inputTokens).toBe(963_300);
         expect(reading?.serverFallback).toBe(true);
     });
 }
