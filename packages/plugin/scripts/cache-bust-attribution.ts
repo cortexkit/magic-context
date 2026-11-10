@@ -1,4 +1,5 @@
 export type CacheBustDivergenceClass =
+    | "cache_scope_changed"
     | "no_mc_pass_row"
     | "system_row_shift"
     | "accounted_hard_model_change"
@@ -34,6 +35,11 @@ export type CacheBustDivergenceClass =
     | "thread_break_unchanged_client_bytes"
     | "full_body_no_baseline";
 
+export interface ProviderCacheMissReason {
+    type: string;
+    cacheMissedInputTokens?: number;
+}
+
 export interface AnalyzedCacheRequest {
     session: string;
     at: string;
@@ -41,6 +47,7 @@ export interface AnalyzedCacheRequest {
     verdict: "BASE" | "BUST" | "SHORT" | "STABLE" | "LATENCY" | "UNMETERED";
     rewrittenTokens?: number;
     divergenceClass?: CacheBustDivergenceClass;
+    providerCacheMissReason?: ProviderCacheMissReason;
     firstDivergence: string;
     analyzerCmd: string;
     /** Render-identity components the matched pass reported as changed, when it logged them. */
@@ -98,6 +105,8 @@ export interface CacheBustDecisionAttribution {
 }
 
 export interface CacheBustAttributionInput {
+    cacheScopeChanged?: boolean;
+    providerCacheMissReason?: string;
     threadEvidence?: "continuation_short_read" | "thread_break_unchanged_client_bytes" | "full_body_no_baseline";
     divergenceIndex: number;
     previousMessageCount: number;
@@ -160,6 +169,11 @@ export interface CacheBustRule {
 }
 
 export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
+    {
+        divergenceClass: "cache_scope_changed",
+        accounted: true,
+        rule: "wire model or account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even after reclaim",
+    },
     {
         divergenceClass: "system_row_shift",
         accounted: true,
@@ -438,6 +452,7 @@ export function isThresholdedThreadClass(divergenceClass: string): boolean {
  * only got shorter, or a small system-row shift (see the rule table).
  */
 const NOT_A_SECOND_REWRITE = new Set<string>([
+    "cache_scope_changed",
     "usage_missing",
     "tail_shrink_no_rewrite",
     "system_row_shift",
@@ -518,6 +533,12 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
 
 /** The request's class judged on its own, ignoring the request before it. */
 function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
+    // A cache belongs to its model and account. Switching either explains a
+    // short read before considering the old cache's age or conversation bytes.
+    if (input.cacheScopeChanged || input.providerCacheMissReason === "model_changed" ||
+        (input.previousModel && input.currentModel && input.previousModel !== input.currentModel)) {
+        return "cache_scope_changed";
+    }
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";

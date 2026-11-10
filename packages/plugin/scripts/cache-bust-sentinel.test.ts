@@ -325,14 +325,14 @@ describe("cache-bust attribution contract", () => {
         ).toBe("no_mc_pass_row");
     });
 
-    test("classifies a zero provider read as a full miss but keeps a short read unaccounted", () => {
+    test("classifies a same-scope zero read as a full miss but keeps a short read unaccounted", () => {
         const fullMiss = classifyCacheBust({
             divergenceIndex: 4,
             previousMessageCount: 20,
             providerComparableRead: 0,
             previousTotal: 594_149,
             previousModel: "claude-opus-5",
-            currentModel: "claude-opus-4-8",
+            currentModel: "claude-opus-5",
             decision: decision({ decision: "defer", canonicalDecision: "defer" }),
         });
         expect(fullMiss).toBe("provider_full_miss");

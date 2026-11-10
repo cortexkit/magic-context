@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
  * Classification rule table (first matching rule wins):
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
+ * | cache_scope_changed | yes | wire model or account changed, or provider reports model_changed; reads a different cache, never wakes, and is not a second rewrite |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
  * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
