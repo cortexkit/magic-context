@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
@@ -106,6 +106,30 @@ describe("docs proposals", () => {
                 "utf8",
             ),
         ).toContain("Base SHA-256");
+    });
+
+    test("a docs proposal before any historian run stays invisible to git while config stays trackable", () => {
+        const dir = fixture();
+        const git = (...args: string[]) =>
+            execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true });
+        git("init", "-q");
+        git("add", "ARCHITECTURE.md", "STRUCTURE.md");
+        mkdirSync(join(dir, ".cortexkit"));
+        writeFileSync(join(dir, ".cortexkit/magic-context.jsonc"), "{}\n");
+        const proposal = writeDocsProposal(dir, replacement, 12000, docsBaseHashes(dir), "head");
+        expect(readFileSync(proposal, "utf8")).toContain("# Docs update proposal");
+        expect(readFileSync(join(dir, ".cortexkit/magic-context/.gitignore"), "utf8")).toBe("*\n");
+        expect(existsSync(join(dir, ".cortexkit/.gitignore"))).toBe(false);
+        expect(git("status", "--porcelain", "--untracked-files=all", "--", ".cortexkit")).toBe(
+            "?? .cortexkit/magic-context.jsonc\n",
+        );
+    });
+
+    test("a gitignore failure does not prevent writing a docs proposal", () => {
+        const dir = fixture();
+        mkdirSync(join(dir, ".cortexkit/magic-context/.gitignore"), { recursive: true });
+        const proposal = writeDocsProposal(dir, replacement, 12000, docsBaseHashes(dir), "head");
+        expect(readFileSync(proposal, "utf8")).toContain("# Docs update proposal");
     });
 
     test("host changeset omits docs, tests and lockfiles and prompt never requests bash", () => {
