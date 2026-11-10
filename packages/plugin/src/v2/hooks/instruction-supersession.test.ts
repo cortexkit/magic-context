@@ -207,7 +207,7 @@ test("incremental Code Mode and MCP deltas preserve their bases while independen
     }
 }, 60000);
 
-test("a combined catalog with an MCP delta stays until both sources have newer full restatements", async () => {
+test("a combined catalog with an MCP delta stays until a newer catalog and a newer MCP list or mention of its server restate it", async () => {
     const f = await oc2ContextFixture(22879, options);
     try {
         await f.pass();

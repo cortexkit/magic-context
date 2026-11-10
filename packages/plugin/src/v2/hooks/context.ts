@@ -177,7 +177,14 @@ import { controlKey, effortPart, rememberedControlKey } from "../fold/native-rep
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
-import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import {
+    CHECKPOINT_NOTE,
+    hasFoldSummary,
+    isCheckpointNote,
+    isHistoryHead,
+    RAW_HISTORY_ACCOUNT,
+    withRecordedHead,
+} from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
@@ -262,15 +269,17 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     if (typeof baseline !== "string") {
         // A migrated host window may contain only its checkpoint. With no raw
         // tail the shared transform has no head to replace, but the checkpoint
-        // is still the only account of the earlier conversation.
-        draft.messages.unshift(checkpoint);
+        // is still the only account of the earlier conversation. One that
+        // stores the note serves the head recorded for it, as before the note.
+        draft.messages.unshift(withRecordedHead(checkpoint, submitted, head.head));
         return true;
     }
     for (const part of checkpoint.content)
         if (part.type === "text" && typeof part.text === "string") {
+            // A function replacement keeps `$&`, `$'` and the like in the head literal.
             part.text = part.text.replace(
                 `<summary>\n${submitted}\n</summary>`,
-                `<summary>\n${baseline}\n</summary>`,
+                () => `<summary>\n${baseline}\n</summary>`,
             );
         }
     const volatile = draft.messages.find((message) => message.id === HEAD_IDS[1]);
@@ -285,15 +294,30 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     return true;
 }
 
-function bindKeptInstructionCoordinates(
+/**
+ * Whether a host checkpoint may be served as the carrier of earlier history. One
+ * whose stored text is a note stands for history only through the head its fold
+ * record kept; without that head it would put the note where history belongs, so
+ * the pass restores the rows instead and renders its own history head.
+ */
+function servableCarrier(stored: string, head: string | undefined): boolean {
+    return !isCheckpointNote(stored) || head !== undefined;
+}
+
+export function bindKeptInstructionCoordinates(
     messages: readonly V2Message[],
     incoming: V2Message | undefined,
-    reader: V2StoreReader,
+    reader: Pick<V2StoreReader, "instructionRowsThrough" | "latestSequence" | "sequenceForId">,
     sessionID: string,
 ): ReturnType<V2StoreReader["instructionRowsThrough"]> {
     const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
     let previous: number | undefined;
     let pending: V2Message[] = [];
+    const matches = (message: V2Message | undefined, row: (typeof rows)[number] | undefined) =>
+        message?.role === "system" &&
+        message.content.length === 1 &&
+        message.content[0]?.type === "text" &&
+        message.content[0].text === row?.data.text;
     const bind = (next?: number) => {
         if (!pending.length) return;
         const candidates = rows.filter(
@@ -312,20 +336,35 @@ function bindKeptInstructionCoordinates(
                   : candidates;
         if (
             selected.length === pending.length &&
-            selected.every((row, index) => {
-                const message = pending[index];
-                return (
-                    message?.role === "system" &&
-                    message.content.length === 1 &&
-                    message.content[0]?.type === "text" &&
-                    message.content[0].text === row.data.text
-                );
-            })
+            selected.every((row, index) => matches(pending[index], row))
         ) {
             selected.forEach((row, index) => {
                 const message = pending[index];
                 if (message) bindNativeRowID(message, row.id, row.seq);
             });
+        } else {
+            // A hole (rows a native fold retired) breaks that window. Then bind
+            // only a row every order-preserving text match places on the same
+            // candidate: its earliest and latest placements agree. Rows with
+            // equal text elsewhere in the window, or no match, stay unbound.
+            const earliest: number[] = [];
+            let at = 0;
+            for (const message of pending) {
+                while (at < candidates.length && !matches(message, candidates[at])) at++;
+                earliest.push(at++);
+            }
+            const latest: number[] = [];
+            at = candidates.length - 1;
+            for (let index = pending.length - 1; index >= 0; index--) {
+                while (at >= 0 && !matches(pending[index], candidates[at])) at--;
+                latest[index] = at--;
+            }
+            if (earliest.every((position) => position < candidates.length))
+                pending.forEach((message, index) => {
+                    const row = candidates[earliest[index]];
+                    if (row && earliest[index] === latest[index])
+                        bindNativeRowID(message, row.id, row.seq);
+                });
         }
         pending = [];
     };
@@ -1580,11 +1619,10 @@ export async function registerContext(context: V2Context) {
                           servedModuleM0Text(sessionID),
                           await nativeFoldReplay.baseline(sessionID),
                           meta.cachedM0Bytes?.toString("utf8"),
-                      ].find((value) => value !== RAW_HISTORY_ACCOUNT && hasFoldSummary(value));
+                      ].find(isHistoryHead);
                       return (
                           !meta.isSubagent &&
-                          summary !== RAW_HISTORY_ACCOUNT &&
-                          hasFoldSummary(summary) &&
+                          isHistoryHead(summary) &&
                           nativeFoldReplay.canFold(sessionID, reader)
                       );
                   },
@@ -1960,15 +1998,19 @@ export async function registerContext(context: V2Context) {
                     // those bytes. If history is only in the incremental update
                     // (M1), keep the frozen baseline and replay the update unchanged.
                     // With no history, use the fixed raw-history account without
-                    // replacing either provider history head.
+                    // replacing either provider history head. Every candidate is
+                    // Magic Context's own state: the host's stored checkpoint text
+                    // is the fixed note, never a history head.
+                    const owned = await folds.read(draft.sessionID);
                     const candidate = [
                         moduleBaseline,
                         await nativeFoldReplay.baseline(draft.sessionID),
                         state.cachedM0Bytes?.toString("utf8"),
-                        (await folds.read(draft.sessionID))?.submitted,
+                        owned?.head ?? owned?.submitted,
                     ].find(
                         (value) =>
                             value !== RAW_HISTORY_ACCOUNT &&
+                            !isCheckpointNote(value) &&
                             ((publishedHistory && value?.includes("<session-history>")) ||
                                 hasFoldSummary(value)),
                     );
@@ -2002,6 +2044,7 @@ export async function registerContext(context: V2Context) {
                             reader,
                             previousCut: reader.latestCompaction(draft.sessionID),
                             summary,
+                            checkpointText: CHECKPOINT_NOTE,
                             manual: manualReplay
                                 ? { replay: manualReplay, commit: () => staged?.commit() }
                                 : undefined,
@@ -2018,7 +2061,10 @@ export async function registerContext(context: V2Context) {
                                 "host_compaction",
                             );
                         }
-                        draft.result = { summary, metadata: { keepID: undefined } };
+                        draft.result = {
+                            summary: CHECKPOINT_NOTE,
+                            metadata: { keepID: undefined },
+                        };
                         return;
                     }
                     if (manual)
@@ -2044,6 +2090,10 @@ export async function registerContext(context: V2Context) {
                     const summary = moduleBaseline ?? materialize(draft);
                     return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
                 },
+                // The host stores the note; the owner keeps the head it stands for,
+                // which the checkpoint carrier serves and measures in its place.
+                checkpointText: CHECKPOINT_NOTE,
+                checkpointID: running?.id,
             });
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
@@ -2268,13 +2318,14 @@ export async function registerContext(context: V2Context) {
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);
             },
-            reclaimHostRows: (sessionID, messages, permitted) =>
+            reclaimHostRows: (sessionID, messages, permitted, covered) =>
                 reclaimInstructionRows(
                     database,
                     sessionID,
                     messages,
                     permitted,
                     foldedInstructionIDs.get(sessionID),
+                    covered,
                 ),
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same
@@ -2810,6 +2861,8 @@ export async function registerContext(context: V2Context) {
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
+            // The head Magic Context recorded for a checkpoint that stores the note.
+            let recordedHead: string | undefined;
             let upgradeCheckpointSequence: number | undefined;
             try {
                 const candidates = syntheticCandidates(
@@ -2881,9 +2934,13 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
-                        submitted = identity.renderedSummary ?? carrier.submitted;
-                        upgradeCheckpointSequence = carrier.row.seq;
+                        const stored = identity.renderedSummary ?? carrier.submitted;
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
+                            submitted = stored;
+                            recordedHead = identity.head;
+                            upgradeCheckpointSequence = carrier.row.seq;
+                        }
                     }
                 }
                 let nativeRestored = localCut
@@ -2982,10 +3039,23 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? incoming);
-                        submitted = identity.rendered
+                        const stored = identity.rendered
                             ? (identity.renderedSummary ?? identity.submitted)
                             : (cut.data.summary ?? "");
+                        // A record rebuilt from a note checkpoint without a head of
+                        // its own is not served: observe already requested the fold,
+                        // and the restored rows below take the checkpoint's place.
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? incoming);
+                            submitted = stored;
+                            // This owner record answered this very cut, so its head
+                            // is the account the stored note stands for.
+                            recordedHead = identity.head;
+                        } else
+                            sessionLog(
+                                draft.sessionID,
+                                "v2 host fold: note checkpoint without a recorded head; serving restored history",
+                            );
                     }
                     draft.messages.splice(
                         0,
@@ -3055,10 +3125,14 @@ export async function registerContext(context: V2Context) {
                     // The checkpoint replaces the frozen history-head message
                     // after the shared transform. Measure it with the restored
                     // tail now so the scheduler can reduce an over-window
-                    // request before it is sent.
+                    // request before it is sent. A checkpoint that stores the note
+                    // is measured with the head it stands for, as before the note.
                     const estimate = estimateCheckpointRequest({
                         ...draft,
-                        messages: [checkpoint, ...draft.messages],
+                        messages: [
+                            withRecordedHead(checkpoint, submitted, recordedHead),
+                            ...draft.messages,
+                        ],
                     });
                     checkpointInputEstimates.set(draft.sessionID, {
                         tokens: estimate.tokens,
@@ -3141,7 +3215,11 @@ export async function registerContext(context: V2Context) {
                 replayHead !== undefined
                     ? replayHead
                     : checkpoint && submitted !== undefined
-                      ? { checkpoint, submitted }
+                      ? {
+                            checkpoint,
+                            submitted,
+                            ...(recordedHead === undefined ? {} : { head: recordedHead }),
+                        }
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;

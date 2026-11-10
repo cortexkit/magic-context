@@ -133,6 +133,22 @@ describe("parameter descriptions match runtime behavior", () => {
         expect(hostArgs.note_ids?.description).toBe(FULL_PARAMETER_DESCRIPTIONS.ctx_note.note_ids);
     });
 
+    it("ctx_memory: required action-irrelevant arguments have explicit filler values", () => {
+        expect(FULL_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
+            content:
+                "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string.",
+            category:
+                "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
+            ids: "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
+        });
+        expect(LIGHT_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
+            content: "One standalone fact (write, update, merge). Archive and get: empty string.",
+            category:
+                "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it.",
+            ids: "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list.",
+        });
+    });
+
     it("ctx_memory: the primary tool no longer describes the dreamer-only list limit", () => {
         for (const descriptions of Object.values(PRESETS)) {
             expect(Object.keys(descriptions.ctx_memory)).not.toContain("limit");

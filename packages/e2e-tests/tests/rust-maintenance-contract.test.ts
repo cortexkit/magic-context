@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
@@ -57,7 +57,7 @@ describe.skipIf(!rustPrereqs.ok)("rust maintenance command contract", () => {
         });
         await h.sendPrompt(sessionId, "historian no-fire evaluation");
 
-        const store = new Database(
+        const store = openTestDb(
             join(h.env.dataDir, "cortexkit", "magic-context", "store.db"),
             { readonly: true },
         );
@@ -96,7 +96,7 @@ describe.skipIf(!rustPrereqs.ok)("rust maintenance command contract", () => {
         const before = await waitForCompartment(h, sessionId);
         expect(Number(before.coverage_ordinal ?? 0)).toBeGreaterThan(0);
 
-        const store = new Database(
+        const store = openTestDb(
             join(h.env.dataDir, "cortexkit", "magic-context", "store.db"),
             { readonly: true },
         );

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { describe, expect, it } from "bun:test";
 import { assertHistorianMockRouting, assertMockEndpoint, assertMockProviders, pinMockAgents } from "./mock-routing";
 
@@ -69,7 +69,7 @@ describe("mock child-agent routing", () => {
   });
 
   it("rejects an external historian attempt even after successful mock fallback", () => {
-    const db = new Database(":memory:");
+    const db = openTestDb(":memory:");
     try {
       db.exec(
         "CREATE TABLE subagent_invocations (harness TEXT, subagent TEXT, provider_id TEXT, model_id TEXT)",

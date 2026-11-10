@@ -20,7 +20,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
@@ -29,7 +29,7 @@ const VARIANT = "high";
 const PASSES_AFTER_RESTART = 4;
 
 function persistedRenderIdentity(h: RustTestHarness, sessionId: string): string {
-    const db = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "store.db"), {
+    const db = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "store.db"), {
         readonly: true,
     });
     try {

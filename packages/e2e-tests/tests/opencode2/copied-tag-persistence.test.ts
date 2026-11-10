@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -69,7 +69,7 @@ test("OpenCode 2 requests carry assistant replies without copied §N§ tag notat
 			turnRequests.push(sent[0]!);
 		}
 
-		const store = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), {
+		const store = openTestDb(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), {
 			readonly: true,
 		});
 		const stored = (
@@ -180,7 +180,7 @@ test("OpenCode 2 recovers a stored whole copied tag followed by failed turns wit
 			const oldTag = requests[turn - 1]!.filter((item) => item.role === "assistant")[0];
 			expect(JSON.stringify(requests[turn]!.filter((item) => item.role === "assistant")[0])).toBe(JSON.stringify(oldTag));
 		}
-		const store = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
+		const store = openTestDb(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
 		const rows = store.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq").all(session.id) as Array<{ data: string }>;
 		store.close();
 		expect(rows.some((row) => row.data.includes("§58§"))).toBe(true);

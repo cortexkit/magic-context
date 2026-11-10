@@ -191,6 +191,18 @@ import {
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
 import {
+    forceRide,
+    forgetRoutinePressureEpisode,
+    heuristicsAlreadyRanThisTurn,
+    heuristicsRunOnPass,
+    markRoutinePressureApplied,
+    pressureBands,
+    routineCleanupRunsOnPass,
+    routinePressureAlreadyApplied,
+    safeReasoningCutoff as sharedSafeReasoningCutoff,
+    updateRoutinePressureEpisode,
+} from "./routine-cleanup-decision";
+import {
     isAnthropicFamilyRoute,
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
@@ -265,11 +277,10 @@ const SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES = 40;
 // Bounded (LRU, max 100) so a crashed/never-reset session can't leak an entry
 // forever in a long-running process — matches the other per-session caches.
 const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
-const routinePressureAppliedBySession = new BoundedSessionMap<boolean>(100);
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
-    routinePressureAppliedBySession.delete(sessionId);
+    forgetRoutinePressureEpisode(sessionId);
 }
 
 export type DeferredCompactionMarkerClearOutcome =
@@ -1675,6 +1686,8 @@ interface RunPostTransformPhaseArgs {
         sessionId: string,
         messages: MessageLike[],
         permitted: boolean,
+        /** Covered host instruction rows this pass serves ahead of `messages`. */
+        covered: MessageLike[],
     ) => HostRowReclaim;
     tags: TagEntry[];
     targets: Map<number, TagTarget>;
@@ -2195,44 +2208,41 @@ export async function runPostTransformPhase(
     );
     let isExplicitFlush = pendingMaterializationAtPassStart;
     const deferredMaterializationWasPending = deferredMaterializationAtPassStart;
-    const alreadyRanThisTurn =
-        args.currentTurnId !== null &&
-        args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
-    const forceMaterialization =
-        args.fullFeatureMode &&
-        !compactionOff &&
-        args.contextUsage.percentage >= args.forceMaterializationPercentage;
+    const alreadyRanThisTurn = heuristicsAlreadyRanThisTurn(
+        args.lastHeuristicsTurnId,
+        args.sessionId,
+        args.currentTurnId,
+    );
     // Tiered emergency drop eligibility (Phase 2). Unlike `forceMaterialization`
     // (primary-only — it also forces m[0] materialization), the emergency tool
     // floor fires at the derived force band for BOTH primary AND subagent: it's the only tool
     // floor subagents have now that routine age-drops are gone. It's still a
     // cache-busting-pass operation (selection persisted, defer passes replay),
     // so it only runs when heuristics run (see shouldRunHeuristics) AND usage is
-    // ≥ the force-materialize threshold.
-    const emergencyDropEligible =
-        !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
-    // A reading that only a local count put in the force band can overstate
-    // the provider, and a provider that reports no usage never sends the
-    // measurement that would confirm it. Below 95% such a reading is therefore
-    // not force-band pressure: it takes no force ride, lifts no signed-thinking
-    // hold and runs no tiered emergency tool drop. A rebuild the pass makes for
-    // another reason (such as the execute pass's own bounded rebuild below)
-    // carries only queued drops and routine cleanup.
-    const forceRideWaitsOnLocalCount =
-        args.contextUsageFromEstimate === true && args.contextUsage.percentage < 95;
-    const forceBandConfirmed = emergencyDropEligible && !forceRideWaitsOnLocalCount;
-    const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
-    if (!executePressureEligible) {
-        routinePressureAppliedBySession.delete(args.sessionId);
-    } else if (args.fullFeatureMode && alreadyRanThisTurn) {
-        // The shared once-per-turn map proves an earlier pass in this pressure
-        // episode already ran even when this process-local episode map is cold.
-        routinePressureAppliedBySession.set(args.sessionId, true);
-    }
-    const routinePressureAlreadyApplied =
-        args.fullFeatureMode &&
-        executePressureEligible &&
-        routinePressureAppliedBySession.get(args.sessionId) === true;
+    // ≥ the force-materialize threshold. A reading that only a local count put
+    // in the force band confirms it only at 95% (see `forceRideWaitsOnLocalCount`).
+    const bands = pressureBands({
+        percentage: args.contextUsage.percentage,
+        fromEstimate: args.contextUsageFromEstimate === true,
+        forceMaterializationPercentage: args.forceMaterializationPercentage,
+        compactionOff,
+        fullFeatureMode: args.fullFeatureMode,
+        schedulerDecision: args.schedulerDecision,
+    });
+    const {
+        forceMaterialization,
+        emergencyDropEligible,
+        forceRideWaitsOnLocalCount,
+        forceBandConfirmed,
+        executePressureEligible,
+    } = bands;
+    const episode = {
+        fullFeatureMode: args.fullFeatureMode,
+        executePressureEligible,
+        alreadyRanThisTurn,
+    };
+    updateRoutinePressureEpisode(args.sessionId, episode);
+    const routinePressureApplied = routinePressureAlreadyApplied(args.sessionId, episode);
     // Require five points below the force band so a batch-induced dip cannot
     // immediately rearm another cache rewrite as the tail regrows. Only a
     // provider-measured reading may end the episode: a local count can read
@@ -2308,14 +2318,10 @@ export async function runPostTransformPhase(
         retainedThinking,
         args.thinkingBindingRecoveryEnabledForModel === true,
     );
-    let maxReasoningTag = 0;
-    for (const tag of args.messageTagNumbers.values())
-        maxReasoningTag = Math.max(maxReasoningTag, tag);
-    let safeReasoningCutoff = maxReasoningTag;
-    for (const message of protectedThinkingMessages) {
-        const tag = args.messageTagNumbers.get(message);
-        if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
-    }
+    const safeReasoningCutoff = sharedSafeReasoningCutoff(
+        args.messageTagNumbers,
+        protectedThinkingMessages,
+    );
     // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
     // model it holds only right after heavy reasoning and below the cap. Any
     // other pass of a signed turn busts like a pass of any other model, and
@@ -2716,16 +2722,12 @@ export async function runPostTransformPhase(
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
-        // A reading that only a local count put in the force band is not
-        // evidence the session is there: the count can overstate the provider.
-        // Below 95% it waits for the provider's next measurement instead of
-        // rewriting the cache on its own. At 95% or more it still rides, since
-        // waiting there risks the next request not fitting.
-        force:
-            emergencyDropEligible &&
-            (args.contextUsage.percentage >= 95 ||
-                (args.contextUsageFromEstimate !== true &&
-                    getEmergencyInputSample(args.db, args.sessionId) === 0)),
+        force: forceRide({
+            bands,
+            percentage: args.contextUsage.percentage,
+            fromEstimate: args.contextUsageFromEstimate === true,
+            emergencySample: () => getEmergencyInputSample(args.db, args.sessionId),
+        }),
         explicitFlush:
             isExplicitFlush &&
             hasPendingMaterializationOrigin(
@@ -2796,26 +2798,18 @@ export async function runPostTransformPhase(
             emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
-    const shouldRunHeuristics =
-        !compactionOff &&
-        publishedWorkDrainAllowed &&
-        (rideSignals.publishedHistory ||
-            rideSignals.executeReclaim ||
-            rideSignals.servedShapeRepair ||
-            materializationRequested ||
-            forceMaterialization ||
-            // The off-wire fold changed the served prefix, so the prefix already
-            // busted. Heuristics may ride it and bypass the once-per-turn guard
-            // without creating an independent prefix rewrite.
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            // the derived force band emergency floor for BOTH primary and subagent. For a primary
-            // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
-            // for a subagent (no forceMaterialization) it's the only path that
-            // fires the tiered drop even when the ordinary scheduler defers.
-            emergencyDropEligible ||
-            (args.schedulerDecision === "execute" &&
-                (!alreadyRanThisTurn || !args.fullFeatureMode)));
+    const shouldRunHeuristics = heuristicsRunOnPass({
+        compactionOff,
+        drainAllowed: publishedWorkDrainAllowed,
+        rides: rideSignals,
+        materializationRequested,
+        bands,
+        foldBustsServedPrefix: foldBustsServedPrefixThisPass,
+        firstRender: firstRenderBust,
+        schedulerDecision: args.schedulerDecision,
+        alreadyRanThisTurn,
+        fullFeatureMode: args.fullFeatureMode,
+    });
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
@@ -3147,10 +3141,44 @@ export async function runPostTransformPhase(
             Math.min(firstApplicationLocations.get(message) ?? Infinity, partIndex),
         );
     };
+    // OpenCode 2 instruction rows are served even once the history summary
+    // covers them; the delivery trim below already keeps every one still in
+    // the array. The switch that extends this to the earlier trims is turned
+    // on by the first pass that may rewrite the whole prefix
+    // (canEditWholePrefix), so a session served before it never changes bytes
+    // on any other pass. Every pass after that serves the same rows, whichever
+    // pass moved the history boundary. Decided before the host-row reclaim,
+    // which applies instruction supersession to the covered rows this pass
+    // serves as well; the switch itself is persisted once the pass's
+    // signed-thinking omissions are durable (next to the reclaim's commit).
+    const coveredHostInstructions = args.coveredHostInstructions ?? [];
+    let coveredRetentionOn = false;
+    let retainCoveredInstructions = false;
+    if (
+        m0M1EnabledForFold &&
+        args.m0M1 &&
+        !compactionOff &&
+        args.opencode2 &&
+        (coveredHostInstructions.length > 0 || canEditWholePrefix) &&
+        hostInstructionRetentionEnabled()
+    ) {
+        try {
+            coveredRetentionOn = isHostInstructionRetentionOn(args.db, args.sessionId);
+        } catch (error) {
+            failPass("host-instruction-retention-read-failure", error);
+        }
+        retainCoveredInstructions = coveredRetentionOn || canEditWholePrefix;
+    }
+    // Instruction rows retire only where the whole prefix may be rewritten. A
+    // pass held for recent signed thinking may still rebuild once context
+    // usage reaches the force band (the forced-rebuild range just below the
+    // hold cap), but every byte in front of the held block must stay as it
+    // was, so such a pass only replays decisions already persisted.
     const hostRowReclaim = args.reclaimHostRows?.(
         args.sessionId,
         args.messages,
-        !compactionOff && isCacheBustingPass,
+        !compactionOff && canEditWholePrefix,
+        retainCoveredInstructions ? coveredHostInstructions : [],
     );
     for (const message of hostRowReclaim?.edits ?? []) {
         const index = args.messages.indexOf(message);
@@ -3289,13 +3317,15 @@ export async function runPostTransformPhase(
             // Force-originated tool and text rewrites share the durable episode.
             // A small pressure dip or a process restart cannot rearm just the text lane.
             // Independent work and the absolute emergency arm still admit all lanes.
-            let routineCleanupApplied =
-                (forceBandConfirmed
-                    ? args.contextUsage.percentage >= 95 ||
-                      getEmergencyInputSample(args.db, args.sessionId) === 0
-                    : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
-                materializationRequested ||
-                emergencyRewriteAlreadyPriced;
+            let routineCleanupApplied = routineCleanupRunsOnPass({
+                bands,
+                percentage: args.contextUsage.percentage,
+                emergencySample: () => getEmergencyInputSample(args.db, args.sessionId),
+                fullFeatureMode: args.fullFeatureMode,
+                routinePressureAlreadyApplied: routinePressureApplied,
+                materializationRequested,
+                rewriteAlreadyPriced: emergencyRewriteAlreadyPriced,
+            });
             // Pending ops run just before heuristics and can drop active tags.
             // Emergency floor math must see that post-op active set; otherwise
             // already-reclaimed tags stay in floorTags and the planner over-evicts.
@@ -3366,7 +3396,7 @@ export async function runPostTransformPhase(
                 routineCleanupApplied = true;
             }
             if (routineCleanupApplied && args.fullFeatureMode && executePressureEligible) {
-                routinePressureAppliedBySession.set(args.sessionId, true);
+                markRoutinePressureApplied(args.sessionId);
             }
             logTransformTiming(
                 args.sessionId,
@@ -3884,31 +3914,13 @@ export async function runPostTransformPhase(
 
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
-    if (m0M1Enabled && args.m0M1 && !compactionOff && args.opencode2) {
-        // OpenCode 2 instruction rows are served even once the history summary
-        // covers them; the delivery trim below already keeps every one still in
-        // the array. The switch that extends this to the earlier trims is set on
-        // the first pass allowed to rewrite the whole prefix, so a session served
-        // before it never changes bytes on a defer pass. Every pass after that
-        // serves the same rows, whichever pass moved the history boundary.
-        const covered = args.coveredHostInstructions ?? [];
-        if (covered.length > 0 || canEditWholePrefix) {
-            let retain = false;
-            if (hostInstructionRetentionEnabled()) {
-                try {
-                    retain = isHostInstructionRetentionOn(args.db, args.sessionId);
-                } catch (error) {
-                    failPass("host-instruction-retention-read-failure", error);
-                }
-                if (!retain && canEditWholePrefix) {
-                    if (!markHostInstructionRetention(args.db, args.sessionId))
-                        failPass("host-instruction-retention-persistence-failure");
-                    retain = true;
-                }
-            }
-            // The covered rows are older than everything left in the array.
-            if (retain && covered.length > 0) args.messages.unshift(...covered);
-        }
+    // The covered rows are older than everything left in the array. The pass
+    // that turns retention on puts them back in front of every signed block,
+    // which is a first application like any other edit there.
+    if (retainCoveredInstructions && coveredHostInstructions.length > 0) {
+        if (!coveredRetentionOn && coveredHostInstructions.some((m) => m.parts.length > 0))
+            recordFirstApplicationWireEdit(true);
+        args.messages.unshift(...coveredHostInstructions);
     }
     if (m0M1Enabled && args.m0M1) {
         // Serve the persisted pair and its trim boundary as they are. Marking
@@ -5072,6 +5084,15 @@ export async function runPostTransformPhase(
     // Host retirements must not survive a failed required thinking-strip write.
     // The omission above is durable before its dependent row edit is committed.
     hostRowReclaim?.commit();
+    // Likewise the retention switch: a pass that fails before this point must
+    // not leave covered rows served on a following pass that may not rewrite
+    // the prefix.
+    if (
+        retainCoveredInstructions &&
+        !coveredRetentionOn &&
+        !markHostInstructionRetention(args.db, args.sessionId)
+    )
+        failPass("host-instruction-retention-persistence-failure");
 
     // Reasoning that a drop neutralized this pass. Canonical Anthropic keeps the
     // empty sentinel its adapter drops (its existing bytes). Elsewhere a drop

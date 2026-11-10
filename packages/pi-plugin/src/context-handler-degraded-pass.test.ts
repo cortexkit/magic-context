@@ -3,6 +3,7 @@ import * as applyOperations from "@magic-context/core/hooks/magic-context/apply-
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import * as tagTranscriptModule from "@magic-context/core/shared/tag-transcript";
+import { IssuePrivacy } from "../../cli/src/lib/issue-privacy";
 
 import {
 	clearContextHandlerSession,
@@ -180,5 +181,39 @@ describe("Pi context handler never serves a degraded pass", () => {
 			[userMessage("hello", 1)],
 		);
 		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it("issue output keeps Pi failure wording without prompt, tool or provider canaries", async () => {
+		const canary =
+			"PRIVATE_PI_PROMPT PRIVATE_PI_FILE PRIVATE_PI_TOOL /home/PRIVATE_PI_HOME/private.env API_KEY=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+		const { result, logLines } = await runFailingPass(
+			"ses_PRIVATE_PI_SESSION",
+			{
+				resolveForProject: () => {
+					throw new TypeError(canary);
+				},
+			},
+			[userMessage(canary, 1)],
+		);
+		expect(result.ok).toBe(false);
+		expect(logLines.join("\n")).toContain("DEGRADED PASS");
+		const privacy = new IssuePrivacy({});
+		const output = logLines
+			.map((line) =>
+				privacy.logLine(
+					`[2026-09-05T10:41:07.130Z] [magic-context][ses_PRIVATE_PI_SESSION] ${line}`,
+				),
+			)
+			.join("\n");
+		expect(output).toContain("DEGRADED PASS");
+		for (const token of [
+			"PRIVATE_PI_PROMPT",
+			"PRIVATE_PI_FILE",
+			"PRIVATE_PI_TOOL",
+			"PRIVATE_PI_HOME",
+			"PRIVATE_PI_SESSION",
+			"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+		])
+			expect(output).not.toContain(token);
 	});
 });

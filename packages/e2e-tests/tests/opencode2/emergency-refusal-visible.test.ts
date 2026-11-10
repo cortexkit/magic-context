@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -64,7 +64,7 @@ test("provider-proven emergency pressure stores a visible refusal before v2 inte
 		const databaseName = host.env.OPENCODE_DB;
 		if (!dataHome || !databaseName)
 			throw new Error("isolated store path is unavailable");
-		const db = new Database(join(dataHome, "opencode", databaseName), {
+		const db = openTestDb(join(dataHome, "opencode", databaseName), {
 			readonly: true,
 		});
 		try {

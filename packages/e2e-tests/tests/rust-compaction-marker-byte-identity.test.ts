@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { closeCompactionMarkerDb, injectCompactionMarker, prepareCompactionMarkerCandidates } from "../../plugin/src/features/magic-context/compaction-marker";
@@ -26,7 +27,7 @@ function sha256(value: string): string {
 
 /** The session's published compartments, in order. */
 function contextHistoryRows(path: string, sessionId: string): Array<{ sequence: number; title: string }> {
-    const db = new Database(path, { readonly: true });
+    const db = openTestDb(path, { readonly: true });
     try {
         return db
             .query("SELECT sequence, title FROM compartments WHERE session_id = ? ORDER BY sequence")
@@ -135,7 +136,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
             // TTL policy freezes on the first model pass, independently of the
             // config file. End the fixture's zero-TTL setup explicitly so the
             // comparison really observes ordinary passes, not repeated idle busts.
-            const contextWriter = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+            const contextWriter = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
             try {
                 contextWriter.exec("PRAGMA busy_timeout=5000");
                 contextWriter.query(`UPDATE session_meta SET cache_ttl='5m',
@@ -435,7 +436,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         const historyBlocks = () => (JSON.parse(h.lastMainWireSerialized()) as Array<{ content: unknown[] }>)[0]!.content.slice(0,2);
         const first = historyBlocks();
         const firstUser = (await h.listMessages(sessionId)).find(message => message.info?.role === "user")!.info!.id!;
-        const context = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+        const context = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
         const pending = { ordinal: 1, endMessageId: firstUser, publishedAt: 1, injectAttempts: 3 };
         try {
             context.query(`UPDATE session_meta SET cache_ttl='5m', trailing_blank_decisions=json_set(trailing_blank_decisions,

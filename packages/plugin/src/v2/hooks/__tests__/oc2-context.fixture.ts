@@ -44,6 +44,8 @@ type Row = {
     metadata?: Record<string, unknown>;
     /** A completed tool call this assistant row made, rendered as the host renders tool steps. */
     tool?: { name: string; input: Record<string, unknown>; output: string };
+    /** The model's reasoning for this assistant row, stored before its text. */
+    reasoning?: string;
 };
 
 /**
@@ -74,6 +76,10 @@ export async function oc2ContextFixture(
         temporal = true,
         host = "2.0.22" as HostVersion,
         protectedTokens = 4000,
+        /** The model's limits as the host reports them (`limit.input` caps the prompt). */
+        limit = { context: 1000000 } as { context: number; input?: number; output?: number },
+        /** Further plugin settings, merged over the fixture's own. */
+        configOverrides = {} as Record<string, unknown>,
         eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
             (async function* () {})(),
     } = {},
@@ -124,6 +130,7 @@ export async function oc2ContextFixture(
         protected_tokens: protectedTokens,
         commit_cluster_trigger: { enabled: false },
         cache_ttl: cacheTtl,
+        ...configOverrides,
     });
     const configPath = join(process.env.XDG_CONFIG_HOME!, "cortexkit");
     mkdirSync(configPath, { recursive: true });
@@ -140,7 +147,7 @@ export async function oc2ContextFixture(
         location: { directory: root },
         agent: { transform: async () => {}, reload: async () => {} },
         model: {
-            list: () => [{ id: model, providerID: provider, limit: { context: 1000000 } }],
+            list: () => [{ id: model, providerID: provider, limit }],
         },
         storage: {
             get: async (key: string) => storage.get(key),
@@ -181,6 +188,7 @@ export async function oc2ContextFixture(
         row.type === "assistant"
             ? {
                   content: [
+                      ...(row.reasoning ? [{ type: "reasoning", text: row.reasoning }] : []),
                       { type: "text", text: row.text },
                       ...(row.tool
                           ? [
@@ -261,7 +269,7 @@ export async function oc2ContextFixture(
     let modelId = model;
     const inputDraft = (): SessionContext => ({
         sessionID: session,
-        model: { providerID: provider, id: modelId, limit: { context: 1000000 } },
+        model: { providerID: provider, id: modelId, limit },
         agent: "build",
         system: [{ type: "text", text: systemText }],
         tools: { read: { description: "Read a file", input: { type: "object" } } },
@@ -520,9 +528,11 @@ export async function oc2ContextFixture(
         respondWithTool(
             tool: { name: string; input: Record<string, unknown>; output: string },
             inputTokens?: number,
+            reasoning?: string,
         ) {
             addRow("assistant", `${seed}/step ${rows.length}`, 5000);
             rows[rows.length - 1]!.tool = tool;
+            if (reasoning !== undefined) rows[rows.length - 1]!.reasoning = reasoning;
             if (modelId !== model) rows[rows.length - 1]!.model = modelId;
             if (inputTokens !== undefined) rows[rows.length - 1]!.inputTokens = inputTokens;
             persist();

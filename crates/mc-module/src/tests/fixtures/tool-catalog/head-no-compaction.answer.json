@@ -1,6 +1,6 @@
 {
-  "generation": "c3302f094107a7885887d119d89378a4fe0b4fb507651045df667fd51b62ae3c",
-  "catalog_digest": "c3302f094107a7885887d119d89378a4fe0b4fb507651045df667fd51b62ae3c",
+  "generation": "c99e27f13108caefb691b7c081caab279fba5b4c0f81453dc3a6fb226b21642d",
+  "catalog_digest": "c99e27f13108caefb691b7c081caab279fba5b4c0f81453dc3a6fb226b21642d",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -106,7 +106,7 @@
           "content": {
             "type": "string",
             "maxLength": 65536,
-            "description": "The memory text — one standalone fact (write, update, merge)."
+            "description": "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string."
           },
           "category": {
             "type": "string",
@@ -117,7 +117,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it)."
+            "description": "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it."
           },
           "ids": {
             "type": "array",
@@ -126,7 +126,7 @@
               "type": "integer",
               "minimum": 1
             },
-            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get."
+            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
           },
           "reason": {
             "type": "string",
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "2b868262d174d4597c3870f3b7a1b13b5a88843a81a8cc6308c8e3a21796815d",
+    "preflight_digest": "f229e6690fa2fde058de34746f0a53efa994e9c1a1d8510f128917eb59c5873d",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

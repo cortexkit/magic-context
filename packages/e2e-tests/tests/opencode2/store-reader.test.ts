@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -109,7 +109,7 @@ test("R16 source filename table covers every channel and override branch", () =>
 test("session_message_reader seq pages idle boundaries and checkpoint window", () => {
 	const { root } = isolation();
 	const path = join(root, "fixture.db");
-	const writer = new Database(path);
+	const writer = openTestDb(path);
 	writer.exec(
 		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
@@ -190,7 +190,7 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 test("10,000-row raw read pages decode only the requested page and count decodes none", () => {
 	const { root } = isolation();
 	const path = join(root, "bounded-reader.db");
-	const writer = new Database(path);
+	const writer = openTestDb(path);
 	writer.exec(
 		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
@@ -282,7 +282,7 @@ test("10,000-row raw read pages decode only the requested page and count decodes
 test("post-historian drop-key collection decodes only the published chunk", async () => {
 	const { root } = isolation();
 	const path = join(root, "post-historian-bounded-reader.db");
-	const writer = new Database(path);
+	const writer = openTestDb(path);
 	writer.exec(`
 		CREATE TABLE session_message(
 			id TEXT PRIMARY KEY,
@@ -352,7 +352,7 @@ test("post-historian drop-key collection decodes only the published chunk", asyn
 test("latestAssistant selects the newest assistant row by seq and ignores other types", () => {
 	const { root } = isolation();
 	const path = join(root, "latest-assistant.db");
-	const writer = new Database(path);
+	const writer = openTestDb(path);
 	writer.exec(
 		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER DEFAULT 0, data TEXT)",
 	);
@@ -398,8 +398,8 @@ test("I11 v1/v2 readers feed the same transform core with pinned host difference
 	const sessionID = "ses-golden";
 	const v1Path = join(root, "golden-v1.db");
 	const v2Path = join(root, "golden-v2.db");
-	const v1 = new Database(v1Path);
-	const v2 = new Database(v2Path);
+	const v1 = openTestDb(v1Path);
+	const v2 = openTestDb(v2Path);
 	v1.exec(`
 		CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
 		CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
@@ -473,7 +473,7 @@ test("I11 v1/v2 readers feed the same transform core with pinned host difference
 test("host-aware dispatch refuses a v1 store before a v2 query", () => {
 	const { root } = isolation();
 	const path = join(root, "v1.db");
-	const db = new Database(path);
+	const db = openTestDb(path);
 	db.exec("CREATE TABLE message(id TEXT); CREATE TABLE part(id TEXT)");
 	db.close();
 	expect(() => new V2StoreReader(path)).toThrow("expected v2, found v1");
