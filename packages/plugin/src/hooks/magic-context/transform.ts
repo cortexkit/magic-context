@@ -4149,19 +4149,20 @@ export function createTransform(deps: TransformDeps) {
                     sessionId,
                     `emergency disarm: trusted final-wire ${emergencyFailClosed.disarm.finalWireTokens} under limit ${emergencyFailClosed.disarm.provenLimitTokens}`,
                 );
-            } else if (recoveryAdmissionPass && !emergencyFailClosed.shouldAbort) {
-                // The recovery check admitted this request: it fits, or nothing
-                // could count it against a window (no window known, or the count
-                // failed), in which case a kept flag could never be cleared and
-                // would hold every later turn in the emergency band. This is the
-                // one place a recovery pass ends its recovery; a historian
-                // publication does not.
+            } else if (
+                recoveryAdmissionPass &&
+                !emergencyFailClosed.shouldAbort &&
+                recoveryServedRequest !== undefined
+            ) {
+                // The recovery check counted this request within its limit, so
+                // it fits. This is the one place a recovery pass ends its
+                // recovery; a historian publication does not. A request nothing
+                // could count (no window known, or the count failed) is sent as
+                // before and leaves recovery to the existing disarms.
                 clearEmergencyRecovery(db, sessionId);
                 sessionLog(
                     sessionId,
-                    recoveryServedRequest
-                        ? `transform: recovery request admitted: about ${recoveryServedRequest.tokens} tokens, within ${recoveryServedRequest.lineTokens} of ${recoveryWindowTokens}; ${emergencyRecoveryOrigin} recovery ends`
-                        : `transform: recovery request could not be counted against a window; ${emergencyRecoveryOrigin} recovery ends`,
+                    `transform: recovery request admitted: about ${recoveryServedRequest.tokens} tokens, within ${recoveryServedRequest.lineTokens} of ${recoveryWindowTokens}; ${emergencyRecoveryOrigin} recovery ends`,
                 );
             }
             if (emergencyFailClosed.shouldAbort) {

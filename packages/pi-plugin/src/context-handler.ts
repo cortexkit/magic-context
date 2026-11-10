@@ -7020,27 +7020,27 @@ export function registerPiContextHandler(
 					);
 					throw contextRefusalError(recoveryRefusalNotice(historyRemains));
 				}
-				if (
-					served === undefined &&
-					!untrustedRecoveryCountLoggedSessions.has(sessionId)
-				) {
-					untrustedRecoveryCountLoggedSessions.add(sessionId);
+				if (served === undefined) {
+					// Sent unchecked, as before; recovery stays armed for the existing
+					// disarms (real pressure below the force band with nothing left
+					// to summarize).
+					if (!untrustedRecoveryCountLoggedSessions.has(sessionId)) {
+						untrustedRecoveryCountLoggedSessions.add(sessionId);
+						sessionLog(
+							sessionId,
+							"transform: recovery request not counted: the fit envelope is untrusted (system prompt or tool definitions not measured yet), so only the byte-count check above applies",
+						);
+					}
+				} else {
+					// The request was counted within its limit, so it fits. This is
+					// where a recovery pass ends its recovery; a historian
+					// publication does not.
+					clearEmergencyRecovery(options.db, sessionId);
 					sessionLog(
 						sessionId,
-						"transform: recovery request not counted: the fit envelope is untrusted (system prompt or tool definitions not measured yet), so only the byte-count check above applies",
+						`transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`,
 					);
 				}
-				// Admitted: the request fits, or it could not be counted, in which
-				// case a kept flag could never be cleared and would hold every later
-				// turn in the emergency band. This is where a recovery pass ends its
-				// recovery; a historian publication does not.
-				clearEmergencyRecovery(options.db, sessionId);
-				sessionLog(
-					sessionId,
-					served === undefined
-						? `transform: recovery request could not be counted; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`
-						: `transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`,
-				);
 			}
 			publishFinalRequestAccounting();
 			let serializedOutput: PiLkgSerializedOutput | undefined;

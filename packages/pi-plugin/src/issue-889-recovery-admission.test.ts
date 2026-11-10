@@ -297,22 +297,22 @@ it("sends a provider-overflow recovery request that fits under the 95% line, and
 	}
 });
 
-it("says once that it cannot count a recovery request when the fit envelope is untrusted", async () => {
+it("says once that it cannot count a recovery request when the fit envelope is untrusted, and keeps recovery armed", async () => {
 	const f = fixture(records(3), { untrustedEnvelope: true });
 	const log = spyOn(logger, "sessionLog");
 	try {
+		await armProviderOverflow(f);
 		for (let turn = 0; turn < 2; turn++) {
-			await armProviderOverflow(f);
 			const { refusal } = await serve(f);
 			// Only the byte-count check applies, and this request passes it.
 			expect(refusal).toBeUndefined();
-			expect(logged(log, "recovery request could not be counted")).toHaveLength(
-				turn + 1,
-			);
+			// Nothing proved the request fits, so recovery is not ended; the
+			// next turn is a recovery pass again.
 			expect(getOverflowState(f.db, sessionId).needsEmergencyRecovery).toBe(
-				false,
+				true,
 			);
 		}
+		expect(logged(log, "recovery request admitted")).toHaveLength(0);
 		expect(
 			logged(
 				log,

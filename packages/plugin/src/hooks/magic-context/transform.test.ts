@@ -4149,40 +4149,26 @@ describe("createTransform shrinking model-switch overflow pre-arm", () => {
             percentage: 0,
             inputTokens: 0,
         });
-        const log = spyOn(loggerModule, "sessionLog");
-        try {
-            await transform(
-                {},
-                {
-                    messages: [
-                        {
-                            info: {
-                                id: "m-user-restart",
-                                role: "user",
-                                sessionID: sessionId,
-                                model: NEW_MODEL,
-                            },
-                            parts: [{ type: "text", text: "continue" }],
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: {
+                            id: "m-user-restart",
+                            role: "user",
+                            sessionID: sessionId,
+                            model: NEW_MODEL,
                         },
-                    ],
-                },
-            );
-            // The stale arm stays a proactive one (it is not turned into a
-            // provider-overflow refusal), and its tiny request goes out, which
-            // ends that recovery (this fixture seeds no window to count it
-            // against).
-            expect(
-                log.mock.calls.some(([, text]) =>
-                    /transform: recovery request .*; proactive_model_shrink recovery ends/.test(
-                        String(text),
-                    ),
-                ),
-            ).toBe(true);
-        } finally {
-            log.mockRestore();
-        }
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                ],
+            },
+        );
 
-        expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(false);
+        expect(getOverflowState(db, sessionId).emergencyRecoveryOrigin).toBe(
+            "proactive_model_shrink",
+        );
         expect(abort).not.toHaveBeenCalled();
     });
 
