@@ -3092,7 +3092,7 @@ const SITE_DATA = [
 "w:run-config.ts:2x,-1t",
 "w:snapshot.ts:2s,d,l,c,16,-2u",
 "r:migrate-config-location.ts:bg,8,1r,3,3,g,l,2,4,3,g,l,8,c",
-"r:project-security.ts:rl,1",
+"r:project-security.ts:rp,1",
 "r:schema/magic-context.ts:1dc",
 "r:variable.ts:1e",
 "k:features/magic-context/chunk-embedding-write-worker.ts:p",
