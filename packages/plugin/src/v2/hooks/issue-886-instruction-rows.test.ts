@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readReplayDocument } from "../../features/magic-context/storage-replay-document";
 import {
     retiredLiveInstructionIDs,
     setCoveredInstructionSupersessionEnabledForTests,
@@ -307,12 +308,8 @@ test("after an upgrade, covered rows a release served are retired only on a pass
         const upgraded = await pass();
         sameBytes(upgraded, legacy);
         expect(
-            f.db
-                .prepare(
-                    "SELECT json_extract(trailing_blank_decisions, '$.coveredInstructionSupersession') AS doc FROM session_meta WHERE session_id=?",
-                )
-                .get(f.session),
-        ).toEqual({ doc: null });
+            readReplayDocument(f.db, f.session).coveredInstructionSupersession ?? null,
+        ).toBeNull();
         // The next pass that may rebuild retires the covered row and turns the
         // switch on; later passes replay that request.
         f.respond(1, 260000);

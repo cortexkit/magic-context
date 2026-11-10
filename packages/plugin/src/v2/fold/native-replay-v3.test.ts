@@ -916,9 +916,7 @@ test("V3 readers and writers reject conversation fields at every metadata level"
 test("v3 admission binds the stored checkpoint note, and a restart takes the head from Magic Context's m[0]", async () => {
     const f = fixture(3);
     const head = "<session-history>frozen history head</session-history>";
-    f.db
-        .prepare("UPDATE session_meta SET cached_m0_bytes=? WHERE session_id='s'")
-        .run(Buffer.from(head));
+    patchSessionMeta(f.db, "s", { cached_m0_bytes: Buffer.from(head) });
     const raw = f.rows.map((row) => message(row.id, row.data.text as string));
     await f.replay.capture(context([message(HEAD_IDS[0], head), ...raw]), raw);
     f.begin();
