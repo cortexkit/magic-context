@@ -5438,11 +5438,12 @@ export async function runPostTransformPhase(
     }
     // The pass completed. A `host_compaction` request is settled when its proof
     // showed no change or an allowed pass rode it; a pass that could not take
-    // the ride keeps it for the next one.
+    // the ride keeps it for the next one. Compaction-off never takes it, so a
+    // pass there settles it rather than keep it pending for good.
     completeHostCheckpointPass(
         args.sessionId,
         args.pendingMaterializationSessions,
-        hostCheckpointRequested && (!hostCheckpointRide || isCacheBustingPass),
+        hostCheckpointRequested && (!hostCheckpointRide || isCacheBustingPass || compactionOff),
     );
     return {
         explicitMaterializedSuccessfully,
