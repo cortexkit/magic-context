@@ -64,7 +64,7 @@ import {
 } from "./send-session-notification";
 import { variantChangeBustsProviderCache } from "./sentinel";
 import { matchStrippedMagicContextCommand } from "./stripped-command";
-import { normalizeTodoStateJson } from "./todo-view";
+import { CLEARED_TODO_STATE_JSON, normalizeTodoStateJson } from "./todo-view";
 
 /**
  * The raw-message source the event hook hands to message-index reconciliation.
@@ -735,16 +735,23 @@ export function createToolExecuteAfterHook(args: {
             // Firing on every todowrite is too eager — agents call it repeatedly while working.
             const todoArgs = typedInput.args as { todos?: unknown } | undefined;
             const todos = todoArgs?.todos;
-            const sessionMeta = Array.isArray(todos)
-                ? getOrCreateSessionMeta(args.db, typedInput.sessionID)
-                : null;
-            if (sessionMeta && !sessionMeta.isSubagent) {
-                const normalizedTodos = normalizeTodoStateJson(todos);
-                if (normalizedTodos !== null) {
-                    updateSessionMeta(args.db, typedInput.sessionID, {
-                        lastTodoState: normalizedTodos,
-                    });
+            const sessionMeta = getOrCreateSessionMeta(args.db, typedInput.sessionID);
+            if (!sessionMeta.isSubagent) {
+                // OpenCode accepts any status and priority string, so every list
+                // its todowrite stores replaces the snapshot. A list this capture
+                // can't read clears it instead: keeping the previous snapshot would
+                // replay an outdated plan as the newest todowrite on the next
+                // prompt rebuild.
+                const readableTodos = normalizeTodoStateJson(todos);
+                if (readableTodos === null) {
+                    sessionLog(
+                        typedInput.sessionID,
+                        "todowrite todos could not be read; cleared the todo snapshot",
+                    );
                 }
+                updateSessionMeta(args.db, typedInput.sessionID, {
+                    lastTodoState: readableTodos ?? CLEARED_TODO_STATE_JSON,
+                });
             }
             if (
                 Array.isArray(todos) &&
@@ -759,7 +766,7 @@ export function createToolExecuteAfterHook(args: {
             ) {
                 // Subagents never deliver note nudges (gated in postprocess), so don't
                 // accumulate orphan trigger state for them.
-                if (sessionMeta && !sessionMeta.isSubagent) {
+                if (!sessionMeta.isSubagent) {
                     onNoteTrigger(args.db, typedInput.sessionID, "todos_complete");
                 }
             }

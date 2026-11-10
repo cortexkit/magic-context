@@ -277,6 +277,8 @@ import {
 	registerTodoStateLifecycle,
 	rememberTodowriteToolCallTodos,
 	setTodoSnapshot,
+	TODO_PRIORITIES,
+	TODO_STATUSES,
 } from "./tools/todo-view-pi";
 
 registerStandalonePluginMarker(packageMetadata.version);
@@ -452,15 +454,39 @@ type CompatiblePiTodoCapture = {
 	todos: Exclude<ReturnType<typeof parseTodos>, null>;
 };
 
+/**
+ * Some Pi users disable Magic Context's built-in `todowrite` and install a
+ * third-party tool with the same name. Capture stays interoperable when that
+ * tool emits Magic Context's exact todo shape, but it must fail closed for any
+ * other status or priority values so bad state never reaches synthetic replay.
+ *
+ * The shared normalizer keeps any status or priority string, as OpenCode's todo
+ * schema does, so Pi checks its own tool's enums here. Magic Context's Pi
+ * `todowrite` refuses a call outside them when it validates the arguments,
+ * which happens after both capture points see the call, so the agent's list
+ * did not change and the previous snapshot stays.
+ */
 function getCompatiblePiTodoCapture(
 	todos: unknown,
 ): CompatiblePiTodoCapture | null {
 	if (!Array.isArray(todos)) return null;
+	if (!todos.every(hasPiTodowriteEnumValues)) return null;
 	const normalized = normalizeTodoStateJson(todos);
 	if (normalized === null) return null;
 	const parsed = parseTodos(todos);
 	if (parsed === null) return null;
 	return { normalized, todos: parsed };
+}
+
+/** True when an item's status and priority are values Pi's `todowrite` schema allows. */
+function hasPiTodowriteEnumValues(todo: unknown): boolean {
+	if (todo === null || typeof todo !== "object") return false;
+	const { status, priority } = todo as { status?: unknown; priority?: unknown };
+	return (
+		(TODO_STATUSES as readonly unknown[]).includes(status) &&
+		(priority === undefined ||
+			(TODO_PRIORITIES as readonly unknown[]).includes(priority))
+	);
 }
 
 function applyCompatiblePiTodoCapture(args: {
