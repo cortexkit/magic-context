@@ -9160,10 +9160,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			stripActiveTurn: true,
 			persistOnly: true,
 			// A tools release records the new tool list once the pass ends, so its
-			// strip must persist or the pass must fail, as on compaction-off: an
-			// entry without a stable id or a failed ledger write refuses the pass
-			// instead of serving thinking bound to the old list and recording the
-			// new one.
+			// strip must persist or the pass must fail (the compaction-off pipeline
+			// already requires this): an entry without a stable id or a failed
+			// ledger write refuses the pass instead of serving thinking bound to
+			// the old list and recording the new one.
 			requirePersistence:
 				!!args.recoveryRebuildReason || !!args.requestToolsChange,
 		});

@@ -26,9 +26,9 @@ import type { Database } from "../../shared/sqlite";
  * prefix-bound models and back: the returning model's own thinking from
  * before the switch is still bound to the list that model last saw, so the
  * return pass must compare with that list, not with the other model's. A model
- * with no record yet (the session's first pass on it, or the first pass after
- * this record existed) adopts its list silently: a model switch has its own
- * handling.
+ * with no record yet adopts its list silently: the session's first pass on that
+ * model, including the first pass after an upgrade to a build that keeps these
+ * records. A model switch has its own handling.
  */
 const NAMESPACE = "requestToolsRelease";
 

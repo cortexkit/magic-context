@@ -222,8 +222,9 @@ function calledToolNames(messages: readonly unknown[]): Set<string> {
  * The fingerprint of the tools Pi's next request sends: the registered tools
  * (`getAllTools`) the session has active (`getActiveTools`), as Pi builds the
  * request from them, written the way the route's provider writer sends them.
- * Undefined when either list cannot be read, which leaves the release to the
- * provider's 400 and the reactive recovery.
+ * Undefined when either list cannot be read: no proactive release then, and a
+ * binding rejection from the provider arms the reactive thinking-binding
+ * recovery instead.
  *
  * Descriptions come from the registered definitions. Pi sends the wrapped
  * tool, which copied the definition's description when the tool registry was
