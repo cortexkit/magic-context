@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite";
  * Classification rule table (first matching rule wins):
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
- * | cache_scope_changed | yes | wire model or account changed, or provider reports model_changed; reads a different cache, never wakes, and is not a second rewrite |
+ * | cache_scope_changed | yes | the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache, so it never wakes and is not a second rewrite |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
  * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
@@ -31,9 +31,13 @@ import { Database } from "bun:sqlite";
  * | unaccounted_rewrite | no | matched pass has no accounted attribution |
  * | provider_short_read_after_reclaim | no | overrides provider_short_read_identical_bytes right after a reclaim bust: the bytes extend the reclaim request, but the provider did not serve its prefix (provider-side; one crossing billed twice) |
  * | double_bust_after_reclaim | no | overrides any other accounted class right after a reclaim bust; the wake names the overridden class as cause |
- * | continuation_short_read | yes | messages are deltas and the full system/tools prefix is unchanged; never wakes, including after reclaim |
+ * | continuation_short_read | yes | messages are deltas and the full system/tools prefix is unchanged; never wakes, including right after a reclaim bust |
  * | thread_break_unchanged_client_bytes | conditional | earlier full body and sent client deltas match; wakes only when the window rewrites at least 20,000 tokens, otherwise persists a suppressed observation; only this class and full_body_no_baseline contribute tokens |
  * | full_body_no_baseline | conditional | no earlier full body is available for comparison; the same 20,000-thread-token window threshold applies |
+ *
+ * A reclaim bust is a rebuild Magic Context makes on purpose to drop or summarize
+ * content: a fold, a flush or a batch of drops. A second rewrite right after one
+ * means a single threshold crossing was billed twice.
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. Without --send, each new event is printed

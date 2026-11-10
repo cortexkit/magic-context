@@ -252,7 +252,11 @@ export interface OpenCodeCacheBustAnalysisOptions {
     scanCursor?: string;
     scanDeadlineMs?: number;
     scanNow?: () => number;
-    /** Override the prior body's stated cache lifetime; fallback without one is 5 min. */
+    /**
+     * Overrides the cache lifetime the previous same-route request stated. When
+     * that request states none, the fallback is five minutes for plugin-host
+     * dumps and one hour for runner sessions.
+     */
     cacheTtlMs?: number;
 }
 
@@ -488,7 +492,7 @@ function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
                         sequence: name?.sequence ?? (finiteNumber(meta.step) ? meta.step : 0),
                     }];
                 } catch {
-                    // Metadata can still be in flight while the sentinel scans.
+                    // A request's metadata file may still be being written while this scan runs.
                     return [];
                 }
             })

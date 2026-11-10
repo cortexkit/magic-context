@@ -172,7 +172,7 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
     {
         divergenceClass: "cache_scope_changed",
         accounted: true,
-        rule: "wire model or account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even after reclaim",
+        rule: "the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even right after a reclaim bust",
     },
     {
         divergenceClass: "system_row_shift",
