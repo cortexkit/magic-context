@@ -290,10 +290,11 @@ test("the pass that turns host instruction retention on strips the signed thinki
     }
 }, 60000);
 
-// A held force-band pass may rebuild, but it may not rewrite anything in front
-// of the held signed block, so it serves exactly the instruction rows of the
-// request before it. A retirement it would have selected waits for the next
-// pass that may rewrite the whole prefix.
+// A held pass in the force band (see the top of this file) may rebuild, but
+// it may not rewrite anything in front of the held signed block, so it serves
+// exactly the instruction rows of the request before it. A retirement it
+// would have selected waits for the next pass that may rewrite the whole
+// prefix.
 test("a held force-band pass serves the previous request's rows and leaves the retirement to the next whole-prefix pass", async () => {
     const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(42886);
     try {

@@ -3162,9 +3162,10 @@ export async function runPostTransformPhase(
         retainCoveredInstructions = coveredRetentionOn || canEditWholePrefix;
     }
     // Instruction rows retire only where the whole prefix may be rewritten. A
-    // pass held for recent signed thinking may still rebuild in the force
-    // band, but every byte in front of the held block must stay as it was, so
-    // such a pass only replays decisions already persisted.
+    // pass held for recent signed thinking may still rebuild once context
+    // usage reaches the force band (the forced-rebuild range just below the
+    // hold cap), but every byte in front of the held block must stay as it
+    // was, so such a pass only replays decisions already persisted.
     const hostRowReclaim = args.reclaimHostRows?.(
         args.sessionId,
         args.messages,
