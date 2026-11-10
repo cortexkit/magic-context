@@ -713,11 +713,15 @@ export function checkCompartmentTrigger(
         return { shouldFire: false };
     }
 
+    const recovery = getOverflowState(db, sessionId).needsEmergencyRecovery;
+    if (tailInfo.boundarySnapshot && recovery) {
+        tailInfo.boundarySnapshot = { ...tailInfo.boundarySnapshot, recovery: true };
+    }
     if (
         tailInfo.boundarySnapshot &&
         shouldWaitForNewHistorianHistory(tailInfo.boundarySnapshot, {
             usagePercentage: usage.percentage,
-            emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+            emergency: recovery,
         })
     ) {
         sessionLog(
@@ -807,6 +811,7 @@ export function checkCompartmentTrigger(
                 usage,
                 usageSource: "live",
                 emergencyTailScale: scale,
+                recovery,
             });
         });
         if (hasRunnableCompartmentWindow(scaledBoundary)) {
@@ -814,7 +819,7 @@ export function checkCompartmentTrigger(
         }
         sessionLog(
             sessionId,
-            "compartment trigger: force_band skipped — raw exists but protected head genuinely empty after emergency tail scale",
+            "compartment trigger: force_band skipped — no protected head meets summary admission after emergency tail scale",
         );
         return { shouldFire: false };
     }

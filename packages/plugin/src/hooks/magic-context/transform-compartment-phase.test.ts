@@ -27,6 +27,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import * as runner from "./compartment-runner";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
 import { checkCompartmentTrigger } from "./compartment-trigger";
+import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
 import { createDefaultBoundarySnapshotForTests } from "./protected-tail-boundary";
 import * as rawHistory from "./read-session-chunk";
 import { __ignoredNotificationTest } from "./send-session-notification";
@@ -748,7 +749,12 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
     // is over the line, within the one inline join budget.
     type RunBehavior = "publish" | "nothing" | "hang" | { publishAfterMs: number };
 
-    function recoveryHarness(sessionId: string, behaviors: RunBehavior[], tokens: number[]) {
+    function recoveryHarness(
+        sessionId: string,
+        behaviors: RunBehavior[],
+        tokens: number[],
+        boundaryOverrides: Partial<ProtectedTailBoundarySnapshot> = {},
+    ) {
         createOpenCodeDb(
             sessionId,
             Array.from({ length: 12 }, (_, i) => ({
@@ -810,6 +816,7 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             rawMessageCountAtTrigger: 12,
             usagePercentage: 97,
             executeThresholdPercentage: 65,
+            ...boundaryOverrides,
         }));
         // The run the pass first joins publishes the first chunk.
         let finishFirst!: () => void;
@@ -890,6 +897,23 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
         } finally {
             harness.cleanup();
             log.mockRestore();
+        }
+    });
+
+    it("keeps model-shrink recovery chaining through heads below the force minimum", async () => {
+        const harness = recoveryHarness(
+            "ses-recovery-chain-small-head",
+            ["publish", "publish"],
+            [30_000, 20_000, 9_000],
+            { usagePercentage: 87, summaryRemovedEligibleTokens: 1 },
+        );
+        try {
+            const result = await harness.run();
+            expect(harness.started).toEqual([3, 5]);
+            expect(result.chainedRecoveryRuns).toBe(2);
+            expect(harness.projected).toEqual([30_000, 20_000, 9_000]);
+        } finally {
+            harness.cleanup();
         }
     });
 
