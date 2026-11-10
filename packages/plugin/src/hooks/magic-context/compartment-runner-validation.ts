@@ -20,6 +20,10 @@ export interface HistorianValidationChunk {
     startIndex: number;
     endIndex: number;
     lines: Array<{ ordinal: number; messageId: string; commitHashes?: string[] }>;
+    /** Formatted lines, retained when a saved turn-one request is recovered. */
+    text?: string;
+    /** Printed labels; text is the fallback. Without either, no ordinals are treated as hidden. */
+    printedBlocks?: ReadonlyArray<{ startOrdinal: number; endOrdinal: number }>;
     /** Optional — when provided, gaps inside these ranges heal at any size. */
     toolOnlyRanges?: ReadonlyArray<{ start: number; end: number }>;
     /** Completed invocation/result arcs visible in the raw snapshot. */
@@ -174,6 +178,44 @@ export function validateHistorianOutput(
         chunk.endIndex,
     );
 
+    // Printed-block bookkeeping is non-enumerable. Recovered turn-one requests
+    // retain the formatted text instead, whose line labels carry the same ranges.
+    const printedBlocks =
+        chunk.printedBlocks ??
+        (chunk.text === undefined
+            ? undefined
+            : Array.from(chunk.text.matchAll(/^\[(\d+)(?:-(\d+))?\] /gm), (match) => ({
+                  startOrdinal: Number(match[1]),
+                  endOrdinal: Number(match[2] ?? match[1]),
+              })));
+    const hiddenOrdinals = new Set(
+        printedBlocks === undefined
+            ? []
+            : chunk.lines
+                  .filter(
+                      (line) =>
+                          !printedBlocks.some(
+                              (block) =>
+                                  block.startOrdinal <= line.ordinal &&
+                                  line.ordinal <= block.endOrdinal,
+                          ),
+                  )
+                  .map((line) => line.ordinal),
+    );
+    // Normalize before mapping message ids so publication and fact anchors share
+    // the same contiguous coverage when a reply starts at the first visible line.
+    let expectedStart = chunk.startIndex;
+    for (const compartment of parsed.compartments) {
+        if (
+            compartment.startMessage <= compartment.endMessage &&
+            compartment.endMessage <= chunk.endIndex &&
+            hiddenPrefixMatches(expectedStart, compartment.startMessage, hiddenOrdinals)
+        ) {
+            compartment.startMessage = expectedStart;
+        }
+        expectedStart = compartment.endMessage + 1;
+    }
+
     const mapped = mapParsedCompartmentsToChunk(parsed.compartments, chunk, sequenceOffset);
     if (!mapped.ok) {
         return finish({
@@ -187,6 +229,7 @@ export function validateHistorianOutput(
         chunk.startIndex,
         chunk.endIndex,
         parsed.unprocessedFrom,
+        hiddenOrdinals,
     );
     if (parsedValidationError) {
         return finish({
@@ -351,11 +394,24 @@ export function validateStoredCompartments(
     return null;
 }
 
+function hiddenPrefixMatches(
+    expected: number,
+    start: number,
+    hiddenOrdinals: ReadonlySet<number>,
+): boolean {
+    if (start < expected) return false;
+    for (let ordinal = expected; ordinal < start; ordinal += 1) {
+        if (!hiddenOrdinals.has(ordinal)) return false;
+    }
+    return true;
+}
+
 function validateParsedCompartments(
     compartments: Array<{ startMessage: number; endMessage: number; p1?: string }>,
     chunkStart: number,
     chunkEnd: number,
     unprocessedFrom: number | null,
+    hiddenOrdinals: ReadonlySet<number>,
 ): string | null {
     let expectedStart = chunkStart;
 
@@ -385,7 +441,10 @@ function validateParsedCompartments(
         // suffix uncovered, <unprocessed_from> must name its first message, so
         // chunkEnd + 1 cannot claim completion over an uncovered tail.
         if (expectedStart <= chunkEnd) {
-            if (unprocessedFrom !== expectedStart) {
+            if (
+                unprocessedFrom > chunkEnd + 1 ||
+                !hiddenPrefixMatches(expectedStart, unprocessedFrom, hiddenOrdinals)
+            ) {
                 return `<unprocessed_from> ${unprocessedFrom} does not match next uncovered message ${expectedStart}`;
             }
             return null;

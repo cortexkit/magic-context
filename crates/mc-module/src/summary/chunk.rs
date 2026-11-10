@@ -414,7 +414,7 @@ fn build_counted(
     let text = lines.join("\n");
     let header = format!("Messages {start}-{end}:\n\n");
     let mut offset = header.len();
-    let printed_blocks = printed
+    let printed_blocks: Vec<PrintedBlock> = printed
         .into_iter()
         .zip(&lines)
         .enumerate()
@@ -429,6 +429,15 @@ fn build_counted(
             }
         })
         .collect();
+    let hidden_ordinals = present
+        .iter()
+        .copied()
+        .filter(|ordinal| {
+            !printed_blocks
+                .iter()
+                .any(|block| block.start <= *ordinal && *ordinal <= block.end)
+        })
+        .collect();
     Some(Chunk {
         input: format!("{header}{text}"),
         validation: HistorianChunk {
@@ -436,6 +445,7 @@ fn build_counted(
             end_index: end,
             lines: covered,
             present_ordinals: present,
+            hidden_ordinals,
             tool_only_ranges: tool_only,
             completed_tool_arcs: Vec::new(),
         },

@@ -59,6 +59,10 @@ pub struct HistorianChunk {
     /// this sparse set to the claimed range instead of assuming 0..n density.
     #[serde(default)]
     pub present_ordinals: Vec<u64>,
+    /// Present raw ordinals outside every printed block's inclusive label range.
+    /// They still need stored coverage, but the historian cannot name unseen labels.
+    #[serde(default)]
+    pub hidden_ordinals: Vec<u64>,
     /// Gaps fully inside one of these ranges are safe to heal at any size because
     /// the omitted raw lines were tool-only transcript noise rather than narrative.
     #[serde(default)]
@@ -683,6 +687,10 @@ pub fn validate_historian_output(
         chunk.end_index,
     );
 
+    // Extend starts before mapping message ids so publication and fact anchors use
+    // the same contiguous coverage, even when the reply names the first visible line.
+    absorb_hidden_starts(&mut parsed.compartments, chunk, &present_ordinals);
+
     let emitted =
         map_parsed_compartments_to_chunk(&parsed.compartments, chunk, options.sequence_offset)
             .map_err(|error| {
@@ -696,6 +704,7 @@ pub fn validate_historian_output(
         chunk.start_index,
         chunk.end_index,
         &present_ordinals,
+        &chunk.hidden_ordinals,
         parsed.unprocessed_from,
     ) {
         return Err(validation_error(format!(
@@ -1117,6 +1126,50 @@ fn heal_compartment_gaps(
     }
 }
 
+fn hidden_prefix_matches(
+    expected: u64,
+    start: u64,
+    present_ordinals: &[u64],
+    hidden_ordinals: &[u64],
+) -> bool {
+    start == expected
+        || (start > expected
+            && hidden_ordinals.contains(&expected)
+            && present_ordinals
+                .iter()
+                .filter(|ordinal| **ordinal >= expected && **ordinal < start)
+                .all(|ordinal| hidden_ordinals.contains(ordinal)))
+}
+
+fn absorb_hidden_starts(
+    compartments: &mut [ParsedCompartment],
+    chunk: &HistorianChunk,
+    present_ordinals: &[u64],
+) {
+    let chunk_ordinals: Vec<u64> = present_ordinals
+        .iter()
+        .copied()
+        .filter(|ordinal| *ordinal >= chunk.start_index && *ordinal <= chunk.end_index)
+        .collect();
+    let mut expected = chunk_ordinals.first().copied();
+    for compartment in compartments {
+        if let Some(expected) = expected {
+            if compartment.start_message <= compartment.end_message
+                && compartment.end_message <= chunk.end_index
+                && hidden_prefix_matches(
+                    expected,
+                    compartment.start_message,
+                    &chunk_ordinals,
+                    &chunk.hidden_ordinals,
+                )
+            {
+                compartment.start_message = expected;
+            }
+        }
+        expected = next_present_after(&chunk_ordinals, compartment.end_message);
+    }
+}
+
 fn map_parsed_compartments_to_chunk(
     compartments: &[ParsedCompartment],
     chunk: &HistorianChunk,
@@ -1171,6 +1224,7 @@ fn validate_parsed_compartments(
     chunk_start: u64,
     chunk_end: u64,
     present_ordinals: &[u64],
+    hidden_ordinals: &[u64],
     unprocessed_from: Option<u64>,
 ) -> Option<String> {
     let chunk_ordinals: Vec<u64> = present_ordinals
@@ -1239,7 +1293,14 @@ fn validate_parsed_compartments(
 
     if let Some(unprocessed_from) = unprocessed_from {
         if let Some(expected) = expected_start {
-            if unprocessed_from != expected {
+            if unprocessed_from > chunk_end.saturating_add(1)
+                || !hidden_prefix_matches(
+                    expected,
+                    unprocessed_from,
+                    &chunk_ordinals,
+                    hidden_ordinals,
+                )
+            {
                 return Some(format!(
                     "<unprocessed_from> {unprocessed_from} does not match next uncovered message {expected}"
                 ));
@@ -1801,6 +1862,10 @@ fn side_channel_anchor_regex() -> &'static Regex {
 }
 
 #[cfg(test)]
+#[path = "relay_gap_tests.rs"]
+mod relay_gap_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1879,6 +1944,7 @@ mod tests {
                 })
                 .collect(),
             present_ordinals: (start..=end).collect(),
+            hidden_ordinals: Vec::new(),
             tool_only_ranges: Vec::new(),
             completed_tool_arcs: Vec::new(),
         }
@@ -2177,6 +2243,7 @@ full narrative
                 },
             ],
             present_ordinals: vec![1, 1, 2],
+            hidden_ordinals: Vec::new(),
             tool_only_ranges: Vec::new(),
             completed_tool_arcs: Vec::new(),
         };
@@ -2204,6 +2271,7 @@ full narrative
                 },
             ],
             present_ordinals: vec![1, 2, 3],
+            hidden_ordinals: Vec::new(),
             tool_only_ranges: Vec::new(),
             completed_tool_arcs: Vec::new(),
         };
@@ -2360,6 +2428,7 @@ full narrative
                 })
                 .collect(),
             present_ordinals: vec![1, 2, 100],
+            hidden_ordinals: Vec::new(),
             tool_only_ranges: Vec::new(),
             completed_tool_arcs: Vec::new(),
         };
