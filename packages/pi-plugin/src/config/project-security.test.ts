@@ -57,14 +57,16 @@ describe("Pi project config security", () => {
 
 	it("strips embedding.dimensions from project config (user-tier only)", () => {
 		const raw: Record<string, unknown> = {
-			embedding: { dimensions: 4096 },
+			embedding: { model: "text-embedding-3-small", dimensions: 4096 },
 			dreamer: { model: "x" },
 		};
 		const warnings = stripUnsafeProjectConfigFields(raw);
+		const embedding = raw.embedding as Record<string, unknown>;
 
-		const embedding = raw.embedding as Record<string, unknown> | undefined;
-		expect(embedding === undefined || !("dimensions" in embedding)).toBe(true);
+		// Field-scoped: the width is gone, the block and its safe siblings survive.
+		expect("dimensions" in embedding).toBe(false);
+		expect(embedding).toEqual({ model: "text-embedding-3-small" });
 		expect(raw.dreamer).toEqual({ model: "x" });
-		expect(warnings.join("\n")).toContain("dimensions");
+		expect(warnings.join("\n")).toContain("embedding.dimensions");
 	});
 });
