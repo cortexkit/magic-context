@@ -17,7 +17,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { join } from "node:path";
 
 import { RustTestHarness } from "../src/rust-harness";
@@ -144,7 +144,7 @@ describe.skipIf(!rustPrereqs.ok)("rust mode memory update re-embedding", () => {
 
             const contextDbPath = join(h.env.dataDir, "cortexkit", "magic-context", "context.db");
             const readState = (): { memoryId: number; content: string; embeddings: number } => {
-                const db = new Database(contextDbPath, { readonly: true });
+                const db = openTestDb(contextDbPath, { readonly: true });
                 try {
                     const memory = db
                         .prepare(
@@ -205,7 +205,7 @@ describe.skipIf(!rustPrereqs.ok)("rust mode memory update re-embedding", () => {
 
             // The vector stored is the one computed from the CURRENT content: the
             // guarded save refuses a vector whose content hash no longer matches.
-            const verifyDb = new Database(contextDbPath, { readonly: true });
+            const verifyDb = openTestDb(contextDbPath, { readonly: true });
             try {
                 const rows = verifyDb
                     .prepare(

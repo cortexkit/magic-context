@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
@@ -106,7 +106,7 @@ async function seedCoveredPrefix(
 				created_at: 1,
 			},
         ];
-    const db = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+    const db = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
     try {
         for (const row of compartments) {
             const columns = Object.keys(row);

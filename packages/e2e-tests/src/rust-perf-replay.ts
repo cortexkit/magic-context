@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { join } from "node:path";
 import type { RustTestHarness } from "./rust-harness";
 
@@ -17,7 +17,7 @@ export function appendPerfReplay(
     sourcePath: string,
     sourceSession: string,
 ): number {
-    const source = new Database(sourcePath, { readonly: true });
+    const source = openTestDb(sourcePath, { readonly: true });
     let messages: Row[];
     let parts: Row[];
     try {
@@ -46,7 +46,7 @@ export function appendPerfReplay(
         source.close();
     }
     if (messages.length === 0) throw new Error("Replay source has no messages");
-    const target = new Database(join(h.env.dataDir, "opencode", "opencode.db"));
+    const target = openTestDb(join(h.env.dataDir, "opencode", "opencode.db"));
     try {
         const seed = JSON.parse(
             (

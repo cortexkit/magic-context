@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { join } from "node:path";
 import { buildPagedModuleTransformPayloads, MODULE_PAGE_MAX_BYTES } from "../../plugin/src/hooks/magic-context/module-wire";
 import { RustTestHarness } from "../src/rust-harness";
@@ -163,7 +163,7 @@ describe.skipIf(!rustPrereqs.ok)("rust performance: ASTRO-shape cold seed", () =
             const sessionId = REPLAY_SESSION_ID ?? "ses_astro_shape_perf";
             if (!PERF_FULL_OUTPUT && !REPLAY_STORE_PATH) {
                 // Compartments are shared context rows, so seed them directly in context.db.
-                const db = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+                const db = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
                 try {
                     db.transaction(() => {
                         for (const row of astroCompartments()) {

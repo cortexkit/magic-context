@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -26,8 +26,8 @@ test("OC2 task child hides memory and note tools; primary tools and bytes surviv
     const parent = await client.session.create({ title: "Write policy primary", location: { directory: host.cwd }, model: { providerID: "anthropic", id: "mock-model" } });
     await waitForPluginActive(client, host.cwd);
     await waitForPluginActive(client, host.cwd, "write-policy-worker");
-    const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), { readonly: true });
-    const store = new Database(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), { readonly: true });
+    const db = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), { readonly: true });
+    const store = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), { readonly: true });
     try {
         const version = JSON.parse(readFileSync(join(realpathSync(CLI), "..", "..", "package.json"), "utf8")).version;
         expect(version).toBe(expectedOpenCode2Version());

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -295,7 +295,7 @@ test("I9b hook_never_throws on deterministic storage failure; interrupt returns 
 			{ sessionID: session.id },
 			{ signal: AbortSignal.timeout(20000) },
 		);
-		const db = new Database(
+		const db = openTestDb(
 			join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"),
 		);
 		db.exec("PRAGMA busy_timeout = 5000");
@@ -480,7 +480,7 @@ test("I15 channel2_via_synthetic uses a recorded admission id at the tool batch 
 			{ sessionID: session.id },
 			{ signal: AbortSignal.timeout(45000) },
 		);
-		const mc = new Database(
+		const mc = openTestDb(
 			join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"),
 		);
         mc.exec("PRAGMA busy_timeout = 5000");
@@ -725,7 +725,7 @@ test("I16a tool_argument_surfaces_v2 preserve edit regions and share supersessio
 			state: { input: Record<string, unknown> };
 		}>;
 		expect(parts).toHaveLength(2);
-		const db = new Database(
+		const db = openTestDb(
 			join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"),
 		);
 		try {

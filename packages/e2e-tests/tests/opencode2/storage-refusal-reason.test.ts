@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -127,7 +127,7 @@ test("OpenCode 2 names a migration refused by an older live host, then recovers 
 		};
 		let historianCalls = 0;
 		const rows = () => {
-			const db = new Database(
+			const db = openTestDb(
 				join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!),
 				{
 					readonly: true,

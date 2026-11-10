@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import { dirname, join } from "node:path";
 import { TestHarness } from "../src/harness";
@@ -10,7 +10,7 @@ test("OC1 task child cannot write memories or notes; primary tools and bytes sur
         magicContextConfig: { dreamer: { disable: true }, memory: { enabled: true } },
         openCodeConfigExtra: { agent: { "write-worker": { mode: "subagent", prompt: CHILD_SYSTEM, description: "Write policy worker", permission: { "*": "allow" } } } },
     });
-    const store = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+    const store = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
     try {
         const version = await fetch(`${h.serverUrl}/global/health`).then(r => r.json()) as { version: string };
         expect(version.version).toMatch(/^1\./);

@@ -19,7 +19,7 @@
  * MC_E2E_PI_PLUGIN_ROOT runs another plugin build (e.g. the pre-fix dist).
  */
 
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -455,7 +455,7 @@ function assertIsolatedProcess(pid: number): void {
 			await step("defer", "work phase 6");
 			await step("defer", "work phase 7");
 			const snapshot = (label: string) => {
-				const db = new Database(dbPath, { readonly: true });
+				const db = openTestDb(dbPath, { readonly: true });
 				const modes = db
 					.prepare(
 						"SELECT drop_mode AS mode, COUNT(*) AS n FROM tags WHERE session_id = ? AND type = 'tool' AND status = 'dropped' GROUP BY drop_mode",
@@ -540,7 +540,7 @@ function assertIsolatedProcess(pid: number): void {
 
 			// Condition 2: removal markers become unreadable (the native lane is
 			// invalid while the rest of the replay document still parses).
-			const writable = new Database(dbPath);
+			const writable = openTestDb(dbPath);
 			writable.exec("PRAGMA busy_timeout = 5000");
 			writable
 				.prepare(
@@ -559,7 +559,7 @@ function assertIsolatedProcess(pid: number): void {
 			assertIsolatedProcess(child.pid!);
 			snapshot("end");
 
-			const db = new Database(dbPath, { readonly: true });
+			const db = openTestDb(dbPath, { readonly: true });
 			summary.droppedToolTags = (
 				db
 					.prepare(

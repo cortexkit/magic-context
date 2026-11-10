@@ -21,7 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
@@ -35,7 +35,7 @@ const STEADY_PASSES_AFTER_RECOVERY = 20;
  * so the restarted module sees a legitimate identity change (one HARD).
  */
 function regressPersistedTagEpoch(h: RustTestHarness, sessionId: string): void {
-    const db = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "store.db"));
+    const db = openTestDb(join(h.env.dataDir, "cortexkit", "magic-context", "store.db"));
     try {
         const row = db
             .prepare("SELECT meta FROM mc_cache_state WHERE session_id = ?")
