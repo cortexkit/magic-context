@@ -1282,7 +1282,11 @@ function transformGeometryForWire(
     if (!geometry) return undefined;
     const { window, reserve } = geometry.derivation;
     let derivation: string;
-    if (geometry.geometry === "separate" && geometry.usableSoft < geometry.usableHard) {
+    // A separate-geometry model whose usable window is smaller than its full
+    // window has a pre-carved input limit. Compare against the window, not the
+    // hard wall: the hard wall is capped at the input limit as well, so in that
+    // case it equals the usable window.
+    if (geometry.geometry === "separate" && geometry.usableSoft < window) {
         derivation = `s1-pre-carve/input=${geometry.usableSoft}`;
     } else if (geometry.geometry === "separate") {
         derivation = `s1-separate/context=${window}`;

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -25,7 +25,7 @@ test("R12 v2 setup selects opencode2 before session storage opens", async () => 
 			{ sessionID: session.id },
 			{ signal: AbortSignal.timeout(20000) },
 		);
-		const db = new Database(
+		const db = openTestDb(
 			join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"),
 			{ readonly: true },
 		);

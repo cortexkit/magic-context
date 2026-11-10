@@ -1,6 +1,7 @@
 /** PiTestHarness — facade for Pi Magic Context e2e tests. */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, PiHostHarness } from "./host-harness";
@@ -662,7 +663,7 @@ export class PiTestHarness implements PiHostHarness {
     if (this.contextDbCached) return this.contextDbCached;
     const dbPath = this.contextDbPath();
     if (!existsSync(dbPath)) throw new Error(`context.db not found at ${dbPath}`);
-    this.contextDbCached = new Database(dbPath, { readonly: true });
+    this.contextDbCached = openTestDb(dbPath, { readonly: true });
     return this.contextDbCached;
   }
 

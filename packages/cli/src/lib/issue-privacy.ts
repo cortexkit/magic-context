@@ -1,5 +1,8 @@
+import { ISSUE_LOG_IDENTIFIERS, ISSUE_LOG_TEMPLATES } from "./issue-log-templates.generated";
 import { parseLogLine } from "./log-lines";
 import { isSecretKey, sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
+
+export { ISSUE_LOG_TEMPLATES } from "./issue-log-templates.generated";
 
 const OMITTED = "<text omitted>";
 const COMPONENTS = new Set([
@@ -129,27 +132,31 @@ const KNOWN_ERROR_CLASSES = new Set([
     "AbortError",
 ]);
 
-// Keep fixed template wording; omit inserted log text, while approved diagnostic
-// fields and aliases may remain.
-type SourceLogTemplate = { parts: readonly [string, ...string[]]; exact?: boolean };
-export const ISSUE_LOG_TEMPLATES: readonly SourceLogTemplate[] = [
-    { parts: ["historian prompt failed:"] },
-    { parts: ["historian: prompt attempt ", " failed:"] },
-    {
-        parts: [
-            "historian failure: source=",
-            ' reason="',
-            '" chunkRange=',
-            " fallbackModel=",
-            " twoPass=",
-        ],
-    },
-    { parts: ["historian post-publish step failed; publication stands:"] },
-    { parts: ["Historian failed while processing this session:"] },
-    { parts: ["Historian returned no assistant output."], exact: true },
-    { parts: ["mc-module: store open failed:"] },
-    { parts: ["mc-module: historian firing failed for ", ":"] },
-];
+const INTERNAL_IDENTIFIERS = new Set(ISSUE_LOG_IDENTIFIERS);
+const LOG_TEMPLATES = ISSUE_LOG_TEMPLATES.map((template) => ({
+    ...template,
+    sanitizedParts: template.parts.map((part) => sanitizeDiagnosticText(part)),
+}));
+
+function templateValues(value: string, parts: readonly string[]): string[] | null {
+    if (!value.startsWith(parts[0])) return null;
+    if (parts.length === 1) return value === parts[0] ? [] : null;
+    const values: string[] = [];
+    let cursor = parts[0].length;
+    for (let index = 1; index < parts.length; index++) {
+        const part = parts[index];
+        const next =
+            index === parts.length - 1
+                ? value.endsWith(part)
+                    ? value.length - part.length
+                    : -1
+                : value.indexOf(part, cursor);
+        if (next < cursor) return null;
+        values.push(value.slice(cursor, next));
+        cursor = next + part.length;
+    }
+    return values;
+}
 
 const LOG_PATH = /(?:[A-Za-z]:[\\/]|~\/|\/)[^\s,;) '\x22]+/g;
 const LOG_ID =
@@ -261,13 +268,15 @@ export class IssuePrivacy {
 
     logLine(line: string): string {
         const parsed = parseLogLine(line);
+        const globalLine = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] (.*)$/.exec(line);
         const safe = sanitizeDiagnosticText(line);
         const component =
             parsed?.tags.find((tag) => COMPONENTS.has(tag)) ??
             [...COMPONENTS].find((name) => new RegExp(`\\b${name}\\b`).test(parsed?.message ?? ""));
         const logger = component ? `magic-context.${component}` : "magic-context";
         const session = parsed?.session ? ` [${this.session(parsed.session)}]` : "";
-        const fields = Object.entries(parsed?.kv ?? {}).flatMap(([key, value]) => {
+        const fields = Object.entries(parsed?.kv ?? {}).flatMap(([key, raw]) => {
+            const value = sanitizeDiagnosticText(raw);
             if (NUMERIC_FIELD.test(key) && /^\d+(?:\.\d+)?$/.test(value))
                 return [`${key}=${value}`];
             if (SESSION_KEY.test(key)) return [`${key}=${this.session(value)}`];
@@ -289,25 +298,20 @@ export class IssuePrivacy {
         });
         // Legacy telemetry often writes timings in prose rather than structured fields.
         const timings = safe.match(/\b\d+(?:\.\d+)?(?:ms|µs|us|s)\b/g) ?? [];
-        // The parser removes quotes from reason fields; restore the source template's delimiters.
-        const message = parsed
-            ? [
-                  parsed.message,
-                  ...Object.entries(parsed.kv).map(
-                      ([key, value]) => `${key}=${key === "reason" ? `"${value}"` : value}`,
-                  ),
-              ]
-                  .filter(Boolean)
-                  .join(" ")
-            : line;
+        // Match before splitting event fields: quotes, duplicate keys and order are source text.
+        const message = parsed?.rawMessage ?? globalLine?.[2] ?? line;
         const identities = [...message.matchAll(LOG_ID)].map(([id]) => {
             if (id.startsWith("ses_") || id.startsWith("msg_")) return this.session(id);
             if (id.startsWith("dir:")) return this.path(id.slice(4));
             return this.project(id);
         });
-        const paths = [...message.matchAll(LOG_PATH)].map(([path]) => this.path(path));
+        const paths = [...message.matchAll(LOG_PATH)].map(([path]) =>
+            this.path(path.replace(/:$/, "")),
+        );
         return [
-            parsed?.ts && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(parsed.ts) ? parsed.ts : "",
+            parsed?.ts && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(parsed.ts)
+                ? parsed.ts
+                : (globalLine?.[1] ?? ""),
             parsed?.level ?? line.match(/^(TRACE|DEBUG|INFO|WARN|ERROR)\b/)?.[1] ?? "LOG",
             `${logger}${session}`,
             this.logMessage(message),
@@ -321,27 +325,62 @@ export class IssuePrivacy {
     }
 
     private logMessage(value: string): string {
-        for (const template of ISSUE_LOG_TEMPLATES) {
-            if (template.exact && value === template.parts[0]) return template.parts[0];
-            if (!value.startsWith(template.parts[0])) continue;
-
-            let cursor = template.parts[0].length;
-            let rendered = template.parts[0];
-            let matched = true;
-            for (const part of template.parts.slice(1)) {
-                const next = value.indexOf(part, cursor);
-                if (next < 0) {
-                    matched = false;
-                    break;
-                }
-                rendered += `${OMITTED}${part}`;
-                cursor = next + part.length;
-            }
-            if (!matched) continue;
-            if (cursor < value.length) rendered += ` ${OMITTED}`;
-            return rendered;
+        const safe = sanitizeDiagnosticText(value);
+        // Generated templates are sorted by static character count, most specific first.
+        for (const template of LOG_TEMPLATES) {
+            // The shared plugin logger sanitizes credentials before writing. That can redact a source literal
+            // such as context_limit_tokens=unknown; restore only the proven static text.
+            const values =
+                templateValues(value, template.parts) ??
+                templateValues(safe, template.sanitizedParts);
+            if (!values) continue;
+            return template.parts.reduce(
+                (result, part, index) =>
+                    result +
+                    (index === 0
+                        ? ""
+                        : this.logValue(
+                              values[index - 1],
+                              template.slots[index - 1],
+                              template.parts[index - 1],
+                          )) +
+                    part,
+                "",
+            );
         }
         return this.summary(value);
+    }
+
+    private logValue(value: string, hint: string, before: string): string {
+        const safe = sanitizeDiagnosticText(value).trim();
+        if (!safe) return "";
+        if (
+            /^-?\d+(?:\.\d+)?(?:\s?(?:ms|µs|us|s|%|tokens))?$/.test(safe) ||
+            ENUMS.has(safe) ||
+            CONFIG_ENUMS.has(safe) ||
+            INTERNAL_IDENTIFIERS.has(safe) ||
+            VERSION.test(safe)
+        )
+            return safe;
+        if (/^(?:ses_|msg_)[A-Za-z0-9_-]+$/.test(safe) || hint === "session" || hint === "message")
+            return this.session(safe);
+        if (
+            /^(?:git:[a-f0-9]{16,64}|pj-[A-Za-z0-9_-]+|dir:[^\s]+)$/.test(safe) ||
+            hint === "project"
+        )
+            return this.project(safe);
+        const model = hint === "model" || /(?:model|provider)[A-Za-z_]*[=:] ?$/i.test(before);
+        if (
+            model &&
+            /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(safe) &&
+            !safe.includes("..") &&
+            safe === value.trim() &&
+            !/REDACTED/.test(safe)
+        )
+            return safe;
+        if (/^(?:~\/|\/|[A-Za-z]:[\\/])[^\s]+$/.test(safe) || hint === "path")
+            return this.path(safe);
+        return OMITTED;
     }
 
     healthMessage(value: string): string {

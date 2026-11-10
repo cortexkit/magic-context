@@ -21,8 +21,9 @@ import { lkgReplayFits, lkgReplayLimit } from "./lkg-replay-fit";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
 
-// A model whose declared input limit is below its usable hard limit (a shared
-// context/output window with a separate input figure), so the two limits differ.
+// A model whose usable hard limit (the window less the output it requests) is
+// above its trusted limit (the window less its output reserve), so the two
+// limits differ. A declared input limit would not do: it caps both limits.
 const MODEL = { providerID: "openai-codex", modelID: "fit-model" };
 const SESSION = "lkg-replay-fit-session";
 
@@ -63,8 +64,7 @@ describe("one admission limit for every last-known-good replay", () => {
                                 models: {
                                     [MODEL.modelID]: {
                                         limit: {
-                                            context: 400_000,
-                                            input: 272_000,
+                                            context: 272_000,
                                             output: 128_000,
                                         },
                                     },
@@ -84,7 +84,7 @@ describe("one admission limit for every last-known-good replay", () => {
         const usableHard = resolveContextWindowGeometry(MODEL.providerID, MODEL.modelID, ctx)
             ?.usableHard as number;
         const trusted = resolveTrustedContextLimit(MODEL.providerID, MODEL.modelID, ctx) as number;
-        expect(trusted).toBe(272_000);
+        expect(trusted).toBe(204_000);
         expect(usableHard).toBeGreaterThan(trusted);
         expect(lkgReplayLimit({ db, sessionId: SESSION, model: MODEL, modelKey: null })).toBe(
             trusted,
@@ -100,9 +100,8 @@ describe("one admission limit for every last-known-good replay", () => {
                 systemPromptTokens: 0,
                 estimator: estimateOf(tokens),
             });
-        // Between the trusted limit and the usable hard limit a provider that
-        // enforces its declared prompt limit rejects the request, so no replay
-        // (failure, wrapper or healthy frozen) is admitted there.
+        // No replay is admitted between the trusted limit and the usable hard
+        // limit.
         expect(fits(trusted).fits).toBe(true);
         expect(fits(trusted + 1).fits).toBe(false);
         expect(fits(usableHard).fits).toBe(false);

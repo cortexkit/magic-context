@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
@@ -48,7 +48,7 @@ function fixture() {
 }
 
 function snapshot(path: string): string {
-    const db = new Database(path, { readonly: true });
+    const db = openTestDb(path, { readonly: true });
     try {
         const tables = db
             .query(
@@ -175,7 +175,7 @@ test("OpenCode 2 generate serves managed bytes without writes and preserves repl
         const first = frames().filter((frame) => frame.name === "context")[0];
         const start = first.raw.messages[0].id;
         const dbPath = join(f.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db");
-        const db = new Database(dbPath);
+        const db = openTestDb(dbPath);
         db.query(
             `INSERT INTO compartments (session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,p1,created_at,harness) VALUES (?,0,1,1,?,?,'Seeded work','GENERATE-COMPARTMENT','GENERATE-COMPARTMENT',?,'opencode')`,
         ).run(session.id, start, start, Date.now());
@@ -294,7 +294,7 @@ test("OpenCode 2 generate serves managed bytes without writes and preserves repl
         const saved = [dbPath, hostDb].map((path) => {
             // stop() kills the host, so its last committed frames may still be
             // in the WAL. Checkpoint before saving only the main database bytes.
-            const checkpoint = new Database(path);
+            const checkpoint = openTestDb(path);
             try {
                 expect(checkpoint.query("PRAGMA wal_checkpoint(TRUNCATE)").get()).toEqual({
                     busy: 0, log: 0, checkpointed: 0,

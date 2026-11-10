@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -91,7 +91,7 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
             expect(bootstrapWrite).toBe(true);
 
             const contextDbPath = join(h.env.dataDir, "cortexkit", "magic-context", "context.db");
-            const seedDb = new Database(contextDbPath);
+            const seedDb = openTestDb(contextDbPath);
             let projectIdentity = "";
             let ownMemoryId = 0;
             let foreignMemoryId = 0;
@@ -236,7 +236,7 @@ describe.skipIf(!rustPrereqs.ok)("rust mode workspace-shared memory addressing",
             expect(mixed).toContain("id 987654: not found or not visible from this project");
 
             // The neighbour's row is untouched by the refused mutation.
-            const verifyDb = new Database(contextDbPath, { readonly: true });
+            const verifyDb = openTestDb(contextDbPath, { readonly: true });
             try {
                 const row = verifyDb
                     .prepare("SELECT content FROM memories WHERE id = ?")

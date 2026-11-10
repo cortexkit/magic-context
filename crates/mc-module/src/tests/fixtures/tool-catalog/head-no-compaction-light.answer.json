@@ -1,6 +1,6 @@
 {
-  "generation": "01569a1bcb825adb3a7a4e4b9df3be33276bcf52bb5ec8820d5ca6b3a3bddfbd",
-  "catalog_digest": "01569a1bcb825adb3a7a4e4b9df3be33276bcf52bb5ec8820d5ca6b3a3bddfbd",
+  "generation": "eb6c3e5035703837e44727d59a04bb2f3f746b4d0585bd9eaed5f0378f9531ef",
+  "catalog_digest": "eb6c3e5035703837e44727d59a04bb2f3f746b4d0585bd9eaed5f0378f9531ef",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -106,7 +106,7 @@
           "content": {
             "type": "string",
             "maxLength": 65536,
-            "description": "One standalone fact (write, update, merge)."
+            "description": "One standalone fact (write, update, merge). Archive and get: empty string."
           },
           "category": {
             "type": "string",
@@ -117,7 +117,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge pass the current category to keep it)."
+            "description": "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it."
           },
           "ids": {
             "type": "array",
@@ -126,7 +126,7 @@
               "type": "integer",
               "minimum": 1
             },
-            "description": "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get."
+            "description": "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list."
           },
           "reason": {
             "type": "string",
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "9a988aab81c8accfc9f13b9957fc1e438ab05c389c9a1154a3b3523e35776fac",
+    "preflight_digest": "f427e20309a562a48858b9129cbe833006c315018957cd84cfab2d7ca57ab8d0",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

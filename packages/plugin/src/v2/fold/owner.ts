@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { V2Context, V2Message } from "../hooks/types";
+import { isCheckpointNote } from "./summary";
 
 export const foldDigest = (value: string) => createHash("sha256").update(value).digest("hex");
 export interface FoldIdentity {
@@ -7,6 +8,15 @@ export interface FoldIdentity {
     cutSeq?: number;
     submitted: string;
     submittedSha: string;
+    /** Magic Context's history head this checkpoint stands for, when the host
+     * stores other text (the checkpoint note). Records written before the note
+     * have no head: their submitted text is the head itself. */
+    head?: string;
+    /** Ids of the host checkpoint rows this record answered, when the host had a
+     * running row to name. Every note checkpoint stores the same text, so after a
+     * revert lets a new checkpoint reuse a sequence number, only these ids tell
+     * whether the head belongs to the checkpoint being served. */
+    answered?: string[];
     rendered?: V2Message;
     renderedSha?: string;
     renderedSummary?: string;
@@ -43,7 +53,12 @@ export class FoldOwner {
         sessionID: string;
         watermark: number;
         runningCut?: number;
+        /** Magic Context's history head for this checkpoint. */
         materialize: () => string;
+        /** The text the host stores for the checkpoint; the head itself when absent. */
+        checkpointText?: string;
+        /** The id of the host's running checkpoint row being answered, when it has one. */
+        checkpointID?: string;
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             const previous = await this.read(args.sessionID);
@@ -52,13 +67,24 @@ export class FoldOwner {
                 (args.runningCut !== undefined
                     ? previous.cutSeq === args.runningCut
                     : previous.cutSeq === undefined && previous.watermark === args.watermark);
-            if (same) return previous;
-            const submitted = args.materialize();
+            if (same) {
+                // The same answer now also stands for this checkpoint row.
+                const id = args.checkpointID;
+                if (id !== undefined && !previous.answered?.includes(id)) {
+                    previous.answered = [...(previous.answered ?? []), id].slice(-8);
+                    await this.storage.set(this.key(args.sessionID), previous);
+                }
+                return previous;
+            }
+            const head = args.materialize();
+            const submitted = args.checkpointText ?? head;
             const next: FoldIdentity = {
                 watermark: args.watermark,
                 cutSeq: args.runningCut,
                 submitted,
                 submittedSha: foldDigest(submitted),
+                ...(submitted === head ? {} : { head }),
+                ...(args.checkpointID === undefined ? {} : { answered: [args.checkpointID] }),
             };
             await this.storage.set(this.key(args.sessionID), next);
             return next;
@@ -73,9 +99,26 @@ export class FoldOwner {
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             let state = await this.read(args.sessionID);
-            // Discard a saved rendered checkpoint with a different message ID,
-            // even if a revert lets the host reuse its sequence number.
-            if (state?.rendered && state.rendered.id !== args.rendered.id) state = undefined;
+            // Discard a record bound to another checkpoint, even if a revert lets
+            // the host reuse its sequence number: one already rendered with another
+            // message id, or one whose answered rows do not include this one. Its
+            // head carries over only to a note checkpoint it answered; without one,
+            // the rebuilt record holds just the stored text.
+            let carriedHead: string | undefined;
+            if (
+                state &&
+                (state.rendered
+                    ? state.rendered.id !== args.rendered.id
+                    : state.answered !== undefined &&
+                      !state.answered.includes(args.rendered.id ?? ""))
+            ) {
+                if (
+                    isCheckpointNote(args.summary) &&
+                    state.answered?.includes(args.rendered.id ?? "")
+                )
+                    carriedHead = state.head;
+                state = undefined;
+            }
             let changed = !state;
             const observedSha = foldDigest(JSON.stringify(args.rendered));
             const rendered = structuredClone(args.rendered);
@@ -90,6 +133,7 @@ export class FoldOwner {
                     watermark: args.cutSeq,
                     submitted: args.summary,
                     submittedSha: foldDigest(args.summary),
+                    ...(carriedHead === undefined ? {} : { head: carriedHead }),
                     reason: "boot_recovery",
                 };
             }

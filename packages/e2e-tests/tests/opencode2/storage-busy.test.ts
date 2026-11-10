@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -85,7 +85,7 @@ for (const seconds of [7, 60]) {
             } else {
                 expect(requests()).toHaveLength(0);
                 const rows = () => {
-                    const db = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
+                    const db = openTestDb(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
                     try { return db.prepare("SELECT type,data FROM session_message WHERE session_id=? ORDER BY seq").all(session.id) as {type: string; data: string}[]; }
                     finally { db.close(); }
                 };

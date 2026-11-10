@@ -7,6 +7,7 @@
         "scripts/check-ci-results.ts",
         "scripts/ci-workflow.test.ts",
         "scripts/ci-dists.test.ts",
+        "scripts/test-db-guard.test.ts",
         "../../scripts/gate.ts",
         "../../scripts/gate.test.ts",
         "../../scripts/gate-tools.test.ts",

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -87,10 +87,10 @@ async function fixture() {
     });
     await waitForPluginActive(client, host.cwd);
     await waitForPluginActive(client, host.cwd, "issue-612-agents");
-    const contextDb = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
+    const contextDb = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
         readonly: true,
     });
-    const store = new Database(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
+    const store = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
         readonly: true,
     });
     const mode = (id: string) =>

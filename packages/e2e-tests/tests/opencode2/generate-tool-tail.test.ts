@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
@@ -159,7 +159,7 @@ test("OpenCode 2 generate replays the last runner wire prefix after an id-less t
 				.map((line) => JSON.parse(line));
 		const start = frames().find((frame) => frame.name === "context").raw
 			.messages[0].id;
-		const db = new Database(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+		const db = openTestDb(join(env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
 		try {
 			db.query(
 				`INSERT INTO compartments (session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,p1,created_at,harness) VALUES (?,0,1,1,?,?,'Seeded work','TOOL-TAIL-COMPARTMENT','TOOL-TAIL-COMPARTMENT',?,'opencode')`,

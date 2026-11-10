@@ -14868,7 +14868,8 @@ fn new_frozen_strip_units(
 
 /// True for Claude models whose signed thinking is bound to the request prefix, on any
 /// route. Mirrors TS `isPrefixBoundThinkingModel` and its `PREFIX_BOUND_THINKING_MODELS`
-/// (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5); the provider is deliberately ignored.
+/// (Fable 5.1, Fable 5.2, Mythos 5.1, Mythos 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5); the
+/// provider is deliberately ignored.
 pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     let Some(key) = model_key else {
@@ -14878,7 +14879,7 @@ pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
     PATTERN
         .get_or_init(|| {
             Regex::new(
-                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5|haiku[-_.]?5[-_.]5)(?:$|[-_.:/@])",
+                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|fable[-_.]?5[-_.]2|mythos[-_.]?5[-_.]1|mythos[-_.]?5[-_.]2|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5|haiku[-_.]?5[-_.]5)(?:$|[-_.:/@])",
             )
             .unwrap()
         })

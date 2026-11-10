@@ -31,6 +31,11 @@ export interface WindowDerivation {
     absoluteWall: number;
     /** Accepted provider input used to raise the usable denominator above metadata. */
     provenInputTokens?: number;
+    /**
+     * The usable hard limit before a declared input limit lowered it, present
+     * only when it did.
+     */
+    hardWithoutInputCap?: number;
 }
 
 export interface WindowGeometryResult {
@@ -221,6 +226,17 @@ export function deriveWindowGeometry(
         const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
         usableHard = hardWindow - requestedOutput;
     }
+    // A declared input limit is the largest prompt the provider accepts, however
+    // much of the context window the output leaves free. Without this cap a model
+    // whose input limit is 302,222 inside a 1,000,000-token context would put its
+    // hard wall at 968,000, and the 95% lines that read it would sit past every
+    // prompt the provider accepts. The wall it replaces is kept for the case where
+    // an accepted request proves the declared limit wrong (applyProvenInputFloor).
+    let hardWithoutInputCap: number | undefined;
+    if (isFinitePositive(input) && input < usableHard) {
+        hardWithoutInputCap = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
+        usableHard = input;
+    }
     usableHard = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
     if (usableHard < usableSoft) {
         logGeometryClampOnce(
@@ -243,6 +259,7 @@ export function deriveWindowGeometry(
             geometry,
             windowSource,
             absoluteWall: Math.floor(hardWindow),
+            ...(hardWithoutInputCap !== undefined ? { hardWithoutInputCap } : {}),
         },
     };
 }
@@ -289,13 +306,23 @@ export function applyProvenInputFloor(
     const window = trustedAbsoluteWall
         ? geometry.derivation.window
         : Math.max(geometry.derivation.window, provenInputTokens);
+    // An accepted request larger than a declared input limit proves that limit
+    // wrong, so the hard limit it capped no longer applies. Without this the
+    // capped hard limit would rise to each new high reading, and every such
+    // reading would sit at 100% of it, past both 95% lines.
+    const inputCapDisproved =
+        geometry.derivation.hardWithoutInputCap !== undefined &&
+        provenInputTokens > geometry.usableHard;
+    const hardBeforeFloor = inputCapDisproved
+        ? (geometry.derivation.hardWithoutInputCap as number)
+        : geometry.usableHard;
     return {
         geometry: {
             ...geometry,
             usableSoft: provenInputTokens,
             usableHard: trustedAbsoluteWall
-                ? geometry.usableHard
-                : Math.max(geometry.usableHard, provenInputTokens),
+                ? hardBeforeFloor
+                : Math.max(hardBeforeFloor, provenInputTokens),
             derivation: {
                 ...geometry.derivation,
                 window,

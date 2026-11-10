@@ -4140,6 +4140,40 @@ export function prepareCachedM0M1Replay(
     };
 }
 
+/**
+ * The m[0]/m[1] messages a pass will put at the head of its request, so the
+ * request can be sized before the postprocess phase injects them. Nothing is
+ * persisted and `options.state` is left unchanged.
+ *
+ * A pass that folds (`folds`) re-renders m[0] from current state at its own
+ * render budgets and resets m[1], so its head is rendered here the same way the
+ * non-persisting fallback renders it, with the empty m[1] a fresh
+ * materialization serves. So is the head of a session without a complete
+ * persisted pair, which is about to render its first. Any other pass serves the
+ * persisted pair; a history refresh later in the same pass may re-render m[1],
+ * usually at a similar size.
+ */
+export function headMessagesForSizing(options: M0M1RenderOptions, folds = false): MessageLike[] {
+    if (!folds) {
+        const cached = prepareCachedM0M1Replay(options.db, options.sessionId);
+        if (cached?.preparedMessages) return cached.preparedMessages;
+    }
+    // The fallback render records the mural it chose on the state it is given.
+    const state: M0M1State = { ...options.state };
+    const fresh = renderFreshM0NonPersisted({ ...options, state });
+    const head: MessageLike[] = [];
+    prependM0M1Messages(
+        options.sessionId,
+        head,
+        fresh.m0Bytes.toString("utf8"),
+        M1_EMPTY_PLACEHOLDER,
+        state.cachedM0MuralDataUrl
+            ? { enabled: true, supportsVision: true, dataUrl: state.cachedM0MuralDataUrl }
+            : undefined,
+    );
+    return head;
+}
+
 export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean {
     const row = db
         .prepare(
