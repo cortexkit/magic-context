@@ -7038,8 +7038,8 @@ export function registerPiContextHandler(
 				sessionLog(
 					sessionId,
 					served === undefined
-						? "transform: recovery request could not be counted; recovery ends"
-						: `transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; recovery ends`,
+						? `transform: recovery request could not be counted; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`
+						: `transform: recovery request admitted: about ${served} tokens, within ${limit} of ${recoveryWindow}; ${recoveryLatch.emergencyRecoveryOrigin} recovery ends`,
 				);
 			}
 			publishFinalRequestAccounting();
