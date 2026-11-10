@@ -1450,12 +1450,14 @@ impl Session {
                 commit_clusters: chunk.commit_clusters,
                 messages: chunk.messages,
                 raw_tokens: readable.iter().map(entry_tokens).sum(),
+                removed_tokens: readable.iter().map(entry_removed_tokens).sum(),
             })
         };
         let pressure = trigger::Pressure {
             usage,
             threshold,
             force,
+            usable_window: window,
             // Drops land only on a pass allowed to rebuild. A head whose
             // summary is still to come is allowed one in the force band, so
             // the usage after its drops counts there.
@@ -1477,7 +1479,7 @@ impl Session {
         let mut until = bounded(tail, force || lift_floor);
         let mut decision = decide(until);
         if decision.is_none() && force {
-            // Nothing to read in the force band: the protected tail shrinks
+            // Too little to read in the force band: the protected tail shrinks
             // to a half, or a quarter from 95% (the plugin's emergency tail
             // scale).
             let scale = if usage >= 95.0 { 0.25 } else { 0.5 };
@@ -4652,6 +4654,99 @@ mod summary_weight_tests {
         // The last tool's 8,000 output tokens protect it even though its call is tiny.
         assert_eq!(request.until, 3);
         assert_eq!(at.drain.spent, 9);
+    }
+
+    fn counted_head(reserve: u64, text_tokens: u64, input_tokens: u64) -> Session {
+        let mut session = fixture(30_000);
+        session.conditions.output_reserve = reserve;
+        session.conditions.last_prompt_tokens =
+            Some(pass::usable_window(&session.conditions) * 9 / 10);
+        let mut entries = session.index.entries().to_vec();
+        entries[0].parts[0].tokens = Some(PartTokens::count(text_tokens));
+        entries[1].parts[0].tokens = Some(PartTokens::tool(input_tokens, 30_000));
+        session.index = Index::default();
+        session.index.extend_counted(entries, Some("test"));
+        session
+    }
+
+    #[test]
+    fn near_limit_summary_minimum_counts_text_and_input_not_tool_output() {
+        for (reserve, text, input, runs) in [
+            (0, 1, 8, false),
+            (0, 1_991, 8, false),
+            (0, 1_992, 8, true),
+            (0, 1, 1_999, true),
+            (20_000, 1_591, 8, false),
+            (20_000, 1_592, 8, true),
+        ] {
+            let mut session = counted_head(reserve, text, input);
+            let request = session.summary_due(&Settings::default());
+            assert_eq!(
+                request.is_some(),
+                runs,
+                "reserve {reserve}, text {text}, input {input}"
+            );
+            if let Some(request) = request {
+                assert_eq!((request.from, request.until), (1, 3));
+                assert_eq!(session.reservation.unwrap().tokens, text + input);
+            } else {
+                assert!(!session.summarizing);
+                assert!(session.reservation.is_none());
+                assert_eq!(session.drain.spent, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn near_limit_summary_minimum_follows_the_configured_force_band() {
+        for (threshold, usage, runs) in [
+            (65.0, 84.99, true),
+            (65.0, 85.0, false),
+            (90.0, 91.99, true),
+            (90.0, 92.0, false),
+        ] {
+            let mut session = counted_head(0, 1, 8);
+            session.conditions.last_prompt_tokens = Some((usage * 1_000.0) as u64);
+            let settings = Settings {
+                execute_threshold_percentage: threshold,
+                ..Settings::default()
+            };
+            assert_eq!(
+                session.summary_due(&settings).is_some(),
+                runs,
+                "threshold {threshold}, usage {usage}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_limit_summary_minimum_also_checks_the_scaled_emergency_tail() {
+        for (input, runs) in [(998, false), (999, true)] {
+            let mut session = counted_head(0, 1_001, input);
+            let mut entries = session.index.entries().to_vec();
+            entries[1].parts[0].tokens = Some(PartTokens::tool(input, 2_000));
+            entries[2].parts[0].tokens = Some(PartTokens::tool(8, 3_000));
+            session.index = Index::default();
+            session.index.extend_counted(entries, Some("test"));
+            let request = session.summary_due(&Settings::default());
+            assert_eq!(request.is_some(), runs, "input {input}");
+            if let Some(request) = request {
+                assert_eq!((request.from, request.until), (1, 3));
+            }
+        }
+    }
+
+    #[test]
+    fn near_limit_summary_minimum_never_blocks_95_percent_or_a_shrunken_window() {
+        for prompt in [95_000, 110_000] {
+            let mut session = counted_head(0, 1, 8);
+            session.conditions.last_prompt_tokens = Some(prompt);
+            assert!(session.summary_due(&Settings::default()).is_some());
+        }
+        let mut session = counted_head(0, 1, 8);
+        assert!(session.summary_due(&Settings::default()).is_none());
+        session.conditions.context_window = 90_000;
+        assert!(session.summary_due(&Settings::default()).is_some());
     }
 }
 
