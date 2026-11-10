@@ -2028,6 +2028,25 @@ async fn large_tool_output_alone_does_not_start_a_summary_at_low_usage() {
 }
 
 #[tokio::test]
+async fn near_limit_summary_waits_when_only_tiny_tool_inputs_can_leave() {
+    // A large fixed prompt keeps usage in the force band. The older shell
+    // result clears the tail boundary but only its tiny input is reclaimable
+    // by the historian, so summarizing it would buy another prompt rewrite
+    // without freeing a meaningful part of the window.
+    let mut config = config("head", Kind::OpenAi, free());
+    config.system_tokens = 85_000;
+    let mut runner = start(config).await;
+    runner
+        .play(&[user("Build it."), shell(3_000), shell(3_000), answer()])
+        .await;
+    assert_clean(&runner);
+    let last = runner.report.requests.last().unwrap();
+    let prompt = last.usage.prompt_tokens.unwrap();
+    assert!((84_150..94_050).contains(&prompt), "{last:?}");
+    assert!(runner.host().child_runs().is_empty(), "tiny summary ran");
+}
+
+#[tokio::test]
 async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
     let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.host().set_responder(summarizer_failing(

@@ -228,6 +228,8 @@ pub struct Scan {
     pub messages: usize,
     /// The history's own size, tool output included.
     pub raw_tokens: u64,
+    /// Text and tool-input tokens, measured as the summary run cap measures them.
+    pub removed_tokens: u64,
 }
 
 /// The usage a pass sees.
@@ -235,6 +237,7 @@ pub struct Pressure {
     pub usage: f64,
     pub threshold: f64,
     pub force: bool,
+    pub usable_window: u64,
     /// Usage once the drops this pass will land have landed, when it lands
     /// any.
     pub after_drops: Option<f64>,
@@ -254,7 +257,15 @@ pub fn decide(
         .after_drops
         .is_some_and(|after| after <= pressure.threshold * POST_DROP_TARGET_RATIO);
     if pressure.force {
-        return (!drops_suffice && scan.is_some()).then_some(Reason::Force);
+        let scan = scan?;
+        // Tiny force-band summaries each rewrite the prompt; wait for enough
+        // text and tool input to reclaim 2% of the request's usable window.
+        // ck-mc has no manual summary commands (wrapup or compartment rebuild)
+        // or dedicated overflow-recovery summary path. Only notices start runs,
+        // so the 95% exemption keeps recovery moving.
+        let enough =
+            pressure.usage >= 95.0 || scan.removed_tokens >= pressure.usable_window.div_ceil(50);
+        return (!drops_suffice && enough).then_some(Reason::Force);
     }
     let scan = scan?;
     if commit_clusters.is_some_and(|min| scan.commit_clusters >= min)
@@ -455,6 +466,7 @@ mod tests {
             usage,
             threshold: 65.0,
             force,
+            usable_window: 200_000,
             after_drops,
         }
     }
@@ -466,6 +478,7 @@ mod tests {
             commit_clusters,
             messages: 5,
             raw_tokens,
+            removed_tokens: tokens,
         }
     }
 
@@ -549,7 +562,7 @@ mod tests {
             ),
             None
         );
-        // The force band runs whenever anything may be read.
+        // The force band waits until enough text and tool input can leave.
         assert_eq!(
             decide(
                 &pressure(90.0, true, none),
@@ -557,12 +570,45 @@ mod tests {
                 budget,
                 Some(3)
             ),
-            Some(Reason::Force)
+            None
         );
         assert_eq!(
             decide(&pressure(90.0, true, none), None, budget, Some(3)),
             None
         );
+    }
+
+    #[test]
+    fn force_band_waits_for_two_percent_of_the_usable_window() {
+        for tokens in [1, 3_999, 4_000] {
+            let mut readable = scan(tokens, 100_000, 3);
+            readable.has_more = true;
+            readable.messages = 100;
+            assert_eq!(
+                decide(&pressure(85.0, true, None), Some(&readable), 5_000, Some(3)),
+                (tokens >= 4_000).then_some(Reason::Force),
+                "{tokens} reclaimable tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn the_force_minimum_does_not_change_lower_usage_or_emergency_runs() {
+        let readable = scan(1, 6_000, 0);
+        assert_eq!(
+            decide(&pressure(84.99, false, None), Some(&readable), 5_000, None),
+            Some(Reason::Proactive)
+        );
+        for usage in [95.0, 100.0, 120.0] {
+            assert_eq!(
+                decide(&pressure(usage, true, None), Some(&readable), 5_000, None),
+                Some(Reason::Force)
+            );
+            assert_eq!(
+                decide(&pressure(usage, true, None), None, 5_000, None),
+                None
+            );
+        }
     }
 
     #[test]
