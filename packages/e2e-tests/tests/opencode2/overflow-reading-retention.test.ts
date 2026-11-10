@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -75,7 +75,7 @@ test("retains rejection-derived input tokens across context pass until a new rep
 		const readSessionMeta = () => {
 			const databasePath = join(storageDir, "context.db");
 			if (!existsSync(databasePath)) return undefined;
-			const db = new Database(databasePath, { readonly: true });
+			const db = openTestDb(databasePath, { readonly: true });
 			try {
 				const row = db
 				.prepare(
@@ -127,7 +127,7 @@ test("retains rejection-derived input tokens across context pass until a new rep
 		expect(metaOverflow.last_input_tokens).toBe(123_456);
 
 		// Disarm recovery flag so Turn 3 can reach the provider after the context pass
-		const db = new Database(join(storageDir, "context.db"));
+		const db = openTestDb(join(storageDir, "context.db"));
 		db.prepare("UPDATE session_meta SET needs_emergency_recovery = 0 WHERE session_id = ?").run(session.id);
 		db.close();
 

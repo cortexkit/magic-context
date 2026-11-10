@@ -20,7 +20,7 @@
  * opencode.db (the bytes opencode would send with no transform).
  */
 
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
@@ -30,7 +30,7 @@ import { rustPrereqs } from "../src/rust-scenario-support";
  *  untransformed array size opencode would otherwise send to the provider. */
 function rawArrayBytes(h: RustTestHarness, sessionId: string): number {
     const ocPath = join(h.env.dataDir, "opencode", "opencode.db");
-    const db = new Database(ocPath, { readonly: true });
+    const db = openTestDb(ocPath, { readonly: true });
     try {
         const parts = db
             .prepare(

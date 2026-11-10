@@ -20,6 +20,7 @@ import {
 } from "../../features/magic-context";
 import { takeCurateSafetyRefusalCount } from "../../features/magic-context/dreamer/curate-memory-safety";
 import { writeTaskStateJson } from "../../features/magic-context/dreamer/storage-task-schedule";
+import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
@@ -2971,7 +2972,9 @@ describe("createCtxMemoryTools", () => {
             ).toBe(true);
         });
 
-        it("archive with empty content and any category validates and archives", async () => {
+        it.each(
+            V2_MEMORY_CATEGORIES,
+        )("archive with empty content and category %s validates and archives", async (category) => {
             await tools.ctx_memory.execute(
                 {
                     action: "write",
@@ -2985,11 +2988,16 @@ describe("createCtxMemoryTools", () => {
                 ids: number[];
                 content: string;
                 category: string;
-            } = { action: "archive", ids: [1], content: "", category: "CONSTRAINTS" };
+            } = { action: "archive", ids: [1], content: "", category };
             const hostSchema = tool.schema.object(tools.ctx_memory.args ?? {});
             expect(hostSchema.safeParse(params).success).toBe(true);
             const result = await tools.ctx_memory.execute(params, toolContext());
             expect(result).toContain("Archived memory [ID: 1]");
+            expect(getMemoryById(db, 1)).toMatchObject({
+                content: "Archivable filler fact.",
+                category: "PROJECT_RULES",
+                status: "archived",
+            });
         });
 
         it("write succeeds with an empty ids list and still rejects an empty content", async () => {
@@ -3015,7 +3023,9 @@ describe("createCtxMemoryTools", () => {
             expect(emptyContent).toBe("Error: 'content' is required when action is 'write'.");
         });
 
-        it("get succeeds with content/category filler and still rejects empty ids", async () => {
+        it.each(
+            V2_MEMORY_CATEGORIES,
+        )("get succeeds with empty content and category %s and still rejects empty ids", async (category) => {
             await tools.ctx_memory.execute(
                 {
                     action: "write",
@@ -3025,10 +3035,11 @@ describe("createCtxMemoryTools", () => {
                 toolContext(),
             );
             const filler = await tools.ctx_memory.execute(
-                { action: "get", ids: [1], content: "", category: "PROJECT_RULES" },
+                { action: "get", ids: [1], content: "", category },
                 toolContext(),
             );
             expect(filler).toContain("Gettable fact.");
+            expect(filler).toContain("PROJECT_RULES");
             const emptyIds = await tools.ctx_memory.execute(
                 { action: "get", ids: [], content: "", category: "PROJECT_RULES" },
                 toolContext(),

@@ -12361,6 +12361,11 @@ describe("proactive strip of thinking on busting passes", () => {
         ["google-vertex-anthropic", "claude-sonnet-5-5@20260930"],
         ["vertex-eu-anthropic", "claude-opus-5-5"],
         ["amazon-bedrock", "us.anthropic.claude-fable-5-1-v1:0"],
+        // Fable 5.2 and Mythos 5.1/5.2 run the same prefix check as Fable 5.1.
+        ["amazon-bedrock", "us.anthropic.claude-fable-5-2-v1:0"],
+        ["google-vertex-anthropic", "claude-fable-5-2@20261109"],
+        ["vertex-eu-anthropic", "claude-mythos-5-1"],
+        ["amazon-bedrock", "us.anthropic.claude-mythos-5-2-v1:0"],
     ]) {
         it(`TS and Rust-mode host strip/replay parity for ${providerID}/${modelID}`, async () => {
             openDb();

@@ -5,6 +5,7 @@
  * upper bound. SQLite timings exclude preparation and instrumentation overhead.
  */
 import { Database } from "bun:sqlite";
+import { openTestDb } from "../test-db";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -330,7 +331,7 @@ CREATE TRIGGER arrival_part AFTER INSERT ON part BEGIN INSERT INTO arrival_probe
                 sha256: new Bun.CryptoHasher("sha256").update(passes[1]!.raw).digest("hex"),
             });
         }
-        const reader = new Database(dbPath, { readonly: true });
+        const reader = openTestDb(dbPath, { readonly: true });
         const gaps = reader
             .query(
                 `SELECT m.id,m.ms AS start_ms,MIN(p.ms)-m.ms AS gap_ms FROM arrival_probe m JOIN message h ON h.id=m.id JOIN arrival_probe p ON p.owner=m.id AND p.kind='part' WHERE m.kind='message' AND json_extract(h.data,'$.role')='user' GROUP BY m.id ORDER BY m.ms`,

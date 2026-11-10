@@ -13,6 +13,8 @@ import * as incremental from "../../hooks/magic-context/compartment-runner-incre
 import * as finalWire from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import * as tagOwnerWarmup from "../../hooks/magic-context/tag-owner-warmup";
+import { setOutputReserveConfig } from "../../shared/models-dev-cache";
 import { oc2ContextFixture as fixture, prose } from "./__tests__/oc2-context.fixture";
 
 // Issue 886, second part: why an OpenCode 2 session with a 250,000-token
@@ -27,6 +29,8 @@ import { oc2ContextFixture as fixture, prose } from "./__tests__/oc2-context.fix
 const LIMIT = { context: 1_000_000, input: 302_222, output: 65_536 };
 /** The window provider readings are a percentage of: the model's input limit. */
 const INPUT_WINDOW = 302_222;
+/** An output reserve that narrows that window below the hard wall. */
+const RESERVE = 100_000;
 const SETTINGS = {
     execute_threshold_tokens: { default: 250_000 },
     execute_threshold_percentage: 80,
@@ -186,32 +190,40 @@ interface LocalCountPasses {
 async function localCountPasses(seed = 8862): Promise<LocalCountPasses> {
     const f = await reporterSession(seed, 0);
     return withSession(f, async () => {
-        const arrays: Array<{ line: string; messages: Composition }> = [];
+        const arrays: Array<{ messages: Composition; pressureTokens: number | undefined }> = [];
         const original = finalWire.estimateFinalWireInputTokens;
         const spy = spyOn(finalWire, "estimateFinalWireInputTokens").mockImplementation((input) => {
-            const caller = new Error().stack?.split("\n")[3] ?? "";
-            arrays.push({ line: caller, messages: composition(input.messages) });
-            return original(input);
+            const messages = composition(input.messages);
+            const result = original(input);
+            arrays.push({ messages, pressureTokens: result.pressureTokens });
+            return result;
         });
         try {
             const first = await f.pass();
+            const firstPassCalls = arrays.slice();
             f.respondWithTool(shellStep(STEPS), 0, prose.repeat(10));
             const second = await f.pass();
             const logs = [...first.logs, ...second.logs];
             const sized =
-                /using wire estimate for priced pass inputTokens=(\d+) percentage=([\d.]+)/.exec(
+                /using wire estimate for priced pass inputTokens=(\d+) percentage=([\d.]+).* pressureTokens=(\d+)/.exec(
                     first.logs.join("\n"),
                 );
             const served =
                 /local count of the last served request percentage=([\d.]+) inputTokens=(\d+)/.exec(
                     second.logs.join("\n"),
                 );
-            if (!sized || !served)
+            // The count the pass was sized from precedes the postprocess phase;
+            // the next call counts the array the pass returns (the final-wire
+            // estimate).
+            const counted = sized
+                ? firstPassCalls
+                      .slice(0, -1)
+                      .findLast((call) => call.pressureTokens === Number(sized[3]))
+                : undefined;
+            if (!sized || !served || !counted)
                 throw new Error(`expected readings missing:\n${logs.join("\n")}`);
-            // The sizing call precedes the postprocess phase; the next call
-            // counts the array the pass returns (the final-wire estimate).
-            const countedArray = arrays[0]!.messages;
-            const servedArray = arrays[1]!.messages;
+            const countedArray = counted.messages;
+            const servedArray = firstPassCalls[firstPassCalls.indexOf(counted) + 1]!.messages;
             return {
                 sized: { inputTokens: Number(sized[1]), percentage: Number(sized[2]) },
                 served: { inputTokens: Number(served[2]), percentage: Number(served[1]) },
@@ -247,13 +259,38 @@ test("a pass sized from a local count counts the history head, the instruction r
     expect(result.countedArray.reasoning).toBe(result.servedArray.reasoning);
 }, 300_000);
 
-// A provider reading is a percentage of the input limit (302,222 here), so a
-// local count of the same request reads against that window too, not against
-// the 1,000,000-token context less the 32,000-token output cap (968,000).
-test("a pass sized from a local count reads it against the input limit provider readings use", async () => {
-    const result = await localCountResult();
-    const expected = (result.sized.inputTokens / INPUT_WINDOW) * 100;
-    expect(Math.abs(result.sized.percentage - expected)).toBeLessThan(0.1);
+// A provider reading is a percentage of the window the model's limits leave
+// for input, so a local count of the same request reads against that window
+// too, not against the hard wall the two 95% lines read. A configured output
+// reserve makes the two differ on the input-limit model: readings are a share
+// of 302,222 less the 100,000-token reserve, while the hard wall stays at the
+// input limit.
+test("a pass sized from a local count reads it against the window provider readings use, not the hard wall", async () => {
+    const f = await fixture(8868, {
+        area: "issue-886-threshold",
+        provider: "opencode-go",
+        model: "deepseek-v4.1-flash",
+        limit: LIMIT,
+        configOverrides: { output_reserve: RESERVE },
+    });
+    try {
+        f.user(`Review these records:\n${prose.repeat(300)}`, 60_000);
+        f.respond(1, 0);
+        const first = await f.pass();
+        const sized =
+            /using wire estimate for priced pass inputTokens=(\d+) percentage=([\d.]+)/.exec(
+                first.logs.join("\n"),
+            );
+        if (!sized) throw new Error(`no local count:\n${first.logs.join("\n")}`);
+        const tokens = Number(sized[1]);
+        const percentage = Number(sized[2]);
+        expect(Math.abs(percentage - (tokens / (INPUT_WINDOW - RESERVE)) * 100)).toBeLessThan(0.1);
+        // Read against the hard wall it would be a third lower.
+        expect(Math.abs(percentage - (tokens / INPUT_WINDOW) * 100)).toBeGreaterThan(0.5);
+    } finally {
+        setOutputReserveConfig(undefined);
+        await f.cleanup();
+    }
 }, 300_000);
 
 // The sizing count is within ten percent of the next pass's count of the
@@ -270,7 +307,10 @@ test("a pass sized from a local count counts the request it serves", async () =>
 // reasoning. The count projects that clearing from the pass's own tags.
 test("a pass sized while the tag ownership summary is being prepared leaves out the reasoning the pass clears", async () => {
     // Only the sizing sees the summary as not ready; the postprocess phase,
-    // later in the same pass, reads it ready.
+    // later in the same pass, reads it ready. That phase waits only 250 ms for
+    // the off-thread preparation and clears nothing when it is not done by then,
+    // which a loaded test host can hit; here it waits until the preparation is
+    // done, so the pass always clears.
     const realEstimates = storageTags.getReasoningTokenEstimatesByMessage;
     let sizingReads = 0;
     const estimates = spyOn(storageTags, "getReasoningTokenEstimatesByMessage").mockImplementation(
@@ -281,6 +321,10 @@ test("a pass sized while the tag ownership summary is being prepared leaves out 
             }
             return realEstimates(...args);
         },
+    );
+    const realWait = tagOwnerWarmup.waitForTagOwners;
+    const wait = spyOn(tagOwnerWarmup, "waitForTagOwners").mockImplementation(
+        (db, sessionId, ratio) => realWait(db, sessionId, ratio, 120_000),
     );
     try {
         const result = await localCountPasses(8869);
@@ -296,6 +340,7 @@ test("a pass sized while the tag ownership summary is being prepared leaves out 
         expect(ratio).toBeGreaterThan(0.9);
         expect(ratio).toBeLessThan(1.1);
     } finally {
+        wait.mockRestore();
         estimates.mockRestore();
     }
 }, 300_000);
@@ -398,7 +443,13 @@ test("force band in the reporter's shape: what the summary tail and the drop pro
 // limit: the execute threshold and the force band are percentages of the
 // window provider readings use, so a local count read against a larger window
 // executes late on exactly the passes that have no provider reading.
-const WINDOW_CASES = [
+const WINDOW_CASES: Array<{
+    name: string;
+    provider: string;
+    model: string;
+    limit: { context: number; input?: number; output: number };
+    settings?: Record<string, unknown>;
+}> = [
     {
         name: "Anthropic 200k/64k",
         provider: "anthropic",
@@ -417,6 +468,16 @@ const WINDOW_CASES = [
         model: "deepseek-v4.1-flash",
         limit: LIMIT,
     },
+    // A configured output reserve narrows the window readings are a share of
+    // (202,222) but not the hard wall (the input limit), so this case reads
+    // differently against the two.
+    {
+        name: "input limit 302,222 with a 100,000-token output reserve",
+        provider: "opencode-go",
+        model: "deepseek-v4.1-flash",
+        limit: LIMIT,
+        settings: { output_reserve: RESERVE },
+    },
 ];
 for (const [index, windowCase] of WINDOW_CASES.entries()) {
     test(`a local count and a provider reading of the same request read the same percentage: ${windowCase.name}`, async () => {
@@ -425,6 +486,7 @@ for (const [index, windowCase] of WINDOW_CASES.entries()) {
             provider: windowCase.provider,
             model: windowCase.model,
             limit: windowCase.limit,
+            ...(windowCase.settings ? { configOverrides: windowCase.settings } : {}),
         });
         try {
             f.user(`Review these records:\n${prose.repeat(300)}`, 60_000);
@@ -450,6 +512,7 @@ for (const [index, windowCase] of WINDOW_CASES.entries()) {
             // Both are logged to one decimal place.
             expect(Math.abs(Number(sized[2]) - Number(reading[1]))).toBeLessThanOrEqual(0.1);
         } finally {
+            setOutputReserveConfig(undefined);
             await f.cleanup();
         }
     }, 300_000);

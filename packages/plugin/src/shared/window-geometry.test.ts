@@ -257,6 +257,44 @@ describe("window geometry", () => {
         });
     });
 
+    test("a proven floor above a declared input limit lifts the cap from the hard wall", () => {
+        // An accepted request larger than the declared input limit proves that
+        // limit wrong. The hard wall goes back to the context less the requested
+        // output (968,000) instead of rising to each new high reading, which
+        // would put every such reading at 100% of it.
+        const limit = { context: 1_000_000, input: 302_222, output: 65_536 };
+        const catalog = deriveWindowGeometry("opencode-go", "model", limit);
+        expect(catalog?.usableHard).toBe(302_222);
+        for (const proven of [400_000, 500_000]) {
+            const floored = applyProvenInputFloor(catalog!, proven).geometry;
+            expect({ usableSoft: floored.usableSoft, usableHard: floored.usableHard }).toEqual({
+                usableSoft: proven,
+                usableHard: 968_000,
+            });
+        }
+        // A reading past that wall still raises it, as on a model without an
+        // input limit.
+        expect(applyProvenInputFloor(catalog!, 990_000).geometry.usableHard).toBe(990_000);
+        // A reading within the input limit proves nothing.
+        expect(applyProvenInputFloor(catalog!, 250_000).geometry).toEqual(catalog!);
+        // A provider-sourced wall is trusted: the reading raises only the soft limit.
+        const provider = deriveWindowGeometry("opencode-go", "model", limit, {
+            providerLimit: { context: 1_000_000, input: 302_222 },
+        });
+        const trusted = applyProvenInputFloor(provider!, 400_000).geometry;
+        expect({ usableSoft: trusted.usableSoft, usableHard: trusted.usableHard }).toEqual({
+            usableSoft: 400_000,
+            usableHard: 968_000,
+        });
+        // Without a declared input limit nothing changes.
+        const uncapped = deriveWindowGeometry("opencode-go", "model", {
+            context: 1_000_000,
+            output: 65_536,
+        });
+        expect(uncapped?.derivation.hardWithoutInputCap).toBeUndefined();
+        expect(applyProvenInputFloor(uncapped!, 990_000).geometry.usableHard).toBe(990_000);
+    });
+
     test("clamps an inversion and logs it", () => {
         const logs: string[] = [];
         const result = deriveWindowGeometry(

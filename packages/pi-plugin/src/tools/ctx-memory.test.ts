@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { writeTaskStateJson } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import { V2_MEMORY_CATEGORIES } from "@magic-context/core/features/magic-context/memory/constants";
 import { _resetProjectEmbeddingRegistryForTests } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -1731,7 +1732,9 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
-		it("archive with empty content and any category validates and archives", async () => {
+		it.each(
+			V2_MEMORY_CATEGORIES,
+		)("archive with empty content and category %s validates and archives", async (category) => {
 			const db = createTestDb();
 			try {
 				const tool = createCtxMemoryTool({
@@ -1757,7 +1760,7 @@ describe("createCtxMemoryTool", () => {
 					action: "archive",
 					ids: [1],
 					content: "",
-					category: "CONSTRAINTS",
+					category,
 				};
 				expect(Value.Check(tool.parameters, params)).toBe(true);
 				const archived = textOf793(
@@ -1770,6 +1773,11 @@ describe("createCtxMemoryTool", () => {
 					),
 				);
 				expect(archived).toContain("Archived memory [ID: 1]");
+				expect(getMemoryById(db, 1)).toMatchObject({
+					content: "Archivable filler fact.",
+					category: "PROJECT_RULES",
+					status: "archived",
+				});
 			} finally {
 				closeQuietly(db);
 			}
@@ -1823,7 +1831,9 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
-		it("get succeeds with content/category filler and still rejects empty ids", async () => {
+		it.each(
+			V2_MEMORY_CATEGORIES,
+		)("get succeeds with empty content and category %s and still rejects empty ids", async (category) => {
 			const db = createTestDb();
 			try {
 				const tool = createCtxMemoryTool({
@@ -1844,13 +1854,14 @@ describe("createCtxMemoryTool", () => {
 				const filler = textOf793(
 					await tool.execute(
 						"call-get-filler",
-						{ action: "get", ids: [1], content: "", category: "PROJECT_RULES" },
+						{ action: "get", ids: [1], content: "", category },
 						signal,
 						undefined,
 						ctx,
 					),
 				);
 				expect(filler).toContain("Seed fact.");
+				expect(filler).toContain("PROJECT_RULES");
 				const empty = textOf793(
 					await tool.execute(
 						"call-get-empty",

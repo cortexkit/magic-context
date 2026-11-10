@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -242,7 +242,7 @@ test("issue 619 task subagent drops ride execute once and replay the provider pr
             .contextDb()
             .query("SELECT session_id FROM session_meta WHERE is_subagent = 1")
             .get() as { session_id: string };
-        const hostDb = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+        const hostDb = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
         let meters: Array<{ read: number; write: number }>;
         try {
             meters = (

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -336,7 +336,7 @@ for (const { band, mode } of [{ band: 76, mode: "drops" }, { band: 85, mode: "dr
                     contain();
                     return;
                 }
-                const hostDb = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+                const hostDb = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
                 let prompt: { id: string }; let parts: Array<{ id: string; type: "text"; text: string }>;
                 try {
                     prompt = hostDb.query("SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' ORDER BY id LIMIT 1").get(childId) as { id: string };
@@ -471,7 +471,7 @@ for (const { band, mode } of [{ band: 76, mode: "drops" }, { band: 85, mode: "dr
 					.all(childId),
 			).toHaveLength(0);
         } finally {
-            const hostProofDb = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+            const hostProofDb = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
             try { writeFileSync(join(proof, "original-thinking-parts.json"), JSON.stringify(hostProofDb.query("SELECT message_id, data FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'reasoning'").all(childId), null, 2)); } finally { hostProofDb.close(); }
             writeFileSync(join(proof, "recovery-state.json"), JSON.stringify(h.contextDb().query("SELECT thinking_binding_recovery_target, merged_reasoning_stripped_ids FROM session_meta WHERE session_id = ?").get(childId), null, 2));
 			writeFileSync(

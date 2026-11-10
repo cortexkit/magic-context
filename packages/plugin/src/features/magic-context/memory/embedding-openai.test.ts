@@ -448,6 +448,72 @@ describe("OpenAICompatibleEmbeddingProvider circuit breaker", () => {
         expect(provider._getCircuitState()).toBe("open");
     });
 
+    test.each([
+        ["HTTP error", () => new Response("bad gateway", { status: 502 })],
+        ["empty body", () => new Response("")],
+        ["malformed JSON", () => new Response("{")],
+        ["model substitution", () => Response.json({ model: "other", data: [] })],
+        ["missing data", () => Response.json({})],
+        ["empty data", () => Response.json({ data: [] })],
+        ["invalid slots", () => Response.json({ data: [{ index: 7, embedding: [1] }] })],
+        ["missing vectors", () => Response.json({ data: [{}] })],
+        [
+            "transport error",
+            () => {
+                throw new Error("connection reset");
+            },
+        ],
+    ] as const)("timestamps delayed %s failures at request start", async (_name, response) => {
+        let now = 0;
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        fetchSpy.mockImplementation(async () => {
+            now += 30_000;
+            return response();
+        });
+        try {
+            const provider = makeProvider();
+            for (let i = 0; i < 3; i++) {
+                expect(await provider.embed("query")).toBeNull();
+                if (i < 2) {
+                    expect(
+                        (provider as unknown as { failureTimes: number[] }).failureTimes,
+                    ).toEqual([0, 30_010].slice(0, i + 1));
+                }
+                now += 10;
+            }
+            expect(provider._getCircuitState()).toBe("open");
+        } finally {
+            clock.mockRestore();
+        }
+    });
+
+    test("failure window includes its boundary and expires older starts", async () => {
+        let now = 0;
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        fetchSpy.mockImplementation(async () => errorResponse());
+        try {
+            const provider = makeProvider();
+            await provider.embed("start");
+            now = 45_000;
+            await provider.embed("middle");
+            now = 90_000;
+            await provider.embed("boundary");
+            expect(provider._getCircuitState()).toBe("open");
+
+            provider._resetCircuit();
+            now = 0;
+            await provider.embed("start");
+            now = 45_000;
+            await provider.embed("middle");
+            now = 90_001;
+            await provider.embed("outside");
+            expect(provider._getCircuitState()).toBe("closed");
+            expect(provider._getFailureCount()).toBe(2);
+        } finally {
+            clock.mockRestore();
+        }
+    });
+
     test("open circuit short-circuits without issuing fetch", async () => {
         fetchSpy.mockImplementation((async () => errorResponse()) as FetchLike);
 

@@ -4145,15 +4145,19 @@ export function prepareCachedM0M1Replay(
  * request can be sized before the postprocess phase injects them. Nothing is
  * persisted and `options.state` is left unchanged.
  *
- * A session with a complete persisted pair gets that pair. A fold or history
- * refresh later in the same pass may re-render it, usually at a similar size.
- * A session without one is about to render its first head, so m[0] is rendered
- * here the same way the non-persisting fallback renders it, with the empty m[1]
- * that a fresh materialization serves.
+ * A pass that folds (`folds`) re-renders m[0] from current state at its own
+ * render budgets and resets m[1], so its head is rendered here the same way the
+ * non-persisting fallback renders it, with the empty m[1] a fresh
+ * materialization serves. So is the head of a session without a complete
+ * persisted pair, which is about to render its first. Any other pass serves the
+ * persisted pair; a history refresh later in the same pass may re-render m[1],
+ * usually at a similar size.
  */
-export function headMessagesForSizing(options: M0M1RenderOptions): MessageLike[] {
-    const cached = prepareCachedM0M1Replay(options.db, options.sessionId);
-    if (cached?.preparedMessages) return cached.preparedMessages;
+export function headMessagesForSizing(options: M0M1RenderOptions, folds = false): MessageLike[] {
+    if (!folds) {
+        const cached = prepareCachedM0M1Replay(options.db, options.sessionId);
+        if (cached?.preparedMessages) return cached.preparedMessages;
+    }
     // The fallback render records the mural it chose on the state it is given.
     const state: M0M1State = { ...options.state };
     const fresh = renderFreshM0NonPersisted({ ...options, state });

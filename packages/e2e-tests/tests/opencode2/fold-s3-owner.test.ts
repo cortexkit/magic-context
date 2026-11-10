@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { getPendingOps, queuePendingOp } from "../../../plugin/src/features/magic-context/storage";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -90,7 +90,7 @@ for (const mode of ["local", "provider"] as const) {
             expect(publication.compartments.length).toBeGreaterThan(0);
             expect(publication.runs[0].status).toBe("success");
             expect(host.mock.requests().length - beforePublication).toBe(1);
-            const mc = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+            const mc = openTestDb(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
             mc.exec("PRAGMA busy_timeout = 5000");
             queuePendingOp(mc as never, session.id, 2, "drop");
             host.mock.setDefault({ text: "Prime SOFT pressure", usage: { input_tokens: 11000, output_tokens: 10 } });
@@ -108,7 +108,7 @@ for (const mode of ["local", "provider"] as const) {
             await turn("Defer after SOFT publication");
             const afterDefer = frames().filter(frame => frame.kind === "context").at(-1);
             expect(sha(afterDefer.messages.slice(0, 2))).toBe(sha(afterPublication.messages.slice(0, 2)));
-            const hardDb = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+            const hardDb = openTestDb(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
             hardDb.exec("PRAGMA busy_timeout = 5000");
             const snapshot = () => hardDb.prepare("SELECT cached_m0_materialized_at AS stamp FROM session_meta WHERE session_id = ?").get(session.id) as { stamp: number };
             // Stale persisted identities exercise the same real transform gates as a changed live signal.
@@ -134,7 +134,7 @@ for (const mode of ["local", "provider"] as const) {
             hardDb.prepare("UPDATE session_meta SET cached_m0_upgrade_state = 'old-upgrade' || substr(cached_m0_upgrade_state, instr(cached_m0_upgrade_state, '|')) WHERE session_id = ?").run(session.id);
             await turn("HARD upgrade state");
             expect(snapshot().stamp).toBeGreaterThan(beforeUpgrade);
-            const hostTimes = new Database(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
+            const hostTimes = openTestDb(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
             const idleTime = Date.now() - 3600000;
             hostTimes.prepare("UPDATE session_message SET data = json_set(data, '$.time.completed', ?) WHERE session_id = ? AND type = 'assistant'").run(idleTime, session.id);
             hostTimes.close();
@@ -154,7 +154,7 @@ for (const mode of ["local", "provider"] as const) {
             await turn("Defer after pressure backstop");
             expect(sha(frames().filter(frame => frame.kind === "context").at(-1).messages[0])).toBe(sha(pressureHead));
             hardDb.close();
-            const hostDb = new Database(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
+            const hostDb = openTestDb(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
             hostDb.prepare("UPDATE session_message SET data = json_set(data, '$.summary', ?) WHERE id = ?").run("CORRUPTED-PERSISTED-SUMMARY", cut!.id);
             hostDb.close();
             await turn("Detect persisted checkpoint divergence");

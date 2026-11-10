@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { afterEach, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -53,7 +53,7 @@ forEachHost(import.meta.url, null, () => {
             .map((f) => join(h.dataDir, "opencode", f))
             .find((p) => existsSync(p));
         expect(dbPath).toBeDefined();
-        const db = new Database(dbPath!, { readonly: true });
+        const db = openTestDb(dbPath!, { readonly: true });
         try {
             const row = db
                 .query(

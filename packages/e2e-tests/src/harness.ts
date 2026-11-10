@@ -15,7 +15,8 @@
  *   await h.dispose();
  */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, HostHarness } from "./host-harness";
@@ -490,7 +491,7 @@ export class TestHarness implements HostHarness {
         if (!existsSync(dbPath)) {
             throw new Error(`context.db not found at ${dbPath} — plugin may not have initialized yet.`);
         }
-        this.contextDbCached = new Database(dbPath, { readonly: true });
+        this.contextDbCached = openTestDb(dbPath, { readonly: true });
         return this.contextDbCached;
     }
 

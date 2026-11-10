@@ -6,7 +6,7 @@
  * unblocked on every OpenCode surface. This drives a real tool call carrying
  * the placeholder through a live OpenCode and asserts the tool never ran.
  */
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { afterEach, beforeEach, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -67,7 +67,7 @@ forEachHost(import.meta.url, "dropped-input guard through the plugin entry", (ho
                 .map((f) => join(h.dataDir, "opencode", f))
                 .find((p) => existsSync(p));
             expect(opencodeDbPath).toBeDefined();
-            const db = new Database(opencodeDbPath!, { readonly: true });
+            const db = openTestDb(opencodeDbPath!, { readonly: true });
             try {
                 const rows = db
                     .query(

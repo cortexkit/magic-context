@@ -5288,6 +5288,10 @@ for (const generation of ["v1", "v2"] as const) {
 for (const { modelID, prefixBound } of [
     { modelID: "claude-sonnet-5", prefixBound: false },
     { modelID: "claude-sonnet-5-5", prefixBound: true },
+    // Fable 5.2 and Mythos 5.1/5.2 run the same prefix check, so they get the same hold.
+    { modelID: "claude-fable-5-2", prefixBound: true },
+    { modelID: "claude-mythos-5-1", prefixBound: true },
+    { modelID: "claude-mythos-5-2", prefixBound: true },
 ]) {
     it(`primary ${modelID} tool loop applies queued drops only where active-turn thinking stays byte-identical`, async () => {
         useTempDataHome(`latest-turn-primary-${modelID}-`);

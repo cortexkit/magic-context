@@ -28,7 +28,7 @@
  * usage and the request's reasoning map (`R` = step still carries reasoning, `-` = it does
  * not). Results land in `<out>/results.json`; secrets never do.
  */
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../test-db";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -114,7 +114,7 @@ export function summarize(calls: CallRecord[]): ScenarioSummary {
 
 /** Queue a drop on the session's oldest tool tag, the same row `ctx_reduce` would queue. */
 function queueOldestToolDrop(host: Host, sessionId: string): number {
-    const db = new Database(host.contextDb);
+    const db = openTestDb(host.contextDb);
     try {
         const tag = db
             .query(

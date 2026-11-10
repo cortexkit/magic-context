@@ -1,4 +1,5 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -271,7 +272,7 @@ export class OpenCode2TestHarness implements HostHarness {
         if (this.contextDbCached) return this.contextDbCached;
         const path = this.contextDbPath();
         if (!existsSync(path)) throw new Error(`context.db not found at ${path}`);
-        this.contextDbCached = new Database(path, { readonly: true });
+        this.contextDbCached = openTestDb(path, { readonly: true });
         return this.contextDbCached;
     }
 

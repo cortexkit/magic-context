@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../test-db";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 
 const arg = (name: string) => {
@@ -65,7 +65,7 @@ let parentId = "";
 const records: unknown[] = [];
 const probes: Array<{ kind: string; tag: number; ordinal: number }> = [];
 function lookup() {
-	const host = new Database(hostDb, { readonly: true });
+	const host = openTestDb(hostDb, { readonly: true });
 	const rows = host
 		.query(
 			"SELECT id FROM message WHERE session_id = ? ORDER BY time_created, id",
@@ -74,7 +74,7 @@ function lookup() {
 	const parts = host
 		.query("SELECT message_id, data FROM part WHERE session_id = ?")
 		.all(parentId) as Array<{ message_id: string; data: string }>;
-	const mc = new Database(join(storage, "context.db"), { readonly: true });
+	const mc = openTestDb(join(storage, "context.db"), { readonly: true });
 	const tags = mc
 		.query("SELECT * FROM tags WHERE session_id = ? ORDER BY tag_number")
 		.all(parentId) as Array<Record<string, any>>;
