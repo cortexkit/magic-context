@@ -442,6 +442,11 @@ export function frozenBindingEntryIds(
  *
  * The proactive strip runs only in the end order, because it is decided on the
  * array the pass serves and must replay at that same point.
+ *
+ * A pass that releases every signed block (its request tools changed) is served
+ * in the end order without recording the switch here: the caller records it
+ * with recordPiBindingStripEndOrder once the pass has succeeded, so a release
+ * pass that fails leaves a start-order session in the start order.
  */
 export function resolvePiBindingStripOrder(args: {
 	db: ContextDatabase;
@@ -450,6 +455,12 @@ export function resolvePiBindingStripOrder(args: {
 	entryIds: readonly (string | undefined)[];
 	/** Known before any stage runs: this pass is allowed to change served bytes. */
 	bustPermittedAtStart: boolean;
+	/**
+	 * This pass strips every signed block (its request tools changed), so it
+	 * rewrites everything the order could affect and may switch whatever the
+	 * branch carries.
+	 */
+	releasesAllThinking?: boolean;
 }): "start" | "end" {
 	const ledger = getMergedReasoningStrippedIds(args.db, args.sessionId);
 	if (ledger.has(THINKING_BINDING_STRIP_ORDER_END_MARKER)) return "end";
@@ -468,17 +479,40 @@ export function resolvePiBindingStripOrder(args: {
 	// them off the branch, or their thinking already gone, both orders render
 	// alike now, and switching would move the byte change to a later pass,
 	// which could be a defer pass.
-	const mayChangeOrder =
-		onBranch && carriesThinking && args.bustPermittedAtStart;
 	if (
-		mayChangeOrder &&
+		onBranch &&
+		carriesThinking &&
+		args.bustPermittedAtStart &&
 		addMergedReasoningStrippedIds(args.db, args.sessionId, [
 			THINKING_BINDING_STRIP_ORDER_END_MARKER,
 		])
 	) {
 		return "end";
 	}
-	return "start";
+	return args.releasesAllThinking === true ? "end" : "start";
+}
+
+/**
+ * Record that the session strips in the end order, after a release pass that
+ * resolvePiBindingStripOrder served in that order has succeeded. True when the
+ * session already uses the end order or the marker was written; false when the
+ * write failed, in which case the caller must not record the release as done,
+ * so the next pass releases (and switches) again.
+ */
+export function recordPiBindingStripEndOrder(
+	db: ContextDatabase,
+	sessionId: string,
+): boolean {
+	try {
+		const ledger = getMergedReasoningStrippedIds(db, sessionId);
+		if (ledger.has(THINKING_BINDING_STRIP_ORDER_END_MARKER)) return true;
+		if (frozenBindingEntryIds(db, sessionId).size === 0) return true;
+		return addMergedReasoningStrippedIds(db, sessionId, [
+			THINKING_BINDING_STRIP_ORDER_END_MARKER,
+		]);
+	} catch {
+		return false;
+	}
 }
 
 /**
