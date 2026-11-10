@@ -7159,8 +7159,8 @@ export function registerPiContextHandler(
 			publishTransformDecision?.();
 			if (
 				!budget.sideTurn &&
-				result.strictThinkingKept &&
-				!result.signedPrefixRewritten &&
+				((result.strictThinkingKept && !result.signedPrefixRewritten) ||
+					result.heldHeadReleasedForSystemChange === true) &&
 				!result.materialized
 			)
 				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
@@ -8686,6 +8686,12 @@ interface RunPipelineResult {
 	prefixMutationAllowed: boolean;
 	strictThinkingKept: boolean;
 	signedPrefixRewritten: boolean;
+	/**
+	 * A held turn's system prompt changed: its signed thinking was stripped, but
+	 * the head the hold prepared was served unchanged, so the caller records
+	 * it as delivered with the new prompt, as for a held pass.
+	 */
+	heldHeadReleasedForSystemChange?: boolean;
 	/** A missing or cold cache already costs a rebuild; further eligible edits add no extra bust. */
 	prefixRebuildAlreadyPriced: boolean;
 	identityRebuilt?: boolean;
@@ -9371,18 +9377,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		lastServedSystemHashBySession.has(args.sessionId) &&
 		lastServedSystemHashBySession.get(args.sessionId) !==
 			args.effectiveSystemHash;
-	// A held signed turn whose system prompt changed (mid-turn, as Pi's
-	// setActiveTools rebuilds it) is invalid behind the new prompt, and the
-	// changed prompt already loses the whole cache. Nothing is left for the hold
-	// to protect: release it before the fold check, so the system_hash fold and
-	// the strip of every signed block land on this one rebuild.
-	if (effectiveSystemChangedThisPass && protectedSignedPrefix) {
-		sessionLog(
-			args.sessionId,
-			"system prompt changed under a held signed turn: releasing signed thinking",
-		);
-		stripForPrefixRewrite();
-	}
 	// The one bust permission an executed fold grants: true only when the fold
 	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
 	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
@@ -9521,6 +9515,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.sessionId,
 			`pi m[0] HARD fold decision: reason=${preFoldInjectionResult?.m0Reason ?? foldDueDecision.reason ?? "soft_refresh"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
 		);
+	}
+	// A held signed turn whose system prompt changed (mid-turn, as Pi's
+	// setActiveTools rebuilds it) is invalid behind the new prompt, and the
+	// changed prompt already loses the provider cache. The head stays as the
+	// hold prepared it: it is delivered with the new prompt and acknowledged
+	// once the provider accepts the request (recordPiHeldSystemHead), so no
+	// later fold is needed for this change. But every signed block is
+	// stripped, and queued drops and cleanup ride this pass instead of a
+	// second rewrite later.
+	let heldHeadReleasedForSystemChange = false;
+	if (effectiveSystemChangedThisPass && protectedSignedPrefix) {
+		sessionLog(
+			args.sessionId,
+			"system prompt changed under a held signed turn: releasing signed thinking",
+		);
+		// The hold prepared a replay of the cached head unless this is its first
+		// render, which the fold block above rendered (and stripped for).
+		heldHeadReleasedForSystemChange =
+			!firstRenderBust && piM0State !== undefined;
+		stripForPrefixRewrite();
 	}
 	// Observe candidates before any history cut. Replay only durable decisions
 	// until the independently priced rebuild permission below is known.
@@ -11564,11 +11578,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// retries the rebuild. Deferred-history is NOT drained
 			// here; Pi-native compaction marker application happens at
 			// the end of runPipeline after materializing work succeeds.
-			if (args.isCacheBusting && prefixMutationAllowed) {
+			// A head held for signed thinking and then released for a system
+			// change was replayed, not rebuilt, so it consumes no refresh.
+			if (
+				args.isCacheBusting &&
+				prefixMutationAllowed &&
+				!heldHeadReleasedForSystemChange
+			) {
 				historyRefreshSessions.delete(args.sessionId);
 				historyWasConsumedThisPass = true;
 			}
-			if (deferredHistoryRefresh && prefixMutationAllowed) {
+			if (
+				deferredHistoryRefresh &&
+				prefixMutationAllowed &&
+				!heldHeadReleasedForSystemChange
+			) {
 				historyWasConsumedThisPass = true;
 			}
 			logTransformTiming(
@@ -12076,6 +12100,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		prefixBustPermitted: isCacheBustingPass,
 		prefixMutationAllowed,
 		strictThinkingKept: protectedSignedPrefix,
+		heldHeadReleasedForSystemChange,
 		signedPrefixRewritten: rewritingSignedPrefix,
 		prefixRebuildAlreadyPriced:
 			firstRenderBust || (!!args.recoveryRebuildReason && isCacheBustingPass),
