@@ -89,6 +89,10 @@ If plugin registration or config writing fails, the prior OMP settings are resto
 </TabItem>
 </Tabs>
 
+Project artifacts such as historian dumps and dreamer documentation proposals live in `.cortexkit/magic-context/`. When writing artifacts, Magic Context creates a `.gitignore` inside that directory containing `*`, hiding both the artifacts and the ignore file itself. The sibling `.cortexkit/magic-context.jsonc` remains trackable. Setup does not edit the repository-root `.gitignore`; existing ignore rules are left unchanged.
+
+On the next artifact write, Magic Context removes its old fenced block from `.cortexkit/.gitignore`, preserving other modules' entries. If only whitespace remains, it deletes the shared file.
+
 ## Manual setup (OpenCode)
 
 If you cannot run the wizard, add this to `opencode.jsonc` (on OpenCode 2, write `plugins` instead of `plugin`):

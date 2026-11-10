@@ -9,7 +9,6 @@
  */
 import type { HarnessAdapter } from "../adapters/types";
 import { offerDashboardInstall } from "../lib/dashboard-install";
-import { ensureDocsProposalGitignore } from "../lib/docs-proposal-gitignore";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { intro, log, note, outro } from "../lib/prompts";
 import { runDoctorStoreInit } from "./doctor-store";
@@ -58,12 +57,6 @@ export async function runSetup(argv: string[]): Promise<number> {
             continue;
         }
         if (!dryRun) {
-            const ignore = ensureDocsProposalGitignore(process.cwd());
-            if (ignore.status === "added") {
-                log.info(`Added .cortexkit/magic-context/ to ${ignore.path}`);
-            } else if (ignore.status === "failed") {
-                log.warn(`Could not update ${ignore.path}: ${ignore.error}`);
-            }
             printNextSteps(adapter);
         }
     }

@@ -2282,6 +2282,7 @@ export function createTransform(deps: TransformDeps) {
                     usage: boundaryUsageForProtectedTail,
                     usageSource: boundaryUsageSource,
                     emergencyTailScale,
+                    recovery: emergencyRecoveryArmed,
                     protectedTailMeta: earlyStateSnapshot.protectedTail,
                 });
                 if (emergencyTailScale) return snapshot;
@@ -2318,9 +2319,21 @@ export function createTransform(deps: TransformDeps) {
                 return false;
             const prepareRecoveryBoundary = (): ProtectedTailBoundarySnapshot | null => {
                 const scale = emergencyUsagePercentageEarly >= 95 ? 0.25 : 0.5;
-                let boundarySnapshot = getRunnableBoundaryForCompartment();
+                const recoveryBoundary = (
+                    scale?: 0.5 | 0.25,
+                ): ProtectedTailBoundarySnapshot | null => {
+                    const snapshot = getRunnableBoundaryForCompartment(scale);
+                    return snapshot
+                        ? {
+                              ...snapshot,
+                              recovery:
+                                  emergencyRecoveryArmed || emergencyUsagePercentageEarly >= 95,
+                          }
+                        : null;
+                };
+                let boundarySnapshot = recoveryBoundary();
                 if (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot)) {
-                    boundarySnapshot = getRunnableBoundaryForCompartment(scale);
+                    boundarySnapshot = recoveryBoundary(scale);
                 }
                 if (
                     process.env.NODE_ENV === "test" &&

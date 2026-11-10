@@ -714,7 +714,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // live messages, so the head can never include a message that now belongs
         // to the current protected tail.
         if (!validation.ok && validation.reason === "stale_snapshot") {
-            const refreshed = deps.refreshBoundarySnapshot
+            const refreshedBoundary = deps.refreshBoundarySnapshot
                 ? deps.refreshBoundarySnapshot(boundarySnapshot, validation)
                 : resolveOpenCodeProtectedTailBoundary({
                       db,
@@ -732,6 +732,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                       // the protected tail is still recomputed from live messages.
                       liftLivePromptFloor: boundarySnapshot.liftLivePromptFloor === true,
                   });
+            const refreshed = refreshedBoundary
+                ? {
+                      ...refreshedBoundary,
+                      recovery: boundarySnapshot.recovery || deps.forceDrainQuota,
+                  }
+                : null;
             if (refreshed && hasRunnableCompartmentWindow(refreshed)) {
                 sessionLog(
                     sessionId,

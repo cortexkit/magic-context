@@ -743,6 +743,30 @@ describe("runCompartmentAgent wrapup controls", () => {
         }
     });
 
+    it("keeps the manual quota override when a stale force-band head refreshes below the minimum", async () => {
+        const db = createDb();
+        const sessionId = "ses-refresh-small-manual-boundary";
+        try {
+            await withProvider(sessionId, 3, async () => {
+                const fresh = {
+                    ...wrapupSnapshot(db, sessionId, 87),
+                    mode: "incremental-runner" as const,
+                    summaryRemovedEligibleTokens: 0,
+                };
+                await runWithLease({
+                    db,
+                    sessionId,
+                    snapshot: { ...fresh, rawRangeFingerprint: "stale-fingerprint" },
+                    forceDrainQuota: true,
+                    refreshBoundarySnapshot: () => fresh,
+                });
+            });
+            expect(getCompartments(db, sessionId)[0]?.endMessage).toBe(1);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("uses refreshBoundarySnapshot when the initial boundary snapshot is stale", async () => {
         const db = createDb();
         const sessionId = "ses-refresh-boundary";

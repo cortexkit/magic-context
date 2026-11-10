@@ -2,11 +2,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import {
-    deriveMinForceEligibleTokens,
-    deriveProtectedTailTokenTarget,
-    MIN_FORCE_ELIGIBLE_TOKENS_CAP,
-} from "./protected-tail-boundary";
+import { deriveProtectedTailTokenTarget } from "./protected-tail-boundary";
 import { buildTrueRawTokenIndexFromTokenCountsForTest } from "./read-session-true-raw-tokens";
 
 describe("protected-tail size walk", () => {
@@ -41,10 +37,20 @@ describe("protected-tail N clamp", () => {
         expect(twelveK.effectiveFloor).toBeLessThanOrEqual(twelveK.ceilingN);
     });
 
-    it("derives the force-head minimum from the scaled tail size", () => {
-        expect(MIN_FORCE_ELIGIBLE_TOKENS_CAP).toBe(1_000);
-        expect(deriveMinForceEligibleTokens(8)).toBe(1);
-        expect(deriveMinForceEligibleTokens(16_000)).toBe(1_000);
+    it("derives the force-head minimum from the usable window, not the scaled tail size", () => {
+        const snapshot = {
+            ...pressureGateSnapshot("force-minimum", 65),
+            eligibleEndOrdinal: 2,
+            summaryRemovedEligibleTokens: 1_999,
+        };
+        expect(hasRunnableCompartmentWindow(snapshot)).toBe(false);
+        expect(hasRunnableCompartmentWindow({ ...snapshot, N: 1 })).toBe(false);
+        expect(
+            hasRunnableCompartmentWindow({ ...snapshot, summaryRemovedEligibleTokens: 2_000 }),
+        ).toBe(true);
+        expect(
+            hasRunnableCompartmentWindow({ ...snapshot, summaryRemovedEligibleTokens: 2_001 }),
+        ).toBe(true);
     });
 });
 
@@ -764,29 +770,58 @@ it("rejects an empty capped window at both force thresholds while keeping the ra
     }
 });
 
-it("treats an emergency-scaled complete small head as runnable even below the force token floor", () => {
-    expect(
-        hasRunnableCompartmentWindow({
-            sessionId: "ses-small-head",
-            mode: "trigger",
-            offset: 1,
-            rawMessageCount: 2,
-            protectedTailStart: 2,
-            eligibleEndOrdinal: 2,
-            N: 2_000,
-            usableTokens: 7_800,
-            usagePercentage: 82,
-            usageInputTokens: 9_840,
-            usageSource: "live",
-            contextLimit: 12_000,
-            executeThresholdPercentage: 65,
-            trueRawEligibleTokens: 1,
-            summaryRemovedEligibleTokens: 1,
-            trueRawTailTokens: 2_000,
-            boundaryReason: "size-walk",
-            rawRangeFingerprint: "stable",
-        }),
-    ).toBe(true);
+it("requires the force minimum for an emergency-scaled complete small head below 95%", () => {
+    const snapshot: ProtectedTailBoundarySnapshot = {
+        ...pressureGateSnapshot("ses-small-head", 65),
+        eligibleEndOrdinal: 2,
+        usagePercentage: 82,
+        emergencyTailScale: 0.5,
+        summaryRemovedEligibleTokens: 1,
+    };
+    expect(hasRunnableCompartmentWindow(snapshot)).toBe(false);
+    expect(hasRunnableCompartmentWindow({ ...snapshot, usagePercentage: 95 })).toBe(true);
+});
+
+describe("force summary admission", () => {
+    const smallHead = (): ProtectedTailBoundarySnapshot => ({
+        ...pressureGateSnapshot("force-admission", 65),
+        eligibleEndOrdinal: 2,
+        trueRawEligibleTokens: 80_000,
+        summaryRemovedEligibleTokens: 1,
+    });
+
+    it("does not count tool results toward the removable-history minimum", () => {
+        expect(hasRunnableCompartmentWindow(smallHead())).toBe(false);
+    });
+
+    it("leaves admission below the derived force band unchanged", () => {
+        expect(hasRunnableCompartmentWindow({ ...smallHead(), usagePercentage: 84.99 })).toBe(true);
+        expect(
+            hasRunnableCompartmentWindow({ ...smallHead(), executeThresholdPercentage: 90 }),
+        ).toBe(true);
+        expect(
+            hasRunnableCompartmentWindow({
+                ...smallHead(),
+                executeThresholdPercentage: 90,
+                usagePercentage: 92,
+            }),
+        ).toBe(false);
+    });
+
+    for (const [name, overrides] of [
+        ["95% emergency", { usagePercentage: 95 }],
+        ["overflow latch", { recovery: true }],
+        ["manual wrapup", { mode: "manual-wrapup" }],
+        ["manual recomp", { mode: "manual-full-recomp" }],
+    ] as const) {
+        it(`admits a small head for ${name}, but never an empty window`, () => {
+            const snapshot = { ...smallHead(), ...overrides };
+            expect(hasRunnableCompartmentWindow(snapshot)).toBe(true);
+            expect(hasRunnableCompartmentWindow({ ...snapshot, eligibleEndOrdinal: 1 })).toBe(
+                false,
+            );
+        });
+    }
 });
 
 describe("wrapup protected-tail boundary", () => {

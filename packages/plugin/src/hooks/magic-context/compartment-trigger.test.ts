@@ -16,6 +16,7 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
+import { recordOverflowDetected } from "../../features/magic-context/storage-meta-persisted";
 import type { SessionMeta } from "../../features/magic-context/types";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -108,6 +109,79 @@ it("does not fire at 88.3% for a tiny capped head even when later eligible histo
                 expect(result.shouldFire).toBe(false);
             }
             expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+        });
+    } finally {
+        if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = oldNodeEnv;
+    }
+});
+
+it.each([
+    { name: "routine small head", words: 300, percentage: 87, recovery: false, fires: false },
+    {
+        name: "enough removable history",
+        words: 3_000,
+        percentage: 87,
+        recovery: false,
+        fires: true,
+    },
+    { name: "95% emergency", words: 300, percentage: 95, recovery: false, fires: true },
+    { name: "overflow latch", words: 300, percentage: 87, recovery: true, fires: true },
+])("force trigger uses removable history for $name", ({
+    name,
+    words,
+    percentage,
+    recovery,
+    fires,
+}) => {
+    useTempDataHome("compartment-trigger-force-minimum-");
+    const db = openDatabase();
+    const sessionId = `ses-force-minimum-${name}`;
+    seedTriggerPolicy(db, sessionId);
+    if (recovery) recordOverflowDetected(db, sessionId, undefined);
+    const messages: RawMessage[] = [
+        rawTextMessage(1, "older", "user", "earlier ".repeat(words)),
+        {
+            ordinal: 2,
+            id: "result",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "read-file",
+                    state: {
+                        status: "completed",
+                        input: { path: "file.txt" },
+                        output: "tool output ".repeat(20_000),
+                    },
+                },
+            ],
+        },
+        rawTextMessage(3, "current", "user", "protected ".repeat(8_000)),
+    ];
+    const oldNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+        withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+            const result = checkCompartmentTrigger(
+                db,
+                sessionId,
+                makeSessionMeta(sessionId, percentage),
+                { percentage, inputTokens: percentage * 1_000 },
+                percentage,
+                65,
+                20_000,
+                undefined,
+                { enabled: false, min_clusters: 3 },
+                [],
+                100_000,
+            );
+            expect(result.shouldFire).toBe(fires);
+            if (fires) {
+                expect(result.reason).toBe("force_band");
+                if (recovery) expect(result.boundarySnapshot?.recovery).toBe(true);
+            }
         });
     } finally {
         if (oldNodeEnv === undefined) delete process.env.NODE_ENV;

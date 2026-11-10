@@ -1,5 +1,8 @@
 # GitHub sends no event when a review thread is resolved. After resolving all
-# bot threads, a maintainer can rerun this gate with workflow_dispatch.
+# bot threads, re-run the PR's own failed run of this workflow (`gh run rerun
+# <run-id>`): that rerun reports on the PR's head commit, so it can satisfy a
+# required check. A workflow_dispatch run reports on the default branch's head
+# commit instead, so it only shows the current state in its summary.
 # Never check out or execute PR code: even fork events only run API queries.
 name: Review findings
 
