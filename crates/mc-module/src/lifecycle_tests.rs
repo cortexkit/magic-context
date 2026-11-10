@@ -12,6 +12,9 @@ use std::sync::Mutex;
 #[path = "pass_decision_tests.rs"]
 mod pass_decision_tests;
 
+#[path = "pass_safety_tests.rs"]
+mod pass_safety_tests;
+
 #[path = "ride_cause_tests.rs"]
 mod ride_cause_tests;
 
