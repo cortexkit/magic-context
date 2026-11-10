@@ -45,6 +45,55 @@ describe("requestToolSchemaDigest", () => {
         cyclic.self = cyclic;
         expect(requestToolSchemaDigest(cyclic)).toMatch(/^[0-9a-f]{64}$/);
     });
+
+    test("writes toJSON results and boxed primitives as JSON.stringify does", () => {
+        const plain = { type: "object", properties: { when: "2026-01-01", flag: true } };
+        expect(
+            requestToolSchemaDigest({
+                type: "object",
+                properties: { when: { toJSON: () => "2026-01-01" }, flag: Object(true) },
+            }),
+        ).toBe(requestToolSchemaDigest(plain));
+        expect(requestToolSchemaDigest({ a: 1, b: { toJSON: () => undefined } })).toBe(
+            requestToolSchemaDigest({ a: 1 }),
+        );
+    });
+});
+
+describe("v2RequestToolsFingerprint schema digests", () => {
+    const schema = () => ({
+        type: "object",
+        properties: { path: { type: "string", description: "The file" } },
+        required: ["path"],
+    });
+
+    test("match the uncached digest for fresh equal objects and follow in-place edits", () => {
+        const tools = { cache_probe: { description: "Probe", input: schema() } };
+        const uncached = requestToolsFingerprint([
+            tool("cache_probe", "Probe", schema()),
+        ]);
+        expect(v2RequestToolsFingerprint(tools)).toEqual(uncached);
+        // A structurally equal copy (a host that rebuilds its schemas per
+        // request) gives the same fingerprint.
+        expect(
+            v2RequestToolsFingerprint({ cache_probe: { description: "Probe", input: schema() } }),
+        ).toEqual(uncached);
+        // An in-place edit of the same object is seen.
+        (tools.cache_probe.input as { required: string[] }).required = [];
+        const edited = v2RequestToolsFingerprint(tools);
+        expect(edited.schemas).not.toBe(uncached.schemas);
+        expect(edited).toEqual(
+            requestToolsFingerprint([
+                tool("cache_probe", "Probe", { ...schema(), required: [] }),
+            ]),
+        );
+        // A schema JSON cannot write still gets a digest.
+        const cyclic: Record<string, unknown> = { type: "object" };
+        cyclic.self = cyclic;
+        expect(
+            v2RequestToolsFingerprint({ cache_probe: { description: "Probe", input: cyclic } }),
+        ).toEqual(requestToolsFingerprint([tool("cache_probe", "Probe", cyclic)]));
+    });
 });
 
 describe("requestToolsFingerprint", () => {

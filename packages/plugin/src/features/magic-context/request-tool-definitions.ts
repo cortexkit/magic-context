@@ -117,6 +117,40 @@ export interface RequestToolsFingerprint {
 export type RequestToolsChange = "names" | "descriptions" | "schemas";
 
 /**
+ * The last schema digest computed for each OpenCode 2 tool name, with the
+ * schema's `JSON.stringify` text it was computed from. OpenCode 2 hands the
+ * context hook a tool map whose schema objects need not be the same objects
+ * from one request to the next (and a hook may edit them in place), so object
+ * identity cannot key a cache; the JSON text can, because the digest depends on
+ * nothing the text leaves out (see requestToolSchemaDigest). Writing the text
+ * costs a fraction of digesting it, so a steady session pays one
+ * `JSON.stringify` and one string comparison per tool. Bounded by the number
+ * of distinct tool names; a name whose schema alternates is digested again.
+ */
+const v2SchemaDigests = new Map<string, { text: string; digest: string }>();
+const V2_SCHEMA_DIGEST_NAMES = 2048;
+
+function v2SchemaDigest(name: string, schema: unknown): string {
+    let text: string | undefined;
+    try {
+        text = JSON.stringify(schema);
+    } catch {
+        // Circular or BigInt-bearing values have no JSON text to key on.
+        return requestToolSchemaDigest(schema);
+    }
+    if (text === undefined) return requestToolSchemaDigest(schema);
+    const cached = v2SchemaDigests.get(name);
+    if (cached?.text === text) return cached.digest;
+    const digest = requestToolSchemaDigest(schema);
+    if (!cached && v2SchemaDigests.size >= V2_SCHEMA_DIGEST_NAMES) {
+        const oldest = v2SchemaDigests.keys().next().value;
+        if (oldest !== undefined) v2SchemaDigests.delete(oldest);
+    }
+    v2SchemaDigests.set(name, { text, digest });
+    return digest;
+}
+
+/**
  * OpenCode 2: fingerprint a request draft's tool map. A tool declared with
  * `defer_loading: true` counts once a message part names it (a call to it).
  */
@@ -131,7 +165,7 @@ export function v2RequestToolsFingerprint(
         entries.push({
             name,
             description: typeof tool.description === "string" ? tool.description : "",
-            schemaDigest: requestToolSchemaDigest(tool.input),
+            schemaDigest: v2SchemaDigest(name, tool.input),
             deferLoading: declared.defer_loading === true || declared.deferLoading === true,
         });
     }
@@ -197,19 +231,33 @@ export function classifyRequestToolsChange(
 
 /**
  * Digest of a tool's input schema as JSON with object keys sorted, so key
- * order does not count and every value does. Values JSON cannot carry are
- * written as JSON.stringify writes them: dropped from objects, `null` in
- * arrays. A value that contains itself is written as "[Circular]"; a value
- * shared by two branches is written in full in both.
+ * order does not count and every value does. Every value is written as
+ * JSON.stringify writes it (`toJSON` applied, boxed primitives unwrapped,
+ * values JSON cannot carry dropped from objects and `null` in arrays), so two
+ * schemas with the same `JSON.stringify` text always have the same digest. A
+ * value that contains itself is written as "[Circular]" and a BigInt as its
+ * decimal string, where JSON.stringify would throw; a value shared by two
+ * branches is written in full in both.
  */
 export function requestToolSchemaDigest(schema: unknown): string {
     const pieces: string[] = [];
-    writeCanonicalJson(schema, [], pieces);
+    writeCanonicalJson(toJsonValue(schema, ""), [], pieces);
     return createHash("sha256").update(pieces.join("")).digest("hex");
 }
 
 function isJsonValue(value: unknown): boolean {
     return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+}
+
+/** The value JSON.stringify writes for `value` under `key`, before quoting. */
+function toJsonValue(value: unknown, key: string): unknown {
+    if (typeof value !== "object" || value === null) return value;
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    const resolved = typeof toJSON === "function" ? toJSON.call(value, key) : value;
+    if (resolved instanceof Number) return Number(resolved);
+    if (resolved instanceof String) return String(resolved);
+    if (resolved instanceof Boolean) return resolved.valueOf();
+    return resolved;
 }
 
 function writeCanonicalJson(value: unknown, ancestors: object[], out: string[]): void {
@@ -238,12 +286,14 @@ function writeCanonicalJson(value: unknown, ancestors: object[], out: string[]):
         out.push("[");
         for (let index = 0; index < value.length; index += 1) {
             if (index > 0) out.push(",");
-            if (isJsonValue(value[index])) writeCanonicalJson(value[index], ancestors, out);
+            const item = toJsonValue(value[index], String(index));
+            if (isJsonValue(item)) writeCanonicalJson(item, ancestors, out);
             else out.push("null");
         }
         out.push("]");
     } else {
         const entries = Object.entries(value)
+            .map(([key, child]): [string, unknown] => [key, toJsonValue(child, key)])
             .filter(([, child]) => isJsonValue(child))
             .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
         out.push("{");
