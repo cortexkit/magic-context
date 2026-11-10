@@ -7021,9 +7021,10 @@ export function registerPiContextHandler(
 					throw contextRefusalError(recoveryRefusalNotice(historyRemains));
 				}
 				if (served === undefined) {
-					// Sent unchecked, as before; recovery stays armed for the existing
-					// disarms (real pressure below the force band with nothing left
-					// to summarize).
+					// Sent without this check (only the byte-count check above
+					// applies). Recovery stays armed for the existing disarms, which
+					// need real pressure below the force-materialization threshold
+					// and nothing left to summarize.
 					if (!untrustedRecoveryCountLoggedSessions.has(sessionId)) {
 						untrustedRecoveryCountLoggedSessions.add(sessionId);
 						sessionLog(
@@ -7033,8 +7034,8 @@ export function registerPiContextHandler(
 					}
 				} else {
 					// The request was counted within its limit, so it fits. This is
-					// where a recovery pass ends its recovery; a historian
-					// publication does not.
+					// where a recovery pass ends its recovery; a historian run that
+					// publishes a summary does not.
 					clearEmergencyRecovery(options.db, sessionId);
 					sessionLog(
 						sessionId,

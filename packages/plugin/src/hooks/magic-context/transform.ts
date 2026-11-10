@@ -4156,9 +4156,10 @@ export function createTransform(deps: TransformDeps) {
             ) {
                 // The recovery check counted this request within its limit, so
                 // it fits. This is the one place a recovery pass ends its
-                // recovery; a historian publication does not. A request nothing
-                // could count (no window known, or the count failed) is sent as
-                // before and leaves recovery to the existing disarms.
+                // recovery; a historian run that publishes a summary does not.
+                // A request nothing could count (no window known, or the count
+                // failed) is still sent, and recovery is left to the existing
+                // disarms.
                 clearEmergencyRecovery(db, sessionId);
                 sessionLog(
                     sessionId,
@@ -4187,7 +4188,8 @@ export function createTransform(deps: TransformDeps) {
                         deps.client,
                         sessionId,
                         // Recovery stays armed for the next turn, so a recovery
-                        // refusal never tells the person to flush or clear.
+                        // refusal never tells the person to run /ctx-flush or
+                        // /clear, as the emergency notice does.
                         recoveryOverLimit
                             ? recoveryRefusalNotice(recoveryServedRequest.historyRemains)
                             : EMERGENCY_REFUSAL_NOTICE,
