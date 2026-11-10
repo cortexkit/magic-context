@@ -207,11 +207,14 @@ fn notes_tokens_growth_changes_the_post_drop_summary_trigger() {
         usage: 90.0,
         threshold: 65.0,
         force: true,
+        usable_window: crate::pass::usable_window(&session.conditions),
         after_drops: session.usage_after_drops(&settings, 90.0),
     };
     let scan = trigger::Scan {
         tokens: 20_000,
         raw_tokens: 20_000,
+        // Text the summary would remove; well above the force band's 2% minimum.
+        removed_tokens: 20_000,
         messages: 20,
         has_more: false,
         commit_clusters: 0,
