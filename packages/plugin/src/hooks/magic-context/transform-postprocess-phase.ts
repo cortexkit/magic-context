@@ -2406,8 +2406,12 @@ export async function runPostTransformPhase(
         fullFeatureMode: args.fullFeatureMode,
         schedulerDecision: args.schedulerDecision,
     });
-    const { forceMaterialization, emergencyDropEligible, forceBandConfirmed, executePressureEligible } =
-        bands;
+    const {
+        forceMaterialization,
+        emergencyDropEligible,
+        forceBandConfirmed,
+        executePressureEligible,
+    } = bands;
     const episode = {
         fullFeatureMode: args.fullFeatureMode,
         executePressureEligible,

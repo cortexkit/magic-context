@@ -76,9 +76,7 @@ export function forceRide(args: {
     return (
         args.bands.emergencyDropEligible &&
         (args.percentage >= 95 ||
-            (args.triggerPermitted !== false &&
-                !args.fromEstimate &&
-                args.emergencySample() === 0))
+            (args.triggerPermitted !== false && !args.fromEstimate && args.emergencySample() === 0))
     );
 }
 
