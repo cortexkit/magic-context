@@ -147,6 +147,7 @@ impl ValidationCache {
         entries: &[Entry],
         candidate: &View,
         rules: &ProviderRules,
+        floor: rules::Floor<'_>,
     ) -> Result<(), ViewRefusal> {
         let edits = &candidate.edits;
         #[cfg(all(feature = "notice-cost-timing", target_os = "linux"))]
@@ -210,8 +211,9 @@ impl ValidationCache {
         // the newest entry with parts, so a projection without it would
         // judge some earlier entry to be the end. All edits remain,
         // preserving duplicate-ID and cross-edit checks. Provider signed-part
-        // rules need every signed entry and the policy anchor too. A trailing
-        // system note also protects the newest non-system turn.
+        // rules need every signed entry and the policy anchor too, and the
+        // signed floor's entry, without which the floor covers nothing. A
+        // trailing system note also protects the newest non-system turn.
         let final_turn = entries
             .iter()
             .rev()
@@ -232,6 +234,7 @@ impl ValidationCache {
                     || Some(e.ordinal) == final_turn
                     || Some(e.ordinal) == final_non_system
                     || candidate.built_through.as_ref() == Some(&e.mid)
+                    || floor.mid() == Some(e.mid.as_str())
                     || e.parts
                         .iter()
                         .any(|part| part.seal == cortexkit_role_compaction::part::Seal::Signed)
@@ -247,12 +250,12 @@ impl ValidationCache {
                 candidate.new_signed.clone(),
             );
             if bounded.built_through.is_some() || bounded.new_signed.is_some() {
-                view::plan_view(&touched, &bounded, rules)?;
+                view::plan_view(&touched, &bounded, rules, floor)?;
             } else {
                 // An unflagged runner plans explicit edits only; no signed
                 // part may rely on render-time stripping to make them valid.
                 view::plan(&touched, &bounded.edits)?;
-                rules::check(&touched, &bounded.edits, rules).map_err(ViewRefusal::Rule)?;
+                rules::check(&touched, &bounded.edits, rules, floor).map_err(ViewRefusal::Rule)?;
             }
         }
         self.inserts = edits
@@ -284,6 +287,7 @@ pub fn next_view(
             version,
             built_through: None,
             new_signed: None,
+            signed_floor: None,
         },
         retire,
         &mut ValidationCache::default(),
@@ -295,6 +299,13 @@ pub(crate) struct ViewPolicy<'a> {
     pub version: u64,
     pub built_through: Option<String>,
     pub new_signed: Option<String>,
+    /// The entry id of the runner's signed floor, if it has one. After a
+    /// tool-set change on a model whose signed reasoning is bound to the
+    /// request prefix, the runner strips the signed reasoning at or before
+    /// that entry from every request (compaction contract W3.5). No edit can
+    /// invalidate it and it needs no drop, so every signed-part check gets
+    /// the floor; signed parts after it are checked as before.
+    pub signed_floor: Option<String>,
 }
 
 pub(crate) fn next_view_cached(
@@ -311,6 +322,7 @@ pub(crate) fn next_view_cached(
         version,
         built_through,
         new_signed,
+        signed_floor,
     } = policy;
     let previous_edits = previous
         .map(|view| view.edits.as_slice())
@@ -410,8 +422,11 @@ pub(crate) fn next_view_cached(
     if !added && !dropped_some && !replaced_in_place && !policy_changed {
         return Ok(None);
     }
+    let floor = signed_floor
+        .as_deref()
+        .map_or(rules::Floor::none(), rules::Floor::through);
     loop {
-        let invalid = rules::invalid_signed_parts(entries, &edits, rules);
+        let invalid = rules::invalid_signed_parts(entries, &edits, rules, floor);
         if invalid.is_empty() {
             break;
         }
@@ -436,7 +451,7 @@ pub(crate) fn next_view_cached(
         // The view was sealed immediately above. Planning performs every edit
         // and transcript check that apply performs, without constructing and
         // hashing rendered message parts that this provider would discard.
-        validation.check(entries, &view, rules)?;
+        validation.check(entries, &view, rules, floor)?;
     }
     Ok(Some(view))
 }
@@ -663,6 +678,7 @@ mod tests {
                 version: 1,
                 built_through: entries.last().map(|e| e.mid.clone()),
                 new_signed: None,
+                signed_floor: None,
             },
             |_| false,
             &mut cache,
@@ -679,6 +695,7 @@ mod tests {
                 version: 1,
                 built_through: entries.last().map(|e| e.mid.clone()),
                 new_signed: None,
+                signed_floor: None,
             },
             |_| false,
             &mut cache,
@@ -692,6 +709,139 @@ mod tests {
             ),
             "{through_end:?}"
         );
+    }
+
+    fn signed(id: &str) -> Part {
+        Part::new(
+            id,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(400),
+            },
+        )
+        .with_seal(Seal::Signed)
+    }
+
+    fn said(id: &str) -> Part {
+        Part::new(
+            id,
+            PartBody::Text {
+                text: format!("text {id}"),
+            },
+        )
+    }
+
+    fn drop_part(mid: &str, part: &str) -> EditOp {
+        EditOp::Drop {
+            mid: mid.into(),
+            part: Some(part.into()),
+        }
+    }
+
+    /// The parts a view drops, as `mid/part`.
+    fn dropped(view: &View) -> Vec<String> {
+        view.edits
+            .iter()
+            .filter_map(|edit| match &edit.op {
+                EditOp::Drop {
+                    mid,
+                    part: Some(part),
+                } => Some(format!("{mid}/{part}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Build a view of `ops` under `floor`, unanchored or anchored at the
+    /// newest entry with the `strip` policy.
+    fn floor_view(
+        entries: &[Entry],
+        ops: Vec<EditOp>,
+        anchored: bool,
+        floor: Option<&str>,
+    ) -> Result<Option<View>, ViewRefusal> {
+        let rules = ProviderRules::new(SignedParts::Bound, EditCost::Suffix);
+        next_view_cached(
+            None,
+            entries,
+            ops,
+            ViewPolicy {
+                rules: &rules,
+                version: 1,
+                built_through: anchored
+                    .then(|| entries.last().map(|entry| entry.mid.clone()))
+                    .flatten(),
+                new_signed: anchored.then(|| "strip".into()),
+                signed_floor: floor.map(str::to_owned),
+            },
+            |_| false,
+            &mut ValidationCache::default(),
+        )
+    }
+
+    /// After a tool-set change the runner strips the signed reasoning at or
+    /// before its floor, so an edit before the floor invalidates nothing
+    /// there: the view draws no drop for it, and a final turn whose only
+    /// part is that reasoning is not judged removed.
+    #[test]
+    fn an_edit_before_the_signed_floor_draws_no_drop_for_reasoning_the_runner_strips() {
+        let entries = vec![
+            Entry::new(1, "m1", Role::User, 0, vec![said("t1")]),
+            Entry::new(2, "m2", Role::Assistant, 0, vec![signed("r2"), said("t2")]),
+            Entry::new(3, "m3", Role::User, 0, vec![said("t3")]),
+            // The newest entry, where the runner put the floor: its only
+            // part is signed reasoning.
+            Entry::new(4, "m4", Role::Assistant, 0, vec![signed("r4")]),
+        ];
+        for anchored in [false, true] {
+            // Without the floor, dropping m2's text invalidates m4's
+            // reasoning, and dropping that removes the final turn.
+            let refused = floor_view(&entries, vec![drop_part("m2", "t2")], anchored, None);
+            assert!(
+                matches!(
+                    refused,
+                    Err(ViewRefusal::Rule(
+                        cortexkit_role_compaction::rules::RuleBreak::FinalTurnRemoved { .. }
+                    ))
+                ),
+                "anchored {anchored}: {refused:?}"
+            );
+            let view = floor_view(&entries, vec![drop_part("m2", "t2")], anchored, Some("m4"))
+                .unwrap_or_else(|refusal| panic!("anchored {anchored}: {refusal:?}"))
+                .expect("a view");
+            assert_eq!(dropped(&view), ["m2/t2"], "anchored {anchored}");
+        }
+    }
+
+    /// Signed reasoning after the floor was generated after the strip and
+    /// still binds to everything before it: an edit before the floor
+    /// invalidates it, and it gets its drop as before.
+    #[test]
+    fn an_edit_before_the_signed_floor_still_invalidates_reasoning_after_it() {
+        let entries = vec![
+            Entry::new(1, "m1", Role::User, 0, vec![said("t1")]),
+            Entry::new(2, "m2", Role::Assistant, 0, vec![signed("r2"), said("t2")]),
+            Entry::new(3, "m3", Role::User, 0, vec![said("t3")]),
+            Entry::new(4, "m4", Role::Assistant, 0, vec![signed("r4"), said("t4")]),
+            Entry::new(5, "m5", Role::User, 0, vec![said("t5")]),
+            Entry::new(6, "m6", Role::Assistant, 0, vec![signed("r6"), said("t6")]),
+            Entry::new(7, "m7", Role::User, 0, vec![said("t7")]),
+        ];
+        for anchored in [false, true] {
+            let built = |floor: Option<&str>| {
+                let view = floor_view(&entries, vec![drop_part("m2", "t2")], anchored, floor)
+                    .unwrap_or_else(|refusal| panic!("anchored {anchored}: {refusal:?}"))
+                    .expect("a view");
+                dropped(&view)
+            };
+            assert_eq!(built(None), ["m2/t2", "m4/r4", "m6/r6"]);
+            assert_eq!(built(Some("m4")), ["m2/t2", "m6/r6"]);
+            // A floor at an entry with no signed part of its own, which no
+            // edit names, still covers the reasoning before it.
+            assert_eq!(built(Some("m5")), ["m2/t2", "m6/r6"]);
+            // A floor naming no entry held here covers nothing.
+            assert_eq!(built(Some("gone")), ["m2/t2", "m4/r4", "m6/r6"]);
+        }
     }
     #[test]
     fn cached_insert_checks_match_full_apply_on_valid_and_invalid_views() {
@@ -810,7 +960,8 @@ mod tests {
                 cache.check(
                     &entries,
                     &view,
-                    &ProviderRules::new(SignedParts::None, EditCost::Suffix)
+                    &ProviderRules::new(SignedParts::None, EditCost::Suffix),
+                    rules::Floor::none(),
                 ),
                 view::apply(&entries, &view).map(|_| ())
             );

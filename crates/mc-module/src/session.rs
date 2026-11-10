@@ -253,6 +253,9 @@ pub struct Session {
     /// A pass held its view back because the view could not meet the move
     /// floor, and no view has met it since: the hold is logged only once.
     move_floor_held: bool,
+    /// The entry id of the runner's signed floor, the newest ck-mc has taken
+    /// (see the `signed_floor` module). The runner strips signed reasoning at or before it.
+    signed_floor: Option<String>,
 }
 
 /// A view the runner took (an `apply_view` it accepted, or a ride's answer)
@@ -567,6 +570,7 @@ impl Session {
             mural_image: None,
             move_floor: None,
             move_floor_held: false,
+            signed_floor: None,
         }
     }
 
@@ -701,6 +705,7 @@ impl Session {
             unconfirmed: self.unconfirmed.clone(),
             summary_unshown: self.summary_unshown,
             move_floor: self.move_floor.clone(),
+            signed_floor: self.signed_floor.clone(),
         }
     }
 
@@ -757,6 +762,7 @@ impl Session {
             .and_then(|pending| pending.before.transcript_retry);
         self.summary_unshown = durable.summary_unshown;
         self.move_floor = durable.move_floor;
+        self.signed_floor = durable.signed_floor;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
         self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
@@ -894,6 +900,8 @@ impl Session {
         if !self.index_ready {
             return;
         }
+        // The floor names an entry, so it is taken once the read holds it.
+        self.take_signed_floor();
         // A process can stop after the runner changed an older tool result but
         // before the background dirty mark was committed. On Setup, reconcile
         // the raw entries loaded from the summary cut through the newest row,
@@ -1090,6 +1098,7 @@ impl Session {
         if !self.index_ready {
             return None;
         }
+        self.take_signed_floor();
         // A view the runner applies that ck-mc does not expect (it lost one,
         // or restored an older one) is taken as ck-mc's own. After the read,
         // so the view's cut message is in the index.
@@ -1160,7 +1169,12 @@ impl Session {
         let (hold, execute, force) = {
             let pressure = self.pressure();
             (
-                pass::signed_thinking_hold(self.index.entries(), &pressure, settings),
+                pass::signed_thinking_hold(
+                    self.index.entries(),
+                    &pressure,
+                    settings,
+                    self.signed_floor(),
+                ),
                 pass::at_execute(&pressure, settings),
                 pass::in_force_band(&pressure, settings),
             )
@@ -1170,7 +1184,11 @@ impl Session {
         // current reading, as the hold would make it wait.
         let fold_held = hold
             || (self.reading_stale
-                && pass::heavy_signed_turn(self.index.entries(), &self.conditions));
+                && pass::heavy_signed_turn(
+                    self.index.entries(),
+                    &self.conditions,
+                    self.signed_floor(),
+                ));
         // A fold for a settings or window change waits out a heavy-thinking
         // turn, as an execute pass does: re-rendering `m[0]` then would drop
         // the signed thinking the model just paid for. The change is found
@@ -1575,6 +1593,7 @@ impl Session {
             edited: &edited,
             protected_tools: &settings.protected_tools,
             keep_first_message: self.features.keep_first_message,
+            signed_floor: self.signed_floor(),
         };
         // Only queued drops this pass can land count: one in the protected
         // tail waits for it to move on, as `build` does and as the plugin
@@ -1604,6 +1623,7 @@ impl Session {
             .iter()
             .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
             .filter(|(entry, part)| !edited.covers(&entry.mid, &part.id))
+            .filter(|(entry, part)| !lanes::stripped_by_floor(context.signed_floor, entry, part))
             .map(|(_, part)| tokens::part(part))
             .sum();
         (freed > 0 && total > 0).then(|| usage * (1.0 - (freed as f64 / total as f64).min(1.0)))
@@ -1942,7 +1962,12 @@ impl Session {
         let execute = {
             let pressure = self.pressure();
             pass::at_execute(&pressure, settings)
-                && !pass::signed_thinking_hold(self.index.entries(), &pressure, settings)
+                && !pass::signed_thinking_hold(
+                    self.index.entries(),
+                    &pressure,
+                    settings,
+                    self.signed_floor(),
+                )
         };
         if execute {
             let (view, _) = self.build_now(client, settings).await;
@@ -2029,6 +2054,7 @@ impl Session {
             edited: &edited,
             protected_tools: &settings.protected_tools,
             keep_first_message: self.features.keep_first_message,
+            signed_floor: self.signed_floor(),
         };
         let floor = settings.protected_tokens.unwrap_or_else(|| {
             lanes::default_protected_tokens(pass::usable_window(&self.conditions))
@@ -2171,6 +2197,7 @@ impl Session {
         }
         let previous = reading_of(&self.conditions);
         self.conditions = ride.conditions.clone();
+        self.take_signed_floor();
         tracing::info!(
             "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {:?}, applied view {:?}",
             self.key.session,
@@ -3326,6 +3353,7 @@ impl Session {
             edited: &edited,
             protected_tools: &settings.protected_tools,
             keep_first_message: self.features.keep_first_message,
+            signed_floor: self.signed_floor(),
         };
         let usable = pass::usable_window(&self.conditions);
         let floor = settings
@@ -3563,6 +3591,7 @@ impl Session {
                         &self.conditions.model.model,
                     ))
                 .then(|| "strip".into()),
+                signed_floor: self.signed_floor.clone(),
             },
             retire,
             &mut self.view_validation,
@@ -4502,6 +4531,7 @@ fn conditions_of(request: &SetupRequest) -> Conditions {
         request.rules.clone(),
     );
     conditions.accepts_images = request.accepts_images;
+    conditions.signed_floor = request.signed_floor.clone();
     conditions
 }
 
@@ -4726,6 +4756,9 @@ mod app_projection;
 #[path = "move_floor.rs"]
 mod move_floor;
 pub use move_floor::MoveFloor;
+
+#[path = "signed_floor.rs"]
+mod signed_floor;
 
 #[cfg(test)]
 mod config_tests {

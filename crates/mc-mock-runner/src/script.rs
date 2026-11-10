@@ -37,6 +37,14 @@ pub enum Step {
     },
     /// The host removes every message from this ordinal on, as an undo does.
     Revert { ordinal: u64 },
+    /// The session's tool set changes: a tool is added, removed or renamed,
+    /// or its description or schema changes. The tool definitions come
+    /// before the messages, so the cached prefix is gone. On a route whose
+    /// signed reasoning is bound to the request prefix, the runner records
+    /// its signed floor at the newest entry and, from the next request on,
+    /// strips the signed reasoning at or before it (runner contract
+    /// §11.1.1).
+    ChangeTools,
     /// The runner restarts: it keeps its stored transcript and view, forgets
     /// when it last sent, and calls Setup again.
     RestartRunner,

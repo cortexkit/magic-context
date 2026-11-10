@@ -216,6 +216,20 @@ pub struct Context<'a> {
     pub protected_tools: &'a BTreeMap<String, u64>,
     /// The session's first message is its task and is never dropped.
     pub keep_first_message: bool,
+    /// The ordinal of the runner's signed floor, when ck-mc holds that entry
+    /// ([`stripped_by_floor`]).
+    pub signed_floor: Option<u64>,
+}
+
+/// Whether the runner already leaves `part` out of every request: signed
+/// reasoning in an entry at or before the signed floor, the entry the runner
+/// marked when the session's tool set changed on a model whose signed
+/// reasoning is bound to the request prefix. The provider rejects kept
+/// thinking after a tool-list change, so the runner strips that reasoning
+/// itself (compaction contract W3.5). No lane counts it, holds for it or
+/// drops it: none of it is sent.
+pub fn stripped_by_floor(floor: Option<u64>, entry: &Entry, part: &Part) -> bool {
+    part.seal == Seal::Signed && floor.is_some_and(|floor| entry.ordinal <= floor)
 }
 
 /// How a lane wants a tool part dropped.
@@ -747,11 +761,14 @@ pub fn reasoning_over_budget(
         .iter()
         .filter(|entry| entry.role == Role::Assistant)
         .map(|entry| {
+            // Reasoning the runner strips under its signed floor is not sent,
+            // so it neither counts against the budget nor needs a drop.
             let reasoning = entry
                 .parts
                 .iter()
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .filter(|part| !context.edited.covers(&entry.mid, &part.id))
+                .filter(|part| !stripped_by_floor(context.signed_floor, entry, part))
                 .collect();
             (entry, reasoning)
         })
@@ -1532,6 +1549,7 @@ mod tests {
             edited: &edited,
             protected_tools: &protected_tools,
             keep_first_message: false,
+            signed_floor: None,
         };
         // The newest three calls (6, 5, 4) hold 3,000 tokens.
         assert_eq!(protected_cutoff(&context, 1), Some(4));
@@ -1554,6 +1572,7 @@ mod tests {
             edited,
             protected_tools,
             keep_first_message: false,
+            signed_floor: None,
         }
     }
 
@@ -1946,6 +1965,79 @@ mod tests {
                 .map(|(key, _)| key)
                 .collect();
         assert_eq!(cleared, [key("m1", "r1")]);
+    }
+
+    /// Signed reasoning at or before the runner's signed floor is already
+    /// stripped from every request: it neither counts against the budget nor
+    /// gets a drop. Signed reasoning after the floor still does both.
+    #[test]
+    fn reasoning_clearing_ignores_signed_reasoning_at_or_before_the_floor() {
+        let signed = |id: &str, text_bytes: u64| {
+            part(
+                id,
+                None,
+                Seal::Signed,
+                PartBody::Reasoning {
+                    text: None,
+                    text_bytes: Some(text_bytes),
+                },
+            )
+        };
+        let mut index = Index::default();
+        // 8,000 reasoning tokens in each of four steps; the floor is at the
+        // third, so only the fourth is sent.
+        index.extend([
+            entry(1, Role::Assistant, vec![signed("r1", 32_000)]),
+            entry(2, Role::Assistant, vec![signed("r2", 32_000)]),
+            entry(3, Role::Assistant, vec![signed("r3", 32_000)]),
+            entry(4, Role::Assistant, vec![signed("r4", 32_000)]),
+            entry(5, Role::Assistant, vec![signed("r5", 32_000)]),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let cleared = |floor: Option<u64>| -> Vec<PartKey> {
+            let context = Context {
+                signed_floor: floor,
+                ..context(&index, &edited, &none)
+            };
+            reasoning_over_budget(&context, 10_000, false)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect()
+        };
+        // Without a floor, everything but the newest 8,000 goes.
+        assert_eq!(
+            cleared(None),
+            [
+                key("m1", "r1"),
+                key("m2", "r2"),
+                key("m3", "r3"),
+                key("m4", "r4")
+            ]
+        );
+        // With the floor at the third step, only the fourth and fifth are
+        // sent: 16,000 tokens, so the fourth goes and nothing at or before
+        // the floor is named.
+        assert_eq!(cleared(Some(3)), [key("m4", "r4")]);
+        // With the floor at the fourth, what is sent fits the budget.
+        assert!(cleared(Some(4)).is_empty());
+        // Unsigned reasoning is never stripped by the floor.
+        let mut unsigned = Index::default();
+        unsigned.extend([
+            entry(1, Role::Assistant, vec![reasoning("r1", 32_000)]),
+            entry(2, Role::Assistant, vec![reasoning("r2", 32_000)]),
+        ]);
+        let context = Context {
+            signed_floor: Some(2),
+            ..context(&unsigned, &edited, &none)
+        };
+        assert_eq!(
+            reasoning_over_budget(&context, 1_000, false)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            [key("m1", "r1")]
+        );
     }
 
     /// The age sweep weighs what a drop wins back: for a recent call with a

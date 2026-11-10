@@ -149,7 +149,12 @@ fn evaluate(row: &Row, table: &Table) -> Value {
     session.emergency_latched = input.emergency_latched;
     let execute = pass::at_execute(&session.conditions, &settings);
     let force = pass::in_force_band(&session.conditions, &settings);
-    let hold = pass::signed_thinking_hold(session.index.entries(), &session.conditions, &settings);
+    let hold = pass::signed_thinking_hold(
+        session.index.entries(),
+        &session.conditions,
+        &settings,
+        session.signed_floor(),
+    );
 
     // This is the same decision point handle_notice uses, including starting a
     // summary before deciding whether the other lanes have permission to land.

@@ -766,7 +766,8 @@ fn a_tool_result_record_does_not_end_the_turn_for_the_signed_thinking_hold() {
     assert!(pass::signed_thinking_hold(
         &entries,
         &conditions,
-        &Settings::default()
+        &Settings::default(),
+        None
     ));
 }
 
@@ -820,6 +821,7 @@ fn a_sealed_text_or_tool_part_never_gets_a_replace_the_runner_refuses() {
         edited: &edited,
         protected_tools: &protected,
         keep_first_message: false,
+        signed_floor: None,
     };
     let key = |mid: &str, part: &str| (mid.to_owned(), part.to_owned());
     let (ops, covered) = lanes::drop_ops(

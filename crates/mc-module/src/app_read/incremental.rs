@@ -46,6 +46,9 @@ struct PartInfo {
     source: &'static str,
     runner_tokens: Option<cortexkit_role_compaction::tokens::PartTokens>,
     origin: Option<Value>,
+    /// Signed reasoning, which the runner strips at or before its signed
+    /// floor.
+    signed: bool,
 }
 struct Cached {
     mid: String,
@@ -129,6 +132,9 @@ pub(crate) struct Projection {
     pending_rows: BTreeMap<u64, IndexRow>,
     revert_from: Option<u64>,
     revert_dirty: Option<u64>,
+    /// The signed floor's ordinal the rows were last made with: signed
+    /// reasoning at or before it is not sent, so it counts as dropped.
+    signed_floor: Option<u64>,
     #[cfg(test)]
     pub(crate) rebuilt_rows: usize,
     #[cfg(test)]
@@ -177,6 +183,7 @@ impl Default for Projection {
             pending_rows: BTreeMap::new(),
             revert_from: None,
             revert_dirty: None,
+            signed_floor: None,
             #[cfg(test)]
             rebuilt_rows: 0,
             #[cfg(test)]
@@ -383,6 +390,7 @@ impl Session {
                             item_tokens,
                             source,
                             runner_tokens: part.tokens,
+                            signed: part.seal == cortexkit_role_compaction::part::Seal::Signed,
                             origin: if matches!(part.body, PartBody::Text { .. }) {
                                 user_origin.clone()
                             } else {
@@ -578,6 +586,19 @@ impl Session {
             }
             #[cfg(not(test))]
             let _ = rebuilt;
+        }
+        // A moved signed floor changes which reasoning is sent in every row
+        // with signed parts at or before it, old floor or new.
+        let signed_floor = self.signed_floor();
+        if p.signed_floor != signed_floor {
+            let end = p.signed_floor.max(signed_floor).unwrap_or(0);
+            p.dirty.extend(
+                p.live
+                    .range(..=end)
+                    .filter(|(_, row)| row.parts.iter().any(|part| part.signed))
+                    .map(|(_, row)| row.mid.clone()),
+            );
+            p.signed_floor = signed_floor;
         }
         let mut rows = Vec::new();
         for mid in std::mem::take(&mut p.dirty) {
@@ -954,10 +975,16 @@ fn message(
         .first()
         .map(|pending| &pending.before.queued);
     let cut = cut.is_some_and(|cut| ordinal <= cut);
+    // The runner strips signed reasoning at or before its signed floor, so
+    // the model never sees it: it counts like reasoning a view dropped.
+    let floor = session.signed_floor().is_some_and(|floor| ordinal <= floor);
     for part in &cached.parts {
         tagged += usize::from(part.tag.is_some());
         let key = (cached.mid.clone(), part.id.clone());
-        let removed = cut || messages.contains(&cached.mid) || dropped.contains(&key);
+        let removed = cut
+            || messages.contains(&cached.mid)
+            || dropped.contains(&key)
+            || (floor && part.signed && part.kind == "reasoning");
         let queued =
             session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
         let (tokens, source) =

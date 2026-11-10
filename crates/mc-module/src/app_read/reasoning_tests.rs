@@ -256,3 +256,36 @@ fn app_read_reasoning_drops_and_applied_summary_cuts_cost_zero() {
     session.index.truncate(201);
     assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 0);
 }
+
+#[test]
+fn app_read_reasoning_leaves_out_signed_reasoning_at_or_before_the_floor() {
+    let mut session = session();
+    let signed = |id: &str| {
+        let mut part = reasoning(id, Some(400));
+        part.seal = Seal::Signed;
+        part
+    };
+    let mut early = assistant(201, vec![signed("a")]);
+    early.reasoning_tokens = Some(ReasoningTokens::new(300, true));
+    let mut late = assistant(202, vec![signed("b")]);
+    late.reasoning_tokens = Some(ReasoningTokens::new(500, true));
+    session
+        .index
+        .extend_counted([early, late], Some("claude-v5/1"));
+    assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 800);
+    // A tool-set change: the runner strips signed reasoning through m201.
+    session.conditions.signed_floor = Some(cortexkit_role_compaction::SignedFloor::new("m201"));
+    session.take_signed_floor();
+    let moved = session.app_update();
+    assert_eq!(moved.rows.len(), 1, "only the row the floor covers changes");
+    assert_eq!(moved.rows[0].0, "m201");
+    let snapshot = session.app_snapshot();
+    assert_eq!(part_tokens(&snapshot, "reasoning"), 500);
+    assert_eq!(items(&snapshot, "m201")[0]["tokens"], 0);
+    assert_eq!(items(&snapshot, "m201")[0]["state"], "dropped");
+    assert_eq!(items(&snapshot, "m202")[0]["tokens"], 500);
+    // The floor moves on to m202, and nothing signed is sent any more.
+    session.conditions.signed_floor = Some(cortexkit_role_compaction::SignedFloor::new("m202"));
+    session.take_signed_floor();
+    assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 0);
+}
