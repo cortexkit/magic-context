@@ -84,6 +84,14 @@ describe("requestToolsFingerprint", () => {
         expect(
             requestToolsFingerprint([tool("read"), deferred], () => new Set(["search"])),
         ).not.toEqual(plain);
+        // Once counted, a deferred tool differs from the same tool sent immediate
+        // only by its defer_loading flag, at the schemas level.
+        expect(
+            classifyRequestToolsChange(
+                requestToolsFingerprint([tool("read"), tool("search")]),
+                requestToolsFingerprint([tool("read"), deferred], () => new Set(["search"])),
+            ),
+        ).toBe("schemas");
     });
 
     test("OpenCode 2: reads names, descriptions and schemas from the draft's tool map", () => {

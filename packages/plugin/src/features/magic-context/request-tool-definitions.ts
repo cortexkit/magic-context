@@ -101,10 +101,11 @@ export interface RequestTool {
 /**
  * Hashes of the tool list a request sends, each over the tools sorted by name:
  * their names; their names and descriptions; and their names, descriptions and
- * input schemas. Unlike the fold identity above, this one counts schemas: a
- * prefix-bound model binds every signed thinking block to the whole `tools`
- * array, so any edit there invalidates the kept blocks. The three levels only
- * name what changed in the logs.
+ * input schemas, with whether each is sent deferred (`defer_loading`). Unlike
+ * the fold identity above, this one counts schemas: a prefix-bound model binds
+ * every signed thinking block to the whole `tools` array, so any edit there
+ * invalidates the kept blocks. The three levels only name what changed in the
+ * logs.
  */
 export interface RequestToolsFingerprint {
     names: string;
@@ -170,7 +171,16 @@ export function requestToolsFingerprint(
     return {
         names: sha(included.map((tool) => tool.name)),
         descriptions: sha(included.map((tool) => [tool.name, tool.description])),
-        schemas: sha(included.map((tool) => [tool.name, tool.description, tool.schemaDigest])),
+        schemas: sha(
+            included.map((tool) =>
+                // A counted deferred tool differs on the wire from an immediate
+                // one by its `defer_loading` flag (and its place after the
+                // immediate tools); immediate tools keep the three-part entry.
+                tool.deferLoading === true
+                    ? [tool.name, tool.description, tool.schemaDigest, "defer_loading"]
+                    : [tool.name, tool.description, tool.schemaDigest],
+            ),
+        ),
     };
 }
 

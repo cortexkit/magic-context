@@ -4788,6 +4788,27 @@ export function registerPiContextHandler(
 							pi,
 							toolWireSchema,
 							event.messages as unknown[],
+							{
+								host: getHarness() === "omp" ? "omp" : "pi",
+								model: ctx.model,
+								oauth: (() => {
+									try {
+										const registry = (
+											ctx as {
+												modelRegistry?: {
+													isUsingOAuth?: (model: unknown) => unknown;
+												};
+											}
+										).modelRegistry;
+										return ctx.model &&
+											typeof registry?.isUsingOAuth === "function"
+											? registry.isUsingOAuth(ctx.model) === true
+											: false;
+									} catch {
+										return false;
+									}
+								})(),
+							},
 						);
 						return fingerprint
 							? evaluateRequestToolsRelease({
