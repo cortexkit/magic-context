@@ -21,7 +21,7 @@ test("every shipped logging call is represented by the regenerated template modu
     }
 }, 30_000);
 
-test("extraction follows aliases, forwarding wrappers, concatenations and Rust field-first messages", () => {
+test("extraction follows aliases, forwarding wrappers, concatenations and Rust field-first messages", async () => {
     const { dir: root, cleanup } = createTestTempDir("issue-log-source-");
     const put = (path: string, text: string) => {
         mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -52,16 +52,21 @@ test("extraction follows aliases, forwarding wrappers, concatenations and Rust f
             'tracing::warn!(session = %session_id, reason = "private", "Rust failed: {error}");',
         );
         const generated = generateIssueLogTemplates(root);
+        put("templates.generated.ts", generated);
+        const decoded = (await import(join(root, "templates.generated.ts"))) as {
+            ISSUE_LOG_TEMPLATES: typeof ISSUE_LOG_TEMPLATES;
+        };
+        const parts = decoded.ISSUE_LOG_TEMPLATES.flatMap((template) => template.parts);
         for (const wording of [
-            '"a new fixed message"',
-            '"wrapper: provider failed: "',
-            '"elapsed "',
-            '"ms reason=cache_hit"',
-            '"Pi pass: "',
-            '"Rust failed: "',
+            "a new fixed message",
+            "wrapper: provider failed: ",
+            "elapsed ",
+            "ms reason=cache_hit",
+            "Pi pass: ",
+            "Rust failed: ",
         ])
-            expect(generated).toContain(wording);
-        expect(generated).not.toContain('"parts":["private"]');
+            expect(parts).toContain(wording);
+        expect(parts).not.toContain("private");
     } finally {
         cleanup();
     }
