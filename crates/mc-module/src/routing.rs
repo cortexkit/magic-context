@@ -18,8 +18,11 @@ pub const CAPABILITY: &str = "routing/v1";
 /// entry for it, so no operator configuration is needed.
 pub const SUMMARY_CONSUMER: &str = "mc_summary";
 /// Summaries need a mid-level model (ARCHITECTURE: module-only model
-/// placement).
-pub const SUMMARY_IQ: u8 = 50;
+/// placement). Routing grades models against the best one the consumer may
+/// use, so the demand that lands on a mid-level model moves when grades move:
+/// under the grades of 10 Nov 2026, 50 selected a top-tier model and 40 the
+/// mid-level one summaries ran on before.
+pub const SUMMARY_IQ: u8 = 40;
 
 /// Why routing gave no model.
 #[derive(Clone, Debug, PartialEq, Eq)]
