@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { CHECKPOINT_NOTE } from "../../../plugin/src/v2/fold/summary";
 import { CLI, isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 test("a hidden row edited in place expires cold fold provenance and rebuilds once through the shared gate", async () => {
@@ -218,7 +219,14 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         additionalModelIDs: ["catalog-rebuild"],
         extraConfig: { mcp: { servers: { stable: server("stable"), toggle: server("toggle") } } },
         magicContextConfig: { cache_ttl: "never", protected_tokens: 4000,
-            historian: { disable: true }, dreamer: { disable: true }, memory: { enabled: false } },
+            historian: { two_pass: false }, dreamer: { disable: true }, memory: { enabled: false } },
+    });
+    // The historian publishes one compartment when /ctx-wrapup asks for it.
+    const historianRequest = (body: unknown) => /Messages (\d+)-(\d+):/.test(JSON.stringify(body));
+    host.mock.addMatcher((body: unknown) => {
+        const range = JSON.stringify(body).match(/Messages (\d+)-(\d+):/);
+        if (!range) return null;
+        return { text: `<compartment start="${range[1]}" end="${range[2]}" title="Retained history"><p1>HIST_SUMMARY preserves the earlier work.</p1></compartment>`, usage: { input_tokens: 100, output_tokens: 40 } };
     });
     const client = OpenCode.make({ baseUrl: host.url,
         headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
@@ -243,7 +251,7 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
             const start = host.mock.requests().length;
             await client.session.prompt({ sessionID: session.id, text });
             await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
-            const request = host.mock.requests().slice(start).at(-1);
+            const request = host.mock.requests().slice(start).filter(candidate => !historianRequest(candidate.body)).at(-1);
             expect(request).toBeDefined();
             return request!;
         };
@@ -275,10 +283,34 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
             await toggle(connected);
             served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
         }
+        // Publish history before compacting. With history to move into the
+        // frozen head, a manual /compact rebuilds that head on every version, so
+        // the pass after it is a rebuild that the catalog retirement can ride.
+        for (let i = 0; i < 4; i++) await turn(`HISTORY_${i}: ${"durable history ".repeat(50)}`);
+        await client.session.command({ sessionID: session.id, name: "ctx-wrapup", text: "2" });
+        const historyDeadline = Date.now() + 60_000;
+        for (;;) {
+            const context = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+            try {
+                const { n } = context.prepare("SELECT COUNT(*) AS n FROM compartments WHERE session_id=?").get(session.id) as { n: number };
+                const { state } = context.prepare("SELECT wrapup_in_progress_state AS state FROM session_meta WHERE session_id=?").get(session.id) as { state: string | null };
+                if (n > 0 && !state) break;
+            } finally { context.close(); }
+            if (Date.now() > historyDeadline) throw new Error("the historian published no history");
+            await Bun.sleep(100);
+        }
+        await client.session.command({ sessionID: session.id, name: "ctx-flush", text: "" });
+        served["after flush"] = copies(await turn("Continue after publishing history."));
+        for (let i = 8; i < 10; i++) {
+            connected = !connected;
+            await toggle(connected);
+            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+        }
         await client.session.compact({ sessionID: session.id });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
         const compactLogStart = host.pluginLog().length;
-        served["after host fold"] = copies(await turn("Continue after the host fold."));
+        const afterFold = await turn("Continue after the host fold.");
+        served["after host fold"] = copies(afterFold);
         // The plugin buffers its log for up to half a second.
         const permissionLine = /rewrite permission: allowed=(\w+) ride=(\S+)/;
         const logDeadline = Date.now() + 5_000;
@@ -286,7 +318,10 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         const compactLog = host.pluginLog().slice(compactLogStart);
         const permission = permissionLine.exec(compactLog);
         const postCompact = { rebuilt: permission?.[1] === "true", ride: permission?.[2] ?? "not logged",
-            foldReason: /HARD fold decision: reason=(\S+)/.exec(compactLog)?.[1] ?? "none" };
+            foldReason: /HARD fold decision: reason=(\S+)/.exec(compactLog)?.[1] ?? "none",
+            headChanged: /host checkpoint head: changed=(\w+)/.exec(compactLog)?.[1] ?? "not logged" };
+        const compaction = source.prepare("SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1").get(session.id) as { data: string };
+        const storedSummary = (JSON.parse(compaction.data) as { summary?: string }).summary;
         await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "mock-model" } });
         served["rebuild after fold"] = copies(await turn("Switching back rebuilds the prefix again."));
         const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8", env: fixture.env }).stdout.trim();
@@ -309,14 +344,21 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         // A rebuild keeps only the newest restatement; later changes append until the next one.
         expect(served["model switch rebuild"]).toBe(1);
         expect([served["toggle 6"], served["toggle 7"]]).toEqual([2, 3]);
-        // Whether the pass after /compact rebuilds does not depend on this rule.
-        // On 2.0.22 and 2.1.0 it usually rebuilds because OpenCode changes the
-        // system prompt after compacting (fold reason system_hash), not because
-        // Magic Context recognizes a host fold, and on 2.2.x it does not
-        // rebuild. Host-fold detection is traced separately, so the copy count
-        // is checked only when that pass rebuilt; postCompact in the evidence
-        // line says which happened.
-        if (postCompact.rebuilt) expect(served["after host fold"]).toBe(1);
+        // Publishing history is a flush, which rebuilds; later changes append again.
+        expect(served["after flush"]).toBe(1);
+        expect([served["toggle 8"], served["toggle 9"]]).toEqual([2, 3]);
+        // The manual /compact moved the published history into the frozen head,
+        // so the pass after it serves a new head on every version. That rebuild
+        // is the ride the catalog retirement lands on. It does not depend on
+        // whether OpenCode also changed its system prompt after compacting
+        // (fold reason system_hash on some 2.0.22 and 2.1.0 runs).
+        expect(postCompact).toMatchObject({ rebuilt: true, ride: "hardFold", headChanged: "true" });
+        expect(served["after host fold"]).toBe(1);
+        // The host stores Magic Context's fixed note as the checkpoint summary; the
+        // request serves Magic Context's own history instead of that note.
+        expect(storedSummary).toBe(CHECKPOINT_NOTE);
+        expect(wire(afterFold.body.input)).not.toContain(CHECKPOINT_NOTE);
+        expect(wire(afterFold.body.input)).toContain("HIST_SUMMARY");
         // On every version the next rebuild keeps only the newest catalog row.
         expect(served["rebuild after fold"]).toBe(1);
     } finally { source.close(); await host.stop(); }
