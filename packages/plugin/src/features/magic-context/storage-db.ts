@@ -101,6 +101,7 @@ interface StartupBackfills {
     controller: AbortController;
     timer?: ReturnType<typeof setTimeout>;
     running?: Promise<void>;
+    run?: () => void;
 }
 const startupBackfills = new WeakMap<Database, StartupBackfills>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
@@ -1118,6 +1119,7 @@ function finishDatabaseOpen(
         // The database handle owns these backfills. Always schedule them
         // asynchronously, even without a startup delay, so an immediate close
         // can cancel them before a worker opens the file.
+        state.run = runBackfills;
         state.timer = scheduleAfterBootQuiet(runBackfills);
     }
     // Wire the persistence-backed tool-definition measurement store and
@@ -2916,6 +2918,20 @@ export function isDatabasePersisted(db: Database | null): boolean {
 export function getDatabasePersistenceError(db: Database | null): string | null {
     if (!db) return null;
     return persistenceErrorByDatabase.get(db) ?? null;
+}
+
+/** Join the handle's startup writers before a test exercises an uncontended transform. */
+export async function __waitForDatabaseStartupForTests(db: Database): Promise<void> {
+    const state = startupBackfills.get(db);
+    if (!state) return;
+    // Tests do not have a host boot lifecycle. Start the scheduled chain now,
+    // then join its actual worker promises rather than guessing a quiet delay.
+    if (state.timer && !state.running) {
+        clearTimeout(state.timer);
+        state.run?.();
+    }
+    await state.running;
+    if (state.timer) throw new Error("Database startup writer did not finish successfully");
 }
 
 /** Close serving handles immediately; the result joins canceled startup work before file removal. */

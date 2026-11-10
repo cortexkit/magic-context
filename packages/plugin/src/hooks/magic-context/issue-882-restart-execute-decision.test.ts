@@ -29,7 +29,6 @@ import {
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
-    openDatabase,
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -37,6 +36,8 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import type { Database } from "../../shared/sqlite";
+import { openTestDatabase } from "../../shared/test-db";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { resolveContextLimit } from "./event-resolvers";
@@ -161,7 +162,7 @@ function pressureOnlyScheduler(): Scheduler {
 
 /** One host process: a real scheduler at the execute threshold, no historian executor. */
 function newProcess(args: {
-    db: ReturnType<typeof openDatabase>;
+    db: Database;
     sessionId: string;
     model: Model;
     liveUsage?: ContextUsage;
@@ -224,7 +225,7 @@ type Restart = {
 async function firstPassAfterRestart(name: string, restart: Restart) {
     useTempDataHome(`issue-882-${name}-`);
     const sessionId = `ses-issue-882-${name}`;
-    const db = openDatabase();
+    const db = await openTestDatabase();
     const savedModel = restart.savedModel ?? MODEL;
     const passModel = restart.passModel ?? MODEL;
     const limit = resolveContextLimit(savedModel.providerID, savedModel.modelID, {

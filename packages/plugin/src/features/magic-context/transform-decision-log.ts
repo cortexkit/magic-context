@@ -164,6 +164,7 @@ const pendingDecisionBySession = new Map<string, PendingTransformDecision>();
 const pendingPiDecisionBySession = new Map<string, PendingPiTransformDecision>();
 const lastBoundMessageIdBySession = new Map<string, string>();
 const scheduledWriteTokensBySession = new Map<string, Set<symbol>>();
+const scheduledWriteWaitersBySession = new Map<string, Set<() => void>>();
 
 /**
  * A changed system prompt rewrites the provider's whole prompt cache on the
@@ -303,6 +304,8 @@ export function clearTransformDecisionSession(sessionId: string): void {
     pendingPiDecisionBySession.delete(sessionId);
     lastBoundMessageIdBySession.delete(sessionId);
     scheduledWriteTokensBySession.delete(sessionId);
+    for (const resolve of scheduledWriteWaitersBySession.get(sessionId) ?? []) resolve();
+    scheduledWriteWaitersBySession.delete(sessionId);
     systemHashChangedSessions.delete(sessionId);
     piSystemHashChangedSessions.delete(sessionId);
     unbustedPassBySession.delete(sessionId);
@@ -652,7 +655,11 @@ function deleteScheduledWriteToken(sessionId: string, token: symbol): void {
     const tokens = scheduledWriteTokensBySession.get(sessionId);
     if (!tokens) return;
     tokens.delete(token);
-    if (tokens.size === 0) scheduledWriteTokensBySession.delete(sessionId);
+    if (tokens.size === 0) {
+        scheduledWriteTokensBySession.delete(sessionId);
+        for (const resolve of scheduledWriteWaitersBySession.get(sessionId) ?? []) resolve();
+        scheduledWriteWaitersBySession.delete(sessionId);
+    }
 }
 
 function findNewestPiAssistantEntryIdAfter(
@@ -798,6 +805,18 @@ function writeTransformDecisionRowOnDatabase(
 }
 
 export const __test = {
+    /** Resolves after the queued decision callbacks finish, including their database writes. */
+    waitForWrites(sessionId: string): Promise<void> {
+        if (!scheduledWriteTokensBySession.has(sessionId)) return Promise.resolve();
+        return new Promise((resolve) => {
+            let waiters = scheduledWriteWaitersBySession.get(sessionId);
+            if (!waiters) {
+                waiters = new Set();
+                scheduledWriteWaitersBySession.set(sessionId, waiters);
+            }
+            waiters.add(resolve);
+        });
+    },
     getPending(sessionId: string): PendingTransformDecision | undefined {
         return pendingDecisionBySession.get(sessionId);
     },
@@ -811,6 +830,9 @@ export const __test = {
         return systemHashChangedSessions.has(sessionId);
     },
     reset(): void {
+        for (const waiters of scheduledWriteWaitersBySession.values())
+            for (const resolve of waiters) resolve();
+        scheduledWriteWaitersBySession.clear();
         pendingDecisionBySession.clear();
         pendingPiDecisionBySession.clear();
         lastBoundMessageIdBySession.clear();
