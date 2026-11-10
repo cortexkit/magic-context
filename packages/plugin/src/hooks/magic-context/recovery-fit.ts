@@ -10,6 +10,15 @@ export interface RecoveryFitProjection {
 }
 
 /**
+ * Shown when a pass in overflow or model-shrink recovery refuses its turn
+ * because the request still does not fit. Recovery stays armed and continues
+ * on the next turn, so the person only needs to send again; clearing the
+ * session would discard the history recovery is summarizing.
+ */
+export const RECOVERY_REFUSAL_NOTICE =
+    "Magic Context is still summarizing older history so this conversation fits the model's context window. Send your message again to continue.";
+
+/**
  * The 95% line of a usable window, the same line as the emergency band. A
  * recovery request above it is not sent: the historian keeps summarizing
  * within the turn, and otherwise the turn is refused.

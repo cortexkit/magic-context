@@ -165,7 +165,7 @@ it("refuses a provider-overflow recovery pass whose request is still over the wi
 		expect(served).toBeUndefined();
 		expect(refusal).toBeInstanceOf(EmergencyFailClosedError);
 		expect((refusal as Error).message).toBe(
-			"Context full — /ctx-flush or /clear to continue.",
+			"Magic Context is still summarizing older history so this conversation fits the model's context window. Send your message again to continue.",
 		);
 		expect(
 			log.mock.calls.some(([, line]) =>

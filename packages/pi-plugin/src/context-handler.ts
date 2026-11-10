@@ -248,7 +248,10 @@ import {
 	resolveKeepReasoningTokens,
 } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
-import { recoveryLineTokens } from "@magic-context/core/hooks/magic-context/recovery-fit";
+import {
+	RECOVERY_REFUSAL_NOTICE,
+	recoveryLineTokens,
+} from "@magic-context/core/hooks/magic-context/recovery-fit";
 import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
@@ -558,9 +561,6 @@ import { createPiTranscript } from "./transcript-pi";
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
-/** Shown when the emergency band is reached, and as the refusal of a recovery request that still does not fit. */
-const PI_EMERGENCY_REFUSAL_NOTICE =
-	"Context full — /ctx-flush or /clear to continue.";
 
 /**
  * Returns every row whose `tagNumber` equals `number`, from a list sorted by
@@ -5462,7 +5462,10 @@ export function registerPiContextHandler(
 				const now = Date.now();
 				if (now - lastNotifiedAt >= EMERGENCY_NOTIFICATION_COOLDOWN_MS) {
 					lastEmergencyNotificationAtMs.set(sessionId, now);
-					sendPiIgnoredNotification(ctx, PI_EMERGENCY_REFUSAL_NOTICE);
+					sendPiIgnoredNotification(
+						ctx,
+						"Context full — /ctx-flush or /clear to continue.",
+					);
 					sessionLog(
 						sessionId,
 						`EMERGENCY: usage=${usagePercentage.toFixed(1)}% — notified user, evaluating available emergency reclaim`,
@@ -6999,7 +7002,7 @@ export function registerPiContextHandler(
 						currentModelKey,
 						recoveryOrigin,
 					);
-					throw contextRefusalError(PI_EMERGENCY_REFUSAL_NOTICE);
+					throw contextRefusalError(RECOVERY_REFUSAL_NOTICE);
 				}
 			}
 			publishFinalRequestAccounting();

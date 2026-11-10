@@ -50,6 +50,9 @@ const LARGE_KEY = `${LARGE.providerID}/${LARGE.modelID}`;
 const SMALL_KEY = `${SMALL.providerID}/${SMALL.modelID}`;
 const TURNS = 8;
 const prose = "Review the records and verify each one carefully before the next deployment step. ";
+/** A recovery refusal asks the person to send again; recovery continues on the next turn. */
+const RECOVERY_NOTICE =
+    "Magic Context is still summarizing older history so this conversation fits the model's context window. Send your message again to continue.";
 
 let dir: string;
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -189,6 +192,7 @@ function newTransform(args: {
     db: ReturnType<typeof openDatabase>;
     live: Map<string, typeof LARGE>;
     onRefuse: () => void;
+    notices?: string[];
 }) {
     return createTransform({
         tagger: createTagger(),
@@ -210,7 +214,9 @@ function newTransform(args: {
         client: {
             session: { abort: mock(async () => ({ data: true })), prompt: mock(async () => ({})) },
         } as unknown as PluginContext["client"],
-        hostRefusalNotice: async () => {},
+        hostRefusalNotice: async (_client, _sessionId, message) => {
+            args.notices?.push(message);
+        },
         hostRefuse: async () => {
             args.onRefuse();
         },
@@ -236,7 +242,8 @@ async function switchedSession(sessionId: string, publishing: number) {
     const db = openDatabase();
     const live = new Map([[sessionId, LARGE]]);
     let refused = 0;
-    const transform = newTransform({ db, live, onRefuse: () => refused++ });
+    const notices: string[] = [];
+    const transform = newTransform({ db, live, onRefuse: () => refused++, notices });
     // An earlier turn on the large model, measured by the provider.
     await transform({}, { messages: hostMessages(sessionId, LARGE) } as never);
     updateSessionMeta(db, sessionId, {
@@ -251,7 +258,14 @@ async function switchedSession(sessionId: string, publishing: number) {
     const output = { messages: hostMessages(sessionId, SMALL) };
     try {
         const lines = await passLogs(sessionId, () => transform({}, output as never));
-        return { db, lines, output, refused: () => refused, historianRuns: historian.runs() };
+        return {
+            db,
+            lines,
+            output,
+            refused: () => refused,
+            notices,
+            historianRuns: historian.runs(),
+        };
     } finally {
         historian.spy.mockRestore();
     }
@@ -279,6 +293,7 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
         // More than one historian run in the one turn, and nothing refused.
         expect(pass.historianRuns).toBeGreaterThan(1);
         expect(pass.refused()).toBe(0);
+        expect(pass.notices).toEqual([]);
         expect(log).not.toContain("EMERGENCY: fail-closed");
         const served = estimateFinalWireInputTokens({
             messages: pass.output.messages as never,
@@ -302,6 +317,7 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
         expect(log).toMatch(
             /EMERGENCY: fail-closed \(reason=recovery-request-over-limit, recoveryOrigin=proactive_model_shrink/,
         );
+        expect(pass.notices).toEqual([RECOVERY_NOTICE]);
         // The publication cleared the latch; the refusal arms it again so the
         // next turn continues recovery.
         const overflow = getOverflowState(pass.db, sessionId);
@@ -328,7 +344,8 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
         ]);
         const live = new Map([[sessionId, SMALL]]);
         let refused = 0;
-        const transform = newTransform({ db, live, onRefuse: () => refused++ });
+        const notices: string[] = [];
+        const transform = newTransform({ db, live, onRefuse: () => refused++, notices });
         await transform({}, { messages: hostMessages(sessionId, SMALL) } as never);
         expect(refused).toBe(0);
         // The provider rejected the next request as too long.
@@ -350,6 +367,7 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
         expect(log).toMatch(
             /EMERGENCY: fail-closed \(reason=recovery-request-over-limit, recoveryOrigin=provider_overflow/,
         );
+        expect(notices).toEqual([RECOVERY_NOTICE]);
         const overflow = getOverflowState(db, sessionId);
         expect(overflow.needsEmergencyRecovery).toBe(true);
         expect(overflow.emergencyRecoveryOrigin).toBe("provider_overflow");

@@ -199,7 +199,11 @@ import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
 } from "./reasoning-budget";
-import { type RecoveryFitProjection, recoveryLineTokens } from "./recovery-fit";
+import {
+    RECOVERY_REFUSAL_NOTICE,
+    type RecoveryFitProjection,
+    recoveryLineTokens,
+} from "./recovery-fit";
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -3924,10 +3928,13 @@ export function createTransform(deps: TransformDeps) {
                 if (emergencyFailClosed.refusalMessage) {
                     throw contextRefusalError(emergencyFailClosed.refusalMessage);
                 }
-                if (
-                    emergencyFailClosed.reason === "recovery-request-over-limit" &&
-                    emergencyRecoveryOrigin !== null
-                ) {
+                // The recovery being continued when this refusal is a recovery
+                // request still over the window; null for every other refusal.
+                const rearmOrigin =
+                    emergencyFailClosed.reason === "recovery-request-over-limit"
+                        ? emergencyRecoveryOrigin
+                        : null;
+                if (rearmOrigin !== null) {
                     sessionLog(
                         sessionId,
                         `transform: recovery request still over the window: about ${recoveryServedRequest?.tokens} tokens against the 95% line ${recoveryServedRequest?.lineTokens} of ${recoveryWindowTokens}; not sending it, recovery stays armed for the next turn`,
@@ -3941,7 +3948,7 @@ export function createTransform(deps: TransformDeps) {
                             sessionId,
                             undefined,
                             currentModelKeyForRecovery,
-                            emergencyRecoveryOrigin,
+                            rearmOrigin,
                         );
                     } catch (error) {
                         throw new EmergencyFailClosedError("Emergency recovery re-arm failed", {
@@ -3954,7 +3961,10 @@ export function createTransform(deps: TransformDeps) {
                     await host.hostRefusalNotice(
                         deps.client,
                         sessionId,
-                        EMERGENCY_REFUSAL_NOTICE,
+                        // A recovery refusal re-arms recovery for the next turn
+                        // (above), so its notice asks the person to send again
+                        // rather than to flush or clear the session.
+                        rearmOrigin !== null ? RECOVERY_REFUSAL_NOTICE : EMERGENCY_REFUSAL_NOTICE,
                         notificationParams,
                     );
                 } catch (error) {
