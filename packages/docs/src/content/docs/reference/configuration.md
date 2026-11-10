@@ -134,8 +134,6 @@ The background agent that condenses old conversation into compact history.
 | `commit_cluster_trigger.enabled` **Live** | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
 | `commit_cluster_trigger.min_clusters` **Live** | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
 
-When the historian or the dreamer has `fallback_models` and a provider refuses a model with a time to retry after (a used-up quota window, for example), later background runs skip that model until then and start on the next one in the list. A restart clears this. It works on OpenCode 1 and on OpenCode 2.2 or newer; Pi and older OpenCode 2 versions don't pass that time to plugins, so runs there fall back as before.
-
 ## Memory & recall
 
 Durable project memory, semantic search, and recall features. OpenAI-compatible instruction-tuned embedding families receive their documented query instruction automatically because those models were trained to distinguish retrieval queries from passages; plain local encoders remain unchanged. Query instructions affect only live search vectors, not stored vectors, so changing `embedding.query_instruction` does not re-embed the corpus. A non-empty `embedding.document_prefix` does affect stored vectors and therefore changes the embedding identity.
@@ -276,6 +274,8 @@ Off-hours maintenance through Dreamer.
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true). Not a dreamer setting despite its place under dreamer: it applies on every host, also with dreamer.disable true. |
 
 On Pi and Oh My Pi, historian and dreamer models, including `fallback_models` and per-task model overrides, must use provider names that host serves. `opencode/*` models are served only by OpenCode's own provider, so Pi and Oh My Pi drop them at startup and log `dropping Pi model not found: <model>`. If every fallback is an `opencode/*` model, only the primary model is left. To see valid names, run `omp models` on Oh My Pi or `pi --list-models` on Pi. `/ctx-status` warns when a dreamer task or the historian has no usable model left.
+
+When the historian or the dreamer has `fallback_models` and a provider refuses a model with a time to retry after (a used-up quota window, for example), later background runs skip that model until then and start on the next one in the list. A restart clears this. It works on OpenCode 1 and on OpenCode 2.2 or newer; Pi and older OpenCode 2 versions don't pass that time to plugins, so runs there fall back as before.
 
 ## Advanced
 
