@@ -798,7 +798,7 @@ const BaseEmbeddingConfigSchema = z
         dimensions: z
             .number()
             .int()
-            .positive()
+            .min(1)
             .max(8192)
             .optional()
             .describe(

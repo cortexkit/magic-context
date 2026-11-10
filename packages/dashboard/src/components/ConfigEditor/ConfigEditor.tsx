@@ -874,11 +874,17 @@ function ConfigForm(props: {
                                             ).trim();
                                             // Raw-JSONC-only field, but the probe must
                                             // request the same width the runtime will.
-                                            const rawDimensions = Number(
-                                              getNestedValue(formData(), "embedding.dimensions"),
+                                            const rawDimensions = getNestedValue(
+                                              formData(),
+                                              "embedding.dimensions",
                                             );
+                                            // Same bounds as the runtime schema (positive
+                                            // integer ≤ 8192), no string coercion.
                                             const dimensions =
-                                              Number.isInteger(rawDimensions) && rawDimensions > 0
+                                              typeof rawDimensions === "number" &&
+                                              Number.isInteger(rawDimensions) &&
+                                              rawDimensions > 0 &&
+                                              rawDimensions <= 8192
                                                 ? rawDimensions
                                                 : null;
                                             if (!endpoint || !model) {

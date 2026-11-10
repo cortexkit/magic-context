@@ -54,4 +54,17 @@ describe("Pi project config security", () => {
 		expect(compaction.futureSibling).toBe(1);
 		expect(warnings.join("\n")).toContain("compaction.enabled");
 	});
+
+	it("strips embedding.dimensions from project config (user-tier only)", () => {
+		const raw: Record<string, unknown> = {
+			embedding: { dimensions: 4096 },
+			dreamer: { model: "x" },
+		};
+		const warnings = stripUnsafeProjectConfigFields(raw);
+
+		const embedding = raw.embedding as Record<string, unknown> | undefined;
+		expect(embedding === undefined || !("dimensions" in embedding)).toBe(true);
+		expect(raw.dreamer).toEqual({ model: "x" });
+		expect(warnings.join("\n")).toContain("dimensions");
+	});
 });

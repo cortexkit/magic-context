@@ -704,6 +704,26 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(result.embedding.model).toBe("repo-model");
         expect(result.configWarnings?.join("\n")).toContain("embedding.endpoint/provider");
     });
+
+    it("ignores a project embedding.dimensions override while the user width still applies", () => {
+        const userConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                endpoint: "https://trusted.example/v1",
+                model: "qwen/qwen3-embedding-8b",
+                dimensions: 768,
+            },
+        });
+        const projectConfig = JSON.stringify({ embedding: { dimensions: 4096 } });
+
+        const result = loadWithUserAndProjectConfig(userConfig, projectConfig);
+
+        expect(result.embedding.provider).toBe("openai-compatible");
+        if (result.embedding.provider === "openai-compatible") {
+            expect(result.embedding.dimensions).toBe(768);
+        }
+        expect(result.configWarnings?.join("\n")).toContain("dimensions");
+    });
 });
 
 describe("loadPluginConfig — experimental graduation migration", () => {

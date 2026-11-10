@@ -242,6 +242,7 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
 
     test("ignores a non-integer / non-positive dimensions value instead of sending it", async () => {
         for (const bad of [0, -768, 1.5, Number.NaN]) {
+            fetchSpy.mockClear();
             const provider = new OpenAICompatibleEmbeddingProvider({
                 endpoint: "http://127.0.0.1:65535",
                 model: "qwen/qwen3-embedding-8b",
