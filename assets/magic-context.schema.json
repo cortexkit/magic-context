@@ -2482,7 +2482,7 @@
           "type": "string"
         },
         "dimensions": {
-          "description": "Optional output width for Matryoshka embedding models (e.g. Qwen3-Embedding-8B accepts 768 | 1024 | 2048 | 4096; OpenAI text-embedding-3-* accept smaller widths than native). Sent as the OpenAI-compatible `dimensions` request field. Omitted from the request when unset, so the endpoint default applies. Changing it changes the produced vectors and folds into the embedding model identity, so switching widths re-embeds rather than mixing vector spaces. Not supported for the local provider.",
+          "description": "Optional output width for Matryoshka embedding models (e.g. Qwen3-Embedding-8B accepts 768 | 1024 | 2048 | 4096; OpenAI text-embedding-3-* accept smaller widths than native). Sent as the OpenAI-compatible `dimensions` request field. Omitted from the request when unset, so the endpoint default applies. Changing it changes the produced vectors and folds into the embedding model identity, so switching widths re-embeds rather than mixing vector spaces. Not supported for the local provider, and ignored from project config like the other embedding fields (a repository cannot choose how private text is embedded).",
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 8192
