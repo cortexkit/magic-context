@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ensureCortexKitArtifactGitignore } from "../../../shared/data-path";
 
 const FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -386,6 +387,7 @@ export function writeDocsProposal(
     const result = validateDocsProposal(projectDir, output, budget, expected);
     const dir = proposalDir(projectDir);
     mkdirSync(join(dir, "superseded"), { recursive: true });
+    ensureCortexKitArtifactGitignore(projectDir);
     const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 8)}`;
     const path = join(dir, `${stamp}.md`);
     const body = `# Docs update proposal\n\nBase commit: ${head}\n${FILES.map((name) => `Base SHA-256 ${name}: ${expected[name]}`).join("\n")}\nResulting tokens: ${result.tokens} / ${budget}\n\n## Proposed sections\n\n${result.changes.map((item) => `### ${item.action} ${item.file}: ${item.heading}\nReason: ${item.reason}\n\n\`\`\`markdown\n${item.text}\n\`\`\``).join("\n\n")}\n\n## Unified diff\n\n\`\`\`diff\n${result.diffs}\n\`\`\`\n`;

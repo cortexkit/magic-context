@@ -1,5 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import {
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -16,6 +24,7 @@ import {
     getProjectMagicContextHistorianDir,
     isMagicContextStorageOutsideEngram,
 } from "./data-path";
+import * as logger from "./logger";
 import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const savedEnv = {
@@ -320,63 +329,102 @@ describe("data-path", () => {
 });
 
 describe("ensureCortexKitArtifactGitignore", () => {
-    test("creates .cortexkit/.gitignore with a fenced magic-context block", () => {
+    const dirs: string[] = [];
+    const legacy = "# >>> cortexkit:magic-context\nmagic-context/\n# <<< cortexkit:magic-context\n";
+    function fixture() {
         const dir = createTestTempDirFromPath(path.join(os.tmpdir(), "mc-gi-"));
-        try {
-            ensureCortexKitArtifactGitignore(dir);
-            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
-            expect(gi).toContain("# >>> cortexkit:magic-context");
-            expect(gi).toContain("magic-context/");
-            expect(gi).toContain("# <<< cortexkit:magic-context");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
+        dirs.push(dir);
+        mkdirSync(path.join(dir, ".cortexkit"), { recursive: true });
+        return {
+            dir,
+            shared: path.join(dir, ".cortexkit/.gitignore"),
+            nested: path.join(dir, ".cortexkit/magic-context/.gitignore"),
+        };
+    }
+    afterEach(() => {
+        for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
     });
 
-    test("is idempotent — a second call does not duplicate the block", () => {
-        const dir = createTestTempDirFromPath(path.join(os.tmpdir(), "mc-gi-"));
-        try {
-            ensureCortexKitArtifactGitignore(dir);
-            ensureCortexKitArtifactGitignore(dir);
-            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
-            const occurrences = gi.split("# >>> cortexkit:magic-context").length - 1;
-            expect(occurrences).toBe(1);
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
+    test("creates only the self-ignoring nested file and does not rewrite matching bytes", () => {
+        const { dir, nested, shared } = fixture();
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(nested, "utf8")).toBe("*\n");
+        const before = statSync(nested).mtimeMs;
+        ensureCortexKitArtifactGitignore(dir);
+        expect(statSync(nested).mtimeMs).toBe(before);
+        expect(existsSync(shared)).toBe(false);
     });
 
-    test("preserves a sibling module's existing entries (appends, never clobbers)", () => {
-        const dir = createTestTempDirFromPath(path.join(os.tmpdir(), "mc-gi-"));
-        try {
-            const ckDir = path.join(dir, ".cortexkit");
-            mkdirSync(ckDir, { recursive: true });
-            // Simulate a sibling (e.g. AFT) already owning a fenced block.
-            writeFileSync(
-                path.join(ckDir, ".gitignore"),
-                "# >>> cortexkit:aft\naft/scratch/\n# <<< cortexkit:aft\n",
-            );
-            ensureCortexKitArtifactGitignore(dir);
-            const gi = readFileSync(path.join(ckDir, ".gitignore"), "utf8");
-            expect(gi).toContain("# >>> cortexkit:aft");
-            expect(gi).toContain("aft/scratch/");
-            expect(gi).toContain("# >>> cortexkit:magic-context");
-            expect(gi).toContain("magic-context/");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
+    test.each([
+        "",
+        "*",
+        "*\r\n",
+        "artifacts/\n",
+    ])("repairs differing nested bytes %j", (existing) => {
+        const { dir, nested } = fixture();
+        mkdirSync(path.dirname(nested), { recursive: true });
+        writeFileSync(nested, existing);
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(nested, "utf8")).toBe("*\n");
     });
 
-    test("does not ignore the project config — only the artifact dir", () => {
-        const dir = createTestTempDirFromPath(path.join(os.tmpdir(), "mc-gi-"));
+    test.each([
+        legacy,
+        ` \r\n\t\n${legacy}\n `,
+        legacy.replaceAll("\n", "\r\n"),
+        legacy.trimEnd(),
+    ])("deletes the old shared file when only our block and whitespace remain %j", (existing) => {
+        const { dir, nested, shared } = fixture();
+        writeFileSync(shared, existing);
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(nested, "utf8")).toBe("*\n");
+        expect(existsSync(shared)).toBe(false);
+    });
+
+    test("removes our complete blocks while preserving every other byte", () => {
+        const { dir, shared } = fixture();
+        const prefix = "# café\r\n# >>> cortexkit:aft\r\naft/scratch/\r\n# <<< cortexkit:aft\r\n\n";
+        const suffix = "# >>> cortexkit:other\nother/\n# <<< cortexkit:other\nlast-without-newline";
+        writeFileSync(shared, prefix + legacy.replaceAll("\n", "\r\n") + legacy + suffix);
+        ensureCortexKitArtifactGitignore(dir);
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(shared)).toEqual(Buffer.from(prefix + suffix));
+    });
+
+    test("shared cleanup preserves non-UTF8 bytes outside our block", () => {
+        const { dir, shared } = fixture();
+        const prefix = Buffer.from([0xff, 0x80, 0x0a]);
+        const suffix = Buffer.from("# >>> cortexkit:aft\naft/\n# <<< cortexkit:aft\n");
+        writeFileSync(shared, Buffer.concat([prefix, Buffer.from(legacy), suffix]));
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(shared)).toEqual(Buffer.concat([prefix, suffix]));
+    });
+
+    test.each([
+        "# >>> cortexkit:aft\naft/scratch/\n# <<< cortexkit:aft\n",
+        "# >>> cortexkit:magic-context\nmagic-context/\n# >>> cortexkit:aft\naft/\n# <<< cortexkit:aft\n# <<< cortexkit:magic-context\n",
+        "prefix # >>> cortexkit:magic-context\nmagic-context/\n# <<< cortexkit:magic-context\n",
+    ])("leaves unowned or incomplete shared blocks unchanged %j", (existing) => {
+        const { dir, shared } = fixture();
+        writeFileSync(shared, existing);
+        ensureCortexKitArtifactGitignore(dir);
+        expect(readFileSync(shared)).toEqual(Buffer.from(existing));
+    });
+
+    test("logs a nested write failure without throwing or retiring the shared rule", () => {
+        const { dir, nested, shared } = fixture();
+        mkdirSync(nested, { recursive: true });
+        writeFileSync(shared, legacy);
+        const logged = spyOn(logger, "log").mockImplementation(() => {});
         try {
-            ensureCortexKitArtifactGitignore(dir);
-            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
-            // The config file stays tracked: it must NOT appear as an ignore.
-            expect(gi).not.toContain("magic-context.jsonc");
-            expect(gi).not.toContain("*.jsonc");
+            expect(() => ensureCortexKitArtifactGitignore(dir)).not.toThrow();
+            expect(readFileSync(shared, "utf8")).toBe(legacy);
+            expect(logged).toHaveBeenCalledWith("Failed to ensure project artifact gitignore", {
+                directory: dir,
+                error: expect.any(String),
+            });
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            logged.mockRestore();
         }
     });
 });
