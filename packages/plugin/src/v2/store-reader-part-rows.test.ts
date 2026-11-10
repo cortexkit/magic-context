@@ -7,7 +7,7 @@ import { Database } from "../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { restoreRow } from "./fold/restore";
 import { oc2ContextFixture } from "./hooks/__tests__/oc2-context.fixture";
-import { V2StoreReader } from "./store-reader";
+import { RAW_MESSAGE_TYPES, V2StoreReader } from "./store-reader";
 
 // OpenCode 2.2.6 with `experimental.part_rows: true` (the table exists since
 // 2.2.2) stores an assistant message's content in `session_part`, one row per
@@ -198,3 +198,154 @@ test("a session without part rows gets byte-identical requests with or without t
     const withEmptyTable = await run(true);
     expect(withEmptyTable).toEqual(withoutTable);
 }, 60000);
+
+// Every row shape a store without part rows holds: user, assistant with
+// reasoning, text and a tool call, an assistant with empty content, an
+// instruction row, an edited row, running and completed compactions, an idle
+// row and a directory switch. A second session in the same store may have part
+// rows of its own, as on a 2.2.6 store that holds old and new sessions.
+function mixedStore(variant: "no-table" | "empty-table" | "other-session-parts") {
+    const base = join(tmpdir(), "magic-context", "oc2-part-rows");
+    mkdirSync(base, { recursive: true });
+    const root = createTestTempDirFromPath(join(base, "mixed-"));
+    roots.push(root);
+    const path = join(root, "opencode.db");
+    const db = new Database(path);
+    db.exec(`CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+        seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)`);
+    if (variant !== "no-table")
+        db.exec(`CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (message_id, ordinal))`);
+    const insert = db.prepare(
+        "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
+    );
+    const assistant = (content: unknown[], created: number) =>
+        JSON.stringify({
+            content,
+            model,
+            time: { created, completed: created + 500 },
+            tokens: { input: 100, output: 10, reasoning: 5, cache: { read: 1, write: 2 } },
+        });
+    const rows: Array<[string, string, number, number | null, string]> = [
+        ["u1", "user", 1000, null, JSON.stringify({ text: "Read a.ts.", time: { created: 1000 } })],
+        [
+            "a1",
+            "assistant",
+            2000,
+            2600,
+            assistant(
+                [{ type: "reasoning", text: "Thinking.", metadata: { signature: "sig" } }, REPLY, TOOL],
+                2000,
+            ),
+        ],
+        ["a-empty", "assistant", 2500, null, assistant([], 2500)],
+        ["sys1", "system", 2700, null, JSON.stringify({ text: "Today's date is day 2." })],
+        [
+            "u2",
+            "user",
+            3000,
+            3100,
+            JSON.stringify({ text: "Edited later.", time: { created: 3000 }, metadata: {} }),
+        ],
+        ["cmp-run", "compaction", 3500, null, JSON.stringify({ status: "running" })],
+        [
+            "cmp-done",
+            "compaction",
+            3600,
+            3700,
+            JSON.stringify({
+                status: "completed",
+                reason: "manual",
+                summary: "Summary text.",
+                metadata: { keepID: "u2" },
+                time: { completed: 3700 },
+            }),
+        ],
+        ["idle1", "idle", 3800, null, JSON.stringify({ outcome: "succeeded" })],
+        ["loc1", "location-switched", 3900, null, JSON.stringify({ directory: "/elsewhere" })],
+        ["a2", "assistant", 4000, null, assistant([{ type: "text", text: "Done." }], 4000)],
+        ["u3", "user", 5000, null, JSON.stringify({ text: "Thanks.", time: { created: 5000 } })],
+    ];
+    rows.forEach(([id, type, created, updated, data], index) =>
+        insert.run(id, "s", type, index + 1, created, updated, data),
+    );
+    insert.run("o-a1", "other", "assistant", 1, 1000, 1000, assistant([], 1000));
+    if (variant === "other-session-parts")
+        db.prepare(
+            "INSERT INTO session_part(message_id,session_id,ordinal,type,call_id,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?,?)",
+        ).run("o-a1", "other", 0, "text", null, 1000, 1000, JSON.stringify(REPLY));
+    db.close();
+    return { path, ids: rows.map(([id]) => id), through: rows.length };
+}
+
+const sha = (value: unknown) =>
+    createHash("sha256")
+        .update(JSON.stringify(value instanceof Map ? [...value] : value) ?? "undefined")
+        .digest("hex");
+
+/** Digests of every reader output a session without part rows feeds into requests,
+ * restored rows, edit detection and saved fold proofs. */
+function readerDigests(path: string, ids: string[], through: number) {
+    const reader = new V2StoreReader(path);
+    try {
+        const range = reader.range("s", -1, through);
+        const conversational = (row: { type: string }) =>
+            (RAW_MESSAGE_TYPES as readonly string[]).includes(row.type) ||
+            row.type === "location-switched";
+        return {
+            range: sha(range),
+            // The formula native fold replay uses for its saved history proof.
+            historyDigest: sha(range.filter(conversational)),
+            restored: sha(
+                range
+                    .filter((row) => row.type === "assistant")
+                    .map((row) => restoreRow(row, model)),
+            ),
+            spanRowStamps: sha(reader.spanRowStamps("s", -1, through)),
+            spanRowStampsAfter3: sha(reader.spanRowStamps("s", 3, through)),
+            page: sha(reader.page("s", {})),
+            pageAssistant: sha(reader.page("s", { type: "assistant" })),
+            messagePage: sha(reader.messagePage("s", 0, 100, reader.latestSequence("s"))),
+            rawRowsThrough: sha(reader.rawRowsThrough("s", through, 100)),
+            messageById: sha(ids.map((id) => reader.messageById("s", id))),
+            assistantSince: sha(reader.assistantSince("s", -1)),
+            latestAssistant: sha(reader.latestAssistant("s")),
+            latestCompaction: sha(reader.latestCompaction("s")),
+            rowStampsThrough: sha(reader.rowStampsThrough("s", through)),
+        };
+    } finally {
+        reader.close();
+    }
+}
+
+// Captured by running readerDigests against store-reader.ts as it was before it
+// read session_part (commit cb915d8e2c). A session without part rows must keep
+// these bytes: its saved fold proofs, edit stamps and served requests depend on
+// them, and a change would rebuild every such session's cache after an upgrade.
+const BEFORE_PART_ROWS: Record<string, string> = {
+    range: "320cd35f5744ae0f9dc4603b835d91d67895b4a5971e38f1580e2aaa4b284f2b",
+    historyDigest: "b057ccdd8855b08cdabf4d1bc04873ca83d3c0a7c481b4087883c52ea429714c",
+    restored: "a15d0d3fe584289c25f165793fd7185695def28518ad2a07e083358c20152459",
+    spanRowStamps: "8dbcbac22a4cfef673b7df3b1da564cff9ebd635897a3f08016dd7abe77e2ff1",
+    spanRowStampsAfter3: "48ff57f9eb97e92058510b23d11ad3f95e75ebb3cbd3d38f87b698e703e2c8a4",
+    page: "7b78a5e61400a18982c1b1c7280d79127a4b6d5a0125be19ad38477bb29114ac",
+    pageAssistant: "d7fbb8ff6c5d6a44fe221102b7c902c6ad85f98af9b5ab760df0608e3a09c213",
+    messagePage: "83541d73fce73043d239b47850741c9e09648f9dcf8ca3fab12285afa4331d00",
+    rawRowsThrough: "200e3fb4a632004e2835082497353a9deed91a86b949a602f90cde7ecb53dac3",
+    messageById: "ae166a3c4c68930d3a20a875ca539454b37eed301435143bac1cea58099e6e7a",
+    assistantSince: "d53828db1fd0b795011b4fe1c3e9fb049c5d0ee857dc37425c91cfb76896c17c",
+    latestAssistant: "e4bb056529ba5e587b23a1003f96837afeae81db74fc520231ec935e489fa5ac",
+    latestCompaction: "f00d8877e2b127bca500b9a64975d5abba0bce410fea9019a8e196649cd86a0b",
+    rowStampsThrough: "c965b2af742c643c7e2990ba9cb5823711ea7ed207c0c5ad8aef82880bcfa696",
+};
+
+test("a session without part rows reads exactly as before the reader read session_part", () => {
+    for (const variant of ["no-table", "empty-table", "other-session-parts"] as const) {
+        const { path, ids, through } = mixedStore(variant);
+        expect({ variant, digests: readerDigests(path, ids, through) }).toEqual({
+            variant,
+            digests: BEFORE_PART_ROWS,
+        });
+    }
+});

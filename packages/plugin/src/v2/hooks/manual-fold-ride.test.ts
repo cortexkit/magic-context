@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { queuePendingOp } from "../../features/magic-context/storage-ops";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
 // A manual host compaction (the user's /compact) on a session with published
@@ -27,6 +28,20 @@ const head = (pass: Pass) => JSON.stringify(pass.draft.messages.slice(0, 2));
 /** The served text of the assistant row `id`; a drop replaces it with a placeholder. */
 const servedText = (pass: Pass, id: string) =>
     JSON.stringify(pass.draft.messages.find((message) => message.id === id)?.content ?? null);
+
+/** The summary the host stored on its latest compaction row. */
+const storedSummary = (f: Fixture) =>
+    (
+        JSON.parse(
+            (
+                f.raw
+                    .prepare(
+                        "SELECT data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq DESC LIMIT 1",
+                    )
+                    .get(f.session) as { data: string }
+            ).data,
+        ) as { summary?: string }
+    ).summary;
 
 /** Serve a head with one compartment, publish a newer one that only a rebuild
  * may render, and queue a drop that only a rebuild may apply. */
@@ -85,6 +100,10 @@ test("the pass after a manual host fold that rebuilt the served head applies the
         // into m[0]): the provider's cached prefix is gone.
         expect(head(afterFold)).not.toBe(head(waiting));
         expect(head(afterFold)).toContain("Review history 1");
+        // The host stores Magic Context's fixed checkpoint note as the summary,
+        // and the request serves Magic Context's own head instead of that note.
+        expect(storedSummary(f)).toBe(CHECKPOINT_NOTE);
+        expect(afterFold.bytes).not.toContain(CHECKPOINT_NOTE);
         expect(afterFold.logs.some((line) => /rewrite permission: allowed=true/.test(line))).toBe(
             true,
         );
@@ -93,6 +112,7 @@ test("the pass after a manual host fold that rebuilt the served head applies the
         // One ride: the next request replays the rebuilt request byte for byte.
         const replay = await f.pass();
         expect(replay.bytes).toBe(afterFold.bytes);
+        expect(replay.bytes).not.toContain(CHECKPOINT_NOTE);
         expect(replay.logs.some((line) => /rewrite permission: allowed=false/.test(line))).toBe(
             true,
         );

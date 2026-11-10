@@ -4,14 +4,16 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { queuePendingOp } from "../../../plugin/src/features/magic-context/storage-ops";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { CHECKPOINT_NOTE } from "../../../plugin/src/v2/fold/summary";
 import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 // A manual /compact on a session with published history. The compaction hook
-// answers with Magic Context's history and commits a new history head (the two
-// synthetic messages, m[0] and m[1], that start every request), so the next
-// request starts with different bytes and the provider's cached prefix is lost
-// on that pass whatever else happens. Work queued for the next rebuild (here a
-// drop such as the agent's ctx_reduce tool queues) must land on that request.
+// answers with a fixed note for the host to store and commits a new history
+// head (the two synthetic messages, m[0] and m[1], that start every request),
+// so the next request starts with different bytes and the provider's cached
+// prefix is lost on that pass whatever else happens. Work queued for the next
+// rebuild (here a drop such as the agent's ctx_reduce tool queues) must land on
+// that request.
 // Before the fix, real 2.0.22, 2.1.0, 2.2.5 and 2.2.6 hosts all logged
 // `rewrite permission: allowed=false ride=none` there, so the drop waited for a
 // second, avoidable rebuild.
@@ -114,6 +116,12 @@ test("the request after a manual compaction that rebuilt the history head carrie
                 expect(text.split(marker).length - 1).toBe(1);
             expect(text).not.toContain("conversation-checkpoint");
             expect(text).not.toContain("recent-context");
+            // The host stored Magic Context's fixed note; the request never serves it.
+            const sourceAfter = s.source();
+            const compaction = sourceAfter.prepare("SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1").get(s.session.id) as { data: string };
+            sourceAfter.close();
+            expect((JSON.parse(compaction.data) as { summary?: string }).summary).toBe(CHECKPOINT_NOTE);
+            expect(text).not.toContain(JSON.stringify(CHECKPOINT_NOTE).slice(1, -1));
             // The head changed, so the provider cache was lost on this pass...
             expect(after[0]).not.toBe(held[0]);
             expect(after[0]).toContain("HIST_SUMMARY");
