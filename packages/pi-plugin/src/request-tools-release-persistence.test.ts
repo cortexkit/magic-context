@@ -33,12 +33,11 @@ import {
 // The request-tools release records a pass's tool list only after the pass
 // has persisted the strip the change required (request-tools-release.ts,
 // `commit`), so a pass whose strip did not land is evaluated again. On Pi with
-// compaction on, the strip of a completed turn's thinking is persisted with
-// `requirePersistence` off, and the pass throws only when an open signed turn
-// could not be recorded. When the write fails and no turn is open, the pass
-// serves the thinking unchanged, records the new tool list anyway, and every
-// later pass compares with it, so the stale block keeps going out until the
-// provider rejects it.
+// compaction on, the strip of a completed turn's thinking is persisted mid-pass
+// and the end of the pass replays it. When that write fails, the pass must be
+// refused rather than serve the thinking and record the new tool list anyway:
+// every later pass would compare with that list, and the stale block would
+// keep going out until the provider rejected it.
 
 const MODEL = "claude-fable-5-2";
 const THINKING = "SIGNED_AGAINST_THE_FIRST_TOOL_LIST";
@@ -203,9 +202,7 @@ it("control: Pi, claude-fable-5-2: with healthy writes the tool change strips th
 	}
 }, 60_000);
 
-// Known gap, kept failing on purpose: the pass after the failed write should
-// still release (or the failed pass should not record the new tool list).
-it.failing("Pi, claude-fable-5-2: a tool change whose strip could not be persisted is released again on the next pass", async () => {
+it("Pi, claude-fable-5-2: a tool change whose strip could not be persisted is released again on the next pass", async () => {
 	const f = fixture("failed-strip-write");
 	try {
 		await f.serve();

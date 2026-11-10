@@ -9123,7 +9123,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			cacheBustingPass: isCacheBustingPass,
 			stripActiveTurn: true,
 			persistOnly: true,
-			requirePersistence: !!args.recoveryRebuildReason,
+			// A tools release records the new tool list once the pass ends, so its
+			// strip must persist or the pass must fail, as on compaction-off: an
+			// entry without a stable id or a failed ledger write refuses the pass
+			// instead of serving thinking bound to the old list and recording the
+			// new one.
+			requirePersistence:
+				!!args.recoveryRebuildReason || !!args.requestToolsChange,
 		});
 		if (activeThinkingTurn && isCacheBustingPass && !result)
 			throw new Error(
