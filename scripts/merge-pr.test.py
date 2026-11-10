@@ -231,6 +231,27 @@ class MergeTests(unittest.TestCase):
         self.prepare_pr(["packages/plugin/demo.ts"], message="fix(agents): keep named allows (#777)")
         self.assertEqual(self.run_script().returncode, 0)
 
+    def test_fork_workflow_change_refuses_without_reason(self):
+        self.prepare_pr([".github/workflows/review-findings.yml", "packages/plugin/demo.ts"])
+        run = self.run_script()
+        self.assert_refused(run, "is from a fork and changes files under .github/")
+        self.assertIn(".github/workflows/review-findings.yml", run.stderr)
+        self.assertFalse(self.commands("bun"))
+
+    def test_fork_workflow_change_proceeds_with_reason(self):
+        self.prepare_pr([".github/workflows/review-findings.yml", "packages/plugin/demo.ts"])
+        run = self.run_script("--workflow-change-reason=read the diff: only a comment changed")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("accepted because: read the diff: only a comment changed", run.stdout)
+
+    def test_blank_workflow_change_reason_refuses(self):
+        self.assert_refused(self.run_script("--workflow-change-reason=  "), "needs a reason")
+
+    def test_same_repository_workflow_change_proceeds(self):
+        self.scenario["cross"] = False
+        self.prepare_pr([".github/workflows/review-findings.yml", "packages/plugin/demo.ts"])
+        self.assertEqual(self.run_script().returncode, 0)
+
     def test_rechecks_description_after_gates(self):
         self.scenario["recheck"] = {"body": "Fixes #123"}
         self.assert_refused(self.run_script(), "PR description contains a GitHub closing keyword")

@@ -43,7 +43,7 @@ if name == "gh":
         pr = {
             "number": 123,
             "headRefOid": scenario["head"],
-            "isCrossRepository": True,
+            "isCrossRepository": scenario.get("cross", True),
             "state": scenario.get("state", "OPEN"),
             "baseRefName": scenario.get("base", "master"),
             "title": scenario.get("title", 'A safe "quoted" title; $(touch SHOULD_NOT_EXIST)'),

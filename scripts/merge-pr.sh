@@ -2,6 +2,7 @@
 # Local merge gate: GitHub's successful bot checks do not mean their findings
 # were handled. Only resolving the review threads on GitHub clears this gate.
 # Usage: scripts/merge-pr.sh <number> [--ci-gate] [--dry-run | --findings-only]
+#                             [--workflow-change-reason=<text>]
 # --ci-gate certifies a trial merge on train/check-pr-<number>, then fast-forwards
 # master to that exact SHA. Without it, touched-package gates run locally.
 # Requires gh, jq, Python 3, GNU timeout (coreutils on macOS), git, and the touched runners.
@@ -27,11 +28,16 @@ number=''
 dry_run=0
 findings_only=0
 ci_gate=0
+workflow_reason=''
 for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=1 ;;
     --findings-only) findings_only=1 ;;
     --ci-gate) ci_gate=1 ;;
+    --workflow-change-reason=*)
+      workflow_reason=${arg#--workflow-change-reason=}
+      [[ "$workflow_reason" =~ [^[:space:]] ]] || die '--workflow-change-reason needs a reason.'
+      ;;
     *)
       [[ "$arg" =~ ^[1-9][0-9]*$ ]] || die "Usage: scripts/merge-pr.sh <number> [--ci-gate] [--dry-run | --findings-only]"
       [ -z "$number" ] || die 'Supply exactly one PR number.'
@@ -91,6 +97,9 @@ check_findings() {
     if [ "$first" -eq 1 ]; then
       head=$(run jq -er '.data.repository.pullRequest.headRefOid' <<< "$page")
       title=$(run jq -er '.data.repository.pullRequest.title' <<< "$page")
+      # Not jq -e: that exits non-zero when the value is false.
+      cross_repository=$(run jq -r '.data.repository.pullRequest.isCrossRepository' <<< "$page")
+      [[ "$cross_repository" =~ ^(true|false)$ ]] || die 'GitHub returned no fork flag for the PR.'
       [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die 'GitHub returned an invalid head SHA.'
       if [ "$findings_only" -eq 0 ]; then
         local mergeable
@@ -161,8 +170,26 @@ Ask the contributor to reword the commit, or squash the PR into one commit with 
   fi
 }
 
+# A fork's PR can change the workflows that report the required review-findings
+# check, so that check alone can't be trusted for such a PR. A merged workflow
+# change also runs on master from then on. A contributor PR touching .github/
+# therefore needs a maintainer to name why it is safe.
+check_workflow_changes() {
+  local changed
+  [ "$cross_repository" = true ] || return 0
+  changed=$(run git diff --name-only "master...$head" -- .github/)
+  [ -n "$changed" ] || return 0
+  if [ -z "$workflow_reason" ]; then
+    die "PR #$number is from a fork and changes files under .github/:
+$changed
+Read those changes, then rerun with --workflow-change-reason=\"<why they are safe>\"."
+  fi
+  printf 'PR #%s changes .github/ files; accepted because: %s\n' "$number" "$workflow_reason"
+}
+
 head=''
 title=''
+cross_repository=''
 check_findings
 [ "$findings_only" -eq 0 ] || exit 0
 check_runs
@@ -184,6 +211,7 @@ run git fetch origin "pull/$number/head"
 fetched_head=$(run git rev-parse FETCH_HEAD)
 [ "$fetched_head" = "$head" ] || die 'PR head changed between the GitHub query and fetch; retry with the new head.'
 check_commit_messages
+check_workflow_changes
 
 worktree="${TMPDIR:-/tmp}/magic-context/merge-pr-$number"
 [ ! -e "$worktree" ] && [ ! -L "$worktree" ] || die "Temporary worktree already exists: $worktree (not removed)."
