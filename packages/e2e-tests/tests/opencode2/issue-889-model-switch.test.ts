@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { beforeAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,6 +6,7 @@ import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-ses
 import { MockProvider } from "../../src/mock-provider/server";
 import { buildMockHistorianPayload, historianRangeInRequest } from "../../src/mock-historian";
 import { inspectOpenFiles, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { openTestDb } from "../../src/test-db";
 
 // models.dev opencode catalog, 2026-11-09: GLM 5.3 is 1M/131072,
 // DeepSeek V4.1 Flash Free is 200k/32000 (context/output).
@@ -102,7 +102,7 @@ export default { id: 'model-switch-observer', async setup(context) {
         const paths = inspectOpenFiles(host.pid!, fixture.root, host.env).filter(path => /\.db(?:-wal|-shm)?$/.test(path));
         expect(paths.length).toBeGreaterThan(0);
         expect(paths.every(path => path.startsWith(`${fixture.root}/`))).toBe(true);
-        const db = new Database(join(host.env.XDG_DATA_HOME!, "opencode", host.env.OPENCODE_DB!), { readonly: true });
+        const db = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", host.env.OPENCODE_DB!), { readonly: true });
         let compactions: unknown[];
         try {
             compactions = db.query("SELECT type, data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq").all(session.id);
@@ -114,7 +114,7 @@ export default { id: 'model-switch-observer', async setup(context) {
         const beforeManual = requests.length;
         await client.session.compact({ sessionID: session.id });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60_000) });
-        const controlDb = new Database(join(host.env.XDG_DATA_HOME!, "opencode", host.env.OPENCODE_DB!), { readonly: true });
+        const controlDb = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", host.env.OPENCODE_DB!), { readonly: true });
         try {
             manualControl = { rows: controlDb.query("SELECT json_object('status', json_extract(data, '$.status'), 'reason', json_extract(data, '$.reason'), 'summary', json_extract(data, '$.summary')) AS data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq").all(session.id) as Array<{ data: string }>, providerCalls: requests.length - beforeManual };
         } finally { controlDb.close(); }
