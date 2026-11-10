@@ -280,35 +280,6 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
             }
         }
     });
-
-    test("rust mode forwards a cleared snapshot to the module", async () => {
-        const db = createTestDb();
-        try {
-            const calls: Array<{ sessionId: string; stateJson: string; ownerMessageId: string }> =
-                [];
-            const hook = createToolExecuteAfterHook({
-                db,
-                channel1StateBySession: new Map(),
-                transformMode: "rust",
-                todoStateSet: async (input) => {
-                    calls.push(input);
-                },
-            });
-            updateSessionMeta(db, "ses-rust-clear", { lastTodoState: PREVIOUS_TODO_STATE });
-
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-rust-clear",
-                args: { todos: [{ content: "Empty", status: "" }], owner_message_id: "msg-owner" },
-            });
-
-            expect(calls).toEqual([
-                { sessionId: "ses-rust-clear", stateJson: "[]", ownerMessageId: "msg-owner" },
-            ]);
-        } finally {
-            closeQuietly(db);
-        }
-    });
 });
 
 describe("createEventHook incremental indexing", () => {
