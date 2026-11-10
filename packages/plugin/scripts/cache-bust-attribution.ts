@@ -29,13 +29,16 @@ export type CacheBustDivergenceClass =
     | "provider_short_read_after_reclaim"
     | "double_bust_after_reclaim"
     | "idle_cache_expiry"
-    | "missing_breakpoint_after_read";
+    | "missing_breakpoint_after_read"
+    | "continuation_short_read"
+    | "thread_break_unchanged_client_bytes"
+    | "full_body_no_baseline";
 
 export interface AnalyzedCacheRequest {
     session: string;
     at: string;
     timestampMs: number;
-    verdict: "BASE" | "BUST" | "STABLE" | "LATENCY" | "UNMETERED";
+    verdict: "BASE" | "BUST" | "SHORT" | "STABLE" | "LATENCY" | "UNMETERED";
     rewrittenTokens?: number;
     divergenceClass?: CacheBustDivergenceClass;
     firstDivergence: string;
@@ -95,6 +98,7 @@ export interface CacheBustDecisionAttribution {
 }
 
 export interface CacheBustAttributionInput {
+    threadEvidence?: "continuation_short_read" | "thread_break_unchanged_client_bytes" | "full_body_no_baseline";
     divergenceIndex: number;
     previousMessageCount: number;
     previousBustDivergenceIndex?: number;
@@ -311,6 +315,21 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         accounted: false,
         rule: "explicit-breakpoint meter: the read fell short of the previous cached prefix, nothing was written, and at least 1,024 tokens were billed as uncached input; the request carried no cache breakpoint past the read point",
     },
+    {
+        divergenceClass: "continuation_short_read",
+        accounted: true,
+        rule: "continuation messages are deltas, not comparable full conversations; unchanged system/tools cannot show a client rewrite; never wakes",
+    },
+    {
+        divergenceClass: "thread_break_unchanged_client_bytes",
+        accounted: false,
+        rule: "full body matches the earlier full body and all intervening client deltas; wakes only at 20,000 rewritten tokens per window",
+    },
+    {
+        divergenceClass: "full_body_no_baseline",
+        accounted: false,
+        rule: "full body follows continuations but no earlier full body is available; wakes only at 20,000 rewritten tokens per window",
+    },
 ] as const;
 
 const ACCOUNTED_CLASSES = new Set(
@@ -405,8 +424,13 @@ export function parseCacheTtl(value: string | undefined): number {
     return Number(match[1]) * unitMs;
 }
 
-export function isUnaccountedCacheBustClass(divergenceClass: string): boolean {
+export function isUnaccountedCacheBustClass(divergenceClass: string, windowRewrittenTokens = Infinity): boolean {
+    if (isThresholdedThreadClass(divergenceClass)) return windowRewrittenTokens >= 20_000;
     return !ACCOUNTED_CLASSES.has(divergenceClass as CacheBustDivergenceClass);
+}
+
+export function isThresholdedThreadClass(divergenceClass: string): boolean {
+    return divergenceClass === "thread_break_unchanged_client_bytes" || divergenceClass === "full_body_no_baseline";
 }
 
 /**
@@ -418,6 +442,9 @@ const NOT_A_SECOND_REWRITE = new Set<string>([
     "tail_shrink_no_rewrite",
     "system_row_shift",
     "idle_cache_expiry",
+    "continuation_short_read",
+    "thread_break_unchanged_client_bytes",
+    "full_body_no_baseline",
 ]);
 
 /** A bust Magic Context caused on purpose and accounted for: a reclaim, fold, or flush. */
@@ -491,6 +518,7 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
 
 /** The request's class judged on its own, ignoring the request before it. */
 function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
+    if (input.threadEvidence) return input.threadEvidence;
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";

@@ -9,6 +9,11 @@
  * implicit prefix cache. WebSocket openai-auth captures may omit response files.
  * Both shapes are normalized to role + part type/length/text-prefix messages so
  * attribution and --show-diff have the same output on either lane.
+ * Anthropic thread continuations carry only new messages. Their system/tools
+ * remain comparable, but their message deltas never compare as full histories.
+ * A later full body compares with the last full body and every intervening
+ * client delta; undumped assistant replies cannot prove a client rewrite.
+ * SHORT means the meter read short without a demonstrated byte rewrite.
  *
  * Usage fields and the meter, per provider:
  *   Anthropic  `input_tokens` are the uncached tokens after the last cache
@@ -34,8 +39,8 @@
  *   For OpenAI and Gemini the previous request's uncached tail may not be cached
  *   yet when the next request arrives, so the floor is the previous read, not the
  *   previous prompt.
- * Any provider: a short read more than --cache-ttl (default 5m) after the prefix
- * was last read in full or written is `idle_cache_expiry`.
+ * For comparable full bodies, a short read more than --cache-ttl (default 5m)
+ * after the prefix was last read in full or written is `idle_cache_expiry`.
  *
  * Usage:
  *   bun scripts/analyze-cache-busts.ts <sessionIdPrefix> [options]
@@ -87,8 +92,8 @@ import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type R
 
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
-type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
-type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED";
+type MeterVerdict = ByteVerdict | "SHORT" | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
+type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED" | "N/A";
 
 interface Segment extends NormalizedMessage {
     id: string;
@@ -155,6 +160,8 @@ interface Snapshot {
     /** The runner meter remains usable when its rolling dump window has no body. */
     runnerRequest?: RunnerRequest;
     bytesMissing?: boolean;
+    threadType?: "create" | "continue";
+    tools?: Segment;
 }
 
 /**
@@ -215,6 +222,8 @@ export interface AnalysisRow {
     runnerDecisions?: RunnerDecision[];
     renderedView?: number | null;
     viewJoin?: "time" | "unmatched";
+    comparisonNote?: string;
+    prefixDivergence?: Segment;
 }
 
 export interface OpenCodeCacheBustAnalysisOptions {
@@ -379,6 +388,72 @@ function buildSegments(
 
 function wireModel(body: Json): string | undefined {
     return typeof body.model === "string" && body.model.length > 0 ? body.model : undefined;
+}
+
+function threadType(body: Json, meta: Json): Snapshot["threadType"] {
+    const type = asJson(body.thread ?? asJson(meta.body)?.thread)?.type;
+    return type === "continue" || type === "create" ? type : undefined;
+}
+
+function sameRoute(left: Snapshot, right: Snapshot): boolean {
+    return left.session === right.session && left.provider === right.provider && left.sourceDir === right.sourceDir;
+}
+
+/** A full body after deltas needs its full baseline and every sent delta in between. */
+function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
+    const extra: Snapshot[] = [];
+    const starts = snapshots.filter((snapshot, index) =>
+        snapshot.threadType !== undefined &&
+        (snapshot.threadType === "create" || snapshots.slice(index + 1).some((later) =>
+            sameRoute(later, snapshot) && later.threadType !== "continue")) &&
+        !snapshots.slice(0, index).some((earlier) => sameRoute(earlier, snapshot)),
+    );
+    for (const first of starts) {
+        const candidate: DumpCandidate = {
+            source: { provider: first.provider, dir: first.sourceDir, label: "thread context" },
+            session: first.session,
+            latestMtimeMs: 0,
+            totalBytes: 0,
+            dumpCount: 0,
+        };
+        const files = readdirSync(first.sourceDir)
+            .filter((file) => file.endsWith(".meta.json"))
+            .flatMap((file) => {
+                const name = parseDumpFilename(file);
+                if (name && name.session !== first.session) return [];
+                try {
+                    const meta = JSON.parse(readFileSync(join(first.sourceDir, file), "utf8")) as Json;
+                    if (!name && String(meta.session ?? "") !== first.session) return [];
+                    return [{
+                        file,
+                        createdAt: name?.createdAt ?? String(meta.createdAt ?? ""),
+                        sequence: name?.sequence ?? (finiteNumber(meta.step) ? meta.step : 0),
+                    }];
+                } catch {
+                    // Metadata can still be in flight while the sentinel scans.
+                    return [];
+                }
+            })
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt) ||
+                b.sequence - a.sequence || b.file.localeCompare(a.file));
+        for (const entry of files) {
+            if (entry.createdAt > first.orderCreatedAt ||
+                (entry.createdAt === first.orderCreatedAt &&
+                    (entry.sequence > first.sequence ||
+                        (entry.sequence === first.sequence && entry.file >= first.file)))) continue;
+            const snapshot = loadCandidateSnapshots(
+                candidate,
+                { ...args, since: undefined, until: undefined, limit: undefined },
+                [entry.file],
+            )[0];
+            if (!snapshot || !sameRoute(snapshot, first)) continue;
+            extra.push(snapshot);
+            if (snapshot.threadType !== "continue") break;
+        }
+    }
+    return [...extra, ...snapshots].sort((a, b) =>
+        a.orderCreatedAt.localeCompare(b.orderCreatedAt) ||
+        a.sequence - b.sequence || a.file.localeCompare(b.file));
 }
 
 function asJson(value: unknown): Json | undefined {
@@ -683,6 +758,10 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
                 wireModel: wireModel(body),
                 sourceDir: candidate.source.dir,
                 segments: normalized.segments,
+                threadType: normalized.provider === "anthropic" ? threadType(body, meta) : undefined,
+                tools: normalized.provider === "anthropic" && body.tools !== undefined
+                    ? { ...buildSegments({ system: body.tools }, "anthropic").segments[0], id: "tools role=system" }
+                    : undefined,
                 usage: meter ? loadMeterUsage(responsePath, meter) : undefined,
                 orderCreatedAt: dumpName?.createdAt ?? createdAt,
                 // Broca exports name files by run and step, not by time and
@@ -773,7 +852,7 @@ function loadSnapshotSelection(opts: Args): SnapshotSelection {
     return {
         candidates,
         selected,
-        snapshots: selected ? loadCandidateSnapshots(selected, opts) : [],
+        snapshots: selected ? withThreadContext(loadCandidateSnapshots(selected, opts), opts) : [],
     };
 }
 
@@ -934,18 +1013,13 @@ export function analyzeOpenCodeCacheBustSession(
                 args, selected.filter((entry) => entry.source === source).map((entry) => entry.file),
             ));
         })();
-    snapshots.sort(
-        (left, right) =>
-            left.orderCreatedAt.localeCompare(right.orderCreatedAt) ||
-            left.sequence - right.sequence ||
-            left.file.localeCompare(right.file),
-    );
+    const contextualSnapshots = withThreadContext(snapshots, args);
     const inWindow = (snapshot: Snapshot): boolean =>
         (options.scanCursor
             ? `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}` > options.scanCursor
             : options.sinceExclusiveMs === undefined || Date.parse(snapshot.createdAt) > options.sinceExclusiveMs) &&
         (options.untilInclusiveMs === undefined || Date.parse(snapshot.createdAt) <= options.untilInclusiveMs);
-    const boundedSnapshots = snapshots.filter((snapshot) => {
+    const boundedSnapshots = contextualSnapshots.filter((snapshot) => {
         const timestampMs = Date.parse(snapshot.createdAt);
         return (
             Number.isFinite(timestampMs) &&
@@ -955,7 +1029,7 @@ export function analyzeOpenCodeCacheBustSession(
     const firstNewIndex = boundedSnapshots.findIndex((snapshot) =>
         inWindow(snapshot),
     );
-    const analysisStart = options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2);
+    const analysisStart = options.sinceExclusiveMs === undefined || contextualSnapshots.some((snapshot) => snapshot.threadType !== undefined) ? 0 : Math.max(0, firstNewIndex - 2);
     const analysisSnapshots = firstNewIndex < 0 ? [] : boundedSnapshots.slice(analysisStart);
     precedingRequestTimestampsMs.push(
         ...boundedSnapshots.slice(0, analysisStart).map((snapshot) => snapshot.requestTimestampMs),
@@ -963,7 +1037,7 @@ export function analyzeOpenCodeCacheBustSession(
     const rows = analyzeSnapshots(
         analysisSnapshots,
         withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath),
-        { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs },
+        { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs: precedingRequestTimestampsMs.filter((at) => !analysisSnapshots.some((snapshot) => snapshot.requestTimestampMs === at)) },
     );
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
@@ -988,7 +1062,7 @@ export function analyzeOpenCodeCacheBustSession(
                 firstDivergence:
                     row.verdict === "BASE"
                         ? "(first request)"
-                        : (segment?.id ?? "(identical normalized prefix)"),
+                        : (row.prefixDivergence?.id ?? row.comparisonNote ?? segment?.id ?? "(identical normalized prefix)"),
                 analyzerCmd: openCodeAnalyzerCommand(row, options),
                 ...(row.decision?.identityDelta
                     ? { identityDelta: row.decision.identityDelta }
@@ -1022,6 +1096,65 @@ function firstDivergence(prev: Segment[], cur: Segment[]): number {
         if (prev[index].hash !== cur[index].hash || prev[index].id !== cur[index].id) return index;
     }
     return prev.length === cur.length ? -1 : n;
+}
+
+interface ByteComparison {
+    previous: Snapshot;
+    divergenceIndex: number;
+    byteVerdict?: ByteVerdict;
+    specialClass?: CacheBustDivergenceClass;
+    comparisonNote?: string;
+    prefixDivergence?: Segment;
+}
+
+function compareClientBytes(current: Snapshot, previous: Snapshot, history: readonly Snapshot[]): ByteComparison {
+    const route = history.filter((snapshot) => sameRoute(snapshot, current) && !snapshot.bytesMissing);
+    const latest = route.at(-1);
+    const continuation = current.threadType === "continue";
+    const afterChain = !continuation && latest?.threadType === "continue";
+    if (!continuation && !afterChain) {
+        const divergenceIndex = firstDivergence(previous.segments, current.segments);
+        return { previous, divergenceIndex, byteVerdict: bustsReusablePrefix(previous, current, divergenceIndex) ? "BUST" : "STABLE" };
+    }
+    // The provider keeps prior conversation bytes on a continuation. Only the
+    // fully transmitted prefix can be compared with the preceding request.
+    const prefixPrevious = latest ?? previous;
+    const toolsChanged = prefixPrevious.tools?.hash !== current.tools?.hash;
+    const previousSystem = prefixPrevious.segments.find((segment) => segment.role === "system");
+    const currentSystem = current.segments.find((segment) => segment.role === "system");
+    const systemChanged = previousSystem?.hash !== currentSystem?.hash;
+    if (toolsChanged || systemChanged) {
+        return { previous: prefixPrevious, divergenceIndex: 0, byteVerdict: "BUST", prefixDivergence: toolsChanged ? current.tools ?? prefixPrevious.tools : currentSystem ?? previousSystem };
+    }
+    if (continuation) return { previous: prefixPrevious, divergenceIndex: -1, specialClass: "continuation_short_read", comparisonNote: "(continuation; message bytes not comparable)" };
+
+    let fullIndex = route.length - 1;
+    while (fullIndex >= 0 && route[fullIndex].threadType === "continue") fullIndex -= 1;
+    if (fullIndex < 0) return { previous, divergenceIndex: -1, specialClass: "full_body_no_baseline", comparisonNote: "(no earlier full body found; client bytes not comparable)" };
+    const full = route[fullIndex];
+    const first = firstDivergence(full.segments, current.segments);
+    if (first >= 0 && first < full.segments.length) return { previous: full, divergenceIndex: first, byteVerdict: bustsReusablePrefix(full, current, first) ? "BUST" : "STABLE" };
+
+    // Reply content is absent from response dumps. Skip those assistant slots,
+    // but compare every sent client message in order, including repeated text.
+    const expected = [...full.segments];
+    let cursor = full.segments.length;
+    let matched = full.segments.filter((segment) => segment.role !== "system").length;
+    for (const delta of route.slice(fullIndex + 1)) {
+        for (const segment of delta.segments.filter((item) => item.role !== "system")) {
+            while (current.segments[cursor]?.role === "assistant") {
+                expected[cursor] = current.segments[cursor];
+                cursor += 1;
+            }
+            expected[cursor] = { ...segment, id: `message[${cursor}] ${describeNormalizedMessage(segment)}` };
+            if (current.segments[cursor]?.hash !== segment.hash) {
+                return { previous: { ...full, segments: expected }, divergenceIndex: cursor, byteVerdict: "BUST" };
+            }
+            cursor += 1;
+            matched += 1;
+        }
+    }
+    return { previous: full, divergenceIndex: -1, byteVerdict: "STABLE", specialClass: "thread_break_unchanged_client_bytes", comparisonNote: `(${matched} client messages compared and matched; reply bytes not dumped)` };
 }
 
 function isTailShrink(previous: Snapshot, current: Snapshot, divergenceIndex: number): boolean {
@@ -1170,22 +1303,19 @@ export function analyzeSnapshots(
         const decision = joinDecision(current.requestTimestampMs);
         if (isUsageMissing(current)) {
             const previous = previousMetered;
-            const divergenceIndex = previous
-                ? firstDivergence(previous.segments, current.segments)
-                : -1;
-            const byteVerdict = previous && !previous.bytesMissing && !current.bytesMissing
-                ? bustsReusablePrefix(previous, current, divergenceIndex)
-                    ? "BUST"
-                    : "STABLE"
-                : undefined;
+            const comparison = previous ? compareClientBytes(current, previous, snaps.slice(0, index)) : undefined;
+            const divergenceIndex = comparison?.divergenceIndex ?? -1;
+            const byteVerdict = previous && !previous.bytesMissing && !current.bytesMissing ? comparison?.byteVerdict : undefined;
             rows.push({
                 current,
-                previous,
+                previous: comparison?.previous ?? previous,
                 divergenceIndex,
                 byteVerdict,
                 verdict: "UNMETERED",
                 meterVsBytes: "UNMETERED",
                 divergenceClass: "usage_missing",
+                comparisonNote: comparison?.comparisonNote,
+                prefixDivergence: comparison?.prefixDivergence,
                 ...runnerFields,
             });
             continue;
@@ -1199,10 +1329,9 @@ export function analyzeSnapshots(
         }
         const previous = previousMetered;
         if (!previous.usage || !current.usage) continue;
-        const divergenceIndex = firstDivergence(previous.segments, current.segments);
-        const byteVerdict: ByteVerdict = bustsReusablePrefix(previous, current, divergenceIndex)
-            ? "BUST"
-            : "STABLE";
+        const comparison = compareClientBytes(current, previous, snaps.slice(0, index));
+        const { divergenceIndex, byteVerdict } = comparison;
+        const comparisonPrevious = comparison.previous;
         // Implicit-prefix forgiveness is the previous request's uncached input: its
         // tail may not be cached yet. After a provider-side miss that input is the
         // whole prompt, which would forgive any read at all, so a Gemini request
@@ -1260,7 +1389,7 @@ export function analyzeSnapshots(
         const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
         // Once a runner's cache has expired, changing bytes cannot incur an
         // additional cache miss. Preserve the diff as evidence, not a bust.
-        if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
+        if (current.runnerRequest && shortRead && !comparison.specialClass && runnerGapMs > cacheTtlMs) {
             rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
                 ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
                 comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
@@ -1305,19 +1434,19 @@ export function analyzeSnapshots(
         // A missing breakpoint is the request's own shape, not provider latency,
         // so it is a BUST even when the reusable bytes are unchanged.
         const verdict: MeterVerdict = shortRead
-            ? byteVerdict === "BUST" || (missingBreakpointAfterRead && !idleCacheExpiry)
+            ? comparison.specialClass ? "SHORT" : byteVerdict === "BUST" || (missingBreakpointAfterRead && !idleCacheExpiry)
                 ? "BUST"
                 : "LATENCY"
             : "STABLE";
         latencyReference = verdict === "LATENCY" ? reference : undefined;
         const meterVsBytes: MeterVsBytes =
-            verdict === "LATENCY"
+            byteVerdict === undefined ? "N/A" : verdict === "LATENCY"
                 ? "LATENCY"
                 : verdict === "STABLE" && byteVerdict === "BUST"
                   ? "BYTES-ONLY"
                   : "AGREE";
         const rewrittenTokens =
-            verdict === "BUST" || verdict === "LATENCY"
+            verdict === "BUST" || verdict === "LATENCY" || verdict === "SHORT"
                 ? (current.usage.cacheCreation ?? Math.max(0, prevTotal - current.usage.cacheRead))
                 : undefined;
         const attributionDecision =
@@ -1327,16 +1456,16 @@ export function analyzeSnapshots(
         const divergentSegment =
             divergenceIndex < 0
                 ? undefined
-                : (current.segments[divergenceIndex] ?? previous.segments[divergenceIndex]);
-        const tailShrink = isTailShrink(previous, current, divergenceIndex);
+                 : (comparison.prefixDivergence ?? current.segments[divergenceIndex] ?? comparisonPrevious.segments[divergenceIndex]);
+        const tailShrink = isTailShrink(comparisonPrevious, current, divergenceIndex);
         // A LATENCY row is also classified: a short read over an unchanged reusable
         // prefix is a provider-side fact and deserves a name, not a blank cell.
         const divergenceClass =
-            verdict === "BUST" || verdict === "LATENCY"
+            verdict === "SHORT" ? comparison.specialClass : verdict === "BUST" || verdict === "LATENCY"
                 ? classifyCacheBust({
                       providerShortReadWithIdenticalPrefix: verdict === "LATENCY",
                       divergenceIndex,
-                      previousMessageCount: previous.segments.length,
+                      previousMessageCount: comparisonPrevious.segments.length,
                       previousBustDivergenceIndex,
                       idleCacheExpiry,
                       missingBreakpointAfterRead,
@@ -1369,7 +1498,7 @@ export function analyzeSnapshots(
                                : undefined;
                        })(),
                         inheritedFold: attributionDecision !== decision,
-                      contentEvidence: [previous, current]
+                      contentEvidence: [comparisonPrevious, current]
                           .flatMap((snapshot) =>
                               snapshot.segments.slice(
                                   Math.max(0, divergenceIndex - 2),
@@ -1397,13 +1526,13 @@ export function analyzeSnapshots(
         previousMeteredDecision = decision;
         rows.push({
             current,
-            previous,
+            previous: comparisonPrevious,
             divergenceIndex,
             byteVerdict,
             verdict,
             meterVsBytes,
             prevTotal,
-            ...(reference !== previous ? { meterReference: reference } : {}),
+            ...(reference !== comparisonPrevious ? { meterReference: reference } : {}),
             epsilon,
             meterFloor,
             comparableRead,
@@ -1411,6 +1540,8 @@ export function analyzeSnapshots(
             idleGapMs,
             rewrittenTokens,
             divergenceClass,
+            comparisonNote: comparison.comparisonNote,
+            prefixDivergence: comparison.prefixDivergence,
             decision: attributionDecision,
             ...runnerFields,
         });
@@ -1476,7 +1607,7 @@ function meterCell(row: AnalysisRow): string {
             ? `; wireModel=${row.previous.wireModel} → ${row.current.wireModel}`
             : "";
     const reference = row.meterReference
-        ? `; ref=${fmtTime(row.meterReference.createdAt)} (last read before the LATENCY run)`
+        ? `; ref=${fmtTime(row.meterReference.createdAt)} (${row.current.provider === "gemini" ? "last read before the LATENCY run" : "meter baseline"})`
         : "";
     const floorBasis = isImplicitPrefixCache(row.current.usage?.provider ?? row.current.provider)
         ? `prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()}`
@@ -1555,8 +1686,8 @@ function main(): void {
         .filter((candidate) => candidate.session === runner.session)
         .flatMap((candidate) => loadCandidateSnapshots(candidate, dumpOptions)) : selection.snapshots;
     const allSnaps = runner ? runnerSnapshots(runner, dumps, opts.meter) : dumps;
-    const since = runner ? resolveTimeBound(opts.since) : undefined;
-    const until = runner ? resolveTimeBound(opts.until) : undefined;
+    const since = resolveTimeBound(opts.since);
+    const until = resolveTimeBound(opts.until);
     const evidence = runner ? loadRunnerEvidence(opts.runnerDataDir, runner, opts.mcLogPath, {
         sinceMs: since ? Date.parse(since) : undefined, untilMs: until ? Date.parse(until) : undefined,
     }) : undefined;
@@ -1566,10 +1697,8 @@ function main(): void {
         runner ? [] : withSchedulerLogFallback([], allSnaps[0]?.session ?? opts.sessionPrefix, opts.mcLogPath),
         { cacheTtlMs: opts.cacheTtl ? parseCacheTtl(opts.cacheTtl) : undefined, runnerEvidence: evidence, cacheTouches: touches.map((touch) => touch.at) },
     );
-    if (runner) {
-        rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
-        if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
-    }
+    rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
+    if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
     const snaps = rows.map((row) => row.current);
     if (snaps.length === 0) {
         const searched = opts.sources.map((source) => source.dir).join(", ");
@@ -1640,6 +1769,7 @@ function main(): void {
 
     let bustCount = 0;
     let latencyCount = 0;
+    let shortCount = 0;
     let unmeteredBustCount = 0;
     for (const row of rows) {
         if (row.current.runnerRequest && (row.current.bytesMissing || row.previous?.bytesMissing)) {
@@ -1652,7 +1782,7 @@ function main(): void {
         if (row.verdict === "BASE") {
             if (opts.allRows) {
                 console.log(
-                    `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`,
+                    `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`,
                 );
             }
             continue;
@@ -1661,11 +1791,13 @@ function main(): void {
             opts.allRows ||
             row.verdict === "BUST" ||
             row.verdict === "LATENCY" ||
+            row.verdict === "SHORT" ||
             row.verdict === "EXPIRED" ||
             (row.verdict === "UNMETERED" && row.byteVerdict === "BUST");
         if (!shouldPrint) continue;
         if (row.verdict === "BUST") bustCount += 1;
         if (row.verdict === "LATENCY") latencyCount += 1;
+        if (row.verdict === "SHORT") shortCount += 1;
         if (row.verdict === "UNMETERED" && row.byteVerdict === "BUST") unmeteredBustCount += 1;
 
         const previous = row.previous;
@@ -1673,16 +1805,16 @@ function main(): void {
             // An unmetered request with no metered predecessor has nothing to diff
             // against; it is still listed so the refusal below has visible rows.
             console.log(
-                `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${"UNMETERED".padEnd(16)} | ${"unavailable; no metered predecessor".padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${"(no metered predecessor)".padEnd(31)} | ${`${row.current.bodyBytes.toLocaleString()}B`.padEnd(27)} |`,
+                `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | ${"UNMETERED".padEnd(16)} | ${"unavailable; no metered predecessor".padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${"(no metered predecessor)".padEnd(31)} | ${`${row.current.bodyBytes.toLocaleString()}B`.padEnd(27)} |`,
             );
             continue;
         }
         const index = row.divergenceIndex;
         const segment =
             index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
-        const attribution = row.verdict === "EXPIRED" ? "(expired cache)" : segment
+        const attribution = row.prefixDivergence?.id ?? row.comparisonNote ?? (row.verdict === "EXPIRED" ? "(expired cache)" : segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
-            : `(identical; bytes ${row.byteVerdict})`;
+            : `(identical; bytes ${row.byteVerdict})`);
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
         const byteDelta = `${previous.bodyBytes.toLocaleString()}B → ${row.current.bodyBytes.toLocaleString()}B`;
         const verdictLabel =
@@ -1690,7 +1822,7 @@ function main(): void {
                 ? `UNMETERED (bytes ${row.byteVerdict})`
                 : `${row.verdict} (meter)`;
         console.log(
-            `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
+            `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${row.byteVerdict === undefined ? "(not comparable)" : `${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`}`,
         );
         if (row.verdict === "EXPIRED" && segment) {
             console.log(`          └─ bytes also changed at ${segment.id}`);
@@ -1726,7 +1858,10 @@ function main(): void {
                     );
                 }
             }
-            if (opts.showDiff) printSegmentDiff(previous, row.current, index);
+            if (opts.showDiff) {
+                if (row.prefixDivergence?.id.startsWith("tools")) printSegmentDiff({ ...previous, segments: previous.tools ? [previous.tools] : [] }, { ...row.current, segments: row.current.tools ? [row.current.tools] : [] }, 0);
+                else printSegmentDiff(previous, row.current, index);
+            }
         }
     }
 
@@ -1748,6 +1883,8 @@ function main(): void {
         }
     } else if (runner && rows.some((row) => row.current.bytesMissing || row.previous?.bytesMissing)) {
         console.log(`No-bytes short reads: ${["EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"].map((verdict) => `${verdict}=${rows.filter((row) => row.verdict === verdict).length}`).join(", ")}. Byte-attributed metered busts: ${bustCount}.`);
+    } else if (bustCount === 0 && shortCount > 0) {
+        console.log(`No byte-attributed metered busts; ${shortCount} metered short read(s) without a demonstrated byte rewrite across ${snaps.length} request(s).`);
     } else if (bustCount === 0) {
         console.log(`No metered busts across ${snaps.length} request(s).`);
     } else {

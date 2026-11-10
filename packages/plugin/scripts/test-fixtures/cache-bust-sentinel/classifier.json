@@ -205,5 +205,20 @@
             "directInput": 474788,
             "previousTotal": 521668
         }
+    },
+    {
+        "class": "continuation_short_read",
+        "decision": {},
+        "input": { "threadEvidence": "continuation_short_read" }
+    },
+    {
+        "class": "thread_break_unchanged_client_bytes",
+        "decision": {},
+        "input": { "threadEvidence": "thread_break_unchanged_client_bytes" }
+    },
+    {
+        "class": "full_body_no_baseline",
+        "decision": {},
+        "input": { "threadEvidence": "full_body_no_baseline" }
     }
 ]
