@@ -17,21 +17,33 @@ import type { Database } from "../../shared/sqlite";
  * prompt, the `tools` array and the messages before it, so a request whose
  * tools changed (a tool added, removed, renamed, or its description or input
  * schema edited) must not resend thinking served behind the old list. The
- * session's replay document keeps the fingerprint of the last tool list served
- * on the session's current model; a pass whose tools differ releases every
- * signed block through the same path a rewrite of the request head uses.
+ * session's replay document keeps, for each prefix-bound model the session
+ * used, the fingerprint of the last tool list served on that model; a pass
+ * whose tools differ from its own model's record releases every signed block
+ * through the same path a rewrite of the request head uses.
  *
- * A model switch is not counted here: it has its own handling, so a fingerprint
- * recorded for another model is replaced silently, as is a missing one (the
- * session's first pass after this record existed).
+ * The record is kept per model because a session can switch between two
+ * prefix-bound models and back: the returning model's own thinking from
+ * before the switch is still bound to the list that model last saw, so the
+ * return pass must compare with that list, not with the other model's. A model
+ * with no record yet (the session's first pass on it, or the first pass after
+ * this record existed) adopts its list silently: a model switch has its own
+ * handling.
  */
 const NAMESPACE = "requestToolsRelease";
+
+/**
+ * How many models' records a session keeps. The least recently served model's
+ * record is dropped first; a session that returns to a model after more than
+ * this many other prefix-bound models adopts that model's list again.
+ */
+const MAX_MODEL_RECORDS = 8;
 
 interface StoredRequestTools extends RequestToolsFingerprint {
     modelKey: string;
 }
 
-function parseStored(value: unknown): StoredRequestTools | null {
+function parseEntry(value: unknown): StoredRequestTools | null {
     if (typeof value !== "object" || value === null) return null;
     const record = value as Record<string, unknown>;
     if (
@@ -49,14 +61,41 @@ function parseStored(value: unknown): StoredRequestTools | null {
     };
 }
 
-function sameStored(left: StoredRequestTools | null, right: StoredRequestTools): boolean {
+/** The session's records, least recently served model first. */
+function parseStored(value: unknown): StoredRequestTools[] {
+    const models = (value as { models?: unknown } | null | undefined)?.models;
+    if (!Array.isArray(models)) return [];
+    const entries: StoredRequestTools[] = [];
+    for (const item of models) {
+        const entry = parseEntry(item);
+        if (entry) entries.push(entry);
+    }
+    return entries;
+}
+
+function sameEntry(left: StoredRequestTools | undefined, right: StoredRequestTools): boolean {
     return (
-        left !== null &&
+        left !== undefined &&
         left.modelKey === right.modelKey &&
         left.names === right.names &&
         left.descriptions === right.descriptions &&
         left.schemas === right.schemas
     );
+}
+
+/** True when `current` is already the most recently served model's record. */
+function isLatest(entries: readonly StoredRequestTools[], current: StoredRequestTools): boolean {
+    return sameEntry(entries.at(-1), current);
+}
+
+/** `entries` with `current` as the most recently served model, bounded. */
+function withLatest(
+    entries: readonly StoredRequestTools[],
+    current: StoredRequestTools,
+): StoredRequestTools[] {
+    const next = entries.filter((entry) => entry.modelKey !== current.modelKey);
+    next.push(current);
+    return next.slice(-MAX_MODEL_RECORDS);
 }
 
 export interface RequestToolsRelease {
@@ -84,41 +123,42 @@ export function evaluateRequestToolsRelease(args: {
     fingerprint: RequestToolsFingerprint;
 }): RequestToolsRelease {
     const current: StoredRequestTools = { modelKey: args.modelKey, ...args.fingerprint };
-    let stored: StoredRequestTools | null = null;
+    let entries: StoredRequestTools[] = [];
     let readable = true;
     try {
-        stored = parseStored(readReplayEnvelope(args.db, args.sessionId, "read")[NAMESPACE]);
+        entries = parseStored(readReplayEnvelope(args.db, args.sessionId, "read")[NAMESPACE]);
     } catch (error) {
         readable = false;
         sessionLog(args.sessionId, "request tools record unreadable:", error);
     }
-    const change =
-        stored !== null && stored.modelKey === current.modelKey
-            ? classifyRequestToolsChange(stored, current)
-            : null;
+    const stored = entries.find((entry) => entry.modelKey === current.modelKey);
+    const change = stored ? classifyRequestToolsChange(stored, current) : null;
     if (change !== null) {
         sessionLog(
             args.sessionId,
             `request tools changed (kind=${change === "schemas" ? "schema-only" : change}, model=${current.modelKey}, schemas ${stored?.schemas.slice(0, 12)}→${current.schemas.slice(0, 12)}): releasing signed thinking`,
         );
-    } else if (readable && stored?.modelKey !== current.modelKey) {
+    } else if (readable && !stored) {
         sessionLog(
             args.sessionId,
-            `request tools fingerprint adopted for model=${current.modelKey}${stored ? ` (was ${stored.modelKey})` : ""}`,
+            `request tools fingerprint adopted for model=${current.modelKey}${entries.length > 0 ? ` (records kept for ${entries.map((entry) => entry.modelKey).join(",")})` : ""}`,
         );
     }
     return {
         change,
         commit: () => {
-            if (!readable || sameStored(stored, current)) return;
+            if (!readable || isLatest(entries, current)) return;
             try {
+                let next = entries;
                 const written = updateReplayDocument(args.db, args.sessionId, (doc) => {
-                    if (sameStored(parseStored(doc[NAMESPACE]), current)) return false;
+                    const latest = parseStored(doc[NAMESPACE]);
+                    if (isLatest(latest, current)) return false;
+                    next = withLatest(latest, current);
                     doc.version = 2;
-                    doc[NAMESPACE] = current;
+                    doc[NAMESPACE] = { models: next };
                     return true;
                 });
-                if (written) stored = current;
+                if (written) entries = next;
                 else sessionLog(args.sessionId, "request tools record not written");
             } catch (error) {
                 sessionLog(args.sessionId, "request tools record write failed:", error);

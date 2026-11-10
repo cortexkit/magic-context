@@ -130,3 +130,37 @@ test("a pass that never commits is evaluated again", () => {
         closeQuietly(db);
     }
 });
+
+test("each model compares with the list last served on that model, for a bounded number of models", () => {
+    const db = database();
+    try {
+        const evaluate = (fp: typeof READ, modelKey: string) => {
+            const release = evaluateRequestToolsRelease({
+                db,
+                sessionId: "ses",
+                modelKey,
+                fingerprint: fp,
+            });
+            release.commit();
+            return release.change;
+        };
+        const added = fingerprint(["read", "Read", { type: "object" }], ["grep", "Grep", {}]);
+        const OTHER = "anthropic/claude-mythos-5-2";
+        expect(evaluate(READ, MODEL)).toBeNull();
+        expect(evaluate(READ, OTHER)).toBeNull();
+        // The tools changed while the session was on the other model: that
+        // model's pass releases its own thinking, and the return to the first
+        // model compares with the list the first model last saw.
+        expect(evaluate(added, OTHER)).toBe("names");
+        expect(evaluate(added, MODEL)).toBe("names");
+        expect(evaluate(added, MODEL)).toBeNull();
+        expect(evaluate(added, OTHER)).toBeNull();
+        // Eight other models later, the first model's record has been dropped
+        // (least recently served first), so its return adopts.
+        for (let index = 0; index < 8; index += 1)
+            expect(evaluate(READ, `anthropic/claude-opus-5-5-v${index}`)).toBeNull();
+        expect(evaluate(READ, MODEL)).toBeNull();
+    } finally {
+        closeQuietly(db);
+    }
+});

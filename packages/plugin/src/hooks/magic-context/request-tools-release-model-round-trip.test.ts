@@ -28,17 +28,17 @@ import { resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { createTransform } from "./transform";
 
-// The request-tools release keeps one fingerprint per session, tagged with the
-// model it was served on, and replaces a fingerprint recorded for another model
-// without comparing. A session that goes from one prefix-bound model (A) to
-// another (B) and back to A therefore compares A's request with B's last list,
-// finds a different model, and adopts. When the tools changed while the session
-// was away from A, A's own signed thinking from before the switch is still
-// bound to A's old tool list, and nothing on the return pass releases it.
+// The request-tools release keeps one fingerprint per model the session used
+// and compares a pass with the list last served on its own model. A session
+// that goes from one prefix-bound model (A) to another (B) and back to A must
+// therefore compare A's return request with A's last list: when the tools
+// changed while the session was away from A, A's own signed thinking from
+// before the switch is still bound to A's old tool list and must be released.
 //
-// On a primary session with compaction on, the model switch folds the history
-// head and that fold strips every signed block, so the control below passes.
-// Compaction-off sessions and subagents never fold on a model switch.
+// On a primary session with compaction on, the model switch also folds the
+// history head and that fold strips every signed block. Compaction-off
+// sessions and subagents never fold on a model switch, so for them the
+// per-model record is the only protection.
 
 const MODEL_A = { providerID: "anthropic", modelID: "claude-fable-5-2" } as const;
 const MODEL_B = { providerID: "anthropic", modelID: "claude-mythos-5-2" } as const;
@@ -195,15 +195,13 @@ test("control: primary session, Fable 5.2 -> Mythos 5.2 -> Fable 5.2 with a tool
     expect(served.backOnA).not.toContain(THINKING);
 });
 
-// Known gap, kept failing on purpose until the release compares against the
-// list last served on the same model (one record per model key).
-test.failing("compaction-off, Fable 5.2 -> Mythos 5.2 -> Fable 5.2 with a tool added: the return request carries no thinking bound to the old tools", async () => {
+test("compaction-off, Fable 5.2 -> Mythos 5.2 -> Fable 5.2 with a tool added: the return request carries no thinking bound to the old tools", async () => {
     const served = await roundTrip("compaction-off");
     expect(served.keptOnA).toContain(THINKING);
     expect(served.backOnA).not.toContain(THINKING);
 });
 
-test.failing("subagent, Fable 5.2 -> Mythos 5.2 -> Fable 5.2 with a tool added: the return request carries no thinking bound to the old tools", async () => {
+test("subagent, Fable 5.2 -> Mythos 5.2 -> Fable 5.2 with a tool added: the return request carries no thinking bound to the old tools", async () => {
     const served = await roundTrip("subagent");
     expect(served.keptOnA).toContain(THINKING);
     expect(served.backOnA).not.toContain(THINKING);
