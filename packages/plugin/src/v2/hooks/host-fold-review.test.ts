@@ -4,7 +4,7 @@ import {
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { NativeFoldReplay } from "../fold/native-replay";
-import { RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
 import {
     addCodeModeEntries,
@@ -329,7 +329,10 @@ test("manual compact without compartments answers while preserving raw conversat
         const stored = f.raw.prepare("SELECT data FROM session_message WHERE id = ?").get(cut) as {
             data: string;
         };
-        expect(JSON.parse(stored.data).summary).toBe(RAW_HISTORY_ACCOUNT);
+        // With no published history the checkpoint still stores the fixed note,
+        // not the raw-history account: the host's stored text never reaches the
+        // model, which keeps getting the raw conversation below.
+        expect(JSON.parse(stored.data).summary).toBe(CHECKPOINT_NOTE);
         const after = await f.pass();
         expect(after.bytes).toBe(before.bytes);
         for (const row of f.rows)
