@@ -28,6 +28,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
+import { createToolExecuteAfterHook } from "./hook-handlers";
 import { buildSyntheticTodoPart, computeSyntheticCallId, isSyntheticTodoPart } from "./todo-view";
 import {
     injectToolPartIntoAssistantById,
@@ -929,5 +930,63 @@ describe("todo state synthesis — wire shape", () => {
         expect(typeof state.output).toBe("string");
         expect(state.metadata).toBeDefined();
         expect(state.time).toBeDefined();
+    });
+});
+
+describe("todo state synthesis — captured snapshot changes wait for a rebuild", () => {
+    it("serves a custom-status list and a cleared snapshot only on rebuilding passes", async () => {
+        useTempDataHome("todo-capture-defer-");
+        const db = openDatabase();
+        const sessionId = "ses-capture-defer";
+        clearToolPermissionDenied(sessionId);
+        const capture = createToolExecuteAfterHook({ db, channel1StateBySession: new Map() });
+        const runPass = async (isCacheBustingPass: boolean): Promise<MessageLike[]> => {
+            const messages = buildMessages();
+            await applyTodoSynthesis({
+                db,
+                sessionId,
+                messages,
+                fullFeatureMode: true,
+                isCacheBustingPass,
+                sessionMeta: getOrCreateSessionMeta(db, sessionId),
+                todowriteAvailability: { callable: true, frozen: true },
+            });
+            return messages;
+        };
+        const servedTodos = (messages: MessageLike[]): unknown =>
+            (findSyntheticPart(messages)?.part as SyntheticTodoPart | undefined)?.state.input.todos;
+
+        const firstTodos = [{ content: "Plan", status: "in_progress", priority: "high" }];
+        await capture({ tool: "todowrite", sessionID: sessionId, args: { todos: firstTodos } });
+        const firstBust = await runPass(true);
+        expect(servedTodos(firstBust)).toEqual(firstTodos);
+        const firstBytes = JSON.stringify(firstBust);
+
+        // A custom status and priority replace the snapshot, but a defer pass
+        // keeps serving the pair the last rebuild froze, byte for byte.
+        const blockedTodos = [{ content: "Plan", status: "blocked", priority: "urgent" }];
+        await capture({ tool: "todowrite", sessionID: sessionId, args: { todos: blockedTodos } });
+        expect(getOrCreateSessionMeta(db, sessionId).lastTodoState).toBe(
+            JSON.stringify(blockedTodos),
+        );
+        expect(JSON.stringify(await runPass(false))).toBe(firstBytes);
+        const blockedBust = await runPass(true);
+        expect(servedTodos(blockedBust)).toEqual(blockedTodos);
+        const blockedBytes = JSON.stringify(blockedBust);
+
+        // A list that can't be read clears the snapshot. The defer pass still
+        // replays the frozen blocked pair; the next rebuild drops it.
+        await capture({
+            tool: "todowrite",
+            sessionID: sessionId,
+            args: { todos: [{ content: "Missing status" }] },
+        });
+        expect(getOrCreateSessionMeta(db, sessionId).lastTodoState).toBe("[]");
+        expect(JSON.stringify(await runPass(false))).toBe(blockedBytes);
+        const clearedBust = await runPass(true);
+        expect(countSyntheticParts(clearedBust)).toBe(0);
+        expect(JSON.stringify(clearedBust)).toBe(JSON.stringify(buildMessages()));
+        expect(getPersistedTodoSyntheticAnchor(db, sessionId)).toBeNull();
+        expect(JSON.stringify(await runPass(false))).toBe(JSON.stringify(buildMessages()));
     });
 });
