@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
  * Classification rule table (first matching rule wins):
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
+ * | cache_scope_changed | yes | the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache, so it never wakes and is not a second rewrite |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
  * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
@@ -30,6 +31,13 @@ import { Database } from "bun:sqlite";
  * | unaccounted_rewrite | no | matched pass has no accounted attribution |
  * | provider_short_read_after_reclaim | no | overrides provider_short_read_identical_bytes right after a reclaim bust: the bytes extend the reclaim request, but the provider did not serve its prefix (provider-side; one crossing billed twice) |
  * | double_bust_after_reclaim | no | overrides any other accounted class right after a reclaim bust; the wake names the overridden class as cause |
+ * | continuation_short_read | yes | messages are deltas and the full system/tools prefix is unchanged; never wakes, including right after a reclaim bust |
+ * | thread_break_unchanged_client_bytes | conditional | earlier full body and sent client deltas match; wakes only when the window rewrites at least 20,000 tokens, otherwise persists a suppressed observation; only this class and full_body_no_baseline contribute tokens |
+ * | full_body_no_baseline | conditional | no earlier full body is available for comparison; the same 20,000-thread-token window threshold applies |
+ *
+ * A reclaim bust is a rebuild Magic Context makes on purpose to drop or summarize
+ * content: a fold, a flush or a batch of drops. A second rewrite right after one
+ * means a single threshold crossing was billed twice.
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. Without --send, each new event is printed
@@ -57,6 +65,7 @@ import {
     type CacheBustSessionAnalysis,
     classifyBustAfterReclaim,
     isUnaccountedCacheBustClass,
+    isThresholdedThreadClass,
 } from "./cache-bust-attribution";
 
 const STATE_VERSION = 1;
@@ -166,6 +175,8 @@ interface OpenBustWindowState {
      * longer among the rows the next run analyzes.
      */
     lastBustClass?: string;
+    /** Only thresholded thread findings contribute to the carried window total. */
+    threadRewrittenTokens?: number;
 }
 
 interface SessionWatermarkState {
@@ -192,6 +203,7 @@ export interface CacheBustSentinelState {
     sessions: Record<string, SessionWatermarkState>;
     windows: Record<string, SentWindowState>;
     deliveries: Record<string, SentDeliveryState>;
+    suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number }>;
 }
 
 export interface BustWindow {
@@ -199,6 +211,7 @@ export interface BustWindow {
     startMs: number;
     lastBustMs: number;
     rows: AnalyzedCacheRequest[];
+    precedingThreadRewrittenTokens?: number;
 }
 
 export interface SentinelCounters {
@@ -246,7 +259,7 @@ export class CacheBustSentinelInputError extends Error {
 }
 
 function defaultState(): CacheBustSentinelState {
-    return { version: STATE_VERSION, sessions: {}, windows: {}, deliveries: {} };
+    return { version: STATE_VERSION, sessions: {}, windows: {}, deliveries: {}, suppressedWindows: {} };
 }
 
 function finiteNonnegative(value: unknown): number | undefined {
@@ -271,7 +284,8 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
     const sessions = recordValue(root?.sessions);
     const windows = recordValue(root?.windows);
     const deliveries = root?.deliveries === undefined ? {} : recordValue(root.deliveries);
-    if (root?.version !== STATE_VERSION || !sessions || !windows || !deliveries) {
+    const suppressed = root?.suppressedWindows === undefined ? {} : recordValue(root.suppressedWindows);
+    if (root?.version !== STATE_VERSION || !sessions || !windows || !deliveries || !suppressed) {
         throw new CacheBustSentinelInputError(`unsupported sentinel state at ${path}`);
     }
 
@@ -298,6 +312,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
                           startMs,
                           lastBustMs,
                           ...(lastBustClass ? { lastBustClass } : {}),
+                           ...(finiteNonnegative(open.threadRewrittenTokens) !== undefined ? { threadRewrittenTokens: open.threadRewrittenTokens as number } : {}),
                       },
                   }
                 : {}),
@@ -320,6 +335,14 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             lastEventId: row.lastEventId,
             eventIds: [...row.eventIds],
         };
+    }
+    for (const [key, raw] of Object.entries(suppressed)) {
+        const row = recordValue(raw);
+        const rewrittenTokens = finiteNonnegative(row?.rewrittenTokens);
+        if (typeof row?.divergenceClass !== "string" || !isThresholdedThreadClass(row.divergenceClass) || rewrittenTokens === undefined) {
+            throw new CacheBustSentinelInputError(`invalid suppressed window state ${key} in ${path}`);
+        }
+        state.suppressedWindows[key] = { divergenceClass: row.divergenceClass, rewrittenTokens };
     }
     for (const [deliveryId, raw] of Object.entries(deliveries)) {
         const row = recordValue(raw);
@@ -837,6 +860,7 @@ export function groupBustWindows(
               startMs: seed.startMs,
               lastBustMs: seed.lastBustMs,
               rows: [],
+              precedingThreadRewrittenTokens: seed.threadRewrittenTokens,
           }
         : undefined;
     let previousWasBust = Boolean(seed);
@@ -850,7 +874,7 @@ export function groupBustWindows(
             previousWasBust = false;
             continue;
         }
-        if (request.verdict !== "BUST") {
+        if (request.verdict !== "BUST" && request.verdict !== "SHORT") {
             if (current?.rows.length) windows.push(current);
             current = undefined;
             previousWasBust = false;
@@ -909,20 +933,32 @@ function windowKey(sessionId: string, startMs: number): string {
     return `${sessionId}|${startMs}`;
 }
 
+function windowRewrittenTokens(window: BustWindow): number {
+    return (window.precedingThreadRewrittenTokens ?? 0) + window.rows.reduce((sum, row) =>
+        sum + (isThresholdedThreadClass(row.divergenceClass ?? "") ? Math.max(0, row.rewrittenTokens ?? 0) : 0), 0);
+}
+
 export function eventForWindow(
     window: BustWindow,
     directory: string,
     state: CacheBustSentinelState,
 ): CacheBustEvent | null {
+    const rewrittenTokens = windowRewrittenTokens(window);
+    const key = windowKey(window.sessionId, window.startMs);
+    for (const row of window.rows) {
+        if (isThresholdedThreadClass(row.divergenceClass as string) && rewrittenTokens < 20_000) {
+            // Observations are distinct from sent-event IDs, so an accumulating
+            // window can cross the threshold later without being deduplicated.
+            state.suppressedWindows[key] = { divergenceClass: row.divergenceClass as string, rewrittenTokens };
+        }
+    }
     const unaccounted = window.rows.filter((row) =>
-        isUnaccountedCacheBustClass(row.divergenceClass as string),
-    );
+        isUnaccountedCacheBustClass(row.divergenceClass as string, rewrittenTokens));
     if (unaccounted.length === 0) return null;
     // A second bust right after a reclaim is the more specific finding than the
     // reclaim it follows, so it speaks for the window and names its cause.
     const representative = unaccounted.find((row) => row.cause) ?? unaccounted[0];
     const divergenceClass = representative.divergenceClass as string;
-    const key = windowKey(window.sessionId, window.startMs);
     const prior = state.windows[key];
     if (prior?.divergenceClass === divergenceClass) return null;
     const baseId = cacheBustWindowId(window.sessionId, window.startMs);
@@ -941,7 +977,7 @@ export function eventForWindow(
         payload: {
             session: window.sessionId,
             at: representative.at,
-            rewritten_tokens: unaccounted.reduce(
+            rewritten_tokens: isThresholdedThreadClass(divergenceClass) ? rewrittenTokens : unaccounted.reduce(
                 (total, row) => total + Math.max(0, row.rewrittenTokens ?? 0),
                 0,
             ),
@@ -1146,7 +1182,7 @@ function updateOpenWindowState(
 ): void {
     const latest = [...requests].sort((left, right) => right.timestampMs - left.timestampMs)[0];
     if (!latest) return;
-    if (latest.verdict !== "BUST") {
+    if (latest.verdict !== "BUST" && latest.verdict !== "SHORT") {
         delete sessionState.openWindow;
         return;
     }
@@ -1159,6 +1195,7 @@ function updateOpenWindowState(
             startMs: window.startMs,
             lastBustMs: window.lastBustMs,
             ...(lastBustClass ? { lastBustClass } : {}),
+            threadRewrittenTokens: windowRewrittenTokens(window),
         };
     }
 }
@@ -1261,9 +1298,9 @@ export async function runSentinelOnce(
                     );
                 }
                 const hasUnaccounted = window.rows.some((row) =>
-                    isUnaccountedCacheBustClass(row.divergenceClass as string),
-                );
+                    isUnaccountedCacheBustClass(row.divergenceClass as string, windowRewrittenTokens(window)));
                 if (!hasUnaccounted) {
+                    eventForWindow(window, analysis.directory ?? session.directory ?? session.projectPath, state);
                     counters.accountedWindows += 1;
                     continue;
                 }

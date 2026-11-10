@@ -8359,6 +8359,7 @@ function maybeFireHistorian(args: {
 				providerShapeVersion: "pi-folded-v1",
 				cacheNamespace: `pi:${sessionId}`,
 				emergencyTailScale,
+				recovery: historianStateSnapshot.needsEmergencyRecovery,
 				liftLivePromptFloor,
 			}),
 		);

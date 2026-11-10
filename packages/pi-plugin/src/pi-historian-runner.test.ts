@@ -259,6 +259,7 @@ async function runHistorianWith(args: {
 	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	providerMessages?: RawMessage[];
 	forceKeepLastCompartment?: boolean;
+	forceDrainQuota?: boolean;
 	historianChunkTokens?: number;
 	historianContextLimit?: number;
 	producerContextLimits?: ReadonlyMap<string, number>;
@@ -322,6 +323,7 @@ async function runHistorianWith(args: {
 		compartmentLeaseHolderId: holderId,
 		ensureProjectRegistered: args.ensureProjectRegistered,
 		forceKeepLastCompartment: args.forceKeepLastCompartment,
+		forceDrainQuota: args.forceDrainQuota,
 	});
 	return { db, runner };
 }
@@ -631,6 +633,56 @@ describe("runPiHistorian", () => {
 					title: "Initial Pi slice",
 				}),
 			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it.each([
+		{
+			name: "routine force pressure",
+			recovery: false,
+			forceDrainQuota: false,
+			runs: 0,
+		},
+		{
+			name: "overflow recovery",
+			recovery: true,
+			forceDrainQuota: false,
+			runs: 1,
+		},
+		{
+			name: "manual quota override",
+			recovery: false,
+			forceDrainQuota: true,
+			runs: 1,
+		},
+	])("preserves small-head admission on stale refresh for $name", async ({
+		recovery,
+		forceDrainQuota,
+		runs,
+	}) => {
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: makeBoundarySnapshot({
+				recovery,
+				usagePercentage: 87,
+				rawLastMessageIdAtTrigger: "old-m12",
+				rawRangeFingerprint: "stale-fingerprint",
+			}),
+			refreshBoundarySnapshot: () =>
+				makeBoundarySnapshot({
+					protectedTailStart: 3,
+					eligibleEndOrdinal: 3,
+					eligibleEndMessageId: "m2",
+					usagePercentage: 87,
+					summaryRemovedEligibleTokens: 1,
+				}),
+			forceDrainQuota,
+		});
+		try {
+			expect(runner.run).toHaveBeenCalledTimes(runs);
+			expect(getCompartments(db, "ses-historian")).toHaveLength(runs);
 		} finally {
 			closeQuietly(db);
 		}

@@ -11,6 +11,7 @@ import {
 import * as storageTags from "../../features/magic-context/storage-tags";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import * as finalWire from "../../hooks/magic-context/final-wire-token-estimate";
+import * as boundary from "../../hooks/magic-context/protected-tail-boundary";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import * as tagOwnerWarmup from "../../hooks/magic-context/tag-owner-warmup";
@@ -377,11 +378,20 @@ test("first pass after a restart and 1h41m idle with a saved 83.9% reading", asy
 
 test("force band in the reporter's shape: what the summary tail and the drop protection window measure", async () => {
     const f = await reporterSession(8864, 262_504); // 86.9% of 302,222
+    const candidates: NonNullable<BoundarySnapshot>[] = [];
+    const hasRunnableWindow = boundary.hasRunnableCompartmentWindow;
+    const admission = spyOn(boundary, "hasRunnableCompartmentWindow").mockImplementation(
+        (snapshot) => {
+            if (snapshot.sessionId === f.session && snapshot.mode === "trigger") {
+                candidates.push(snapshot);
+            }
+            return hasRunnableWindow(snapshot);
+        },
+    );
     await withSession(f, async (runs) => {
-        // At 86.9% (the force band starts at 85%) the trigger starts a summary run
-        // in the background. The first pass after the hook starts may still be
-        // numbering the stored messages and skip the trigger, so take a few steps
-        // until a run reaches the historian.
+        // Force pressure alone must not start a summary when the eligible text
+        // and inputs are below 2% of the usable window. Allow ordinal preparation
+        // to finish, then measure the rejected boundary as well as tool protection.
         const passLogs: string[] = [];
         for (let step = 0; step < 4 && runs.length === 0; step++) {
             if (step > 0) f.respondWithTool(shellStep(STEPS + step), 262_504, prose.repeat(10));
@@ -395,7 +405,7 @@ test("force band in the reporter's shape: what the summary tail and the drop pro
                 "SELECT tag_number AS tag, token_count AS output, input_token_count AS input FROM tags WHERE session_id = ? AND type = 'tool'",
             )
             .all(f.session) as Array<{ tag: number; output: number; input: number }>;
-        const snapshot = runs[0];
+        const snapshot = candidates.find((candidate) => candidate.usagePercentage >= 85);
         console.log(
             `ISSUE886_FORCE ${JSON.stringify({
                 tail: {
@@ -429,13 +439,15 @@ test("force band in the reporter's shape: what the summary tail and the drop pro
         expect(snapshot!.trueRawEligibleTokens).toBeGreaterThan(
             5 * snapshot!.summaryRemovedEligibleTokens,
         );
+        expect(snapshot!.summaryRemovedEligibleTokens).toBeLessThan(INPUT_WINDOW * 0.02);
+        expect(runs).toHaveLength(0);
         // `protected_tokens` is a mass of tool output alone: with short shell
         // output, 16,000 tokens of it protect every tool call of the turn.
         expect(window.status.protectedCount).toBe(tools.length);
         expect(
             first.logs.some((line) => /emergency tiered drop skipped: no-candidates/.test(line)),
         ).toBe(true);
-    });
+    }).finally(() => admission.mockRestore());
 }, 300_000);
 
 // A pass sized from a local count and a pass with a provider reading of the

@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 
 import {
     type AnalyzedCacheRequest,
@@ -40,7 +41,7 @@ import { disruptionLogMarkers } from "./cache-bust-scheduler-log";
 const temporaryDirectories: string[] = [];
 
 function temporaryDirectory(label: string): string {
-    const directory = mkdtempSync(join(tmpdir(), label));
+    const directory = createTestTempDirFromPath(join(tmpdir(), label));
     temporaryDirectories.push(directory);
     return directory;
 }
@@ -324,14 +325,14 @@ describe("cache-bust attribution contract", () => {
         ).toBe("no_mc_pass_row");
     });
 
-    test("classifies a zero provider read as a full miss but keeps a short read unaccounted", () => {
+    test("classifies a same-scope zero read as a full miss but keeps a short read unaccounted", () => {
         const fullMiss = classifyCacheBust({
             divergenceIndex: 4,
             previousMessageCount: 20,
             providerComparableRead: 0,
             previousTotal: 594_149,
             previousModel: "claude-opus-5",
-            currentModel: "claude-opus-4-8",
+            currentModel: "claude-opus-5",
             decision: decision({ decision: "defer", canonicalDecision: "defer" }),
         });
         expect(fullMiss).toBe("provider_full_miss");
@@ -1161,6 +1162,7 @@ describe("cache-bust sentinel runs", () => {
             startMs: 50_000,
             lastBustMs: 50_000,
             lastBustClass: "accounted_execute_published_history",
+            threadRewrittenTokens: 0,
         });
 
         time = 120_000;

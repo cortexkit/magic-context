@@ -168,9 +168,7 @@ test("force band with the fixed floor over the ceiling: the conditions of the lo
     expect(result.floorSkips).toBeGreaterThan(0);
 }, 120_000);
 
-// Expected to fail until the force band stops buying a prefix rebuild for a
-// summary of one or two messages. A fix flips this to `test`.
-test.failing("force band with the fixed floor over the ceiling: tiny summaries do not rebuild the prefix every few steps", async () => {
+test("force band with the fixed floor over the ceiling: tiny summaries do not rebuild the prefix every few steps", async () => {
     const result = await steadyState();
     // At most one rebuild over the measured steps: the accumulated summaries may
     // land together in one rebuild, not in a rebuild every other step.

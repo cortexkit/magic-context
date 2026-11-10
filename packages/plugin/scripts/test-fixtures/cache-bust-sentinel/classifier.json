@@ -1,5 +1,15 @@
 [
     {
+        "class": "cache_scope_changed",
+        "decision": {},
+        "input": {
+            "previousModel": "model-a",
+            "currentModel": "model-b",
+            "idleCacheExpiry": true,
+            "threadEvidence": "thread_break_unchanged_client_bytes"
+        }
+    },
+    {
         "class": "system_row_shift",
         "decision": { "decision": "defer" },
         "input": {
@@ -108,7 +118,7 @@
             "providerComparableRead": 0,
             "previousTotal": 594149,
             "previousModel": "claude-opus-5",
-            "currentModel": "claude-opus-4-8"
+            "currentModel": "claude-opus-5"
         }
     },
     {
@@ -205,5 +215,20 @@
             "directInput": 474788,
             "previousTotal": 521668
         }
+    },
+    {
+        "class": "continuation_short_read",
+        "decision": {},
+        "input": { "threadEvidence": "continuation_short_read" }
+    },
+    {
+        "class": "thread_break_unchanged_client_bytes",
+        "decision": {},
+        "input": { "threadEvidence": "thread_break_unchanged_client_bytes" }
+    },
+    {
+        "class": "full_body_no_baseline",
+        "decision": {},
+        "input": { "threadEvidence": "full_body_no_baseline" }
     }
 ]

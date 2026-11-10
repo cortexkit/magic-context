@@ -325,6 +325,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             usage: args.boundaryUsage,
             usageSource: args.boundaryUsageSource,
             emergencyTailScale,
+            recovery: args.projectRecoveryRequest !== undefined,
         });
     }
 
@@ -466,11 +467,14 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         cachedBoundarySnapshot = null;
         if (!hasNewRawHistoryForCompartment()) return null;
         const resolve = args.resolveRecoveryBoundary ?? resolveBoundarySnapshot;
-        let snapshot = resolve();
+        let snapshot = { ...resolve(), recovery: true };
         if (!hasRunnableCompartmentWindow(snapshot)) {
-            snapshot = resolve(
-                args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5,
-            );
+            snapshot = {
+                ...resolve(
+                    args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5,
+                ),
+                recovery: true,
+            };
         }
         cachedBoundarySnapshot = snapshot;
         return hasRunnableCompartmentWindow(snapshot) ? snapshot : null;

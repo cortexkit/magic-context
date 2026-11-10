@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 import { stripSystemInjection } from "../src/hooks/magic-context/system-injection-stripper";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import { type CacheBustDecisionAttribution } from './cache-bust-attribution';
@@ -500,8 +501,8 @@ describe("analyze-cache-bust dump discovery", () => {
         }
     });
 
-    test("classifies an Anthropic zero read and wire-model swap as a provider full miss", () => {
-        const dir = mkdtempSync(join(tmpdir(), "cache-provider-full-miss-"));
+    test("classifies an Anthropic zero read and wire-model swap as a cache scope change", () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "cache-provider-full-miss-"));
         tempDirs.push(dir);
         const session = "ses_brocaFullMiss";
         const previousAt = "2026-09-20T16:25:56.000Z";
@@ -543,7 +544,7 @@ describe("analyze-cache-bust dump discovery", () => {
             },
         ]);
 
-        expect(rows[1]?.divergenceClass).toBe("provider_full_miss");
+        expect(rows[1]?.divergenceClass).toBe("cache_scope_changed");
         expect(rows[1]?.previous?.wireModel).toBe("claude-opus-5");
         expect(rows[1]?.current.wireModel).toBe("claude-opus-4-8");
 
@@ -555,7 +556,7 @@ describe("analyze-cache-bust dump discovery", () => {
             "--dir",
             dir,
             "--all-rows",
-        ]);
+        ], { windowsHide: true });
         expect(run.exitCode).toBe(0);
         expect(run.stdout.toString()).toContain(
             "wireModel=claude-opus-5 → claude-opus-4-8",
@@ -1535,11 +1536,9 @@ describe("analyze-cache-bust rotating billing header", () => {
     test("a short read over an unchanged reusable prefix is provider-side latency", () => {
         const { dir, session } = billingHeaderSession();
 
-        // The fixture's third request came 6 min after the second. A 1 h TTL keeps
-        // this about the identical-bytes provider class, not idle expiry.
-        const row = __test.analyzeSnapshots(snapshotsFor(dir, session), [], {
-            cacheTtlMs: 3_600_000,
-        })[2];
+        // The fixture's previous body declares a 1 h TTL, so its six-minute gap
+        // still tests the identical-bytes provider class rather than idle expiry.
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[2];
 
         expect(row.verdict).toBe("LATENCY");
         expect(row.byteVerdict).toBe("STABLE");
@@ -1551,10 +1550,12 @@ describe("analyze-cache-bust rotating billing header", () => {
         expect(row.current.usage?.cacheRead).toBe(285_161);
     });
 
-    test("the same short read 6 min after the last refresh is idle expiry under the default 5 min TTL", () => {
+    test("the same short read 6 min after the last refresh is idle expiry with an explicit 5 min TTL", () => {
         const { dir, session } = billingHeaderSession();
 
-        const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[2];
+        const row = __test.analyzeSnapshots(snapshotsFor(dir, session), [], {
+            cacheTtlMs: 300_000,
+        })[2];
 
         expect(row.verdict).toBe("LATENCY");
         expect(row.idleGapMs).toBe(361_502);

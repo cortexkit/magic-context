@@ -5,11 +5,13 @@ import {
     readFileSync,
     readlinkSync,
     realpathSync,
+    unlinkSync,
     writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getHarness, type HarnessId } from "./harness";
+import { log } from "./logger";
 import { createTestTempDir } from "./test-temp-dir";
 
 export function getDataDir(): string {
@@ -90,8 +92,8 @@ export function getMagicContextHistorianDir(harness: HarnessId = getHarness()): 
  *
  * `.cortexkit/` is the shared CortexKit per-project dir (also holds the
  * project config `magic-context.jsonc`). Because these artifacts are transient
- * debug dumps that shouldn't dirty the user's repo, the first write also drops
- * a fenced-block `.gitignore` entry ignoring this subdir (see
+ * debug dumps that shouldn't dirty the user's repo, each writer ensures a
+ * self-ignoring `.gitignore` inside this subdir (see
  * ensureCortexKitArtifactGitignore) while leaving `*.jsonc` config tracked.
  *
  * Migration note: artifacts used to live under `.opencode/magic-context/`. We
@@ -106,47 +108,45 @@ export function getProjectMagicContextDir(directory: string): string {
     return path.join(directory, ".cortexkit", "magic-context");
 }
 
-const GITIGNORE_GUARD_OPEN = "# >>> cortexkit:magic-context";
-const GITIGNORE_GUARD_CLOSE = "# <<< cortexkit:magic-context";
-
 /**
- * Ensure `<project>/.cortexkit/.gitignore` ignores Magic Context's transient
- * artifact subdir (`magic-context/`) without touching anything else in the
- * shared `.cortexkit/` dir — the project config `magic-context.jsonc` stays
- * tracked, and any sibling module's (e.g. AFT's) entries are preserved.
- *
- * Uses the shared CortexKit fenced-block convention: each module owns exactly
- * its `# >>> cortexkit:<module>` … `# <<< cortexkit:<module>` block and appends
- * it idempotently (no-op when its own guard line is already present). This lets
- * multiple cortexkit modules coexist in one `.gitignore` without clobbering.
+ * Hide artifacts and their ignore file without hiding the sibling project
+ * config. Retire our old shared-file block only after the nested rule is ready,
+ * preserving all bytes outside our complete fences.
  *
  * Best-effort: a write failure never blocks an artifact write (the caller
  * already degrades gracefully on its own write failures).
  */
 export function ensureCortexKitArtifactGitignore(directory: string): void {
     try {
-        const cortexKitDir = path.join(directory, ".cortexkit");
-        const gitignorePath = path.join(cortexKitDir, ".gitignore");
-        let existing = "";
-        if (existsSync(gitignorePath)) {
-            existing = readFileSync(gitignorePath, "utf8");
-            // Already fenced by us — nothing to do.
-            if (existing.includes(GITIGNORE_GUARD_OPEN)) return;
+        const artifactDir = getProjectMagicContextDir(directory);
+        const gitignorePath = path.join(artifactDir, ".gitignore");
+        mkdirSync(artifactDir, { recursive: true });
+        if (!existsSync(gitignorePath) || readFileSync(gitignorePath, "utf8") !== "*\n") {
+            writeFileSync(gitignorePath, "*\n", "utf8");
         }
-        const block = `${GITIGNORE_GUARD_OPEN}\nmagic-context/\n${GITIGNORE_GUARD_CLOSE}\n`;
-        const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-        const next = existing + (needsLeadingNewline ? "\n" : "") + block;
-        mkdirSync(cortexKitDir, { recursive: true });
-        writeFileSync(gitignorePath, next, "utf8");
-    } catch {
-        // best-effort — never block an artifact write on the gitignore.
+
+        const sharedPath = path.join(directory, ".cortexkit", ".gitignore");
+        if (!existsSync(sharedPath)) return;
+        // A byte-preserving encoding keeps even non-UTF8 sibling entries intact.
+        const existing = readFileSync(sharedPath).toString("latin1");
+        // Do not cross another module's fence if an old block is incomplete.
+        const next = existing.replace(
+            /^# >>> cortexkit:magic-context\r?\n(?:(?!^# (?:>>>|<<<) cortexkit:)[\s\S])*?^# <<< cortexkit:magic-context(?:\r?\n|$)/gm,
+            "",
+        );
+        if (next === existing) return;
+        const remaining = Buffer.from(next, "latin1");
+        if (remaining.toString("utf8").trim() === "") unlinkSync(sharedPath);
+        else writeFileSync(sharedPath, remaining);
+    } catch (error) {
+        log("Failed to ensure project artifact gitignore", { directory, error: String(error) });
     }
 }
 
 /**
  * Project-local historian artifact directory.
  *
- * Layout: `<project-directory>/.opencode/magic-context/historian/`
+ * Layout: `<project-directory>/.cortexkit/magic-context/historian/`
  *
  * Used for:
  *   - existing-state offload XMLs that long historian/recomp passes write
@@ -154,7 +154,7 @@ export function ensureCortexKitArtifactGitignore(directory: string): void {
  *   - validation-failure dump XMLs preserved for debugging
  *
  * Callers must `mkdirSync(dir, { recursive: true })` before writing — the
- * `.opencode/` parent may not exist on a fresh project, and write failures
+ * `.cortexkit/` parent may not exist on a fresh project, and write failures
  * here must degrade gracefully (e.g. historian falls back to inline state).
  */
 export function getProjectMagicContextHistorianDir(directory: string): string {

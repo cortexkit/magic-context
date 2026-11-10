@@ -22,7 +22,7 @@ export interface PersistV2UsageReadingArgs {
 /**
  * Record the usage OpenCode stored for the latest completed reply.
  *
- * The reading is the prompt size of a request the provider accepted, so it is
+ * An unmarked `reading` is the prompt size of a request the provider accepted, so it is
  * real pressure at any size. It is never compared with the configured window:
  * that window can be smaller than what the model actually serves, and a reading
  * past it is real overflow of the user's limit for the scheduler to handle.
@@ -68,6 +68,15 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         !providerResponseFailed(completion) &&
         (reading.inputTokens > 0 || isSuccessfulProviderCompletion(completion));
     const responseTime = served && reading.completed;
+    // Without usage for each run, the server sum does not measure one context size.
+    if (reading.serverFallback) {
+        if (responseTime) updateSessionMeta(db, sessionID, { lastResponseTime: responseTime });
+        sessionLog(
+            sessionID,
+            `v2 usage: ignored server-fallback reply inputTokens=${reading.inputTokens} (${reading.serverFallbackInvalidUsage ? "invalid server-fallback usage marker" : "sum of two server runs"}); keeping previous reading`,
+        );
+        return;
+    }
     if (reading.inputTokens <= 0 || !Number.isFinite(reading.limit) || reading.limit <= 0) {
         if (responseTime) updateSessionMeta(db, sessionID, { lastResponseTime: responseTime });
         return;
