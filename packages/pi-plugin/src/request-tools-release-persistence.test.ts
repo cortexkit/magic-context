@@ -7,6 +7,7 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import { isSessionMetaCollectionInline } from "@magic-context/core/features/magic-context/storage-session-collections";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	_resetHarnessForTesting,
@@ -144,13 +145,27 @@ function fixture(name: string) {
 		return JSON.stringify(served?.messages ?? messages);
 	};
 	/** Make every write to the thinking-strip ledger fail, as a failed SQLite write would. */
+	// The strip ledger is a session_meta column in older stores and chunk rows
+	// in session_meta_chunks in current ones; fail whichever write it takes.
 	const failStripWrites = (fail: boolean) =>
 		db.exec(
-			fail
-				? `CREATE TRIGGER fail_strip_ledger BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta
+			!fail
+				? `DROP TRIGGER IF EXISTS fail_strip_ledger;
+				   DROP TRIGGER IF EXISTS fail_strip_ledger_insert;
+				   DROP TRIGGER IF EXISTS fail_strip_ledger_delete;`
+				: isSessionMetaCollectionInline(db, "merged_reasoning_stripped_ids")
+					? `CREATE TRIGGER fail_strip_ledger BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta
 				   WHEN NEW.merged_reasoning_stripped_ids IS NOT OLD.merged_reasoning_stripped_ids
 				   BEGIN SELECT RAISE(ABORT, 'injected strip ledger write failure'); END;`
-				: "DROP TRIGGER IF EXISTS fail_strip_ledger;",
+					: `CREATE TRIGGER fail_strip_ledger BEFORE UPDATE ON session_meta_chunks
+				   WHEN NEW.column_name = 'merged_reasoning_stripped_ids' OR OLD.column_name = 'merged_reasoning_stripped_ids'
+				   BEGIN SELECT RAISE(ABORT, 'injected strip ledger write failure'); END;
+				   CREATE TRIGGER fail_strip_ledger_insert BEFORE INSERT ON session_meta_chunks
+				   WHEN NEW.column_name = 'merged_reasoning_stripped_ids'
+				   BEGIN SELECT RAISE(ABORT, 'injected strip ledger write failure'); END;
+				   CREATE TRIGGER fail_strip_ledger_delete BEFORE DELETE ON session_meta_chunks
+				   WHEN OLD.column_name = 'merged_reasoning_stripped_ids'
+				   BEGIN SELECT RAISE(ABORT, 'injected strip ledger write failure'); END;`,
 		);
 	return {
 		tools,
