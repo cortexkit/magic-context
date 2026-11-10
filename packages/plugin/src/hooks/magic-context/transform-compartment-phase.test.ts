@@ -746,7 +746,7 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
     // leave the request far over the window. The blocking join keeps starting
     // the historian on the next eligible chunk while the request it would send
     // is over the line, within the one inline join budget.
-    type RunBehavior = "publish" | "nothing" | "hang";
+    type RunBehavior = "publish" | "nothing" | "hang" | { publishAfterMs: number };
 
     function recoveryHarness(sessionId: string, behaviors: RunBehavior[], tokens: number[]) {
         createOpenCodeDb(
@@ -788,6 +788,11 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             );
             if (behavior === "publish") publish(run);
             if (behavior === "hang") hanging.push(finish);
+            else if (typeof behavior === "object")
+                setTimeout(() => {
+                    publish(run);
+                    finish();
+                }, behavior.publishAfterMs);
             else finish();
         });
         const projected: number[] = [];
@@ -830,6 +835,9 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             historianChunkTokens: 25_000,
             historianTimeoutMs,
             compartmentDirectory: "/tmp",
+            // The runner start is mocked; an executor only marks the historian
+            // as able to run, as it is in production.
+            hiddenCompletionExecutor: {} as never,
             messages: Array.from({ length: 12 }, (_, i) => ({
                 info: { id: `m${i + 1}`, role: i % 2 === 0 ? "user" : "assistant" },
                 parts: [],
@@ -895,6 +903,8 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             expect(result.chainedRecoveryRuns).toBe(2);
             expect(result.historianJoinTimedOut).toBe(false);
             expect(result.justAwaitedPublication).toBe(true);
+            // Eligible history is left, so the final check keeps the 95% line.
+            expect(result.recoveryHistoryRemains).toBe(true);
             expect(
                 log.mock.calls.some(([, text]) =>
                     String(text).includes(
@@ -923,8 +933,86 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             // The chunks already published are still adopted on this pass.
             expect(result.awaitedCompartmentRun).toBe(true);
             expect(result.pendingCompartmentInjection?.compartmentCount).toBe(2);
+            // The timed-out run is still active, and the pass reports it so.
+            expect(result.compartmentInProgress).toBe(true);
+            expect(result.recoveryHistoryRemains).toBe(true);
         } finally {
             harness.cleanup();
+        }
+    });
+
+    it("gives the whole chain one join budget: a later run waits only for what is left", async () => {
+        const sessionId = "ses-recovery-chain-one-budget";
+        const log = spyOn(logger, "sessionLog");
+        // The first chained run takes 600 ms of the 2 s budget; the next one
+        // hangs and may wait only for what is left of the same budget.
+        const harness = recoveryHarness(sessionId, [{ publishAfterMs: 600 }, "hang"], [30_000]);
+        try {
+            const result = await harness.run(2_000);
+            expect(harness.started).toEqual([3, 5]);
+            expect(result.historianJoinTimedOut).toBe(true);
+            const waited = log.mock.calls
+                .map(([, text]) => String(text).match(/compartment await timed out after (\d+)ms/))
+                .find((match) => match !== null);
+            expect(waited).toBeDefined();
+            expect(Number(waited?.[1])).toBeLessThanOrEqual(1_400);
+        } finally {
+            harness.cleanup();
+            log.mockRestore();
+        }
+    });
+
+    it("does not start a chained run with less than a quarter of a short budget left", async () => {
+        const sessionId = "ses-recovery-chain-min-budget";
+        const log = spyOn(logger, "sessionLog");
+        // A 2 s budget needs 500 ms left to start a chained run; the first
+        // chained run leaves about 300 ms.
+        const harness = recoveryHarness(sessionId, [{ publishAfterMs: 1_700 }], [30_000]);
+        try {
+            const result = await harness.run(2_000);
+            expect(harness.started).toEqual([3]);
+            expect(result.historianJoinTimedOut).toBe(false);
+            expect(result.compartmentInProgress).toBe(false);
+            expect(
+                log.mock.calls.some(([, text]) =>
+                    /recovery chain stops: \d+ms of the 2000ms inline join budget is left, under the 500ms a chained run needs/.test(
+                        String(text),
+                    ),
+                ),
+            ).toBe(true);
+        } finally {
+            harness.cleanup();
+            log.mockRestore();
+        }
+    });
+
+    it("stops when the historian's drain budget is spent", async () => {
+        const sessionId = "ses-recovery-chain-drain-budget";
+        const log = spyOn(logger, "sessionLog");
+        const harness = recoveryHarness(sessionId, ["publish"], [30_000]);
+        try {
+            const db = openDatabase();
+            getOrCreateSessionMeta(db, sessionId);
+            // At emergency pressure the drain budget binds only during the
+            // backoff after a failed drain run.
+            const now = Date.now();
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 500000, historian_drain_failure_at = ? WHERE session_id = ?",
+            ).run(now, now, sessionId);
+            const result = await harness.run();
+            expect(harness.started).toEqual([]);
+            expect(result.chainedRecoveryRuns).toBe(0);
+            expect(result.recoveryHistoryRemains).toBe(false);
+            expect(
+                log.mock.calls.some(([, text]) =>
+                    String(text).includes(
+                        "recovery chain stops: the historian's drain budget is spent",
+                    ),
+                ),
+            ).toBe(true);
+        } finally {
+            harness.cleanup();
+            log.mockRestore();
         }
     });
 
@@ -951,6 +1039,9 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
             expect(harness.started).toEqual([]);
             expect(result.chainedRecoveryRuns).toBe(0);
             expect(result.awaitedCompartmentRun).toBe(true);
+            // Nothing left for the historian, so the final check may send a
+            // request up to the whole window.
+            expect(result.recoveryHistoryRemains).toBe(false);
         } finally {
             harness.cleanup();
         }

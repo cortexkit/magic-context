@@ -10,7 +10,8 @@
  *
  * The historian's model call is stubbed: each run publishes one user turn and
  * its reply as a compartment, the way the real runner publishes (the published
- * callback, and the recovery latch cleared).
+ * callback; the recovery latch stays armed until a recovery pass's request
+ * fits).
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
@@ -27,7 +28,6 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
-    clearEmergencyRecovery,
     getOverflowState,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
@@ -183,7 +183,6 @@ function stubHistorian(db: ReturnType<typeof openDatabase>, publishing: number) 
             },
         ]);
         deps.onCompartmentStatePublished?.(deps.sessionId);
-        clearEmergencyRecovery(db, deps.sessionId);
     });
     return { spy, runs: () => runs };
 }
@@ -193,6 +192,7 @@ function newTransform(args: {
     live: Map<string, typeof LARGE>;
     onRefuse: () => void;
     notices?: string[];
+    hostAddedTokens?: number;
 }) {
     return createTransform({
         tagger: createTagger(),
@@ -217,6 +217,12 @@ function newTransform(args: {
         hostRefusalNotice: async (_client, _sessionId, message) => {
             args.notices?.push(message);
         },
+        // An OpenCode 2 host reports the checkpoint text it adds after the
+        // transform; the totals are kept small so they raise no pressure.
+        hostInputEstimate:
+            args.hostAddedTokens === undefined
+                ? undefined
+                : () => ({ tokens: 1, pressureTokens: 1, hostAddedTokens: args.hostAddedTokens }),
         hostRefuse: async () => {
             args.onRefuse();
         },
@@ -237,13 +243,23 @@ async function passLogs(sessionId: string, run: () => Promise<unknown>): Promise
 }
 
 /** A session last measured on the large model at well over the small model's window. */
-async function switchedSession(sessionId: string, publishing: number) {
+async function switchedSession(
+    sessionId: string,
+    publishing: number,
+    options: { hostAddedTokens?: number } = {},
+) {
     writeOpenCodeDb(sessionId);
     const db = openDatabase();
     const live = new Map([[sessionId, LARGE]]);
     let refused = 0;
     const notices: string[] = [];
-    const transform = newTransform({ db, live, onRefuse: () => refused++, notices });
+    const transform = newTransform({
+        db,
+        live,
+        onRefuse: () => refused++,
+        notices,
+        hostAddedTokens: options.hostAddedTokens,
+    });
     // An earlier turn on the large model, measured by the provider.
     await transform({}, { messages: hostMessages(sessionId, LARGE) } as never);
     updateSessionMeta(db, sessionId, {
@@ -295,6 +311,9 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
         expect(pass.refused()).toBe(0);
         expect(pass.notices).toEqual([]);
         expect(log).not.toContain("EMERGENCY: fail-closed");
+        // The request fits, so this pass ends recovery.
+        expect(log).toMatch(/recovery request admitted: about \d+ tokens/);
+        expect(getOverflowState(pass.db, sessionId).needsEmergencyRecovery).toBe(false);
         const served = estimateFinalWireInputTokens({
             messages: pass.output.messages as never,
             systemPromptTokens: 0,
@@ -303,6 +322,24 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
             sessionId,
         });
         expect(served.pressureTokens).toBeLessThanOrEqual(recoveryLine(pass.db, sessionId));
+    });
+
+    it("counts the text an OpenCode 2 host adds after the transform", async () => {
+        const sessionId = "ses-889-oc1-host-text";
+        // The host's checkpoint text alone is larger than the small window, so
+        // no amount of summarizing makes the request fit.
+        const pass = await switchedSession(sessionId, TURNS, { hostAddedTokens: 30_000 });
+        const log = pass.lines.join("\n");
+        expect(log).toContain("arming overflow recovery proactively for the shrinking switch");
+        // The chain counts it too, so it keeps summarizing past the point where
+        // the request alone would fit.
+        expect(log).not.toContain("recovery chain done");
+        expect(pass.refused()).toBe(1);
+        const counted = Number(
+            log.match(/recovery request still over the window: about (\d+) tokens/)?.[1],
+        );
+        expect(counted).toBeGreaterThanOrEqual(30_000);
+        expect(getOverflowState(pass.db, sessionId).needsEmergencyRecovery).toBe(true);
     });
 
     it("refuses a model-shrink pass whose partial fold still leaves the request over the window", async () => {
@@ -318,8 +355,8 @@ describe("OpenCode 1: recovery never sends a request over the window (issue 889)
             /EMERGENCY: fail-closed \(reason=recovery-request-over-limit, recoveryOrigin=proactive_model_shrink/,
         );
         expect(pass.notices).toEqual([RECOVERY_NOTICE]);
-        // The publication cleared the latch; the refusal arms it again so the
-        // next turn continues recovery.
+        // The publication leaves the latch armed, and so does the refusal, so
+        // the next turn continues recovery.
         const overflow = getOverflowState(pass.db, sessionId);
         expect(overflow.needsEmergencyRecovery).toBe(true);
         expect(overflow.emergencyRecoveryOrigin).toBe("proactive_model_shrink");

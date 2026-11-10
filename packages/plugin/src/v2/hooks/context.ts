@@ -441,6 +441,41 @@ function estimateCheckpointRequest(draft: SessionContext) {
     });
 }
 
+/**
+ * The text a checkpoint adds around the history head when it takes the head's
+ * place after the shared transform (applyCheckpointHead): the checkpoint
+ * message with its summary emptied, since the head's own text fills it. A pass
+ * in overflow or model-shrink recovery adds this to the request it counts
+ * before sending. Undefined when it cannot be counted.
+ */
+function estimateCheckpointFraming(
+    draft: SessionContext,
+    checkpoint: V2Message,
+    submitted: string,
+): number | undefined {
+    const framing = structuredClone(checkpoint);
+    for (const part of framing.content)
+        if (part.type === "text" && typeof part.text === "string")
+            part.text = part.text.replace(
+                `<summary>\n${submitted}\n</summary>`,
+                "<summary>\n\n</summary>",
+            );
+    try {
+        const estimate = estimateFinalWireInputTokens({
+            messages: adaptPayload({ ...draft, messages: [framing] }).messages,
+            toolDefinitionTokens: 0,
+            systemPromptTokens: 0,
+            providerID: draft.model.providerID,
+            modelID: draft.model.id,
+            agentName: draft.agent,
+            sessionId: draft.sessionID,
+        });
+        return estimate.pressureTokens ?? estimate.tokens;
+    } catch {
+        return undefined;
+    }
+}
+
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
 const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
 /**
@@ -2191,7 +2226,10 @@ export async function registerContext(context: V2Context) {
     // only read instance state can keep a shared closure environment alive, along
     // with replay helpers that hold the request's messages and attachments.
     const checkpointPassPermissions = new Map<string, boolean>();
-    const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
+    const checkpointInputEstimates = new Map<
+        string,
+        { tokens: number; pressureTokens: number; hostAddedTokens?: number }
+    >();
     const admissionRebuildPasses = new Set<string>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
@@ -2999,6 +3037,7 @@ export async function registerContext(context: V2Context) {
                     checkpointInputEstimates.set(draft.sessionID, {
                         tokens: estimate.tokens,
                         pressureTokens: estimate.pressureTokens ?? estimate.tokens,
+                        hostAddedTokens: estimateCheckpointFraming(draft, projected, submitted),
                     });
                 }
             }

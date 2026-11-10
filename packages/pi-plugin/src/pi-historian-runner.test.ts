@@ -1451,6 +1451,35 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("leaves overflow recovery armed after a publication", async () => {
+		// A publication is progress, not proof that the next request fits; only
+		// a recovery pass that counts its request within its limit ends recovery
+		// (issue 889).
+		const { db } = await runHistorianWith({
+			outputs: [twoCompartmentSuccessXml()],
+			providerMessages: rawMessages(5),
+			boundarySnapshot: makeBoundarySnapshot({
+				protectedTailStart: 5,
+				protectedTailStartMessageId: "m5",
+				eligibleEndOrdinal: 5,
+				eligibleEndMessageId: "m4",
+				rawMessageCountAtTrigger: 5,
+				rawLastMessageIdAtTrigger: "m5",
+			}),
+			beforeRun: (database) => {
+				recordOverflowDetected(database, "ses-historian", 100_000);
+			},
+		});
+		try {
+			expect(getCompartments(db, "ses-historian").length).toBeGreaterThan(0);
+			const overflow = getOverflowState(db, "ses-historian");
+			expect(overflow.needsEmergencyRecovery).toBe(true);
+			expect(overflow.emergencyRecoveryOrigin).toBe("provider_overflow");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("downgrades forced final keep on token-capped chunks so discard-last healing still applies", async () => {
 		const projectPath = resolveProjectIdentity(process.cwd());
 		const longMessages = rawMessages(10).map((message) => ({

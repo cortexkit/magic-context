@@ -1,11 +1,13 @@
 /**
  * Issue 889 on Pi. A pass in provider-overflow recovery that cannot reclaim
- * enough must not send a request over the model's window. Pi otherwise refuses
- * only a request whose byte count proves it is over the whole context window;
- * dense text (many tokens per byte) passes that check while its token count is
- * far over the window. Pi never arms recovery by itself when the person
- * switches to a smaller model (OpenCode does), so a provider overflow is the
- * recovery tested here.
+ * enough must not send a request over its limit: the 95% line of the model's
+ * usable window while a historian run is still summarizing older history, and
+ * the whole usable window once none is. Pi otherwise refuses only a request
+ * whose byte count proves it is over the whole context window; dense text
+ * (many tokens per byte) passes that check while its token count is far over
+ * the window. Pi never arms recovery by itself when the person switches to a
+ * smaller model (OpenCode does), so a provider overflow is the recovery tested
+ * here.
  */
 
 import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
@@ -22,6 +24,7 @@ import {
 } from "@magic-context/core/shared/harness";
 import * as logger from "@magic-context/core/shared/logger";
 import {
+	__test,
 	clearContextHandlerSession,
 	recordPiLiveModel,
 	registerPiContextHandler,
@@ -46,6 +49,11 @@ const sessionId = "issue-889-pi-recovery";
 const modelKey = "mock/mock";
 const model = { provider: "mock", id: "mock", contextWindow: 100_000 };
 
+const STILL_SUMMARIZING =
+	"Magic Context is still summarizing older history so this conversation fits the model's context window. Send your message again to continue.";
+const NOTHING_LEFT =
+	"This conversation no longer fits the model's context window, and Magic Context has no more older history it can summarize. Switch to a model with a larger context window to continue.";
+
 /** Deterministic random words: several tokens per word, under four bytes per token. */
 function denseText(seed: number, words: number): string {
 	let state = seed;
@@ -57,20 +65,43 @@ function denseText(seed: number, words: number): string {
 	return out.join(" ");
 }
 
-function fixture(turns: number) {
+/** A request for the records, `turns` long dense records, and a short prompt. */
+function records(turns: number) {
+	const messages = [userMessage("Review the records", 1)];
+	for (let i = 0; i < turns; i++)
+		messages.push(
+			assistantMessage(`Record ${i}: ${denseText(i + 1, 2_500)}`, i + 2),
+		);
+	messages.push(userMessage("Continue", turns + 2));
+	return messages;
+}
+
+/** One dense prompt of `words` words. */
+function prompt(words: number) {
+	return [userMessage(`Please review: ${denseText(7, words)}`, 1)];
+}
+
+function fixture(
+	messages: ReturnType<typeof records>,
+	options: { untrustedEnvelope?: boolean } = {},
+) {
 	const db = createTestDb();
 	updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
 	const fake = createFakePi();
-	const pi = {
-		...fake.pi,
-		getAllTools: () => [
-			{
-				name: "read",
-				description: "Read a file",
-				parameters: { type: "object" },
-			},
-		],
-	};
+	// Without the host's tool registry the fit envelope cannot be measured,
+	// so it is untrusted.
+	const pi = options.untrustedEnvelope
+		? fake.pi
+		: {
+				...fake.pi,
+				getAllTools: () => [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object" },
+					},
+				],
+			};
 	registerPiContextHandler(pi as never, {
 		db,
 		protectedTags: 0,
@@ -79,12 +110,6 @@ function fixture(turns: number) {
 	});
 	const handler = fake.handlers.get("context");
 	if (!handler) throw new Error("missing context handler");
-	const messages = [userMessage("Review the records", 1)];
-	for (let i = 0; i < turns; i++)
-		messages.push(
-			assistantMessage(`Record ${i}: ${denseText(i + 1, 2_500)}`, i + 2),
-		);
-	messages.push(userMessage("Continue", turns + 2));
 	return {
 		db,
 		async run(tokens: number) {
@@ -126,21 +151,26 @@ function fixture(turns: number) {
 	};
 }
 
-const usableHard = () =>
-	resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
-		?.usableHard ?? 0;
+const geometry = () => {
+	const usableHard =
+		resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
+			?.usableHard ?? 0;
+	return { usableHard, line: Math.floor((usableHard * 95) / 100) };
+};
 
-/** Serve a provider-overflow recovery pass; returns its message tokens or the refusal. */
-async function recoveryPass(f: ReturnType<typeof fixture>) {
-	await f.run(40_000);
-	// The provider rejected the next request as too long.
-	recordOverflowDetected(
-		f.db,
-		sessionId,
-		undefined,
-		modelKey,
-		"provider_overflow",
-	);
+/** Words for a dense prompt whose own count is about `target` tokens. */
+function wordsForTokens(target: number): number {
+	const count = (words: number) => {
+		const counts = tokenizePiMessages(prompt(words) as never);
+		return counts.conversation + counts.toolCall;
+	};
+	const low = count(4_000);
+	const high = count(8_000);
+	return Math.round(4_000 + ((target - low) * 4_000) / (high - low));
+}
+
+/** Serve one pass; returns its message tokens or the refusal. */
+async function serve(f: ReturnType<typeof fixture>) {
 	try {
 		const result = await f.run(40_000);
 		const counts = tokenizePiMessages(result.messages as never);
@@ -153,25 +183,41 @@ async function recoveryPass(f: ReturnType<typeof fixture>) {
 	}
 }
 
-it("refuses a provider-overflow recovery pass whose request is still over the window (issue 889)", async () => {
-	const f = fixture(16);
+/** A first pass, then the provider rejects the next request as too long. */
+async function armProviderOverflow(f: ReturnType<typeof fixture>) {
+	await f.run(40_000);
+	recordOverflowDetected(
+		f.db,
+		sessionId,
+		undefined,
+		modelKey,
+		"provider_overflow",
+	);
+}
+
+function logged(log: ReturnType<typeof spyOn>, text: string): string[] {
+	return log.mock.calls
+		.map(([, line]) => String(line))
+		.filter((line) => line.includes(text));
+}
+
+it("refuses a recovery request over the whole window when no historian run can summarize more (issue 889)", async () => {
+	const f = fixture(records(16));
 	const log = spyOn(logger, "sessionLog");
 	try {
-		const { served, refusal } = await recoveryPass(f);
+		await armProviderOverflow(f);
+		const { served, refusal } = await serve(f);
 		if (served !== undefined)
 			console.log(
-				`ISSUE889_PI sent a recovery request of about ${served} message tokens; 95% line ${Math.floor(usableHard() * 0.95)}, window ${model.contextWindow}`,
+				`ISSUE889_PI sent a recovery request of about ${served} message tokens; window ${geometry().usableHard}`,
 			);
 		expect(served).toBeUndefined();
 		expect(refusal).toBeInstanceOf(EmergencyFailClosedError);
-		expect((refusal as Error).message).toBe(
-			"Magic Context is still summarizing older history so this conversation fits the model's context window. Send your message again to continue.",
+		// Nothing is left to summarize, so the notice does not ask to send again.
+		expect((refusal as Error).message).toBe(NOTHING_LEFT);
+		expect(logged(log, "recovery request still over the window")[0]).toContain(
+			"against the whole window",
 		);
-		expect(
-			log.mock.calls.some(([, line]) =>
-				String(line).includes("recovery request still over the window"),
-			),
-		).toBe(true);
 		const overflow = getOverflowState(f.db, sessionId);
 		expect(overflow.needsEmergencyRecovery).toBe(true);
 		expect(overflow.emergencyRecoveryOrigin).toBe("provider_overflow");
@@ -181,16 +227,100 @@ it("refuses a provider-overflow recovery pass whose request is still over the wi
 	}
 });
 
-it("sends a provider-overflow recovery request that fits under the 95% line", async () => {
-	const f = fixture(3);
+it("holds a recovery request to the 95% line while a historian run is in flight, and continues recovery on the next turn", async () => {
+	const { usableHard, line } = geometry();
+	// Between the 95% line and the window: it fits, but a run in flight can
+	// still bring it under the line.
+	const f = fixture(
+		prompt(wordsForTokens(line + Math.floor((usableHard - line) / 3))),
+	);
+	const log = spyOn(logger, "sessionLog");
+	let restoreHistorian: (() => void) | undefined;
 	try {
-		const { served, refusal } = await recoveryPass(f);
+		await armProviderOverflow(f);
+		restoreHistorian = __test.setInFlightHistorianForTests(
+			sessionId,
+			Promise.resolve(),
+		);
+		const first = await serve(f);
+		expect(first.served).toBeUndefined();
+		expect(first.refusal).toBeInstanceOf(EmergencyFailClosedError);
+		expect((first.refusal as Error).message).toBe(STILL_SUMMARIZING);
+		const refusedAt = Number(
+			logged(log, "recovery request still over the window")[0]?.match(
+				/about (\d+) tokens against the 95% line/,
+			)?.[1],
+		);
+		expect(refusedAt).toBeGreaterThan(line);
+		expect(refusedAt).toBeLessThanOrEqual(usableHard);
+		// The refusal leaves recovery armed, so the next turn is a recovery pass.
+		expect(getOverflowState(f.db, sessionId).needsEmergencyRecovery).toBe(true);
+
+		// The run finished without bringing the request under the line, and
+		// none is in flight now: the request fits the window, so it is sent and
+		// recovery ends.
+		restoreHistorian();
+		restoreHistorian = undefined;
+		log.mockClear();
+		const second = await serve(f);
+		expect(second.refusal).toBeUndefined();
+		expect(second.served ?? 0).toBeGreaterThan(line);
+		expect(logged(log, "recovery request admitted")).toHaveLength(1);
+		expect(getOverflowState(f.db, sessionId).needsEmergencyRecovery).toBe(
+			false,
+		);
+	} finally {
+		restoreHistorian?.();
+		log.mockRestore();
+		f.close();
+	}
+});
+
+it("sends a provider-overflow recovery request that fits under the 95% line, and ends recovery", async () => {
+	const f = fixture(records(3));
+	const log = spyOn(logger, "sessionLog");
+	try {
+		await armProviderOverflow(f);
+		const { served, refusal } = await serve(f);
 		expect(refusal).toBeUndefined();
 		expect(served ?? 0).toBeGreaterThan(0);
 		expect(served ?? Number.POSITIVE_INFINITY).toBeLessThan(
-			usableHard() * 0.95,
+			geometry().usableHard * 0.95,
+		);
+		expect(logged(log, "recovery request admitted")).toHaveLength(1);
+		expect(getOverflowState(f.db, sessionId).needsEmergencyRecovery).toBe(
+			false,
 		);
 	} finally {
+		log.mockRestore();
+		f.close();
+	}
+});
+
+it("says once that it cannot count a recovery request when the fit envelope is untrusted", async () => {
+	const f = fixture(records(3), { untrustedEnvelope: true });
+	const log = spyOn(logger, "sessionLog");
+	try {
+		for (let turn = 0; turn < 2; turn++) {
+			await armProviderOverflow(f);
+			const { refusal } = await serve(f);
+			// Only the byte-count check applies, and this request passes it.
+			expect(refusal).toBeUndefined();
+			expect(logged(log, "recovery request could not be counted")).toHaveLength(
+				turn + 1,
+			);
+			expect(getOverflowState(f.db, sessionId).needsEmergencyRecovery).toBe(
+				false,
+			);
+		}
+		expect(
+			logged(
+				log,
+				"recovery request not counted: the fit envelope is untrusted",
+			),
+		).toHaveLength(1);
+	} finally {
+		log.mockRestore();
 		f.close();
 	}
 });

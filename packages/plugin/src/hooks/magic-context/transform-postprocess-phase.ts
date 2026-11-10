@@ -1956,8 +1956,10 @@ export function evaluateEmergencyFailClosed(input: {
     protectedToolTokens?: number;
     /**
      * The request this pass will send, counted the way the served-request
-     * sizing counts it, and the 95% line of the current model's usable window.
-     * Only a pass in overflow or model-shrink recovery supplies it.
+     * sizing counts it, and the most it may be: the 95% line of the current
+     * model's usable window while older history remains to summarize, else the
+     * whole usable window (see recoveryAdmissionLimitTokens). Only a pass in
+     * overflow or model-shrink recovery supplies it.
      */
     recoveryServedRequest?: { tokens: number; lineTokens: number };
 }): EmergencyFailClosedDecision {
@@ -2000,8 +2002,8 @@ export function evaluateEmergencyFailClosed(input: {
     // Recovery that summarized or folded part of the history is progress, not
     // proof that the request now fits: after a switch to a much smaller model a
     // single historian run can leave the request several times over the new
-    // window. Whatever this pass reclaimed, a recovery request still over the
-    // 95% line is not sent, so the provider never rejects it.
+    // window. Whatever this pass reclaimed, a recovery request over its limit
+    // is not sent, so the provider never rejects it.
     const served = input.recoveryServedRequest;
     if (
         recoveryOrigin !== null &&

@@ -34,7 +34,6 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
-    clearEmergencyRecovery,
     getOverflowState,
     resetEmergencyRecoveryRegistryForTest,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -164,8 +163,10 @@ function hostMessages(sessionId: string, fixture: Fixture, model: typeof LARGE) 
 
 /**
  * Each historian run publishes the next user turn and its reply, the way the
- * real runner publishes (callback, then the recovery latch cleared). A run
- * whose index is in `holdRuns` waits for `release()` before it publishes.
+ * real runner publishes: the callback, with the recovery latch left armed (a
+ * publication no longer ends recovery; only a recovery pass whose request fits
+ * does). A run whose index is in `holdRuns` waits for `release()` before it
+ * publishes.
  */
 function stubHistorian(
     db: ReturnType<typeof openDatabase>,
@@ -199,7 +200,6 @@ function stubHistorian(
             },
         ]);
         deps.onCompartmentStatePublished?.(deps.sessionId);
-        clearEmergencyRecovery(db, deps.sessionId);
     });
     return { spy, runs: () => runs, release };
 }

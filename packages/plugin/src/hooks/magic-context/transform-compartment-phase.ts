@@ -41,6 +41,12 @@ import type { MessageLike } from "./transform-operations";
  */
 export const HISTORIAN_INLINE_JOIN_BUDGET_MS = 60_000;
 
+/**
+ * The least of the inline join budget a recovery pass must have left to start
+ * one more chained historian run (see chainRecoveryRuns).
+ */
+export const CHAINED_RECOVERY_RUN_MIN_BUDGET_MS = 15_000;
+
 export function resolveHistorianInlineJoinBudget(configuredTimeoutMs?: number): number {
     const requested = configuredTimeoutMs ?? HISTORIAN_INLINE_JOIN_BUDGET_MS;
     return Math.max(0, Math.min(requested, HISTORIAN_INLINE_JOIN_BUDGET_MS));
@@ -241,6 +247,12 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     historianJoinBudgetMs: number | null;
     /** Historian runs a recovery pass started after its first join (see chainRecoveryRuns). */
     chainedRecoveryRuns: number;
+    /**
+     * On a recovery pass, whether the historian can still summarize older
+     * history after this pass's joins (see recoveryHistoryRemainsAfterJoins).
+     * False on any other pass.
+     */
+    recoveryHistoryRemains: boolean;
 }> {
     let pendingCompartmentInjection = args.pendingCompartmentInjection;
     let compartmentInProgress = args.sessionMeta.compartmentInProgress;
@@ -275,6 +287,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             historianJoinTimedOut,
             historianJoinBudgetMs,
             chainedRecoveryRuns,
+            recoveryHistoryRemains: false,
         };
     }
     let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null =
@@ -479,15 +492,20 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         project: () => RecoveryFitProjection | undefined,
         deadline: number,
         budgetMs: number,
-    ): Promise<void> {
+    ): Promise<"timed_out" | "stopped"> {
         let lastRun = firstRun;
+        // A chained run started with little budget left would most likely
+        // outlive it, and a pass whose join times out is refused. Start one only
+        // with at least this much of the budget left: 15 s of the default 60 s
+        // budget, and a quarter of a shorter configured one.
+        const minimumRunBudgetMs = Math.min(CHAINED_RECOVERY_RUN_MIN_BUDGET_MS, budgetMs / 4);
         for (;;) {
             if (!lastRun.published) {
                 sessionLog(
                     args.sessionId,
                     `transform: recovery chain stops: the last historian run published nothing (${chainedRecoveryRuns} chained runs)`,
                 );
-                return;
+                return "stopped";
             }
             let fit: RecoveryFitProjection | undefined;
             try {
@@ -498,23 +516,23 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     "transform: recovery chain stops: the request could not be counted:",
                     error,
                 );
-                return;
+                return "stopped";
             }
-            if (!fit) return;
+            if (!fit) return "stopped";
             if (Number.isFinite(fit.tokens) && fit.tokens <= fit.lineTokens) {
                 sessionLog(
                     args.sessionId,
                     `transform: recovery chain done: the request is about ${fit.tokens} tokens, under the 95% line ${fit.lineTokens} (${chainedRecoveryRuns} chained runs)`,
                 );
-                return;
+                return "stopped";
             }
             const remainingMs = deadline - Date.now();
-            if (remainingMs <= 0) {
+            if (remainingMs < minimumRunBudgetMs) {
                 sessionLog(
                     args.sessionId,
-                    `transform: recovery chain stops: the ${budgetMs}ms inline join budget is spent; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
+                    `transform: recovery chain stops: ${Math.max(0, remainingMs)}ms of the ${budgetMs}ms inline join budget is left, under the ${minimumRunBudgetMs}ms a chained run needs; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
                 );
-                return;
+                return "stopped";
             }
             const boundary = resolveNextRecoveryBoundary();
             if (!boundary) {
@@ -522,7 +540,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     args.sessionId,
                     `transform: recovery chain stops: no eligible history before the protected tail; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
                 );
-                return;
+                return "stopped";
             }
             if (
                 isHistorianDrainBudgetSpent({
@@ -532,8 +550,13 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     executeThresholdPercentage: args.boundaryExecuteThresholdPercentage,
                     usagePercentage: args.boundaryUsage.percentage,
                 })
-            )
-                return;
+            ) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: recovery chain stops: the historian's drain budget is spent; the request is still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}`,
+                );
+                return "stopped";
+            }
             startCompartmentAgent(historianRunDeps(boundary));
             const nextRun = getActiveCompartmentRun(args.sessionId);
             if (!nextRun || nextRun === lastRun) {
@@ -541,7 +564,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     args.sessionId,
                     "transform: recovery chain stops: the next historian run did not start",
                 );
-                return;
+                return "stopped";
             }
             chainedRecoveryRuns += 1;
             const result = await awaitCompartmentRun(
@@ -549,9 +572,40 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 `transform: recovery request still about ${fit.tokens} tokens, over the 95% line ${fit.lineTokens}; blocking for historian run ${chainedRecoveryRuns + 1} on the next chunk`,
                 { timeoutMs: remainingMs, budgetMs },
             );
-            if (result === "timed_out") return;
+            if (result === "timed_out") return "timed_out";
             lastRun = nextRun;
         }
+    }
+
+    /**
+     * On a recovery pass, after the joins: whether the historian can still
+     * summarize older history, because a run is still active or the next
+     * eligible chunk could start one. The transform's final check holds a
+     * recovery request to the 95% line only while it can; with nothing left to
+     * summarize, the line could never be reached.
+     */
+    function recoveryHistoryRemainsAfterJoins(): boolean {
+        if (!historianRunnable || !args.canRunCompartments) return false;
+        if (getActiveCompartmentRun(args.sessionId)) return true;
+        if (!args.client && !args.hiddenCompletionExecutor) return false;
+        try {
+            if (resolveNextRecoveryBoundary() === null) return false;
+        } catch (error) {
+            // Unknown: keep the 95% line, which the next turn checks again.
+            sessionLog(
+                args.sessionId,
+                "transform: recovery history check failed; keeping the 95% line:",
+                error,
+            );
+            return true;
+        }
+        return !isHistorianDrainBudgetSpent({
+            db: args.db,
+            sessionId: args.sessionId,
+            contextLimit: args.boundaryContextLimit,
+            executeThresholdPercentage: args.boundaryExecuteThresholdPercentage,
+            usagePercentage: args.boundaryUsage.percentage,
+        });
     }
 
     // A saved flag cannot publish a summary without an executor or a live run.
@@ -705,12 +759,15 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 awaitedCompartmentRun = true;
                 compartmentInProgress = false;
                 if (args.projectRecoveryRequest) {
-                    await chainRecoveryRuns(
+                    const chain = await chainRecoveryRuns(
                         activeRun,
                         args.projectRecoveryRequest,
                         joinDeadline,
                         join.budgetMs,
                     );
+                    // A chained run that outlived the budget keeps running in
+                    // the background, so the rest of this pass sees one active.
+                    if (chain === "timed_out") compartmentInProgress = true;
                 }
                 refreshCompartmentCoverage();
             } else {
@@ -728,6 +785,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
 
     // v2: no independent compressor — deterministic decay-tier rendering keeps
     // the history block within budget at render time, with no LLM pass.
+    const recoveryHistoryRemains =
+        args.projectRecoveryRequest !== undefined && recoveryHistoryRemainsAfterJoins();
     return {
         pendingCompartmentInjection,
         awaitedCompartmentRun,
@@ -738,5 +797,6 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         historianJoinTimedOut,
         historianJoinBudgetMs,
         chainedRecoveryRuns,
+        recoveryHistoryRemains,
     };
 }
