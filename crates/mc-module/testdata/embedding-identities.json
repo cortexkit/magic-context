@@ -1,0 +1,116 @@
+{
+  "source_commit": "9291efc9ff",
+  "source_function": "getEmbeddingProviderIdentity(EmbeddingConfigSchema.parse(config))",
+  "vectors": [
+    {
+      "name": "unset",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b"
+      },
+      "identity": "embedding-provider:290772548f2613737025902dc2f3c9fb"
+    },
+    {
+      "name": "768",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 768
+      },
+      "identity": "embedding-provider:b8b06ccf2f0272534cfe8f9aab3885e7"
+    },
+    {
+      "name": "1024",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 1024
+      },
+      "identity": "embedding-provider:2b595b75893d56de2fcd20aaf8504a22"
+    },
+    {
+      "name": "all passage knobs",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 1024,
+        "api_key": "k",
+        "input_type": "passage",
+        "truncate": "END",
+        "document_prefix": "Document:  "
+      },
+      "identity": "embedding-provider:f80626d6516a61a9a73e9290d3b44005"
+    },
+    {
+      "name": "trim and integral float",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": " https://Example.com/v1/// ",
+        "model": " Qwen/Qwen3-Embedding-8B ",
+        "input_type": " passage ",
+        "truncate": " END ",
+        "api_key": " key ",
+        "dimensions": 768
+      },
+      "identity": "embedding-provider:10c7b37b4fe4664742eee952c68efce1"
+    },
+    {
+      "name": "nomic prefix",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "nomic-embed-text:latest",
+        "dimensions": 256
+      },
+      "identity": "embedding-provider:30bb818ba2321c503ac6134552926dc6"
+    },
+    {
+      "name": "query-only knobs",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 768,
+        "query_instruction": false,
+        "query_input_type": "query"
+      },
+      "identity": "embedding-provider:b8b06ccf2f0272534cfe8f9aab3885e7"
+    },
+    {
+      "name": "minimum",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 1
+      },
+      "identity": "embedding-provider:396a5379211deadd3e752f6a67d9eb4a"
+    },
+    {
+      "name": "maximum",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "http://h/v1",
+        "model": "qwen/qwen3-embedding-8b",
+        "dimensions": 8192
+      },
+      "identity": "embedding-provider:9b16c178219877e1a22a134233b93aba"
+    },
+    {
+      "name": "legacy voyage",
+      "config": {
+        "provider": "openai-compatible",
+        "endpoint": "https://api.voyageai.com/v1/",
+        "model": "voyage-4",
+        "api_key": "k",
+        "input_type": "document",
+        "max_input_tokens": 8192
+      },
+      "identity": "embedding-provider:fe1e3cf9119cf8e4c7667b9d6c0fb057"
+    }
+  ]
+}

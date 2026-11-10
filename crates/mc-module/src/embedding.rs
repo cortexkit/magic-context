@@ -12,7 +12,7 @@
 //! the Synapse module. With either, search keeps its lexical lanes.
 //!
 //! The request matches `embedding-openai.ts`: one POST to `<endpoint>/embeddings`
-//! with `model`, `input`, and `input_type`/`truncate` when set; no redirects;
+//! with `model`, `input`, and `input_type`/`truncate`/`dimensions` when set; no redirects;
 //! a 30-second background limit and a 5-second explicit-search limit; a response
 //! for another model is refused. A failed query embed only drops semantic scores.
 
@@ -31,6 +31,8 @@ use circuit::{Attempt, Circuit};
 
 #[cfg(test)]
 pub(crate) mod circuit_tests;
+#[cfg(test)]
+mod dimensions_tests;
 /// History chunks are sized for this many input tokens when the user names
 /// no limit; it is part of the chunk vectors' identity.
 const DEFAULT_CHUNK_MAX_INPUT_TOKENS: u64 = 512;
@@ -52,6 +54,7 @@ pub struct Provider {
     query_instruction: Option<String>,
     document_prefix: Option<String>,
     truncate: Option<String>,
+    dimensions: Option<u64>,
     max_input_tokens: Option<u64>,
     circuit: Arc<Mutex<Circuit>>,
     fetch_timeout: Duration,
@@ -71,7 +74,7 @@ impl Provider {
     /// The provider from the two configuration tiers, or `None` when search
     /// has no remote embedding. The user tier arrives with `{env:}`/`{file:}`
     /// already expanded. A project may tune the model's request, but where
-    /// text is sent and how a query is worded stay the user's choice.
+    /// text is sent, how a query is worded and the output width stay the user's choice.
     pub fn from_tiers(user: &Value, project: &Value, _user_path: &Path) -> Option<Self> {
         let mut merged = json!({"provider": "local"});
         merge(
@@ -87,6 +90,7 @@ impl Provider {
                 "query_instruction",
                 "document_prefix",
                 "truncate",
+                "dimensions",
                 "max_input_tokens",
             ],
         );
@@ -127,6 +131,7 @@ impl Provider {
             },
             document_prefix: merged["document_prefix"].as_str().map(str::to_owned),
             truncate: text(&merged, "truncate"),
+            dimensions: crate::config::integer(&merged["dimensions"]),
             max_input_tokens: crate::config::integer(&merged["max_input_tokens"])
                 .filter(|n| *n > 0),
         })
@@ -155,6 +160,7 @@ impl Provider {
             query_instruction: None,
             document_prefix: None,
             truncate: None,
+            dimensions: None,
             max_input_tokens: None,
         }
     }
@@ -176,6 +182,11 @@ impl Provider {
         }
         if let Some(truncate) = &self.truncate {
             serialized.push_str(&format!(",\"truncate\":{}", json!(truncate)));
+        }
+        // Match the plugin's conditional field and position. An absent width
+        // must keep existing vector identities unchanged across upgrades.
+        if let Some(dimensions) = self.dimensions {
+            serialized.push_str(&format!(",\"dimensions\":{dimensions}"));
         }
         serialized.push('}');
         let normalized = serialized
@@ -351,6 +362,9 @@ impl Provider {
         if let Some(truncate) = &self.truncate {
             body["truncate"] = json!(truncate);
         }
+        if let Some(dimensions) = self.dimensions {
+            body["dimensions"] = json!(dimensions);
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -380,7 +394,20 @@ impl Provider {
             .bytes()
             .await
             .map_err(|_| RequestFailure::Unavailable)?;
-        parse_response(&raw, &self.model, count).ok_or(RequestFailure::Unavailable)
+        let vectors =
+            parse_response(&raw, &self.model, count).ok_or(RequestFailure::Unavailable)?;
+        // A gateway may ignore dimensions and return the model's default
+        // subspace. Never store those vectors under a requested-width identity.
+        if let Some(dimensions) = self.dimensions {
+            if vectors
+                .iter()
+                .flatten()
+                .any(|vector| vector.len() as u64 != dimensions)
+            {
+                return Err(RequestFailure::Unavailable);
+            }
+        }
+        Ok(vectors)
     }
 }
 
@@ -606,6 +633,7 @@ fn merge(target: &mut Value, source: &Value, keys: &[&str]) {
     for &key in keys {
         if let Some(value) = source.get(key).filter(|value| match key {
             "max_input_tokens" => crate::config::integer(value).is_some_and(|n| n > 0),
+            "dimensions" => crate::config::integer(value).is_some_and(|n| (1..=8192).contains(&n)),
             "query_instruction" => value.is_string() || **value == Value::Bool(false),
             _ => value.is_string(),
         }) {
