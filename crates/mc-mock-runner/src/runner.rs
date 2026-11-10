@@ -24,12 +24,13 @@ use cortexkit_role_compaction::read::{
     Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
 };
 use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
-use cortexkit_role_compaction::rules::ProviderRules;
+use cortexkit_role_compaction::rules::{ProviderRules, SignedParts};
 use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
 use cortexkit_role_compaction::view::{
-    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, EditOp, View, ViewRefusal,
+    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal,
 };
 use cortexkit_role_compaction::wire::{codes, Refusal};
+use cortexkit_role_compaction::SignedFloor;
 use cortexkit_role_llm_runner::delivery_order::{Mode, Template, TemplateUse};
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
@@ -330,6 +331,16 @@ impl Report {
 struct State {
     notice_keep: bool,
     provider_entry_speaks_for: bool,
+    /// The provider declared `compaction-signed-floor/v1`, so Setup and
+    /// conditions name the signed floor.
+    provider_signed_floor: bool,
+    /// The entry id of the signed floor: the newest entry when the tool set
+    /// last changed on a route with prefix-bound signed reasoning. Signed
+    /// reasoning at or before it is stripped from every request.
+    signed_floor: Option<String>,
+    /// How many times the tool set changed; part of the system digest, since
+    /// the tool definitions precede the messages.
+    tools_revision: u64,
     observations: Option<ObservationLog>,
     config: SessionConfig,
     transcript: Transcript,
@@ -393,7 +404,91 @@ impl State {
             conditions.last_prompt_view = self.last_prompt_view;
         }
         conditions.accepts_images = self.config.accepts_images;
+        if let Some(floor) = &self.signed_floor {
+            conditions =
+                conditions.with_signed_floor(SignedFloor::new(floor), self.provider_signed_floor);
+        }
         conditions
+    }
+
+    /// What identifies the system prompt and the tool definitions.
+    fn system_digest(&self) -> String {
+        format!("system-v{}", 1 + self.tools_revision)
+    }
+
+    /// The signed floor for compaction-view's checks. The runner strips the
+    /// signed parts at or before it at render whatever a view says, so no
+    /// view is refused for keeping them and no edit can invalidate them
+    /// (compaction contract W3.5).
+    fn floor(&self) -> cortexkit_compaction_view::rules::Floor<'_> {
+        self.signed_floor
+            .as_deref()
+            .map_or(cortexkit_compaction_view::rules::Floor::none(), |floor| {
+                cortexkit_compaction_view::rules::Floor::through(floor)
+            })
+    }
+
+    /// The runner's own strip: drops of the signed parts at or before the
+    /// floor that `edits` keep, for rendering with view `version`. The
+    /// checks know the floor, so these drops count as no edit to the signed
+    /// parts after it. As the strip never empties an entry, a part is kept
+    /// when stripping it would; the model provider then rejects it, which
+    /// shows the gap.
+    fn floor_drops(&self, edits: &[Edit], version: u64) -> Vec<Edit> {
+        let entries = self.transcript.entries();
+        let Some(through) = self
+            .signed_floor
+            .as_ref()
+            .and_then(|floor| entries.iter().position(|entry| &entry.mid == floor))
+        else {
+            return Vec::new();
+        };
+        let cut = edits
+            .iter()
+            .filter_map(|edit| match &edit.op {
+                EditOp::Cut { through } => entries.iter().position(|entry| &entry.mid == through),
+                _ => None,
+            })
+            .max();
+        let dropped = |mid: &str, part: Option<&str>| {
+            edits.iter().any(|edit| match &edit.op {
+                EditOp::Drop {
+                    mid: target,
+                    part: target_part,
+                } => target == mid && (target_part.is_none() || target_part.as_deref() == part),
+                _ => false,
+            })
+        };
+        let mut drops = Vec::new();
+        for (index, entry) in entries[..=through].iter().enumerate() {
+            if cut.is_some_and(|cut| index <= cut) || dropped(&entry.mid, None) {
+                continue;
+            }
+            let stripped: Vec<&str> = entry
+                .parts
+                .iter()
+                .filter(|part| part.seal == Seal::Signed && !dropped(&entry.mid, Some(&part.id)))
+                .map(|part| part.id.as_str())
+                .collect();
+            let rest = entry
+                .parts
+                .iter()
+                .filter(|part| !stripped.contains(&part.id.as_str()))
+                .any(|part| !dropped(&entry.mid, Some(&part.id)));
+            if !rest {
+                continue;
+            }
+            drops.extend(stripped.into_iter().map(|part| {
+                Edit::new(
+                    version,
+                    EditOp::Drop {
+                        mid: entry.mid.clone(),
+                        part: Some(part.to_owned()),
+                    },
+                )
+            }));
+        }
+        drops
     }
 
     fn latest_version(&self) -> u64 {
@@ -452,11 +547,16 @@ impl State {
         self.verify(candidate)?;
         let entries = self.transcript.entries();
         if self.config.view_anchor {
-            view::plan_view(entries, candidate, &self.config.rules)?;
+            view::plan_view(entries, candidate, &self.config.rules, self.floor())?;
         } else {
             view::plan(entries, &candidate.edits)?;
-            cortexkit_compaction_view::rules::check(entries, &candidate.edits, &self.config.rules)
-                .map_err(ViewRefusal::Rule)?;
+            cortexkit_compaction_view::rules::check(
+                entries,
+                &candidate.edits,
+                &self.config.rules,
+                self.floor(),
+            )
+            .map_err(ViewRefusal::Rule)?;
         }
         Ok(())
     }
@@ -467,16 +567,18 @@ impl State {
             .applied
             .as_ref()
             .map(|applied| {
+                let mut edits = edits_for_transcript(entries, &applied.edits);
+                edits.extend(self.floor_drops(&edits, applied.version));
                 View::seal_with_policy(
                     applied.version,
-                    edits_for_transcript(entries, &applied.edits),
+                    edits,
                     applied.built_through.clone(),
                     applied.new_signed.clone(),
                 )
             })
-            .unwrap_or_else(|| View::seal(1, vec![]));
+            .unwrap_or_else(|| View::seal(1, self.floor_drops(&[], 1)));
         let rendered = if self.config.view_anchor {
-            view::apply_with_rules(entries, &candidate, &self.config.rules)
+            view::apply_with_rules(entries, &candidate, &self.config.rules, self.floor())
         } else {
             view::apply(entries, &candidate)
         };
@@ -698,6 +800,12 @@ impl Host {
         self.lock().applied.as_ref().map(|view| view.version)
     }
 
+    /// The entry id of the signed floor, if the tool set changed on a route
+    /// with prefix-bound signed reasoning.
+    pub fn signed_floor(&self) -> Option<String> {
+        self.lock().signed_floor.clone()
+    }
+
     /// From now on, send each model step's notice only after the next step
     /// has applied its view and rendered its request (see
     /// [`State::lag_notices`]). A notice still held when a script ends goes
@@ -782,6 +890,9 @@ impl<P: Provider> Runner<P> {
         let state = State {
             notice_keep: false,
             provider_entry_speaks_for: false,
+            provider_signed_floor: false,
+            signed_floor: None,
+            tools_revision: 0,
             observations: observe.then(|| ObservationLog {
                 started: Instant::now(),
                 values: Observations::default(),
@@ -847,6 +958,8 @@ impl<P: Provider> Runner<P> {
             state.setup_due = false;
             state.provider_entry_speaks_for =
                 cortexkit_role_compaction::provides_entry_speaks_for(&provides);
+            state.provider_signed_floor =
+                cortexkit_role_compaction::provides_signed_floor(&provides);
             let mut request = SetupRequest::new(
                 state.config.preset.clone(),
                 state.config.model.clone(),
@@ -860,6 +973,10 @@ impl<P: Provider> Runner<P> {
             request.newest = state.transcript.cursor();
             request.accepts_images = state.config.accepts_images;
             request.view_anchor = state.config.view_anchor.then_some(true);
+            if let Some(floor) = &state.signed_floor {
+                request =
+                    request.with_signed_floor(SignedFloor::new(floor), state.provider_signed_floor);
+            }
             request
         };
         let started = Instant::now();
@@ -929,6 +1046,19 @@ impl<P: Provider> Runner<P> {
                         });
                     }
                     self.notice().await;
+                    true
+                }
+                Step::ChangeTools => {
+                    let mut state = self.host.lock();
+                    state.tools_revision += 1;
+                    // Every signed part so far was signed under the old tool
+                    // list. With an empty transcript there is none to strip.
+                    if state.config.rules.signed_parts == SignedParts::Bound {
+                        let newest = state.transcript.entries().last().map(|e| e.mid.clone());
+                        if newest.is_some() {
+                            state.signed_floor = newest;
+                        }
+                    }
                     true
                 }
                 Step::RestartRunner => {
@@ -1081,9 +1211,10 @@ impl<P: Provider> Runner<P> {
                 .unwrap_or(0);
             let reasoning = &state.reasoning_tokens;
             let lookup = |id: &str| reasoning.get(id).copied().unwrap_or(0);
+            let system_digest = state.system_digest();
             let request = Request {
                 messages: &messages,
-                system_digest: "system-v1",
+                system_digest: &system_digest,
                 system_tokens: state.config.system_tokens,
                 window: state.config.context_window,
                 now: state.now,
@@ -1616,7 +1747,9 @@ fn render(
 
 /// The ride causes the mock runner detects and declares at Setup. Its model
 /// providers keep no connection whose reset would lose the cache, and it has
-/// no accounts or tool surfaces that change.
+/// no accounts that change. It declares no `surface_change` either: a tool-set
+/// change ([`Step::ChangeTools`]) is announced by no ride, only by the signed
+/// floor in the next conditions.
 const DETECTS: [RideCause; 4] = [
     RideCause::CacheExpired,
     RideCause::ModelChange,

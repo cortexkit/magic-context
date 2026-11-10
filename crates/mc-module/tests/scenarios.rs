@@ -37,6 +37,8 @@ mod agent_surface;
 mod app_read;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
+#[path = "scenarios/signed_floor.rs"]
+mod signed_floor;
 
 #[cfg(feature = "context-db-timing")]
 #[path = "scenarios/write_lock_budget.rs"]

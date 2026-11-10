@@ -208,10 +208,16 @@ pub const HOLD_CAP_POINTS: f64 = 10.0;
 /// thinking is lost or the request must shrink either way. A ride that only
 /// says the provider forgot its cache is held like any other pass, since
 /// resending the same bytes keeps the thinking valid.
+///
+/// `signed_floor` is the ordinal of the runner's signed floor when ck-mc
+/// holds that entry ([`lanes::stripped_by_floor`]). The runner already
+/// strips the signed reasoning of every step at or before it, so those steps
+/// have nothing left for the hold to protect.
 pub fn signed_thinking_hold(
     entries: &[Entry],
     conditions: &Conditions,
     settings: &Settings,
+    signed_floor: Option<u64>,
 ) -> bool {
     if conditions.rules.signed_parts != SignedParts::Bound {
         return false;
@@ -224,15 +230,20 @@ pub fn signed_thinking_hold(
     {
         return false;
     }
-    heavy_signed_turn(entries, conditions)
+    heavy_signed_turn(entries, conditions, signed_floor)
 }
 
 /// The part of [`signed_thinking_hold`] that doesn't depend on usage: the
 /// runner declares signed reasoning, and one of the current turn's last 15
-/// assistant steps spent more than 1,500 reasoning tokens. With no usage the
-/// hold can't be decided, so this says whether it would hold if usage were
-/// below its cap.
-pub fn heavy_signed_turn(entries: &[Entry], conditions: &Conditions) -> bool {
+/// assistant steps after the signed floor spent more than 1,500 reasoning
+/// tokens. With no usage the hold can't be decided, so this says whether it
+/// would hold if usage were below its cap. Steps at or before the floor
+/// still count toward the 15; their reasoning just makes no step heavy.
+pub fn heavy_signed_turn(
+    entries: &[Entry],
+    conditions: &Conditions,
+    signed_floor: Option<u64>,
+) -> bool {
     if conditions.rules.signed_parts != SignedParts::Bound {
         return false;
     }
@@ -244,6 +255,7 @@ pub fn heavy_signed_turn(entries: &[Entry], conditions: &Conditions) -> bool {
         .rev()
         .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
         .take(HEAVY_REASONING_WINDOW_STEPS)
+        .filter(|entry| !signed_floor.is_some_and(|floor| entry.ordinal <= floor))
         .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
 }
 

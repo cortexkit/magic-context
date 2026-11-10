@@ -39,6 +39,8 @@ fn once(mut decide: impl FnMut(&Host) -> Option<Vec<Edit>> + Send + 'static) -> 
 /// ride with whatever `on_ride` returns.
 struct TestProvider {
     entry_speaks_for: Mutex<bool>,
+    /// Declare `compaction-signed-floor/v1`.
+    signed_floor: Mutex<bool>,
     host: Mutex<Option<Host>>,
     on_notice: Mutex<Option<Decide>>,
     on_ride: Mutex<Option<Decide>>,
@@ -53,6 +55,7 @@ impl TestProvider {
     fn new() -> Self {
         Self {
             entry_speaks_for: Mutex::new(false),
+            signed_floor: Mutex::new(false),
             host: Mutex::new(None),
             on_notice: Mutex::new(None),
             on_ride: Mutex::new(None),
@@ -81,11 +84,14 @@ impl TestProvider {
 
 impl Provider for TestProvider {
     async fn compaction_provides(&self) -> Result<Vec<String>, CallError> {
-        Ok(if *self.entry_speaks_for.lock().unwrap() {
-            vec![cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.into()]
-        } else {
-            Vec::new()
-        })
+        let mut provides = Vec::new();
+        if *self.entry_speaks_for.lock().unwrap() {
+            provides.push(cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.into());
+        }
+        if *self.signed_floor.lock().unwrap() {
+            provides.push(cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.into());
+        }
+        Ok(provides)
     }
 
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
@@ -781,7 +787,12 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
     let version = runner.provider().version() + 1;
     let mut edits = vec![drop_edit(version, &tools[0])];
     loop {
-        let invalid = invalid_signed_parts(&host.entries(), &edits, &anthropic_bound());
+        let invalid = invalid_signed_parts(
+            &host.entries(),
+            &edits,
+            &anthropic_bound(),
+            cortexkit_compaction_view::rules::Floor::none(),
+        );
         if invalid.is_empty() {
             break;
         }
@@ -1038,4 +1049,102 @@ async fn a_wrong_self_tag_breaks_the_chain_once() {
         text,
         format!("§{}§ Done.", first_reply.parts[0].tag.unwrap())
     );
+}
+
+fn think(reasoning: u64) -> Step {
+    Step::Model(Turn {
+        reasoning_tokens: Some(reasoning),
+        text: Some("Thinking it over.".into()),
+        output_tokens: 5,
+        ..Turn::default()
+    })
+}
+
+/// A tool-set change on a route whose signed reasoning is bound to the
+/// request prefix: the runner sets its signed floor at the newest entry,
+/// strips the signed reasoning at or before it from every later request,
+/// reports the floor only to a provider that declares it, and accepts a
+/// view whose edits before the floor would otherwise invalidate it.
+#[tokio::test]
+async fn a_tool_change_on_a_bound_route_strips_earlier_signed_reasoning() {
+    for declared in [false, true] {
+        let provider = TestProvider::new();
+        *provider.signed_floor.lock().unwrap() = declared;
+        let mut runner =
+            Runner::start(config(Kind::Anthropic, anthropic_bound(), 40_000), provider)
+                .await
+                .unwrap();
+        runner.provider().attach(runner.host().clone());
+        runner.play(&[user("go"), think(100), think(100)]).await;
+        let floor = runner.host().entries().last().unwrap().mid.clone();
+        // Once the floor is set, drop the person's message: an edit before
+        // both reasoning parts the floor covers.
+        let first = runner.host().entries()[0].clone();
+        *runner.provider().on_notice.lock().unwrap() = Some(once(move |host| {
+            host.signed_floor().map(|_| {
+                vec![Edit::new(
+                    1,
+                    EditOp::Drop {
+                        mid: first.mid.clone(),
+                        part: Some(first.parts[0].id.clone()),
+                    },
+                )]
+            })
+        }));
+        runner
+            .play(&[Step::ChangeTools, answer(), think(100), answer()])
+            .await;
+        // Without the strip, the first request after the change would keep
+        // reasoning signed under the old tool list, and the model provider
+        // would reject it.
+        assert!(
+            runner.report.model_errors.is_empty(),
+            "{:?}",
+            runner.report.model_errors
+        );
+        assert!(runner.report.view_refusals.is_empty());
+        assert_eq!(runner.host().signed_floor(), Some(floor.clone()));
+        assert_eq!(
+            runner.provider().published.lock().unwrap().as_slice(),
+            [ApplyViewAnswer::Accepted]
+        );
+        assert_eq!(runner.host().applied_version(), Some(1));
+        let rendered: Vec<String> = runner
+            .host()
+            .rendered()
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
+            .map(|part| part.id.clone())
+            .collect();
+        // Only the reasoning written after the change is sent.
+        assert_eq!(rendered.len(), 1);
+        let expected = declared.then(|| floor.clone());
+        let reported = |conditions: &cortexkit_role_compaction::notice::Conditions| {
+            conditions
+                .signed_floor
+                .as_ref()
+                .map(|floor| floor.through.clone())
+        };
+        let notices = runner.provider().notices.lock().unwrap().clone();
+        assert_eq!(reported(&notices.last().unwrap().conditions), expected);
+        runner.play(&[Step::RestartRunner]).await;
+        let setups = runner.provider().setups.lock().unwrap().clone();
+        assert_eq!(
+            setups
+                .last()
+                .unwrap()
+                .signed_floor
+                .as_ref()
+                .map(|floor| floor.through.clone()),
+            expected
+        );
+    }
+    // A route whose reasoning is not bound to the prefix keeps it.
+    let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    runner
+        .play(&[user("go"), think(100), Step::ChangeTools, answer()])
+        .await;
+    assert!(runner.report.model_errors.is_empty());
+    assert_eq!(runner.host().signed_floor(), None);
 }

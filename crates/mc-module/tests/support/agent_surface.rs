@@ -287,6 +287,7 @@ fn surface_injection_cleanup_keeps_runner_marked_notices() {
         edited: &edited,
         protected_tools: &protected_tools,
         keep_first_message: true,
+        signed_floor: None,
     };
     assert!(lanes::injected_text(&context, None).is_empty());
 }
@@ -306,6 +307,7 @@ fn surface_reclaimable_tokens_exclude_text_in_the_protected_tail() {
         edited: &edited,
         protected_tools: &protected_tools,
         keep_first_message: true,
+        signed_floor: None,
     };
     let cutoff = lanes::protected_cutoff(&context, 1);
     assert_eq!(cutoff, Some(2));
@@ -331,6 +333,7 @@ fn surface_keep_retains_later_person_instructions() {
         edited: &edited,
         protected_tools: &protected_tools,
         keep_first_message: true,
+        signed_floor: None,
     };
     let drops = lanes::keep_drops(&context, &BTreeSet::new(), None);
     assert!(drops.iter().any(|(key, _)| key.0 == "m2"));
