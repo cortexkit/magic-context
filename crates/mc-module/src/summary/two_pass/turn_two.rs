@@ -119,7 +119,9 @@ impl Drop for Working {
 #[derive(Clone, Debug)]
 struct Carrier {
     runner: String,
+    /// Stage and check-attempt rows belong to the owning session's harness.
     harness: String,
+    child_harness: String,
     owner: String,
     child: String,
     project_root: Option<String>,
@@ -134,6 +136,7 @@ impl Carrier {
         Self {
             runner: job.owner.runner.clone(),
             harness: job.owner.harness.clone(),
+            child_harness: job.continuation.child.session.harness.clone(),
             owner: job.owner.session.clone(),
             child: job.continuation.child.session.session.clone(),
             project_root: job.project_root.clone(),
@@ -151,7 +154,7 @@ impl Carrier {
 
     fn child(&self, session: &str) -> Child {
         Child {
-            session: SessionRef::new(self.runner.clone(), self.harness.clone(), session),
+            session: SessionRef::new(self.runner.clone(), self.child_harness.clone(), session),
             project_root: self.project_root.clone(),
         }
     }
@@ -167,6 +170,14 @@ impl Carrier {
         })
     }
 
+    fn stage_model_json(&self) -> Value {
+        let mut model = self.model_json();
+        // Recovery needs the child's route, but check keys hash only the model
+        // profile so a route change never causes the same check to be sent twice.
+        model["childHarness"] = json!(self.child_harness);
+        model
+    }
+
     /// The carrier a stage row and its request name, for recovery.
     fn from_stage(row: &StageRow, project_root: Option<String>) -> Option<Self> {
         let runner = row.carrier.strip_prefix("ck-mc:")?.to_owned();
@@ -179,6 +190,11 @@ impl Carrier {
         Some(Self {
             runner,
             harness: row.harness.clone(),
+            // Older stages did not record a child route and used the owner's.
+            child_harness: model["childHarness"]
+                .as_str()
+                .unwrap_or(&row.harness)
+                .to_owned(),
             owner: row.session.clone(),
             child: row.child.clone()?,
             project_root,
@@ -1486,7 +1502,7 @@ fn reserve(
         .map(|fact| (fact.id.to_string(), json!(fact.attempts)))
         .collect();
     let request = json!({
-        "model": carrier.model_json(),
+        "model": carrier.stage_model_json(),
         "factAttempts": attempts,
         "items": fitted.items.iter().map(|item| item.item).collect::<Vec<_>>(),
         "lexicalOnly": lexical_only,
@@ -1737,7 +1753,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         Ok(reply) => reply,
         Err(error) if error == TIMED_OUT => return Ok(Outcome::InFlight),
         Err(error) => {
-            // A known failure: every fact of the send is retried later.
+            // A known failure spends an attempt; facts with attempts left retry later.
             db.with_connection(|conn| {
                 charge_stage(
                     conn,
@@ -1772,3 +1788,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         Outcome::Resolved
     })
 }
+
+#[cfg(test)]
+#[path = "turn_two_tests.rs"]
+mod tests;

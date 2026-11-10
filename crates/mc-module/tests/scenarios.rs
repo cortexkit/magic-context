@@ -58,6 +58,8 @@ struct NoticeTrace {
 #[derive(Clone, Default)]
 struct HostClient {
     child_harnesses: Arc<Mutex<Vec<(String, String)>>>,
+    /// When set, only this harness can host a summarizer child.
+    required_child_harness: Option<String>,
     host: Arc<Mutex<Option<Host>>>,
     /// Every catch-up read ck-mc made (compact detail).
     reads: ReadLog,
@@ -309,6 +311,16 @@ impl RunnerClient for HostClient {
             .lock()
             .unwrap()
             .push(("send".into(), child.session.harness.clone()));
+        if self
+            .required_child_harness
+            .as_ref()
+            .is_some_and(|harness| harness != &child.session.harness)
+        {
+            return Err(ClientError::refused(
+                "invalid_params",
+                "invalid or unsupported parameter generation.max_output_tokens",
+            ));
+        }
         self.child_scopes
             .lock()
             .unwrap()
@@ -2448,6 +2460,111 @@ async fn the_two_pass_historian_reconciles_its_facts_with_memory_in_a_second_tur
         stages.contains(&("turn_two".into(), "resolved".into())),
         "{stages:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn turn_two_uses_the_child_harness_and_keeps_stage_ownership_on_pi() {
+    let dir = scratch("two-pass-child-harness");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    let client = HostClient {
+        required_child_harness: Some("opencode2".into()),
+        ..HostClient::default()
+    };
+    let mut config = config("head", Kind::OpenAi, free());
+    config.session.harness = "pi".into();
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_with_client(
+        client.clone(),
+        config,
+        Settings::default(),
+        Some(dir.clone()),
+        false,
+        |_| {},
+    )
+    .await;
+    let mut setup = SetupRequest::new(
+        "head",
+        ModelRef::new("test", "test-model"),
+        100_000,
+        1_000,
+        free(),
+        Vec::new(),
+        1,
+    );
+    setup.child_harness = Some("opencode2".into());
+    let route = runner.provider().route.clone();
+    let module = runner.provider().module();
+    module.setup(route.clone(), setup).unwrap();
+    module.idle(&route.session).await.unwrap();
+    let summarizer = mc_mock_runner::child::scripted_summarizer();
+    runner.host().set_responder(Arc::new(move |settings, prompt| {
+        use mc_mock_runner::child as mock;
+        let mut reply = summarizer(settings, prompt);
+        if prompt.contains(mock::TURN_TWO_FACT) {
+            reply.text = mock::turn_two_reply(
+                &mock::facts_of(prompt)
+                    .into_iter()
+                    .map(|(id, _)| {
+                        format!(r#"{{"fact_id":{id},"action":"new","check":"no memory states it"}}"#)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        } else if prompt.contains(mock::TURN_ONE_FORMAT) {
+            reply.text = mock::turn_one_reply(&mock::summarize(prompt).replace(
+                "</output>",
+                "<facts><PROJECT_RULES>\n* [at_compartment=1 messages=1] Releases need two reviewers.\n</PROJECT_RULES></facts>\n</output>",
+            ));
+        }
+        reply
+    }));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let stages: Vec<(String, String, String)> = conn
+        .prepare("SELECT stage, harness, state FROM memory_stage_attempts ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        stages.contains(&("turn_two".into(), "pi".into(), "resolved".into())),
+        "{stages:?}"
+    );
+    assert!(stages.iter().all(|(_, harness, _)| harness == "pi"));
+    let stored_model: String = conn
+        .query_row(
+            "SELECT json_extract(request_json, '$.model.childHarness') FROM memory_stage_attempts WHERE stage = 'turn_two'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_model, "opencode2");
+    let calls = client.child_harnesses.lock().unwrap().clone();
+    assert!(calls.len() >= 4, "{calls:?}");
+    assert!(
+        calls.iter().all(|(_, harness)| harness == "opencode2"),
+        "{calls:?}"
+    );
+    let receipts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_decision_receipts r JOIN memory_pending_facts f ON f.id = r.fact_id
+             JOIN memory_publications p ON p.publication_id = f.publication_id
+             WHERE p.source_session_id = 's1' AND p.project_path = 'pj-test' AND f.state = 'applied'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipts, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
