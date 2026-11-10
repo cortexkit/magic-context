@@ -157,7 +157,7 @@ test("a manual host fold that leaves the served head unchanged keeps the cache a
 // the hook still commits a new head in front of what the provider cached from
 // the last process. The request after the compaction is a rebuild all the
 // same, so the queued drop belongs on it.
-test.failing("after a restart, the pass after a manual host fold that rebuilt the served head applies the held drop", async () => {
+test("after a restart, the pass after a manual host fold that rebuilt the served head applies the held drop", async () => {
     const { f, seed, target, waiting, pending } = await heldDropWithNewerHistory(51886);
     try {
         expect(pending()).toBe(1);
@@ -169,9 +169,9 @@ test.failing("after a restart, the pass after a manual host fold that rebuilt th
         const afterFold = await f.pass();
         expect(head(afterFold)).not.toBe(head(waiting));
         expect(head(afterFold)).toContain("Review history 1");
-        // This pass currently logs `host checkpoint head: changed=false` and
-        // `rewrite permission: allowed=false`, and the drop stays queued; the
-        // assertions below state what it should do instead.
+        // Before the compaction hook recorded its own proof, this pass logged
+        // `host checkpoint head: changed=false` and `rewrite permission:
+        // allowed=false`, and the drop stayed queued.
         expect(afterFold.logs.some((line) => /rewrite permission: allowed=true/.test(line))).toBe(
             true,
         );

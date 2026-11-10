@@ -169,7 +169,7 @@ const servedReasoning = (messages: MessageLike[]) =>
         .flatMap((message) => message.parts)
         .filter((part) => (part as { type?: string }).type === "reasoning");
 
-test.failing("a held pass that serves a head committed outside a pass keeps no signed thinking behind it", async () => {
+test("a held pass that serves a head committed outside a pass keeps no signed thinking behind it", async () => {
     const sessionId = "held-host-checkpoint-thinking";
     const { database, pending, servedHead } = await headCommittedOutsideAPass(sessionId);
     const messages = signedTurns();

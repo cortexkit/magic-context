@@ -143,7 +143,12 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
-import { hostCheckpointChangedServedHead, rememberServedHead } from "./host-checkpoint-ride";
+import {
+    beginHostCheckpointPass,
+    completeHostCheckpointPass,
+    hostCheckpointHeadChange,
+    stageServedHead,
+} from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
@@ -2193,6 +2198,7 @@ export async function runPostTransformPhase(
     const pendingMaterializationAtPassStart = args.pendingMaterializationSessions.has(
         args.sessionId,
     );
+    beginHostCheckpointPass(args.sessionId, args.pendingMaterializationSessions);
     const pendingOrigin = pendingMaterializationOrigin(
         args.pendingMaterializationSessions,
         args.sessionId,
@@ -2375,6 +2381,45 @@ export async function runPostTransformPhase(
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
         sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
+        releaseThinkingForRewrite(false, true);
+    }
+    // OpenCode 2 can replace the history head outside any pass: its compaction
+    // hook commits a new m[0]/m[1] for a manual /compact and asks for a
+    // `host_compaction` materialization. When that proves the head this request
+    // serves differs from the one the provider cached, the cache is already
+    // lost, so this pass is the hardFold ride every queued lane lands on. The
+    // request stays pending until a pass settles it (see the end of this phase).
+    const hostCheckpointRequested = hasPendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
+        args.sessionId,
+        "host_compaction",
+    );
+    const hostCheckpointProof =
+        hostCheckpointRequested && m0M1EnabledForFold
+            ? hostCheckpointHeadChange(args.sessionId, () => {
+                  hydrateCachedM0Mural(args.db, args.sessionId, args.sessionMeta as M0M1State);
+                  return {
+                      m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                      m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                      muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                  };
+              })
+            : undefined;
+    const hostCheckpointRide = hostCheckpointProof?.changed === true;
+    if (hostCheckpointRequested) {
+        sessionLog(
+            args.sessionId,
+            `host checkpoint head: changed=${hostCheckpointRide} proof=${hostCheckpointProof?.source ?? "none"}`,
+        );
+    }
+    // A held pass replays the persisted head, and the hook already replaced
+    // it: the hold keeps nothing unchanged. As on a first render, the new head
+    // goes out, so the open turn's signed thinking leaves the wire with it.
+    if (hostCheckpointRide && activeThinkingPrefixHold) {
+        sessionLog(
+            args.sessionId,
+            "host checkpoint head changed under a signed-thinking hold: stripping signed thinking",
+        );
         releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =
@@ -2698,38 +2743,6 @@ export async function runPostTransformPhase(
         const depth = getPendingOpsCount(args.db, args.sessionId);
         return depth === null ? "not loaded (deferred pass)" : String(depth);
     };
-    // OpenCode 2 can replace the history head outside any pass: its compaction
-    // hook commits a new m[0]/m[1] for a manual /compact and asks for a
-    // `host_compaction` materialization. When the head this request serves
-    // really differs from the one the previous pass injected, the provider
-    // cache is already lost on this request, so it is the hardFold ride every
-    // queued lane lands on. The request is withdrawn on this pass either way:
-    // the next pass serves the same head again and must not rebuild for it a
-    // second time.
-    const hostCheckpointRequested = hasPendingMaterializationOrigin(
-        args.pendingMaterializationSessions,
-        args.sessionId,
-        "host_compaction",
-    );
-    const hostCheckpointRide =
-        hostCheckpointRequested &&
-        m0M1EnabledForFold &&
-        hostCheckpointChangedServedHead(args.sessionId, {
-            m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
-            m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
-            muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
-        });
-    if (hostCheckpointRequested) {
-        clearPendingMaterializationOrigin(
-            args.pendingMaterializationSessions,
-            args.sessionId,
-            "host_compaction",
-        );
-        sessionLog(
-            args.sessionId,
-            `host checkpoint head: changed=${hostCheckpointRide} (one ride; request withdrawn)`,
-        );
-    }
     // All first applications share an independently priced cache-bust permission.
     // An expired provider cache is not one of them: when only the provider forgot
     // the cache, the pass replays byte-identically like a warm one, so queued
@@ -2813,6 +2826,7 @@ export async function runPostTransformPhase(
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
+            hostCheckpointHead: hostCheckpointRide,
             // A reading that only a local count put in the force band lifts the
             // signed-thinking hold only at 95% or more, by the same rule as the
             // force ride.
@@ -3328,6 +3342,7 @@ export async function runPostTransformPhase(
                 pendingOpsDidMutate ||
                 foldBustsServedPrefixThisPass ||
                 firstRenderBust ||
+                hostCheckpointRide ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
@@ -4031,11 +4046,17 @@ export async function runPostTransformPhase(
                 if (result.m0RematerializedThisPass) {
                     m0ComparisonDecision = result.decision;
                 }
-                rememberServedHead(args.sessionId, {
-                    m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
-                    m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
-                    muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
-                });
+                stageServedHead(
+                    args.sessionId,
+                    {
+                        m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                        m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                        muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                    },
+                    args.sessionMeta.cachedM0Bytes == null
+                        ? -1
+                        : args.sessionMeta.cachedM0MaxCompartmentSeq,
+                );
                 sessionLog(
                     args.sessionId,
                     `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
@@ -4676,6 +4697,7 @@ export async function runPostTransformPhase(
     let bustedThisPass =
         firstApplicationEdits.any ||
         firstRenderBust ||
+        hostCheckpointRide ||
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||
@@ -5395,6 +5417,33 @@ export async function runPostTransformPhase(
 
     logTransformTiming(args.sessionId, "pp.tailGuard", tTailGuard);
     if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
+    if (hostCheckpointRide && isCacheBustingPass) {
+        // The hook's head can cover newer compartments than the head the
+        // provider saw, exactly as an executed fold that advances coverage.
+        try {
+            rearmChannel2AfterCoverageAdvancingHardFold({
+                db: args.db,
+                sessionId: args.sessionId,
+                foldExecuted: true,
+                compactionOff,
+                previousCoverage: hostCheckpointProof?.previousCoverage ?? null,
+                currentCoverage:
+                    args.sessionMeta.cachedM0Bytes == null
+                        ? null
+                        : args.sessionMeta.cachedM0MaxCompartmentSeq,
+            });
+        } catch (error) {
+            sessionLog(args.sessionId, "channel2 host-checkpoint reset failed (ignored):", error);
+        }
+    }
+    // The pass completed. A `host_compaction` request is settled when its proof
+    // showed no change or an allowed pass rode it; a pass that could not take
+    // the ride keeps it for the next one.
+    completeHostCheckpointPass(
+        args.sessionId,
+        args.pendingMaterializationSessions,
+        hostCheckpointRequested && (!hostCheckpointRide || isCacheBustingPass),
+    );
     return {
         explicitMaterializedSuccessfully,
         deferredMaterializedSuccessfully,
@@ -5456,7 +5505,6 @@ export function checkM0MutationDriftAndSignal(args: {
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
-    clearPendingMaterializationOrigin,
     hasPendingMaterializationOrigin,
     pendingMaterializationOrigin,
     requestPendingMaterialization,

@@ -124,6 +124,7 @@ import {
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
+import { forgetHostCheckpointPass, revertHostCheckpointPass } from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import { takeCoveredInstructionRows } from "./host-served-rows";
 import {
@@ -4478,9 +4479,15 @@ export function createTransform(deps: TransformDeps) {
     const timedTransform: typeof transform = (input, output) =>
         withTransformTimingSummary(async () => {
             const sessionId = findSessionId(output.messages as MessageLike[]);
+            if (sessionId) forgetHostCheckpointPass(sessionId);
             try {
                 await transform(input, output);
+                if (sessionId) forgetHostCheckpointPass(sessionId);
             } catch (error) {
+                // A refused pass served nothing: a host checkpoint request it
+                // settled must stay pending for the retry.
+                if (sessionId)
+                    revertHostCheckpointPass(sessionId, deps.pendingMaterializationSessions);
                 // These refusals propagate; the wrapper does not replay a previously prepared request.
                 if (sessionId && !deps.compactionOff && error instanceof EmergencyFailClosedError)
                     recordUsageRefusal(deps.db, sessionId);
