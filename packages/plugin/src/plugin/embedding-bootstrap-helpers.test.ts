@@ -70,6 +70,7 @@ describe("isConfigLoadUntrusted — recovered fields", () => {
         "embedding.query_instruction",
         "embedding.document_prefix",
         "embedding.truncate",
+        "embedding.dimensions",
         "embedding.max_input_tokens",
         "embedding.local_runtime",
         "embedding.local_dtype",

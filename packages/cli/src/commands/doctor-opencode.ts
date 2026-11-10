@@ -897,6 +897,9 @@ async function checkEmbeddingConfig(
         typeof embedding?.input_type === "string" ? embedding.input_type.trim() : undefined;
     const truncateMode =
         typeof embedding?.truncate === "string" ? embedding.truncate.trim() : undefined;
+    // Probe the SAME vector space the runtime embeds into: a configured width
+    // that the probe omits would certify the endpoint default instead.
+    const dimensions = typeof embedding?.dimensions === "number" ? embedding.dimensions : undefined;
 
     let localIssues = 0;
 
@@ -952,6 +955,7 @@ async function checkEmbeddingConfig(
             apiKey: apiKey,
             ...(inputType ? { inputType } : {}),
             ...(truncateMode ? { truncate: truncateMode } : {}),
+            ...(dimensions !== undefined ? { dimensions } : {}),
             timeoutMs: 10_000,
         });
     } catch (error) {
@@ -970,6 +974,14 @@ async function checkEmbeddingConfig(
                 `Embedding endpoint OK (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
             );
             return { issues: localIssues };
+        case "dimensions_mismatch":
+            log.error(
+                `Embedding endpoint ignored dimensions=${outcome.requested} and returned ${outcome.returned}-dim vectors (${outcome.status})`,
+            );
+            log.info(
+                "  The endpoint or model does not support the dimensions parameter. Remove embedding.dimensions, or use a Matryoshka-capable model/endpoint. Mismatched vectors are rejected at runtime.",
+            );
+            return { issues: localIssues + 1 };
         case "auth_failed":
             log.error(
                 `Embedding endpoint rejected credentials (${outcome.status}) — check api_key / env var`,

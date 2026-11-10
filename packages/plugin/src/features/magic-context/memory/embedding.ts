@@ -93,6 +93,11 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
                 ? { document_prefix: config.document_prefix }
                 : {}),
             ...(truncate ? { truncate } : {}),
+            // Requested output width (Matryoshka models). Preserved so it reaches
+            // the provider body AND the identity hash — a dropped value here is a
+            // silent revert to the endpoint default. Conditional spread keeps the
+            // default identity byte-identical when unset.
+            ...(config.dimensions ? { dimensions: config.dimensions } : {}),
             ...(config.max_input_tokens
                 ? {
                       max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
@@ -144,6 +149,7 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             queryInstruction: config.query_instruction,
             documentPrefix: config.document_prefix,
             truncate: config.truncate,
+            dimensions: config.dimensions,
             maxInputTokens: config.max_input_tokens,
         });
     }

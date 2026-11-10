@@ -1422,6 +1422,7 @@ pub(crate) fn prepare_embedding_probe_options(
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
+    dimensions: Option<u32>,
     source: Option<String>,
 ) -> Result<EmbeddingProbeOptions, EmbeddingProbeOutcome> {
     // TRUST BOUNDARY. Token expansion + contacting the endpoint is only safe for
@@ -1468,6 +1469,7 @@ pub(crate) fn prepare_embedding_probe_options(
         api_key,
         input_type,
         truncate,
+        dimensions: dimensions.filter(|d| *d > 0),
         timeout_ms: 10_000,
     })
 }
@@ -1479,12 +1481,14 @@ pub async fn test_embedding_endpoint(
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
+    // Matryoshka output width; sent so the probe tests the configured space.
+    dimensions: Option<u32>,
     // "user" (the only scope that expands tokens + probes) or "project"
     // (refused). Absent = user, for the existing user-config caller.
     source: Option<String>,
 ) -> EmbeddingProbeOutcome {
     let options = match prepare_embedding_probe_options(
-        endpoint, model, api_key, input_type, truncate, source,
+        endpoint, model, api_key, input_type, truncate, dimensions, source,
     ) {
         Ok(options) => options,
         Err(outcome) => return outcome,
@@ -2034,6 +2038,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("resolvable file token should expand, not error");
 
@@ -2053,6 +2058,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("resolvable env token should expand, not error");
         env.remove("MC_DASHBOARD_TEST_MODEL");
@@ -2068,6 +2074,7 @@ mod tests {
             "https://example.com/v1".to_string(),
             "text-embedding-3-small".to_string(),
             Some("{env:MC_DASHBOARD_UNSET_TEST_VAR}".to_string()),
+            None,
             None,
             None,
             None,
@@ -2096,6 +2103,7 @@ mod tests {
             Some("{env:MC_DASHBOARD_PROJECT_SECRET}".to_string()),
             None,
             None,
+            None,
             Some("project".to_string()),
         )
         .expect_err("project scope must be refused");
@@ -2114,6 +2122,7 @@ mod tests {
         let options = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "{env:MC_DASHBOARD_USER_SCOPE_MODEL}".to_string(),
+            None,
             None,
             None,
             None,

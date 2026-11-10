@@ -260,6 +260,7 @@ struct TestEmbeddingEndpointArgs {
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
+    dimensions: Option<u32>,
     source: Option<String>,
 }
 
@@ -723,6 +724,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 a.api_key,
                 a.input_type,
                 a.truncate,
+                a.dimensions,
                 a.source,
             ) {
                 Ok(options) => options,

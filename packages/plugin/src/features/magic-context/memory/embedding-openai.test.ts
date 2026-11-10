@@ -37,6 +37,27 @@ describe("provider modelId matches canonical identity (write/read must agree)", 
             },
         },
         {
+            name: "with dimensions set (width picks a subspace)",
+            config: {
+                provider: "openai-compatible",
+                endpoint: "http://h/v1",
+                model: "qwen/qwen3-embedding-8b",
+                dimensions: 768,
+            },
+        },
+        {
+            name: "with dimensions + input_type + truncate together",
+            config: {
+                provider: "openai-compatible",
+                endpoint: "http://h/v1",
+                model: "qwen/qwen3-embedding-8b",
+                api_key: "k",
+                input_type: "passage",
+                truncate: "END",
+                dimensions: 1024,
+            },
+        },
+        {
             name: "with document prefix",
             config: {
                 provider: "openai-compatible",
@@ -63,6 +84,8 @@ describe("provider modelId matches canonical identity (write/read must agree)", 
                         ? c.config.document_prefix
                         : undefined,
                 truncate: c.config.provider === "openai-compatible" ? c.config.truncate : undefined,
+                dimensions:
+                    c.config.provider === "openai-compatible" ? c.config.dimensions : undefined,
             });
             expect(provider.modelId).toBe(getEmbeddingProviderIdentity(c.config));
         });
@@ -196,6 +219,37 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         expect("input_type" in body).toBe(false);
         expect("truncate" in body).toBe(false);
         expect(body.input).toBeDefined();
+    });
+
+    test("sends dimensions when configured (Matryoshka output width)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+            dimensions: 768,
+        });
+        const body = await capturedBody(provider);
+        expect(body.dimensions).toBe(768);
+    });
+
+    test("omits dimensions entirely when unset (endpoint default instead)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+        });
+        const body = await capturedBody(provider);
+        expect("dimensions" in body).toBe(false);
+    });
+
+    test("ignores a non-integer / non-positive dimensions value instead of sending it", async () => {
+        for (const bad of [0, -768, 1.5, Number.NaN]) {
+            fetchSpy.mockClear();
+            const provider = new OpenAICompatibleEmbeddingProvider({
+                endpoint: "http://127.0.0.1:65535",
+                model: "qwen/qwen3-embedding-8b",
+                dimensions: bad,
+            });
+            expect("dimensions" in (await capturedBody(provider))).toBe(false);
+        }
     });
 
     test("coerces empty / whitespace-only input to a space so the provider can't 400 the batch", async () => {
@@ -905,5 +959,91 @@ describe("OpenAICompatibleEmbeddingProvider response ordering", () => {
             respondWith(data);
             expect(await provider().embedBatch(["zero", "one"])).toEqual([null, null]);
         }
+    });
+});
+
+describe("OpenAICompatibleEmbeddingProvider dimensions enforcement", () => {
+    // A gateway/router that ignores `dimensions` answers with the model default
+    // width. Storing that under an identity that declares 768 mixes two vector
+    // spaces under one model_id, and cosineSimilarity returns 0 on length
+    // mismatch — recall collapses silently instead of erroring.
+    let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+
+    beforeEach(() => {
+        fetchSpy = spyOn(globalThis, "fetch");
+    });
+    afterEach(() => {
+        fetchSpy.mockRestore();
+    });
+
+    function vectorsOfWidth(width: number, count = 1): Response {
+        const body = {
+            data: Array.from({ length: count }, () => ({
+                embedding: Array.from({ length: width }, () => 0.1),
+            })),
+        };
+        return new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+        });
+    }
+
+    test("accepts a response whose width matches the requested dimensions", async () => {
+        fetchSpy.mockImplementation((async () => vectorsOfWidth(768)) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+            dimensions: 768,
+        });
+
+        const vector = await provider.embed("text");
+
+        expect(vector).not.toBeNull();
+        expect(vector?.length).toBe(768);
+        expect(provider.getLastFailureReason()).toBeNull();
+    });
+
+    test("rejects the whole batch when the endpoint returned another width", async () => {
+        fetchSpy.mockImplementation((async () => vectorsOfWidth(4096, 2)) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+            dimensions: 768,
+        });
+
+        expect(await provider.embedBatch(["zero", "one"])).toEqual([null, null]);
+        expect(provider.getLastFailureReason()).toEqual({
+            class: "invalid_envelope",
+            reason: "requested dimensions=768 but endpoint returned 4096-dim vectors; the endpoint may not support the dimensions parameter for this model",
+            retryable: false,
+        });
+    });
+
+    test("does not police width when no dimensions were requested", async () => {
+        fetchSpy.mockImplementation((async () => vectorsOfWidth(4096)) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+        });
+
+        const vector = await provider.embed("text");
+
+        expect(vector?.length).toBe(4096);
+        expect(provider.getLastFailureReason()).toBeNull();
+    });
+
+    test("different widths produce different model identities (no shared vector space)", () => {
+        const base = {
+            provider: "openai-compatible" as const,
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen/qwen3-embedding-8b",
+        };
+        const narrow = getEmbeddingProviderIdentity({ ...base, dimensions: 768 });
+        const wide = getEmbeddingProviderIdentity({ ...base, dimensions: 4096 });
+        const unset = getEmbeddingProviderIdentity(base);
+
+        expect(narrow).not.toBe(wide);
+        expect(narrow).not.toBe(unset);
+        expect(wide).not.toBe(unset);
     });
 });

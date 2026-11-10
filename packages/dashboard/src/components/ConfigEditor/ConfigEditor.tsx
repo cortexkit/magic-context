@@ -277,6 +277,7 @@ function ConfigForm(props: {
    */
   type EmbeddingProbeOutcome =
     | { kind: "ok"; status: number; dimensions: number | null }
+    | { kind: "dimensions_mismatch"; status: number; requested: number; returned: number }
     | { kind: "auth_failed"; status: number; preview: string }
     | { kind: "endpoint_unsupported"; status: number; preview: string }
     | { kind: "http_error"; status: number; preview: string }
@@ -299,6 +300,11 @@ function ConfigForm(props: {
         return {
           ok: true,
           message: `✓ Connected (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
+        };
+      case "dimensions_mismatch":
+        return {
+          ok: false,
+          message: `Endpoint returned ${outcome.returned}-dim vectors but embedding.dimensions is ${outcome.requested} — this model or endpoint ignores the dimensions parameter; remove it or pick a model that supports it`,
         };
       case "auth_failed":
         return {
@@ -866,6 +872,21 @@ function ConfigForm(props: {
                                               getNestedValue(formData(), "embedding.truncate") ??
                                                 "",
                                             ).trim();
+                                            // Raw-JSONC-only field, but the probe must
+                                            // request the same width the runtime will.
+                                            const rawDimensions = getNestedValue(
+                                              formData(),
+                                              "embedding.dimensions",
+                                            );
+                                            // Same bounds as the runtime schema (positive
+                                            // integer ≤ 8192), no string coercion.
+                                            const dimensions =
+                                              typeof rawDimensions === "number" &&
+                                              Number.isInteger(rawDimensions) &&
+                                              rawDimensions > 0 &&
+                                              rawDimensions <= 8192
+                                                ? rawDimensions
+                                                : null;
                                             if (!endpoint || !model) {
                                               setEmbeddingTestResult({
                                                 ok: false,
@@ -891,6 +912,7 @@ function ConfigForm(props: {
                                                   apiKey: apiKey || null,
                                                   inputType: inputType || null,
                                                   truncate: truncate || null,
+                                                  dimensions,
                                                   // Backend trust boundary: only "user"
                                                   // scope expands tokens + probes. The
                                                   // button is hidden for projects, but

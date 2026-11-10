@@ -11,6 +11,7 @@
 
 export type EmbeddingProbeOutcome =
     | { kind: "ok"; status: number; dimensions: number | null }
+    | { kind: "dimensions_mismatch"; status: number; requested: number; returned: number }
     | { kind: "auth_failed"; status: number; preview: string }
     | { kind: "endpoint_unsupported"; status: number; preview: string }
     | { kind: "http_error"; status: number; preview: string }
@@ -32,6 +33,10 @@ export interface EmbeddingProbeOptions {
     inputType?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM). Omitted when unset. */
     truncate?: string;
+    /** Optional `dimensions` body field (Matryoshka output width). Omitted when
+     *  unset. When set, a response of any other width is `dimensions_mismatch`:
+     *  the runtime provider rejects such vectors, so the probe must too. */
+    dimensions?: number;
     /** Milliseconds before aborting the request. Defaults to 10000. */
     timeoutMs?: number;
     /**
@@ -49,6 +54,7 @@ const MAX_PREVIEW_CHARS = 240;
  * Probe an embeddings endpoint and classify the outcome.
  *
  * - 2xx with at least one `data[].embedding` array → `ok` with dimension count
+ * - 2xx whose width differs from a requested `dimensions` → `dimensions_mismatch`
  * - 2xx without `data[].embedding` → `endpoint_unsupported` (e.g. routers
  *   that accept the URL but don't implement the embeddings spec)
  * - 401 / 403 → `auth_failed`
@@ -83,11 +89,18 @@ export async function probeEmbeddingEndpoint(
     // input keeps the check cheap even on metered accounts.
     const inputType = options.inputType?.trim();
     const truncateMode = options.truncate?.trim();
+    const requestedDimensions =
+        typeof options.dimensions === "number" &&
+        Number.isInteger(options.dimensions) &&
+        options.dimensions > 0
+            ? options.dimensions
+            : undefined;
     const body = JSON.stringify({
         model: options.model,
         input: "magic-context probe",
         ...(inputType ? { input_type: inputType } : {}),
         ...(truncateMode ? { truncate: truncateMode } : {}),
+        ...(requestedDimensions ? { dimensions: requestedDimensions } : {}),
     });
 
     let response: Response;
@@ -132,6 +145,14 @@ export async function probeEmbeddingEndpoint(
                 kind: "endpoint_unsupported",
                 status,
                 preview: await readPreview(parsed),
+            };
+        }
+        if (requestedDimensions !== undefined && dimensions !== requestedDimensions) {
+            return {
+                kind: "dimensions_mismatch",
+                status,
+                requested: requestedDimensions,
+                returned: dimensions,
             };
         }
         return { kind: "ok", status, dimensions };

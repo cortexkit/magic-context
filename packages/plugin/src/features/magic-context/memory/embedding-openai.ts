@@ -28,6 +28,8 @@ interface OpenAICompatibleEmbeddingProviderOptions {
     documentPrefix?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
     truncate?: string;
+    /** Optional `dimensions` body field (Matryoshka output width). Omitted when unset. */
+    dimensions?: number;
     /** Maximum safe input tokens for chunk embeddings. */
     maxInputTokens?: number;
 }
@@ -259,6 +261,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private readonly queryPrefix: string;
     private readonly documentPrefix: string;
     private readonly truncate: string;
+    /** Requested output width; `undefined` leaves the endpoint default in place. */
+    private readonly dimensions: number | undefined;
     private initialized = false;
 
     // Circuit breaker state (per provider instance — resets when config
@@ -292,6 +296,12 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.queryPrefix = prefixes.queryPrefix;
         this.documentPrefix = prefixes.documentPrefix;
         this.truncate = options.truncate?.trim() ?? "";
+        this.dimensions =
+            typeof options.dimensions === "number" &&
+            Number.isInteger(options.dimensions) &&
+            options.dimensions > 0
+                ? options.dimensions
+                : undefined;
         this.rateLimitKey = rateLimitStateKey(this.endpoint, this.apiKey);
         const maxInputTokensSet =
             typeof options.maxInputTokens === "number" && Number.isFinite(options.maxInputTokens);
@@ -324,6 +334,10 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             // over-long input embeds). A missing field here makes the provider
             // write under a different model_id than reads/GC resolve.
             ...(this.truncate ? { truncate: this.truncate } : {}),
+            // dimensions selects the vector subspace and MUST mirror
+            // getEmbeddingProviderIdentity, or writes land under a model_id that
+            // reads/GC never resolve.
+            ...(this.dimensions ? { dimensions: this.dimensions } : {}),
         });
     }
 
@@ -511,6 +525,9 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     // unaffected.
                     ...(inputTypeForRequest ? { input_type: inputTypeForRequest } : {}),
                     ...(this.truncate ? { truncate: this.truncate } : {}),
+                    // Standard OpenAI field (text-embedding-3-*, Matryoshka models
+                    // such as Qwen3-Embedding). Omitted when unset.
+                    ...(this.dimensions ? { dimensions: this.dimensions } : {}),
                 }),
                 // SSRF: refuse to FOLLOW redirects. The pre-flight SSRF check only
                 // validates the configured endpoint; default redirect-follow would
@@ -649,6 +666,29 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     results[slot] = Float32Array.from(embedding);
                 }
             });
+
+            // Returned-width enforcement. When a width was requested, a vector
+            // of any other length is from a different vector space (a gateway
+            // that ignores `dimensions` returns the model default). Storing it
+            // would mix widths under one model_id, and cosineSimilarity returns
+            // 0 for mismatched lengths — recall silently collapses instead of
+            // failing. Reject the whole batch as a non-retryable config error.
+            if (this.dimensions !== undefined) {
+                const requested = this.dimensions;
+                const returned = results.find((r) => r !== null && r.length !== requested)?.length;
+                if (returned !== undefined) {
+                    const failure = this.failure(
+                        "invalid_envelope",
+                        `requested dimensions=${requested} but endpoint returned ${returned}-dim vectors; the endpoint may not support the dimensions parameter for this model`,
+                        false,
+                    );
+                    log(
+                        `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                    );
+                    this.recordFailure(requestStartedAt, isProbe, failure);
+                    return Array.from({ length: texts.length }, () => null);
+                }
+            }
 
             // A response with no usable vectors is still a failure — the
             // endpoint is up but not actually embedding.

@@ -63,6 +63,10 @@ function fallbackConfig(
     const documentPrefix =
         typeof raw.document_prefix === "string" ? raw.document_prefix : undefined;
     const truncate = typeof raw.truncate === "string" ? raw.truncate.trim() : "";
+    // dimensions must survive the synapse → openai-compatible fallback rebuild:
+    // dropping it here silently reverts the fallback lane to the endpoint default
+    // width while the configured lane asked for another one (PR #406 review P1).
+    const dimensions = typeof raw.dimensions === "number" ? raw.dimensions : undefined;
     const maxInputTokens =
         typeof raw.max_input_tokens === "number" ? raw.max_input_tokens : undefined;
 
@@ -78,6 +82,7 @@ function fallbackConfig(
             ...(queryInstruction !== undefined ? { query_instruction: queryInstruction } : {}),
             ...(documentPrefix !== undefined ? { document_prefix: documentPrefix } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(dimensions !== undefined ? { dimensions } : {}),
             ...(maxInputTokens !== undefined ? { max_input_tokens: maxInputTokens } : {}),
         };
     }
