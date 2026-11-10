@@ -696,7 +696,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				refreshBoundarySnapshot
 			) {
 				try {
-					const refreshed = refreshBoundarySnapshot(boundarySnapshot);
+					const refreshed = {
+						...refreshBoundarySnapshot(boundarySnapshot),
+						recovery: boundarySnapshot.recovery || forceDrainQuota,
+					};
 					if (hasRunnableCompartmentWindow(refreshed)) {
 						sessionLog(
 							sessionId,

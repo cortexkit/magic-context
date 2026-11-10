@@ -195,7 +195,7 @@ test("Pi summary cap admits a small head followed by large folded tool results",
 	]);
 	const sessionId = "pi-summary-removed-weight";
 	withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
-		const snapshot = resolveProtectedTailBoundary({
+		const context: Parameters<typeof resolveProtectedTailBoundary>[0] = {
 			sessionId,
 			mode: "pi-trigger",
 			contextLimit: 100_000,
@@ -209,12 +209,37 @@ test("Pi summary cap admits a small head followed by large folded tool results",
 			migrationFloorActive: false,
 			providerShapeVersion: "pi-folded-v1",
 			cacheNamespace: sessionId,
-		});
+		};
+		const snapshot = resolveProtectedTailBoundary(context);
 		expect(snapshot.protectedTailStart).toBe(4);
 		expect(snapshot.eligibleEndOrdinal).toBe(4);
 		expect(snapshot.trueRawEligibleTokens).toBeGreaterThan(16_250);
 		expect(snapshot.summaryRemovedEligibleTokens).toBeLessThan(100);
 		expect(snapshot.oversizeAtomicUnit).toBe(false);
+		expect(hasRunnableCompartmentWindow(snapshot)).toBe(true);
+		const force = resolveProtectedTailBoundary({
+			...context,
+			usage: { percentage: 87, inputTokens: 87_000 },
+		});
+		expect(force.summaryRemovedEligibleTokens).toBeLessThan(2_000);
+		expect(hasRunnableCompartmentWindow(force)).toBe(false);
+		expect(
+			hasRunnableCompartmentWindow(
+				resolveProtectedTailBoundary({
+					...context,
+					usage: { percentage: 95, inputTokens: 95_000 },
+				}),
+			),
+		).toBe(true);
+		expect(
+			hasRunnableCompartmentWindow(
+				resolveProtectedTailBoundary({
+					...context,
+					usage: { percentage: 87, inputTokens: 87_000 },
+					recovery: true,
+				}),
+			),
+		).toBe(true);
 	});
 });
 
