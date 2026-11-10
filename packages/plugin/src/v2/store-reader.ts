@@ -536,10 +536,12 @@ export class V2StoreReader {
      * Give assistant rows the content OpenCode itself reads. With
      * `experimental.part_rows` (OpenCode 2.2.6) an assistant message's content is
      * stored in `session_part`, one row per part, and its `session_message` row
-     * keeps `content: []`. OpenCode then uses those part rows, in ordinal order,
-     * as the message content (`SessionHistory.withParts`), so this reader does
-     * the same. A row without part rows is returned unchanged, so sessions that
-     * never used part rows read exactly the bytes they did before.
+     * keeps `content: []`. OpenCode reads a row with part rows as those parts, in
+     * ordinal order, followed by any inline content, or the parts alone when the
+     * row has no content array (`withParts` in `@opencode/core` 2.2.6), so this
+     * reader composes it the same way. A row without part rows is returned
+     * unchanged, so sessions that never used part rows read exactly the bytes
+     * they did before.
      */
     private withParts(rows: StoreRow[]): StoreRow[] {
         const ids = rows.flatMap((row) => (row.type === "assistant" ? [row.id] : []));
@@ -569,9 +571,17 @@ export class V2StoreReader {
         if (parts.size === 0) return rows;
         return rows.map((row) => {
             const content = parts.get(row.id);
-            return content && row.type === "assistant" && "content" in row.data
-                ? { ...row, data: { ...row.data, content: content as MessageData["content"] } }
-                : row;
+            if (!content) return row;
+            const inline = (row.data as { content?: unknown }).content;
+            return {
+                ...row,
+                data: {
+                    ...row.data,
+                    content: (Array.isArray(inline)
+                        ? [...content, ...inline]
+                        : content) as MessageData["content"],
+                },
+            };
         });
     }
     close(): void {
@@ -1141,17 +1151,30 @@ export class V2StoreReader {
     spanRowStamps(sessionID: string, after: number, through: number): Map<number, string> {
         if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through))
             throw new Error("Invalid seq span");
-        const partColumns = this.hasPartTable()
-            ? `, (SELECT COUNT(*) FROM session_part p WHERE p.message_id = m.id) AS parts,
-               (SELECT MAX(p.time_updated) FROM session_part p WHERE p.message_id = m.id) AS partsUpdated,
-               (SELECT SUM(length(CAST(p.data AS BLOB))) FROM session_part p WHERE p.message_id = m.id) AS partsBytes`
+        const partJoin = this.hasPartTable()
+            ? `LEFT JOIN (SELECT p.message_id AS message_id, COUNT(*) AS parts,
+                       MAX(p.time_updated) AS partsUpdated,
+                       SUM(length(CAST(p.data AS BLOB))) AS partsBytes
+                    FROM session_message s JOIN session_part p ON p.message_id = s.id
+                    WHERE s.session_id = ? AND s.seq > ? AND s.seq <= ?
+                    GROUP BY p.message_id) g ON g.message_id = m.id`
             : "";
         const rows = this.prepare(
             `SELECT m.seq AS seq, m.id AS id, m.time_updated AS updated,
-                    length(CAST(m.data AS BLOB)) AS bytes${partColumns}
-                 FROM session_message m WHERE m.session_id = ? AND m.seq > ? AND m.seq <= ?
+                    length(CAST(m.data AS BLOB)) AS bytes${
+                        partJoin
+                            ? ", g.parts AS parts, g.partsUpdated AS partsUpdated, g.partsBytes AS partsBytes"
+                            : ""
+                    }
+                 FROM session_message m ${partJoin}
+                 WHERE m.session_id = ? AND m.seq > ? AND m.seq <= ?
                  ORDER BY m.seq ASC`,
-        ).all(sessionID, after, through) as Array<{
+        ).all(
+            ...(partJoin ? [sessionID, after, through] : []),
+            sessionID,
+            after,
+            through,
+        ) as Array<{
             seq: number;
             id: string;
             updated: number | null;

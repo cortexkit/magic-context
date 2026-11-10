@@ -235,7 +235,11 @@ function mixedStore(variant: "no-table" | "empty-table" | "other-session-parts")
             2000,
             2600,
             assistant(
-                [{ type: "reasoning", text: "Thinking.", metadata: { signature: "sig" } }, REPLY, TOOL],
+                [
+                    { type: "reasoning", text: "Thinking.", metadata: { signature: "sig" } },
+                    REPLY,
+                    TOOL,
+                ],
                 2000,
             ),
         ],
@@ -267,9 +271,8 @@ function mixedStore(variant: "no-table" | "empty-table" | "other-session-parts")
         ["a2", "assistant", 4000, null, assistant([{ type: "text", text: "Done." }], 4000)],
         ["u3", "user", 5000, null, JSON.stringify({ text: "Thanks.", time: { created: 5000 } })],
     ];
-    rows.forEach(([id, type, created, updated, data], index) =>
-        insert.run(id, "s", type, index + 1, created, updated, data),
-    );
+    for (const [index, [id, type, created, updated, data]] of rows.entries())
+        insert.run(id, "s", type, index + 1, created, updated, data);
     insert.run("o-a1", "other", "assistant", 1, 1000, 1000, assistant([], 1000));
     if (variant === "other-session-parts")
         db.prepare(
@@ -347,5 +350,47 @@ test("a session without part rows reads exactly as before the reader read sessio
             variant,
             digests: BEFORE_PART_ROWS,
         });
+    }
+});
+
+test("part rows come before inline content, and stand alone when a row has no content array, as OpenCode composes them", () => {
+    const base = join(tmpdir(), "magic-context", "oc2-part-rows");
+    mkdirSync(base, { recursive: true });
+    const root = createTestTempDirFromPath(join(base, "compose-"));
+    roots.push(root);
+    const path = join(root, "opencode.db");
+    const db = new Database(path);
+    db.exec(`CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+        seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+        CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (message_id, ordinal))`);
+    const INLINE = { type: "text", text: "INLINE_AFTER_PARTS" };
+    const { content: _content, ...withoutContent } = JSON.parse(assistantData([])) as {
+        content: unknown[];
+    };
+    const insert = db.prepare(
+        "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
+    );
+    insert.run("both", "s", "assistant", 1, 2000, 2000, assistantData([INLINE]));
+    insert.run("no-content", "s", "assistant", 2, 2000, 2000, JSON.stringify(withoutContent));
+    const part = db.prepare(
+        "INSERT INTO session_part(message_id,session_id,ordinal,type,call_id,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?,?)",
+    );
+    for (const id of ["both", "no-content"]) {
+        // Inserted out of order: the reader orders by ordinal.
+        part.run(id, "s", 1, "tool", "call-1", 2000, 3000, JSON.stringify(TOOL));
+        part.run(id, "s", 0, "text", null, 2000, 3000, JSON.stringify(REPLY));
+    }
+    db.close();
+    const reader = new V2StoreReader(path);
+    try {
+        const rows = reader.range("s", -1, 2);
+        expect(rows.map((row) => row.data.content)).toEqual([
+            [REPLY, TOOL, INLINE],
+            [REPLY, TOOL],
+        ]);
+    } finally {
+        reader.close();
     }
 });
