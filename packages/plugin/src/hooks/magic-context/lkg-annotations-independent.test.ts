@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { startMessageFtsRowidMapBackfill } from "../../features/magic-context/message-fts-rowid-map";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -47,6 +48,9 @@ async function fixture(parts: Message["parts"], anchored = false, hideReduce = f
     tempDir = createTestTempDir("lkg-annotations-independent-").dir;
     process.env.XDG_DATA_HOME = tempDir;
     const db = openDatabase();
+    // Finish the startup writer before healthy passes: its WAL lock would
+    // correctly replay the last good request instead of exercising annotations.
+    await startMessageFtsRowidMapBackfill(db);
     const sessionId = `independent-annotations-${++fixtureNumber}`;
     const raw = (): Message[] => [
         {
