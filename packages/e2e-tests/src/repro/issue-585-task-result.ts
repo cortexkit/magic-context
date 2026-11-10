@@ -10,7 +10,6 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { openTestDb } from "../test-db";
 import { MockProvider, type MockResponse } from "../mock-provider/server";
 
 const arg = (name: string) => {

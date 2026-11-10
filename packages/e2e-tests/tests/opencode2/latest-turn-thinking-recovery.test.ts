@@ -14,7 +14,6 @@ import { openTestDb } from "../../src/test-db";
  * restoring anything and the provider accepts the continued session.
  */
 import { Database } from "bun:sqlite";
-import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { readFileSync, realpathSync } from "node:fs";

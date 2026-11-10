@@ -1,7 +1,6 @@
 import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { openTestDb } from "../src/test-db";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

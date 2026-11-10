@@ -1,6 +1,5 @@
 import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
-import { openTestDb } from "../../src/test-db";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

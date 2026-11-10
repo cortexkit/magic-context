@@ -1,6 +1,5 @@
 import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
-import { openTestDb } from "../../src/test-db";
 import { getPendingOps, queuePendingOp } from "../../../plugin/src/features/magic-context/storage";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

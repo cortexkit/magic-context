@@ -2,7 +2,6 @@ import { openTestDb } from "./test-db";
 /** PiTestHarness — facade for Pi Magic Context e2e tests. */
 
 import type { Database } from "bun:sqlite";
-import { openTestDb } from "./test-db";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, PiHostHarness } from "./host-harness";
