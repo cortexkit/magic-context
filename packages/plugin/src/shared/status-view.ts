@@ -160,6 +160,7 @@ export interface StatusViewSource {
      */
     readonly dreamerTickFailure?: DreamerTickFailure | null;
     readonly dreamerFailures?: readonly { task: string; error: string }[];
+    readonly hiddenModelSkips?: readonly string[];
     readonly memoryCount: number;
     readonly sessionNoteCount?: number;
     readonly readySmartNoteCount?: number;
@@ -530,7 +531,7 @@ function dreamerUnsupportedRows(source: StatusViewSource): StatusRow[] {
 
 /** One row naming the stage that stopped the last maintenance pass, if one did. */
 function dreamerTickFailureRows(source: StatusViewSource, now: number): StatusRow[] {
-    const quotas = [
+    const quotas: StatusRow[] = [
         ...new Set(
             (source.dreamerFailures ?? []).flatMap((failure) => {
                 const quota = primaryQuotaDiagnostic(failure.error);
@@ -538,6 +539,15 @@ function dreamerTickFailureRows(source: StatusViewSource, now: number): StatusRo
             }),
         ),
     ].map((value): StatusRow => ({ label: "Dreamer quota", value, tone: "warning" }));
+    quotas.push(
+        ...(source.hiddenModelSkips ?? []).map(
+            (value): StatusRow => ({
+                label: "Hidden model quota",
+                value,
+                tone: "warning",
+            }),
+        ),
+    );
     const failure = source.dreamerTickFailure;
     if (!failure) return quotas;
     return [

@@ -3,11 +3,48 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database, isTransientSqliteError, withSqliteTransformPass } from "../../shared/sqlite";
+import { openTestDatabase } from "../../shared/test-db";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { startMessageFtsRowidMapBackfill } from "./message-fts-rowid-map";
 import { startMessageTimeBackfill } from "./message-time-backfill";
 import { runMigrations } from "./migrations";
-import { initializeDatabase } from "./storage-db";
+import { closeDatabase, initializeDatabase, openDatabase, resolveDatabasePath } from "./storage-db";
+
+test("opted-in managed startup fills legacy FTS rowid mappings", async () => {
+    const home = createTestTempDirFromPath(join(tmpdir(), "mc-fts-startup-open-"));
+    const previousHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = home;
+    try {
+        const seed = openDatabase(resolveDatabasePath().dbPath)!;
+        seed.prepare(
+            "INSERT INTO message_history_fts(session_id,message_ordinal,message_id,role,content) VALUES('legacy',1,'m1','user','legacy text')",
+        ).run();
+        // Opening a fresh store completes its empty-index backfill. Re-arm
+        // the cursor so the inserted legacy row represents unfinished maintenance.
+        seed.exec("UPDATE message_fts_rowid_map_backfill_state SET completed=0 WHERE id=1");
+        expect(seed.prepare("SELECT COUNT(*) AS n FROM message_fts_rowid_map").get()).toEqual({
+            n: 0,
+        });
+        await closeDatabase();
+
+        const db = await openTestDatabase();
+        expect(
+            db
+                .prepare(
+                    "SELECT COUNT(*) AS n FROM message_fts_rowid_map WHERE session_id='legacy'",
+                )
+                .get(),
+        ).toEqual({ n: 1 });
+        expect(
+            db.prepare("SELECT completed FROM message_fts_rowid_map_backfill_state").get(),
+        ).toEqual({ completed: 1 });
+    } finally {
+        await closeDatabase();
+        if (previousHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousHome;
+        rmSync(home, { recursive: true, force: true });
+    }
+}, 15000);
 
 test("startup FTS map backfill must not synchronously wait for the production five-second timeout", async () => {
     const root = join(tmpdir(), "magic-context", "issue-601-review-r2");

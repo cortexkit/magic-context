@@ -165,6 +165,13 @@ describe("status detail text", () => {
         expect(summary).not.toContain("manifest missing");
     });
 
+    test("shows live hidden-model quota skips in chat-only status", () => {
+        const value = "google/primary until 2026-10-10T04:46:40.000Z: provider said to retry later";
+        expect(
+            formatStatusDetailMarkdown({ ...STATUS_FIXTURE, hiddenModelSkips: [value] }),
+        ).toContain(value);
+    });
+
     test("keeps internal vocabulary and identifiers out of the summary", () => {
         const summary = formatStatusDetailMarkdown({
             ...STATUS_FIXTURE,

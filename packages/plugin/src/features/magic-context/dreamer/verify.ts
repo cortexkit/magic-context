@@ -42,7 +42,6 @@ import { DreamerModuleFailureError, type DreamerModuleRoute } from "./module-app
 import {
     DreamerProviderOutputFailureError,
     providerOutputFailureFromInvalidManifest,
-    withDreamerModelCooldown,
 } from "./provider-output-failure";
 import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import { DreamTokenBudgetExceeded } from "./token-budget";
@@ -247,10 +246,6 @@ function closeBroadCycle(args: VerifyArgs, cycleStartAt: number | undefined): vo
 }
 
 export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
-    return withDreamerModelCooldown(() => runVerifyWithCooldown(args));
-}
-
-async function runVerifyWithCooldown(args: VerifyArgs): Promise<VerifyResult> {
     const runStartedAt = Date.now();
     const result: VerifyResult = {
         verified: 0,

@@ -23,6 +23,15 @@ pub enum EmbeddingProbeOutcome {
         status: u16,
         dimensions: Option<usize>,
     },
+    /// 2xx with an embedding whose width differs from the requested
+    /// `dimensions`. The runtime provider rejects such vectors (storing them
+    /// would mix vector spaces under one model id), so the probe must not
+    /// report success for a configuration the runtime will refuse.
+    DimensionsMismatch {
+        status: u16,
+        requested: u32,
+        returned: usize,
+    },
     /// 401 / 403 — credentials rejected.
     AuthFailed { status: u16, preview: String },
     /// 404 / 405 or 2xx without an embedding body — endpoint doesn't serve
@@ -78,6 +87,9 @@ pub struct EmbeddingProbeOptions {
     pub input_type: Option<String>,
     /// Optional `truncate` body field (e.g. NVIDIA NIM).
     pub truncate: Option<String>,
+    /// Optional `dimensions` body field (Matryoshka output width). When set,
+    /// a response of any other width is `DimensionsMismatch`.
+    pub dimensions: Option<u32>,
     pub timeout_ms: u64,
 }
 
@@ -321,6 +333,15 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
                 serde_json::Value::String(truncate.to_string()),
             );
         }
+        // Standard OpenAI field (text-embedding-3-*, Matryoshka models such as
+        // Qwen3-Embedding). Sent only when configured so the probe exercises the
+        // same vector space the runtime will request.
+        if let Some(dimensions) = options.dimensions.filter(|d| *d > 0) {
+            map.insert(
+                "dimensions".to_string(),
+                serde_json::Value::Number(dimensions.into()),
+            );
+        }
     }
 
     let mut req = client
@@ -369,10 +390,7 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
         let preview = truncate_preview(&body_text);
         match parsed {
             Ok(value) => match extract_dimensions(&value) {
-                Some(dims) => EmbeddingProbeOutcome::Ok {
-                    status: status_u16,
-                    dimensions: Some(dims),
-                },
+                Some(dims) => classify_returned_width(status_u16, dims, options.dimensions),
                 None => EmbeddingProbeOutcome::EndpointUnsupported {
                     status: status_u16,
                     preview,
@@ -527,6 +545,29 @@ fn is_unicast_link_local_ipv6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// Classify a well-formed 2xx embedding by its width. With no requested
+/// `dimensions` any width is success; with one, only an exact match is —
+/// mirroring the runtime provider, which rejects other widths.
+fn classify_returned_width(
+    status: u16,
+    returned: usize,
+    requested: Option<u32>,
+) -> EmbeddingProbeOutcome {
+    match requested.filter(|d| *d > 0) {
+        Some(requested) if returned != requested as usize => {
+            EmbeddingProbeOutcome::DimensionsMismatch {
+                status,
+                requested,
+                returned,
+            }
+        }
+        _ => EmbeddingProbeOutcome::Ok {
+            status,
+            dimensions: Some(returned),
+        },
+    }
+}
+
 fn extract_dimensions(body: &serde_json::Value) -> Option<usize> {
     let data = body.get("data")?.as_array()?;
     let first = data.first()?;
@@ -584,6 +625,51 @@ fn truncate_preview(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returned_width_without_requested_dimensions_is_ok() {
+        match classify_returned_width(200, 768, None) {
+            EmbeddingProbeOutcome::Ok { status, dimensions } => {
+                assert_eq!(status, 200);
+                assert_eq!(dimensions, Some(768));
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returned_width_matching_requested_dimensions_is_ok() {
+        match classify_returned_width(200, 1024, Some(1024)) {
+            EmbeddingProbeOutcome::Ok { dimensions, .. } => {
+                assert_eq!(dimensions, Some(1024));
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returned_width_differing_from_requested_dimensions_is_mismatch() {
+        match classify_returned_width(200, 4096, Some(1024)) {
+            EmbeddingProbeOutcome::DimensionsMismatch {
+                status,
+                requested,
+                returned,
+            } => {
+                assert_eq!(status, 200);
+                assert_eq!(requested, 1024);
+                assert_eq!(returned, 4096);
+            }
+            other => panic!("expected DimensionsMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returned_width_with_zero_requested_dimensions_is_ok() {
+        assert!(matches!(
+            classify_returned_width(200, 768, Some(0)),
+            EmbeddingProbeOutcome::Ok { .. }
+        ));
+    }
 
     #[test]
     fn substitute_leaves_text_without_tokens_untouched() {
@@ -724,6 +810,7 @@ mod tests {
             api_key: Some("literal-key".to_string()),
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 100,
         })
         .await;
@@ -751,6 +838,7 @@ mod tests {
             api_key: None,
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 200,
         })
         .await;
@@ -774,6 +862,7 @@ mod tests {
             api_key: None,
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 100,
         })
         .await;
@@ -934,6 +1023,7 @@ mod tests {
             api_key: None,
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 100,
         })
         .await;
@@ -1024,6 +1114,7 @@ mod tests {
             api_key: None,
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 1000,
         })
         .await;
@@ -1041,6 +1132,7 @@ mod tests {
             api_key: None,
             input_type: None,
             truncate: None,
+            dimensions: None,
             timeout_ms: 1000,
         })
         .await;

@@ -416,6 +416,11 @@ function classifyEmbeddingOutcome(outcome: EmbeddingProbeOutcome): CheckResult {
                 status: "pass",
                 message: `Embedding endpoint OK (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
             };
+        case "dimensions_mismatch":
+            return {
+                status: "fail",
+                message: `Embedding endpoint ignored dimensions=${outcome.requested} and returned ${outcome.returned}-dim vectors (${outcome.status}); remove embedding.dimensions or use a Matryoshka-capable model`,
+            };
         case "auth_failed":
             return {
                 status: "fail",
@@ -934,6 +939,9 @@ async function runHealthChecks(options: {
             typeof mergedEmbedding.truncate === "string"
                 ? mergedEmbedding.truncate.trim()
                 : undefined;
+        // Probe the same vector space the runtime embeds into.
+        const dimensions =
+            typeof mergedEmbedding.dimensions === "number" ? mergedEmbedding.dimensions : undefined;
         if (!endpoint || !model) {
             add(
                 results,
@@ -948,6 +956,7 @@ async function runHealthChecks(options: {
                     apiKey,
                     ...(inputType ? { inputType } : {}),
                     ...(truncateMode ? { truncate: truncateMode } : {}),
+                    ...(dimensions !== undefined ? { dimensions } : {}),
                     timeoutMs: 10_000,
                 });
                 const classified = classifyEmbeddingOutcome(outcome);

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createV1HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
 import * as shared from "../../../shared";
+import { hiddenModelCooldowns } from "../../../shared/hidden-model-cooldown";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
@@ -31,7 +32,6 @@ import { initializeDatabase } from "../storage-db";
 import { getSubagentInvocations } from "../storage-subagent-invocations";
 import { acquireLease } from "./lease";
 import { DreamerProviderOutputFailureError } from "./provider-output-failure";
-import { RECORDED_GEMINI_QUOTA_NOTICE } from "./provider-output-failure.test-support";
 import { getTaskScheduleState, seedTaskScheduleState } from "./storage-task-schedule";
 import { getDreamTaskBacklog } from "./task-gates";
 import {
@@ -392,21 +392,20 @@ describe("runVerify disposition", () => {
         });
     }
 
-    test("uses configured fallback after the recorded quota notice and skips the primary in later batches", async () => {
+    test("uses configured fallback after a structured quota refusal and skips the primary in later batches", async () => {
         const db = freshDb();
         const log = spyOn(logger, "log").mockImplementation(() => {});
         try {
             const project = "git:verify-quota-cooldown";
             addMappedMemories(db, project, 15);
-            const client = scriptedVerifyClient((call) =>
-                call === 1
-                    ? {
-                          kind: "text",
-                          text: RECORDED_GEMINI_QUOTA_NOTICE,
-                          tokens: { output: 33, reasoning: 0 },
-                      }
-                    : { kind: "manifest" },
-            );
+            const client = scriptedVerifyClient((call) => {
+                if (call === 1)
+                    throw Object.assign(new Error("provider quota exhausted"), {
+                        statusCode: 412,
+                        responseHeaders: { "retry-after": "190000" },
+                    });
+                return { kind: "manifest" };
+            });
             const args = verifyArgs(db, tempProject(), project);
             args.client = client.client as never;
             args.model = "google/antigravity-gemini-3.8-flash";
@@ -433,6 +432,7 @@ describe("runVerify disposition", () => {
             expect(args.fallbackModels).toEqual(["deepseek/deepseek-flash"]);
         } finally {
             log.mockRestore();
+            hiddenModelCooldowns.succeeded("google/antigravity-gemini-3.8-flash");
             closeQuietly(db);
         }
     });

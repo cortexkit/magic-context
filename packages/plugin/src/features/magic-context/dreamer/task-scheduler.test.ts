@@ -147,7 +147,7 @@ describe("task-scheduler — a slot another dreamer already ran", () => {
             if (
                 !ranElsewhere &&
                 sql === "BEGIN IMMEDIATE" &&
-                new Error().stack?.includes("runDomainGroupWithCooldown")
+                new Error().stack?.includes("runDomainGroup")
             ) {
                 ranElsewhere = true;
                 writeTaskScheduleState(shared, {

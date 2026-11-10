@@ -42,6 +42,12 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
     }
 
     const truncate = config.provider === "openai-compatible" ? config.truncate?.trim() : undefined;
+    // A requested output width picks a different vector subspace out of the same
+    // weights (Matryoshka MRL), so it MUST fold into identity exactly like the
+    // model name does. Spread CONDITIONALLY and omit when unset: the identity
+    // stays byte-identical for every config that never sets it, so this field
+    // forces no global re-embed on upgrade.
+    const dimensions = config.provider === "openai-compatible" ? config.dimensions : undefined;
     const documentPrefix =
         config.provider === "openai-compatible"
             ? resolveEmbeddingTextPrefixes(
@@ -88,6 +94,7 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
                   inputType: config.input_type?.trim() || "",
                   ...(documentPrefix ? { documentPrefix } : {}),
                   ...(truncate ? { truncate } : {}),
+                  ...(dimensions ? { dimensions } : {}),
               }
             : {
                   provider: "local",

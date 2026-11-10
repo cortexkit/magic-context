@@ -444,7 +444,7 @@ async function awaitAssistantRow(
         if (newIdle && (!newAssistant || newIdle.seq > newAssistant.seq)) {
             const outcome = newIdle.data.outcome;
             if (outcome === "failed" || outcome === "interrupted") {
-                const sessionError = await readSessionError();
+                const sessionError = (await readSessionError()) ?? newAssistant?.data.error;
                 const details = [
                     `outcome=${outcome}`,
                     `terminal_row=${errorText(newIdle)}`,
@@ -461,7 +461,7 @@ async function awaitAssistantRow(
         if (newAssistant) {
             const outcome = assistantOutcome(newAssistant);
             if (outcome === "failed" || outcome === "interrupted") {
-                const sessionError = await readSessionError();
+                const sessionError = (await readSessionError()) ?? newAssistant.data.error;
                 const details = [
                     `outcome=${outcome}`,
                     `terminal_row=${errorText(newAssistant)}`,
@@ -476,6 +476,7 @@ async function awaitAssistantRow(
             if (newAssistant.data.error !== undefined) {
                 throw new HiddenProviderError(errorText(newAssistant.data.error), {
                     settled: typeof newAssistant.data.finish === "string",
+                    hostError: newAssistant.data.error,
                 });
             }
             if (typeof newAssistant.data.finish === "string" || outcome === "succeeded") {

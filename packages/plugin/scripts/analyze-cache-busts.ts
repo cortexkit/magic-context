@@ -9,6 +9,14 @@
  * implicit prefix cache. WebSocket openai-auth captures may omit response files.
  * Both shapes are normalized to role + part type/length/text-prefix messages so
  * attribution and --show-diff have the same output on either lane.
+ * Anthropic thread continuations carry only new messages. Their system/tools
+ * remain comparable, but their message deltas never compare as full histories.
+ * A later full body compares with the last full body and every intervening
+ * client delta; undumped assistant replies cannot prove a client rewrite.
+ * SHORT means the meter read short without a demonstrated byte rewrite.
+ * A changed wire model/account or a provider model_changed diagnostic reads a
+ * different cache: cache_scope_changed accounts for that miss before all other
+ * attribution. Other provider diagnostic types are printed without interpreting them.
  *
  * Usage fields and the meter, per provider:
  *   Anthropic  `input_tokens` are the uncached tokens after the last cache
@@ -34,8 +42,11 @@
  *   For OpenAI and Gemini the previous request's uncached tail may not be cached
  *   yet when the next request arrives, so the floor is the previous read, not the
  *   previous prompt.
- * Any provider: a short read more than --cache-ttl (default 5m) after the prefix
- * was last read in full or written is `idle_cache_expiry`.
+ * Any request kind, including a continuation: a short read after the cache lifetime
+ * is `idle_cache_expiry`. --cache-ttl overrides the previous same-route body's
+ * longest stated cache_control TTL. Without a stated TTL, the fallback is 1h for
+ * runners and 5m for plugin-host dumps. Unstated breakpoint TTLs do not override
+ * those defaults. The clock starts when the prefix was last read in full or written.
  *
  * Usage:
  *   bun scripts/analyze-cache-busts.ts <sessionIdPrefix> [options]
@@ -48,7 +59,8 @@
  *   --since <time>   created at/after ISO time or duration ago (for example 30m)
  *   --until <time>   created at/before ISO time or duration ago
  *   --limit <N>      only the last N requests in range
- *   --cache-ttl <d>  cache lifetime (default 1h for runners, 5m for legacy dumps)
+ *   --cache-ttl <d>  override prior same-route body's stated breakpoint TTL
+ *                    (fallback: 1h for runners, 5m for plugin-host dumps)
  *   --source <kind> auto (default), dumps (OC1/Broca), oc2, or pi
  *   --dump-dir <p>  override the runner's dump directory
  *   --runner-data-dir <p> override the CortexKit data root (for offline fixtures)
@@ -61,9 +73,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     type AnalyzedCacheRequest,
+    type CacheBustAttributionInput,
     type CacheBustDecisionAttribution,
     type CacheBustDivergenceClass,
     type CacheBustSessionAnalysis,
+    type ProviderCacheMissReason,
     CACHE_READ_EPSILON_TOKENS,
     cachedPrefixFloor,
     classifyCacheBust,
@@ -87,8 +101,8 @@ import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type R
 
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
-type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
-type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED";
+type MeterVerdict = ByteVerdict | "SHORT" | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
+type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED" | "N/A";
 
 interface Segment extends NormalizedMessage {
     id: string;
@@ -155,6 +169,12 @@ interface Snapshot {
     /** The runner meter remains usable when its rolling dump window has no body. */
     runnerRequest?: RunnerRequest;
     bytesMissing?: boolean;
+    threadType?: "create" | "continue";
+    tools?: Segment;
+    statedCacheTtlMs?: number;
+    /** Account routing identity; it does not change which bytes are compared or how lifetime is tracked. */
+    route?: string;
+    providerCacheMissReason?: ProviderCacheMissReason;
 }
 
 /**
@@ -215,6 +235,9 @@ export interface AnalysisRow {
     runnerDecisions?: RunnerDecision[];
     renderedView?: number | null;
     viewJoin?: "time" | "unmatched";
+    comparisonNote?: string;
+    prefixDivergence?: Segment;
+    providerCacheMissReason?: ProviderCacheMissReason;
 }
 
 export interface OpenCodeCacheBustAnalysisOptions {
@@ -229,7 +252,11 @@ export interface OpenCodeCacheBustAnalysisOptions {
     scanCursor?: string;
     scanDeadlineMs?: number;
     scanNow?: () => number;
-    /** Idle time after which the provider prefix counts as expired; default 5 min. */
+    /**
+     * Overrides the cache lifetime the previous same-route request stated. When
+     * that request states none, the fallback is five minutes for plugin-host
+     * dumps and one hour for runner sessions.
+     */
     cacheTtlMs?: number;
 }
 
@@ -379,6 +406,116 @@ function buildSegments(
 
 function wireModel(body: Json): string | undefined {
     return typeof body.model === "string" && body.model.length > 0 ? body.model : undefined;
+}
+
+function threadType(body: Json, meta: Json): Snapshot["threadType"] {
+    const type = asJson(body.thread ?? asJson(meta.body)?.thread)?.type;
+    return type === "continue" || type === "create" ? type : undefined;
+}
+
+/** Read TTLs before normalization removes cache_control from comparable bytes. */
+function requestCacheTtlMs(body: Json): number | undefined {
+    let longest = 0;
+    const visit = (value: unknown): void => {
+        if (Array.isArray(value)) {
+            for (const child of value) visit(child);
+            return;
+        }
+        const object = asJson(value);
+        if (!object) return;
+        const control = asJson(object.cache_control);
+        if (control?.type === "ephemeral") {
+            if (control.ttl === "1h") longest = Math.max(longest, 3_600_000);
+            else if (control.ttl === "5m") longest = Math.max(longest, DEFAULT_CACHE_TTL_MS);
+        }
+        for (const child of Object.values(object)) visit(child);
+    };
+    visit(body);
+    return longest || undefined;
+}
+
+function sameRoute(left: Snapshot, right: Snapshot): boolean {
+    return left.session === right.session && left.provider === right.provider && left.sourceDir === right.sourceDir;
+}
+
+/** Runner requests with no body and no recognized meter cannot prove a wire-model change. */
+function scopeWireModel(snapshot?: Snapshot): string | undefined {
+    return snapshot?.runnerRequest && snapshot.bytesMissing && !snapshot.meter
+        ? undefined : snapshot?.wireModel;
+}
+
+function cacheScopeChange(current: Snapshot, previous?: Snapshot): string | undefined {
+    const changes: string[] = [];
+    const previousModel = scopeWireModel(previous);
+    const currentModel = scopeWireModel(current);
+    if (previousModel && currentModel && previousModel !== currentModel) {
+        changes.push(`model ${previousModel} → ${currentModel}`);
+    }
+    if (previous?.route && current.route && previous.route !== current.route) {
+        const account = (route: string) => route.split(":").at(-1) ?? route;
+        changes.push(`account ${account(previous.route)} → ${account(current.route)}`);
+    }
+    if (changes.length === 0 && current.providerCacheMissReason?.type === "model_changed") {
+        changes.push("provider reports model_changed");
+    }
+    return changes.length ? changes.join("; ") : undefined;
+}
+
+/** A full body after deltas needs its full baseline and every sent delta in between. */
+function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
+    const extra: Snapshot[] = [];
+    const starts = snapshots.filter((snapshot, index) =>
+        snapshot.threadType !== undefined &&
+        (snapshot.threadType === "create" || snapshots.slice(index + 1).some((later) =>
+            sameRoute(later, snapshot) && later.threadType !== "continue")) &&
+        !snapshots.slice(0, index).some((earlier) => sameRoute(earlier, snapshot)),
+    );
+    for (const first of starts) {
+        const candidate: DumpCandidate = {
+            source: { provider: first.provider, dir: first.sourceDir, label: "thread context" },
+            session: first.session,
+            latestMtimeMs: 0,
+            totalBytes: 0,
+            dumpCount: 0,
+        };
+        const files = readdirSync(first.sourceDir)
+            .filter((file) => file.endsWith(".meta.json"))
+            .flatMap((file) => {
+                const name = parseDumpFilename(file);
+                if (name && name.session !== first.session) return [];
+                try {
+                    const meta = JSON.parse(readFileSync(join(first.sourceDir, file), "utf8")) as Json;
+                    if (!name && String(meta.session ?? "") !== first.session) return [];
+                    return [{
+                        file,
+                        createdAt: name?.createdAt ?? String(meta.createdAt ?? ""),
+                        sequence: name?.sequence ?? (finiteNumber(meta.step) ? meta.step : 0),
+                    }];
+                } catch {
+                    // A request's metadata file may still be being written while this scan runs.
+                    return [];
+                }
+            })
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt) ||
+                b.sequence - a.sequence || b.file.localeCompare(a.file));
+        for (const entry of files) {
+            if (entry.createdAt > first.orderCreatedAt ||
+                (entry.createdAt === first.orderCreatedAt &&
+                    (entry.sequence > first.sequence ||
+                        (entry.sequence === first.sequence && entry.file >= first.file)))) continue;
+            const snapshot = loadCandidateSnapshots(
+                candidate,
+                { ...args, since: undefined, until: undefined, limit: undefined },
+                [entry.file],
+            )[0];
+            if (!snapshot || !sameRoute(snapshot, first)) continue;
+            extra.push(snapshot);
+            if (snapshot.threadType !== "continue") break;
+        }
+    }
+    return [...extra, ...snapshots].sort((a, b) =>
+        a.orderCreatedAt.localeCompare(b.orderCreatedAt) ||
+        a.sequence - b.sequence || a.file.localeCompare(b.file));
 }
 
 function asJson(value: unknown): Json | undefined {
@@ -534,15 +671,30 @@ function loadMeterUsage(
     responsePath: string | undefined,
     provider: BodyProvider = "anthropic",
 ): MeterUsage | undefined {
-    if (!responsePath || !existsSync(responsePath)) return undefined;
+    return loadResponseEvidence(responsePath, provider).usage;
+}
+
+function loadResponseEvidence(responsePath: string | undefined, provider?: BodyProvider): {
+    usage?: MeterUsage;
+    providerCacheMissReason?: ProviderCacheMissReason;
+} {
+    if (!responsePath || !existsSync(responsePath)) return {};
     try {
         const candidates: MeterUsage[] = [];
+        let providerCacheMissReason: ProviderCacheMissReason | undefined;
         for (const payload of parseResponsePayloads(readFileSync(responsePath, "utf8"))) {
-            collectUsageCandidates(payload, "response", provider, candidates);
+            if (provider) collectUsageCandidates(payload, "response", provider, candidates);
+            const reason = asJson(asJson(asJson(payload)?.diagnostics)?.cache_miss_reason);
+            if (typeof reason?.type !== "string") continue;
+            const missed = reason.cache_missed_input_tokens;
+            providerCacheMissReason = {
+                type: reason.type,
+                ...(finiteNumber(missed) && missed >= 0 ? { cacheMissedInputTokens: missed } : {}),
+            };
         }
-        return candidates.at(-1);
+        return { usage: candidates.at(-1), ...(providerCacheMissReason ? { providerCacheMissReason } : {}) };
     } catch {
-        return undefined;
+        return {};
     }
 }
 
@@ -683,7 +835,13 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
                 wireModel: wireModel(body),
                 sourceDir: candidate.source.dir,
                 segments: normalized.segments,
-                usage: meter ? loadMeterUsage(responsePath, meter) : undefined,
+                statedCacheTtlMs: normalized.provider === "anthropic" ? requestCacheTtlMs(body) : undefined,
+                threadType: normalized.provider === "anthropic" ? threadType(body, meta) : undefined,
+                tools: normalized.provider === "anthropic" && body.tools !== undefined
+                    ? { ...buildSegments({ system: body.tools }, "anthropic").segments[0], id: "tools role=system" }
+                    : undefined,
+                route: typeof meta.route === "string" && meta.route.length > 0 ? meta.route : undefined,
+                ...loadResponseEvidence(responsePath, meter),
                 orderCreatedAt: dumpName?.createdAt ?? createdAt,
                 // Broca exports name files by run and step, not by time and
                 // sequence; meta.step keeps same-millisecond steps in order.
@@ -773,7 +931,7 @@ function loadSnapshotSelection(opts: Args): SnapshotSelection {
     return {
         candidates,
         selected,
-        snapshots: selected ? loadCandidateSnapshots(selected, opts) : [],
+        snapshots: selected ? withThreadContext(loadCandidateSnapshots(selected, opts), opts) : [],
     };
 }
 
@@ -799,7 +957,7 @@ function runnerSnapshots(runner: RunnerSession, dumps: readonly Snapshot[], forc
             requestTimestampMs: request.at, sequence: request.sequence,
             provider: meter ?? dump?.provider ?? "anthropic", meter,
             ...(forcedMeter ? { meterForced: true } : {}),
-            wireModel: request.model, runnerRequest: request, bytesMissing: !dump,
+            wireModel: dump?.wireModel ?? request.model, runnerRequest: request, bytesMissing: !dump,
             usage: reading && meter ? {
                 cacheRead: reading.cacheRead, cacheCreation: reading.cacheWrite, input: reading.input,
                 output: reading.output, total: reading.input + reading.cacheRead + reading.cacheWrite,
@@ -934,18 +1092,13 @@ export function analyzeOpenCodeCacheBustSession(
                 args, selected.filter((entry) => entry.source === source).map((entry) => entry.file),
             ));
         })();
-    snapshots.sort(
-        (left, right) =>
-            left.orderCreatedAt.localeCompare(right.orderCreatedAt) ||
-            left.sequence - right.sequence ||
-            left.file.localeCompare(right.file),
-    );
+    const contextualSnapshots = withThreadContext(snapshots, args);
     const inWindow = (snapshot: Snapshot): boolean =>
         (options.scanCursor
             ? `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}` > options.scanCursor
             : options.sinceExclusiveMs === undefined || Date.parse(snapshot.createdAt) > options.sinceExclusiveMs) &&
         (options.untilInclusiveMs === undefined || Date.parse(snapshot.createdAt) <= options.untilInclusiveMs);
-    const boundedSnapshots = snapshots.filter((snapshot) => {
+    const boundedSnapshots = contextualSnapshots.filter((snapshot) => {
         const timestampMs = Date.parse(snapshot.createdAt);
         return (
             Number.isFinite(timestampMs) &&
@@ -955,7 +1108,7 @@ export function analyzeOpenCodeCacheBustSession(
     const firstNewIndex = boundedSnapshots.findIndex((snapshot) =>
         inWindow(snapshot),
     );
-    const analysisStart = options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2);
+    const analysisStart = options.sinceExclusiveMs === undefined || contextualSnapshots.some((snapshot) => snapshot.threadType !== undefined) ? 0 : Math.max(0, firstNewIndex - 2);
     const analysisSnapshots = firstNewIndex < 0 ? [] : boundedSnapshots.slice(analysisStart);
     precedingRequestTimestampsMs.push(
         ...boundedSnapshots.slice(0, analysisStart).map((snapshot) => snapshot.requestTimestampMs),
@@ -963,7 +1116,7 @@ export function analyzeOpenCodeCacheBustSession(
     const rows = analyzeSnapshots(
         analysisSnapshots,
         withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath),
-        { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs },
+        { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs: precedingRequestTimestampsMs.filter((at) => !analysisSnapshots.some((snapshot) => snapshot.requestTimestampMs === at)) },
     );
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
@@ -985,10 +1138,11 @@ export function analyzeOpenCodeCacheBustSession(
                 verdict: row.verdict,
                 rewrittenTokens: row.rewrittenTokens,
                 divergenceClass: row.divergenceClass,
+                ...(row.providerCacheMissReason ? { providerCacheMissReason: row.providerCacheMissReason } : {}),
                 firstDivergence:
                     row.verdict === "BASE"
                         ? "(first request)"
-                        : (segment?.id ?? "(identical normalized prefix)"),
+                        : (row.prefixDivergence?.id ?? row.comparisonNote ?? segment?.id ?? "(identical normalized prefix)"),
                 analyzerCmd: openCodeAnalyzerCommand(row, options),
                 ...(row.decision?.identityDelta
                     ? { identityDelta: row.decision.identityDelta }
@@ -1022,6 +1176,65 @@ function firstDivergence(prev: Segment[], cur: Segment[]): number {
         if (prev[index].hash !== cur[index].hash || prev[index].id !== cur[index].id) return index;
     }
     return prev.length === cur.length ? -1 : n;
+}
+
+interface ByteComparison {
+    previous: Snapshot;
+    divergenceIndex: number;
+    byteVerdict?: ByteVerdict;
+    specialClass?: CacheBustAttributionInput["threadEvidence"];
+    comparisonNote?: string;
+    prefixDivergence?: Segment;
+}
+
+function compareClientBytes(current: Snapshot, previous: Snapshot, history: readonly Snapshot[]): ByteComparison {
+    const route = history.filter((snapshot) => sameRoute(snapshot, current) && !snapshot.bytesMissing);
+    const latest = route.at(-1);
+    const continuation = current.threadType === "continue";
+    const afterChain = !continuation && latest?.threadType === "continue";
+    if (!continuation && !afterChain) {
+        const divergenceIndex = firstDivergence(previous.segments, current.segments);
+        return { previous, divergenceIndex, byteVerdict: bustsReusablePrefix(previous, current, divergenceIndex) ? "BUST" : "STABLE" };
+    }
+    // The provider keeps prior conversation bytes on a continuation. Only the
+    // fully transmitted prefix can be compared with the preceding request.
+    const prefixPrevious = latest ?? previous;
+    const toolsChanged = prefixPrevious.tools?.hash !== current.tools?.hash;
+    const previousSystem = prefixPrevious.segments.find((segment) => segment.role === "system");
+    const currentSystem = current.segments.find((segment) => segment.role === "system");
+    const systemChanged = previousSystem?.hash !== currentSystem?.hash;
+    if (toolsChanged || systemChanged) {
+        return { previous: prefixPrevious, divergenceIndex: 0, byteVerdict: "BUST", prefixDivergence: toolsChanged ? current.tools ?? prefixPrevious.tools : currentSystem ?? previousSystem };
+    }
+    if (continuation) return { previous: prefixPrevious, divergenceIndex: -1, specialClass: "continuation_short_read", comparisonNote: "(continuation; message bytes not comparable)" };
+
+    let fullIndex = route.length - 1;
+    while (fullIndex >= 0 && route[fullIndex].threadType === "continue") fullIndex -= 1;
+    if (fullIndex < 0) return { previous, divergenceIndex: -1, specialClass: "full_body_no_baseline", comparisonNote: "(no earlier full body found; client bytes not comparable)" };
+    const full = route[fullIndex];
+    const first = firstDivergence(full.segments, current.segments);
+    if (first >= 0 && first < full.segments.length) return { previous: full, divergenceIndex: first, byteVerdict: bustsReusablePrefix(full, current, first) ? "BUST" : "STABLE" };
+
+    // Reply content is absent from response dumps. Skip those assistant slots,
+    // but compare every sent client message in order, including repeated text.
+    const expected = [...full.segments];
+    let cursor = full.segments.length;
+    let matched = full.segments.filter((segment) => segment.role !== "system").length;
+    for (const delta of route.slice(fullIndex + 1)) {
+        for (const segment of delta.segments.filter((item) => item.role !== "system")) {
+            while (current.segments[cursor]?.role === "assistant") {
+                expected[cursor] = current.segments[cursor];
+                cursor += 1;
+            }
+            expected[cursor] = { ...segment, id: `message[${cursor}] ${describeNormalizedMessage(segment)}` };
+            if (current.segments[cursor]?.hash !== segment.hash) {
+                return { previous: { ...full, segments: expected }, divergenceIndex: cursor, byteVerdict: "BUST" };
+            }
+            cursor += 1;
+            matched += 1;
+        }
+    }
+    return { previous: full, divergenceIndex: -1, byteVerdict: "STABLE", specialClass: "thread_break_unchanged_client_bytes", comparisonNote: `(${matched} client messages compared and matched; reply bytes not dumped)` };
 }
 
 function isTailShrink(previous: Snapshot, current: Snapshot, divergenceIndex: number): boolean {
@@ -1113,7 +1326,8 @@ export function analyzeSnapshots(
     decisionsAndMarkers: readonly CacheBustDecisionAttribution[] = [],
     options: { cacheTtlMs?: number; precedingRequestTimestampsMs?: readonly number[]; runnerEvidence?: RunnerEvidence; cacheTouches?: readonly number[] } = {},
 ): AnalysisRow[] {
-    const cacheTtlMs = options.cacheTtlMs ?? (snaps[0]?.runnerRequest ? 3_600_000 : DEFAULT_CACHE_TTL_MS);
+    const previousRequestByRoute = new Map<string, Snapshot>();
+    const previousRequestBySession = new Map<string, Snapshot>();
     const renders = joinRequestsToViews(snaps.map((snapshot) => snapshot.requestTimestampMs), options.runnerEvidence?.renders ?? []);
     // When the reusable prefix was last read in full or written; see
     // refreshesCachedPrefix for which requests move it.
@@ -1156,42 +1370,51 @@ export function analyzeSnapshots(
     const rows: AnalysisRow[] = [];
     for (let index = 0; index < snaps.length; index += 1) {
         const current = snaps[index];
+        const previousSessionRequest = previousRequestBySession.get(current.session);
+        previousRequestBySession.set(current.session, current);
+        const scopeChange = cacheScopeChange(current, previousSessionRequest);
+        const routeKey = JSON.stringify([current.session, current.provider, current.sourceDir]);
+        const previousRouteRequest = previousRequestByRoute.get(routeKey);
+        previousRequestByRoute.set(routeKey, current);
+        const cacheTtlMs = options.cacheTtlMs ??
+            (previousRouteRequest?.bytesMissing ? undefined : previousRouteRequest?.statedCacheTtlMs) ??
+            (current.runnerRequest ? 3_600_000 : DEFAULT_CACHE_TTL_MS);
         const render = renders[index];
         const joinedAt = render?.at ?? current.requestTimestampMs;
         const previousAt = renders[index - 1]?.at ?? snaps[index - 1]?.requestTimestampMs ?? joinedAt;
         const runnerDecisions = options.runnerEvidence
             ? runnerDecisionsBetween(options.runnerEvidence, previousAt, joinedAt, render?.view)
             : undefined;
-        const runnerFields = current.runnerRequest ? {
-            runnerDecisions: runnerDecisions?.all, renderedView: render?.view,
-            viewJoin: render ? "time" as const : "unmatched" as const,
-        } : {};
+        const requestFields = {
+            ...(current.runnerRequest ? {
+                runnerDecisions: runnerDecisions?.all, renderedView: render?.view,
+                viewJoin: render ? "time" as const : "unmatched" as const,
+            } : {}),
+            ...(current.providerCacheMissReason ? { providerCacheMissReason: current.providerCacheMissReason } : {}),
+        };
         // BASE, STABLE, and unmetered requests claim passes too, not just busts.
         const decision = joinDecision(current.requestTimestampMs);
         if (isUsageMissing(current)) {
             const previous = previousMetered;
-            const divergenceIndex = previous
-                ? firstDivergence(previous.segments, current.segments)
-                : -1;
-            const byteVerdict = previous && !previous.bytesMissing && !current.bytesMissing
-                ? bustsReusablePrefix(previous, current, divergenceIndex)
-                    ? "BUST"
-                    : "STABLE"
-                : undefined;
+            const comparison = previous ? compareClientBytes(current, previous, snaps.slice(0, index)) : undefined;
+            const divergenceIndex = comparison?.divergenceIndex ?? -1;
+            const byteVerdict = previous && !previous.bytesMissing && !current.bytesMissing ? comparison?.byteVerdict : undefined;
             rows.push({
                 current,
-                previous,
+                previous: comparison?.previous ?? previous,
                 divergenceIndex,
                 byteVerdict,
                 verdict: "UNMETERED",
                 meterVsBytes: "UNMETERED",
                 divergenceClass: "usage_missing",
-                ...runnerFields,
+                comparisonNote: comparison?.comparisonNote,
+                prefixDivergence: comparison?.prefixDivergence,
+                ...requestFields,
             });
             continue;
         }
         if (!previousMetered) {
-            rows.push({ current, divergenceIndex: -1, verdict: "BASE", decision, ...runnerFields });
+            rows.push({ current, divergenceIndex: -1, verdict: "BASE", decision, ...requestFields });
             previousMetered = current;
             previousMeteredDecision = decision;
             prefixRefreshedAtMs = current.requestTimestampMs;
@@ -1199,10 +1422,6 @@ export function analyzeSnapshots(
         }
         const previous = previousMetered;
         if (!previous.usage || !current.usage) continue;
-        const divergenceIndex = firstDivergence(previous.segments, current.segments);
-        const byteVerdict: ByteVerdict = bustsReusablePrefix(previous, current, divergenceIndex)
-            ? "BUST"
-            : "STABLE";
         // Implicit-prefix forgiveness is the previous request's uncached input: its
         // tail may not be cached yet. After a provider-side miss that input is the
         // whole prompt, which would forgive any read at all, so a Gemini request
@@ -1258,13 +1477,33 @@ export function analyzeSnapshots(
         if (lastTouch !== undefined && lastTouch > (prefixRefreshedAtMs ?? -Infinity)) prefixRefreshedAtMs = lastTouch;
         const previousRequestAt = snaps[index - 1]?.requestTimestampMs ?? previous.requestTimestampMs;
         const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
+        if (shortRead && scopeChange) {
+            const scopePrevious = previousSessionRequest ?? previous;
+            rows.push({
+                current, previous: scopePrevious, divergenceIndex: -1, verdict: "SHORT",
+                meterVsBytes: "N/A", comparisonNote: scopeChange, divergenceClass: "cache_scope_changed",
+                shortRead, meterFloor, comparableRead, epsilon, prevTotal,
+                ...(reference !== scopePrevious ? { meterReference: reference } : {}),
+                rewrittenTokens: current.usage.cacheCreation ?? Math.max(0, prevTotal - current.usage.cacheRead),
+                decision, ...requestFields,
+            });
+            previousMetered = current;
+            previousMeteredDecision = decision;
+            latencyReference = undefined;
+            previousBustDivergenceIndex = undefined;
+            if (refreshesCachedPrefix(reading, { shortRead, explicitBreakpoints })) prefixRefreshedAtMs = current.requestTimestampMs;
+            continue;
+        }
+        const comparison = compareClientBytes(current, previous, snaps.slice(0, index));
+        const { divergenceIndex, byteVerdict } = comparison;
+        const comparisonPrevious = comparison.previous;
         // Once a runner's cache has expired, changing bytes cannot incur an
         // additional cache miss. Preserve the diff as evidence, not a bust.
         if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
             rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
                 ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
                 comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
-                divergenceClass: "idle_cache_expiry", ...runnerFields });
+                divergenceClass: "idle_cache_expiry", ...requestFields });
             previousMetered = current;
             previousMeteredDecision = decision;
             latencyReference = undefined;
@@ -1280,7 +1519,7 @@ export function analyzeSnapshots(
             const verdict: MeterVerdict = !shortRead ? "STABLE"
                 : runnerDecisions?.changes.length ? "VIEW" : "UNEXPLAINED (no bytes)";
             rows.push({ current, previous, divergenceIndex: -1, verdict, shortRead, meterFloor,
-                comparableRead, epsilon, prevTotal, idleGapMs, ...runnerFields });
+                comparableRead, epsilon, prevTotal, idleGapMs, ...requestFields });
             previousMetered = current;
             previousMeteredDecision = decision;
             latencyReference = undefined;
@@ -1305,19 +1544,19 @@ export function analyzeSnapshots(
         // A missing breakpoint is the request's own shape, not provider latency,
         // so it is a BUST even when the reusable bytes are unchanged.
         const verdict: MeterVerdict = shortRead
-            ? byteVerdict === "BUST" || (missingBreakpointAfterRead && !idleCacheExpiry)
+            ? comparison.specialClass ? "SHORT" : byteVerdict === "BUST" || (missingBreakpointAfterRead && !idleCacheExpiry)
                 ? "BUST"
                 : "LATENCY"
             : "STABLE";
         latencyReference = verdict === "LATENCY" ? reference : undefined;
         const meterVsBytes: MeterVsBytes =
-            verdict === "LATENCY"
+            byteVerdict === undefined ? "N/A" : verdict === "LATENCY"
                 ? "LATENCY"
                 : verdict === "STABLE" && byteVerdict === "BUST"
                   ? "BYTES-ONLY"
                   : "AGREE";
         const rewrittenTokens =
-            verdict === "BUST" || verdict === "LATENCY"
+            verdict === "BUST" || verdict === "LATENCY" || verdict === "SHORT"
                 ? (current.usage.cacheCreation ?? Math.max(0, prevTotal - current.usage.cacheRead))
                 : undefined;
         const attributionDecision =
@@ -1327,16 +1566,18 @@ export function analyzeSnapshots(
         const divergentSegment =
             divergenceIndex < 0
                 ? undefined
-                : (current.segments[divergenceIndex] ?? previous.segments[divergenceIndex]);
-        const tailShrink = isTailShrink(previous, current, divergenceIndex);
+                 : (comparison.prefixDivergence ?? current.segments[divergenceIndex] ?? comparisonPrevious.segments[divergenceIndex]);
+        const tailShrink = isTailShrink(comparisonPrevious, current, divergenceIndex);
         // A LATENCY row is also classified: a short read over an unchanged reusable
         // prefix is a provider-side fact and deserves a name, not a blank cell.
         const divergenceClass =
-            verdict === "BUST" || verdict === "LATENCY"
+            verdict === "SHORT" || verdict === "BUST" || verdict === "LATENCY"
                 ? classifyCacheBust({
+                      threadEvidence: comparison.specialClass,
+                      providerCacheMissReason: current.providerCacheMissReason?.type,
                       providerShortReadWithIdenticalPrefix: verdict === "LATENCY",
                       divergenceIndex,
-                      previousMessageCount: previous.segments.length,
+                      previousMessageCount: comparisonPrevious.segments.length,
                       previousBustDivergenceIndex,
                       idleCacheExpiry,
                       missingBreakpointAfterRead,
@@ -1351,8 +1592,8 @@ export function analyzeSnapshots(
                       providerComparableRead: current.usage.cacheRead,
                       directInput: current.usage.input,
                        previousTotal: prevTotal,
-                       previousModel: previous.wireModel,
-                       currentModel: current.wireModel,
+                        previousModel: scopeWireModel(previousSessionRequest),
+                        currentModel: scopeWireModel(current),
                        ocInputStepRatio: (() => {
                            if (attributionDecision?.inputCount === undefined) return undefined;
                            const recentCounts = decisions
@@ -1369,7 +1610,7 @@ export function analyzeSnapshots(
                                : undefined;
                        })(),
                         inheritedFold: attributionDecision !== decision,
-                      contentEvidence: [previous, current]
+                      contentEvidence: [comparisonPrevious, current]
                           .flatMap((snapshot) =>
                               snapshot.segments.slice(
                                   Math.max(0, divergenceIndex - 2),
@@ -1397,13 +1638,13 @@ export function analyzeSnapshots(
         previousMeteredDecision = decision;
         rows.push({
             current,
-            previous,
+            previous: comparisonPrevious,
             divergenceIndex,
             byteVerdict,
             verdict,
             meterVsBytes,
             prevTotal,
-            ...(reference !== previous ? { meterReference: reference } : {}),
+            ...(reference !== comparisonPrevious ? { meterReference: reference } : {}),
             epsilon,
             meterFloor,
             comparableRead,
@@ -1411,8 +1652,10 @@ export function analyzeSnapshots(
             idleGapMs,
             rewrittenTokens,
             divergenceClass,
+            comparisonNote: comparison.comparisonNote,
+            prefixDivergence: comparison.prefixDivergence,
             decision: attributionDecision,
-            ...runnerFields,
+            ...requestFields,
         });
     }
     return rows;
@@ -1458,6 +1701,13 @@ function printSegmentDiff(previous: Snapshot, current: Snapshot, index: number):
     console.log(`             cur:  ${clippedDiff(curText, start, curEnd)}`);
 }
 
+function printProviderCacheMiss(row: AnalysisRow): void {
+    const reason = row.providerCacheMissReason;
+    if (!reason) return;
+    const missed = reason.cacheMissedInputTokens;
+    console.log(`          └─ provider says: ${reason.type}${missed === undefined ? "" : `, ${missed.toLocaleString()} missed`}`);
+}
+
 function meterCell(row: AnalysisRow): string {
     if (row.verdict === "UNMETERED") return `unavailable; bytes=${row.byteVerdict}`;
     const read = row.current.usage?.cacheRead ?? 0;
@@ -1476,7 +1726,7 @@ function meterCell(row: AnalysisRow): string {
             ? `; wireModel=${row.previous.wireModel} → ${row.current.wireModel}`
             : "";
     const reference = row.meterReference
-        ? `; ref=${fmtTime(row.meterReference.createdAt)} (last read before the LATENCY run)`
+        ? `; ref=${fmtTime(row.meterReference.createdAt)} (${row.current.provider === "gemini" ? "last read before the LATENCY run" : "meter baseline"})`
         : "";
     const floorBasis = isImplicitPrefixCache(row.current.usage?.provider ?? row.current.provider)
         ? `prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()}`
@@ -1522,8 +1772,8 @@ Options:
   --meter <kind>        force the anthropic, openai, or gemini meter for every request
   --since/--until <t>   ISO timestamp or duration ago (for example 2h)
   --limit <N>           keep the last N requests in range
-  --cache-ttl <dur>     idle time after which the provider prefix counts as
-                         expired (default 1h for runners, 5m for legacy dumps)
+  --cache-ttl <dur>     override the previous same-route body's longest stated
+                         breakpoint ttl (fallback: 1h for runners, 5m for dumps)
   --show-diff           print both versions of the first-diverging message
   --all-busts           list every diverging message
   --all-rows            also print STABLE and UNMETERED rows`;
@@ -1555,8 +1805,8 @@ function main(): void {
         .filter((candidate) => candidate.session === runner.session)
         .flatMap((candidate) => loadCandidateSnapshots(candidate, dumpOptions)) : selection.snapshots;
     const allSnaps = runner ? runnerSnapshots(runner, dumps, opts.meter) : dumps;
-    const since = runner ? resolveTimeBound(opts.since) : undefined;
-    const until = runner ? resolveTimeBound(opts.until) : undefined;
+    const since = resolveTimeBound(opts.since);
+    const until = resolveTimeBound(opts.until);
     const evidence = runner ? loadRunnerEvidence(opts.runnerDataDir, runner, opts.mcLogPath, {
         sinceMs: since ? Date.parse(since) : undefined, untilMs: until ? Date.parse(until) : undefined,
     }) : undefined;
@@ -1566,10 +1816,8 @@ function main(): void {
         runner ? [] : withSchedulerLogFallback([], allSnaps[0]?.session ?? opts.sessionPrefix, opts.mcLogPath),
         { cacheTtlMs: opts.cacheTtl ? parseCacheTtl(opts.cacheTtl) : undefined, runnerEvidence: evidence, cacheTouches: touches.map((touch) => touch.at) },
     );
-    if (runner) {
-        rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
-        if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
-    }
+    rows = rows.filter((row) => (!since || row.current.createdAt >= since) && (!until || row.current.createdAt <= until));
+    if (opts.limit && rows.length > opts.limit) rows = rows.slice(-opts.limit);
     const snaps = rows.map((row) => row.current);
     if (snaps.length === 0) {
         const searched = opts.sources.map((source) => source.dir).join(", ");
@@ -1603,7 +1851,7 @@ function main(): void {
     const describeMeterChoice = wireFamilies.length > 0 || opts.meter !== undefined;
     console.log(`Session:  ${snaps[0].session}`);
     if (runner) console.log(`Source: ${runner.kind}; files read: ${[...runner.files, ...(evidence?.files ?? []), ...touches.map((touch) => touch.file)].join(", ")}; dump directories: ${opts.sources.map((source) => source.dir).join(", ")}`);
-    if (runner) console.log(`Runner: ${runner.requests.length} metered step(s); ${touches.length} keep-warm cache touch(es), never steps or byte baselines. Request/view join: nearest time within 60s, once per render. Cache lifetime: ${opts.cacheTtl ?? "1h"}.`);
+    if (runner) console.log(`Runner: ${runner.requests.length} metered step(s); ${touches.length} keep-warm cache touch(es), never steps or byte baselines. Request/view join: nearest time within 60s, once per render. Cache lifetime: ${opts.cacheTtl ?? "previous same-route body's longest stated breakpoint TTL (fallback: 1h)"}.`);
     if (runner) console.log(`Models: ${[...new Set(snaps.map((snapshot) => `${snapshot.runnerRequest?.provider}/${snapshot.runnerRequest?.model}${snapshot.runnerRequest?.variant ? ` (variant=${snapshot.runnerRequest.variant})` : ""}`))].join(", ")}`);
     console.log(
         wireFamilies.length > 0
@@ -1640,32 +1888,39 @@ function main(): void {
 
     let bustCount = 0;
     let latencyCount = 0;
+    let shortCount = 0;
     let unmeteredBustCount = 0;
     for (const row of rows) {
         if (row.current.runnerRequest && (row.current.bytesMissing || row.previous?.bytesMissing)) {
-            if (opts.allRows || !["BASE", "STABLE"].includes(row.verdict)) {
+            if (opts.allRows || row.providerCacheMissReason || !["BASE", "STABLE"].includes(row.verdict)) {
                 console.log(`${fmtTime(row.current.createdAt)} | ${row.verdict} | read=${row.current.usage?.cacheRead ?? "unavailable"} write=${row.current.usage?.cacheCreation ?? "unavailable"} input=${row.current.usage?.input ?? "unavailable"} floor=${row.meterFloor ?? "—"} gap=${row.idleGapMs === undefined ? "—" : `${(row.idleGapMs / 60_000).toFixed(1)}m`} | bytes unavailable | view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
+                if (row.divergenceClass === "cache_scope_changed") console.log(`          └─ cache_scope_changed: ${row.comparisonNote}`);
+                printProviderCacheMiss(row);
                 for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
             }
             continue;
         }
         if (row.verdict === "BASE") {
-            if (opts.allRows) {
+            if (opts.allRows || row.providerCacheMissReason) {
                 console.log(
-                    `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`,
+                    `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`,
                 );
+                printProviderCacheMiss(row);
             }
             continue;
         }
         const shouldPrint =
             opts.allRows ||
+            row.providerCacheMissReason ||
             row.verdict === "BUST" ||
             row.verdict === "LATENCY" ||
+            row.verdict === "SHORT" ||
             row.verdict === "EXPIRED" ||
             (row.verdict === "UNMETERED" && row.byteVerdict === "BUST");
         if (!shouldPrint) continue;
         if (row.verdict === "BUST") bustCount += 1;
         if (row.verdict === "LATENCY") latencyCount += 1;
+        if (row.verdict === "SHORT") shortCount += 1;
         if (row.verdict === "UNMETERED" && row.byteVerdict === "BUST") unmeteredBustCount += 1;
 
         const previous = row.previous;
@@ -1673,16 +1928,17 @@ function main(): void {
             // An unmetered request with no metered predecessor has nothing to diff
             // against; it is still listed so the refusal below has visible rows.
             console.log(
-                `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${"UNMETERED".padEnd(16)} | ${"unavailable; no metered predecessor".padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${"(no metered predecessor)".padEnd(31)} | ${`${row.current.bodyBytes.toLocaleString()}B`.padEnd(27)} |`,
+                `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | ${"UNMETERED".padEnd(16)} | ${"unavailable; no metered predecessor".padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${"(no metered predecessor)".padEnd(31)} | ${`${row.current.bodyBytes.toLocaleString()}B`.padEnd(27)} |`,
             );
+            printProviderCacheMiss(row);
             continue;
         }
         const index = row.divergenceIndex;
         const segment =
             index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
-        const attribution = row.verdict === "EXPIRED" ? "(expired cache)" : segment
+        const attribution = row.prefixDivergence?.id ?? row.comparisonNote ?? (row.verdict === "EXPIRED" ? "(expired cache)" : segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
-            : `(identical; bytes ${row.byteVerdict})`;
+            : `(identical; bytes ${row.byteVerdict})`);
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
         const byteDelta = `${previous.bodyBytes.toLocaleString()}B → ${row.current.bodyBytes.toLocaleString()}B`;
         const verdictLabel =
@@ -1690,8 +1946,9 @@ function main(): void {
                 ? `UNMETERED (bytes ${row.byteVerdict})`
                 : `${row.verdict} (meter)`;
         console.log(
-            `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
+            `${fmtTime(row.current.createdAt)} | ${(row.current.threadType === "continue" ? `${row.current.messagesCount - (row.current.segments[0]?.role === "system" ? 1 : 0)}c` : String(row.current.segments.length)).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${row.byteVerdict === undefined ? "(not comparable)" : `${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`}`,
         );
+        printProviderCacheMiss(row);
         if (row.verdict === "EXPIRED" && segment) {
             console.log(`          └─ bytes also changed at ${segment.id}`);
         }
@@ -1726,7 +1983,10 @@ function main(): void {
                     );
                 }
             }
-            if (opts.showDiff) printSegmentDiff(previous, row.current, index);
+            if (opts.showDiff) {
+                if (row.prefixDivergence?.id.startsWith("tools")) printSegmentDiff({ ...previous, segments: previous.tools ? [previous.tools] : [] }, { ...row.current, segments: row.current.tools ? [row.current.tools] : [] }, 0);
+                else printSegmentDiff(previous, row.current, index);
+            }
         }
     }
 
@@ -1748,6 +2008,8 @@ function main(): void {
         }
     } else if (runner && rows.some((row) => row.current.bytesMissing || row.previous?.bytesMissing)) {
         console.log(`No-bytes short reads: ${["EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"].map((verdict) => `${verdict}=${rows.filter((row) => row.verdict === verdict).length}`).join(", ")}. Byte-attributed metered busts: ${bustCount}.`);
+    } else if (bustCount === 0 && shortCount > 0) {
+        console.log(`No byte-attributed metered busts; ${shortCount} metered short read(s) without a demonstrated byte rewrite across ${snaps.length} request(s).`);
     } else if (bustCount === 0) {
         console.log(`No metered busts across ${snaps.length} request(s).`);
     } else {
@@ -1763,7 +2025,7 @@ function main(): void {
     const expiryCount = rows.filter((row) => row.divergenceClass === "idle_cache_expiry").length;
     if (expiryCount > 0) {
         console.log(
-            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? (runner ? "1h" : "5m")} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
+            `${expiryCount} short read(s) came more than ${opts.cacheTtl ?? "the previous same-route body's stated cache lifetime (fallback: 1h for runners, 5m for plugin dumps)"} ${runner ? "since the previous request or keep-warm cache touch" : "after the prefix was last read in full or written"} (idle_cache_expiry; --cache-ttl changes the window).`,
         );
     }
     if (unmeteredBustCount > 0) {

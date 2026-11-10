@@ -403,6 +403,21 @@ describe("status view model", () => {
      * (issue 496).
      */
     describe("blocked background maintenance", () => {
+        test("shows live hidden-model quota skips beside background failures", () => {
+            const value =
+                "google/primary until 2026-10-10T04:46:40.000Z: provider said to retry later";
+            for (const compactionEnabled of [true, false]) {
+                const rows = view({
+                    hiddenModelSkips: [value],
+                    compactionEnabled,
+                }).sections.flatMap((section) => section.rows);
+                expect(rows.find((row) => row.label === "Hidden model quota")).toMatchObject({
+                    value,
+                    tone: "warning",
+                });
+            }
+        });
+
         test("shows a scheduled task's primary quota deadline in the status dialog", () => {
             const error =
                 "primary quota exhausted until 2026-10-08T03:40:04.275Z; account=private@example.com";

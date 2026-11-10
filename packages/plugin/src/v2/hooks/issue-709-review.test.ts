@@ -8,11 +8,7 @@ import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import * as embedding from "../../features/magic-context/memory/embedding";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
-import {
-    closeDatabase,
-    getTagsBySession,
-    openDatabase,
-} from "../../features/magic-context/storage";
+import { closeDatabase, getTagsBySession } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getAutoSearchHintDecisions } from "../../features/magic-context/storage-meta-persisted";
 import { sessionRenderCacheSelect } from "../../features/magic-context/storage-session-cache";
@@ -28,7 +24,7 @@ import * as logger from "../../shared/logger";
 import * as models from "../../shared/models-dev-cache";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { scaleTest } from "../../shared/slow-test";
-import { Database } from "../../shared/sqlite";
+import { openTestDatabase, openTestDb } from "../../shared/test-db";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
 import type { FoldIdentity } from "../fold/owner";
@@ -82,11 +78,11 @@ async function fixture(
     ))
         mkdirSync(process.env[key]!, { recursive: true });
     resetOpenCodeDbPathStateForTesting();
-    const raw = new Database(process.env.OPENCODE_DB!);
+    const raw = openTestDb(process.env.OPENCODE_DB!);
     raw.exec(
         "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, fork_session_id TEXT, fork_boundary TEXT);",
     );
-    const db = openDatabase();
+    const db = await openTestDatabase();
     if (!db) throw new Error("isolated review database unavailable");
     const opened = db.prepare("PRAGMA database_list").all() as Array<{ file: string }>;
     // SQLite reports the resolved path, so on macOS a root under /var reads back

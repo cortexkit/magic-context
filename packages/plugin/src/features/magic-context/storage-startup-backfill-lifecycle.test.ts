@@ -1,17 +1,28 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as warmup from "../../hooks/magic-context/raw-ordinal-warmup";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import * as messageTime from "./message-time-backfill";
-import { closeDatabase, openDatabase, openDatabaseAsync } from "./storage-db";
+import {
+    __getDatabaseStartupStateForTests,
+    __setScheduleStartupMaintenanceOnOpenForTests,
+    closeDatabase,
+    openDatabase,
+    openDatabaseAsync,
+} from "./storage-db";
 
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 let dir: string | undefined;
 let restoreWorker: (() => void) | undefined;
 let restoreTime: (() => void) | undefined;
+let previousStartupPolicy: boolean;
+
+beforeEach(() => {
+    previousStartupPolicy = __setScheduleStartupMaintenanceOnOpenForTests(true);
+});
 
 function useStore(): void {
     dir = createTestTempDirFromPath(join(tmpdir(), "storage-startup-lifecycle-"));
@@ -21,6 +32,7 @@ function useStore(): void {
 
 afterEach(async () => {
     await closeDatabase();
+    __setScheduleStartupMaintenanceOnOpenForTests(previousStartupPolicy);
     restoreWorker?.();
     restoreTime?.();
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -36,7 +48,9 @@ test("closing before the startup turn cancels the queued FTS writer", async () =
         ftsRowidBackfill: true,
     });
     restoreWorker = () => worker.mockRestore();
-    expect(openDatabase()).not.toBeNull();
+    const db = openDatabase();
+    expect(db).not.toBeNull();
+    expect(__getDatabaseStartupStateForTests(db!).timerScheduled).toBe(true);
     await closeDatabase();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(worker).not.toHaveBeenCalled();

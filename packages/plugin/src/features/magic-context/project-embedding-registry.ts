@@ -645,6 +645,9 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
                 ? { document_prefix: config.document_prefix }
                 : {}),
             ...(truncate ? { truncate } : {}),
+            // Requested output width (Matryoshka models): part of the vector
+            // space, so it must reach both the provider body and identity.
+            ...(config.dimensions ? { dimensions: config.dimensions } : {}),
             ...(config.max_input_tokens
                 ? {
                       max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
@@ -739,6 +742,7 @@ function createProvider(
             queryInstruction: config.query_instruction,
             documentPrefix: config.document_prefix,
             truncate: config.truncate,
+            dimensions: config.dimensions,
             maxInputTokens: config.max_input_tokens,
         });
     }

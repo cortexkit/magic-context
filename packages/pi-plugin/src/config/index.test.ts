@@ -1132,4 +1132,24 @@ describe("loadPiConfig — project config cannot reset user settings", () => {
 			default: 300_000,
 		});
 	});
+
+	it("ignores a project embedding.dimensions override while the user width still applies", () => {
+		const result = load(
+			{
+				embedding: {
+					provider: "openai-compatible",
+					endpoint: "https://trusted.example/v1",
+					model: "qwen/qwen3-embedding-8b",
+					dimensions: 768,
+				},
+			},
+			{ embedding: { dimensions: 4096 } },
+		);
+		const embedding = result.config.embedding;
+		expect(embedding.provider).toBe("openai-compatible");
+		if (embedding.provider === "openai-compatible") {
+			expect(embedding.dimensions).toBe(768);
+		}
+		expect(result.warnings.join("\n")).toContain("dimensions");
+	});
 });

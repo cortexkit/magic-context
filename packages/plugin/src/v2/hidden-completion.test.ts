@@ -23,6 +23,7 @@ import {
     observeProducerModelsForTest,
 } from "../hooks/magic-context/producer-window-test-support";
 import { createOpenCodeRescoreCarrier } from "../hooks/magic-context/rescore-driver";
+import { hiddenModelCooldowns } from "../shared/hidden-model-cooldown";
 import * as logger from "../shared/logger";
 import { resolveHistorianModel } from "../shared/model-resolution";
 import {
@@ -470,6 +471,38 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
+    for (const retryAfterMs of [undefined, 190_000_000]) {
+        test(`retains structured quota delay when the host exposes it (${retryAfterMs ?? "unavailable"})`, async () => {
+            const f = await setup();
+            const handle = await f.executor.open(dreamerRun);
+            const hostError = {
+                type: "provider.rate-limit",
+                status: 429,
+                message: "quota exhausted",
+                ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+            };
+            f.host.prompt = async ({ sessionID }) => {
+                f.rows.append(sessionID, "", { error: hostError });
+            };
+            try {
+                await expect(
+                    promptSyncWithValidatedOutputRetry(undefined, request(), {
+                        transport: (args) => f.executor.attempt(handle, args),
+                        fetchOutput: () => f.executor.collect(handle),
+                        validateOutput: (completion) => completion.text,
+                    }),
+                ).rejects.toThrow("quota exhausted");
+                expect(
+                    hiddenModelCooldowns.live().some((entry) => entry.model === "mock/cheap"),
+                ).toBe(retryAfterMs !== undefined);
+            } finally {
+                hiddenModelCooldowns.succeeded("mock/cheap");
+                await close(f.executor, handle, false);
+                f.db.close();
+            }
+        });
+    }
+
     test("records the dispatched model and terminal host error when no assistant row exists", async () => {
         const { dir: dataHome, cleanup } = createTestTempDir("v2-model-refusal-");
         const previous = process.env.XDG_DATA_HOME;

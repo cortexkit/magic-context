@@ -196,7 +196,7 @@ Project config may only set \`"rerank": {"provider": "off"}\`. Project routing, 
         keys: ["dreamer"],
         title: "Background agents",
         intro: "Off-hours maintenance through Dreamer.",
-        outro: "On Pi and Oh My Pi, historian and dreamer models, including `fallback_models` and per-task model overrides, must use provider names that host serves. `opencode/*` models are served only by OpenCode's own provider, so Pi and Oh My Pi drop them at startup and log `dropping Pi model not found: <model>`. If every fallback is an `opencode/*` model, only the primary model is left. To see valid names, run `omp models` on Oh My Pi or `pi --list-models` on Pi. `/ctx-status` warns when a dreamer task or the historian has no usable model left.",
+        outro: "On Pi and Oh My Pi, historian and dreamer models, including `fallback_models` and per-task model overrides, must use provider names that host serves. `opencode/*` models are served only by OpenCode's own provider, so Pi and Oh My Pi drop them at startup and log `dropping Pi model not found: <model>`. If every fallback is an `opencode/*` model, only the primary model is left. To see valid names, run `omp models` on Oh My Pi or `pi --list-models` on Pi. `/ctx-status` warns when a dreamer task or the historian has no usable model left.\n\nWhen the historian or the dreamer has `fallback_models` and a provider refuses a model with a time to retry after (a used-up quota window, for example), later background runs skip that model until then and start on the next one in the list. A restart clears this. It works on OpenCode 1 and on OpenCode 2.2 or newer; Pi and older OpenCode 2 versions don't pass that time to plugins, so runs there fall back as before.",
     },
     {
         keys: [

@@ -21,12 +21,12 @@ import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
-    openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import { openTestDatabase } from "../../shared/test-db";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { providerMass, resolveDecisionCalibration } from "./decision-calibration";
 import { createEventHandler } from "./event-handler";
@@ -89,8 +89,8 @@ function prose(chars: number, seed: number): string {
     return out.join(" ");
 }
 
-function harness(sessionId: string) {
-    const db = openDatabase();
+async function harness(sessionId: string) {
+    const db = await openTestDatabase();
     getOrCreateSessionMeta(db, sessionId);
     updateSessionMeta(db, sessionId, { systemPromptTokens: SYSTEM_TOKENS, cacheTtl: "1h" });
     const history: Msg[] = [];
@@ -243,7 +243,7 @@ function harness(sessionId: string) {
 }
 
 async function overflowRestartCase(counted: boolean) {
-    const h = harness(`ses-review-752-overflow-${counted ? "counted" : "bare"}`);
+    const h = await harness(`ses-review-752-overflow-${counted ? "counted" : "bare"}`);
     try {
         // A managed session the provider last measured at about 60%.
         h.user("start the listings");

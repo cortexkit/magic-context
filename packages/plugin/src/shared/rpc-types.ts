@@ -149,6 +149,7 @@ export interface SidebarSnapshot {
     /** Dreamer tasks whose last scheduled run failed. Empty when all of them are
      *  healthy; absent on a database with no scheduler table yet. */
     dreamerFailures?: DreamTaskFailureState[];
+    hiddenModelSkips?: string[];
     dreamerSkipped?: string[];
     recompProgress?: {
         /** "recomp" → "Recomp" labels; "upgrade" → "Upgrade" labels. */

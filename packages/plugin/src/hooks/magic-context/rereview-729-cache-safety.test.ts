@@ -31,7 +31,6 @@ import {
     closeDatabase,
     getOrCreateSessionMeta,
     getTagsBySession,
-    openDatabase,
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -44,6 +43,7 @@ import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-pro
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
+import { openTestDatabase } from "../../shared/test-db";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { readPersistedLkgUntaggedInputIds } from "./lkg-recovery-prefix";
 import { resetLkgSlotsForTest } from "./lkg-slot";
@@ -154,13 +154,17 @@ interface SessionOptions {
  * oracle also treats the system prompt as part of the prefix: a kept block
  * born under one date must not be served under another.
  */
-function session(host: "opencode1" | "opencode2", sessionId: string, options: SessionOptions = {}) {
+async function session(
+    host: "opencode1" | "opencode2",
+    sessionId: string,
+    options: SessionOptions = {},
+) {
     const dataHome = createTestTempDir("mc-rr729-data-").dir;
     const directory = createTestTempDir("mc-rr729-session-").dir;
     tempDirs.push(dataHome, directory);
     process.env.XDG_DATA_HOME = dataHome;
     writeFileSync(join(directory, "ARCHITECTURE.md"), "# Architecture\n\nv1\n");
-    let db = openDatabase();
+    let db = await openTestDatabase();
     getOrCreateSessionMeta(db, sessionId);
     updateSessionMeta(db, sessionId, { cacheTtl: "5m", lastResponseTime: Date.now() });
     const usage = new Map([
@@ -271,10 +275,10 @@ function session(host: "opencode1" | "opencode2", sessionId: string, options: Se
          * Simulates a process restart: clears the in-memory last-good slots,
          * reopens the database and rebuilds every handler.
          */
-        restart() {
+        async restart() {
             resetLkgSlotsForTest();
-            closeDatabase();
-            db = openDatabase();
+            await closeDatabase();
+            db = await openTestDatabase();
             build();
         },
         user(text: string) {
@@ -455,7 +459,10 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: compaction-off, a dashboard memory edit mid-turn keeps m[0] in front of kept thinking`,
         async () => {
-            const s = session(host, `rr729-off-mem-${host}`, { compactionOff: true, memory: true });
+            const s = await session(host, `rr729-off-mem-${host}`, {
+                compactionOff: true,
+                memory: true,
+            });
             s.editMemory("Prefer small commits");
             s.user("run some bash commands");
             await s.pass();
@@ -481,7 +488,7 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: compaction-off, a project-docs change mid-turn keeps m[0] in front of kept thinking`,
         async () => {
-            const s = session(host, `rr729-off-docs-${host}`, { compactionOff: true });
+            const s = await session(host, `rr729-off-docs-${host}`, { compactionOff: true });
             s.user("run some bash commands");
             await s.pass();
             for (let n = 1; n <= 3; n++) {
@@ -492,7 +499,7 @@ for (const host of HOSTS) {
             s.step(4, 200);
             const out = await s.pass();
             // The same change across a restart.
-            s.restart();
+            await s.restart();
             s.editDocs("v3");
             s.step(5, 200);
             const after = await s.pass();
@@ -507,7 +514,7 @@ for (const host of HOSTS) {
     );
 
     it(`${host}: compaction-off, the first render after a restart (no cached m[0]/m[1]) with changed docs`, async () => {
-        const s = session(host, `rr729-off-first-${host}`, { compactionOff: true });
+        const s = await session(host, `rr729-off-first-${host}`, { compactionOff: true });
         s.user("run some bash commands");
         await s.pass();
         for (let n = 1; n <= 3; n++) {
@@ -518,7 +525,7 @@ for (const host of HOSTS) {
         // migration clears it) and the process restarts; the docs changed.
         s.clearHead();
         s.editDocs("v2");
-        s.restart();
+        await s.restart();
         s.step(4, 200);
         const out = await s.pass();
         report(`${host} off first-render-after-restart`, s, {
@@ -530,7 +537,7 @@ for (const host of HOSTS) {
     }, 60_000);
 
     it(`${host}: compaction-off, a first render in the same process (no cached m[0]/m[1]) with changed docs`, async () => {
-        const s = session(host, `rr729-off-first-warm-${host}`, { compactionOff: true });
+        const s = await session(host, `rr729-off-first-warm-${host}`, { compactionOff: true });
         s.user("run some bash commands");
         await s.pass();
         for (let n = 1; n <= 3; n++) {
@@ -576,7 +583,10 @@ for (const host of HOSTS) {
             it.skipIf(!ENABLED)(
                 `${host}: ${replays} last-good replay(s), a deferring held idle pass, then an unheld flush ${withDrop ? "with a queued drop" : "with nothing queued"}`,
                 async () => {
-                    const s = session(host, `rr729-lkg-unheld-${replays}-${withDrop}-${host}`);
+                    const s = await session(
+                        host,
+                        `rr729-lkg-unheld-${replays}-${withDrop}-${host}`,
+                    );
                     await heldAfterReplay(s, replays);
                     const deferred = s.relevantLogs();
                     // Above the cap (75%): unheld. A user flush busts the cache
@@ -610,9 +620,9 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: a restart between the deferring held pass and the next pass`,
         async () => {
-            const s = session(host, `rr729-lkg-restart-${host}`);
+            const s = await session(host, `rr729-lkg-restart-${host}`);
             await heldAfterReplay(s, 1);
-            s.restart();
+            await s.restart();
             // Still held (heavy step 1 is within 15 steps, usage 30%).
             s.step(10, 200);
             const held = await s.pass();
@@ -635,7 +645,7 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: a restart right after a last-good replay, on a held turn`,
         async () => {
-            const s = session(host, `rr729-lkg-restart-direct-${host}`);
+            const s = await session(host, `rr729-lkg-restart-direct-${host}`);
             s.user("long task");
             await s.pass();
             s.step(1, 2_400);
@@ -645,7 +655,7 @@ for (const host of HOSTS) {
             await s.pass();
             s.step(3, 200);
             await s.pass();
-            s.restart();
+            await s.restart();
             s.step(4, 200);
             const out = await s.pass();
             report(`${host} lkg -> restart (held)`, s, {
@@ -661,7 +671,7 @@ for (const host of HOSTS) {
 
 for (const host of HOSTS) {
     it(`${host}: a restart together with a new real user after a last-good replay re-tags the replayed result in front of kept thinking`, async () => {
-        const s = session(host, `rr729-lkg-restart-user-${host}`);
+        const s = await session(host, `rr729-lkg-restart-user-${host}`);
         s.user("long task");
         await s.pass();
         s.step(1, 2_400);
@@ -675,7 +685,7 @@ for (const host of HOSTS) {
         // the next request. The randomized driver (review-729-driver.test.ts,
         // MC_REVIEW_729_SEED=5150) reaches the same shape.
         s.user("next task");
-        s.restart();
+        await s.restart();
         const out = await s.pass();
         report(`${host} lkg -> user+restart`, s, {
             kept: signedSignatures(out.messages ?? []),
@@ -691,7 +701,7 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: a date rollover on a held pass, then on an unheld lift-only bust`,
         async () => {
-            const s = session(host, `rr729-date-${host}`);
+            const s = await session(host, `rr729-date-${host}`);
             s.user("long task");
             await s.pass("2026-10-21");
             s.step(1, 2_400);
@@ -723,7 +733,7 @@ for (const host of HOSTS) {
     );
 
     it(`${host}: a date rollover on a held idle-expiry pass`, async () => {
-        const s = session(host, `rr729-date-idle-${host}`);
+        const s = await session(host, `rr729-date-idle-${host}`);
         s.user("long task");
         await s.pass("2026-10-21");
         s.step(1, 2_400);
@@ -746,7 +756,7 @@ for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: a date rollover on an unheld idle-expiry bust that keeps the turn's thinking`,
         async () => {
-            const s = session(host, `rr729-date-idle-unheld-${host}`);
+            const s = await session(host, `rr729-date-idle-unheld-${host}`);
             s.user("long task");
             await s.pass("2026-10-21");
             // Light steps only: never held.
@@ -776,7 +786,7 @@ const ledger = (s: ReturnType<typeof session>, sessionId: string) =>
 for (const host of HOSTS) {
     it(`${host}: compaction-off keeps replaying the strip of a first render on later passes and after a restart`, async () => {
         const sessionId = `rr729-off-first-replay-${host}`;
-        const s = session(host, sessionId, { compactionOff: true });
+        const s = await session(host, sessionId, { compactionOff: true });
         s.user("run some bash commands");
         await s.pass();
         for (let n = 1; n <= 3; n++) {
@@ -801,7 +811,7 @@ for (const host of HOSTS) {
         s.step(5, 200);
         const later = await s.pass();
         expect(signedSignatures(later.messages ?? [])).toEqual(["sig-5"]);
-        s.restart();
+        await s.restart();
         s.step(6, 200);
         const restarted = await s.pass();
         expect(signedSignatures(restarted.messages ?? [])).toEqual(["sig-5", "sig-6"]);
@@ -811,7 +821,7 @@ for (const host of HOSTS) {
 
     it(`${host}: compaction-off never applies the binding strips managed mode recorded`, async () => {
         const sessionId = `rr729-off-managed-ledger-${host}`;
-        const s = session(host, sessionId, { compactionOff: true });
+        const s = await session(host, sessionId, { compactionOff: true });
         s.user("run some bash commands");
         await s.pass();
         s.step(1, 200);
@@ -827,7 +837,7 @@ for (const host of HOSTS) {
 
     it(`${host}: after a restart and a new real user the replayed result stays untagged until a bust strips`, async () => {
         const sessionId = `rr729-lkg-restart-user-flush-${host}`;
-        const s = session(host, sessionId, { memory: true });
+        const s = await session(host, sessionId, { memory: true });
         s.user("long task");
         await s.pass();
         s.step(1, 2_400);
@@ -840,7 +850,7 @@ for (const host of HOSTS) {
         // The pass after the replay recorded which messages it served untagged.
         expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
         s.user("next task");
-        s.restart();
+        await s.restart();
         await s.pass();
         // Defer passes of the new turn keep call-2 untagged.
         s.step(4, 200);
@@ -891,7 +901,7 @@ for (const host of HOSTS) {
     for (const held of [true, false])
         it(`${host}: a date rollover on ${held ? "a held" : "an unheld"} idle-expiry pass when the system hook runs first`, async () => {
             const sessionId = `rr729-date-idle-first-${held}-${host}`;
-            const s = session(host, sessionId);
+            const s = await session(host, sessionId);
             s.user("long task");
             await s.pass("2026-10-21", { systemFirst: true });
             s.step(1, held ? 2_400 : 200);

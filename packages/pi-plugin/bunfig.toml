@@ -3,4 +3,4 @@
 # database (shared with OpenCode). See test-preload.ts for the rationale
 # (2026-06-01 incident). Structural guard; do not remove.
 [test]
-preload = ["./test-preload.ts"]
+preload = ["./src/test-preload.ts"]

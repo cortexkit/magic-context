@@ -103,6 +103,7 @@ import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getMagicContextStorageDir } from "../shared/data-path";
 import { getHarness } from "../shared/harness";
+import { hiddenModelCooldowns } from "../shared/hidden-model-cooldown";
 import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
@@ -455,6 +456,12 @@ export function buildSidebarSnapshot(
             dreamerBacklog,
             dreamerProgress,
             ...(dreamerFailures === undefined ? {} : { dreamerFailures }),
+            hiddenModelSkips: hiddenModelCooldowns
+                .live()
+                .map(
+                    (entry) =>
+                        `${entry.model} until ${new Date(entry.until).toISOString()}: ${entry.reason}`,
+                ),
             ...(dreamerSkipped === undefined ? {} : { dreamerSkipped }),
             compartmentTokens: calibrated.compartmentTokens,
             factTokens: calibrated.factTokens,

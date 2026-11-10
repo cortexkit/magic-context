@@ -836,6 +836,15 @@ const BaseEmbeddingConfigSchema = z
             .describe(
                 "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
             ),
+        dimensions: z
+            .number()
+            .int()
+            .min(1)
+            .max(8192)
+            .optional()
+            .describe(
+                "Optional output width for Matryoshka embedding models (e.g. Qwen3-Embedding-8B accepts 768 | 1024 | 2048 | 4096; OpenAI text-embedding-3-* accept smaller widths than native). Sent as the OpenAI-compatible `dimensions` request field. Omitted from the request when unset, so the endpoint default applies. Changing it changes the produced vectors and folds into the embedding model identity, so switching widths re-embeds rather than mixing vector spaces. Not supported for the local provider, and ignored from project config like the other embedding fields (a repository cannot choose how private text is embedded).",
+            ),
         max_input_tokens: z
             .number()
             .int()
@@ -905,6 +914,12 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(model ? { model } : {}),
             ...(endpoint ? { endpoint } : {}),
             ...(apiKey ? { api_key: apiKey } : {}),
+            // dimensions is carried on the synapse block ONLY so it survives to
+            // the openai-compatible fallback lane (fallbackConfig rebuilds that
+            // provider from this object). Synapse's own lane ignores it — its
+            // width is pinned from the first embed response, and a static width
+            // here would fight that.
+            ...(data.dimensions ? { dimensions: data.dimensions } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(data.query_instruction !== undefined
@@ -943,6 +958,10 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             provider: "openai-compatible" as const,
             model: data.model?.trim() ?? "",
             endpoint: data.endpoint?.trim() ?? "",
+            // dimensions is spread CONDITIONALLY (mirrors truncate/local_dtype):
+            // omitting it when unset keeps the identity byte-identical for every
+            // existing config, so adding this field forces no global re-embed.
+            ...(data.dimensions ? { dimensions: data.dimensions } : {}),
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),

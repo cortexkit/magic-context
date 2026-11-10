@@ -41,6 +41,9 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     // not let a broken value re-register mid-session.
     "embedding.input_type",
     "embedding.truncate",
+    // dimensions selects the output vector width (Matryoshka) and is part of
+    // the identity fingerprint, same as input_type.
+    "embedding.dimensions",
     // max_input_tokens and document_prefix affect stored chunk vectors;
     // query_input_type and query_instruction affect live query vectors. A failed
     // substitution on any of them must not register a bogus runtime or model identity.

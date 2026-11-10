@@ -67,6 +67,10 @@ const EMBEDDING_USER_ONLY_FIELDS = [
     "fallback_provider",
     "query_instruction",
     "document_prefix",
+    // Per-request output width. A repository choosing it changes the stored-vector
+    // identity (one re-embed of the project's history) and, if the pinned endpoint
+    // ignores or rejects that width, breaks embedding and semantic search outright.
+    "dimensions",
 ] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";

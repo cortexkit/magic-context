@@ -2,10 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import {
     DreamerProviderOutputFailureError,
-    primaryQuotaFailure,
     providerOutputFailureFromInvalidManifest,
-    rememberPrimaryQuota,
-    withDreamerModelCooldown,
 } from "./provider-output-failure";
 import {
     RECORDED_GEMINI_QUOTA_NOTICE,
@@ -32,39 +29,15 @@ function assistantCompletion(args: {
 }
 
 describe("providerOutputFailureFromInvalidManifest", () => {
-    it("isolates quota cooldowns between concurrent maintenance runs", async () => {
+    it("classifies the old account-pool notice as an outage without inferring a reset time", () => {
         const failure = providerOutputFailureFromInvalidManifest(
             recordedGeminiQuotaMessages(),
             RECORDED_GEMINI_QUOTA_NOTICE,
-        )!;
-        await Promise.all([
-            withDreamerModelCooldown(async () => {
-                rememberPrimaryQuota("google/gemini", failure);
-                await Promise.resolve();
-                expect(primaryQuotaFailure("google/gemini")?.quotaResetAt).toBe(
-                    failure.quotaResetAt,
-                );
-                expect(primaryQuotaFailure("google/other")).toBeNull();
-            }),
-            withDreamerModelCooldown(async () => {
-                await Promise.resolve();
-                expect(primaryQuotaFailure("google/gemini")).toBeNull();
-            }),
-        ]);
-        expect(primaryQuotaFailure("google/gemini")).toBeNull();
-    });
-    it("recognizes the recorded 33-token Gemini account-pool exhaustion notice", () => {
-        const failure = providerOutputFailureFromInvalidManifest(
-            recordedGeminiQuotaMessages(),
-            RECORDED_GEMINI_QUOTA_NOTICE,
-            1791425104275,
         );
         expect(failure).toBeInstanceOf(DreamerProviderOutputFailureError);
         expect(failure?.outputTokens).toBe(33);
-        expect(failure?.quotaResetAt).toBe(1791430804275);
-        expect(failure?.message).toBe(
-            "provider quota exhausted until 2026-10-08T03:40:04.275Z (account-pool rate limit)",
-        );
+        expect(failure?.message).toContain("provider-outage completion");
+        expect(failure?.message).not.toContain("quota exhausted until");
     });
 
     it("does not classify quoted, incomplete, or reasoning-bearing quota notices", () => {

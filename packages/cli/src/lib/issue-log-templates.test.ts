@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createTestTempDir } from "../../../plugin/src/shared/test-temp-dir";
+import {
+    cleanupTestTempDir,
+    createTestTempDir,
+    createTestTempDirFromPath,
+} from "../../../plugin/src/shared/test-temp-dir";
 import { generateIssueLogTemplates, OUTPUT } from "../../scripts/generate-issue-log-templates";
-import { ISSUE_LOG_SITES, ISSUE_LOG_TEMPLATES } from "./issue-log-templates.generated";
+import { ISSUE_LOG_SOURCE_FILES, ISSUE_LOG_TEMPLATES } from "./issue-log-templates.generated";
 import { IssuePrivacy } from "./issue-privacy";
 import { parseLogLine } from "./log-lines";
 
@@ -17,9 +22,64 @@ test("every shipped logging call is represented by the regenerated template modu
         "packages/plugin/src/hooks/",
         "packages/pi-plugin/src/",
     ]) {
-        expect(ISSUE_LOG_SITES.some((site) => site.startsWith(directory))).toBe(true);
+        expect(ISSUE_LOG_SOURCE_FILES.some((path) => path.startsWith(directory))).toBe(true);
     }
+    expect(ISSUE_LOG_SOURCE_FILES).toEqual([...new Set(ISSUE_LOG_SOURCE_FILES)].sort());
+    for (const path of ISSUE_LOG_SOURCE_FILES) expect(path).toMatch(/\.(?:ts|rs)$/);
 }, 30_000);
+
+test("blank lines above a copied log call leave generated output byte-identical", () => {
+    const root = createTestTempDirFromPath(join(tmpdir(), "issue-log-line-shift-"));
+    const path = "packages/plugin/src/shared/write-transaction-timing.ts";
+    const source = readFileSync(new URL(`../../../../${path}`, import.meta.url), "utf8");
+    const shifted = source.replace("        log(", "\n\n        log(");
+    expect(shifted).not.toBe(source);
+    try {
+        for (const directory of [
+            "packages/plugin/src/shared",
+            "packages/pi-plugin/src",
+            "crates/mc-module/src",
+        ])
+            mkdirSync(join(root, directory), { recursive: true });
+        writeFileSync(join(root, path), source);
+        const original = generateIssueLogTemplates(root);
+        expect(original).toContain("slow write transaction: site=");
+        writeFileSync(join(root, path), shifted);
+        expect(generateIssueLogTemplates(root)).toBe(original);
+    } finally {
+        cleanupTestTempDir(root);
+    }
+});
+
+test("call and file traversal order leave generated templates unchanged", () => {
+    const root = createTestTempDirFromPath(join(tmpdir(), "issue-log-call-order-"));
+    const first = "packages/plugin/src/first.ts";
+    const second = "packages/pi-plugin/src/second.ts";
+    const rust = "crates/mc-module/src/example.rs";
+    const put = (path: string, calls: string[]) => {
+        mkdirSync(dirname(join(root, path)), { recursive: true });
+        writeFileSync(join(root, path), calls.join("\n"));
+    };
+    const firstCalls = ["log(`shared ${sessionId}`);", "log(`shared ${path}`);"];
+    // Canonically equivalent strings also need a traversal-independent tie-break.
+    const secondCalls = ['log("same \u00e9e\u0301");', 'log("same e\u0301\u00e9");'];
+    const rustCalls = ['tracing::info!("Rust first");', 'tracing::warn!("Rust second");'];
+    try {
+        put(first, firstCalls);
+        put(second, secondCalls);
+        put(rust, rustCalls);
+        const original = generateIssueLogTemplates(root);
+        put(first, [...firstCalls].reverse());
+        put(second, [...secondCalls].reverse());
+        put(rust, [...rustCalls].reverse());
+        expect(generateIssueLogTemplates(root)).toBe(original);
+        put(first, secondCalls);
+        put(second, [...firstCalls, firstCalls[0]]);
+        expect(generateIssueLogTemplates(root)).toBe(original);
+    } finally {
+        cleanupTestTempDir(root);
+    }
+});
 
 test("extraction follows aliases, forwarding wrappers, concatenations and Rust field-first messages", async () => {
     const { dir: root, cleanup } = createTestTempDir("issue-log-source-");
@@ -55,7 +115,13 @@ test("extraction follows aliases, forwarding wrappers, concatenations and Rust f
         put("templates.generated.ts", generated);
         const decoded = (await import(join(root, "templates.generated.ts"))) as {
             ISSUE_LOG_TEMPLATES: typeof ISSUE_LOG_TEMPLATES;
+            ISSUE_LOG_SOURCE_FILES: typeof ISSUE_LOG_SOURCE_FILES;
         };
+        expect(decoded.ISSUE_LOG_SOURCE_FILES).toEqual([
+            "crates/mc-module/src/example.rs",
+            "packages/pi-plugin/src/example.ts",
+            "packages/plugin/src/example.ts",
+        ]);
         const parts = decoded.ISSUE_LOG_TEMPLATES.flatMap((template) => template.parts);
         for (const wording of [
             "a new fixed message",

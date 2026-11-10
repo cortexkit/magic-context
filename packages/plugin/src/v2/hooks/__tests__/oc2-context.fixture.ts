@@ -15,7 +15,7 @@ import { setHarness } from "../../../shared/harness";
 import * as logger from "../../../shared/logger";
 import { resetOpenCodeDbPathStateForTesting } from "../../../shared/opencode-db-path";
 import * as sqlite from "../../../shared/sqlite";
-import { Database } from "../../../shared/sqlite";
+import { openTestDatabase, openTestDb } from "../../../shared/test-db";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { resetHostMediaForTests } from "../../fold/host-media";
 import { nativeFoldCache } from "../../fold/memory-cache";
@@ -109,12 +109,12 @@ export async function oc2ContextFixture(
     ))
         mkdirSync(process.env[key]!, { recursive: true });
     resetOpenCodeDbPathStateForTesting();
-    const raw = new Database(process.env.OPENCODE_DB!);
+    const raw = openTestDb(process.env.OPENCODE_DB!);
     raw.exec("PRAGMA busy_timeout = 5000");
     raw.exec(
         "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, fork_session_id TEXT, fork_boundary TEXT);",
     );
-    const db = openDatabase();
+    const db = await openTestDatabase();
     if (!db) throw new Error("isolated database unavailable");
     const realRoot = realpathSync(root);
     for (const row of db.prepare("PRAGMA database_list").all() as Array<{ file: string }>)

@@ -45,6 +45,7 @@ import {
     getProjectMagicContextHistorianDir,
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
+import { hiddenModelCooldowns, selectHiddenModelStart } from "../../shared/hidden-model-cooldown";
 import { rememberV1HiddenRun } from "../../shared/hidden-zen-read";
 import { isTransientHistorianPromptError } from "../../shared/historian-transient-error";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
@@ -305,7 +306,7 @@ export function createV1HiddenCompletionExecutor(
                 preferResponseOnMissingData: true,
             });
             const assistantFailure = extractLatestAssistantFailure(messages);
-            const hostError = hostErrors.get(handle.id);
+            const hostError = assistantFailure?.error ?? hostErrors.get(handle.id);
             if (assistantFailure || hostError !== undefined) {
                 const finish = assistantFailure?.finish
                     ? ` (finish=${assistantFailure.finish})`
@@ -532,6 +533,10 @@ export async function runValidatedHistorianPass(args: {
     turnOneStageKey?: string;
     recoverTurnOne?: boolean;
 }): Promise<ValidatedHistorianPassResult> {
+    const selected = selectHiddenModelStart(args.model, args.fallbackModels, (message) =>
+        shared.sessionLog(args.parentSessionId, message),
+    );
+    args = { ...args, model: selected.primary, fallbackModels: selected.fallbacks };
     const withChild = (
         result: ValidatedHistorianPassResult,
         run: HistorianRunResult,
@@ -1156,6 +1161,7 @@ async function runHistorianPrompt(args: {
         }
 
         completion ??= await executor.collect(handle, 50);
+        hiddenModelCooldowns.succeeded(handle.attemptedModel ?? toModelEntry(modelOverride)?.model);
         if (args.turnOneStageKey)
             db.prepare(
                 "UPDATE memory_stage_attempts SET state='replied',reply_json=? WHERE stage_key=? AND state='sending'",
@@ -1293,6 +1299,10 @@ async function runHistorianPrompt(args: {
             reportedProfile: profile ?? undefined,
         };
     } catch (modelError: unknown) {
+        hiddenModelCooldowns.record(
+            handle?.attemptedModel ?? toModelEntry(modelOverride)?.model,
+            modelError,
+        );
         // A failed response read does not make an accepted prompt safe to send again.
         // Keep its child and key until recovery observes a reply or confirms expiry.
         if (

@@ -1,12 +1,10 @@
 /// <reference types="bun-types" />
 
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { startMessageFtsRowidMapBackfill } from "../../features/magic-context/message-fts-rowid-map";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
     getTagsBySession,
-    openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
 import {
@@ -18,6 +16,7 @@ import {
 import { markTagDropped } from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
+import { openTestDatabase } from "../../shared/test-db";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { applyPendingOperations, renderDroppedText } from "./apply-operations";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
@@ -47,10 +46,7 @@ afterEach(() => {
 async function fixture(parts: Message["parts"], anchored = false, hideReduce = false) {
     tempDir = createTestTempDir("lkg-annotations-independent-").dir;
     process.env.XDG_DATA_HOME = tempDir;
-    const db = openDatabase();
-    // Finish the startup writer before healthy passes: its WAL lock would
-    // correctly replay the last good request instead of exercising annotations.
-    await startMessageFtsRowidMapBackfill(db);
+    const db = await openTestDatabase();
     const sessionId = `independent-annotations-${++fixtureNumber}`;
     const raw = (): Message[] => [
         {

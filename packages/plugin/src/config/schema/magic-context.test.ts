@@ -841,6 +841,49 @@ describe("MagicContextConfigSchema", () => {
             ).toMatchObject({ query_instruction: false });
         });
 
+        it("preserves embedding.dimensions through the schema transform", () => {
+            const parsed = MagicContextConfigSchema.parse({
+                embedding: {
+                    provider: "openai-compatible",
+                    endpoint: "http://localhost:1234/v1",
+                    model: "qwen/qwen3-embedding-8b",
+                    dimensions: 768,
+                },
+            }).embedding;
+
+            expect(parsed).toMatchObject({ dimensions: 768 });
+            // The transform rebuilds the object field by field; a field it forgets
+            // is silently dropped and the wire request loses the parameter.
+            expect("dimensions" in parsed).toBe(true);
+        });
+
+        it("omits embedding.dimensions from the resolved config when unset", () => {
+            const parsed = MagicContextConfigSchema.parse({
+                embedding: {
+                    provider: "openai-compatible",
+                    endpoint: "http://localhost:1234/v1",
+                    model: "text-embedding-3-small",
+                },
+            }).embedding;
+
+            expect("dimensions" in parsed).toBe(false);
+        });
+
+        it("rejects a non-positive or non-integer embedding.dimensions", () => {
+            for (const dimensions of [0, -768, 1.5]) {
+                expect(
+                    MagicContextConfigSchema.safeParse({
+                        embedding: {
+                            provider: "openai-compatible",
+                            endpoint: "http://localhost:1234/v1",
+                            model: "text-embedding-3-small",
+                            dimensions,
+                        },
+                    }).success,
+                ).toBe(false);
+            }
+        });
+
         it("defaults local embedding runtime to auto and accepts explicit overrides", () => {
             expect(
                 MagicContextConfigSchema.parse({ embedding: { provider: "local" } }).embedding,

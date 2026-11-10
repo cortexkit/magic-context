@@ -1,9 +1,7 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
 import {
-    DreamerProviderOutputFailureError,
-    primaryQuotaFailure,
+    isAccountPoolQuotaNotice,
     providerOutputFailureFromInvalidManifest,
-    rememberPrimaryQuota,
 } from "../features/magic-context/dreamer/provider-output-failure";
 import { DreamTokenBudgetExceeded } from "../features/magic-context/dreamer/token-budget";
 import { detectOverflow } from "../features/magic-context/overflow-detection";
@@ -15,10 +13,11 @@ import {
     extractLatestAssistantFailure,
     extractLatestAssistantText,
 } from "./assistant-message-extractor";
+import { hiddenModelCooldowns, selectHiddenModelStart } from "./hidden-model-cooldown";
 import { log } from "./logger";
 import type { ModelInput } from "./model-resolution";
 import { sanitizeDiagnosticText } from "./redaction";
-import { parseProviderModel, toModelEntry } from "./resolve-fallbacks";
+import { modelBodyField, parseProviderModel, toModelEntry } from "./resolve-fallbacks";
 
 type Client = ReturnType<typeof createOpencodeClient> | undefined;
 
@@ -67,8 +66,6 @@ export interface PromptAttemptInfo {
     totalAttempts: number;
     /** Explicit model override for this attempt, when one was supplied. */
     model?: { providerID: string; modelID: string };
-    /** A run-local quota deadline prevented dispatch; not an actual model call. */
-    skipped?: boolean;
 }
 
 export interface PromptRetryOptions {
@@ -553,25 +550,14 @@ function throwWithPromptFailure(
         legacyError instanceof Error ? legacyError : new Error(extractMessage(legacyError));
     const last = failedAttempts.at(-1);
     const failureClass = last?.failureClass ?? "unknown";
-    const quota = failedAttempts.find(
-        (failure) =>
-            failure.error instanceof DreamerProviderOutputFailureError &&
-            failure.error.quotaResetAt !== undefined,
-    )?.error as DreamerProviderOutputFailureError | undefined;
-    if (quota && error !== quota && !error.message.includes(quota.message))
-        error.message = `${quota.message}; ${error.message}`;
     const providerError =
-        failureClass === "provider_error" || quota
-            ? sanitizeDiagnosticText(
-                  `${quota ? `${quota.message}; ` : ""}${shortErr(last?.error ?? legacyError)}`,
-              ).slice(0, 500)
+        failureClass === "provider_error"
+            ? sanitizeDiagnosticText(shortErr(last?.error ?? legacyError)).slice(0, 500)
             : null;
     promptFailureDetails.set(error, {
         failureClass,
         modelAttempted: last?.attempt.label ?? null,
-        modelsTried: failedAttempts
-            .filter((failure) => !failure.attempt.skipped)
-            .map((failure) => failure.attempt.label),
+        modelsTried: failedAttempts.map((failure) => failure.attempt.label),
         providerError,
         timeoutMs: failureClass === "provider_timeout" ? timeoutMs : null,
         childSessionId: transport ? (transport.childSessionId ?? null) : args.path.id || null,
@@ -618,6 +604,8 @@ async function attemptOnce(
     } catch (error) {
         // Non-retryable failures and callers with model suggestions disabled
         // must surface the original error without accepting a provider suggestion.
+        if (!signal?.aborted && !isPromptTimeoutError(error))
+            hiddenModelCooldowns.record(label, error);
         if (isNonRetryable(error, signal) || !allowModelSuggestions) throw error;
 
         const suggestion = parseModelSuggestion(error);
@@ -686,6 +674,24 @@ function createChainClock(options: PromptRetryOptions, timeoutMs: number) {
     };
 }
 
+function cooldownStart<T extends PromptRetryOptions>(
+    args: PromptArgs,
+    options: T,
+): { args: PromptArgs; options: T } {
+    const model = args.body.model;
+    if (!model) return { args, options };
+    const selected = selectHiddenModelStart(
+        { model: `${model.providerID}/${model.modelID}`, qualifier: args.body.variant },
+        options.fallbackModels,
+        log,
+    );
+    const { variant: _variant, ...body } = args.body;
+    return {
+        args: copyPromptArgs(args, { ...body, ...modelBodyField(selected.primary) }),
+        options: { ...options, fallbackModels: selected.fallbacks },
+    };
+}
+
 /**
  * Run an OpenCode subagent prompt with model fallback support.
  *
@@ -705,6 +711,7 @@ export async function promptSyncWithModelSuggestionRetry(
     args: PromptArgs,
     options: PromptRetryOptions = {},
 ): Promise<void> {
+    ({ args, options } = cooldownStart(args, options));
     const timeoutMs = options.timeoutMs ?? 300_000;
     const callContext = options.callContext ?? "subagent";
     const fallbacks = options.fallbackModels ?? [];
@@ -848,6 +855,8 @@ async function attemptAndValidate<TOutput, TValidated>(
     try {
         output = await raceWithSignal(options.fetchOutput(args, attempt), options.signal);
     } catch (error) {
+        if (!signal?.aborted && !isPromptTimeoutError(error))
+            hiddenModelCooldowns.record(attempt.label, error);
         throw {
             error,
             failureClass: classifyPromptFailure(error, "output", signal),
@@ -856,7 +865,7 @@ async function attemptAndValidate<TOutput, TValidated>(
     }
 
     try {
-        // Only the structured account-pool notice bypasses caller validation.
+        // Only the exact account-pool notice bypasses caller validation.
         // The near-zero-token heuristic remains owned by manifest callers.
         const messages = Array.isArray(output)
             ? output
@@ -864,7 +873,7 @@ async function attemptAndValidate<TOutput, TValidated>(
         const text = extractLatestAssistantText(messages);
         if (text) {
             const failure = providerOutputFailureFromInvalidManifest(messages, text);
-            if (failure?.quotaResetAt !== undefined) throw failure;
+            if (failure && isAccountPoolQuotaNotice(text)) throw failure;
         }
         if (!extractLatestAssistantText(output)) {
             const assistantFailure = extractLatestAssistantFailure(output);
@@ -875,10 +884,13 @@ async function attemptAndValidate<TOutput, TValidated>(
                 Object.assign(error, {
                     name: "DreamerProviderOutputFailureError",
                     transient: true,
+                    hostError: assistantFailure.error,
                 });
+                hiddenModelCooldowns.record(attempt.label, assistantFailure.error);
                 throw error;
             }
         }
+        hiddenModelCooldowns.succeeded(attempt.label);
         const validated = await options.validateOutput(output, attempt);
         return { output, validated, attempt };
     } catch (error) {
@@ -903,6 +915,7 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
     args: PromptArgs,
     options: ValidatedPromptRetryOptions<TOutput, TValidated>,
 ): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
+    ({ args, options } = cooldownStart(args, options));
     const timeoutMs = options.timeoutMs ?? 300_000;
     const callContext = options.callContext ?? "subagent";
     const fallbacks = options.fallbackModels ?? [];
@@ -920,24 +933,10 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
     const failedAttempts: FailedAttempt[] = [];
     let firstError: unknown = null;
     let lastError: unknown = null;
-    const cooledPrimary = primaryQuotaFailure(explicitPrimaryLabel);
     const clock = createChainClock(options, timeoutMs);
 
     const primaryStartedAt = Date.now();
     try {
-        if (cooledPrimary)
-            throw {
-                error: cooledPrimary,
-                failureClass: "provider_error",
-                attempt: {
-                    label: explicitPrimaryLabel,
-                    attemptIndex: 0,
-                    isFallback: false,
-                    totalAttempts,
-                    model: baseBody.model,
-                    skipped: true,
-                },
-            } satisfies FailedAttempt;
         const budget = clock.budget(0);
         return await attemptAndValidate(
             client,
@@ -961,19 +960,6 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
         clock.settle(failure.error, primaryStartedAt);
         firstError = failure.error;
         lastError = failure.error;
-        if (
-            failure.error instanceof DreamerProviderOutputFailureError &&
-            failure.error.quotaResetAt !== undefined
-        )
-            failure.error.message = failure.error.message.replace(
-                /^provider quota exhausted/,
-                "primary quota exhausted",
-            );
-        const quota = !cooledPrimary && rememberPrimaryQuota(explicitPrimaryLabel, failure.error);
-        if (quota)
-            log(
-                `[${callContext}] ${quota.message}; skipping ${explicitPrimaryLabel} for this run until reset`,
-            );
         if (isNonRetryable(failure.error, options.signal)) {
             throwWithPromptFailure(
                 failure.error,
@@ -994,10 +980,9 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
             );
         }
 
-        if (!cooledPrimary && !quota)
-            log(
-                `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; ${fallbacks.length} fallback(s) configured, subject to remaining budget`,
-            );
+        log(
+            `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; ${fallbacks.length} fallback(s) configured, subject to remaining budget`,
+        );
     }
 
     for (let i = 0; i < fallbacks.length; i += 1) {

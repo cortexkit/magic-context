@@ -2,6 +2,7 @@
 """Focused tests for exact-run selection and bounded, fail-fast CI waits."""
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -58,6 +59,46 @@ class GateTests(unittest.TestCase):
                     patch.object(gate, "inventory", return_value=[{"name": "broken job", "conclusion": conclusion}]):
                 with self.assertRaisesRegex(RuntimeError, f"CI job broken job: {conclusion}"):
                     gate.wait_ci(SHA, "train/check-pr-123", 23, 10)
+
+    def test_wait_follows_latest_job_attempt_during_rerun(self):
+        old_failure = {"name": "Rust shard", "run_attempt": 1, "status": "completed", "conclusion": "failure"}
+        for final_conclusion in ("success", "failure"):
+            now = [0]
+            polls = []
+            job_routes = []
+
+            def command(args, **kwargs):
+                route = args[-1]
+                if "/jobs?" in route:
+                    job_routes.append(route)
+                    job = dict(old_failure, run_attempt=2, status="in_progress" if len(polls) == 1 else "completed",
+                               conclusion=None if len(polls) == 1 else final_conclusion)
+                    # The API's latest filter omits earlier executions of a job.
+                    jobs = [job, *SLOW_JOBS] if "filter=latest" in route else [old_failure, job, *SLOW_JOBS]
+                    pages = [{"jobs": jobs}]
+                else:
+                    polls.append(route)
+                    pages = [{"workflow_runs": [{
+                        "id": 1, "name": "CI", "head_sha": SHA, "head_branch": "train/check-pr-123",
+                        "event": "push", "run_attempt": 2,
+                        "status": "in_progress" if len(polls) == 1 else "completed",
+                        "conclusion": None if len(polls) == 1 else final_conclusion,
+                    }]}]
+                self.assertIn("--paginate", args)
+                self.assertIn("--slurp", args)
+                return gate.subprocess.CompletedProcess(args, 0, stdout=json.dumps(pages))
+
+            with self.subTest(conclusion=final_conclusion), \
+                    patch.object(gate.subprocess, "run", side_effect=command), \
+                    patch.object(gate.time, "monotonic", side_effect=lambda: now[0]), \
+                    patch.object(gate.time, "sleep", side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+                if final_conclusion == "success":
+                    gate.wait_ci(SHA, "train/check-pr-123", 23, 10)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "CI job Rust shard: failure"):
+                        gate.wait_ci(SHA, "train/check-pr-123", 23, 10)
+                self.assertEqual(len(polls), 2)
+                self.assertEqual(job_routes, ["repos/cortexkit/magic-context/actions/runs/1/jobs?filter=latest&per_page=100"] * 2)
 
     def test_latest_slow_run_ignores_fast_master_but_not_newer_failed_candidate(self):
         candidate = {"id": 1, "name": "CI", "head_sha": SHA, "head_branch": "train/check-pr-123", "event": "push"}

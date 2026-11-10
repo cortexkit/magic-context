@@ -41,6 +41,7 @@ export interface UserStatusSummary {
     hiddenVariantWarnings?: string[];
     dreamerSkipped?: readonly string[];
     dreamerQuotas?: readonly string[];
+    hiddenModelSkips?: readonly string[];
 }
 
 /**
@@ -134,6 +135,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
         dreamerSkipped: detail.dreamerSkipped,
+        hiddenModelSkips: detail.hiddenModelSkips,
         dreamerQuotas: [
             ...new Set(
                 (detail.dreamerFailures ?? []).flatMap((failure) => {
@@ -236,6 +238,7 @@ export function renderUserStatusSummary(
     }
     for (const skipped of summary.dreamerSkipped ?? []) values.push(["Dreamer skipped", skipped]);
     for (const quota of summary.dreamerQuotas ?? []) values.push(["Dreamer quota", quota]);
+    for (const quota of summary.hiddenModelSkips ?? []) values.push(["Hidden model quota", quota]);
     if (summary.historianRefusal) {
         values.push([
             "Historian refusal",

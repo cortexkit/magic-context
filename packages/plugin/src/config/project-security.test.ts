@@ -182,6 +182,7 @@ describe("stripUnsafeProjectConfigFields", () => {
                 query_input_type: "query",
                 query_instruction: "repo-controlled instruction",
                 document_prefix: "repo-controlled document prefix",
+                dimensions: 1,
             },
         };
 
@@ -194,9 +195,12 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(embedding.query_input_type).toBe("query");
         expect(embedding.query_instruction).toBeUndefined();
         expect(embedding.document_prefix).toBeUndefined();
+        expect(embedding.dimensions).toBeUndefined();
         expect(
             warnings.some((w) =>
-                w.includes("embedding.endpoint/provider/query_instruction/document_prefix"),
+                w.includes(
+                    "embedding.endpoint/provider/query_instruction/document_prefix/dimensions",
+                ),
             ),
         ).toBe(true);
     });

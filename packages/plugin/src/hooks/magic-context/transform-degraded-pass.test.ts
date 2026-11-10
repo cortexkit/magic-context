@@ -32,7 +32,8 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
 import * as loggerModule from "../../shared/logger";
-import { Database } from "../../shared/sqlite";
+import type { Database } from "../../shared/sqlite";
+import { openTestDatabase, openTestDb } from "../../shared/test-db";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import * as autoSearchRunner from "./auto-search-runner";
 import * as modeTransition from "./compaction-off-transition";
@@ -69,7 +70,7 @@ function useTempDataHome(prefix: string): void {
  * SQLITE_BUSY whenever such a write is still in progress.
  */
 function holdWriteLock(path: string): void {
-    heldLock = new Database(path);
+    heldLock = openTestDb(path);
     heldLock.exec("PRAGMA busy_timeout = 5000");
     heldLock.exec("BEGIN IMMEDIATE");
 }
@@ -173,7 +174,7 @@ async function sessionWithPersistedDrop(
     source = history,
 ) {
     useTempDataHome("mc-degraded-pass-");
-    const db = openDatabase();
+    const db = await openTestDatabase();
     if (noteAnchor) {
         appendNoteNudgeAnchor(db, sessionId, noteAnchor.messageId, noteAnchor.text);
     }

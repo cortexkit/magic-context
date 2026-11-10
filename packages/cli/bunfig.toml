@@ -5,4 +5,4 @@
 # DB. resolveDatabasePath() also has a NODE_ENV=test backstop; this keeps the
 # redirect canonical. See packages/plugin/test-preload.ts for the full rationale.
 [test]
-preload = ["../plugin/test-preload.ts"]
+preload = ["../plugin/src/test-preload.ts"]

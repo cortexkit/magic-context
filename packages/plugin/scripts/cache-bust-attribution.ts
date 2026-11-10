@@ -1,4 +1,5 @@
 export type CacheBustDivergenceClass =
+    | "cache_scope_changed"
     | "no_mc_pass_row"
     | "system_row_shift"
     | "accounted_hard_model_change"
@@ -29,15 +30,24 @@ export type CacheBustDivergenceClass =
     | "provider_short_read_after_reclaim"
     | "double_bust_after_reclaim"
     | "idle_cache_expiry"
-    | "missing_breakpoint_after_read";
+    | "missing_breakpoint_after_read"
+    | "continuation_short_read"
+    | "thread_break_unchanged_client_bytes"
+    | "full_body_no_baseline";
+
+export interface ProviderCacheMissReason {
+    type: string;
+    cacheMissedInputTokens?: number;
+}
 
 export interface AnalyzedCacheRequest {
     session: string;
     at: string;
     timestampMs: number;
-    verdict: "BASE" | "BUST" | "STABLE" | "LATENCY" | "UNMETERED";
+    verdict: "BASE" | "BUST" | "SHORT" | "STABLE" | "LATENCY" | "UNMETERED";
     rewrittenTokens?: number;
     divergenceClass?: CacheBustDivergenceClass;
+    providerCacheMissReason?: ProviderCacheMissReason;
     firstDivergence: string;
     analyzerCmd: string;
     /** Render-identity components the matched pass reported as changed, when it logged them. */
@@ -95,6 +105,9 @@ export interface CacheBustDecisionAttribution {
 }
 
 export interface CacheBustAttributionInput {
+    cacheScopeChanged?: boolean;
+    providerCacheMissReason?: string;
+    threadEvidence?: "continuation_short_read" | "thread_break_unchanged_client_bytes" | "full_body_no_baseline";
     divergenceIndex: number;
     previousMessageCount: number;
     previousBustDivergenceIndex?: number;
@@ -156,6 +169,11 @@ export interface CacheBustRule {
 }
 
 export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
+    {
+        divergenceClass: "cache_scope_changed",
+        accounted: true,
+        rule: "the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even right after a reclaim bust",
+    },
     {
         divergenceClass: "system_row_shift",
         accounted: true,
@@ -311,6 +329,21 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         accounted: false,
         rule: "explicit-breakpoint meter: the read fell short of the previous cached prefix, nothing was written, and at least 1,024 tokens were billed as uncached input; the request carried no cache breakpoint past the read point",
     },
+    {
+        divergenceClass: "continuation_short_read",
+        accounted: true,
+        rule: "continuation messages are deltas, not comparable full conversations; unchanged system/tools cannot show a client rewrite; never wakes",
+    },
+    {
+        divergenceClass: "thread_break_unchanged_client_bytes",
+        accounted: false,
+        rule: "full body matches the earlier full body and all intervening client deltas; wakes only at 20,000 tokens from thresholded thread findings in the window",
+    },
+    {
+        divergenceClass: "full_body_no_baseline",
+        accounted: false,
+        rule: "full body follows continuations but no earlier full body is available; wakes only at 20,000 tokens from thresholded thread findings in the window",
+    },
 ] as const;
 
 const ACCOUNTED_CLASSES = new Set(
@@ -405,8 +438,13 @@ export function parseCacheTtl(value: string | undefined): number {
     return Number(match[1]) * unitMs;
 }
 
-export function isUnaccountedCacheBustClass(divergenceClass: string): boolean {
+export function isUnaccountedCacheBustClass(divergenceClass: string, windowRewrittenTokens = Infinity): boolean {
+    if (isThresholdedThreadClass(divergenceClass)) return windowRewrittenTokens >= 20_000;
     return !ACCOUNTED_CLASSES.has(divergenceClass as CacheBustDivergenceClass);
+}
+
+export function isThresholdedThreadClass(divergenceClass: string): boolean {
+    return divergenceClass === "thread_break_unchanged_client_bytes" || divergenceClass === "full_body_no_baseline";
 }
 
 /**
@@ -414,10 +452,14 @@ export function isUnaccountedCacheBustClass(divergenceClass: string): boolean {
  * only got shorter, or a small system-row shift (see the rule table).
  */
 const NOT_A_SECOND_REWRITE = new Set<string>([
+    "cache_scope_changed",
     "usage_missing",
     "tail_shrink_no_rewrite",
     "system_row_shift",
     "idle_cache_expiry",
+    "continuation_short_read",
+    "thread_break_unchanged_client_bytes",
+    "full_body_no_baseline",
 ]);
 
 /** A bust Magic Context caused on purpose and accounted for: a reclaim, fold, or flush. */
@@ -491,9 +533,16 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
 
 /** The request's class judged on its own, ignoring the request before it. */
 function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
+    // A cache belongs to its model and account. Switching either explains a
+    // short read before considering the old cache's age or conversation bytes.
+    if (input.cacheScopeChanged || input.providerCacheMissReason === "model_changed" ||
+        (input.previousModel && input.currentModel && input.previousModel !== input.currentModel)) {
+        return "cache_scope_changed";
+    }
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";
+    if (input.threadEvidence) return input.threadEvidence;
     // A request that wrote nothing while most of its prompt went uncached had no
     // breakpoint to write at. That is the request's own shape, so it outranks the
     // identical-bytes provider class and any pass the request joins.

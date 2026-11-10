@@ -17,7 +17,6 @@ import { join } from "node:path";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
-    openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -27,6 +26,7 @@ import {
     scheduleOpenCodeTransformDecisionWrite,
 } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { openTestDatabase } from "../../shared/test-db";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     clearCtxReduceAvailability,
@@ -65,7 +65,7 @@ interface DecisionRow {
     materialize_reason: string | null;
 }
 
-function harness(order: Order, label: string) {
+async function harness(order: Order, label: string) {
     const parent = join(tmpdir(), "magic-context", "issue-713");
     mkdirSync(parent, { recursive: true });
     const root = createTestTempDirFromPath(join(parent, `${label}-`));
@@ -73,7 +73,7 @@ function harness(order: Order, label: string) {
     process.env.XDG_DATA_HOME = root;
     const sessionId = `ses-system-hash-row-${label}-${order}`;
     sessions.push(sessionId);
-    const db = openDatabase();
+    const db = await openTestDatabase();
     getOrCreateSessionMeta(db, sessionId);
     updateSessionMeta(db, sessionId, { cacheTtl: "never", lastResponseTime: Date.now() });
     const historyRefreshSessions = new Set<string>();
@@ -160,7 +160,7 @@ function harness(order: Order, label: string) {
             messageId: args.reply,
             inputTokens: 40_000,
         });
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await decisionLog.waitForWrites(sessionId);
         return { messages: output.messages, system: systemOutput.system };
     };
     const rows = (): DecisionRow[] =>
@@ -178,7 +178,7 @@ function harness(order: Order, label: string) {
 describe("system prompt change names system_hash on its request's decision row", () => {
     for (const order of ["system-first", "messages-first"] as const) {
         it(`TS mid tool loop: the deferred pass that carries the change records system_hash (${order})`, async () => {
-            const h = harness(order, "mid-loop");
+            const h = await harness(order, "mid-loop");
             const user = h.text("msg_0001", "user");
             await h.serve({
                 messages: [user],
@@ -243,7 +243,7 @@ describe("system prompt change names system_hash on its request's decision row",
         });
 
         it(`TS normal: a busting pass that carries the change records system_hash, not its own reason (${order})`, async () => {
-            const h = harness(order, "normal");
+            const h = await harness(order, "normal");
             const user = h.text("msg_0001", "user");
             await h.serve({
                 messages: [user],
@@ -288,7 +288,7 @@ describe("system prompt change names system_hash on its request's decision row",
     }
 
     it("a late completion event for an earlier reply does not take the change", async () => {
-        const h = harness("messages-first", "late-event");
+        const h = await harness("messages-first", "late-event");
         const user = h.text("msg_0001", "user");
         await h.serve({
             messages: [user],
@@ -315,7 +315,7 @@ describe("system prompt change names system_hash on its request's decision row",
                 inputTokens: 1,
             }),
         ).toBe(true);
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await decisionLog.waitForWrites(h.sessionId);
         expect(h.rows().slice(before)).toEqual([
             expect.objectContaining({ message_id: "msg_0003", materialize_reason: "system_hash" }),
         ]);
