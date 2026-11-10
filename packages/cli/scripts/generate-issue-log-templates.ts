@@ -33,7 +33,9 @@ function files(directory: string, extension: string): string[] {
             if (/^(?:tests|__tests__|fixtures|__fixtures__)$/.test(entry.name)) return [];
             const path = join(directory, entry.name);
             if (entry.isDirectory()) return files(path, extension);
-            return path.endsWith(extension) && !/\.(?:test|fixture|spec)\./.test(path)
+            // Probes (*.probe.ts) are differential harnesses that tests run, not
+            // shipped code, like the test and fixture files.
+            return path.endsWith(extension) && !/\.(?:test|fixture|spec|probe)\./.test(path)
                 ? [path]
                 : [];
         })
