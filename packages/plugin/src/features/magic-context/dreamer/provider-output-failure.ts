@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 
 import { isRecord } from "../../../shared/record-type-guard";
@@ -22,85 +21,21 @@ export class DreamerProviderOutputFailureError extends Error {
         readonly outputTokens: number,
         readonly reasoningTokens: number,
         responseText: string,
-        readonly quotaResetAt?: number,
     ) {
         const preview = responseText.trim().replace(/\s+/g, " ").slice(0, 160);
         super(
-            quotaResetAt !== undefined
-                ? `provider quota exhausted until ${new Date(quotaResetAt).toISOString()} (account-pool rate limit)`
-                : `dreamer provider-outage completion (output_tokens=${outputTokens}, reasoning_tokens=${reasoningTokens}): ${JSON.stringify(preview)}`,
+            `dreamer provider-outage completion (output_tokens=${outputTokens}, reasoning_tokens=${reasoningTokens}): ${JSON.stringify(preview)}`,
         );
         this.name = "DreamerProviderOutputFailureError";
     }
 }
 
-// Concurrent maintenance runs must not share provider health, and a new run
-// must re-probe its configured primary. Nested verify batches inherit the scope.
-const primaryQuotas = new AsyncLocalStorage<Map<string, DreamerProviderOutputFailureError>>();
-
-export function withDreamerModelCooldown<T>(run: () => T): T {
-    return primaryQuotas.getStore() ? run() : primaryQuotas.run(new Map(), run);
-}
-
-export function rememberPrimaryQuota(
-    model: string,
-    error: unknown,
-): DreamerProviderOutputFailureError | null {
-    const quotas = primaryQuotas.getStore();
-    if (
-        !quotas ||
-        model === "primary" ||
-        !(error instanceof DreamerProviderOutputFailureError) ||
-        error.quotaResetAt === undefined ||
-        error.quotaResetAt <= Date.now()
-    )
-        return null;
-    const cached = new DreamerProviderOutputFailureError(
-        error.fingerprint,
-        error.outputTokens,
-        error.reasoningTokens,
-        "",
-        error.quotaResetAt,
-    );
-    cached.message = error.message;
-    quotas.set(model, cached);
-    return error;
-}
-
-export function primaryQuotaFailure(model: string): DreamerProviderOutputFailureError | null {
-    const quotas = primaryQuotas.getStore();
-    const error = quotas?.get(model);
-    if (!error) return null;
-    if (error.quotaResetAt === undefined || error.quotaResetAt <= Date.now()) {
-        quotas?.delete(model);
-        return null;
-    }
-    const failure = new DreamerProviderOutputFailureError(
-        error.fingerprint,
-        error.outputTokens,
-        error.reasoningTokens,
-        "",
-        error.quotaResetAt,
-    );
-    failure.message = error.message;
-    return failure;
-}
-
 /** The auth adapter emits this entire notice as assistant text, not a host error.
- * Match the envelope, never a quoted notice inside a real manifest or narration. */
-function quotaResetAt(responseText: string, now: number): number | undefined {
-    const notice =
-        /^All [1-9]\d* account\(s\) rate-limited for [\w.-]+\. Quota resets in ((?:\d+[hms] ?)+)\. Add more accounts with `opencode auth login` or wait and retry\.$/.exec(
-            responseText.trim(),
-        );
-    if (!notice) return undefined;
-    const units: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
-    const duration = [...notice[1].matchAll(/(\d+)([hms])/g)].reduce(
-        (sum, match) => sum + Number(match[1]) * units[match[2]],
-        0,
+ * Recognize the failed completion, but never infer a reset deadline from prose. */
+export function isAccountPoolQuotaNotice(responseText: string): boolean {
+    return /^All [1-9]\d* account\(s\) rate-limited for [\w.-]+\. Quota resets in (?:\d+[hms] ?)+\. Add more accounts with `opencode auth login` or wait and retry\.$/.test(
+        responseText.trim(),
     );
-    const resetAt = now + duration;
-    return duration > 0 && Number.isSafeInteger(resetAt) && resetAt < 8.64e15 ? resetAt : undefined;
 }
 
 function finiteTokenCount(value: unknown): number | null {
@@ -149,7 +84,6 @@ function latestAssistantCompletion(messages: unknown): AssistantCompletionShape 
 export function providerOutputFailureFromInvalidManifest(
     messages: unknown,
     responseText: string,
-    now = Date.now(),
 ): DreamerProviderOutputFailureError | null {
     const completion = latestAssistantCompletion(messages);
     if (completion?.finish?.toLowerCase() !== "stop") return null;
@@ -163,17 +97,16 @@ export function providerOutputFailureFromInvalidManifest(
 
     const normalized = responseText.trim().replace(/\s+/g, " ").toLowerCase();
     if (!normalized) return null;
-    const resetAt = quotaResetAt(responseText, now);
-    if (resetAt === undefined && completion.outputTokens > MAX_NEAR_ZERO_OUTPUT_TOKENS) return null;
+    if (
+        !isAccountPoolQuotaNotice(responseText) &&
+        completion.outputTokens > MAX_NEAR_ZERO_OUTPUT_TOKENS
+    )
+        return null;
     const fingerprint = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
     return new DreamerProviderOutputFailureError(
         fingerprint,
         completion.outputTokens,
         completion.reasoningTokens,
         responseText,
-        resetAt,
     );
 }
-
-// Initialize the resource root before this module's request-local quota scope.
-import "../../../shared/sqlite";

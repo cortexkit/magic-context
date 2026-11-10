@@ -1018,11 +1018,11 @@ describe("createDreamTaskExecutor — verify-broad disposition", () => {
             { db, projectIdentity: project, holderId, leaseKey },
         );
         expect(outcome).toMatchObject({ status: "failed", transient: true });
-        expect(outcome.error).toContain("primary quota exhausted until");
-        expect(outcome.failureDetail).toContain("primary quota exhausted until");
+        expect(outcome.error).toContain("provider-outage completion");
+        expect(outcome.failureDetail).toContain("MC-D02");
         const task = JSON.parse(getDreamRuns(db, project)[0].tasks_json)[0];
         expect(task.failure.failure_class).toBe("provider_error");
-        expect(task.failure.provider_error).toContain("primary quota exhausted until");
+        expect(task.failure.provider_error).toContain("provider-outage completion");
         expect(task.error).not.toContain("manifest missing");
     });
     test("keeps a textless assistant completion without a row error as empty_completion", async () => {

@@ -32,6 +32,7 @@ import {
     getProjectMagicContextHistorianDir,
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
+import { hiddenModelCooldowns, selectHiddenModelStart } from "../../shared/hidden-model-cooldown";
 import { rememberV1HiddenRun } from "../../shared/hidden-zen-read";
 import { isTransientHistorianPromptError } from "../../shared/historian-transient-error";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
@@ -282,7 +283,7 @@ export function createV1HiddenCompletionExecutor(
                 preferResponseOnMissingData: true,
             });
             const assistantFailure = extractLatestAssistantFailure(messages);
-            const hostError = hostErrors.get(handle.id);
+            const hostError = assistantFailure?.error ?? hostErrors.get(handle.id);
             if (assistantFailure || hostError !== undefined) {
                 const finish = assistantFailure?.finish
                     ? ` (finish=${assistantFailure.finish})`
@@ -389,6 +390,10 @@ export async function runValidatedHistorianPass(args: {
     agentId?: string;
     language?: string;
 }): Promise<ValidatedHistorianPassResult> {
+    const selected = selectHiddenModelStart(args.model, args.fallbackModels, (message) =>
+        shared.sessionLog(args.parentSessionId, message),
+    );
+    args = { ...args, model: selected.primary, fallbackModels: selected.fallbacks };
     const firstRun = await runHistorianPrompt({
         ...args,
         dumpLabel: `${args.dumpLabelBase}-initial`,
@@ -835,6 +840,7 @@ async function runHistorianPrompt(args: {
         }
 
         completion = await executor.collect(handle, 50);
+        hiddenModelCooldowns.succeeded(handle.attemptedModel ?? toModelEntry(modelOverride)?.model);
         const lengthCapped = completion.lengthCapped;
         const tokens = {
             ...runTokenLog(undefined, args.maxOutputTokens),
@@ -890,6 +896,10 @@ async function runHistorianPrompt(args: {
         );
         return { ok: true, result, dumpPath, invocationId: invocationId ?? undefined };
     } catch (modelError: unknown) {
+        hiddenModelCooldowns.record(
+            handle?.attemptedModel ?? toModelEntry(modelOverride)?.model,
+            modelError,
+        );
         const desc = describeError(modelError);
         shared.sessionLog(
             parentSessionId,
