@@ -1,5 +1,4 @@
 import { openTestDb } from "../../src/test-db";
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,7 +67,7 @@ test("a compartment-heavy first OpenCode 2 pass decodes at most four raw-message
 		});
 		await waitForPluginActive(client, host.cwd);
 
-		const store = new Database(
+		const store = openTestDb(
 			gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env),
 		);
 		try {

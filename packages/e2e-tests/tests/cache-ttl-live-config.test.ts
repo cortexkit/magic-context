@@ -1,6 +1,7 @@
 import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -143,7 +144,7 @@ test("OpenCode 1 live cache_ttl edits reach the idle diagnostics without changin
     } finally {
         writer?.close();
         try {
-            const hostDb = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+            const hostDb = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
             try {
                 writeFileSync(join(taskRoot, `host-run-${h.opencode.pid}.json`), JSON.stringify({
                     pid: h.opencode.pid, root, projectPath: h.workdir, startedAt,

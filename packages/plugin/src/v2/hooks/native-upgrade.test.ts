@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { NativeFoldReplay } from "../fold/native-replay";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import { HEAD_IDS } from "./payload";
@@ -90,20 +92,39 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
         expect((await f.pass()).bytes).toBe(repaired.bytes);
         await f.restart();
         expect((await f.pass()).bytes).toBe(repaired.bytes);
-        const nextCut = await f.nativeFold();
+        // The head the hook answers with stays in Magic Context; capture what it
+        // hands native admission to compare it with the served head.
+        const supplied: Array<{ summary: string; checkpointText?: string }> = [];
+        const realSupply = NativeFoldReplay.prototype.supply;
+        const supply = spyOn(NativeFoldReplay.prototype, "supply").mockImplementation(function (
+            this: NativeFoldReplay,
+            args,
+        ) {
+            supplied.push({ summary: args.summary, checkpointText: args.checkpointText });
+            return realSupply.call(this, args);
+        });
+        let nextCut: string;
+        try {
+            nextCut = await f.nativeFold();
+        } finally {
+            supply.mockRestore();
+        }
         const data = f.raw.prepare("SELECT data FROM session_message WHERE id=?").get(nextCut) as {
             data: string;
         };
         const summary = JSON.parse(data.data).summary as string;
-        expect(summary).toContain("<session-history>");
-        expect(sent).toContain(summary);
-        expect(
-            repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])?.content[0]?.text,
-        ).toBe(summary);
+        // The host stores the fixed note; the fold stands for the head Magic
+        // Context served, which the pass after the fold serves unchanged.
+        expect(summary).toBe(CHECKPOINT_NOTE);
+        const head = repaired.draft.messages.find((message) => message.id === HEAD_IDS[0])
+            ?.content[0]?.text;
+        expect(supplied).toEqual([{ summary: head!, checkpointText: CHECKPOINT_NOTE }]);
+        expect(head).toContain("<session-history>");
+        expect(sent).toContain(head!);
         expect(sent).not.toContain("<conversation-checkpoint>");
         // The permitted rebuild is now a model-change fold, which merges the new
         // summary into m[0]; the published compartment is served there.
-        expect(summary).toContain("Review history 0");
+        expect(head).toContain("Review history 0");
         const delta = repaired.draft.messages.find((message) => message.id === HEAD_IDS[1]);
         expect(JSON.stringify(delta?.content)).toContain(
             "no new content since last materialization",

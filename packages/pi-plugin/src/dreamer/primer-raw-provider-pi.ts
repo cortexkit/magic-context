@@ -30,6 +30,7 @@ const TOOL_KEYS = [
 	"symbol",
 	"module",
 	"action",
+	"command",
 ];
 
 function record(value: unknown): Record<string, unknown> {

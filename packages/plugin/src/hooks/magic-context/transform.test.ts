@@ -4123,16 +4123,38 @@ describe("createTransform shrinking model-switch overflow pre-arm", () => {
             percentage: 58,
             inputTokens: 300_000,
         });
-        await transform({}, { messages: switchTurnMessages("ses-shrink") });
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        const log = spyOn(loggerModule, "sessionLog");
+        try {
+            await transform({}, { messages: switchTurnMessages("ses-shrink") });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const lines = log.mock.calls.map(([, text]) => String(text));
+            // Armed THIS pass so the existing bump-to-95% compacts before the
+            // oversized request is sent (not one pass late from the provider error).
+            expect(
+                lines.some((line) =>
+                    line.includes("arming overflow recovery proactively for the shrinking switch"),
+                ),
+            ).toBe(true);
+            expect(
+                lines.some((line) => line.includes("bumping percentage to 95% due to overflow")),
+            ).toBe(true);
+            // The request this fixture sends is tiny, so the recovery check
+            // admits it and that ends the proactive recovery on the same pass.
+            expect(
+                lines.some((line) =>
+                    /recovery request admitted: .*; proactive_model_shrink recovery ends/.test(
+                        line,
+                    ),
+                ),
+            ).toBe(true);
+        } finally {
+            log.mockRestore();
+        }
 
         const overflow = getOverflowState(db, "ses-shrink");
-        // Armed THIS pass so the existing bump-to-95% compacts before the
-        // oversized request is sent (not one pass late from the provider error).
-        expect(overflow.needsEmergencyRecovery).toBe(true);
+        expect(overflow.needsEmergencyRecovery).toBe(false);
         // Flag-only: no catalog/auth limit pinned into detected_context_limit.
         expect(overflow.detectedContextLimit).toBe(0);
-        expect(overflow.emergencyRecoveryOrigin).toBe("proactive_model_shrink");
         expect(abort).not.toHaveBeenCalled();
     });
 
@@ -4328,31 +4350,49 @@ describe("createTransform shrinking model-switch overflow pre-arm", () => {
             percentage: 58,
             inputTokens: 300_000,
         });
-        await transform(
-            {},
-            {
-                messages: [
-                    {
-                        info: {
-                            id: "m-assistant-old",
-                            role: "assistant",
-                            sessionID: "ses-nomodel",
-                            providerID: OLD_MODEL.providerID,
-                            modelID: OLD_MODEL.modelID,
+        const log = spyOn(loggerModule, "sessionLog");
+        try {
+            await transform(
+                {},
+                {
+                    messages: [
+                        {
+                            info: {
+                                id: "m-assistant-old",
+                                role: "assistant",
+                                sessionID: "ses-nomodel",
+                                providerID: OLD_MODEL.providerID,
+                                modelID: OLD_MODEL.modelID,
+                            },
+                            parts: [{ type: "text", text: "old model reply" }],
                         },
-                        parts: [{ type: "text", text: "old model reply" }],
-                    },
-                    {
-                        // newest user, no info.model
-                        info: { id: "m-user-1", role: "user", sessionID: "ses-nomodel" },
-                        parts: [{ type: "text", text: "continue" }],
-                    },
-                ],
-            },
-        );
-        await new Promise((resolve) => setTimeout(resolve, 0));
-
-        expect(getOverflowState(db, "ses-nomodel").needsEmergencyRecovery).toBe(true);
+                        {
+                            // newest user, no info.model
+                            info: { id: "m-user-1", role: "user", sessionID: "ses-nomodel" },
+                            parts: [{ type: "text", text: "continue" }],
+                        },
+                    ],
+                },
+            );
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            // The arm fired; the tiny request this fixture sends is then
+            // admitted, which ends the recovery on the same pass.
+            const lines = log.mock.calls.map(([, text]) => String(text));
+            expect(
+                lines.some((line) =>
+                    line.includes("arming overflow recovery proactively for the shrinking switch"),
+                ),
+            ).toBe(true);
+            expect(
+                lines.some((line) =>
+                    /recovery request admitted: .*; proactive_model_shrink recovery ends/.test(
+                        line,
+                    ),
+                ),
+            ).toBe(true);
+        } finally {
+            log.mockRestore();
+        }
     });
 });
 
@@ -5338,6 +5378,10 @@ for (const generation of ["v1", "v2"] as const) {
 for (const { modelID, prefixBound } of [
     { modelID: "claude-sonnet-5", prefixBound: false },
     { modelID: "claude-sonnet-5-5", prefixBound: true },
+    // Fable 5.2 and Mythos 5.1/5.2 run the same prefix check, so they get the same hold.
+    { modelID: "claude-fable-5-2", prefixBound: true },
+    { modelID: "claude-mythos-5-1", prefixBound: true },
+    { modelID: "claude-mythos-5-2", prefixBound: true },
 ]) {
     it(`primary ${modelID} tool loop applies queued drops only where active-turn thinking stays byte-identical`, async () => {
         useTempDataHome(`latest-turn-primary-${modelID}-`);

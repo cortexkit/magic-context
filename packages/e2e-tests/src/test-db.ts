@@ -24,9 +24,9 @@ type SqliteConstructor = new (path: string, options?: any) => SqliteHandle;
  * Pass an adapter's constructor as the third argument to retain its connection
  * tracking and transaction behavior while applying the same timeout policy.
  *
- * Every test that opens the context DB directly (reader or writer) must go
- * through this helper so the timeout can never be forgotten — a bare
- * `new Database(...)` in a test reintroduces the flake.
+ * Every test that opens a DB directly (reader or writer) must use this helper
+ * unless it immediately sets its own longer timeout. The test-db guard checks
+ * each constructor so a bare `new Database(...)` cannot reintroduce the flake.
  */
 export function openTestDb<C extends SqliteConstructor = typeof Database>(
 	path: string,

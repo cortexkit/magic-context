@@ -216,7 +216,8 @@ export function resolveUnknownUsageFromWireEstimate(input: {
     wireEstimateTrusted?: boolean;
     providerProvenInputTokens?: number;
     providerProvenLimitTokens?: number;
-    usableHardLimit: number | undefined;
+    /** The window the returned percentage is a share of. */
+    windowTokens: number | undefined;
 }): ContextUsage {
     if (input.usage.inputTokens > 0 || !input.pricedPass) return input.usage;
     const wireTokens = input.wireEstimateTokens;
@@ -234,7 +235,7 @@ export function resolveUnknownUsageFromWireEstimate(input: {
         Number.isFinite(providerLimit) &&
         providerLimit > 0;
     const tokens = canUseProviderMass ? Math.max(wireTokens, providerTokens) : wireTokens;
-    const limit = input.usableHardLimit;
+    const limit = input.windowTokens;
     const estimatedPercentage =
         typeof limit === "number" && Number.isFinite(limit) && limit > 0
             ? (tokens / limit) * 100

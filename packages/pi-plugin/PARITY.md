@@ -874,6 +874,23 @@ perform a HARD cache bust, preventing a long-lived stale recovery prefix.
 
 ---
 
+## 27. Overflow-recovery count: Pi reads the hard limit; OpenCode reads the usable window
+
+A pass that the provider has not measured sizes itself from a local count of
+its request. OpenCode divides that count by the window a provider reading of
+the same request is a share of (the trusted context limit, less any output
+reserve), so an unmeasured count and a provider reading of the same token total
+read the same percentage; this holds for its overflow-recovery count too. Pi's
+overflow-recovery count (`pi-overflow-recovery.ts`, `windowTokens:
+args.usableHardLimit`) still divides by the usable hard limit, which is larger
+wherever the output reserve exceeds the requested output, so the same request
+reads a lower percentage there. The recovery count is only compared with 95%,
+which the overflow-recovery bump already guarantees on both harnesses, so no
+decision differs today. This is a known difference, not an intended one: align
+Pi when its unmeasured priced-pass sizing is next changed.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -63,7 +63,7 @@ test("real OpenCode historian sees communication answers; expand stays cheap unl
 
         // Read only this host's throwaway store. The same raw history drives both
         // renders, so their difference measures the actual input budget cost.
-        const db = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+        const db = openTestDb(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
         const rows = db.query("SELECT id, data FROM message WHERE session_id = ? ORDER BY id").all(session) as Array<{ id: string; data: string }>;
         const messages = rows.map((row, index) => ({ ordinal: index + 1, id: row.id, role: JSON.parse(row.data).role as string,
             parts: (db.query("SELECT data FROM part WHERE message_id = ? ORDER BY id").all(row.id) as Array<{ data: string }>).map((p) => JSON.parse(p.data)) }));

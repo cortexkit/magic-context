@@ -30,6 +30,9 @@ function identity(slot: LkgSlot): string {
 export interface V2LkgCheckpointHead {
     checkpoint: V2Message;
     submitted: string;
+    /** The history head recorded for a checkpoint that stores the note in
+     * place of its head; absent when the stored text is the head itself. */
+    head?: string;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
     embedTextForProject,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
+import { withQueryEmbeddingDeadline } from "../../features/magic-context/memory/embedding-query-deadline";
 import {
     describeUnresolvedProjectIdentity,
     directoryHasGitMetadata,
@@ -226,15 +227,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     limit: normalizeLimit(args.limit),
                     memoryEnabled,
                     embeddingEnabled,
-                    embedQuery: async (text, signal) => {
-                        const result = await embedTextForProject(
-                            projectPath,
-                            text,
+                    embedQuery: (text, signal) =>
+                        withQueryEmbeddingDeadline(
+                            (embeddingSignal) =>
+                                embedTextForProject(projectPath, text, embeddingSignal, "query"),
                             signal,
-                            "query",
-                        );
-                        return result;
-                    },
+                        ),
                     isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
                     readMessages: deps.readMessages,
                     maxMessageOrdinal: messageOrdinalCutoff,

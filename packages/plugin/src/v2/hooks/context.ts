@@ -33,7 +33,12 @@ import {
     recoverCachedSessionProjectOwner,
 } from "../../features/magic-context/memory/session-identity-decision";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
-import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
+import {
+    type RequestToolsFingerprint,
+    v2RequestToolsFingerprint,
+    v2ToolDefinitionsHash,
+} from "../../features/magic-context/request-tool-definitions";
 import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
@@ -83,9 +88,13 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { noteHostCheckpointCommit } from "../../hooks/magic-context/host-checkpoint-ride";
 import { markCoveredInstructionRow } from "../../hooks/magic-context/host-served-rows";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
-import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
+import {
+    armLatestThinkingRecoveryFromError,
+    armThinkingBindingRecoveryFromError,
+} from "../../hooks/magic-context/latest-thinking-recovery";
 import {
     beginV2LkgRequest,
     clearLkgMeasuredRequest,
@@ -175,7 +184,14 @@ import { controlKey, effortPart, rememberedControlKey } from "../fold/native-rep
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
-import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import {
+    CHECKPOINT_NOTE,
+    hasFoldSummary,
+    isCheckpointNote,
+    isHistoryHead,
+    RAW_HISTORY_ACCOUNT,
+    withRecordedHead,
+} from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
@@ -258,15 +274,17 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     if (typeof baseline !== "string") {
         // A migrated host window may contain only its checkpoint. With no raw
         // tail the shared transform has no head to replace, but the checkpoint
-        // is still the only account of the earlier conversation.
-        draft.messages.unshift(checkpoint);
+        // is still the only account of the earlier conversation. One that
+        // stores the note serves the head recorded for it, as before the note.
+        draft.messages.unshift(withRecordedHead(checkpoint, submitted, head.head));
         return true;
     }
     for (const part of checkpoint.content)
         if (part.type === "text" && typeof part.text === "string") {
+            // A function replacement keeps `$&`, `$'` and the like in the head literal.
             part.text = part.text.replace(
                 `<summary>\n${submitted}\n</summary>`,
-                `<summary>\n${baseline}\n</summary>`,
+                () => `<summary>\n${baseline}\n</summary>`,
             );
         }
     const volatile = draft.messages.find((message) => message.id === HEAD_IDS[1]);
@@ -281,15 +299,30 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     return true;
 }
 
-function bindKeptInstructionCoordinates(
+/**
+ * Whether a host checkpoint may be served as the carrier of earlier history. One
+ * whose stored text is a note stands for history only through the head its fold
+ * record kept; without that head it would put the note where history belongs, so
+ * the pass restores the rows instead and renders its own history head.
+ */
+function servableCarrier(stored: string, head: string | undefined): boolean {
+    return !isCheckpointNote(stored) || head !== undefined;
+}
+
+export function bindKeptInstructionCoordinates(
     messages: readonly V2Message[],
     incoming: V2Message | undefined,
-    reader: V2StoreReader,
+    reader: Pick<V2StoreReader, "instructionRowsThrough" | "latestSequence" | "sequenceForId">,
     sessionID: string,
 ): ReturnType<V2StoreReader["instructionRowsThrough"]> {
     const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
     let previous: number | undefined;
     let pending: V2Message[] = [];
+    const matches = (message: V2Message | undefined, row: (typeof rows)[number] | undefined) =>
+        message?.role === "system" &&
+        message.content.length === 1 &&
+        message.content[0]?.type === "text" &&
+        message.content[0].text === row?.data.text;
     const bind = (next?: number) => {
         if (!pending.length) return;
         const candidates = rows.filter(
@@ -308,20 +341,35 @@ function bindKeptInstructionCoordinates(
                   : candidates;
         if (
             selected.length === pending.length &&
-            selected.every((row, index) => {
-                const message = pending[index];
-                return (
-                    message?.role === "system" &&
-                    message.content.length === 1 &&
-                    message.content[0]?.type === "text" &&
-                    message.content[0].text === row.data.text
-                );
-            })
+            selected.every((row, index) => matches(pending[index], row))
         ) {
             selected.forEach((row, index) => {
                 const message = pending[index];
                 if (message) bindNativeRowID(message, row.id, row.seq);
             });
+        } else {
+            // A hole (rows a native fold retired) breaks that window. Then bind
+            // only a row every order-preserving text match places on the same
+            // candidate: its earliest and latest placements agree. Rows with
+            // equal text elsewhere in the window, or no match, stay unbound.
+            const earliest: number[] = [];
+            let at = 0;
+            for (const message of pending) {
+                while (at < candidates.length && !matches(message, candidates[at])) at++;
+                earliest.push(at++);
+            }
+            const latest: number[] = [];
+            at = candidates.length - 1;
+            for (let index = pending.length - 1; index >= 0; index--) {
+                while (at >= 0 && !matches(pending[index], candidates[at])) at--;
+                latest[index] = at--;
+            }
+            if (earliest.every((position) => position < candidates.length))
+                pending.forEach((message, index) => {
+                    const row = candidates[earliest[index]];
+                    if (row && earliest[index] === latest[index])
+                        bindNativeRowID(message, row.id, row.seq);
+                });
         }
         pending = [];
     };
@@ -443,6 +491,41 @@ function estimateCheckpointRequest(draft: SessionContext) {
         agentName: draft.agent,
         sessionId: draft.sessionID,
     });
+}
+
+/**
+ * The text a checkpoint adds around the history head when it takes the head's
+ * place after the shared transform (applyCheckpointHead): the checkpoint
+ * message with its summary emptied, since the head's own text fills it. A pass
+ * in overflow or model-shrink recovery adds this to the request it counts
+ * before sending. Undefined when it cannot be counted.
+ */
+function estimateCheckpointFraming(
+    draft: SessionContext,
+    checkpoint: V2Message,
+    submitted: string,
+): number | undefined {
+    const framing = structuredClone(checkpoint);
+    for (const part of framing.content)
+        if (part.type === "text" && typeof part.text === "string")
+            part.text = part.text.replace(
+                `<summary>\n${submitted}\n</summary>`,
+                "<summary>\n\n</summary>",
+            );
+    try {
+        const estimate = estimateFinalWireInputTokens({
+            messages: adaptPayload({ ...draft, messages: [framing] }).messages,
+            toolDefinitionTokens: 0,
+            systemPromptTokens: 0,
+            providerID: draft.model.providerID,
+            modelID: draft.model.id,
+            agentName: draft.agent,
+            sessionId: draft.sessionID,
+        });
+        return estimate.pressureTokens ?? estimate.tokens;
+    } catch {
+        return undefined;
+    }
 }
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
@@ -816,6 +899,16 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
 }
 
 /**
+ * Fingerprint the tools this draft sends, for the signed-thinking release on
+ * prefix-bound models (request-tools-release.ts). It reads the draft after
+ * Magic Context's own description edits, like the measurement above, so only a
+ * later plugin hook or a host filter can change the wire without changing it.
+ */
+export function v2DraftRequestToolsFingerprint(draft: SessionContext): RequestToolsFingerprint {
+    return v2RequestToolsFingerprint(draft.tools ?? {}, draft.messages);
+}
+
+/**
  * Run the system-prompt handler over one context draft and write its result back.
  *
  * The handler only compares and records the system-prompt hash once the session's
@@ -976,6 +1069,7 @@ export async function registerContext(context: V2Context) {
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const toolDefinitionsHashes = new BoundedSessionMap<string>(1000);
+    const requestToolsFingerprints = new BoundedSessionMap<RequestToolsFingerprint>(1000);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode2",
         directory,
@@ -1593,11 +1687,10 @@ export async function registerContext(context: V2Context) {
                       const summary = [
                           await nativeFoldReplay.baseline(sessionID),
                           meta.cachedM0Bytes?.toString("utf8"),
-                      ].find((value) => value !== RAW_HISTORY_ACCOUNT && hasFoldSummary(value));
+                      ].find(isHistoryHead);
                       return (
                           !meta.isSubagent &&
-                          summary !== RAW_HISTORY_ACCOUNT &&
-                          hasFoldSummary(summary) &&
+                          isHistoryHead(summary) &&
                           nativeFoldReplay.canFold(sessionID, reader)
                       );
                   },
@@ -1608,6 +1701,32 @@ export async function registerContext(context: V2Context) {
     const hostFoldIdle = hostFolds
         ? new HostFoldIdle((sessionID, eligible) => hostFolds.idle(sessionID, eligible))
         : undefined;
+    /**
+     * Arm thinking-binding recovery when a host failure event carries the
+     * binding 400, so the next pass strips the rejected thinking instead of
+     * resending it. Same conditions as OpenCode 1's event handler: managed
+     * mode (compaction on) and a prefix-bound model.
+     */
+    const armBindingRecoveryFromEvent = (
+        sessionID: string,
+        error: unknown,
+        source: string | undefined,
+    ): void => {
+        if (error === undefined || !db || compactionOff) return;
+        const model = liveModels.get(sessionID);
+        try {
+            armThinkingBindingRecoveryFromError({
+                db,
+                sessionId: sessionID,
+                error,
+                providerID: model?.providerID,
+                modelID: model?.modelID,
+                source: source ?? "session event",
+            });
+        } catch (armError) {
+            log("[magic-context] v2 thinking binding recovery arm failed", armError);
+        }
+    };
     const usageController = new AbortController();
     const usageDone = (async () => {
         let retry = 0;
@@ -1679,6 +1798,14 @@ export async function registerContext(context: V2Context) {
                             if (typeof messageID === "string")
                                 messageTimesCache.deleteMessage(sessionID, messageID);
                         }
+                        // A failed step carries the provider error itself; a
+                        // binding 400 may reach this loop only that way.
+                        if (event.type === "session.step.failed")
+                            armBindingRecoveryFromEvent(
+                                sessionID,
+                                event.data.error,
+                                "session.step.failed",
+                            );
                         if (
                             event.type === "session.error" ||
                             event.type === "session.execution.failed"
@@ -1688,8 +1815,9 @@ export async function registerContext(context: V2Context) {
                             if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                             if (error !== undefined && db && !compactionOff) {
                                 const model = liveModels.get(sessionID);
+                                let latestTurnRejection = false;
                                 try {
-                                    armLatestThinkingRecoveryFromError({
+                                    latestTurnRejection = armLatestThinkingRecoveryFromError({
                                         db,
                                         sessionId: sessionID,
                                         error,
@@ -1702,6 +1830,8 @@ export async function registerContext(context: V2Context) {
                                         armError,
                                     );
                                 }
+                                if (!latestTurnRejection)
+                                    armBindingRecoveryFromEvent(sessionID, error, event.type);
                             }
                             continue;
                         }
@@ -1929,14 +2059,18 @@ export async function registerContext(context: V2Context) {
                     // those bytes. If history is only in the incremental update
                     // (M1), keep the frozen baseline and replay the update unchanged.
                     // With no history, use the fixed raw-history account without
-                    // replacing either provider history head.
+                    // replacing either provider history head. Every candidate is
+                    // Magic Context's own state: the host's stored checkpoint text
+                    // is the fixed note, never a history head.
+                    const owned = await folds.read(draft.sessionID);
                     const candidate = [
                         await nativeFoldReplay.baseline(draft.sessionID),
                         state.cachedM0Bytes?.toString("utf8"),
-                        (await folds.read(draft.sessionID))?.submitted,
+                        owned?.head ?? owned?.submitted,
                     ].find(
                         (value) =>
                             value !== RAW_HISTORY_ACCOUNT &&
+                            !isCheckpointNote(value) &&
                             ((publishedHistory && value?.includes("<session-history>")) ||
                                 hasFoldSummary(value)),
                     );
@@ -1969,6 +2103,7 @@ export async function registerContext(context: V2Context) {
                             reader,
                             previousCut: reader.latestCompaction(draft.sessionID),
                             summary,
+                            checkpointText: CHECKPOINT_NOTE,
                             manual: manualReplay
                                 ? { replay: manualReplay, commit: () => staged?.commit() }
                                 : undefined,
@@ -1979,13 +2114,22 @@ export async function registerContext(context: V2Context) {
                             generateReplay.forget(draft.sessionID);
                             restoredRows.forget(draft.sessionID);
                             historyRefreshSessions.add(draft.sessionID);
+                            // The next pass rides only on proof that this
+                            // commit changed the head the provider cached.
+                            noteHostCheckpointCommit(
+                                draft.sessionID,
+                                staged?.headCommit() ?? { changed: false, previousCoverage: null },
+                            );
                             requestPendingMaterialization(
                                 pendingMaterializationSessions,
                                 draft.sessionID,
                                 "host_compaction",
                             );
                         }
-                        draft.result = { summary, metadata: { keepID: undefined } };
+                        draft.result = {
+                            summary: CHECKPOINT_NOTE,
+                            metadata: { keepID: undefined },
+                        };
                         return;
                     }
                     if (manual)
@@ -2011,6 +2155,10 @@ export async function registerContext(context: V2Context) {
                     const summary = materialize(draft);
                     return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
                 },
+                // The host stores the note; the owner keeps the head it stands for,
+                // which the checkpoint carrier serves and measures in its place.
+                checkpointText: CHECKPOINT_NOTE,
+                checkpointID: running?.id,
             });
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
@@ -2199,7 +2347,10 @@ export async function registerContext(context: V2Context) {
     // only read instance state can keep a shared closure environment alive, along
     // with replay helpers that hold the request's messages and attachments.
     const checkpointPassPermissions = new Map<string, boolean>();
-    const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
+    const checkpointInputEstimates = new Map<
+        string,
+        { tokens: number; pressureTokens: number; hostAddedTokens?: number }
+    >();
     const admissionRebuildPasses = new Set<string>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
@@ -2220,13 +2371,14 @@ export async function registerContext(context: V2Context) {
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);
             },
-            reclaimHostRows: (sessionID, messages, permitted) =>
+            reclaimHostRows: (sessionID, messages, permitted, covered) =>
                 reclaimInstructionRows(
                     database,
                     sessionID,
                     messages,
                     permitted,
                     foldedInstructionIDs.get(sessionID),
+                    covered,
                 ),
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same
@@ -2263,6 +2415,7 @@ export async function registerContext(context: V2Context) {
                 );
             },
             getToolDefinitionsHash: (sessionId) => toolDefinitionsHashes.get(sessionId),
+            getRequestToolsFingerprint: (sessionId) => requestToolsFingerprints.get(sessionId),
             channel1StateBySession: channel1,
             historyRefreshSessions,
             pendingMaterializationSessions,
@@ -2599,6 +2752,13 @@ export async function registerContext(context: V2Context) {
             if (admissionDb) hideSubagentTools(draft, admissionDb);
             recordV2ToolDefinitions(draft);
             toolDefinitionsHashes.set(draft.sessionID, v2ToolDefinitionsHash(draft.tools));
+            // Only a prefix-bound model's signed thinking is bound to the tools.
+            if (isPrefixBoundThinkingModel(draft.model.providerID, draft.model.id))
+                requestToolsFingerprints.set(
+                    draft.sessionID,
+                    v2DraftRequestToolsFingerprint(draft),
+                );
+            else requestToolsFingerprints.delete(draft.sessionID);
             // Only a failure to read or record usage refuses here. A high reading is
             // left to the transform below: its force band and emergency path are what
             // reduce an over-limit session, and refusing ahead of them would refuse
@@ -2721,6 +2881,8 @@ export async function registerContext(context: V2Context) {
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
+            // The head Magic Context recorded for a checkpoint that stores the note.
+            let recordedHead: string | undefined;
             let upgradeCheckpointSequence: number | undefined;
             try {
                 const candidates = syntheticCandidates(
@@ -2790,9 +2952,13 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
-                        submitted = identity.renderedSummary ?? carrier.submitted;
-                        upgradeCheckpointSequence = carrier.row.seq;
+                        const stored = identity.renderedSummary ?? carrier.submitted;
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
+                            submitted = stored;
+                            recordedHead = identity.head;
+                            upgradeCheckpointSequence = carrier.row.seq;
+                        }
                     }
                 }
                 let nativeRestored = localCut
@@ -2887,10 +3053,23 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? incoming);
-                        submitted = identity.rendered
+                        const stored = identity.rendered
                             ? (identity.renderedSummary ?? identity.submitted)
                             : (cut.data.summary ?? "");
+                        // A record rebuilt from a note checkpoint without a head of
+                        // its own is not served: observe already requested the fold,
+                        // and the restored rows below take the checkpoint's place.
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? incoming);
+                            submitted = stored;
+                            // This owner record answered this very cut, so its head
+                            // is the account the stored note stands for.
+                            recordedHead = identity.head;
+                        } else
+                            sessionLog(
+                                draft.sessionID,
+                                "v2 host fold: note checkpoint without a recorded head; serving restored history",
+                            );
                     }
                     draft.messages.splice(
                         0,
@@ -2952,14 +3131,19 @@ export async function registerContext(context: V2Context) {
                     // The checkpoint replaces the frozen history-head message
                     // after the shared transform. Measure it with the restored
                     // tail now so the scheduler can reduce an over-window
-                    // request before it is sent.
+                    // request before it is sent. A checkpoint that stores the note
+                    // is measured with the head it stands for, as before the note.
                     const estimate = estimateCheckpointRequest({
                         ...draft,
-                        messages: [checkpoint, ...draft.messages],
+                        messages: [
+                            withRecordedHead(checkpoint, submitted, recordedHead),
+                            ...draft.messages,
+                        ],
                     });
                     checkpointInputEstimates.set(draft.sessionID, {
                         tokens: estimate.tokens,
                         pressureTokens: estimate.pressureTokens ?? estimate.tokens,
+                        hostAddedTokens: estimateCheckpointFraming(draft, projected, submitted),
                     });
                 }
             }
@@ -3037,7 +3221,11 @@ export async function registerContext(context: V2Context) {
                 replayHead !== undefined
                     ? replayHead
                     : checkpoint && submitted !== undefined
-                      ? { checkpoint, submitted }
+                      ? {
+                            checkpoint,
+                            submitted,
+                            ...(recordedHead === undefined ? {} : { head: recordedHead }),
+                        }
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;

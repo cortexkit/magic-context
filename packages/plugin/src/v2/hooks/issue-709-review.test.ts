@@ -31,6 +31,8 @@ import { scaleTest } from "../../shared/slow-test";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
+import type { FoldIdentity } from "../fold/owner";
+import { CHECKPOINT_NOTE } from "../fold/summary";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context, V2Message } from "./types";
@@ -464,7 +466,10 @@ async function fixture(
                 role: "user",
                 content: [{ type: "text", text: `<summary>\n${draft.result.summary}\n</summary>` }],
             };
-            return draft.result.summary;
+            // The host stores the fixed checkpoint note; the history head this fold
+            // answered with is in Magic Context's own fold record.
+            const owned = storage.get(`fold/v1/${session}`) as FoldIdentity | undefined;
+            return owned?.head ?? draft.result.summary;
         },
         freshTurn() {
             const n = source.length;
@@ -810,6 +815,9 @@ test("issue 709 witness: OC2 compaction honors inject_docs=false", async () => {
         const before = await f.pass();
         expect(before.bytes.includes("Isolated architecture")).toBe(false);
         const summary = await f.fold();
+        // The fold returns the head from Magic Context's own record; the stored
+        // note would make the assertion below pass without checking anything.
+        expect(summary).not.toBe(CHECKPOINT_NOTE);
         expect(summary.includes("Isolated architecture")).toBe(false);
     } finally {
         await f.cleanup();
@@ -1145,6 +1153,7 @@ test("OC2 fold memory policy: memory-off summaries omit project memory without a
             try {
                 await f.pass();
                 const summary = await f.fold();
+                expect(summary).not.toBe(CHECKPOINT_NOTE);
                 const after = await f.pass();
                 const replay = await f.pass();
                 const hard = after.logs.filter((line) => /HARD.*executed=true/.test(line));

@@ -303,6 +303,13 @@ export interface OpenCode2SpawnOptions {
 	includeMagicContext?: boolean;
 	modelContextLimit?: number;
 	modelOutputLimit?: number;
+	/** Live diagnostics may supply a provider instead of the default mock settings. */
+	providerSettings?: { baseURL: string; apiKey: string };
+	modelInputLimit?: number;
+	/** Use the supplied Magic Context config without the e2e mock defaults/pins. */
+	preserveMagicContextDefaults?: boolean;
+	/** Service registration can precede API readiness on newer hosts. Default off. */
+	waitForTransport?: boolean;
 	/**
 	 * Register a second mock model and pin the historian to it, so a scenario can
 	 * keep a small window on the session model while the historian gets a window
@@ -332,7 +339,53 @@ export interface OpenCode2SpawnOptions {
 	prepareContextDatabase?: boolean;
 }
 
-/** Event-driven, bounded startup; no readiness polling. CLI contract: AFT playbook:54-64. */
+export function openCode2ProviderSettings(options: OpenCode2SpawnOptions, baseURL: string) {
+	return options.providerSettings ?? { baseURL, apiKey: "mock-key" };
+}
+
+export function openCode2MagicContextConfig(options: OpenCode2SpawnOptions) {
+	if (options.preserveMagicContextDefaults) return options.magicContextConfig;
+	return {
+		auto_update: false,
+		execute_threshold_percentage: 40,
+		history_budget_percentage: 0.15,
+		embedding: { provider: "off" },
+		...pinMockAgents(
+			options.magicContextConfig,
+			`${options.providerID ?? "openai"}/${options.defaultModelID ?? "mock-model"}`,
+			"opencode",
+			options.historianProvider
+				? { historian: `${options.historianProvider.providerID}/${options.historianProvider.modelID}` }
+				: options.historianModel ? { historian: `${options.providerID ?? "openai"}/${options.historianModel.id}` } : {},
+		),
+	};
+}
+
+export async function awaitOpenCode2Transport(
+	enabled: boolean,
+	probe: (signal: AbortSignal) => Promise<unknown>,
+	options: { now?: () => number; pause?: (ms: number) => Promise<void>; log?: (line: string) => void } = {},
+): Promise<void> {
+	if (!enabled) return;
+	const now = options.now ?? Date.now;
+	const pause = options.pause ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+	const deadline = now() + 30_000;
+	const signal = AbortSignal.timeout(30_000);
+	for (;;) {
+		try {
+			await probe(signal);
+			return;
+		} catch (error) {
+			const failure = error as { reason?: string; cause?: { status?: number } };
+			if (failure.reason !== "UnexpectedStatus" || failure.cause?.status !== 503) throw error;
+			options.log?.("OpenCode 2 readiness probe returned 503; retrying before session creation");
+			if (now() >= deadline) throw new Error("OpenCode 2 transport readiness exceeded 30s", { cause: error });
+			await pause(Math.min(100, deadline - now()));
+		}
+	}
+}
+
+/** Bounded startup with event-driven activation and opt-in transport readiness. */
 export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 	setHarness("opencode2");
 	const providerID = options.providerID ?? "openai";
@@ -391,7 +444,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 				compaction: { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
 				providers: {
 					[providerID]: {
-						settings: { baseURL: provider.baseURL, apiKey: "mock-key" },
+						settings: openCode2ProviderSettings(options, provider.baseURL),
 						models: Object.fromEntries(
 							[...modelIDs].map((id) => [
 								id,
@@ -407,6 +460,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 												? options.historianModel.contextLimit
 												: (options.modelContextLimit ?? 200_000),
 										output: options.modelOutputLimit ?? 32768,
+										...(options.modelInputLimit === undefined ? {} : { input: options.modelInputLimit }),
 									},
 								},
 							]),
@@ -431,6 +485,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 						: {}),
 				},
 			}),
+			{ mode: 0o600 },
 		);
 		if (options.magicContextConfig !== undefined) {
 			const configDir = join(fixture.env.XDG_CONFIG_HOME!, "cortexkit");
@@ -438,25 +493,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			writeFileSync(
 				join(configDir, "magic-context.jsonc"),
 				JSON.stringify(
-					{
-						auto_update: false,
-						execute_threshold_percentage: 40,
-						history_budget_percentage: 0.15,
-						embedding: { provider: "off" },
-						...pinMockAgents(
-							options.magicContextConfig,
-							`${providerID}/${defaultModelID}`,
-							// Both OpenCode host generations use the `agents.*.opencode` config block.
-							"opencode",
-							options.historianProvider
-								? {
-										historian: `${options.historianProvider.providerID}/${options.historianProvider.modelID}`,
-									}
-								: options.historianModel
-									? { historian: `${providerID}/${options.historianModel.id}` }
-									: {},
-						),
-					},
+					openCode2MagicContextConfig(options),
 					null,
 					2,
 				),
@@ -564,12 +601,16 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					);
 				},
 			);
-			if (child.pid) inspectOpenFiles(child.pid, fixture.root, fixture.env);
-            options.onHandoff?.({ ...ready, ...fixture, pid: child.pid, mock, stderr: () => stderr, stop });
             const readinessClient = OpenCode.make({
                 baseUrl: ready.url,
                 headers: { authorization: `Basic ${btoa(`opencode:${ready.password}`)}` },
             });
+            await awaitOpenCode2Transport(options.waitForTransport ?? false,
+                (signal) => readinessClient.plugin.list({ location: { directory: fixture.cwd } }, { signal }), {
+                    log: (line) => { stderr += `${line}\n`; console.error(line); },
+                });
+			if (child.pid) inspectOpenFiles(child.pid, fixture.root, fixture.env);
+            options.onHandoff?.({ ...ready, ...fixture, pid: child.pid, mock, stderr: () => stderr, stop });
             await requireSchemaGuard(readinessClient, fixture.cwd);
 			return {
 				...ready,
@@ -692,7 +733,7 @@ export function inspectOpenFiles(
 	});
 	if (!placements)
 		throw new Error(
-			"v2 child did not open its throwaway XDG_DATA_HOME database",
+			`v2 child did not open its throwaway XDG_DATA_HOME database: expected ${db}; open paths=${JSON.stringify(paths)}`,
 		);
 	return paths;
 }

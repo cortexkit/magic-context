@@ -1,40 +1,10 @@
 import { type ReclaimRideSignals, reclaimRidePermitted } from "./cache-busting-signals";
-
-/**
- * The pressure bands a pass sits in. `forceMaterialization` is primary-only (it
- * also forces m[0] materialization); the emergency tool floor applies to primary
- * and subagent sessions alike. Compaction-off sessions are in neither band.
- */
-export function pressureBands(args: {
-    fullFeatureMode: boolean;
-    compactionOff: boolean;
-    contextPercentage: number;
-    forceMaterializationPercentage: number;
-    /** The usage reading came from a local count, not from the provider. */
-    contextUsageFromEstimate: boolean;
-}): {
-    forceMaterialization: boolean;
-    emergencyDropEligible: boolean;
-    forceRideWaitsOnLocalCount: boolean;
-    forceBandConfirmed: boolean;
-} {
-    const emergencyDropEligible =
-        !args.compactionOff && args.contextPercentage >= args.forceMaterializationPercentage;
-    // A reading that only a local count put in the force band can overstate
-    // the provider, and a provider that reports no usage never sends the
-    // measurement that would confirm it. Below 95% such a reading is therefore
-    // not force-band pressure: it takes no force ride, lifts no signed-thinking
-    // hold and runs no tiered emergency tool drop. A rebuild the pass makes for
-    // another reason (such as the execute pass's own bounded rebuild) carries
-    // only queued drops and routine cleanup.
-    const forceRideWaitsOnLocalCount = args.contextUsageFromEstimate && args.contextPercentage < 95;
-    return {
-        forceMaterialization: args.fullFeatureMode && emergencyDropEligible,
-        emergencyDropEligible,
-        forceRideWaitsOnLocalCount,
-        forceBandConfirmed: emergencyDropEligible && !forceRideWaitsOnLocalCount,
-    };
-}
+import {
+    forceRide,
+    heuristicsRunOnPass,
+    pressureBands,
+    routineCleanupRunsOnPass,
+} from "./routine-cleanup-decision";
 
 /** Everything the OpenCode postprocess phase knows when it decides whether a pass may mutate. */
 export interface PassMutationInput {
@@ -59,6 +29,12 @@ export interface PassMutationInput {
     foldBustsServedPrefix: boolean;
     /** No complete cached m[0]/m[1] pair exists, so this pass renders the head for the first time. */
     firstRenderBust: boolean;
+    /**
+     * OpenCode 2's compaction hook replaced the history head outside any pass
+     * (a manual `/compact`), and the head this request serves differs from the
+     * one the provider cached (see host-checkpoint-ride.ts).
+     */
+    hostCheckpointHead?: boolean;
     /** A user `/ctx-flush` is pending. */
     explicitFlush: boolean;
     /** Freshly published history changed the served m[1] bytes. */
@@ -101,12 +77,21 @@ export function decidePassMutation(
     input: PassMutationInput,
     executeReclaim: (args: { primaryExecute: boolean; alreadyBusting: boolean }) => boolean,
 ): PassMutationDecision {
+    const bands = pressureBands({
+        percentage: input.contextPercentage,
+        fromEstimate: input.contextUsageFromEstimate,
+        forceMaterializationPercentage: input.forceMaterializationPercentage,
+        compactionOff: input.compactionOff,
+        fullFeatureMode: input.fullFeatureMode,
+        schedulerDecision: input.schedulerDecision,
+    });
     const {
         forceMaterialization,
         emergencyDropEligible,
         forceRideWaitsOnLocalCount,
         forceBandConfirmed,
-    } = pressureBands(input);
+    } = bands;
+    const hostCheckpointHead = input.hostCheckpointHead === true;
     // An expired provider cache is not a ride: when only the provider forgot
     // the cache, the pass replays byte-identically like a warm one, so queued
     // drops, cleanup and signed thinking all wait for a real ride.
@@ -115,18 +100,18 @@ export function decidePassMutation(
         executeReclaim: false,
         subagentExecute: !input.fullFeatureMode && input.schedulerDecision === "execute",
         hardFold:
-            input.rewritingSignedPrefix || input.foldBustsServedPrefix || input.firstRenderBust,
-        // A reading that only a local count put in the force band is not
-        // evidence the session is there: the count can overstate the provider.
-        // Below 95% it waits for the provider's next measurement instead of
-        // rewriting the cache on its own. At 95% or more it still rides, since
-        // waiting there risks the next request not fitting.
-        force:
-            emergencyDropEligible &&
-            (input.contextPercentage >= 95 ||
-                (input.forceTriggerPermitted &&
-                    !input.contextUsageFromEstimate &&
-                    input.emergencyInputSample() === 0)),
+            input.rewritingSignedPrefix ||
+            input.foldBustsServedPrefix ||
+            input.firstRenderBust ||
+            hostCheckpointHead,
+        // Below 95%, a parked force trigger (trigger-parking.ts) also waits.
+        force: forceRide({
+            bands,
+            percentage: input.contextPercentage,
+            fromEstimate: input.contextUsageFromEstimate,
+            emergencySample: input.emergencyInputSample,
+            triggerPermitted: input.forceTriggerPermitted,
+        }),
         explicitFlush: input.explicitFlush,
         publishedHistory: input.publishedHistory,
     };
@@ -160,31 +145,25 @@ export function decidePassMutation(
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: input.signedThinkingHold,
             firstRender: input.firstRenderBust,
+            hostCheckpointHead,
             // A reading that only a local count put in the force band lifts the
             // signed-thinking hold only at 95% or more, by the same rule as the
             // force ride.
             emergency: forceBandConfirmed,
         });
     const shouldApplyPendingOps = !input.compactionOff && publishedWorkDrainAllowed;
-    const shouldRunHeuristics =
-        !input.compactionOff &&
-        publishedWorkDrainAllowed &&
-        (rideSignals.publishedHistory ||
-            rideSignals.executeReclaim ||
-            rideSignals.servedShapeRepair ||
-            input.materializationRequested ||
-            forceMaterialization ||
-            // The off-wire fold changed the served prefix, so the prefix already
-            // busted. Heuristics may ride it and bypass the once-per-turn guard
-            // without creating an independent prefix rewrite.
-            input.foldBustsServedPrefix ||
-            input.firstRenderBust ||
-            // The force band's emergency floor, for primary and subagent alike. For a
-            // primary it coincides with forceMaterialization; for a subagent it is the
-            // only path that fires the tiered drop even when the scheduler defers.
-            emergencyDropEligible ||
-            (input.schedulerDecision === "execute" &&
-                (!input.alreadyRanThisTurn || !input.fullFeatureMode)));
+    const shouldRunHeuristics = heuristicsRunOnPass({
+        compactionOff: input.compactionOff,
+        drainAllowed: publishedWorkDrainAllowed,
+        rides: rideSignals,
+        materializationRequested: input.materializationRequested,
+        bands,
+        foldBustsServedPrefix: input.foldBustsServedPrefix,
+        firstRender: input.firstRenderBust,
+        schedulerDecision: input.schedulerDecision,
+        alreadyRanThisTurn: input.alreadyRanThisTurn,
+        fullFeatureMode: input.fullFeatureMode,
+    });
     return {
         forceMaterialization,
         emergencyDropEligible,
@@ -211,6 +190,8 @@ export function emergencyRewriteAlreadyPriced(args: {
     pendingOpsDidMutate: boolean;
     foldBustsServedPrefix: boolean;
     firstRenderBust: boolean;
+    /** The pass serves a head OpenCode 2's compaction hook replaced (see `hostCheckpointHead`). */
+    hostCheckpointHead?: boolean;
     historyRebuiltThisPass: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -219,6 +200,7 @@ export function emergencyRewriteAlreadyPriced(args: {
         args.pendingOpsDidMutate ||
         args.foldBustsServedPrefix ||
         args.firstRenderBust ||
+        args.hostCheckpointHead === true ||
         args.historyRebuiltThisPass ||
         args.compartmentInjectionRebuiltFromDb ||
         args.rebuiltHistoryFromInitialPrepare
@@ -257,11 +239,13 @@ export function routineCleanupAdmitted(args: {
     materializationRequested: boolean;
     rewriteAlreadyPriced: boolean;
 }): boolean {
-    return (
-        (args.forceBandConfirmed
-            ? args.contextPercentage >= 95 || args.emergencyInputSample() === 0
-            : !args.fullFeatureMode || !args.routinePressureAlreadyApplied) ||
-        args.materializationRequested ||
-        args.rewriteAlreadyPriced
-    );
+    return routineCleanupRunsOnPass({
+        bands: { forceBandConfirmed: args.forceBandConfirmed },
+        percentage: args.contextPercentage,
+        emergencySample: args.emergencyInputSample,
+        fullFeatureMode: args.fullFeatureMode,
+        routinePressureAlreadyApplied: args.routinePressureAlreadyApplied,
+        materializationRequested: args.materializationRequested,
+        rewriteAlreadyPriced: args.rewriteAlreadyPriced,
+    });
 }

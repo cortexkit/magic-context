@@ -12,6 +12,7 @@ import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir
 import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
+	recordPiBindingStripEndOrder,
 	resolvePiBindingStripOrder,
 	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
@@ -141,6 +142,40 @@ it("a defer branch-away does not silently switch legacy strip order before undo 
 				bustPermittedAtStart: false,
 			}),
 		).toBe("start");
+	} finally {
+		db.close();
+	}
+});
+
+it("a tools release serves in the end order but records the switch only when the caller reports success", () => {
+	const db = new Database(":memory:");
+	initializeDatabase(db);
+	try {
+		const sessionId = "legacy-release";
+		addMergedReasoningStrippedIds(db, sessionId, [
+			"binding_mismatch:assistant-1",
+		]);
+		const resolve = (releasesAllThinking: boolean) =>
+			resolvePiBindingStripOrder({
+				db,
+				sessionId,
+				messages: [{ role: "user", content: "other branch" }],
+				entryIds: ["user-other"],
+				bustPermittedAtStart: false,
+				releasesAllThinking,
+			});
+		// The release pass strips in the end order, without recording it.
+		expect(resolve(true)).toBe("end");
+		expect(getMergedReasoningStrippedIds(db, sessionId)).not.toContain(
+			"binding_mismatch_order:end",
+		);
+		// That pass failed, and the tools reverted: the next pass keeps the
+		// order the session last served in.
+		expect(resolve(false)).toBe("start");
+		// A release pass that succeeds records the switch for later passes.
+		expect(resolve(true)).toBe("end");
+		expect(recordPiBindingStripEndOrder(db, sessionId)).toBe(true);
+		expect(resolve(false)).toBe("end");
 	} finally {
 		db.close();
 	}

@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { patchSessionMeta } from "../../features/magic-context/__tests__/session-meta-fixture";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
-import { hasFoldSummary, RAW_HISTORY_ACCOUNT } from "../fold/summary";
+import { NativeFoldReplay } from "../fold/native-replay";
+import { CHECKPOINT_NOTE, hasFoldSummary } from "../fold/summary";
 import {
     addCodeModeEntries,
     codeModeInstructionMetadata,
@@ -88,12 +89,104 @@ test("required host checkpoints answer without empty history and preserve raw re
         const stored = f.raw.prepare("SELECT data FROM session_message WHERE id = ?").get(cut) as {
             data: string;
         };
-        expect(JSON.parse(stored.data).summary).toBe(RAW_HISTORY_ACCOUNT);
+        // A session without any history head still stores the fixed note rather
+        // than an empty answer; the raw conversation replays unchanged.
+        expect(JSON.parse(stored.data).summary).toBe(CHECKPOINT_NOTE);
         expect((await f.pass()).bytes).toBe(before.bytes);
     } finally {
         await f.cleanup();
     }
 }, 60000);
+
+for (const reason of ["automatic", "manual"] as const) {
+    test(`a ${reason} checkpoint stores the note and the served request replays across the fold and a restart`, async () => {
+        const f = await oc2ContextFixture(reason === "manual" ? 9891 : 9890, {
+            area: "host-fold-patch",
+            instructions: false,
+            temporal: false,
+            cacheTtl: "never",
+        });
+        try {
+            f.compartment(4);
+            f.respond();
+            const before = await f.pass();
+            const cut = await f.nativeFold(
+                3,
+                0,
+                undefined,
+                reason === "manual" ? "manual" : undefined,
+            );
+            const stored = f.raw
+                .prepare("SELECT data FROM session_message WHERE id=?")
+                .get(cut) as { data: string };
+            expect(JSON.parse(stored.data).summary).toBe(CHECKPOINT_NOTE);
+            const after = await f.pass();
+            // The model keeps getting Magic Context's own history head; the note
+            // only labels the checkpoint for the user.
+            expect(after.bytes).not.toContain("Magic Context added a compaction marker");
+            expect(after.bytes).toContain("<session-history>");
+            // An automatic checkpoint changes nothing the provider sees.
+            if (reason === "automatic") expect(after.bytes).toBe(before.bytes);
+            expect((await f.pass()).bytes).toBe(after.bytes);
+            await f.restart();
+            expect((await f.pass()).bytes).toBe(after.bytes);
+        } finally {
+            await f.cleanup();
+        }
+    }, 60000);
+}
+
+for (const path of ["native", "fallback carrier"] as const) {
+    test(`two note checkpoints in a row (${path}) never serve the note and replay across a restart`, async () => {
+        const f = await oc2ContextFixture(path === "native" ? 9892 : 9893, {
+            area: "host-fold-patch",
+            instructions: false,
+            temporal: false,
+            cacheTtl: "never",
+        });
+        // A refused native admission leaves the fold to the fold owner, whose
+        // carrier serves the host checkpoint with the recorded head inside it.
+        const refused =
+            path === "fallback carrier"
+                ? spyOn(NativeFoldReplay.prototype, "supply").mockResolvedValue(false)
+                : undefined;
+        try {
+            f.compartment(4);
+            f.respond();
+            const before = await f.pass();
+            const stored: string[] = [];
+            const fold = async () => {
+                const cut = await f.nativeFold(3, 0, "");
+                const row = f.raw
+                    .prepare("SELECT data FROM session_message WHERE id=?")
+                    .get(cut) as { data: string };
+                stored.push(JSON.parse(row.data).summary);
+            };
+            await fold();
+            const first = await f.pass();
+            if (path === "native") expect(first.bytes).toBe(before.bytes);
+            f.user("a turn between the two checkpoints", 1000);
+            const between = await f.pass();
+            f.respond();
+            await f.pass();
+            await fold();
+            const second = await f.pass();
+            expect(stored).toEqual([CHECKPOINT_NOTE, CHECKPOINT_NOTE]);
+            for (const pass of [first, between, second]) {
+                expect(pass.bytes).not.toContain("Magic Context added a compaction marker");
+                expect(pass.bytes).toContain("<session-history>");
+            }
+            if (path === "fallback carrier")
+                expect(second.bytes).toContain("<conversation-checkpoint>");
+            expect((await f.pass()).bytes).toBe(second.bytes);
+            await f.restart();
+            expect((await f.pass()).bytes).toBe(second.bytes);
+        } finally {
+            refused?.mockRestore();
+            await f.cleanup();
+        }
+    }, 60000);
+}
 
 test("an expired idle fold is recovered after reload only on a rebuilding pass; warm and expired replays stay byte-identical", async () => {
     const threshold = process.env.MC_OC2_HOST_FOLD_ROWS;

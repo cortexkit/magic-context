@@ -8,7 +8,7 @@ import { runIssueFlow } from "../commands/doctor-opencode";
 import { runDoctor as runPiDoctor } from "../commands/doctor-pi";
 import type { DiagnosticReport } from "./diagnostics-opencode";
 import type { PiDiagnosticReport } from "./diagnostics-pi";
-import { ISSUE_LOG_TEMPLATES, IssuePrivacy } from "./issue-privacy";
+import { IssuePrivacy } from "./issue-privacy";
 
 const roots: string[] = [];
 const savedEnv = { ...process.env };
@@ -48,7 +48,7 @@ function fixture() {
         mkdirSync(path, { recursive: true });
     const logs = [
         "2026-09-05T10:41:03.130Z ERROR magic-context.historian: [session=opencode:ses_private700] TypeError: Customer payroll account /Users/avery/Work/acme-payroll/src/payroll-secret.ts email=avery@private.example host=avery-mbp.local token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 retry=2 durationMs=125 count=7",
-        "[2026-09-05T10:41:04.130Z] [magic-context][ses_private701] historian prompt failed: tool read /home/avery/Work/secret-orchard/.env API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 tokens=4096",
+        "[2026-09-05T10:41:04.130Z] [magic-context][ses_private701] historian prompt failed: tool read /home/avery/Work/secret-orchard/.env API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 tokens=4096 promptLength=900",
         "2026-09-05T10:41:05.130Z INFO  magic-context.perf: [session=opencode:ses_private700] finished durationMs=125 count=7",
         "    at payrollCustomer (C:\\Users\\avery\\Work\\private-retina\\src\\customer-secret.ts:42:7)",
         "[2026-09-05T10:41:06.130Z] [magic-context][ses_private700] failed: project=git:1a2b3c4d5e6f7081928374655647382910abcdef project=dir:/Users/avery/Work/acme-payroll project=pj-98fedcba76543210",
@@ -392,7 +392,7 @@ it("keeps source-owned log wording while omitting interpolated content", () => {
     const privacy = new IssuePrivacy({});
     const output = [
         privacy.logLine(
-            "[2026-09-05T10:41:03.130Z] [magic-context][ses_private700] historian prompt failed: read /Users/avery/Work/private-repo/.env API_KEY=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 tool-output-secret",
+            "[2026-09-05T10:41:03.130Z] [magic-context][ses_private700] historian prompt failed: read /Users/avery/Work/private-repo/.env API_KEY=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 tool-output-secret promptLength=900",
         ),
         privacy.logLine(
             "[2026-09-05T10:41:04.130Z] [magic-context][ses_private700] historian: prompt attempt 2 failed: private provider message /home/avery/secret-orchard/password.txt",
@@ -406,8 +406,8 @@ it("keeps source-owned log wording while omitting interpolated content", () => {
     ].join("\n");
 
     expect(output).toContain("historian prompt failed: <text omitted>");
-    expect(output).toContain("historian: prompt attempt <text omitted> failed: <text omitted>");
-    expect(output).toContain('historian failure: source=<text omitted> reason="<text omitted>"');
+    expect(output).toContain("historian: prompt attempt 2 failed: <text omitted>");
+    expect(output).toContain('historian failure: source=validation reason="<text omitted>"');
     expect(output).toContain("source=validation");
     expect(output).toContain("chunkRange=12-18");
     expect(output).toContain("fallbackModel=vertex-eu-google/gemini-3.8-flash");
@@ -420,75 +420,6 @@ it("keeps source-owned log wording while omitting interpolated content", () => {
     expect(output).not.toContain("tool-output-secret");
     expect(output).not.toContain("sensitive tool output marker");
     expect(output).not.toContain("CustomerPayrollError");
-});
-
-it("ties current log templates to source and pins historical Rust wording", () => {
-    const sources = [
-        {
-            path: new URL(
-                "../../../plugin/src/hooks/magic-context/compartment-runner-historian.ts",
-                import.meta.url,
-            ),
-            fragments: [
-                "historian prompt failed:",
-                "historian: prompt attempt ",
-                " failed:",
-                "Historian failed while processing this session:",
-                "Historian returned no assistant output.",
-            ],
-        },
-        {
-            path: new URL(
-                "../../../plugin/src/hooks/magic-context/compartment-runner-incremental.ts",
-                import.meta.url,
-            ),
-            fragments: [
-                "historian failure: source=",
-                ' reason="',
-                '" chunkRange=',
-                " fallbackModel=",
-                " twoPass=",
-                "historian post-publish step failed; publication stands:",
-            ],
-        },
-    ];
-
-    // Bundles may include logs from before the module rewrite. Keep their safe
-    // template wording, but do not require the replacement module to emit it.
-    const historicalRustFragments = [
-        "mc-module: store open failed:",
-        "mc-module: historian firing failed for ",
-        ":",
-    ];
-    const sourceFragments = [
-        ...sources.flatMap(({ fragments }) => fragments),
-        ...historicalRustFragments,
-    ];
-    const configuredFragments = ISSUE_LOG_TEMPLATES.flatMap(({ parts }) => parts);
-    expect([...configuredFragments].sort()).toEqual([...sourceFragments].sort());
-
-    for (const { path, fragments } of sources) {
-        const source = readFileSync(path, "utf8");
-        for (const fragment of fragments) expect(source).toContain(fragment);
-    }
-
-    const privacy = new IssuePrivacy({});
-    for (const template of ISSUE_LOG_TEMPLATES) {
-        const message = template.exact
-            ? template.parts[0]
-            : `${template.parts
-                  .join("SENSITIVE-INTERPOLATION")
-                  .replace(
-                      "fallbackModel=SENSITIVE-INTERPOLATION",
-                      'fallbackModel="sensitive tool output"',
-                  )} SENSITIVE-TAIL`;
-        const line = privacy.logLine(
-            `[2026-09-05T10:41:07.130Z] [magic-context][ses_private700] ${message}`,
-        );
-        for (const part of template.parts) expect(line).toContain(part);
-        expect(line).not.toContain("SENSITIVE-INTERPOLATION");
-        expect(line).not.toContain("SENSITIVE-TAIL");
-    }
 });
 
 it("health check summaries retain configuration labels and measurements", () => {

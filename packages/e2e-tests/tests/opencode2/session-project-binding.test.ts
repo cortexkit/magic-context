@@ -1,5 +1,4 @@
 import { openTestDb } from "../../src/test-db";
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -53,7 +52,7 @@ async function runTurns(gitRepo: boolean) {
 				{ signal: AbortSignal.timeout(20000) },
 			);
 		}
-		const hostStore = new Database(
+		const hostStore = openTestDb(
 			join(host.env.XDG_DATA_HOME!, "opencode", host.env.OPENCODE_DB!),
 			{ readonly: true },
 		);

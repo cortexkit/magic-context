@@ -16,7 +16,8 @@ import { openTestDb } from "./test-db";
  *   await h.dispose();
  */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openTestDb } from "./test-db";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { HostCapabilities, HostHarness } from "./host-harness";

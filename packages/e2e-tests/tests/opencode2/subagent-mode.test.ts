@@ -1,5 +1,4 @@
 import { openTestDb } from "../../src/test-db";
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -91,7 +90,7 @@ async function fixture() {
     const contextDb = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
         readonly: true,
     });
-    const store = new Database(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
+    const store = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
         readonly: true,
     });
     const mode = (id: string) =>

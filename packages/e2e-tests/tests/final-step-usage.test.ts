@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -140,7 +140,7 @@ forEachHost(import.meta.url, null, () => {
         await h.waitForMockQuiescence({ label: "four-step turn settles" });
         expect(toolSteps).toBe(3);
 
-        const hostDb = new Database(join(h.dataDir, "opencode", "opencode.db"), {
+        const hostDb = openTestDb(join(h.dataDir, "opencode", "opencode.db"), {
             readonly: true,
         });
         const finalRow = await h.waitFor(
