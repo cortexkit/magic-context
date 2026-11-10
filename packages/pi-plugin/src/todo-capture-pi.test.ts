@@ -158,6 +158,49 @@ describe("Pi todowrite capture compatibility", () => {
 		}
 	});
 
+	it("capture ignores priorities outside Pi's todowrite enum", () => {
+		// The shared normalizer keeps any priority string, as OpenCode does, but
+		// Pi's own todowrite refuses this call, so the snapshot must not change.
+		const db = createTestDb();
+		const previousState =
+			'[{"content":"Keep","status":"pending","priority":"medium"}]';
+		const todos = [{ content: "Hotfix", status: "pending", priority: "urgent" }];
+		let overlayUpdates = 0;
+		try {
+			updateSessionMeta(db, "ses-priority", { lastTodoState: previousState });
+
+			expect(
+				capturePiTodowriteArgsIfCompatible({
+					db,
+					sessionId: "ses-priority",
+					todos,
+					todowriteEnabled: true,
+					todoOverlay: { update: () => overlayUpdates++ },
+					persist: true,
+					toolCallId: "call-priority",
+				}),
+			).toBe(false);
+			expect(
+				capturePiTodowriteMessageIfCompatible({
+					db,
+					sessionId: "ses-priority",
+					message: assistantToolCall("call-1", "todowrite", { todos }),
+					todowriteEnabled: true,
+					todoOverlay: { update: () => overlayUpdates++ },
+					persist: true,
+				}),
+			).toBe(false);
+
+			expect(getOrCreateSessionMeta(db, "ses-priority").lastTodoState).toBe(
+				previousState,
+			);
+			expect(getTodoSnapshot("ses-priority").todos).toEqual([]);
+			expect(overlayUpdates).toBe(0);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("message_end capture preserves interop for compatible foreign todowrite payloads", () => {
 		const db = createTestDb();
 		let overlayUpdates = 0;

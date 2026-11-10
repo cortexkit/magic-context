@@ -42,14 +42,58 @@ describe("normalizeTodoStateJson", () => {
         ]);
     });
 
-    it("rejects foreign status values", () => {
-        expect(normalizeTodoStateJson([{ content: "Interop", status: "done" }])).toBeNull();
+    it("keeps custom status values such as blocked as written", () => {
+        expect(normalizeTodoStateJson([{ content: "Waiting", status: "blocked" }])).toBe(
+            '[{"content":"Waiting","status":"blocked","priority":"medium"}]',
+        );
+        expect(
+            normalizeTodoStateJson([{ content: "Interop", status: "done", priority: "low" }]),
+        ).toBe('[{"content":"Interop","status":"done","priority":"low"}]');
     });
 
-    it("rejects unknown priority values", () => {
+    it("keeps custom priority values as written, including an empty one", () => {
         expect(
             normalizeTodoStateJson([{ content: "Urgent", status: "pending", priority: "urgent" }]),
+        ).toBe('[{"content":"Urgent","status":"pending","priority":"urgent"}]');
+        expect(
+            normalizeTodoStateJson([{ content: "Unranked", status: "pending", priority: "" }]),
+        ).toBe('[{"content":"Unranked","status":"pending","priority":""}]');
+    });
+
+    it("rejects items it can't read", () => {
+        expect(normalizeTodoStateJson([{ content: "Empty status", status: "" }])).toBeNull();
+        expect(normalizeTodoStateJson([{ content: "No status" }])).toBeNull();
+        expect(normalizeTodoStateJson([{ content: 7, status: "pending" }])).toBeNull();
+        expect(normalizeTodoStateJson([{ status: "pending" }])).toBeNull();
+        expect(
+            normalizeTodoStateJson([{ content: "Bad priority", status: "pending", priority: 7 }]),
         ).toBeNull();
+        expect(
+            normalizeTodoStateJson([{ content: "Null priority", status: "pending", priority: null }]),
+        ).toBeNull();
+        expect(normalizeTodoStateJson(["not an object"])).toBeNull();
+    });
+
+    it("keeps the JSON and call id of built-in lists byte-identical to earlier releases", () => {
+        // Pinned from the release that accepted only the built-in values. Stored
+        // snapshots and the synthetic call ids derived from them must not change.
+        const json = normalizeTodoStateJson([
+            { content: "Plan", status: "pending", priority: "high" },
+            { content: "Build", status: "in_progress" },
+            { content: "Ship", status: "completed", priority: "low", id: "x" },
+            { content: "Drop", status: "cancelled", priority: "medium" },
+        ]);
+        expect(json).toBe(
+            '[{"content":"Plan","status":"pending","priority":"high"},' +
+                '{"content":"Build","status":"in_progress","priority":"medium"},' +
+                '{"content":"Ship","status":"completed","priority":"low"},' +
+                '{"content":"Drop","status":"cancelled","priority":"medium"}]',
+        );
+        expect(computeSyntheticCallId(json ?? "")).toBe("mc_synthetic_todo_0a023787097b0328");
+        expect(buildSyntheticTodoPart(json ?? "")?.callID).toBe(
+            "mc_synthetic_todo_0a023787097b0328",
+        );
+        expect(buildSyntheticTodoPart(json ?? "")?.state.title).toBe("3 todos");
     });
 
     it("rejects whole array if any item is malformed", () => {
@@ -90,6 +134,37 @@ describe("buildSyntheticTodoPart", () => {
 
     it("returns null for empty array", () => {
         expect(buildSyntheticTodoPart("[]")).toBeNull();
+    });
+
+    it("returns null when a stored item can't be read", () => {
+        expect(
+            buildSyntheticTodoPart(JSON.stringify([{ content: "Empty status", status: "" }])),
+        ).toBeNull();
+    });
+
+    it("treats custom statuses as open and counts them in the title", () => {
+        const blockedAndDone = buildSyntheticTodoPart(
+            JSON.stringify([
+                { content: "Waiting on review", status: "blocked", priority: "high" },
+                { content: "Done", status: "completed", priority: "low" },
+            ]),
+        );
+        expect(blockedAndDone?.state.title).toBe("1 todos");
+        expect(blockedAndDone?.state.input.todos[0]).toEqual({
+            content: "Waiting on review",
+            status: "blocked",
+            priority: "high",
+        });
+
+        // Only completed and cancelled are terminal, so a blocked item keeps the
+        // reminder alive; cancelled still counts in the title, as in OpenCode.
+        const blockedAndCancelled = buildSyntheticTodoPart(
+            JSON.stringify([
+                { content: "Waiting", status: "blocked", priority: "urgent" },
+                { content: "Dropped", status: "cancelled", priority: "low" },
+            ]),
+        );
+        expect(blockedAndCancelled?.state.title).toBe("2 todos");
     });
 
     it("produces a valid OpenCode tool part shape", () => {

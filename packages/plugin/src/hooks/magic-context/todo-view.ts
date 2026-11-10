@@ -25,6 +25,12 @@
 
 import { createHash } from "node:crypto";
 
+// The statuses and priorities OpenCode's `todowrite` describes to the model.
+// OpenCode's todo schema declares `status` and `priority` as plain strings and
+// names these values only in their descriptions, so agents can write others
+// (for example `blocked`). They are therefore not a closed set here: capture
+// and replay keep any other value as written. Pi's own `todowrite` tool uses
+// them as its parameter enum.
 export const TODO_STATUS_PENDING = "pending";
 export const TODO_STATUS_IN_PROGRESS = "in_progress";
 export const TODO_STATUS_COMPLETED = "completed";
@@ -47,25 +53,24 @@ export const TODO_PRIORITIES = [
     TODO_PRIORITY_LOW,
 ] as const;
 
-export type TodoStatus = (typeof TODO_STATUSES)[number];
-export type TodoPriority = (typeof TODO_PRIORITIES)[number];
-
 interface TodoInputItem {
     content: string;
-    status: TodoStatus;
-    priority?: TodoPriority;
+    status: string;
+    priority?: string;
 }
 
 export interface TodoItem {
     content: string;
-    status: TodoStatus;
-    priority: TodoPriority;
+    status: string;
+    priority: string;
 }
 
-const TODO_STATUS_SET = new Set<TodoStatus>(TODO_STATUSES);
-const TODO_PRIORITY_SET = new Set<TodoPriority>(TODO_PRIORITIES);
-
-export const TERMINAL_STATUSES = new Set<TodoStatus>([
+/**
+ * The only statuses that end a todo. Every other status, including custom ones
+ * such as `blocked`, counts as still open, so a list keeps its reminder until
+ * each item is completed or cancelled.
+ */
+export const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
     TODO_STATUS_COMPLETED,
     TODO_STATUS_CANCELLED,
 ]);
@@ -73,26 +78,36 @@ export const TERMINAL_STATUSES = new Set<TodoStatus>([
 /**
  * The set of statuses real OpenCode `todowrite` excludes when computing the
  * tool-part `title` (e.g. "3 todos"). OpenCode counts only `completed` as
- * "done"; cancelled todos still appear in the title's active count.
+ * "done"; cancelled and custom-status todos still appear in the title's
+ * active count.
  *
  * Source: ~/Work/OSS/opencode/packages/opencode/src/tool/todo.ts:47-52.
  */
-export const TITLE_DONE_STATUSES = new Set<TodoStatus>([TODO_STATUS_COMPLETED]);
+export const TITLE_DONE_STATUSES: ReadonlySet<string> = new Set([TODO_STATUS_COMPLETED]);
 
 const SYNTHETIC_CALL_ID_PREFIX = "mc_synthetic_todo_";
 
 /**
+ * The snapshot an explicit empty `todowrite` list stores. It builds no
+ * reminder, so capture stores it as well when a `todowrite` list can't be
+ * read: keeping the older snapshot instead would replay an outdated plan as
+ * the agent's latest one.
+ */
+export const CLEARED_TODO_STATE_JSON = "[]";
+
+/**
  * Normalize a `todowrite` args.todos array into a stable JSON string.
- * Returns `null` if the input is not a valid todo array.
  *
- * Some Pi users disable Magic Context's built-in `todowrite` and install a
- * third-party tool with the same name. Capture stays interoperable when that
- * tool emits Magic Context's exact todo shape, but it must fail closed for any
- * other status or priority values so bad state never reaches synthetic replay.
+ * Any status and priority string is kept as written, the way OpenCode's todo
+ * schema accepts it; a missing priority becomes `medium`. Returns `null` when
+ * the list can't be read: it is not an array, or an item is not an object with
+ * a string `content`, a non-empty string `status`, and a `priority` that is
+ * either absent or a string.
  *
- * Used by the snapshot capture path (`hook-handlers.ts`) to produce a
- * deterministic representation that survives JSON round-tripping with
- * stable field order.
+ * The output always lists `content`, `status`, then `priority` and drops other
+ * fields, so the same list produces the same JSON (and the same synthetic call
+ * id) on every pass and after a JSON round trip. Used by the snapshot capture
+ * path (`hook-handlers.ts`).
  */
 export function normalizeTodoStateJson(todos: unknown): string | null {
     if (!Array.isArray(todos)) return null;
@@ -143,8 +158,8 @@ export interface SyntheticTodoPart {
 
 /**
  * Build a synthetic todowrite tool part from a normalized state JSON.
- * Returns `null` if the state is empty or all todos are terminal — in
- * those cases the agent doesn't need a reminder.
+ * Returns `null` if the state can't be read, is empty, or all todos are
+ * terminal — in those cases the agent doesn't need a reminder.
  */
 export function buildSyntheticTodoPart(stateJson: string): SyntheticTodoPart | null {
     const todos = parseTodoState(stateJson);
@@ -245,20 +260,13 @@ function parseTodoState(stateJson: string): TodoItem[] | null {
     }
 }
 
-function isTodoStatus(value: unknown): value is TodoStatus {
-    return typeof value === "string" && TODO_STATUS_SET.has(value as TodoStatus);
-}
-
-function isTodoPriority(value: unknown): value is TodoPriority {
-    return typeof value === "string" && TODO_PRIORITY_SET.has(value as TodoPriority);
-}
-
 function isTodoItem(value: unknown): value is TodoInputItem {
     if (value === null || typeof value !== "object") return false;
     const todo = value as Record<string, unknown>;
     return (
         typeof todo.content === "string" &&
-        isTodoStatus(todo.status) &&
-        (todo.priority === undefined || isTodoPriority(todo.priority))
+        typeof todo.status === "string" &&
+        todo.status.length > 0 &&
+        (todo.priority === undefined || typeof todo.priority === "string")
     );
 }

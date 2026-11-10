@@ -45,6 +45,7 @@ function createTestHook(db: Database): ReturnType<typeof createToolExecuteAfterH
 }
 
 describe("createToolExecuteAfterHook todo snapshots", () => {
+    const PREVIOUS_TODO_STATE = '[{"content":"Older plan","status":"pending","priority":"medium"}]';
     test("native task hook surfaces an empty completed child result", async () => {
         const db = createTestDb();
         try {
@@ -241,60 +242,102 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         }
     });
 
-    test("foreign todowrite statuses leave state unchanged", async () => {
+    test("a custom status such as blocked replaces the snapshot", async () => {
         const db = createTestDb();
         try {
             const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-foreign", { lastTodoState: "[]" });
+            updateSessionMeta(db, "ses-blocked", { lastTodoState: PREVIOUS_TODO_STATE });
 
             await hook({
                 tool: "todowrite",
-                sessionID: "ses-foreign",
-                args: { todos: [{ content: "Third-party", status: "done" }] },
+                sessionID: "ses-blocked",
+                args: {
+                    todos: [
+                        { content: "Wait for review", status: "blocked", priority: "high" },
+                        { content: "Third-party", status: "done" },
+                    ],
+                },
             });
 
-            expect(getOrCreateSessionMeta(db, "ses-foreign").lastTodoState).toBe("[]");
+            expect(getOrCreateSessionMeta(db, "ses-blocked").lastTodoState).toBe(
+                '[{"content":"Wait for review","status":"blocked","priority":"high"},' +
+                    '{"content":"Third-party","status":"done","priority":"medium"}]',
+            );
         } finally {
             closeQuietly(db);
         }
     });
 
-    test("missing or non-array todowrite todos leave state unchanged", async () => {
+    test("a custom priority replaces the snapshot", async () => {
         const db = createTestDb();
         try {
             const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-malformed", { lastTodoState: "[]" });
+            updateSessionMeta(db, "ses-priority", { lastTodoState: PREVIOUS_TODO_STATE });
 
             await hook({
                 tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: {},
-            });
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: { todos: { content: "Not an array", status: "pending" } },
+                sessionID: "ses-priority",
+                args: { todos: [{ content: "Hotfix", status: "pending", priority: "urgent" }] },
             });
 
-            expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
+            expect(getOrCreateSessionMeta(db, "ses-priority").lastTodoState).toBe(
+                '[{"content":"Hotfix","status":"pending","priority":"urgent"}]',
+            );
         } finally {
             closeQuietly(db);
         }
     });
 
-    test("malformed todowrite args leave state unchanged", async () => {
+    test("todowrite lists that can't be read clear the snapshot", async () => {
+        const unreadableArgs: Array<{ label: string; args: Record<string, unknown> }> = [
+            { label: "missing todos", args: {} },
+            { label: "non-array todos", args: { todos: { content: "Not an array" } } },
+            { label: "missing status", args: { todos: [{ content: "Missing status" }] } },
+            { label: "empty status", args: { todos: [{ content: "Empty", status: "" }] } },
+            { label: "non-string content", args: { todos: [{ content: 7, status: "pending" }] } },
+        ];
+        for (const { label, args } of unreadableArgs) {
+            const db = createTestDb();
+            try {
+                const hook = createTestHook(db);
+                updateSessionMeta(db, "ses-unreadable", { lastTodoState: PREVIOUS_TODO_STATE });
+
+                await hook({ tool: "todowrite", sessionID: "ses-unreadable", args });
+
+                expect({
+                    label,
+                    state: getOrCreateSessionMeta(db, "ses-unreadable").lastTodoState,
+                }).toEqual({ label, state: "[]" });
+            } finally {
+                closeQuietly(db);
+            }
+        }
+    });
+
+    test("rust mode forwards a cleared snapshot to the module", async () => {
         const db = createTestDb();
         try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-malformed", { lastTodoState: "[]" });
+            const calls: Array<{ sessionId: string; stateJson: string; ownerMessageId: string }> =
+                [];
+            const hook = createToolExecuteAfterHook({
+                db,
+                channel1StateBySession: new Map(),
+                transformMode: "rust",
+                todoStateSet: async (input) => {
+                    calls.push(input);
+                },
+            });
+            updateSessionMeta(db, "ses-rust-clear", { lastTodoState: PREVIOUS_TODO_STATE });
 
             await hook({
                 tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: { todos: [{ content: "Missing status" }] },
+                sessionID: "ses-rust-clear",
+                args: { todos: [{ content: "Empty", status: "" }], owner_message_id: "msg-owner" },
             });
 
-            expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
+            expect(calls).toEqual([
+                { sessionId: "ses-rust-clear", stateJson: "[]", ownerMessageId: "msg-owner" },
+            ]);
         } finally {
             closeQuietly(db);
         }
