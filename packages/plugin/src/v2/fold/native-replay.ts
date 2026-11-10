@@ -35,7 +35,7 @@ import {
 } from "./native-replay-v3";
 import { foldDigest, stripCheckpointRecentContext } from "./owner";
 import { restoreRow } from "./restore";
-import { CHECKPOINT_NOTE } from "./summary";
+import { isCheckpointNote } from "./summary";
 
 interface NativeTail {
     model: string;
@@ -1754,7 +1754,7 @@ export class NativeFoldReplay {
                         // instead; older checkpoints stored the head itself.
                         baseline:
                             tail?.baseline ??
-                            (cut.data.summary === CHECKPOINT_NOTE
+                            (isCheckpointNote(cut.data.summary)
                                 ? readSessionMeta(
                                       this.storage.db,
                                       sessionID,

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as ownerModule from "./owner";
 import { FoldOwner, foldDigest } from "./owner";
+import { CHECKPOINT_NOTE } from "./summary";
 
 function fixture() {
     const data = new Map<string, unknown>();
@@ -262,4 +263,54 @@ test("a checkpoint answered with the note keeps its head in the fold record", as
     const plain = await fixture().supply(12, 13);
     expect(plain.submitted).toBe("baseline 1");
     expect("head" in plain).toBe(false);
+});
+
+test("after a revert reuses a sequence number, a note record keeps its head only for checkpoints it answered", async () => {
+    const note = CHECKPOINT_NOTE;
+    const rendered = (id: string) => ({
+        id,
+        role: "user",
+        content: [{ type: "text", text: `<summary>\n${note}\n</summary>` }],
+    });
+    const observe = (owner: FoldOwner, id: string, hard: string[]) =>
+        owner.observe({
+            sessionID: "s",
+            cutSeq: 13,
+            summary: note,
+            rendered: rendered(id),
+            onHard: (reason) => hard.push(reason),
+        });
+    const answer = (owner: FoldOwner, checkpointID: string) =>
+        owner.supply({
+            sessionID: "s",
+            watermark: 12,
+            runningCut: 13,
+            materialize: () => "frozen history head",
+            checkpointText: note,
+            checkpointID,
+        });
+    // Checkpoint A is answered and served; after a revert, checkpoint B gets A's
+    // sequence number and the hook answers it with the same record.
+    const answeredB = fixture();
+    await answer(answeredB.owner, "A");
+    expect(await observe(answeredB.owner, "A", [])).toMatchObject({ head: "frozen history head" });
+    expect((await answer(answeredB.owner, "B")).answered).toEqual(["A", "B"]);
+    const hard: string[] = [];
+    const rebuilt = await observe(answeredB.owner, "B", hard);
+    expect(hard).toEqual(["boot_recovery"]);
+    expect(rebuilt.rendered?.id).toBe("B");
+    expect(rebuilt.head).toBe("frozen history head");
+    // B was answered another way (the hook never reached this record), so the
+    // record's head is A's, and the rebuilt record keeps none.
+    for (const observed of [true, false]) {
+        const other = fixture();
+        await answer(other.owner, "A");
+        if (observed) await observe(other.owner, "A", []);
+        const otherHard: string[] = [];
+        const foreign = await observe(other.owner, "B", otherHard);
+        expect(otherHard).toEqual(["boot_recovery"]);
+        expect(foreign.submitted).toBe(note);
+        expect(foreign.head).toBeUndefined();
+        expect(foreign.rendered?.id).toBe("B");
+    }
 });

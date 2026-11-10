@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import {
     CHECKPOINT_NOTE,
+    CHECKPOINT_NOTES,
     hasFoldSummary,
+    isCheckpointNote,
     isHistoryHead,
     RAW_HISTORY_ACCOUNT,
     withRecordedHead,
@@ -11,6 +13,24 @@ test("the checkpoint note is the fixed text the user sees, with no per-session v
     expect(CHECKPOINT_NOTE).toBe(
         "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.",
     );
+});
+
+test("every note text ever stored stays recognised, and the current one is written", () => {
+    // Host rows keep the note they were written with. A rewording appends to the
+    // list, so the first shipped text must stay its first entry.
+    expect(CHECKPOINT_NOTES[0]).toBe(
+        "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.",
+    );
+    expect(CHECKPOINT_NOTES.at(-1)).toBe(CHECKPOINT_NOTE);
+    for (const note of CHECKPOINT_NOTES) {
+        expect(isCheckpointNote(note)).toBe(true);
+        expect(isHistoryHead(note)).toBe(false);
+        expect(JSON.stringify(withRecordedHead(checkpoint(note), note, "recorded head"))).toBe(
+            JSON.stringify(checkpoint("recorded head")),
+        );
+    }
+    expect(isCheckpointNote(`${CHECKPOINT_NOTE} `)).toBe(false);
+    expect(isCheckpointNote(RAW_HISTORY_ACCOUNT)).toBe(false);
 });
 
 test("neither the stored note nor the raw-history account counts as a history head", () => {

@@ -22,9 +22,12 @@ import type { SessionContext, V2Context } from "./types";
 /**
  * `stored` is the text the host stored for the checkpoint, when it is not the
  * head itself (the checkpoint note); `head: false` leaves the transform's
- * output without history head messages.
+ * output without history head messages, and `baseline` is the text of the first
+ * one. `checkpointID` names the host checkpoint row the fold record answered.
  */
-async function fixture(options: { stored?: string; head?: boolean } = {}) {
+async function fixture(
+    options: { stored?: string; head?: boolean; baseline?: string; checkpointID?: string } = {},
+) {
     const parent = join(tmpdir(), "magic-context", "checkpoint-head");
     mkdirSync(parent, { recursive: true });
     const dir = createTestTempDirFromPath(join(parent, "fixture-"));
@@ -81,7 +84,10 @@ async function fixture(options: { stored?: string; head?: boolean } = {}) {
                         parts: [
                             {
                                 type: "text",
-                                text: id === HEAD_IDS[0] ? "current baseline" : "delta",
+                                text:
+                                    id === HEAD_IDS[0]
+                                        ? (options.baseline ?? "current baseline")
+                                        : "delta",
                             },
                         ],
                     })),
@@ -137,6 +143,7 @@ async function fixture(options: { stored?: string; head?: boolean } = {}) {
         runningCut: 2,
         materialize: () => summary,
         ...(options.stored === undefined ? {} : { checkpointText: options.stored }),
+        ...(options.checkpointID === undefined ? {} : { checkpointID: options.checkpointID }),
     });
     return {
         db,
@@ -292,6 +299,87 @@ test("a rebuilt fold record still never serves the checkpoint note as history in
     };
     expect(await served()).toContain("<session-history>summary</session-history>");
     expect(await served(CHECKPOINT_NOTE)).not.toContain("Magic Context added a compaction marker");
+});
+
+/** Bind the fixture's fold record to a checkpoint a revert removed. */
+async function rebindToRevertedCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
+    const record = (await f.storage.get("fold/v1/s")) as FoldIdentity;
+    await f.storage.set("fold/v1/s", {
+        ...record,
+        rendered: {
+            id: "reverted-cut",
+            role: "user",
+            content: [{ type: "text", text: "checkpoint removed by a revert" }],
+        },
+    });
+}
+
+test("a note checkpoint whose rebuilt record has no head serves restored history, folds once, then replays", async () => {
+    // The path the rebuilt-record witness above takes: observe rebuilds the
+    // record from the host row and requests a fold (HARD) once; the checkpoint is
+    // never served, so the restored rows and the pass's own history head stand
+    // in for it on this pass and every later one.
+    const logs = spyOn(logger, "sessionLog");
+    const f = await fixture({ stored: CHECKPOINT_NOTE, head: false });
+    try {
+        await rebindToRevertedCheckpoint(f);
+        const passes: string[] = [];
+        for (let pass = 0; pass < 4; pass++) {
+            const draft = f.draft();
+            await f.hooks.get("context")!(draft);
+            passes.push(JSON.stringify(draft.messages));
+        }
+        expect(passes[0]).not.toContain("<conversation-checkpoint>");
+        expect(passes[0]).toContain("unarchived source");
+        for (const later of passes.slice(1)) expect(later).toBe(passes[0]!);
+        const lines = logs.mock.calls.map((args) => args.map(String).join(" "));
+        expect(lines.filter((line) => line.includes("HARD reason=boot_recovery"))).toHaveLength(1);
+        expect(
+            lines.filter((line) => line.includes("note checkpoint without a recorded head")),
+        ).toHaveLength(4);
+        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).head).toBeUndefined();
+    } finally {
+        logs.mockRestore();
+        await f.close();
+    }
+});
+
+test("a note checkpoint the rebuilt record answered keeps serving the recorded head", async () => {
+    // The fold record answered this checkpoint row too (a revert let it reuse the
+    // sequence number of the checkpoint it was served for), so its head carries over.
+    for (const head of [true, false]) {
+        const f = await fixture({ stored: CHECKPOINT_NOTE, head, checkpointID: "cut" });
+        try {
+            await rebindToRevertedCheckpoint(f);
+            const first = f.draft();
+            await f.hooks.get("context")!(first);
+            const served = JSON.stringify(first.messages);
+            expect(served).toContain("<conversation-checkpoint>");
+            expect(served).not.toContain("Magic Context added a compaction marker");
+            expect(served).toContain(
+                head ? "current baseline" : "<session-history>summary</session-history>",
+            );
+            const replay = f.draft();
+            await f.hooks.get("context")!(replay);
+            expect(JSON.stringify(replay.messages)).toBe(served);
+        } finally {
+            await f.close();
+        }
+    }
+});
+
+test("the served history head replaces the checkpoint summary literally, `$` sequences included", async () => {
+    const baseline =
+        "<session-history>cost $& and $1 and $' and $$ stay as written</session-history>";
+    const f = await fixture({ baseline });
+    try {
+        const draft = f.draft();
+        await f.hooks.get("context")!(draft);
+        const text = String(draft.messages[0]?.content[0]?.text);
+        expect(text).toContain(`<summary>\n${baseline}\n</summary>`);
+    } finally {
+        await f.close();
+    }
 });
 
 test("an oversized deferred checkpoint is refused, then an overflow permission repairs it before egress", async () => {

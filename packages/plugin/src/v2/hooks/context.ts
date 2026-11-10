@@ -172,6 +172,7 @@ import { restoreRow } from "../fold/restore";
 import {
     CHECKPOINT_NOTE,
     hasFoldSummary,
+    isCheckpointNote,
     isHistoryHead,
     RAW_HISTORY_ACCOUNT,
     withRecordedHead,
@@ -267,9 +268,10 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     }
     for (const part of checkpoint.content)
         if (part.type === "text" && typeof part.text === "string") {
+            // A function replacement keeps `$&`, `$'` and the like in the head literal.
             part.text = part.text.replace(
                 `<summary>\n${submitted}\n</summary>`,
-                `<summary>\n${baseline}\n</summary>`,
+                () => `<summary>\n${baseline}\n</summary>`,
             );
         }
     const volatile = draft.messages.find((message) => message.id === HEAD_IDS[1]);
@@ -282,6 +284,16 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
         ...draft.messages.filter((message) => message !== first),
     );
     return true;
+}
+
+/**
+ * Whether a host checkpoint may be served as the carrier of earlier history. One
+ * whose stored text is a note stands for history only through the head its fold
+ * record kept; without that head it would put the note where history belongs, so
+ * the pass restores the rows instead and renders its own history head.
+ */
+function servableCarrier(stored: string, head: string | undefined): boolean {
+    return !isCheckpointNote(stored) || head !== undefined;
 }
 
 function bindKeptInstructionCoordinates(
@@ -1922,7 +1934,7 @@ export async function registerContext(context: V2Context) {
                     ].find(
                         (value) =>
                             value !== RAW_HISTORY_ACCOUNT &&
-                            value !== CHECKPOINT_NOTE &&
+                            !isCheckpointNote(value) &&
                             ((publishedHistory && value?.includes("<session-history>")) ||
                                 hasFoldSummary(value)),
                     );
@@ -2005,6 +2017,7 @@ export async function registerContext(context: V2Context) {
                 // The host stores the note; the owner keeps the head it stands for,
                 // which the checkpoint carrier serves and measures in its place.
                 checkpointText: CHECKPOINT_NOTE,
+                checkpointID: running?.id,
             });
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
@@ -2836,9 +2849,13 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
-                        submitted = identity.renderedSummary ?? carrier.submitted;
-                        upgradeCheckpointSequence = carrier.row.seq;
+                        const stored = identity.renderedSummary ?? carrier.submitted;
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
+                            submitted = stored;
+                            recordedHead = identity.head;
+                            upgradeCheckpointSequence = carrier.row.seq;
+                        }
                     }
                 }
                 let nativeRestored = localCut
@@ -2937,13 +2954,23 @@ export async function registerContext(context: V2Context) {
                                 );
                             },
                         });
-                        checkpoint = structuredClone(identity.rendered ?? incoming);
-                        submitted = identity.rendered
+                        const stored = identity.rendered
                             ? (identity.renderedSummary ?? identity.submitted)
                             : (cut.data.summary ?? "");
-                        // This owner record answered this very cut, so its head
-                        // is the account the stored note stands for.
-                        recordedHead = identity.head;
+                        // A record rebuilt from a note checkpoint without a head of
+                        // its own is not served: observe already requested the fold,
+                        // and the restored rows below take the checkpoint's place.
+                        if (servableCarrier(stored, identity.head)) {
+                            checkpoint = structuredClone(identity.rendered ?? incoming);
+                            submitted = stored;
+                            // This owner record answered this very cut, so its head
+                            // is the account the stored note stands for.
+                            recordedHead = identity.head;
+                        } else
+                            sessionLog(
+                                draft.sessionID,
+                                "v2 host fold: note checkpoint without a recorded head; serving restored history",
+                            );
                     }
                     draft.messages.splice(
                         0,

@@ -13,10 +13,24 @@ export const RAW_HISTORY_ACCOUNT =
  * context. The model never reads the stored text: Magic Context serves its own
  * head and restores the rows between its history and the host's cut. Code that
  * needs the head reads it from Magic Context's own state, never from this text.
- * Fixed bytes, with no per-session values.
+ * Fixed bytes, with no per-session values. Stored checkpoints are recognised by
+ * these exact bytes, so a rewording must be appended to CHECKPOINT_NOTES below,
+ * never edited in place.
  */
 export const CHECKPOINT_NOTE =
     "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.";
+
+/**
+ * Every checkpoint note text any release has stored, oldest first; the last entry
+ * is the one written now. Host rows keep the text they were written with, so code
+ * that recognises a note checkpoint must accept all of them.
+ */
+export const CHECKPOINT_NOTES: readonly string[] = Object.freeze([CHECKPOINT_NOTE]);
+
+/** Whether a stored checkpoint text is a note rather than a history head. */
+export function isCheckpointNote(value: string | null | undefined): boolean {
+    return typeof value === "string" && CHECKPOINT_NOTES.includes(value);
+}
 
 /** Markup without any history is not a usable host compaction summary. */
 export function hasFoldSummary(summary: string | null | undefined): summary is string {
@@ -28,7 +42,7 @@ export function hasFoldSummary(summary: string | null | undefined): summary is s
  * neither the raw-history account nor the stored checkpoint note.
  */
 export function isHistoryHead(value: string | null | undefined): value is string {
-    return value !== RAW_HISTORY_ACCOUNT && value !== CHECKPOINT_NOTE && hasFoldSummary(value);
+    return value !== RAW_HISTORY_ACCOUNT && !isCheckpointNote(value) && hasFoldSummary(value);
 }
 
 /**
@@ -43,8 +57,7 @@ export function withRecordedHead(
     submitted: string,
     head: string | undefined,
 ): V2Message {
-    if (submitted !== CHECKPOINT_NOTE || head === undefined || head === submitted)
-        return checkpoint;
+    if (!isCheckpointNote(submitted) || head === undefined || head === submitted) return checkpoint;
     const copy = structuredClone(checkpoint);
     for (const part of copy.content)
         if (part.type === "text" && typeof part.text === "string")
