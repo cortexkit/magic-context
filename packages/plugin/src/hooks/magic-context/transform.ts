@@ -718,6 +718,8 @@ export interface TransformDeps {
         sessionId: string,
         messages: MessageLike[],
         permitted: boolean,
+        /** Covered host instruction rows this pass serves ahead of `messages`. */
+        covered: MessageLike[],
     ) => HostRowReclaim;
     /** Resolved project mode. Rust mode bypasses every TS mutation below. */
     transformMode?: "ts" | "rust";

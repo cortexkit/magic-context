@@ -1,4 +1,4 @@
-type CatalogVersion = "2.0.22" | "2.1.4" | "2.2.3";
+type CatalogVersion = "2.0.22" | "2.1.2" | "2.1.4" | "2.2.3";
 
 export const codeModeInstructionMetadata = {
     notice: "instructions",
@@ -7,7 +7,8 @@ export const codeModeInstructionMetadata = {
 
 // Mirrors render() and the complete-catalog added-entry branch of update() in
 // OpenCode packages/core/src/codemode/instructions.ts at v2.0.22, v2.1.4 and
-// v2.2.3, with namespace/entry lines from codemode/catalog.ts. Descriptions are
+// v2.2.3 (v2.1.2 renders the catalog as v2.1.4 does), with namespace/entry
+// lines from codemode/catalog.ts. Descriptions are
 // fixture inputs; changing a namespace description makes update() emit a full
 // replacement. The newer version changes the prompt, not the replacement rules.
 // Each namespace has one pinned tool, keeping the catalog complete even when
@@ -47,3 +48,97 @@ export function addCodeModeEntries(descriptions: readonly string[]) {
     );
     return `The Code Mode tool catalog has changed.\n\nNew tools are available in addition to those previously listed:\n${entries.join("\n")}`;
 }
+
+// The text OpenCode renders when Code Mode is switched off for a session
+// (`removed` in codemode/instructions.ts, unchanged from v2.0.22 to v2.2.5).
+export const CODE_MODE_REMOVED =
+    "Code Mode tools are no longer available. Do not use any previously listed Code Mode tools.";
+
+/** One MCP server's instructions as OpenCode lists them. */
+export interface McpServerFixture {
+    server: string;
+    instructions: string;
+    /** False when the server's tools are called directly instead of through Code Mode. */
+    codemode?: false;
+}
+
+// Mirrors entries(), render(), update() and the `removed` renderer in OpenCode
+// packages/core/src/mcp/instructions.ts at v2.0.22, v2.1.2, v2.1.4 and v2.2.5,
+// and McpTool.namespace() in tool/mcp.ts. Up to v2.1.2, a server whose
+// instructions changed made update() restate the whole list; from v2.1.3 it
+// renders a "have changed" entry instead. Added and removed servers render as
+// entries in every version, so connecting or disconnecting a server never
+// restates the list.
+function mcpEntries(servers: readonly McpServerFixture[]): string[] {
+    return servers.flatMap((server) => [
+        `  <server name="${server.server}">`,
+        ...(server.codemode === false
+            ? []
+            : [
+                  `    Use tools from this server through \`execute\` under \`tools[${JSON.stringify(server.server.replace(/[^a-zA-Z0-9_-]/g, "_"))}]\`.`,
+              ]),
+        ...server.instructions.split("\n").map((line) => `    ${line}`),
+        "  </server>",
+    ]);
+}
+
+export function renderMcpGuidance(servers: readonly McpServerFixture[]): string {
+    return ["<mcp_instructions>", ...mcpEntries(servers), "</mcp_instructions>"].join("\n");
+}
+
+export function updateMcpGuidance(
+    previous: readonly McpServerFixture[],
+    current: readonly McpServerFixture[],
+    version: CatalogVersion = "2.2.3",
+): string {
+    const before = new Map(previous.map((server) => [server.server, server]));
+    const names = new Set(current.map((server) => server.server));
+    const added = current.filter((server) => !before.has(server.server));
+    const removed = previous.filter((server) => !names.has(server.server));
+    const changed = current.filter((server) => {
+        const old = before.get(server.server);
+        return (
+            old !== undefined &&
+            (old.instructions !== server.instructions || old.codemode !== server.codemode)
+        );
+    });
+    const restate =
+        version === "2.0.22" || version === "2.1.2"
+            ? changed.length > 0 || (added.length === 0 && removed.length === 0)
+            : added.length === 0 && changed.length === 0 && removed.length === 0;
+    if (restate)
+        return [
+            "The available MCP server instructions have changed. This list supersedes the previous one.",
+            renderMcpGuidance(current),
+        ].join("\n");
+    return [
+        ...(added.length === 0
+            ? []
+            : [
+                  "New MCP server instructions are available in addition to those previously listed:",
+                  ...mcpEntries(added),
+              ]),
+        ...(changed.length === 0
+            ? []
+            : [
+                  "The following MCP server instructions have changed. Each entry replaces the previously listed server with the same name:",
+                  ...mcpEntries(changed),
+              ]),
+        ...(removed.length === 0
+            ? []
+            : [
+                  `Instructions for the following MCP servers are no longer available: ${removed.map((server) => server.server).join(", ")}.`,
+              ]),
+    ].join("\n");
+}
+
+export const MCP_GUIDANCE_REMOVED = "MCP server instructions are no longer available.";
+
+// The core/date source in OpenCode packages/core/src/instructions/builtins.ts.
+export const changedDate = (date: Date) => `Today's date is now: ${date.toDateString()}`;
+
+// Instructions.renderUpdate in OpenCode packages/core/src/instructions/index.ts
+// joins the sources a row carries with a blank line, in the order
+// SessionContext combines them: core/codemode, core/mcp-guidance, then project
+// instructions (core/instructions), then core/date.
+export const instructionRow = (...parts: string[]) => parts.join("\n\n");
