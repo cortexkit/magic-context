@@ -484,6 +484,7 @@ import {
 	applyPiThinkingBindingRecovery,
 	frozenBindingEntryIds,
 	hasUnfrozenPiThinking,
+	recordPiBindingStripEndOrder,
 	resolvePiBindingStripOrder,
 	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
@@ -5976,9 +5977,6 @@ export function registerPiContextHandler(
 					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
 				});
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
-			// The pipeline persisted the strip a tools release required, so the new
-			// tool list becomes the one later passes compare with.
-			requestToolsRelease?.commit();
 			thinkingFitInputObserverForTests?.({
 				sessionId,
 				held: pipelineArgs.signedThinkingHold === true,
@@ -7157,6 +7155,23 @@ export function registerPiContextHandler(
 			}
 			budget.assertOutcome();
 			publishTransformDecision?.();
+			// The pass succeeded, and the pipeline persisted the strip a tools
+			// release required (or refused the pass), so the new tool list becomes
+			// the one later passes compare with. A release pass is served in the end
+			// strip order, which is recorded only now, so a release pass that fails
+			// leaves a start-order session unchanged; if that record cannot be
+			// written, the release is not recorded either and the next pass
+			// releases again.
+			if (
+				requestToolsChange === null ||
+				recordPiBindingStripEndOrder(options.db, sessionId)
+			)
+				requestToolsRelease?.commit();
+			else
+				sessionLog(
+					sessionId,
+					"request tools release not recorded: the end strip order could not be written",
+				);
 			if (
 				!budget.sideTurn &&
 				((result.strictThinkingKept && !result.signedPrefixRewritten) ||
