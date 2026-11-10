@@ -17,6 +17,7 @@ type OpenCode2Client = ReturnType<typeof OpenCode.make>;
 
 export interface OpenCode2TestHarnessOptions {
     mockModelID?: string;
+    additionalModelIDs?: string[];
     thinkingScope?: (body: Record<string, unknown>) => string | undefined;
     prefixBinding?: boolean;
     magicContextConfig?: Record<string, unknown>;
@@ -76,6 +77,7 @@ export class OpenCode2TestHarness implements HostHarness {
     static async create(options: OpenCode2TestHarnessOptions = {}): Promise<OpenCode2TestHarness> {
         const spawnOptions: OpenCode2SpawnOptions = {
             defaultModelID: options.mockModelID,
+            additionalModelIDs: options.additionalModelIDs,
             thinkingScope: options.thinkingScope,
             prefixBinding: options.prefixBinding,
             magicContextConfig: options.magicContextConfig ?? {},
