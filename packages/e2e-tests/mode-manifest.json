@@ -67,6 +67,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/oc2-manual-fold-ride.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host manual /compact with published history: the request after it serves a rebuilt history head, every row between the history coverage and the host cut comes back once, and work queued for the next rebuild must land on that request. With experimental part_rows (OpenCode 2.2.6+), restored rows must keep their assistant replies.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/native-fold-provenance.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
