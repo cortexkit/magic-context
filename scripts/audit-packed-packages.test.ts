@@ -26,7 +26,7 @@ describe("packed audit exceptions", () => {
         const result = classifyHighFindings({ vulnerabilities: tomlChain() }, ROOT);
         expect(result.refused).toEqual([]);
         expect(result.accepted).toHaveLength(4);
-        expect(result.unusedExceptions).toEqual(["zod"]);
+        expect(result.unusedExceptions).toEqual(["zod", "effect"]);
     });
 
     it("refuses a toml advisory that is not on the list", () => {
@@ -68,7 +68,55 @@ describe("packed audit exceptions", () => {
         const result = classifyHighFindings({ vulnerabilities: {} }, ROOT);
         expect(result.accepted).toEqual([]);
         expect(result.refused).toEqual([]);
-        expect(result.unusedExceptions).toEqual(["toml", "zod"]);
+        expect(result.unusedExceptions).toEqual(["toml", "zod", "effect"]);
+    });
+
+    /** The shape npm audit reported for the packed plugin on 2026-11-10. */
+    const effectCookieAdvisory = (range = ">=4.0.0-beta.0 <4.0.0-beta.103") => ({
+        source: 2,
+        title: "Effect: Cookie attribute injection",
+        url: "https://github.com/advisories/GHSA-chp3-j5qr-2vfr",
+        severity: "moderate",
+        range,
+    });
+
+    it("effect exception accepts its own advisory together with the toml path", () => {
+        const vulnerabilities = tomlChain();
+        vulnerabilities.effect = { severity: "high", via: [effectCookieAdvisory(), "toml"] };
+        const result = classifyHighFindings({ vulnerabilities }, ROOT);
+        expect(result.refused).toEqual([]);
+        expect(result.accepted).toHaveLength(4);
+        expect(result.unusedExceptions).toEqual(["zod"]);
+    });
+
+    it("effect exception refuses a widened advisory range", () => {
+        const vulnerabilities = tomlChain();
+        vulnerabilities.effect = {
+            severity: "high",
+            via: [effectCookieAdvisory(">=4.0.0-beta.0 <4.0.0-rc.120"), "toml"],
+        };
+        const result = classifyHighFindings({ vulnerabilities }, ROOT);
+        expect(result.refused).toContain("effect (high)");
+        expect(result.refused).toContain(`${ROOT} (high)`);
+    });
+
+    it("effect exception does not cover a second advisory or an unaccepted dependency", () => {
+        const second = tomlChain();
+        second.effect = {
+            severity: "high",
+            via: [effectCookieAdvisory(), advisory("GHSA-1111-1111-1111"), "toml"],
+        };
+        expect(classifyHighFindings({ vulnerabilities: second }, ROOT).refused).toContain("effect (high)");
+
+        const otherDependency = tomlChain();
+        otherDependency.effect = { severity: "high", via: [effectCookieAdvisory(), "toml", "some-parser"] };
+        otherDependency["some-parser"] = { severity: "high", via: [advisory("GHSA-2222-2222-2222")] };
+        expect(classifyHighFindings({ vulnerabilities: otherDependency }, ROOT).refused).toContain("effect (high)");
+
+        const newToml = tomlChain();
+        newToml.toml = { severity: "high", via: [...TOML_ADVISORIES, advisory("GHSA-0000-0000-0000")] };
+        newToml.effect = { severity: "high", via: [effectCookieAdvisory(), "toml"] };
+        expect(classifyHighFindings({ vulnerabilities: newToml }, ROOT).refused).toContain("effect (high)");
     });
 
     it("zod exception accepts only its documented advisory", () => {
@@ -84,7 +132,7 @@ describe("packed audit exceptions", () => {
         const accepted = classifyHighFindings({ vulnerabilities: chain() }, ROOT);
         expect(accepted.refused).toEqual([]);
         expect(accepted.accepted).toHaveLength(5);
-        expect(accepted.unusedExceptions).toEqual([]);
+        expect(accepted.unusedExceptions).toEqual(["effect"]);
         for (const name of ["zod", "@opencode-ai/plugin", ROOT]) {
             const vulnerabilities: NonNullable<AuditReport["vulnerabilities"]> = chain();
             vulnerabilities[name].via?.push(advisory("GHSA-new-advisory"));

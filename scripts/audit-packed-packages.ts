@@ -19,7 +19,7 @@ const PACKAGES = [
     },
 ] as const;
 
-type AuditVia = string | { url?: unknown; source?: unknown; title?: unknown };
+type AuditVia = string | { url?: unknown; source?: unknown; title?: unknown; range?: unknown };
 
 export type AuditReport = {
     metadata?: {
@@ -44,6 +44,15 @@ export type AuditReport = {
  * validation. Our packages require patched Zod, but @opencode-ai/plugin pins
  * 4.1.8. Accept only its nested copy and this advisory; remove the entry when
  * OpenCode updates the pin. A vulnerable direct or differently nested copy fails.
+ *
+ * effect < 4.0.0-beta.103: cookie attribute injection in Effect's HTTP cookie
+ * helpers, rated moderate. `@opencode-ai/plugin` pins an affected beta, and that
+ * copy is already rated high through `toml` above, so the audit refuses the
+ * release until this advisory is listed too. Magic Context never calls Effect's
+ * cookie code, and its own `effect` dependency is a later release candidate
+ * outside the range. The entry accepts the advisory only at the range it was
+ * published with: if the range is ever widened, it could reach our own copy,
+ * and the audit fails again. Remove the entry when OpenCode updates the pin.
  */
 export const ACCEPTED_ADVISORIES = [
     {
@@ -62,6 +71,12 @@ export const ACCEPTED_ADVISORIES = [
         dependentPath: ["@opencode-ai/plugin"],
         vulnerableNodes: ["node_modules/@opencode-ai/plugin/node_modules/zod"],
     },
+    {
+        vulnerablePackage: "effect",
+        advisories: ["https://github.com/advisories/GHSA-chp3-j5qr-2vfr"],
+        advisoryRanges: [">=4.0.0-beta.0 <4.0.0-beta.103"],
+        dependentPath: ["@opencode-ai/plugin"],
+    },
 ] as const;
 
 /**
@@ -69,6 +84,10 @@ export const ACCEPTED_ADVISORIES = [
  * accepted only when everything it is flagged for traces back to an accepted
  * advisory along that entry's dependency path. A new advisory on any package in
  * that path, including the root package itself, is refused.
+ *
+ * A package can be flagged for both reasons at once: its own listed advisory and
+ * a dependency on another accepted package (`effect` carries its own advisory and
+ * depends on `toml`). It is accepted only when both hold.
  */
 export function classifyHighFindings(
     report: AuditReport,
@@ -78,18 +97,25 @@ export function classifyHighFindings(
     const acceptedNames = new Set<string>();
     const usedExceptions = new Set<string>();
     const allowedEdges = new Map<string, Set<string>>();
+    // Packages whose own advisories are all listed, but which are also flagged
+    // through a dependency. The loop below accepts them once that dependency is.
+    const ownAdvisoriesAccepted = new Set<string>();
     for (const entry of ACCEPTED_ADVISORIES) {
         const vulnerable = findings[entry.vulnerablePackage];
         if (!vulnerable) continue;
         const via = vulnerable.via ?? [];
+        const ownAdvisories = via.filter((item) => typeof item !== "string");
         const onlyAccepted =
-            via.length > 0 &&
-            via.every(
+            ownAdvisories.length > 0 &&
+            ownAdvisories.every(
                 (item) =>
                     typeof item === "object" &&
                     item !== null &&
                     typeof item.url === "string" &&
-                    (entry.advisories as readonly string[]).includes(item.url),
+                    (entry.advisories as readonly string[]).includes(item.url) &&
+                    (!("advisoryRanges" in entry) ||
+                        (typeof item.range === "string" &&
+                            (entry.advisoryRanges as readonly string[]).includes(item.range))),
             );
         if (!onlyAccepted) continue;
         if ("vulnerableNodes" in entry) {
@@ -100,7 +126,8 @@ export function classifyHighFindings(
             ) continue;
         }
         usedExceptions.add(entry.vulnerablePackage);
-        acceptedNames.add(entry.vulnerablePackage);
+        if (ownAdvisories.length === via.length) acceptedNames.add(entry.vulnerablePackage);
+        else ownAdvisoriesAccepted.add(entry.vulnerablePackage);
         let previous: string = entry.vulnerablePackage;
         for (const dependent of [...entry.dependentPath, rootPackage]) {
             const allowed = allowedEdges.get(dependent) ?? new Set<string>();
@@ -121,7 +148,11 @@ export function classifyHighFindings(
             const dependentVia = finding.via ?? [];
             if (
                 dependentVia.length > 0 &&
-                dependentVia.every((item) => typeof item === "string" && allowed.has(item) && acceptedNames.has(item))
+                dependentVia.every((item) =>
+                    typeof item === "string"
+                        ? allowed.has(item) && acceptedNames.has(item)
+                        : ownAdvisoriesAccepted.has(dependent),
+                )
             ) {
                 acceptedNames.add(dependent);
                 changed = true;
