@@ -58,6 +58,25 @@ export function clearPendingMaterialization(sessions: Set<string>, sessionId: st
     causes.get(sessions)?.delete(sessionId);
 }
 
+/** Withdraw one recorded cause. The session stays pending while another cause
+ * remains, and its log label moves to one of those remaining causes. */
+export function clearPendingMaterializationOrigin(
+    sessions: Set<string>,
+    sessionId: string,
+    origin: PendingMaterializationOrigin,
+): void {
+    const pendingCauses = causes.get(sessions)?.get(sessionId);
+    if (!sessions.has(sessionId) || !pendingCauses?.has(origin)) return;
+    pendingCauses.delete(origin);
+    const [next] = pendingCauses;
+    if (next === undefined) {
+        clearPendingMaterialization(sessions, sessionId);
+        return;
+    }
+    if (origins.get(sessions)?.get(sessionId) === origin)
+        origins.get(sessions)?.set(sessionId, next);
+}
+
 /** The first origin remains the log label, but subsequent requests still matter:
  * a flush arriving while a system edit awaits its reply must not be deferred. */
 export function hasOnlySystemHashMaterialization(

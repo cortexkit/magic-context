@@ -1,5 +1,9 @@
 import { decodeMergedReasoningParts } from "../../features/magic-context/merged-reasoning-decisions";
-import { detectLatestTurnThinkingMismatch } from "../../features/magic-context/overflow-detection";
+import {
+    detectLatestTurnThinkingMismatch,
+    detectThinkingBindingMismatch,
+    isPrefixBoundThinkingModel,
+} from "../../features/magic-context/overflow-detection";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     armThinkingBindingRecovery,
@@ -7,6 +11,7 @@ import {
     getThinkingBindingRecoveryTarget,
 } from "../../features/magic-context/storage-meta-persisted";
 import { ensureSessionMetaRow } from "../../features/magic-context/storage-meta-shared";
+import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { contextRefusalError } from "./emergency-fail-closed";
 import { latestAssistantTurnStart } from "./latest-assistant-turn";
@@ -300,5 +305,37 @@ export function armLatestThinkingRecoveryFromError(args: {
     armLatestThinkingRecovery(args.db, args.sessionId);
     // The last-known-good request still carries the rejected bytes.
     dropSlot(args.sessionId, "latest-thinking-recovery-arm");
+    return true;
+}
+
+/**
+ * Arm thinking-binding recovery from a host failure event when the provider
+ * rejected a signed thinking block bound to a different prefix (the binding
+ * 400). OpenCode 2 reports provider failures only through its session event
+ * stream, so it arms here, as OpenCode 1's event handler does; the next pass
+ * then strips the reasoning of every assistant still carrying it. Without the
+ * arm, every later prompt would resend the same rejected block. Arms only for
+ * prefix-bound models (the same rule as OpenCode 1). Returns whether the error
+ * was this rejection.
+ */
+export function armThinkingBindingRecoveryFromError(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    error: unknown;
+    providerID?: string;
+    modelID?: string;
+    /** The host event the error came from, for the log line. */
+    source: string;
+}): boolean {
+    const mismatch = detectThinkingBindingMismatch(args.error);
+    if (!mismatch.isBindingMismatch) return false;
+    if (!isPrefixBoundThinkingModel(args.providerID, args.modelID)) return true;
+    armBindingRecoverySafely(args.db, args.sessionId);
+    sessionLog(
+        args.sessionId,
+        `thinking binding recovery armed from ${args.source} (provider paths: failing=${mismatch.failingBlockPath ?? "?"} firstChanged=${mismatch.firstChangedPath ?? "?"})`,
+    );
+    // The last-known-good request still carries the rejected bytes.
+    dropSlot(args.sessionId, "thinking-binding-recovery-arm");
     return true;
 }

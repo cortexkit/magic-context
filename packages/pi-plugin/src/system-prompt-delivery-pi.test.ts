@@ -240,7 +240,14 @@ it("Pi: already_delivered_system_change_does_not_hard_after_signed_head_hold", a
 		queuePendingOp(f.db, f.sessionId, target.tagNumber, "drop");
 		const held = await f.serve("genuine changed instruction");
 		expect(f.pair()).toBe(prefix);
-		expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
+		// The held turn's signed thinking is invalid behind the new prompt, which
+		// already loses the provider cache: the thinking is stripped, and the
+		// queued drop rides this request instead of buying a rewrite of its own
+		// later. The head stays as the hold prepared it, delivered with the new
+		// prompt.
+		expect(JSON.stringify(held.messages)).not.toContain("active plan");
+		expect(getPendingOps(f.db, f.sessionId)).toHaveLength(0);
+		expect(JSON.stringify(held.messages)).toContain("[dropped");
 		const hash = held.prompt.currentHash;
 		expect(
 			getOrCreateSessionMeta(f.db, f.sessionId).cachedM0SystemHash,
@@ -252,9 +259,9 @@ it("Pi: already_delivered_system_change_does_not_hard_after_signed_head_hold", a
 		await (await f.serve("genuine changed instruction")).accept();
 		f.wake();
 		const wake = await f.serve("genuine changed instruction");
+		// The delivered change folds nothing later; the landed drop replays.
 		expect(f.pair()).toBe(prefix);
-		expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
-		expect(JSON.stringify(wake.messages)).not.toContain("[dropped");
+		expect(JSON.stringify(wake.messages)).toContain("[dropped");
 		signalPiPendingMaterialization(f.sessionId, "user_flush");
 		const flushed = await f.serve("genuine changed instruction");
 		expect(getPendingOps(f.db, f.sessionId)).toHaveLength(0);

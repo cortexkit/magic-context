@@ -4,6 +4,7 @@ import {
     normalizeProtectedToolName,
     protectedToolTagNumbers,
 } from "../../features/magic-context/reclaim-protection";
+import type { RequestToolsChange } from "../../features/magic-context/request-tool-definitions";
 import {
     HYGIENE_PROVIDER_UNITS_VERSION,
     sessionDecisionCalibration,
@@ -143,6 +144,12 @@ import {
 } from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
+import {
+    beginHostCheckpointPass,
+    completeHostCheckpointPass,
+    hostCheckpointHeadChange,
+    stageServedHead,
+} from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import {
     clearInjectionCache,
@@ -1752,6 +1759,12 @@ interface RunPostTransformPhaseArgs {
      * thinking block on the wire sits behind changed bytes.
      */
     compactionModeTransition?: boolean;
+    /**
+     * What changed in the request's tools since the session's last pass on this
+     * prefix-bound model, or null. Signed thinking is bound to the tools, so
+     * every block on the wire is invalid on this pass.
+     */
+    requestToolsChange?: RequestToolsChange | null;
     readLastServedMessages?: () => readonly unknown[] | null;
     structuralSentinelUpgradeFailed?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
@@ -2212,6 +2225,7 @@ export async function runPostTransformPhase(
     const pendingMaterializationAtPassStart = args.pendingMaterializationSessions.has(
         args.sessionId,
     );
+    beginHostCheckpointPass(args.sessionId, args.pendingMaterializationSessions);
     const pendingOrigin = pendingMaterializationOrigin(
         args.pendingMaterializationSessions,
         args.sessionId,
@@ -2394,6 +2408,54 @@ export async function runPostTransformPhase(
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
         sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
+        releaseThinkingForRewrite(false, true);
+    }
+    // OpenCode 2 can replace the history head outside any pass: its compaction
+    // hook commits a new m[0]/m[1] for a manual /compact and asks for a
+    // `host_compaction` materialization. When that proves the head this request
+    // serves differs from the one the provider cached, the cache is already
+    // lost, so this pass is the hardFold ride every queued lane lands on. The
+    // request stays pending until a pass settles it (see the end of this phase).
+    const hostCheckpointRequested = hasPendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
+        args.sessionId,
+        "host_compaction",
+    );
+    const hostCheckpointProof =
+        hostCheckpointRequested && m0M1EnabledForFold
+            ? hostCheckpointHeadChange(args.sessionId, () => {
+                  hydrateCachedM0Mural(args.db, args.sessionId, args.sessionMeta as M0M1State);
+                  return {
+                      m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                      m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                      muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                  };
+              })
+            : undefined;
+    const hostCheckpointRide = hostCheckpointProof?.changed === true;
+    if (hostCheckpointRequested) {
+        sessionLog(
+            args.sessionId,
+            `host checkpoint head: changed=${hostCheckpointRide} proof=${hostCheckpointProof?.source ?? "none"}`,
+        );
+    }
+    // A held pass replays the persisted head, and the hook already replaced
+    // it: the hold keeps nothing unchanged. As on a first render, the new head
+    // goes out, so the open turn's signed thinking leaves the wire with it.
+    if (hostCheckpointRide && activeThinkingPrefixHold) {
+        sessionLog(
+            args.sessionId,
+            "host checkpoint head changed under a signed-thinking hold: stripping signed thinking",
+        );
+        releaseThinkingForRewrite(false, true);
+    }
+    // The request's tools changed (the caller logged what changed and lifted any
+    // hold). Tools come first in the request, so this pass already loses the
+    // whole provider cache: strip every signed block, compaction-off included,
+    // and let the queued work ride the rewrite. Only the m[0] fold decision
+    // below is unaffected: a name or description change still folds through
+    // its own trigger, and a schema-only change never does.
+    if (args.requestToolsChange && args.thinkingBindingRecoveryEnabledForModel === true) {
         releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =
@@ -2725,7 +2787,11 @@ export async function runPostTransformPhase(
         servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold: rewritingSignedPrefix || foldBustsServedPrefixThisPass || firstRenderBust,
+        hardFold:
+            rewritingSignedPrefix ||
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            hostCheckpointRide,
         force: forceRide({
             bands,
             percentage: args.contextUsage.percentage,
@@ -2796,6 +2862,7 @@ export async function runPostTransformPhase(
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
+            hostCheckpointHead: hostCheckpointRide,
             // A reading that only a local count put in the force band lifts the
             // signed-thinking hold only at 95% or more, by the same rule as the
             // force ride.
@@ -2839,7 +2906,12 @@ export async function runPostTransformPhase(
         activeThinkingTurn &&
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
-        if (foldBustsServedPrefixThisPass || firstRenderBust || publishedM1RefreshedThisPass)
+        if (
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            publishedM1RefreshedThisPass ||
+            hostCheckpointRide
+        )
             releaseThinkingForRewrite();
         else {
             unheldSignedTurnBust = true;
@@ -2861,6 +2933,7 @@ export async function runPostTransformPhase(
     const recoveryHeadChangedThisPass =
         !prefixPreflightFailed &&
         (foldChangesHeadThisPass ||
+            hostCheckpointRide ||
             (!firstRenderBust && publishedM1RefreshedThisPass) ||
             (!m0M1EnabledForFold && legacyPublishedHeadChanged(args)));
     const recoveryHeadlessRebuild =
@@ -3305,6 +3378,7 @@ export async function runPostTransformPhase(
                 pendingOpsDidMutate ||
                 foldBustsServedPrefixThisPass ||
                 firstRenderBust ||
+                hostCheckpointRide ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
@@ -4008,6 +4082,17 @@ export async function runPostTransformPhase(
                 if (result.m0RematerializedThisPass) {
                     m0ComparisonDecision = result.decision;
                 }
+                stageServedHead(
+                    args.sessionId,
+                    {
+                        m0Text: args.sessionMeta.cachedM0Bytes?.toString("utf8"),
+                        m1Text: args.sessionMeta.cachedM1Bytes?.toString("utf8"),
+                        muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+                    },
+                    args.sessionMeta.cachedM0Bytes == null
+                        ? -1
+                        : args.sessionMeta.cachedM0MaxCompartmentSeq,
+                );
                 sessionLog(
                     args.sessionId,
                     `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
@@ -4648,6 +4733,7 @@ export async function runPostTransformPhase(
     let bustedThisPass =
         firstApplicationEdits.any ||
         firstRenderBust ||
+        hostCheckpointRide ||
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||
@@ -5367,6 +5453,34 @@ export async function runPostTransformPhase(
 
     logTransformTiming(args.sessionId, "pp.tailGuard", tTailGuard);
     if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
+    if (hostCheckpointRide && isCacheBustingPass) {
+        // The hook's head can cover newer compartments than the head the
+        // provider saw, exactly as an executed fold that advances coverage.
+        try {
+            rearmChannel2AfterCoverageAdvancingHardFold({
+                db: args.db,
+                sessionId: args.sessionId,
+                foldExecuted: true,
+                compactionOff,
+                previousCoverage: hostCheckpointProof?.previousCoverage ?? null,
+                currentCoverage:
+                    args.sessionMeta.cachedM0Bytes == null
+                        ? null
+                        : args.sessionMeta.cachedM0MaxCompartmentSeq,
+            });
+        } catch (error) {
+            sessionLog(args.sessionId, "channel2 host-checkpoint reset failed (ignored):", error);
+        }
+    }
+    // The pass completed. A `host_compaction` request is settled when its proof
+    // showed no change or an allowed pass rode it; a pass that could not take
+    // the ride keeps it for the next one. Compaction-off never takes it, so a
+    // pass there settles it rather than keep it pending for good.
+    completeHostCheckpointPass(
+        args.sessionId,
+        args.pendingMaterializationSessions,
+        hostCheckpointRequested && (!hostCheckpointRide || isCacheBustingPass || compactionOff),
+    );
     return {
         explicitMaterializedSuccessfully,
         deferredMaterializedSuccessfully,

@@ -10,6 +10,7 @@ import {
 } from "../../features/magic-context/message-index-async";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
+import type { RequestToolsFingerprint } from "../../features/magic-context/request-tool-definitions";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
@@ -124,6 +125,7 @@ import {
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
+import { forgetHostCheckpointPass, revertHostCheckpointPass } from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
 import { takeCoveredInstructionRows } from "./host-served-rows";
 import {
@@ -218,6 +220,7 @@ import {
 } from "./recovery-fit";
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
+import { evaluateRequestToolsRelease, type RequestToolsRelease } from "./request-tools-release";
 import { heuristicsAlreadyRanThisTurn } from "./routine-cleanup-decision";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
@@ -657,6 +660,14 @@ export interface TransformDeps {
      */
     getToolSetHash?: (sessionId: string) => string;
     getToolDefinitionsHash?: (sessionId: string) => string | undefined;
+    /**
+     * The fingerprint of the tools this session's request sends (names,
+     * descriptions and schemas), when the host can see them per request. On a
+     * prefix-bound model a change releases signed thinking (see
+     * request-tools-release.ts). Only OpenCode 2 supplies it: OpenCode 1's tool
+     * hook is shared by every session on a route.
+     */
+    getRequestToolsFingerprint?: (sessionId: string) => RequestToolsFingerprint | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
@@ -1960,13 +1971,35 @@ export function createTransform(deps: TransformDeps) {
                   },
               })
             : null;
+        // A prefix-bound model binds every signed thinking block to the request's
+        // tools. When they changed since the session's last pass on this model,
+        // the kept thinking is invalid: the pass releases it (no hold, every
+        // signed block stripped in postprocess) and rides the cache loss the
+        // changed tools already cause.
+        const requestToolsFingerprint =
+            modelForBudget &&
+            isPrefixBoundThinkingModel(modelForBudget.providerID, modelForBudget.modelID)
+                ? deps.getRequestToolsFingerprint?.(sessionId)
+                : undefined;
+        const requestToolsRelease: RequestToolsRelease | undefined =
+            modelForBudget && requestToolsFingerprint
+                ? evaluateRequestToolsRelease({
+                      db,
+                      sessionId,
+                      modelKey: `${modelForBudget.providerID}/${modelForBudget.modelID}`,
+                      fingerprint: requestToolsFingerprint,
+                  })
+                : undefined;
+        const requestToolsChanged = requestToolsRelease?.change != null;
         // Compaction-off has no bust permission, so nothing could strip a turn
         // whose prefix changes (a memory fold still re-renders
         // m[0] there). It keeps the blanket hold for every open signed turn, as
         // before the hold was bounded; it has no history reclaim for the hold to
         // delay.
         activeThinkingPrefixHold =
-            signedThinkingPrefixBound && (compactionOff || signedThinkingHold?.held === true);
+            !requestToolsChanged &&
+            signedThinkingPrefixBound &&
+            (compactionOff || signedThinkingHold?.held === true);
         freezeM0M1 ||= activeThinkingPrefixHold;
         const originalForThinkingFit = takeSignedThinkingFitSnapshot({
             sessionId,
@@ -3665,6 +3698,7 @@ export function createTransform(deps: TransformDeps) {
             directoryPrefixHold: unresolvedDirectoryHold,
             forceSignedRebuildForFit: thinkingFitRetries.has(sessionId) || !!recovery.rebuildReason,
             compactionModeTransition: compactionModeTransitionPending.has(sessionId),
+            requestToolsChange: requestToolsRelease?.change ?? null,
             readLastServedMessages: () => {
                 const slot = getInMemorySlot(sessionId) ?? loadPersistedLkgSlot(db, sessionId);
                 try {
@@ -3753,6 +3787,9 @@ export function createTransform(deps: TransformDeps) {
         // The pass recorded any strip the mode switch required; later passes
         // replay it from the persisted ledger.
         compactionModeTransitionPending.delete(sessionId);
+        // Likewise for a request-tools release: its strip is persisted, so the
+        // new tool list becomes the one later passes compare with.
+        requestToolsRelease?.commit();
         if (recovery.prefix && recoveryReleased && !recoveryNormalized) {
             if (!recoveryBeforePostprocess)
                 throw new Error("Cannot release recovery without its pre-edit snapshot");
@@ -4685,9 +4722,15 @@ export function createTransform(deps: TransformDeps) {
     const timedTransform: typeof transform = (input, output) =>
         withTransformTimingSummary(async () => {
             const sessionId = findSessionId(output.messages as MessageLike[]);
+            if (sessionId) forgetHostCheckpointPass(sessionId);
             try {
                 await transform(input, output);
+                if (sessionId) forgetHostCheckpointPass(sessionId);
             } catch (error) {
+                // A refused pass served nothing: a host checkpoint request it
+                // settled must stay pending for the retry.
+                if (sessionId)
+                    revertHostCheckpointPass(sessionId, deps.pendingMaterializationSessions);
                 // These refusals propagate; the wrapper does not replay a previously prepared request.
                 if (sessionId && !deps.compactionOff && error instanceof EmergencyFailClosedError)
                     recordUsageRefusal(deps.db, sessionId);
