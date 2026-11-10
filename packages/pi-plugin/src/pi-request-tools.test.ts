@@ -107,7 +107,10 @@ const single = (
 	);
 
 it("on pi-ai's Anthropic writer, counts only the schema keys the request sends", () => {
-	const base = single({ type: "object", properties: { path: { type: "string" } } });
+	const base = single({
+		type: "object",
+		properties: { path: { type: "string" } },
+	});
 	// pi-ai sends { type: "object", properties, required } only, writing a
 	// missing `properties` or `required` as empty.
 	expect(
@@ -121,7 +124,9 @@ it("on pi-ai's Anthropic writer, counts only the schema keys the request sends",
 			description: "not sent",
 		}),
 	).toEqual(base);
-	expect(single({ type: "object" })).toEqual(single({ properties: {}, required: [] }));
+	expect(single({ type: "object" })).toEqual(
+		single({ properties: {}, required: [] }),
+	);
 	expect(
 		single({
 			type: "object",
@@ -130,7 +135,8 @@ it("on pi-ai's Anthropic writer, counts only the schema keys the request sends",
 		})?.schemas,
 	).not.toBe(base?.schemas);
 	expect(
-		single({ type: "object", properties: { path: { type: "number" } } })?.schemas,
+		single({ type: "object", properties: { path: { type: "number" } } })
+			?.schemas,
 	).not.toBe(base?.schemas);
 });
 
@@ -138,7 +144,10 @@ it("counts the whole schema on routes that send it whole", () => {
 	const extra = { type: "object", additionalProperties: false };
 	const routes: PiRequestToolsRoute[] = [
 		// Bedrock sends the registered schema as it is.
-		{ host: "pi", model: { ...PI_ANTHROPIC.model, api: "bedrock-converse-stream" } },
+		{
+			host: "pi",
+			model: { ...PI_ANTHROPIC.model, api: "bedrock-converse-stream" },
+		},
 		// A model that accepts strict tools gets the whole schema for tools that
 		// ask for constrained sampling, which the registry does not show.
 		{
@@ -162,14 +171,20 @@ it("over OAuth, counts tools under the Claude Code names pi-ai sends", () => {
 		readPiRequestToolsFingerprint(
 			{
 				getAllTools: () =>
-					registered.map((tool) => ({ ...tool, parameters: { type: "object" } })),
+					registered.map((tool) => ({
+						...tool,
+						parameters: { type: "object" },
+					})),
 				getActiveTools: () => registered.map((tool) => tool.name),
 			},
 			undefined,
 			[],
 			{ ...PI_ANTHROPIC, oauth },
 		);
-	const sentAsRead = fingerprint([{ name: "Read", description: "Second" }], false);
+	const sentAsRead = fingerprint(
+		[{ name: "Read", description: "Second" }],
+		false,
+	);
 	// "read" goes out as "Read"; of two tools with the same Claude Code name
 	// pi-ai sends the last one.
 	expect(fingerprint([{ name: "read", description: "Second" }], true)).toEqual(
@@ -199,7 +214,11 @@ it("over OAuth, counts tools under the Claude Code names pi-ai sends", () => {
 it("marks a tool a tool result activated before any call as deferred, as pi-ai sends it", () => {
 	const registered = [
 		...tools(),
-		{ name: "mcp_search", description: "Search", parameters: { type: "object" } },
+		{
+			name: "mcp_search",
+			description: "Search",
+			parameters: { type: "object" },
+		},
 	];
 	const pi = {
 		getAllTools: () => registered,
@@ -208,7 +227,9 @@ it("marks a tool a tool result activated before any call as deferred, as pi-ai s
 	const activation = [
 		{
 			role: "assistant",
-			content: [{ type: "toolCall", id: "c1", name: "load_tools", arguments: {} }],
+			content: [
+				{ type: "toolCall", id: "c1", name: "load_tools", arguments: {} },
+			],
 		},
 		{
 			role: "toolResult",
@@ -217,7 +238,12 @@ it("marks a tool a tool result activated before any call as deferred, as pi-ai s
 			addedToolNames: ["mcp_search"],
 		},
 	];
-	const immediate = readPiRequestToolsFingerprint(pi, undefined, [], PI_ANTHROPIC);
+	const immediate = readPiRequestToolsFingerprint(
+		pi,
+		undefined,
+		[],
+		PI_ANTHROPIC,
+	);
 	const deferred = readPiRequestToolsFingerprint(
 		pi,
 		undefined,
@@ -237,7 +263,9 @@ it("marks a tool a tool result activated before any call as deferred, as pi-ai s
 			[
 				{
 					role: "assistant",
-					content: [{ type: "toolCall", id: "c0", name: "mcp_search", arguments: {} }],
+					content: [
+						{ type: "toolCall", id: "c0", name: "mcp_search", arguments: {} },
+					],
 				},
 				...activation,
 			],
@@ -249,15 +277,22 @@ it("marks a tool a tool result activated before any call as deferred, as pi-ai s
 		...PI_ANTHROPIC,
 		model: { ...PI_ANTHROPIC.model, id: "claude-haiku-5-5" },
 	};
-	expect(readPiRequestToolsFingerprint(pi, undefined, activation, haiku)).toEqual(
-		readPiRequestToolsFingerprint(pi, undefined, [], haiku),
-	);
+	expect(
+		readPiRequestToolsFingerprint(pi, undefined, activation, haiku),
+	).toEqual(readPiRequestToolsFingerprint(pi, undefined, [], haiku));
 	// With every tool deferred, pi-ai sends them all as immediate tools.
 	const onlyDeferred = {
 		getAllTools: () => registered,
 		getActiveTools: () => ["mcp_search"],
 	};
 	expect(
-		readPiRequestToolsFingerprint(onlyDeferred, undefined, activation, PI_ANTHROPIC),
-	).toEqual(readPiRequestToolsFingerprint(onlyDeferred, undefined, [], PI_ANTHROPIC));
+		readPiRequestToolsFingerprint(
+			onlyDeferred,
+			undefined,
+			activation,
+			PI_ANTHROPIC,
+		),
+	).toEqual(
+		readPiRequestToolsFingerprint(onlyDeferred, undefined, [], PI_ANTHROPIC),
+	);
 });

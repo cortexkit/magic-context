@@ -69,9 +69,7 @@ describe("v2RequestToolsFingerprint schema digests", () => {
 
     test("match the uncached digest for fresh equal objects and follow in-place edits", () => {
         const tools = { cache_probe: { description: "Probe", input: schema() } };
-        const uncached = requestToolsFingerprint([
-            tool("cache_probe", "Probe", schema()),
-        ]);
+        const uncached = requestToolsFingerprint([tool("cache_probe", "Probe", schema())]);
         expect(v2RequestToolsFingerprint(tools)).toEqual(uncached);
         // A structurally equal copy (a host that rebuilds its schemas per
         // request) gives the same fingerprint.
@@ -83,9 +81,7 @@ describe("v2RequestToolsFingerprint schema digests", () => {
         const edited = v2RequestToolsFingerprint(tools);
         expect(edited.schemas).not.toBe(uncached.schemas);
         expect(edited).toEqual(
-            requestToolsFingerprint([
-                tool("cache_probe", "Probe", { ...schema(), required: [] }),
-            ]),
+            requestToolsFingerprint([tool("cache_probe", "Probe", { ...schema(), required: [] })]),
         );
         // A schema JSON cannot write still gets a digest.
         const cyclic: Record<string, unknown> = { type: "object" };
