@@ -39,8 +39,8 @@
  *   For OpenAI and Gemini the previous request's uncached tail may not be cached
  *   yet when the next request arrives, so the floor is the previous read, not the
  *   previous prompt.
- * For comparable full bodies, a short read more than --cache-ttl (default 5m)
- * after the prefix was last read in full or written is `idle_cache_expiry`.
+ * Any request kind, including a continuation: a short read more than --cache-ttl
+ * (default 5m) after the prefix was last read in full or written is `idle_cache_expiry`.
  *
  * Usage:
  *   bun scripts/analyze-cache-busts.ts <sessionIdPrefix> [options]
@@ -66,6 +66,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     type AnalyzedCacheRequest,
+    type CacheBustAttributionInput,
     type CacheBustDecisionAttribution,
     type CacheBustDivergenceClass,
     type CacheBustSessionAnalysis,
@@ -1102,7 +1103,7 @@ interface ByteComparison {
     previous: Snapshot;
     divergenceIndex: number;
     byteVerdict?: ByteVerdict;
-    specialClass?: CacheBustDivergenceClass;
+    specialClass?: CacheBustAttributionInput["threadEvidence"];
     comparisonNote?: string;
     prefixDivergence?: Segment;
 }
@@ -1389,7 +1390,7 @@ export function analyzeSnapshots(
         const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
         // Once a runner's cache has expired, changing bytes cannot incur an
         // additional cache miss. Preserve the diff as evidence, not a bust.
-        if (current.runnerRequest && shortRead && !comparison.specialClass && runnerGapMs > cacheTtlMs) {
+        if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
             rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
                 ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
                 comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
@@ -1461,8 +1462,9 @@ export function analyzeSnapshots(
         // A LATENCY row is also classified: a short read over an unchanged reusable
         // prefix is a provider-side fact and deserves a name, not a blank cell.
         const divergenceClass =
-            verdict === "SHORT" ? comparison.specialClass : verdict === "BUST" || verdict === "LATENCY"
+            verdict === "SHORT" || verdict === "BUST" || verdict === "LATENCY"
                 ? classifyCacheBust({
+                      threadEvidence: comparison.specialClass,
                       providerShortReadWithIdenticalPrefix: verdict === "LATENCY",
                       divergenceIndex,
                       previousMessageCount: comparisonPrevious.segments.length,

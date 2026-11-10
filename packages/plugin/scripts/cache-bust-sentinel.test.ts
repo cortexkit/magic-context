@@ -1162,7 +1162,7 @@ describe("cache-bust sentinel runs", () => {
             startMs: 50_000,
             lastBustMs: 50_000,
             lastBustClass: "accounted_execute_published_history",
-            rewrittenTokens: 123,
+            threadRewrittenTokens: 0,
         });
 
         time = 120_000;

@@ -31,8 +31,8 @@ import { Database } from "bun:sqlite";
  * | provider_short_read_after_reclaim | no | overrides provider_short_read_identical_bytes right after a reclaim bust: the bytes extend the reclaim request, but the provider did not serve its prefix (provider-side; one crossing billed twice) |
  * | double_bust_after_reclaim | no | overrides any other accounted class right after a reclaim bust; the wake names the overridden class as cause |
  * | continuation_short_read | yes | messages are deltas and the full system/tools prefix is unchanged; never wakes, including after reclaim |
- * | thread_break_unchanged_client_bytes | conditional | earlier full body and sent client deltas match; wakes only when the window rewrites at least 20,000 tokens, otherwise persists a suppressed observation |
- * | full_body_no_baseline | conditional | no earlier full body is available for comparison; the same 20,000-token window threshold applies |
+ * | thread_break_unchanged_client_bytes | conditional | earlier full body and sent client deltas match; wakes only when the window rewrites at least 20,000 tokens, otherwise persists a suppressed observation; only this class and full_body_no_baseline contribute tokens |
+ * | full_body_no_baseline | conditional | no earlier full body is available for comparison; the same 20,000-thread-token window threshold applies |
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. Without --send, each new event is printed
@@ -170,7 +170,8 @@ interface OpenBustWindowState {
      * longer among the rows the next run analyzes.
      */
     lastBustClass?: string;
-    rewrittenTokens?: number;
+    /** Only thresholded thread findings contribute to the carried window total. */
+    threadRewrittenTokens?: number;
 }
 
 interface SessionWatermarkState {
@@ -205,7 +206,7 @@ export interface BustWindow {
     startMs: number;
     lastBustMs: number;
     rows: AnalyzedCacheRequest[];
-    precedingRewrittenTokens?: number;
+    precedingThreadRewrittenTokens?: number;
 }
 
 export interface SentinelCounters {
@@ -306,7 +307,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
                           startMs,
                           lastBustMs,
                           ...(lastBustClass ? { lastBustClass } : {}),
-                           ...(finiteNonnegative(open.rewrittenTokens) !== undefined ? { rewrittenTokens: open.rewrittenTokens as number } : {}),
+                           ...(finiteNonnegative(open.threadRewrittenTokens) !== undefined ? { threadRewrittenTokens: open.threadRewrittenTokens as number } : {}),
                       },
                   }
                 : {}),
@@ -854,7 +855,7 @@ export function groupBustWindows(
               startMs: seed.startMs,
               lastBustMs: seed.lastBustMs,
               rows: [],
-              precedingRewrittenTokens: seed.rewrittenTokens,
+              precedingThreadRewrittenTokens: seed.threadRewrittenTokens,
           }
         : undefined;
     let previousWasBust = Boolean(seed);
@@ -928,26 +929,8 @@ function windowKey(sessionId: string, startMs: number): string {
 }
 
 function windowRewrittenTokens(window: BustWindow): number {
-    return (window.precedingRewrittenTokens ?? 0) + window.rows.reduce((sum, row) => sum + Math.max(0, row.rewrittenTokens ?? 0), 0);
-}
-
-function unaccountedWindowRows(window: BustWindow, state: CacheBustSentinelState): AnalyzedCacheRequest[] {
-    const rewrittenTokens = windowRewrittenTokens(window);
-    const rows = window.rows.filter((row) =>
-        isUnaccountedCacheBustClass(row.divergenceClass as string, rewrittenTokens));
-    const observation = state.suppressedWindows[windowKey(window.sessionId, window.startMs)];
-    if (observation && rewrittenTokens >= 20_000 &&
-        !rows.some((row) => row.divergenceClass === observation.divergenceClass) && window.rows[0]) {
-        // A later continuation can push an earlier suppressed thread break over
-        // the threshold. Its class remains evidence even after the scan advances.
-        rows.push({
-            ...window.rows[0],
-            divergenceClass: observation.divergenceClass as CacheBustDivergenceClass,
-            cause: undefined,
-            firstDivergence: "(earlier suppressed thread observation; see analyzer)",
-        });
-    }
-    return rows;
+    return (window.precedingThreadRewrittenTokens ?? 0) + window.rows.reduce((sum, row) =>
+        sum + (isThresholdedThreadClass(row.divergenceClass ?? "") ? Math.max(0, row.rewrittenTokens ?? 0) : 0), 0);
 }
 
 export function eventForWindow(
@@ -964,7 +947,8 @@ export function eventForWindow(
             state.suppressedWindows[key] = { divergenceClass: row.divergenceClass as string, rewrittenTokens };
         }
     }
-    const unaccounted = unaccountedWindowRows(window, state);
+    const unaccounted = window.rows.filter((row) =>
+        isUnaccountedCacheBustClass(row.divergenceClass as string, rewrittenTokens));
     if (unaccounted.length === 0) return null;
     // A second bust right after a reclaim is the more specific finding than the
     // reclaim it follows, so it speaks for the window and names its cause.
@@ -1206,7 +1190,7 @@ function updateOpenWindowState(
             startMs: window.startMs,
             lastBustMs: window.lastBustMs,
             ...(lastBustClass ? { lastBustClass } : {}),
-            rewrittenTokens: windowRewrittenTokens(window),
+            threadRewrittenTokens: windowRewrittenTokens(window),
         };
     }
 }
@@ -1308,7 +1292,8 @@ export async function runSentinelOnce(
                         }),
                     );
                 }
-                const hasUnaccounted = unaccountedWindowRows(window, state).length > 0;
+                const hasUnaccounted = window.rows.some((row) =>
+                    isUnaccountedCacheBustClass(row.divergenceClass as string, windowRewrittenTokens(window)));
                 if (!hasUnaccounted) {
                     eventForWindow(window, analysis.directory ?? session.directory ?? session.projectPath, state);
                     counters.accountedWindows += 1;

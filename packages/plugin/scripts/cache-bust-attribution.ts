@@ -323,12 +323,12 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
     {
         divergenceClass: "thread_break_unchanged_client_bytes",
         accounted: false,
-        rule: "full body matches the earlier full body and all intervening client deltas; wakes only at 20,000 rewritten tokens per window",
+        rule: "full body matches the earlier full body and all intervening client deltas; wakes only at 20,000 tokens from thresholded thread findings in the window",
     },
     {
         divergenceClass: "full_body_no_baseline",
         accounted: false,
-        rule: "full body follows continuations but no earlier full body is available; wakes only at 20,000 rewritten tokens per window",
+        rule: "full body follows continuations but no earlier full body is available; wakes only at 20,000 tokens from thresholded thread findings in the window",
     },
 ] as const;
 
@@ -518,10 +518,10 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
 
 /** The request's class judged on its own, ignoring the request before it. */
 function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
-    if (input.threadEvidence) return input.threadEvidence;
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";
+    if (input.threadEvidence) return input.threadEvidence;
     // A request that wrote nothing while most of its prompt went uncached had no
     // breakpoint to write at. That is the request's own shape, so it outranks the
     // identical-bytes provider class and any pass the request joins.

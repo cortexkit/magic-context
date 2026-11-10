@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
-import { classifyBustAfterReclaim, isUnaccountedCacheBustClass } from "./cache-bust-attribution";
+import {
+    classifyBustAfterReclaim,
+    classifyCacheBust,
+    isUnaccountedCacheBustClass,
+} from "./cache-bust-attribution";
 import {
     eventForWindow,
     groupBustWindows,
@@ -228,6 +232,60 @@ test("old dumps without thread remain full-body comparisons", () => {
     expect(f.rows()[1].divergenceIndex).toBe(1);
 });
 
+for (const type of ["continue", "create"] as const)
+    test(`expired cache outranks thread evidence for ${type} bodies and runner joins`, () => {
+        const f = fixture();
+        f.dump(0, "create", [user("baseline")]);
+        f.dump(1, "continue", [user("delta")]);
+        f.dump(
+            1000,
+            type,
+            type === "continue"
+                ? [user("next delta")]
+                : [user("baseline"), assistant("reply"), user("delta")],
+        );
+        expect(f.rows()[2].divergenceClass).toBe("idle_cache_expiry");
+        expect(f.analyze().requests[2].divergenceClass).toBe("idle_cache_expiry");
+        for (const kind of ["oc2", "pi"] as const) {
+            const dumps = f.snapshots();
+            const snapshots = __test.runnerSnapshots(
+                {
+                    kind,
+                    session: sessionId,
+                    files: [],
+                    requests: dumps.map((dump) => ({
+                        id: dump.file,
+                        at: dump.requestTimestampMs,
+                        sequence: dump.sequence,
+                        model: "claude-opus",
+                        provider: "anthropic",
+                        usage: {
+                            input: dump.usage!.input,
+                            output: 10,
+                            cacheRead: dump.usage!.cacheRead,
+                            cacheWrite: dump.usage!.cacheCreation ?? 0,
+                        },
+                    })),
+                },
+                dumps,
+            );
+            expect(
+                __test.analyzeSnapshots(snapshots, [], { cacheTtlMs: 300_000 })[2].divergenceClass,
+            ).toBe("idle_cache_expiry");
+        }
+        expect(
+            classifyCacheBust({
+                divergenceIndex: -1,
+                previousMessageCount: 2,
+                idleCacheExpiry: true,
+                threadEvidence:
+                    type === "continue"
+                        ? "continuation_short_read"
+                        : "thread_break_unchanged_client_bytes",
+            }),
+        ).toBe("idle_cache_expiry");
+    });
+
 for (const kind of ["oc2", "pi"] as const)
     test(`${kind} runner adapter keeps continuation metadata when joining bodies to its meter`, () => {
         const f = fixture();
@@ -392,56 +450,110 @@ test("suppressed thread-break observations do not suppress other wake classes", 
     ).toBe("unaccounted_rewrite");
 });
 
-for (const laterClass of ["thread_break_unchanged_client_bytes", "continuation_short_read"] as const) test(`sentinel accumulates a suppressed window across scans without double-counting reruns (${laterClass})`, async () => {
+for (const laterClass of [
+    "thread_break_unchanged_client_bytes",
+    "continuation_short_read",
+] as const)
+    test(`suppressed thread windows use only their own tokens across scans (${laterClass})`, async () => {
+        const f = fixture();
+        const stateFile = join(f.root, "state.json");
+        const options = {
+            once: true,
+            send: false,
+            intervalMs: 60_000,
+            lookbackMs: 500,
+            stateFile,
+            databasePath: join(f.root, "missing.db"),
+            rustStorePath: join(f.root, "missing-store.db"),
+            connectionFile: join(f.root, "missing.json"),
+            wakeModuleId: "fixture",
+            wakeAgentId: "fixture",
+            wakeFromAgent: "fixture",
+        };
+        const threadBreakOnly = laterClass === "thread_break_unchanged_client_bytes";
+        const requests = (threadBreakOnly ? [12_000, 12_000] : [19_000, 10_000, 10_000]).map(
+            (rewrittenTokens, index) => ({
+                session: sessionId,
+                at: new Date(epoch + index * 1000).toISOString(),
+                timestampMs: epoch + index * 1000,
+                verdict: "SHORT" as const,
+                rewrittenTokens,
+                divergenceClass:
+                    index === 0 ? ("thread_break_unchanged_client_bytes" as const) : laterClass,
+                firstDivergence: "unchanged",
+                analyzerCmd: "fixture",
+            }),
+        );
+        let now = epoch;
+        const events: string[] = [];
+        const deps = {
+            now: () => now,
+            listActiveSessions: () => [
+                {
+                    sessionId,
+                    harness: "opencode" as const,
+                    projectPath: "fixture",
+                    activityMs: now,
+                },
+            ],
+            loadDecisions: () => [],
+            analyzeSession: async () => ({ requests, highWaterMarkMs: now }),
+            stdout: (line: string) => events.push(line),
+            stderr: () => {},
+        };
+        await runSentinelOnce(options, deps);
+        expect(events).toHaveLength(0);
+        expect(
+            Object.values(loadSentinelState(stateFile).suppressedWindows)[0].rewrittenTokens,
+        ).toBe(threadBreakOnly ? 12_000 : 19_000);
+        await runSentinelOnce(options, deps);
+        expect(
+            Object.values(loadSentinelState(stateFile).suppressedWindows)[0].rewrittenTokens,
+        ).toBe(threadBreakOnly ? 12_000 : 19_000);
+        now += (requests.length - 1) * 1000;
+        await runSentinelOnce(options, deps);
+        expect(events).toHaveLength(threadBreakOnly ? 1 : 0);
+        if (threadBreakOnly) {
+            expect(JSON.parse(events[0]).payload.rewritten_tokens).toBe(24_000);
+            expect(JSON.parse(events[0]).payload.divergence_class).toBe(
+                "thread_break_unchanged_client_bytes",
+            );
+        } else {
+            expect(
+                Object.values(loadSentinelState(stateFile).suppressedWindows)[0].rewrittenTokens,
+            ).toBe(19_000);
+        }
+    });
+
+test("thread-only token threshold excludes accounted folds and sums thread rows in one scan", () => {
     const f = fixture();
-    const stateFile = join(f.root, "state.json");
-    const options = {
-        once: true,
-        send: false,
-        intervalMs: 60_000,
-        lookbackMs: 500,
-        stateFile,
-        databasePath: join(f.root, "missing.db"),
-        rustStorePath: join(f.root, "missing-store.db"),
-        connectionFile: join(f.root, "missing.json"),
-        wakeModuleId: "fixture",
-        wakeAgentId: "fixture",
-        wakeFromAgent: "fixture",
-    };
-    const requests = [12_000, 8_000].map((rewrittenTokens, index) => ({
+    const state = loadSentinelState(join(f.root, "state.json"));
+    const row = (
+        offset: number,
+        rewrittenTokens: number,
+        divergenceClass: "accounted_hard_fold" | "thread_break_unchanged_client_bytes",
+    ) => ({
         session: sessionId,
-        at: new Date(epoch + index * 1000).toISOString(),
-        timestampMs: epoch + index * 1000,
-        verdict: "SHORT" as const,
+        at: new Date(epoch + offset).toISOString(),
+        timestampMs: epoch + offset,
+        verdict: "BUST" as const,
         rewrittenTokens,
-        divergenceClass: index === 0 ? "thread_break_unchanged_client_bytes" as const : laterClass,
-        firstDivergence: "unchanged",
+        divergenceClass,
+        firstDivergence: "fixture",
         analyzerCmd: "fixture",
-    }));
-    let now = epoch;
-    const events: string[] = [];
-    const deps = {
-        now: () => now,
-        listActiveSessions: () => [
-            { sessionId, harness: "opencode" as const, projectPath: "fixture", activityMs: now },
-        ],
-        loadDecisions: () => [],
-        analyzeSession: async () => ({ requests, highWaterMarkMs: now }),
-        stdout: (line: string) => events.push(line),
-        stderr: () => {},
-    };
-    await runSentinelOnce(options, deps);
-    expect(events).toHaveLength(0);
-    expect(Object.values(loadSentinelState(stateFile).suppressedWindows)[0].rewrittenTokens).toBe(
-        12_000,
-    );
-    await runSentinelOnce(options, deps);
-    expect(Object.values(loadSentinelState(stateFile).suppressedWindows)[0].rewrittenTokens).toBe(
-        12_000,
-    );
-    now += 1000;
-    await runSentinelOnce(options, deps);
-    expect(events).toHaveLength(1);
-    expect(JSON.parse(events[0]).payload.rewritten_tokens).toBe(20_000);
-    expect(JSON.parse(events[0]).payload.divergence_class).toBe("thread_break_unchanged_client_bytes");
+    });
+    const accounted = groupBustWindows([
+        row(0, 300_000, "accounted_hard_fold"),
+        row(1000, 2_000, "thread_break_unchanged_client_bytes"),
+    ])[0];
+    expect(eventForWindow(accounted, "fixture", state)).toBeNull();
+    expect(Object.values(state.suppressedWindows)).toEqual([
+        { divergenceClass: "thread_break_unchanged_client_bytes", rewrittenTokens: 2_000 },
+    ]);
+    const threads = groupBustWindows([
+        row(10_000, 12_000, "thread_break_unchanged_client_bytes"),
+        row(11_000, 12_000, "thread_break_unchanged_client_bytes"),
+    ])[0];
+    expect(eventForWindow(threads, "fixture", state)?.payload.rewritten_tokens).toBe(24_000);
+    expect(eventForWindow(threads, "fixture", state)).toBeNull();
 });
