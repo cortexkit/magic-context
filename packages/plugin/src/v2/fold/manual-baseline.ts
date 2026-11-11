@@ -307,6 +307,16 @@ function writeRenderedMurals(db: Database, murals: readonly StagedMural[]): void
  * process that stops at any point, and another reader all see that head. No
  * step puts an old head back, so there is no such step that can fail.
  *
+ * The cost is the lock: the whole render, including reading every summary and
+ * memory and possibly encoding the mural image, runs under the write lock that
+ * every host on the machine shares. On a session with 2,000 summaries that is
+ * about 0.1 s (about 0.14 s when the mural must be encoded), against about
+ * 10 ms for an ordinary fold, which holds the lock only for its write section.
+ * That is accepted because a manual compaction is rare and started by a person,
+ * and in exchange no rendered head is ever committed before the host admits it.
+ * Anyone who makes this path frequent (an automatic caller) must first move the
+ * read-only part of the render out from under the lock.
+ *
  * `commit` writes the staged head verbatim in its own write transaction, unless
  * the stored head changed while the host admitted the compaction. It also
  * stores the mural rows the render wrote, so the next fold reuses that render.
