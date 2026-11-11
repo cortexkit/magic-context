@@ -596,3 +596,106 @@ async fn spent_witness_an_untrusted_runner_builds_twice_on_one_reading() {
         "a repeat of the reading the view was built on built a second view"
     );
 }
+
+/// A reading above the threshold, measured on a request that was in flight
+/// when the runner took the view built on `READING`.
+const IN_FLIGHT: u64 = 71_000;
+
+/// The view rule ignores the reading of a request in flight when the runner
+/// took view 1, since it names view 0. The runner then restarts before any
+/// request goes out under view 1. A restarted runner no longer knows which
+/// view its last reading measured, so after its Setup its notices carry
+/// that same reading with no view. It is still a measurement from before
+/// view 1 and must build nothing, though the model queued another drop; a
+/// different reading builds. The runner applies view 1 by the time the
+/// in-flight reading arrives, or still holds it accepted and says so when
+/// Setup offers it again.
+#[tokio::test]
+async fn spent_an_ignored_older_reading_repeated_without_its_view_after_a_runner_restart_builds_nothing(
+) {
+    for applied in [false, true] {
+        let (mut session, client, settings) = worker();
+        let mut request = reading(&session, &client, 1, READING, None);
+        request.conditions.last_prompt_view = Some(0);
+        session.notice(&client, &settings, request).await;
+        let first = offered(&client)
+            .last()
+            .cloned()
+            .expect("a reading at the threshold builds a view");
+        let shown = applied.then_some(&first);
+
+        let mut request = reading(&session, &client, 2, IN_FLIGHT, shown);
+        request.conditions.last_prompt_view = Some(0);
+        session.notice(&client, &settings, request).await;
+        assert!(
+            session.reading_stale,
+            "applied: {applied}: the in-flight reading counted"
+        );
+
+        // The runner restarts and sets the session up again. One that holds
+        // the accepted view refuses it as not newer when Setup offers it.
+        if !applied {
+            *client.refuse.lock().unwrap() = true;
+            *client.refusal.lock().unwrap() = Some(ViewRefusal::StaleVersion {
+                version: first.version,
+                latest: first.version,
+            });
+        }
+        set_up_again(&mut session, &client, &settings, shown).await;
+        *client.refuse.lock().unwrap() = false;
+        let built = offered(&client).len();
+
+        session.queued.insert(("mid".into(), "m1".into()));
+        let request = reading(&session, &client, 1, IN_FLIGHT, shown);
+        session.notice(&client, &settings, request).await;
+        assert!(session.reading_stale, "applied: {applied}");
+        assert_eq!(
+            offered(&client).len(),
+            built,
+            "applied: {applied}: the in-flight reading, repeated without its view, built a view"
+        );
+
+        let request = reading(&session, &client, 2, NEXT_READING, shown);
+        session.notice(&client, &settings, request).await;
+        assert!(!session.reading_stale, "applied: {applied}");
+        let views = offered(&client);
+        assert!(
+            views.len() == built + 1 && drops(&views[built], "mid", "m1"),
+            "applied: {applied}: a new reading above the threshold built nothing: {views:?}"
+        );
+    }
+}
+
+/// ck-mc restarts after the runner applied the view built on the reading,
+/// and reading the runner's view back fails at the runner's Setup. A failed
+/// read says nothing about which view the runner holds, so the spent
+/// reading stays: once the read works, a repeat of the reading still builds
+/// nothing.
+#[tokio::test]
+async fn spent_a_failed_read_back_at_setup_keeps_the_spent_reading() {
+    let (mut session, client, settings) = worker();
+    let first = built_on_the_reading(&mut session, &client, &settings).await;
+    let request = reading(&session, &client, 2, READING, Some(&first));
+    session.notice(&client, &settings, request).await;
+    assert!(session.unconfirmed.is_empty(), "the runner applies the view");
+
+    let (mut restored, _, _, _, _) = fixture();
+    restored.restore(session.durable());
+    *client.fail_applied_view.lock().unwrap() = true;
+    set_up_again(&mut restored, &client, &settings, Some(&first)).await;
+    assert_eq!(
+        restored.spent_reading, session.spent_reading,
+        "a failed read-back forgot the spent reading"
+    );
+
+    *client.fail_applied_view.lock().unwrap() = false;
+    runner_applies(&client, Some(&first));
+    restored.queued.insert(("mid".into(), "m1".into()));
+    let request = reading(&restored, &client, 1, READING, Some(&first));
+    restored.notice(&client, &settings, request).await;
+    assert_eq!(
+        offered(&client),
+        vec![first],
+        "a repeat of the spent reading built a second view after a failed read-back"
+    );
+}
