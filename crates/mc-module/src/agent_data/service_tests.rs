@@ -20,9 +20,9 @@ use cortexkit_role_compaction::read::SessionRef;
 use serde_json::{json, Value};
 
 use super::journal::{self, Cut};
-use super::service::{canonical, ready_participants, receipt, Done, Host, Probe, Service};
+use super::service::{canonical, ready_participants, receipt, Done, Host, Park, Probe, Service};
 use super::Journal;
-use crate::client::EntorhinalRefusal;
+use crate::client::{DoorRefusal, EntorhinalRefusal};
 use subc_client_rs::CatalogEntry;
 
 const ENTORHINAL: &str = "reserved:entorhinal";
@@ -161,6 +161,23 @@ impl Host for Stand {
                 detail: None,
             }),
         })
+    }
+
+    /// These tests run no session, so no worker is ever there to park.
+    async fn park(&self, _session: &SessionRef, _budget: Duration) -> Park {
+        Park::NoWorker
+    }
+
+    fn resume(&self, _session: &SessionRef) {}
+
+    fn forget(&self, _session: &SessionRef, _cut: &str) {}
+
+    async fn door(&self, _method: &str, _params: Value) -> Result<Value, DoorRefusal> {
+        Err(DoorRefusal::unavailable("no session door in these tests"))
+    }
+
+    fn stream(&self) -> String {
+        "reserved:magic-context".to_owned()
     }
 }
 
@@ -674,7 +691,8 @@ async fn an_op_naming_another_ref_set_than_its_cut_is_refused_with_the_expected_
         assert_eq!(refused.detail, Some(expected.clone()), "{method} {names:?}");
     }
     // The same set in another order passes both checks and reaches the op,
-    // which this build does not carry out yet; its refusal records nothing.
+    // which refuses it here: this stand-in has no context.db, so there is
+    // no snapshot to export. Its refusal records nothing.
     let refused = call(
         &service,
         &host,

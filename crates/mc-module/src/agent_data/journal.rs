@@ -119,6 +119,36 @@ pub struct Cut {
     /// once every ref is installed.
     #[serde(default)]
     pub activate_request: Option<String>,
+    /// Source: where `prepare` cut each ref's session, in the order of the
+    /// cut's refs. `export` admits these snapshots and `release` tombstones
+    /// these sessions, so neither asks Entorhinal again, whose answer may
+    /// already name the new holder by then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepared: Vec<Prepared>,
+}
+
+/// One ref's session as `prepare` cut it on the source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Prepared {
+    pub ref_kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub runner: String,
+    pub harness: String,
+    pub session: String,
+    /// The session's handle on Engram's door, the llm-runner `sessionRef`
+    /// of runner, harness and session.
+    pub session_ref: String,
+    /// Where this cut's snapshot starts and ends in the session's stream on
+    /// the door. Earlier moves of the session left the bytes before `start`.
+    pub start: u64,
+    pub end: u64,
+    /// The SHA-256 of the stream's bytes up to `end`, which the cut seals.
+    pub digest: String,
+    /// The SHA-256 of the snapshot's body: the session's baseline once the
+    /// snapshot is exported.
+    pub body: String,
 }
 
 /// A cut no op has recorded anything for yet.
@@ -131,6 +161,7 @@ impl Default for Cut {
             snapshots: BTreeMap::new(),
             undo_images: BTreeMap::new(),
             activate_request: None,
+            prepared: Vec::new(),
         }
     }
 }

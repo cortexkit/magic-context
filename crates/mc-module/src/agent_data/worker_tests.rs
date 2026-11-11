@@ -133,11 +133,7 @@ impl Fixture {
                     "cut-1".into(),
                     Cut {
                         step: Step::Prepared,
-                        refs: None,
-                        receipts: Default::default(),
-                        snapshots: Default::default(),
-                        undo_images: Default::default(),
-                        activate_request: None,
+                        ..Cut::default()
                     },
                 );
                 contents

@@ -125,6 +125,11 @@ impl ChildScopes {
         }
     }
 
+    /// The module id ck-mc runs under, as the daemon launched it.
+    pub fn module_id(&self) -> &str {
+        &self.module_id
+    }
+
     /// Publish through the daemon from now on.
     pub fn install(&self, handle: ModuleHandle) {
         self.set_publisher(Arc::new(ModulePublisher(handle)));

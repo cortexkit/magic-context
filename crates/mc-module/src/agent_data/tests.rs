@@ -12,11 +12,7 @@ use cortexkit_role_agent_data::step::Step;
 fn freeze(contents: &mut Contents, key: &SessionRef, cut: &str, state: MovingState) {
     contents.cuts.entry(cut.to_owned()).or_insert(Cut {
         step: Step::Prepared,
-        refs: None,
-        receipts: Default::default(),
-        snapshots: Default::default(),
-        undo_images: Default::default(),
-        activate_request: None,
+        ..Cut::default()
     });
     contents
         .session_mut(&key.runner, &key.harness, &key.session)

@@ -32,14 +32,14 @@ use contract::idempotency::{self, Repeat};
 use contract::request::Request;
 use contract::status::StatusReply;
 use contract::step::{self, Step, StepRefusal};
-use contract::{EmptyReply, Op};
+use contract::Op;
 use cortexkit_role_agent_data as contract;
 use cortexkit_role_compaction::read::SessionRef;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::journal::{Contents, Cut, Journal, Receipt};
-use crate::client::EntorhinalRefusal;
+use crate::client::{DoorRefusal, EntorhinalRefusal};
 
 /// The stores `describe` declares, each with its sync class: the session's
 /// own history (summaries, notes and waiting facts), its machine-local state
@@ -82,6 +82,45 @@ pub trait Host: Send + Sync {
         &self,
         body: Vec<u8>,
     ) -> impl Future<Output = Option<Result<Vec<u8>, EntorhinalRefusal>>> + Send;
+    /// Stop the session's worker between two jobs for a move's `prepare`,
+    /// waiting at most `budget` for it to get there. The worker stays
+    /// parked until the returned [`Parked`] is dropped, so no job of the
+    /// session runs while `prepare` checks, freezes and reads it.
+    fn park(&self, session: &SessionRef, budget: Duration) -> impl Future<Output = Park> + Send;
+    /// Run the jobs the session's worker held while a move held it, once the
+    /// move no longer does.
+    fn resume(&self, session: &SessionRef);
+    /// Drop everything this process keeps for a session released to another
+    /// machine by `cut`: its worker with the jobs it held, its Setup and its
+    /// cached project.
+    fn forget(&self, session: &SessionRef, cut: &str);
+    /// One call to Engram's session door: the reply's `result`, or the
+    /// door's refusal.
+    fn door(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value, DoorRefusal>> + Send;
+    /// This module's stream on the door, `reserved:<module id>`.
+    fn stream(&self) -> String;
+}
+
+/// Where a session's worker is when `prepare` asks it to stop.
+#[derive(Debug)]
+pub enum Park {
+    /// The session has no worker in this process, so nothing of it runs.
+    NoWorker,
+    Parked(Parked),
+    /// The worker did not get there within the budget.
+    NoAnswer,
+}
+
+/// A parked worker. Dropping this lets it take its next job.
+#[derive(Debug)]
+pub struct Parked {
+    /// Whether a view the worker offered the runner is still unconfirmed.
+    pub view_unconfirmed: bool,
+    pub release: tokio::sync::oneshot::Sender<()>,
 }
 
 /// What a session's worker answered when asked about its views.
@@ -96,11 +135,13 @@ pub enum Probe {
     NoAnswer,
 }
 
-/// A state-changing op that succeeded: the reply to send and record, and
-/// any further journal change to make in the same write as its receipt.
+/// A state-changing op that succeeded: the reply to send and record, any
+/// further journal change to make in the same write as its receipt, and
+/// what to do once both are durable.
 pub(crate) struct Done {
     pub reply: Vec<u8>,
     pub edit: Box<dyn FnOnce(&mut Contents) + Send>,
+    pub after: Vec<After>,
 }
 
 impl Done {
@@ -108,6 +149,46 @@ impl Done {
         Self {
             reply: canonical(reply),
             edit: Box::new(|_| {}),
+            after: Vec::new(),
+        }
+    }
+}
+
+/// Work an op leaves for after its journal change is durable, because it
+/// must not happen if that change is lost: in-memory state a restart would
+/// not have, and files the journal still names until then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum After {
+    /// Run the jobs the session's worker held during the move.
+    Resume(SessionRef),
+    /// Drop what this process keeps for a session released by this cut.
+    Forget(SessionRef, String),
+    /// Delete a folder of move files nothing names any more.
+    Remove(PathBuf),
+}
+
+fn carry_out<H: Host>(host: &H, after: Vec<After>) {
+    for step in after {
+        match step {
+            After::Resume(session) => host.resume(&session),
+            After::Forget(session, cut) => {
+                tracing::info!(
+                    cut = %cut,
+                    "ck-mc: session {}/{}/{} was released to another machine by agent-data cut {cut}; it is refused session_moved here from now on, and its worker, Setup and cached project are dropped",
+                    session.runner,
+                    session.harness,
+                    session.session
+                );
+                host.forget(&session, &cut);
+            }
+            After::Remove(folder) => match std::fs::remove_dir_all(&folder) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    "ck-mc: agent-data could not delete {} ({error}); it holds only a finished move's snapshot and can be deleted by hand",
+                    folder.display()
+                ),
+            },
         }
     }
 }
@@ -163,12 +244,32 @@ impl Service {
             Request::Busy(busy) => super::busy::busy(host, &busy.refs).await,
             Request::Status(status) => status_reply(host.journal(), status.cut_id.as_str()),
             Request::Diverged(_) => Err(not_served_yet(op)),
-            _ => {
-                self.keyed(host.journal(), &request, |cut| run(&request, cut))
-                    .await
-            }
+            _ => self
+                .keyed_then(host.journal(), &request, |cut| run(host, &request, cut))
+                .await
+                .map(|(reply, after)| {
+                    carry_out(host, after);
+                    reply
+                }),
         };
         answer.map_err(|refusal| allowed(op, refusal))
+    }
+
+    /// [`Self::keyed_then`], leaving out what the op leaves for afterwards.
+    #[cfg(test)]
+    pub(crate) async fn keyed<F, Fut>(
+        &self,
+        journal: &Journal,
+        request: &Request,
+        run: F,
+    ) -> Result<Vec<u8>, ErrorBody>
+    where
+        F: FnOnce(Option<Cut>) -> Fut,
+        Fut: Future<Output = Result<Done, ErrorBody>>,
+    {
+        self.keyed_then(journal, request, run)
+            .await
+            .map(|(reply, _)| reply)
     }
 
     /// Run a state-changing op under its cut's lock. The lock is taken
@@ -178,13 +279,14 @@ impl Service {
     /// against the state this one left. `run` is given the cut's record as
     /// it stands, and only runs for a first request the step machine and the
     /// one-ref-set rule allow. A refusal records nothing, so the same
-    /// request is decided afresh next time.
-    pub(crate) async fn keyed<F, Fut>(
+    /// request is decided afresh next time. A replayed reply leaves nothing
+    /// to do afterwards: the first one did it.
+    pub(crate) async fn keyed_then<F, Fut>(
         &self,
         journal: &Journal,
         request: &Request,
         run: F,
-    ) -> Result<Vec<u8>, ErrorBody>
+    ) -> Result<(Vec<u8>, Vec<After>), ErrorBody>
     where
         F: FnOnce(Option<Cut>) -> Fut,
         Fut: Future<Output = Result<Done, ErrorBody>>,
@@ -203,7 +305,7 @@ impl Service {
             .and_then(|cut| cut.receipts.get(op.method()))
         {
             match idempotency::compare(&recorded_request(op, receipt)?, request) {
-                Repeat::Replay => return Ok(receipt.reply.clone().into_bytes()),
+                Repeat::Replay => return Ok((receipt.reply.clone().into_bytes(), Vec::new())),
                 Repeat::Reused => {
                     return Err(ErrorBody::new(
                         RefusalCode::IdReused,
@@ -230,7 +332,7 @@ impl Service {
                 format!("Cut {cut_id} started with another set of refs; every later op must name the same set."),
             )
         })?;
-        let Done { reply, edit } = run(record).await?;
+        let Done { reply, edit, after } = run(record).await?;
         let receipt = receipt(request, &reply);
         // Only the first op of a side fixes the ref set: `prepare` on the
         // source, `import` on the receiver. An abort of a cut never seen
@@ -254,26 +356,37 @@ impl Service {
                     ),
                 )
             })?;
-        Ok(reply)
+        Ok((reply, after))
     }
 }
 
-/// What a state-changing op does once the step machine allows it. Only an
-/// abort of a cut this machine never saw is served so far: it touches no
-/// data and only records the cut aborted, so a delayed `prepare` or
-/// `import` for that cut is refused afterwards.
-async fn run(request: &Request, cut: Option<Cut>) -> Result<Done, ErrorBody> {
+/// What a state-changing op does once the step machine allows it: the
+/// source's ops, and an abort, which on a machine that never saw the cut
+/// touches no data and only records the cut aborted, so a delayed
+/// `prepare` or `import` for it is refused afterwards. The receiver's ops
+/// are not served yet.
+async fn run<H: Host>(host: &H, request: &Request, cut: Option<Cut>) -> Result<Done, ErrorBody> {
+    use super::source;
     match request {
-        Request::Abort(_) if cut.is_none_or(|cut| cut.step == Step::None) => {
-            Ok(Done::reply(&EmptyReply::new()))
+        Request::Prepare(prepare) => {
+            source::prepare(host, prepare.cut_id.as_str(), &prepare.refs).await
         }
+        Request::Export(export) => {
+            let cut = cut.expect("the step machine lets export run only after prepare");
+            source::export(host, export.cut_id.as_str(), &cut, &export.refs).await
+        }
+        Request::Release(release) => {
+            let cut = cut.expect("the step machine lets release run only after export");
+            source::release(host, release.cut_id.as_str(), &cut, &release.holder).await
+        }
+        Request::Abort(abort) => source::abort(host, abort.cut_id.as_str(), cut.as_ref()).await,
         _ => Err(not_served_yet(request.op())),
     }
 }
 
 /// The refusal for an op this build does not carry out yet. `unavailable`
 /// records nothing, so the driver may send the same request again later.
-fn not_served_yet(op: Op) -> ErrorBody {
+pub(crate) fn not_served_yet(op: Op) -> ErrorBody {
     ErrorBody::new(
         RefusalCode::Unavailable,
         format!("{} is not served by this build of ck-mc yet.", op.method()),

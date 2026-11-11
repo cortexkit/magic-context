@@ -90,6 +90,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         &context_path,
     )));
     journal.log_held(agent_data);
+    mc_module::agent_data::source::sweep(&context_path, &journal);
     if let Some(data_dir) = context_path.parent() {
         let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
     }

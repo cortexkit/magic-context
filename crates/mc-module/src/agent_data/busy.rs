@@ -83,18 +83,8 @@ pub(crate) async fn cause<H: Host>(host: &H, session: &SessionRef) -> BusyEntry 
     match facts_in_flight(host.context_db(), session).await {
         Ok(None) => BusyEntry::new(BusyState::Idle),
         Ok(Some(held)) => {
+            log_held_fact(session, &held);
             let stage = held.stage.as_deref().unwrap_or("(no stage key)");
-            tracing::info!(
-                session = %format!("{}/{}/{}", session.runner, session.harness, session.session),
-                stage = %stage,
-                "ck-mc: session {}/{}/{} cannot move yet: fact {} of publication {} is in flight under second-turn stage {stage}; a later second turn in a session of project {} resolves or gives it up, then prepare can run again",
-                session.runner,
-                session.harness,
-                session.session,
-                held.fact_index,
-                held.publication,
-                held.project
-            );
             BusyEntry::new(BusyState::Busy)
                 .with_reason_code(FACTS_IN_FLIGHT)
                 .with_reason(format!(
@@ -124,6 +114,23 @@ pub(crate) struct HeldFact {
     /// no key, which no send releases either.
     pub stage: Option<String>,
     pub project: String,
+}
+
+/// Say which second-turn stage keeps the session from moving, and what lets
+/// it go.
+pub(crate) fn log_held_fact(session: &SessionRef, held: &HeldFact) {
+    let stage = held.stage.as_deref().unwrap_or("(no stage key)");
+    tracing::info!(
+        session = %format!("{}/{}/{}", session.runner, session.harness, session.session),
+        stage = %stage,
+        "ck-mc: session {}/{}/{} cannot move yet: fact {} of publication {} is in flight under second-turn stage {stage}; a later second turn in a session of project {} resolves or gives it up, then prepare can run again",
+        session.runner,
+        session.harness,
+        session.session,
+        held.fact_index,
+        held.publication,
+        held.project
+    );
 }
 
 /// The session's committed publications are those whose first turn was
@@ -169,6 +176,16 @@ fn held_fact(db: &Path, harness: &str, session: &str) -> Result<Option<HeldFact>
         .map_err(|error| error.to_string())?;
     conn.busy_timeout(Duration::from_millis(500))
         .map_err(|error| error.to_string())?;
+    held_fact_on(&conn, harness, session)
+}
+
+/// The first of the session's facts a second-turn send holds, read on
+/// `conn`, inside whatever transaction it has open.
+pub(crate) fn held_fact_on(
+    conn: &Connection,
+    harness: &str,
+    session: &str,
+) -> Result<Option<HeldFact>, String> {
     conn.query_row(
         HELD_FACT,
         params![

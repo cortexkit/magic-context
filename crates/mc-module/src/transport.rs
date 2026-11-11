@@ -637,6 +637,49 @@ impl RunnerClient for SubcRunnerClient {
             capability,
         ))
     }
+
+    /// On Engram's session door, which keeps one stream per caller and
+    /// session: it derives the stream from the route's attested caller,
+    /// ck-mc's own principal, so the bind identity names no session.
+    async fn door_call(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, crate::client::DoorRefusal> {
+        use crate::client::DoorRefusal;
+        let consumer = self.consumer().await.map_err(DoorRefusal::unavailable)?;
+        let reply = consumer
+            .call(
+                RouteTarget::InternalService {
+                    module_id: "engram".to_owned(),
+                    service_id: "session-door".to_owned(),
+                },
+                BindIdentity::new("agent-data", "agent-data"),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout: crate::agent_data::door::DEADLINE,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                subc_client_rs::CallError::Module(body) => DoorRefusal {
+                    code: body.code,
+                    message: body.message,
+                    detail: body.detail,
+                },
+                other => DoorRefusal::unavailable(format!("{method}: {other:?}")),
+            })?;
+        let value: Value = serde_json::from_slice(&reply).map_err(|error| {
+            DoorRefusal::unavailable(format!("{method} answer is not JSON: {error}"))
+        })?;
+        engram_result(value)
+            .map_err(|_| DoorRefusal::unavailable(format!("{method} answer has no result")))
+    }
+
+    fn door_stream(&self) -> String {
+        format!("reserved:{}", self.child_scopes.module_id())
+    }
 }
 
 /// Engram answers a device-streams call as `{"result": <answer>}`; a
