@@ -1,6 +1,7 @@
-//! The runner's signed floor: ck-mc takes it from Setup and from every
-//! notice's conditions, keeps it moving forward only, saves it with the
-//! session, and stops treating the signed reasoning it covers as sent.
+//! The runner's signed floor: ck-mc holds the floor the latest Setup, notice
+//! or ride states, drops it when a refusal shows the runner does not apply
+//! it, saves it with the session, and stops treating the signed reasoning it
+//! covers as sent.
 
 use super::*;
 use cortexkit_role_compaction::SignedFloor;
@@ -115,13 +116,16 @@ async fn signed_floor_conditions_state_it_in_full() {
     assert_eq!(captured.count(REGRESSED), 1);
 }
 
+/// A notice naming an entry the index doesn't hold is taken as named, and
+/// covers nothing ck-mc holds.
 #[tokio::test]
-async fn signed_floor_naming_an_entry_ck_mc_does_not_hold_is_not_taken() {
+async fn signed_floor_naming_an_entry_ck_mc_does_not_hold_covers_nothing() {
     let (mut session, client, _, _, settings) = set_up(None).await;
     session
         .notice(&client, &settings, floor_notice(&session, 1, "elsewhere"))
         .await;
-    assert_eq!(session.signed_floor, None);
+    assert_eq!(session.signed_floor.as_deref(), Some("elsewhere"));
+    assert_eq!(session.signed_floor(), None);
 }
 
 #[tokio::test]
@@ -459,8 +463,11 @@ async fn signed_floor_a_setup_naming_an_older_floor_is_taken() {
     assert_eq!(session.signed_floor(), Some(3));
 }
 
+/// A Setup naming an entry the index doesn't hold replaces ck-mc's floor:
+/// the runner's statement is taken as named, and it covers nothing ck-mc
+/// holds. That is no floor going away, so nothing warns.
 #[tokio::test]
-async fn signed_floor_a_setup_naming_an_entry_ck_mc_does_not_hold_leaves_it() {
+async fn signed_floor_a_setup_naming_an_entry_ck_mc_does_not_hold_covers_nothing() {
     let captured = Captured::default();
     let _guard = captured.install();
     let (mut session, client, route, request, settings) = bound_set_up(Some("floor")).await;
@@ -468,8 +475,14 @@ async fn signed_floor_a_setup_naming_an_entry_ck_mc_does_not_hold_leaves_it() {
     session
         .setup(&client, &settings, &route, &elsewhere, session.features)
         .await;
-    assert_eq!(session.signed_floor.as_deref(), Some("floor"));
+    assert_eq!(session.signed_floor.as_deref(), Some("elsewhere"));
+    assert_eq!(session.signed_floor(), None);
     assert_eq!(captured.count(REGRESSED), 0);
+    // The next view judges `thought/r` as if there were no floor.
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.expect("the requested drops build a view");
+    assert!(!keeps_thought(&view));
+    check_without_floor(&session, &view);
 }
 
 /// The runner refuses a view for keeping signed reasoning at or before
@@ -586,11 +599,13 @@ async fn signed_floor_a_refused_floor_the_runner_keeps_naming_is_ignored_until_i
     assert_eq!(captured.count(CONTRADICTED), 1);
 }
 
-/// The floor's entry leaves the runner's active path, so the runner applies
-/// no floor: it refuses the view built under it and names none. When the
-/// entry is back and the runner names the floor again, ck-mc takes it.
+/// The runner stops applying its floor without saying why: it refuses the
+/// view built under it and, in the same notice, names no floor. ck-mc holds
+/// none. When a later notice names the same floor again, ck-mc takes it,
+/// although it is not newer than the one it had. (The review witness below
+/// performs a real undo.)
 #[tokio::test]
-async fn signed_floor_follows_the_runner_away_and_back_across_a_refusal() {
+async fn signed_floor_a_refusal_with_no_floor_named_then_the_same_floor_named_again() {
     let captured = Captured::default();
     let _guard = captured.install();
     let (mut session, client, _, _, settings) = bound_set_up(Some("floor")).await;

@@ -35,20 +35,24 @@
 //!   capability. Once the index has caught up, ck-mc holds exactly the floor
 //!   stated, newer or older than before, and none when none is stated. A
 //!   floor that goes away is logged as `signed_floor_regressed`. A floor
-//!   naming an entry the index doesn't hold is left alone: it is either
-//!   before the summary cut (the oldest entries a view replaces with the
-//!   history head), where the model sees nothing anyway, or not on the
-//!   transcript ck-mc read, and the next conditions state it again.
-//! - A refusal overrides a statement only when the two contradict. A view
-//!   refused for keeping a signed part at or before ck-mc's floor shows the
-//!   runner does not strip there, since the contract forbids that refusal
-//!   under a floor it applies. ck-mc drops its floor at once
-//!   (`signed_floor_regressed`), and the refused view's drops are not held
-//!   against it: ck-mc's copy was at fault, not the drops. While conditions
-//!   keep naming that same floor, the runner contradicts itself, and ck-mc
-//!   keeps ignoring it (`signed_floor_contradicted`, logged once). The first
-//!   statement of no floor or a different one ends that, as does any Setup;
-//!   after that the floor is taken again when stated.
+//!   naming an entry the index doesn't hold is taken too, and covers nothing
+//!   ck-mc holds: its entry is before the summary cut (the oldest entries a
+//!   view replaces with the history head), where the model sees nothing
+//!   anyway, or not on the transcript ck-mc read.
+//! - A refusal is judged against the refused view's own edits, not against
+//!   the floor ck-mc holds when it arrives, since the floor may have moved
+//!   since the view was built. A view refused for keeping a signed part that
+//!   its edits invalidate once no floor covers it was built relying on a
+//!   floor the runner did not apply at that step, so its drops are not held
+//!   against it. If the part is valid under the floor ck-mc holds now, a
+//!   runner applying that floor would have taken the view, so it does not
+//!   apply it, even though it states it: the contract forbids that refusal
+//!   under a floor the runner applies. That refusal overrides the statement,
+//!   and ck-mc drops its floor at once (`signed_floor_regressed`). While
+//!   conditions keep naming that same floor, the runner contradicts itself,
+//!   and ck-mc keeps ignoring it (`signed_floor_contradicted`, logged once).
+//!   The first statement of no floor or a different one ends that, as does
+//!   any Setup; after that the floor is taken again when stated.
 //!
 //! The floor ck-mc holds is saved with the session's state, so a restart
 //! starts from the value last taken.
@@ -86,7 +90,7 @@ impl Session {
                     disproved.warned = true;
                     let (mid, part) = &disproved.part;
                     tracing::warn!(
-                        "ck-mc: session {}: signed_floor_contradicted: the runner names signed floor {} again, but it refused a view for keeping signed part {mid}/{part} at or before it; ck-mc takes no floor until the runner states another one or none",
+                        "ck-mc: session {}: signed_floor_contradicted: the runner names signed floor {} again, but it refused a view for keeping signed part {mid}/{part}, which only that floor makes valid; ck-mc takes no floor until the runner states another one or none",
                         self.key.session,
                         disproved.floor
                     );
@@ -111,51 +115,107 @@ impl Session {
         if self.signed_floor.as_deref() == Some(through.as_str()) {
             return;
         }
-        let Some(ordinal) = self.index.ordinal_of(&through) else {
-            return;
+        // Taken even when the index doesn't hold its entry: such a floor
+        // covers nothing ck-mc holds (`signed_floor()` places it nowhere),
+        // and it starts to cover the transcript if the index reads its entry.
+        let at = |mid: &str| {
+            self.index
+                .ordinal_of(mid)
+                .map_or_else(|| "not held".to_owned(), |at| format!("message {at}"))
         };
-        let from = match (self.signed_floor.as_deref(), self.signed_floor()) {
-            (Some(held), Some(at)) => format!("{held} (message {at})"),
-            (Some(held), None) => format!("{held} (not held)"),
-            (None, _) => "none".to_owned(),
-        };
+        let from = self.signed_floor.as_deref().map_or_else(
+            || "none".to_owned(),
+            |held| format!("{held} ({})", at(held)),
+        );
         tracing::info!(
-            "ck-mc: session {}: signed floor moved to {through} (message {ordinal}) from {from}; the runner strips signed reasoning at or before it",
-            self.key.session
+            "ck-mc: session {}: signed floor moved to {through} ({}) from {from}; the runner strips signed reasoning at or before it",
+            self.key.session,
+            at(&through)
         );
         self.signed_floor = Some(through);
     }
 
-    /// Whether the runner's refusal of view `version` shows that it does not
-    /// apply the floor ck-mc holds: it names a signed part at or before the
-    /// floor as invalid, which the contract forbids under a floor the runner
-    /// applies. ck-mc then drops its floor, so the next view judges that
-    /// reasoning like any other, and remembers the floor as disproved. The
-    /// caller rolls the view back without holding its drops against it.
-    pub(super) fn refusal_disproves_floor(&mut self, version: u64, refusal: &ViewRefusal) -> bool {
+    /// Whether a `SignedPartInvalid` refusal of a view with `edits` names a
+    /// part ck-mc kept only because of a signed floor, current or one held
+    /// when the view was built: the part is invalid under the view's own
+    /// edits once no floor covers it. Then the view's drops were not at
+    /// fault, and the caller rolls it back without holding them against it.
+    /// `None` for any other refusal, which keeps the usual handling.
+    ///
+    /// `Some(true)` when the part is also valid under the floor ck-mc holds
+    /// now: a runner applying that floor would have taken the view, so it
+    /// does not apply it, and the caller drops it ([`Self::disprove_floor`]).
+    /// The part need not be at or before the floor: a runner that keeps the
+    /// reasoning the floor covers can see ck-mc's drops after the floor as a
+    /// gap between kept signed parts, and name the first kept part after it.
+    pub(super) fn kept_for_a_floor(
+        &self,
+        edits: &[cortexkit_role_compaction::view::Edit],
+        refusal: &ViewRefusal,
+    ) -> Option<bool> {
         let ViewRefusal::Rule(RuleBreak::SignedPartInvalid { mid, part }) = refusal else {
-            return false;
+            return None;
         };
-        let (Some(held_at), Some(ordinal)) = (self.signed_floor(), self.index.ordinal_of(mid))
-        else {
-            return false;
+        use cortexkit_compaction_view::rules::{invalid_signed_parts, Floor};
+        let names = |floor: Floor<'_>| {
+            invalid_signed_parts(self.index.entries(), edits, &self.conditions.rules, floor)
+                .iter()
+                .any(|(m, p)| m == mid && p == part)
         };
-        if ordinal > held_at {
-            return false;
+        if !names(Floor::none()) {
+            return None;
         }
-        let Some(held) = self.signed_floor.take() else {
+        // A floor the index can't place covers nothing, so the part is
+        // invalid under it too and disproves nothing.
+        let held = self.signed_floor.as_deref();
+        Some(held.is_some_and(|held| !names(Floor::through(held))))
+    }
+
+    /// Judge a refusal of a view with `edits` (version `version`) for a
+    /// signed floor's fault (see [`Self::kept_for_a_floor`]), dropping the
+    /// held floor when the refusal disproves it. Whether the floor, not the
+    /// view's drops, was at fault.
+    pub(super) fn judge_floor_refusal(
+        &mut self,
+        edits: &[cortexkit_role_compaction::view::Edit],
+        version: u64,
+        refusal: &ViewRefusal,
+    ) -> bool {
+        let Some(disproves) = self.kept_for_a_floor(edits, refusal) else {
             return false;
+        };
+        if disproves {
+            self.disprove_floor(version, refusal);
+        }
+        true
+    }
+
+    /// Drop the floor ck-mc holds, which the runner's refusal of view
+    /// `version` showed it does not apply (see [`Self::kept_for_a_floor`]),
+    /// so the next view judges that reasoning like any other, and remember
+    /// it as disproved.
+    pub(super) fn disprove_floor(&mut self, version: u64, refusal: &ViewRefusal) {
+        let ViewRefusal::Rule(RuleBreak::SignedPartInvalid { mid, part }) = refusal else {
+            return;
+        };
+        let held_at = self.signed_floor();
+        let Some(held) = self.signed_floor.take() else {
+            return;
+        };
+        let at = |ordinal: Option<u64>| {
+            ordinal.map_or_else(|| "not held".to_owned(), |at| format!("message {at}"))
         };
         tracing::warn!(
-            "ck-mc: session {}: signed_floor_regressed: ck-mc held signed floor {held} (message {held_at}), the runner refused view {version} for keeping signed part {mid}/{part} (message {ordinal}); the runner does not strip there, so ck-mc drops its floor",
-            self.key.session
+            "ck-mc: session {}: signed_floor_regressed: ck-mc held signed floor {held} ({}), the runner refused view {version} for keeping signed part {mid}/{part} ({}), which only that floor makes valid; the runner does not apply it, so ck-mc drops its floor",
+            self.key.session,
+            at(held_at),
+            at(self.index.ordinal_of(mid))
         );
         self.disproved_floor = Some(Disproved {
             floor: held,
             part: (mid.clone(), part.clone()),
             warned: false,
         });
-        true
     }
 
     /// The ordinal of the signed floor's entry, when the index holds it.

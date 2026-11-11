@@ -4010,12 +4010,12 @@ impl Session {
                     }
                     _ => false,
                 };
-                // A signed part kept at or before ck-mc's signed floor: the
-                // runner does not apply that floor, so ck-mc's copy of it was
-                // at fault, not the drops the view carried. They stay queued,
-                // with no refusal counted against them; the apps still show
-                // the view as refused.
-                let floor_at_fault = self.refusal_disproves_floor(view.version, &refusal);
+                // A signed part ck-mc kept only because of a signed floor the
+                // runner did not apply: the floor, not the drops the view
+                // carried, was at fault. They stay queued, with no refusal
+                // counted against them; the apps still show the view as
+                // refused.
+                let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
                 self.roll_back(
                     view.version,
                     !stale && !floor_at_fault,
@@ -4114,9 +4114,11 @@ impl Session {
                     policy_members(&view)
                 );
                 // As for a view refused when first handed over: a signed
-                // part kept at or before ck-mc's floor puts the fault on the
-                // floor, not on the drops.
-                let floor_at_fault = self.refusal_disproves_floor(view.version, &refusal);
+                // part kept only because of a floor puts the fault on the
+                // floor, not on the drops. After a restart the index is
+                // still empty here, so nothing is placed and the usual
+                // penalty applies.
+                let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
                 self.roll_back(oldest, !floor_at_fault, None);
                 if floor_at_fault {
                     self.app_view_status(oldest, "refused");
@@ -4320,15 +4322,23 @@ impl Session {
             })
             .min_by_key(|(version, _)| *version)
         {
-            // A signed part kept at or before ck-mc's signed floor: the
-            // runner does not apply that floor, so ck-mc's copy of it was at
-            // fault, and the retry, built without it, pays no penalty.
-            let floor_at_fault = self.refusal_disproves_floor(*version, refusal);
-            let moved = if floor_at_fault {
-                None
-            } else {
-                TranscriptRefusal::of(refusal).or_else(|| self.new_signed_part(*version, refusal))
+            let moved =
+                TranscriptRefusal::of(refusal).or_else(|| self.new_signed_part(*version, refusal));
+            // A signed part the view knew, kept only because of a signed
+            // floor the runner did not apply: the floor was at fault, not
+            // the drops, and the retry pays no penalty.
+            let kept = match moved {
+                Some(_) => None,
+                None => self
+                    .unconfirmed
+                    .iter()
+                    .find(|pending| pending.view.version == *version)
+                    .and_then(|pending| self.kept_for_a_floor(&pending.view.edits, refusal)),
             };
+            if kept == Some(true) {
+                self.disprove_floor(*version, refusal);
+            }
+            let floor_at_fault = kept.is_some();
             // FinalTurnRemoved depends on the newest entry; UnknownMessage
             // can follow a revert. Neither blames a drop when an accepted
             // view first loses that race. Only its immediate retry pays the
