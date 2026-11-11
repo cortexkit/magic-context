@@ -1,0 +1,25 @@
+{
+  "name": "head-worker",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": false,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": null
+      },
+      "managed": true,
+      "messages": []
+    }
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "name": "head",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": true,
+      "messages": [
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "name": "ARCHITECTURE.md",
+                  "text": "<file name=\"ARCHITECTURE.md\">\n# Architecture\nKeep the prefix stable.\n</file>",
+                  "tokens": 24
+                },
+                {
+                  "name": "STRUCTURE.md",
+                  "text": "<file name=\"STRUCTURE.md\">\n# Structure\nSources live in src/.\n</file>",
+                  "tokens": 22
+                }
+              ],
+              "kind": "project_docs",
+              "text": "<project-docs>\n<file name=\"ARCHITECTURE.md\">\n# Architecture\nKeep the prefix stable.\n</file>\n\n<file name=\"STRUCTURE.md\">\n# Structure\nSources live in src/.\n</file>\n</project-docs>",
+              "tokens": 60
+            },
+            {
+              "kind": "user_profile",
+              "text": "<user-profile>\n- Prefer concise explanations.\n</user-profile>",
+              "tokens": 19
+            },
+            {
+              "items": [
+                {
+                  "compartment_id": "1",
+                  "tier": 1,
+                  "tokens": 13
+                }
+              ],
+              "kind": "history",
+              "text": "<session-history>\n## 1-4 · Earlier work\nPreserved the cache.\n</session-history>",
+              "tokens": 25
+            },
+            {
+              "items": [
+                {
+                  "category": "PROJECT_RULES",
+                  "id": 1,
+                  "text": "#1: Expand 42 for evidence.\n  Keep the original bytes.",
+                  "tokens": 14
+                }
+              ],
+              "kind": "memory",
+              "text": "<project-memory>\n<PROJECT_RULES>\n#1: Expand 42 for evidence.\n  Keep the original bytes.\n</PROJECT_RULES>\n</project-memory>",
+              "tokens": 40
+            },
+            {
+              "image": {
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+                "media_type": "image/png",
+                "sha256": "0a97501e18a664a7d7ee7a1aeea061759a8833e1dbe6b6259d4b7c7746a4506c",
+                "tokens": null
+              },
+              "kind": "memory_mural",
+              "text": "<memory-mural>\nThe project memory mural image follows.\nThe memory mural image lists project memories that did not fit `<project-memory>`, as compressed cues under category banners. A red cue is a prohibition (`⊘thing (reason)`), `→` means leads to. Run `ctx_search` with a cue's identifiers to recall the full memory.\n</memory-mural>",
+              "tokens": 87
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 239
+        },
+        {
+          "empty": false,
+          "sections": [
+            {
+              "items": [
+                {
+                  "form": "full",
+                  "text": "  <updated id=\"1\" category=\"PROJECT_RULES\">Expand 43 for updated evidence.</updated>"
+                }
+              ],
+              "kind": "memory_updates",
+              "text": "<memory-updates>\nThese memories changed since the snapshot below — trust these:\n  <updated id=\"1\" category=\"PROJECT_RULES\">Expand 43 for updated evidence.</updated>\n</memory-updates>",
+              "tokens": 45
+            },
+            {
+              "items": [
+                {
+                  "compartment_id": "2",
+                  "tier": 1,
+                  "tokens": 13
+                }
+              ],
+              "kind": "history",
+              "text": "<new-compartments>\n## 5-8 · New work\nAdded a head read.\n</new-compartments>",
+              "tokens": 29
+            },
+            {
+              "kind": "user_profile",
+              "text": "<new-user-profile>\n- Prefer concise explanations and concrete evidence.\n</new-user-profile>",
+              "tokens": 26
+            }
+          ],
+          "slot": "delta",
+          "tokens": 118,
+          "wrapper": {
+            "close": "</session-history-since>",
+            "open": "<session-history-since>"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -971,6 +971,7 @@ impl Session {
                 Some(forget_from)
             }
         };
+        self.app_resume_head();
         self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
         // Before anything is offered: a view offered again must meet the
         // floor too.
@@ -1008,6 +1009,7 @@ impl Session {
         if let Some(view) = &self.latest {
             self.view_validation.prime(self.index.entries(), view);
         }
+        self.app_projection.head_read.ready = !self.latest_unknown;
         if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
@@ -3548,6 +3550,7 @@ impl Session {
                 .map(|op| cortexkit_role_compaction::view::Edit::new(version, op))
                 .collect(),
         );
+        self.app_capture_head(&view);
         if let Some(next) = self.next_baseline.take() {
             self.baseline = Some(next);
             self.fold_due = false;
@@ -4305,6 +4308,7 @@ impl Session {
         // state went back, or that stopped applying any view, measures its
         // requests under what it applies now.
         self.newest_applied = applied.map_or(0, |applied| applied.version);
+        self.app_confirm_head(self.newest_applied);
         if let Some(applied) = applied {
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
@@ -4474,6 +4478,7 @@ impl Session {
         }
         self.spent_reading = before.spent_reading;
         self.baseline = before.baseline;
+        self.app_projection.head_read.offered = None;
         self.fold_due = before.fold_due;
         self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
         self.caveman = before.caveman;
@@ -4560,12 +4565,14 @@ impl Session {
                     {
                         self.latest = None;
                         self.latest_unknown = false;
+                        self.app_adopt_head();
                         return;
                     }
                     self.apply_cut(view);
                 }
                 self.latest = answer.view;
                 self.latest_unknown = false;
+                self.app_adopt_head();
             }
             Err(error) => self.runner_call_failed("session.applied_view", &error),
         }

@@ -20,6 +20,7 @@ impl Session {
             "{}/{}",
             self.conditions.model.provider, self.conditions.model.model
         );
+        self.app_capture_head(view);
         let changes = (self.app.last_model.as_ref() != Some(&model))
             .then(|| json!({"prev":self.app.last_model,"new":model}));
         let identity_delta = if changes.is_some() {
@@ -59,6 +60,119 @@ impl Session {
                 self.app_decisions_dirty = true;
             }
         }
+    }
+
+    pub(super) fn app_confirm_head(&mut self, version: u64) {
+        if version == 0 {
+            self.app_projection.head_read.confirmed = None;
+            return;
+        }
+        if self
+            .app_projection
+            .head_read
+            .confirmed
+            .as_ref()
+            .is_some_and(|head| head.version == version)
+        {
+            return;
+        }
+        // Confirmation can name an intermediate view while a newer view waits.
+        // The next pending view's rollback snapshot owns that view's baseline.
+        if self
+            .app_projection
+            .head_read
+            .offered
+            .as_ref()
+            .is_none_or(|head| head.version != version)
+        {
+            if let Some(at) = self
+                .unconfirmed
+                .iter()
+                .position(|pending| pending.view.version == version)
+            {
+                let baseline = self
+                    .unconfirmed
+                    .get(at + 1)
+                    .map_or(self.baseline.as_ref(), |pending| {
+                        pending.before.baseline.as_ref()
+                    })
+                    .cloned();
+                let mut state = crate::app_read::head::ReadState::default();
+                state.record(
+                    &self.unconfirmed[at].view,
+                    baseline,
+                    &format!(
+                        "{}/{}",
+                        self.conditions.model.provider, self.conditions.model.model
+                    ),
+                );
+                self.app_projection.head_read.confirmed = state.offered;
+            } else if let Some(pending) = self.unconfirmed.first().filter(|pending| {
+                pending
+                    .before
+                    .latest
+                    .as_ref()
+                    .is_some_and(|view| view.version == version)
+            }) {
+                let mut state = crate::app_read::head::ReadState::default();
+                state.record(
+                    pending.before.latest.as_ref().expect("matching view"),
+                    pending.before.baseline.clone(),
+                    &format!(
+                        "{}/{}",
+                        self.conditions.model.provider, self.conditions.model.model
+                    ),
+                );
+                self.app_projection.head_read.confirmed = state.offered;
+            }
+        } else {
+            self.app_projection.head_read.confirm(version);
+        }
+    }
+
+    pub(super) fn app_capture_head(&mut self, view: &View) {
+        self.app_projection.head_read.record(
+            view,
+            self.next_baseline
+                .as_ref()
+                .or(self.baseline.as_ref())
+                .cloned(),
+            &format!(
+                "{}/{}",
+                self.conditions.model.provider, self.conditions.model.model
+            ),
+        );
+    }
+
+    pub(super) fn app_resume_head(&mut self) {
+        if let Some(view) = &self.latest {
+            self.app_projection.head_read.record(
+                view,
+                self.baseline.clone(),
+                &format!(
+                    "{}/{}",
+                    self.conditions.model.provider, self.conditions.model.model
+                ),
+            );
+        }
+    }
+
+    pub(super) fn app_adopt_head(&mut self) {
+        let state = &mut self.app_projection.head_read;
+        state.offered = None;
+        state.confirmed = None;
+        if let Some(view) = &self.latest {
+            state.record(
+                view,
+                self.baseline.clone(),
+                &format!(
+                    "{}/{}",
+                    self.conditions.model.provider, self.conditions.model.model
+                ),
+            );
+            state.confirm(self.newest_applied);
+        }
+        state.ready = true;
     }
 }
 
@@ -499,6 +613,61 @@ mod tests {
             )
         }));
         session
+    }
+
+    #[test]
+    fn head_read_tracks_confirmation_rollback_and_no_view_steps_without_copies() {
+        let mut session = session();
+        let baseline = Arc::new(Baseline {
+            m0: "<session-history></session-history>".into(),
+            ..Default::default()
+        });
+        session.next_baseline = Some(baseline.clone());
+        let ops = crate::summary::head::head_ops(&baseline.m0,"<session-history-since>(no new content since last materialization)</session-history-since>",None);
+        let view = session.seal_unchecked(ops);
+        session.accept(view.clone());
+        let offered = session.app_projection.head_read.offered.clone().unwrap();
+        assert!(session.app_projection.head_read.confirmed.is_none());
+        for _ in 0..10 {
+            let update = session.app_update();
+            assert!(Arc::ptr_eq(update.head.offered.as_ref().unwrap(), &offered));
+        }
+        session.settle_unconfirmed(
+            Some(&AppliedView::new(view.version, view.checksum.clone())),
+            &[],
+        );
+        assert!(Arc::ptr_eq(
+            session.app_projection.head_read.confirmed.as_ref().unwrap(),
+            &offered
+        ));
+        let later = session.seal_unchecked(vec![]);
+        session.accept(later.clone());
+        for _ in 0..10 {
+            session.settle_unconfirmed(
+                Some(&AppliedView::new(view.version, view.checksum.clone())),
+                &[],
+            );
+            assert!(Arc::ptr_eq(
+                session.app_projection.head_read.confirmed.as_ref().unwrap(),
+                &offered
+            ));
+        }
+        assert_ne!(
+            session
+                .app_projection
+                .head_read
+                .offered
+                .as_ref()
+                .unwrap()
+                .version,
+            view.version
+        );
+        session.ride_undelivered(later.version);
+        assert!(session.app_projection.head_read.offered.is_none());
+        assert!(Arc::ptr_eq(
+            session.app_projection.head_read.confirmed.as_ref().unwrap(),
+            &offered
+        ));
     }
 
     #[tokio::test]

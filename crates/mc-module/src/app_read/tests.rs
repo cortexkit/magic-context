@@ -30,7 +30,7 @@ fn fixture() -> Snapshot {
         decisions: vec![],
     }
 }
-fn replica(context: Option<Connection>) -> Replica {
+pub(super) fn replica(context: Option<Connection>) -> Replica {
     let s = fixture();
     Replica {
         boundaries: HashMap::new(),
@@ -40,9 +40,10 @@ fn replica(context: Option<Connection>) -> Replica {
         store: None,
         context,
         watches: watch::Hub::new(),
+        heads: HashMap::new(),
     }
 }
-fn request(extra: Value) -> Value {
+pub(super) fn request(extra: Value) -> Value {
     let mut p = extra;
     p["session"] = json!(key());
     p
@@ -837,6 +838,7 @@ fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
     });
     replica.publish(first);
     replica.update(Update {
+        head: Default::default(),
         key: key(),
         header,
         rows: vec![("m1".into(), Arc::new(boundary))],

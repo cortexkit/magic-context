@@ -89,6 +89,7 @@ struct Replacement {
 }
 
 pub(crate) struct Projection {
+    pub(crate) head_read: crate::app_read::head::ReadState,
     identity: u64,
     model: String,
     live: BTreeMap<u64, Cached>,
@@ -159,6 +160,7 @@ const SNAPSHOT_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 impl Default for Projection {
     fn default() -> Self {
         Self {
+            head_read: Default::default(),
             identity: 0,
             model: String::new(),
             live: BTreeMap::new(),
@@ -799,6 +801,11 @@ impl Session {
             None
         };
         let update = Update {
+            head: {
+                let mut head = p.head_read.clone();
+                head.counter = Some(counter);
+                head
+            },
             key: self.key.clone(),
             header,
             rows,

@@ -101,6 +101,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
                 "session_data.read",
                 "context.watch",
                 "context.states",
+                "context.head",
                 "context.compartment",
                 "context.cache_why",
                 "context.search",
@@ -1660,6 +1661,28 @@ mod agent_surface_tests {
 #[cfg(test)]
 mod app_read_tests {
     use super::*;
+
+    #[test]
+    fn app_read_head_is_declared_and_uses_the_states_admission() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let service = manifest["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["service_id"] == "mc-app-read")
+            .unwrap();
+        for method in ["context.head", "context.states"] {
+            assert!(service["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(method)));
+            // Admission precedes method decoding, so a forbidden caller cannot
+            // enter either read, regardless of the requested session.
+            let mut bind = request();
+            bind.principal = Some(Principal::Unverified);
+            assert_eq!(app_admission(&bind).unwrap_err().code, "not_permitted");
+        }
+    }
 
     fn request() -> RouteBindRequest {
         let mut request = RouteBindRequest::new(

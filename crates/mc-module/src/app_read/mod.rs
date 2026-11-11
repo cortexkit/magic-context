@@ -15,6 +15,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
+pub(crate) mod head;
 pub(crate) mod persistence;
 mod search;
 mod states;
@@ -276,6 +277,7 @@ pub(crate) struct Update {
     pub compartments: Option<Arc<Vec<Value>>>,
     pub decisions: Option<Arc<Vec<Value>>>,
     pub reverted: bool,
+    pub head: head::ReadState,
 }
 
 #[derive(Clone)]
@@ -332,6 +334,7 @@ struct Replica {
     store: Option<Connection>,
     context: Option<Connection>,
     watches: watch::Hub,
+    heads: HashMap<SessionRef, head::ReadState>,
 }
 
 impl AppRead {
@@ -361,6 +364,7 @@ impl AppRead {
                     store,
                     context,
                     watches: watch::Hub::new(),
+                    heads: HashMap::new(),
                 };
                 replica.load();
                 while let Ok(command) = rx.recv() {
@@ -540,6 +544,7 @@ impl Replica {
     fn update(&mut self, update: Update) {
         let _timing = crate::notice_cost_timing::span("app.replica");
         let key = update.key;
+        self.heads.insert(key.clone(), update.head);
         let h = update.header;
         let mut snapshot = self.snapshots.remove(&key).unwrap_or_else(|| Snapshot {
             key: key.clone(),
@@ -656,6 +661,7 @@ impl Replica {
         let allowed: &[&str] = match method {
             "session_data.read" => &["session", "section", "if_version"],
             "context.states" => &["session", "message_ids", "if_version"],
+            "context.head" => &["session"],
             "context.compartment" => &["session", "compartment_id"],
             "context.cache_why" => &["session", "producers"],
             "context.search" => &["query", "scope", "sources", "cursor"],
@@ -667,6 +673,9 @@ impl Replica {
         }
         let key = session(p.get("session").unwrap_or(&Value::Null))?;
         let snapshot = self.locate(&key)?;
+        if method == "context.head" {
+            return head::read(snapshot, self.heads.get(&key));
+        }
         let mut fields = match method {
             "session_data.read" => {
                 let section = string(p, "section")?;
