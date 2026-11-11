@@ -55,6 +55,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 nix = { version = "0.31.3", features = ["fs"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"

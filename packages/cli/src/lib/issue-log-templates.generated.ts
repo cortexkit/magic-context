@@ -1782,6 +1782,7 @@ const TEMPLATE_DATA = [
 "[magic-context] failed to copy embedding model cache:",
 "[magic-context] host stall profiler disabled: stopped",
 "[magic-context] no conflicts detected, plugin enabled",
+"ck-mc: timed out flushing app checkpoints on shutdown",
 "exact ordinal read failed; the historian start waits:",
 "LKG refused request could not be marked undispatched:",
 "LKG snapshot slices failed verification; slot cleared",

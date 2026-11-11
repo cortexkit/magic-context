@@ -123,8 +123,11 @@ pub(crate) struct Projection {
     initialized: bool,
     header: Option<Arc<Header>>,
     persisted: Option<(u64, String)>,
-    snapshot_saved: Option<std::time::Instant>,
+    snapshot_saved: Option<tokio::time::Instant>,
     snapshot_dirty: bool,
+    snapshot_changed: Option<tokio::time::Instant>,
+    snapshot_retry: Option<tokio::time::Instant>,
+    snapshot_timer: Option<SnapshotTimer>,
     snapshot_rows: BTreeMap<String, Arc<Message>>,
     snapshot_removed: BTreeSet<String>,
     snapshot_reset: bool,
@@ -140,6 +143,19 @@ pub(crate) struct Projection {
     #[cfg(test)]
     pub(crate) head_rebuilds: usize,
 }
+
+// A timer belongs to the projection, not the runner. Replacing or dropping the
+// session must cancel it rather than leaving work addressed to its old key.
+struct SnapshotTimer(tokio::task::AbortHandle);
+
+impl Drop for SnapshotTimer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+const SNAPSHOT_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Default for Projection {
     fn default() -> Self {
         Self {
@@ -176,6 +192,9 @@ impl Default for Projection {
             persisted: None,
             snapshot_saved: None,
             snapshot_dirty: false,
+            snapshot_changed: None,
+            snapshot_retry: None,
+            snapshot_timer: None,
             snapshot_rows: BTreeMap::new(),
             snapshot_removed: BTreeSet::new(),
             snapshot_reset: false,
@@ -802,8 +821,12 @@ impl Session {
         // independently until a transaction commits successfully.
         p.snapshot_rows.extend(update.rows.iter().cloned());
         p.snapshot_summaries |= update.compartments.is_some();
-        p.snapshot_dirty |=
+        let changed =
             !update.rows.is_empty() || update.reset_from.is_some() || update.prune_before.is_some();
+        p.snapshot_dirty |= changed;
+        if changed {
+            p.snapshot_changed = Some(tokio::time::Instant::now());
+        }
         p.base = self.index.base();
         p.initialized = true;
         self.app_projection = p;
@@ -855,22 +878,58 @@ impl Session {
             );
             match store.save_app_checkpoint(&self.key, &checkpoint) {
                 Ok(()) => {
-                    self.app_projection.snapshot_saved = Some(std::time::Instant::now());
+                    self.app_projection.snapshot_saved = Some(tokio::time::Instant::now());
                     self.app_projection.snapshot_dirty = false;
+                    self.app_projection.snapshot_changed = None;
+                    self.app_projection.snapshot_retry = None;
+                    self.app_projection.snapshot_timer = None;
                     self.app_projection.snapshot_rows.clear();
                     self.app_projection.snapshot_removed.clear();
                     self.app_projection.snapshot_reset = false;
                     self.app_projection.snapshot_summaries = false;
                 }
-                Err(error) => tracing::warn!("ck-mc: {error}"),
+                Err(error) => {
+                    // Keep the delta, but a busy store must not make an overdue
+                    // timer retry continuously between session jobs.
+                    self.app_projection.snapshot_retry =
+                        Some(tokio::time::Instant::now() + SNAPSHOT_DELAY);
+                    tracing::warn!("ck-mc: {error}");
+                }
             }
+        }
+    }
+
+    pub(crate) fn app_snapshot_deadline(&self) -> Option<tokio::time::Instant> {
+        let p = &self.app_projection;
+        (self.store.is_some() && p.snapshot_dirty && p.snapshot_timer.is_none())
+            .then(|| {
+                p.snapshot_changed.map(|changed| {
+                    let due = changed + SNAPSHOT_DELAY;
+                    p.snapshot_retry.map_or(due, |retry| due.max(retry))
+                })
+            })
+            .flatten()
+    }
+
+    pub(crate) fn app_arm_snapshot(&mut self, timer: tokio::task::AbortHandle) {
+        self.app_projection.snapshot_timer = Some(SnapshotTimer(timer));
+    }
+
+    pub(crate) fn app_checkpoint_if_due(&mut self, flush: bool) {
+        self.app_projection.snapshot_timer = None;
+        if self.app_projection.snapshot_dirty
+            && (flush
+                || self
+                    .app_snapshot_deadline()
+                    .is_some_and(|deadline| deadline <= tokio::time::Instant::now()))
+        {
+            self.app_save_snapshot();
         }
     }
 
     #[cfg(test)]
     pub(crate) fn app_age_snapshot(&mut self) {
-        self.app_projection.snapshot_saved =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
+        self.app_projection.snapshot_saved = Some(tokio::time::Instant::now() - SNAPSHOT_DELAY);
     }
 
     fn app_persist_index(&mut self) {

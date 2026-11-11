@@ -93,12 +93,14 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest(&module_id),
-        Handler::new(module),
+        Handler::new(module.clone()),
     )
     .await?;
     // ck-mc's child scopes are published through its serving connection.
     child_scopes.install(handle);
-    serve.await?;
+    let result = serve.await;
+    module.flush_app_snapshots().await;
+    result?;
     Ok(())
 }
 

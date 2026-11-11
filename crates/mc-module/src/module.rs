@@ -112,6 +112,10 @@ enum Job {
         reply: oneshot::Sender<Addition>,
     },
     Idle(oneshot::Sender<()>),
+    /// A timer queues a checkpoint job without owning the session or writing to storage.
+    AppCheckpoint {
+        flush: Option<oneshot::Sender<()>>,
+    },
     /// Boxed: a summary result is much larger than any other job.
     SummaryFinished(Box<Result<Option<run::Summarized>, String>>),
 }
@@ -182,6 +186,36 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         match &self.inner.search {
             Some(search) => search.idle(session).await,
             None => Ok(()),
+        }
+    }
+
+    /// Best-effort checkpointing after the serving connection ends. Queue all
+    /// sessions first, so one busy runner cannot keep the others from flushing.
+    pub async fn flush_app_snapshots(&self) {
+        let answers: Vec<_> = {
+            let workers = self.inner.workers.lock().expect("worker map");
+            workers
+                .values()
+                .filter_map(|worker| {
+                    let (reply, answer) = oneshot::channel();
+                    worker
+                        .send(Job::AppCheckpoint { flush: Some(reply) })
+                        .ok()
+                        .map(|()| answer)
+                })
+                .collect()
+        };
+        // The daemon may force an exit after its drain budget. A stuck session
+        // must not extend process shutdown; signal termination has no flush hook.
+        if tokio::time::timeout(Duration::from_secs(2), async {
+            for answer in answers {
+                let _ = answer.await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("ck-mc: timed out flushing app checkpoints on shutdown");
         }
     }
 
@@ -504,11 +538,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     (_, None) => Settings::default(),
                 };
                 let settings = &settings;
-                let publish_app = !matches!(&job, Job::Idle(_) | Job::PreUser { .. });
+                let publish_app = !matches!(
+                    &job,
+                    Job::Idle(_) | Job::PreUser { .. } | Job::AppCheckpoint { .. }
+                );
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
+                    Job::AppCheckpoint { flush } => {
+                        if let Some(session) = &mut session {
+                            session.app_checkpoint_if_due(flush.is_some());
+                        }
+                        if let Some(reply) = flush {
+                            let _ = reply.send(());
+                        }
+                    }
                     Job::Setup(route, request, features) => match &mut session {
                         // A session that so far only called tools starts
                         // afresh below, like any new one.
@@ -687,6 +732,18 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                     }
                 }
+                if let Some(session) = &mut session {
+                    if let Some(deadline) = session.app_snapshot_deadline() {
+                        let own = own.clone();
+                        let timer = tokio::spawn(async move {
+                            tokio::time::sleep_until(deadline).await;
+                            if let Some(worker) = own.upgrade() {
+                                let _ = worker.send(Job::AppCheckpoint { flush: None });
+                            }
+                        });
+                        session.app_arm_snapshot(timer.abort_handle());
+                    }
+                }
                 // A tools-only session has nothing to keep across a restart.
                 if let (Some(store), Some(session)) = (
                     &inner.store,
@@ -808,6 +865,10 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
+
+#[cfg(test)]
+#[path = "app_read/deadline_tests.rs"]
+mod app_snapshot_tests;
 
 #[cfg(test)]
 mod config_tests {
