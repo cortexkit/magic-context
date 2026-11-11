@@ -163,6 +163,7 @@ import {
     MaterializeContentionError,
     type MaterializeDecision,
     mustMaterialize,
+    type PrefixTrimRefusal,
     type PrefixTrimSourceOrder,
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
@@ -1918,6 +1919,8 @@ export interface PostTransformPhaseResult {
     bustedThisPass: boolean;
     /** How the delivered prefix cut the raw conversation; null when no m[0]/m[1] prefix was delivered. */
     prefixTrimStatus: PrefixTrimStatus | null;
+    /** Why a `refused` trim made no cut; null otherwise. */
+    prefixTrimRefusal: PrefixTrimRefusal | null;
     /** Pending flag applied to the live output; the caller clears it only after the live lane succeeds. */
     thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null;
     /** Thinking this busting pass removed because its own edit invalidated it. */
@@ -1968,7 +1971,11 @@ export interface EmergencyFailClosedDecision {
 export function evaluateEmergencyFailClosed(input: {
     usagePercentage: number;
     emergencyRecoveryArmed: boolean;
-    emergencyRecoveryOrigin: "provider_overflow" | "proactive_model_shrink" | null;
+    emergencyRecoveryOrigin:
+        | "provider_overflow"
+        | "proactive_model_shrink"
+        | "history_boundary_over_window"
+        | null;
     foldMaterializedThisPass: boolean;
     finalWireEstimate?: {
         tokens: number;
@@ -5508,6 +5515,7 @@ export async function runPostTransformPhase(
         prefixMutationPermitted: isCacheBustingPass,
         bustedThisPass,
         prefixTrimStatus: deliveredPrefix?.prefixTrimStatus ?? null,
+        prefixTrimRefusal: deliveredPrefix?.prefixTrimRefusal ?? null,
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,

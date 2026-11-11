@@ -1362,7 +1362,11 @@ function hardWallUsagePercentage(
 function shouldDisarmRustEmergencyRecovery(input: {
     materialized: boolean;
     usagePercentage: number;
-    recoveryOrigin: "provider_overflow" | "proactive_model_shrink" | null;
+    recoveryOrigin:
+        | "provider_overflow"
+        | "proactive_model_shrink"
+        | "history_boundary_over_window"
+        | null;
     recoveryArmedAt: number | null;
     usageEntry: { updatedAt: number; hasUsageTokens?: boolean } | null | undefined;
     finalWireEstimate?: { tokens: number; trusted: boolean };

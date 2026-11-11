@@ -2119,13 +2119,19 @@ export function clearHistorianFailureState(db: Database, sessionId: string): voi
 
 // ── Overflow detection state ──
 //
-// Recovery can be armed by either a provider rejection or a proactive model
-// shrink check. Persisting the origin keeps restarts from conflating the two:
+// Recovery can be armed by a provider rejection, a proactive model shrink
+// check, or a pass that measured its own request over the window after it
+// could not cut the summarized history out of it
+// (`history_boundary_over_window`). Persisting the origin keeps restarts from
+// conflating them:
 // only the provider's own overflow rejection is trustworthy enough for the
 // transform to abort before another request. Numeric gating is deferred to the
 // module-side provider-accurate estimator.
 
-export type EmergencyRecoveryOrigin = "provider_overflow" | "proactive_model_shrink";
+export type EmergencyRecoveryOrigin =
+    | "provider_overflow"
+    | "proactive_model_shrink"
+    | "history_boundary_over_window";
 
 export interface PersistedOverflowState {
     /** Provider-reported context limit from the overflow error; 0 means none detected. */
@@ -2147,7 +2153,11 @@ function normalizeDetectedLimitModelKey(modelKey: string | null | undefined): st
 }
 
 function normalizeEmergencyRecoveryOrigin(value: unknown): EmergencyRecoveryOrigin | null {
-    return value === "provider_overflow" || value === "proactive_model_shrink" ? value : null;
+    return value === "provider_overflow" ||
+        value === "proactive_model_shrink" ||
+        value === "history_boundary_over_window"
+        ? value
+        : null;
 }
 
 type PersistedOverflowRow = {

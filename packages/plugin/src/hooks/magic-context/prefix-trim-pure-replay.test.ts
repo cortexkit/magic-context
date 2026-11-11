@@ -168,12 +168,16 @@ describe("prefix trim shapes the absent-boundary fallback must not change", () =
 });
 
 // Computed with inject-compartments.ts from master bd8b7d5fce (before the fallback).
+// sourceOrderInvalid is the one exception: an unusable source order now places a
+// visible boundary by its position in the live array instead of refusing the
+// cut, so it serves exactly the bytes a valid source order serves for the same
+// window and boundary (sourceOrderFound[0]).
 const PINNED: Record<string, string[]> = {
     foundById: ["e240e7397f6f9ee3", "e240e7397f6f9ee3", "9d4ad8f05834550d"],
     noBoundary: ["daa9121a6e3f22d2", "4799ab1110ffbdf5"],
     absentNoStore: ["b46ecebebfe62beb", "b46ecebebfe62beb", "84e38817a370b5b2"],
     sourceOrderFound: ["fde86711883560fc", "0ec71e798e4c1e9b"],
-    sourceOrderInvalid: ["ddbde1ceead49af4"],
+    sourceOrderInvalid: ["fde86711883560fc"],
 };
 
 it("keeps a partial end-boundary message and its uncovered blocks raw on direct and source-order trims", () => {
