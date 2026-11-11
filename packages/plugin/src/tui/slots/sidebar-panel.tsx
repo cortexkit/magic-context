@@ -8,7 +8,7 @@ import {
     SidebarStatRow,
     SidebarTextRow,
     type SidebarTheme,
-} from "@cortexkit/opencode-sidebar"
+} from "../vendor/opencode-sidebar"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { badgeTextColor } from "../badge-contrast"
 import type { GaugeRowView, SidebarView, StatRowView } from "./sidebar-view"
