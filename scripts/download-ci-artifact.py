@@ -109,8 +109,9 @@ def artifact_metadata(args, token):
         # A rerun can leave earlier immutable artifacts with the same name; use the newest ID.
         artifact_id = str(max(matches, key=lambda item: item["id"])["id"])
 
-    # The id comes from a listing or from the wait step, which just saw the artifact. GitHub can
-    # answer 404 for such an id for a moment, so a 404 here is retried; a wrong id fails after the retries.
+    # The id comes from a listing above or from the caller, which gets it from wait-ci-artifact.py once
+    # that script has seen the artifact. GitHub can answer 404 for such an id for a moment, so a 404
+    # here is retried; a wrong id fails after the retries.
     metadata = retry_call(
         lambda: request_json(base + f"/actions/artifacts/{quote(str(artifact_id), safe='')}", token),
         f"artifact metadata for {args.artifact_name or artifact_id}",
