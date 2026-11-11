@@ -204,9 +204,12 @@ pub struct ContextDb {
 #[path = "context_db_timing.rs"]
 pub mod timing;
 
-/// The schema version a store is at: its newest migration that is not a
-/// fork's. Opening a store compares it with [`SCHEMA_VERSION`], and a move
-/// records it in the snapshot it reads, inside the same read transaction.
+/// The schema version a store is at: its newest applied migration below
+/// [`FORK_VERSION_FLOOR`]. Numbers at or above that floor are reserved for
+/// forks of the plugin, which add their own migrations without changing the
+/// schema this build reads, so they don't count. Opening a store compares the
+/// result with [`SCHEMA_VERSION`], and a move records it in the snapshot it
+/// reads, inside the same read transaction.
 pub(crate) fn live_schema_version(connection: &Connection) -> rusqlite::Result<i64> {
     connection.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations WHERE version < ?1",

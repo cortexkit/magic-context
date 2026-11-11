@@ -27,8 +27,9 @@
 /// It is committed when it has a place in the project's backlog
 /// (`commit_order`), the second turn's own rule. A fact waits when it is
 /// `retryable`, or `in_flight` under a move's own reservation (`agent-data:`
-/// and a cut id): a second-turn send holds the other `in_flight` facts, and
-/// `applied`, `covered` and `decided_pending` are final.
+/// followed by the id of the cut, the one move attempt that reserved it): a
+/// second-turn send holds the other `in_flight` facts, and `applied`,
+/// `covered` and `decided_pending` are final.
 pub fn publications() -> String {
     format!(
         "SELECT p.publication_id FROM memory_publications p
@@ -181,7 +182,8 @@ pub enum Required {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reassigned {
     /// The session id. Every row of the selection holds the session's own,
-    /// so the body leaves it out and the install writes the ref's.
+    /// so the body leaves it out and the install writes the session id the
+    /// snapshot's header names.
     SessionId,
     /// The harness, like the session id.
     Harness,

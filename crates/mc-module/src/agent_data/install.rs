@@ -2,7 +2,8 @@
 //! plan ([`crate::move_batches`]): staged in `schema_migrations_meta` under
 //! a key for the cut and the session, then applied in short transactions
 //! that each advance the plan's cursor, so a crash resumes where it stopped
-//! and no batch is applied twice.
+//! and no batch is applied twice. A cut is one move attempt; its id comes
+//! with every step of that move, so two attempts never share a plan.
 //!
 //! The plan first deletes the receiver's rows in the session's selection,
 //! children before parents, then inserts the snapshot's rows, parents
