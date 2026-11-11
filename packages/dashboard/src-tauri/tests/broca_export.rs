@@ -7,7 +7,6 @@ use isolated_home::isolated_home;
 mod broca_export;
 use broca_export::BrocaRunIndex;
 use rusqlite::{params, Connection, OpenFlags};
-use std::time::Instant;
 
 fn fixture() -> (tempfile::TempDir, Connection, Connection) {
     let folder = tempfile::tempdir().unwrap();
@@ -26,7 +25,7 @@ fn fixture() -> (tempfile::TempDir, Connection, Connection) {
 }
 
 fn poll(index: &mut BrocaRunIndex, conn: &Connection) -> broca_export::PollStats {
-    let stats = index.refresh(conn, Instant::now()).unwrap();
+    let stats = index.refresh(conn).unwrap();
     assert!(conn.is_autocommit(), "a poll must release its snapshot");
     stats
 }

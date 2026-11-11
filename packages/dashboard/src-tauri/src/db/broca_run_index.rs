@@ -5,7 +5,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
-use std::time::Instant;
 
 const PAGE_SIZE: usize = 512;
 
@@ -104,11 +103,7 @@ pub(super) struct PollStats {
 impl BrocaRunIndex {
     /// Metadata and pages share one short snapshot so a source reset cannot
     /// mix the old source's facts into the new source's cursor.
-    pub(super) fn refresh(
-        &mut self,
-        conn: &Connection,
-        _now: Instant,
-    ) -> rusqlite::Result<PollStats> {
+    pub(super) fn refresh(&mut self, conn: &Connection) -> rusqlite::Result<PollStats> {
         let transaction = conn.unchecked_transaction()?;
         let source = transaction.query_row(
             "SELECT source_instance_id, source_epoch FROM export_meta WHERE id = 1",
@@ -166,8 +161,9 @@ impl BrocaRunIndex {
     }
 
     fn add(&mut self, run_id: String, fact: SessionFact) {
-        // Value's sorted object keys give old callers the same canonical JSON
-        // identity regardless of the writer's member order or extra members.
+        // The identity string serializes the session's project folder, harness
+        // and name in a fixed member order. As a map key it keeps sessions
+        // distinct when any part differs, including a missing versus empty folder.
         let identity = serde_json::to_value(&fact.session)
             .expect("serializable session")
             .to_string();

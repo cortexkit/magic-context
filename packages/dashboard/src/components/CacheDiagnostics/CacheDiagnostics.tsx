@@ -671,8 +671,8 @@ export default function CacheDiagnostics() {
                       tooltip: brocaCardTooltip(stat.broca),
                     }
                   : sessionLabel(stat.harness, stat.session_id, stat.title);
-                // Every Broca session is managed, so only the exception is
-                // marked: an unmanaged card listed because the toggle is on.
+                // Every Broca session is managed. An unmanaged card is marked only
+                // when the tab header's "Show unmanaged" button allows it into the list.
                 const unmanaged = isManagedFilterableHarness(stat.harness) && !stat.managed;
                 return (
                   <button

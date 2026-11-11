@@ -3443,7 +3443,7 @@ fn with_broca_run_index<T>(
         *guard = Some((path.to_path_buf(), file_key, Default::default()));
     }
     let (_, _, index) = guard.as_mut()?;
-    if index.refresh(conn, std::time::Instant::now()).is_err() {
+    if index.refresh(conn).is_err() {
         // Leave nothing half-read behind for the next poll to build on.
         *guard = None;
         return None;
@@ -3460,7 +3460,7 @@ fn load_broca_cache_sessions(limit: usize) -> Vec<CacheSessionListEntry> {
         return Vec::new();
     };
     with_broca_run_index(&conn, &path, |index| index.list(limit))
-        .map(|listed| broca_list_entries(listed, Some(&root), limit))
+        .map(|listed| broca_list_entries(listed, limit))
         .unwrap_or_default()
 }
 
@@ -3471,17 +3471,15 @@ fn load_broca_cache_sessions(limit: usize) -> Vec<CacheSessionListEntry> {
 #[cfg(test)]
 fn load_broca_cache_sessions_from_conn(
     conn: &Connection,
-    wal_state_root: Option<&Path>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CacheSessionListEntry>> {
     let mut index = broca_run_index::BrocaRunIndex::default();
-    index.refresh(conn, std::time::Instant::now())?;
-    Ok(broca_list_entries(index.list(limit), wal_state_root, limit))
+    index.refresh(conn)?;
+    Ok(broca_list_entries(index.list(limit), limit))
 }
 
 fn broca_list_entries(
     listed: Vec<broca_run_index::ListedSession>,
-    _wal_state_root: Option<&Path>,
     limit: usize,
 ) -> Vec<CacheSessionListEntry> {
     let mut sessions = Vec::new();
@@ -14355,7 +14353,7 @@ mod broca_cache_tests {
             params![segment.to_string()],
         )
         .unwrap();
-        let sessions = load_broca_cache_sessions_from_conn(&conn, None, 10).unwrap();
+        let sessions = load_broca_cache_sessions_from_conn(&conn, 10).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title.as_deref(), Some("alfonso:bg_errored"));
         let events = build_db_cache_events(
@@ -14852,7 +14850,7 @@ mod broca_cache_tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/broca-export-facts/fixture-run-index.db");
         let reader = open_broca_store(&path).unwrap();
-        let listed = load_broca_cache_sessions_from_conn(&reader, None, 10).unwrap();
+        let listed = load_broca_cache_sessions_from_conn(&reader, 10).unwrap();
         let head = listed
             .iter()
             .find(|row| row.title.as_deref() == Some("synthetic-agent-head"))
@@ -14898,7 +14896,7 @@ mod broca_cache_tests {
             reader.execute("DELETE FROM export_facts", []).is_err(),
             "the production opener must be read-only"
         );
-        let listed = load_broca_cache_sessions_from_conn(&reader, None, 10).unwrap();
+        let listed = load_broca_cache_sessions_from_conn(&reader, 10).unwrap();
         assert_eq!(listed.len(), 5, "undated finished work must not disappear");
         assert_eq!(
             listed.last().unwrap().title.as_deref(),
@@ -14911,7 +14909,7 @@ mod broca_cache_tests {
     fn run_totals_through_the_run_index_match_the_full_filter() {
         let (conn, id) = two_run_session();
         let mut index = broca_run_index::BrocaRunIndex::default();
-        index.refresh(&conn, std::time::Instant::now()).unwrap();
+        index.refresh(&conn).unwrap();
         let run_ids = index.run_ids(&id);
         assert_eq!(run_ids, ["r1", "r2"]);
         let indexed = load_broca_run_totals(&conn, &id, Some(&run_ids)).unwrap();
@@ -15007,7 +15005,7 @@ mod broca_cache_tests {
         ] {
             insert(&conn, fact, fact, &identity(session), ts, usage.clone());
         }
-        let sessions = load_broca_cache_sessions_from_conn(&conn, None, 10).unwrap();
+        let sessions = load_broca_cache_sessions_from_conn(&conn, 10).unwrap();
         let titles: Vec<_> = sessions.iter().filter_map(|s| s.title.as_deref()).collect();
         assert_eq!(
             titles,
@@ -15027,9 +15025,7 @@ mod broca_cache_tests {
             ));
         }
         assert_eq!(
-            load_broca_cache_sessions_from_conn(&conn, None, 2)
-                .unwrap()
-                .len(),
+            load_broca_cache_sessions_from_conn(&conn, 2).unwrap().len(),
             2
         );
     }
