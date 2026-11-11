@@ -564,6 +564,11 @@ fn child_cpu_us() -> u64 {
 
 include!("../benches/fixtures/notice-cost-fixed-interleaved.inc.rs");
 
+mod first_contact {
+    use super::*;
+    include!("../benches/fixtures/first-contact-cost.inc.rs");
+}
+
 #[cfg(feature = "notice-cost-timing")]
 include!("../benches/fixtures/surface-ride-cost.inc.rs");
 
