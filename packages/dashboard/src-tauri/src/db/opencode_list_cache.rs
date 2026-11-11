@@ -668,4 +668,84 @@ mod tests {
             "a one-turn poll read {delta} pages, a full scan {full}"
         );
     }
+
+    /// The owner's `wal_checkpoint(TRUNCATE)`: `(busy, log frames, checkpointed frames)`.
+    /// `busy` is 1 when a reader's snapshot kept it from finishing.
+    fn checkpoint(store: &Store) -> (i64, i64, i64) {
+        store
+            .writer
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_owner_can_checkpoint_to_completion_between_polls() {
+        let store = Store::new();
+        for index in 0..30 {
+            let id = format!("s{index:02}");
+            store.session(&id, None, 1_000 + index);
+            store.turn(&id, &format!("m{index:02}"), 1_000 + index);
+        }
+        let mut cache = OpenCodeListCache::open(&store.path).unwrap();
+        let start = Instant::now();
+        // A limit below the candidate count leaves the candidate walk
+        // part-way through its pages, the case most likely to leave a
+        // statement stepped but unfinished.
+        cache.recent_sessions(3, &HashSet::new(), start);
+        assert!(cache.finish_poll());
+        assert_eq!(checkpoint(&store).0, 0, "a poll left a read snapshot open");
+
+        store.turn("s04", "m-new", 9_000);
+        cache.recent_sessions(3, &HashSet::new(), start + Duration::from_secs(1));
+        cache.child_session_ids(start + Duration::from_secs(1));
+        assert!(cache.finish_poll());
+        assert_eq!(checkpoint(&store).0, 0, "a poll left a read snapshot open");
+    }
+
+    #[test]
+    fn a_statement_left_mid_read_is_ended_before_the_poll_returns() {
+        let store = Store::new();
+        for index in 0..5 {
+            let id = format!("s{index}");
+            store.session(&id, None, 1_000 + index);
+            store.turn(&id, &format!("m{index}"), 1_000 + index);
+        }
+        let mut cache = OpenCodeListCache::open(&store.path).unwrap();
+        listed(&mut cache, Instant::now());
+        // Simulate a reader that stepped a statement once and returned
+        // without finishing it: the statement holds a read snapshot.
+        let mut statement = std::ptr::null_mut();
+        let sql = c"SELECT id FROM session";
+        unsafe {
+            assert_eq!(
+                rusqlite::ffi::sqlite3_prepare_v2(
+                    cache.store.conn.handle(),
+                    sql.as_ptr(),
+                    -1,
+                    &mut statement,
+                    std::ptr::null_mut(),
+                ),
+                rusqlite::ffi::SQLITE_OK
+            );
+            assert_eq!(
+                rusqlite::ffi::sqlite3_step(statement),
+                rusqlite::ffi::SQLITE_ROW
+            );
+        }
+        store.turn("s1", "m-new", 9_000);
+        assert_eq!(
+            checkpoint(&store).0,
+            1,
+            "the half-read statement must block the checkpoint"
+        );
+
+        assert!(cache.finish_poll());
+
+        assert_eq!(checkpoint(&store).0, 0, "the poll left the snapshot open");
+        unsafe {
+            rusqlite::ffi::sqlite3_finalize(statement);
+        }
+    }
 }

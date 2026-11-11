@@ -307,6 +307,8 @@ pub fn opencode_overrides() -> OpenCodeDbOverrides {
 }
 
 mod opencode_stores;
+#[cfg(test)]
+mod opencode_stores_tests;
 pub(crate) use opencode_stores::{
     configured_store_values, parse_runner_roots, read_store, readable_opencode_stores,
     runner_roots_path, store_list_for, ReadableStore,
