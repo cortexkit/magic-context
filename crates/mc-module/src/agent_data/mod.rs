@@ -3,7 +3,10 @@
 //!
 //! Entorhinal moves an agent by asking every module that holds data for it
 //! to stop that data at a cut, ship it through Engram's session door, and
-//! bring it up on the other machine. For ck-mc a move covers, per runner
+//! bring it up on the other machine. A cut is one move attempt, which
+//! Entorhinal identifies with a cut id that every step of the move names.
+//! Engram's session door is Engram's service that carries a session's
+//! snapshot from one machine to the other. For ck-mc a move covers, per runner
 //! session, its summaries, session notes, project link, and the facts its
 //! summarizer extracted that still wait for the summarizer's second turn to
 //! reconcile them with project memory, all in `context.db`.

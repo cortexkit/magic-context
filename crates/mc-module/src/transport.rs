@@ -623,14 +623,19 @@ impl RunnerClient for SubcRunnerClient {
         engram_result(value)
     }
 
-    /// The module ids that claim `capability` in the daemon's catalog, by
-    /// the same lookup routing uses to find its provider.
-    async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
+    /// The modules in the daemon's catalog that claim `capability` and are
+    /// ready and nonce-verified. `resolve_providers` matches the claim
+    /// alone, and would list a module the daemon would not open a route to.
+    async fn ready_participants(&self, capability: &str) -> Result<Vec<String>, String> {
         let consumer = self.consumer().await?;
-        consumer
-            .resolve_providers(capability)
+        let catalog = consumer
+            .catalog_list()
             .await
-            .map_err(|error| format!("{error:?}"))
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(crate::agent_data::service::ready_participants(
+            &catalog.modules,
+            capability,
+        ))
     }
 }
 

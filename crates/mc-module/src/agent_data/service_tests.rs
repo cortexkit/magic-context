@@ -20,19 +20,39 @@ use cortexkit_role_compaction::read::SessionRef;
 use serde_json::{json, Value};
 
 use super::journal::{self, Cut};
-use super::service::{canonical, receipt, Done, Host, Probe, Service};
+use super::service::{canonical, ready_participants, receipt, Done, Host, Probe, Service};
 use super::Journal;
 use crate::client::EntorhinalRefusal;
+use subc_client_rs::CatalogEntry;
 
 const ENTORHINAL: &str = "reserved:entorhinal";
 const CUT: &str = "0123456789abcdef0123456789abcdef";
 const OTHER_CUT: &str = "fedcba9876543210fedcba9876543210";
 
+/// A catalog entry for `module`, as the daemon lists a registered module.
+fn entry(module: &str, ready: bool, verified: bool, claims: &[&str]) -> CatalogEntry {
+    let mut entry = CatalogEntry::new(module, Vec::new(), Vec::new());
+    entry.ready = ready;
+    entry.nonce_verified = verified;
+    entry.capabilities = Some(subc_protocol::manifest::CapabilityDeclarations {
+        provides: claims.iter().map(|claim| (*claim).to_owned()).collect(),
+        requires: Vec::new(),
+        must_never_reach: Vec::new(),
+    });
+    entry
+}
+
+/// A ready, verified module that claims `agent-data/v1`.
+fn participant(module: &str) -> CatalogEntry {
+    entry(module, true, true, &[contract::PROVIDES])
+}
+
 /// A host with stand-ins for the catalog, Entorhinal and the session's
 /// worker, counting every read the service makes of them.
 struct Stand {
     journal: Journal,
-    providers: Mutex<Result<Vec<String>, String>>,
+    /// The daemon's catalog as `catalog.list` answers it.
+    catalog: Mutex<Result<Vec<CatalogEntry>, String>>,
     /// Entorhinal's bindings, by ref: the `result` it answers.
     bindings: Mutex<HashMap<String, Value>>,
     entorhinal_answers: AtomicBool,
@@ -48,7 +68,7 @@ impl Stand {
     fn new(journal: Journal) -> Self {
         Self {
             journal,
-            providers: Mutex::new(Ok(vec!["broca".into(), "magic-context".into()])),
+            catalog: Mutex::new(Ok(vec![participant("broca"), participant("magic-context")])),
             bindings: Mutex::default(),
             entorhinal_answers: AtomicBool::new(true),
             historian: Mutex::default(),
@@ -112,10 +132,16 @@ impl Host for Stand {
         self.db.clone()
     }
 
-    async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
+    /// The ready participants the real filter finds in this catalog.
+    async fn ready_participants(&self, capability: &str) -> Result<Vec<String>, String> {
         assert_eq!(capability, contract::PROVIDES);
         self.catalog_reads.fetch_add(1, Ordering::SeqCst);
-        self.providers.lock().unwrap().clone()
+        self.catalog
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|catalog| ready_participants(catalog, capability))
+            .map_err(Clone::clone)
     }
 
     async fn entorhinal(&self, body: Vec<u8>) -> Option<Result<Vec<u8>, EntorhinalRefusal>> {
@@ -405,8 +431,12 @@ async fn the_published_describe_busy_and_status_vectors_decode_and_match() {
     );
 }
 
+/// `describe` declares a kind only while its owner is in the catalog as an
+/// `agent-data/v1` participant that is ready and verified, read afresh on
+/// every call; when the catalog cannot be read it declares nothing.
 #[tokio::test]
-async fn describe_declares_its_stores_and_broca_session_only_while_broca_is_a_participant() {
+async fn describe_declares_its_stores_and_broca_session_only_while_broca_is_a_ready_verified_participant(
+) {
     let host = Stand::new(Journal::in_memory());
     let service = Service::new(true);
     let describe = || call(&service, &host, contract::ops::DESCRIBE, json!({}));
@@ -422,18 +452,45 @@ async fn describe_declares_its_stores_and_broca_session_only_while_broca_is_a_pa
     );
     // Computed on every call: the catalog is read again, and what it lists
     // now is what is declared.
-    for (providers, kinds) in [
-        // Broca is gone from the catalog.
-        (Ok(vec!["magic-context".to_owned()]), json!([])),
-        // Broca is in the catalog but is not an agent-data participant
-        // (yet), so the lookup does not list it.
+    let ours = participant("magic-context");
+    for (case, catalog, kinds) in [
+        ("broca is gone", Ok(vec![ours.clone()]), json!([])),
         (
-            Ok(vec!["entorhinal".to_owned(), "magic-context".to_owned()]),
+            "broca claims agent-data/v1 and is not ready",
+            Ok(vec![
+                entry("broca", false, true, &[contract::PROVIDES]),
+                ours.clone(),
+            ]),
             json!([]),
         ),
-        (Err("connect: refused".to_owned()), json!([])),
         (
-            Ok(vec!["broca".to_owned(), "thalamus-harness".to_owned()]),
+            "broca claims agent-data/v1, is ready and its nonce is not verified",
+            Ok(vec![
+                entry("broca", true, false, &[contract::PROVIDES]),
+                ours.clone(),
+            ]),
+            json!([]),
+        ),
+        (
+            "broca is ready and verified and is no agent-data participant",
+            Ok(vec![
+                entry("broca", true, true, &["tool-provider/v1"]),
+                ours.clone(),
+            ]),
+            json!([]),
+        ),
+        (
+            "the catalog cannot be read",
+            Err("connect: refused".to_owned()),
+            json!([]),
+        ),
+        (
+            "broca and the THALAMUS harness are ready verified participants",
+            Ok(vec![
+                participant("broca"),
+                participant("thalamus-harness"),
+                ours.clone(),
+            ]),
             json!([
                 "broca-session",
                 "opencode2-session",
@@ -441,15 +498,19 @@ async fn describe_declares_its_stores_and_broca_session_only_while_broca_is_a_pa
                 "claude-code-session"
             ]),
         ),
-        (Ok(vec!["broca".to_owned()]), json!(["broca-session"])),
+        (
+            "broca is a ready verified participant",
+            Ok(vec![participant("broca")]),
+            json!(["broca-session"]),
+        ),
     ] {
-        *host.providers.lock().unwrap() = providers.clone();
+        *host.catalog.lock().unwrap() = catalog;
         let reply = describe().await.unwrap();
-        assert_eq!(reply["ref_kinds"], kinds, "{providers:?}");
+        assert_eq!(reply["ref_kinds"], kinds, "{case}");
         assert_eq!(reply["stores"], stores);
         assert_eq!(reply["external"], false);
     }
-    assert_eq!(host.catalog_reads.load(Ordering::SeqCst), 6);
+    assert_eq!(host.catalog_reads.load(Ordering::SeqCst), 8);
 }
 
 #[tokio::test]
