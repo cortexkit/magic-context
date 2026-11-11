@@ -109,6 +109,21 @@ export interface PricedPassPlanInput {
     /** The history injection was rebuilt on this pass before the postprocess phase. */
     historyRebuilt: boolean;
     alreadyRanThisTurn: boolean;
+    /**
+     * Whether trigger parking still allows the force band its ride. It is false
+     * while a force trigger parked on an earlier frozen pass is still parked
+     * (`ParkedBustTriggers.permissions`), and the postprocess phase passes the
+     * same permission to `decidePassMutation`. Omitted means permitted.
+     */
+    forceTriggerPermitted?: boolean;
+    /**
+     * Whether trigger parking still allows this pass's `/ctx-flush` and
+     * materialization request. It is false while a materialization trigger
+     * parked on an earlier frozen pass is still parked: the postprocess phase
+     * then clears both before it asks `decidePassMutation`
+     * (`ParkedBustTriggers.permissions`). Omitted means permitted.
+     */
+    materializationTriggerPermitted?: boolean;
 }
 
 /**
@@ -141,6 +156,7 @@ export function planPricedPass(
         schedulerDecision: input.schedulerDecision,
     });
     const emergencySample = () => getEmergencyInputSample(input.db, input.sessionId);
+    const materializationPermitted = input.materializationTriggerPermitted !== false;
     const rides: ReclaimRideSignals = {
         hardFold: input.folds || input.firstRender,
         force: forceRide({
@@ -148,8 +164,9 @@ export function planPricedPass(
             percentage: usage.percentage,
             fromEstimate: usage.fromEstimate,
             emergencySample,
+            triggerPermitted: input.forceTriggerPermitted,
         }),
-        explicitFlush: input.explicitFlush,
+        explicitFlush: input.explicitFlush && materializationPermitted,
         publishedHistory: false,
         subagentExecute: !input.fullFeatureMode && input.schedulerDecision === "execute",
         executeReclaim: false,
@@ -162,8 +179,10 @@ export function planPricedPass(
             firstRender: input.firstRender,
             emergency: bands.forceBandConfirmed,
         });
-    // A held pass drops its flush and published-history requests.
-    const materializationRequested = !input.signedThinkingHold && input.materializationRequested;
+    // A held pass drops its flush and published-history requests, and so does a
+    // pass whose materialization trigger stays parked.
+    const materializationRequested =
+        !input.signedThinkingHold && materializationPermitted && input.materializationRequested;
     const heuristics = heuristicsRunOnPass({
         compactionOff: input.compactionOff,
         drainAllowed,

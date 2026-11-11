@@ -18,6 +18,20 @@ function acquires(statement: ts.Statement): boolean {
         // Pi's prefix helper completes either an inline BEGIN or a savepoint
         // under an already-admitted paired writer. Its clock starts afterwards.
         if (expression.expression.getText() === "beginPrefixWrite") return true;
+        // The OpenCode fold's write-section helper (inject-compartments.ts) runs
+        // the BEGIN IMMEDIATE it is handed when no transaction is open, and
+        // otherwise takes the write lock under a savepoint; either way it
+        // returns holding the writer. It counts only when handed a literal
+        // writer BEGIN, like a direct exec.
+        if (expression.expression.getText() === "beginFoldWriter") {
+            const begin = expression.arguments[1];
+            return (
+                !!begin &&
+                ts.isArrowFunction(begin) &&
+                !ts.isBlock(begin.body) &&
+                direct(begin.body)
+            );
+        }
         if (
             ts.isPropertyAccessExpression(expression.expression) &&
             expression.expression.name.text === "exec"
@@ -164,6 +178,18 @@ test("hold-clock fence distinguishes wait time from transaction callback time", 
             "fixture.ts",
         ),
     ).toHaveLength(1);
+    expect(
+        violations(
+            'function f(db) { const writer=beginFoldWriter(db,()=>db.exec("BEGIN IMMEDIATE")); const clock=performance.now(); logSlowWriteTransaction("good",clock); }',
+            "fixture.ts",
+        ),
+    ).toEqual([]);
+    for (const bad of [
+        'function f(db) { const clock=performance.now(); const writer=beginFoldWriter(db,()=>db.exec("BEGIN IMMEDIATE")); logSlowWriteTransaction("bad",clock); }',
+        'function f(db) { const writer=beginFoldWriter(db,()=>db.exec("BEGIN")); const clock=performance.now(); logSlowWriteTransaction("bad",clock); }',
+        'function f(db) { const reader=beginFoldRead(db,()=>db.exec("BEGIN IMMEDIATE")); const clock=performance.now(); logSlowWriteTransaction("bad",clock); }',
+    ])
+        expect(violations(bad, "fixture.ts")).toHaveLength(1);
 });
 
 test("every slow-write hold clock starts after writer admission", () => {

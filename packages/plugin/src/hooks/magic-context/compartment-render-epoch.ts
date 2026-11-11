@@ -116,6 +116,22 @@ export function withCachedM0ToolDefinitionsHash(
     return `${withoutHash}${TOOL_DEFINITIONS_COMPONENT_PREFIX}${encodeURIComponent(hash)}`;
 }
 
+/**
+ * The marker as a comparison key: its leading state, then its components in
+ * sorted order. Writers replace a component by removing it and appending it at
+ * the end (the memory ids, the tool-definitions hash), so the same fields can
+ * arrive in a different order; that is the same marker. A changed field, an
+ * added or removed one, or a repeated one gives a different key.
+ */
+export function cachedM0UpgradeIdentityKey(identity: string | null): string | null {
+    if (identity === null) return null;
+    const [state = "", ...components] = identity.split("|");
+    const names = components.map((component) => component.slice(0, component.indexOf(":") + 1));
+    // The last of two same-named components wins on read, so their order matters.
+    if (new Set(names).size !== names.length) return identity;
+    return [state, ...components.sort()].join("|");
+}
+
 export function readCachedM0ToolDefinitionsHash(identity: string | null): string | null {
     const encoded = component(identity ?? "", TOOL_DEFINITIONS_COMPONENT_PREFIX);
     if (!encoded) return null;

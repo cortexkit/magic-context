@@ -281,6 +281,7 @@ import {
     servesThinkingBlock,
 } from "./transform-postprocess-phase";
 import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
+import { ParkedBustTriggers } from "./trigger-parking";
 import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
 import {
     storedHistoryBoundaryPresence,
@@ -3471,6 +3472,10 @@ export function createTransform(deps: TransformDeps) {
                               }
                             : undefined,
                 });
+                const parked =
+                    freezeM0M1 && signedThinkingPolicy.strict && !compactionOff
+                        ? ParkedBustTriggers.load(db, sessionId)
+                        : undefined;
                 planInput = {
                     db,
                     sessionId,
@@ -3501,6 +3506,14 @@ export function createTransform(deps: TransformDeps) {
                         sessionId,
                         currentTurnId,
                     ),
+                    // While this pass's head is frozen (kept signed thinking or an
+                    // unresolved project directory) under the strict hold policy,
+                    // the postprocess phase withholds a parked force ride below
+                    // 95% and clears a parked flush or materialization request
+                    // (`ParkedBustTriggers.permissions`); plan the pass the same way.
+                    forceTriggerPermitted: parked?.reason("force") === undefined,
+                    materializationTriggerPermitted:
+                        parked?.reason("materialization") === undefined,
                 };
             } catch (error) {
                 sizingInput = undefined;

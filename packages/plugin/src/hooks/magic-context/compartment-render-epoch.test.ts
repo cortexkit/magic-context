@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+    cachedM0UpgradeIdentityKey,
     decodeCachedM0UpgradeIdentity,
     encodeCachedM0UpgradeIdentity,
     readCachedM0MemoryIds,
@@ -134,4 +135,27 @@ test("request tool identity extends the frozen KV container without changing oth
     expect(
         decodeCachedM0UpgradeIdentity(withCachedM0ToolDefinitionsHash(null, hash)).upgradeState,
     ).toBeNull();
+});
+
+// The comparison key a manual-compaction commit uses to tell whether the stored
+// marker changed: component order is not a change, but with a component name
+// repeated the last occurrence wins on read, so there order is a change.
+describe("upgrade-identity comparison key", () => {
+    test("reordered components are the same marker", () => {
+        expect(cachedM0UpgradeIdentityKey("ready|a:1|m0-memory-ids:[7]|b:2")).toBe(
+            cachedM0UpgradeIdentityKey("ready|b:2|a:1|m0-memory-ids:[7]"),
+        );
+        expect(cachedM0UpgradeIdentityKey("ready|a:1|b:2")).not.toBe(
+            cachedM0UpgradeIdentityKey("ready|a:1|b:3"),
+        );
+    });
+
+    test("with a repeated component name, order is a change", () => {
+        const first = "ready|m0-memory-ids:[7]|m0-memory-ids:[8]";
+        const second = "ready|m0-memory-ids:[8]|m0-memory-ids:[7]";
+        expect(readCachedM0MemoryIds(first, [], 0)).not.toEqual(
+            readCachedM0MemoryIds(second, [], 0),
+        );
+        expect(cachedM0UpgradeIdentityKey(first)).not.toBe(cachedM0UpgradeIdentityKey(second));
+    });
 });
