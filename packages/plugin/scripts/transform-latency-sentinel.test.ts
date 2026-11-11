@@ -1,17 +1,23 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 import { alertUrgency, formatAlerts, type LatencyAlert, readNewLines, runLatencySentinel } from "./transform-latency-sentinel";
 
 const BASE = Date.parse("2026-09-28T18:00:00Z");
 let root: string;
 let path: string;
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), "latency-sentinel-")); path = join(root, "log"); });
+beforeEach(() => { root = createTestTempDirFromPath(join(tmpdir(), "latency-sentinel-")); path = join(root, "log"); });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 const line = (id: string, second: number, elapsed: number, module?: number) =>
     `[${new Date(BASE + second * 1000).toISOString()}] [magic-context][${id}] ${module === undefined ? `transform completed in ${elapsed}ms` : `rust pass: decision=SOFT+ served_from=transform elapsed=${elapsed} ms module=${module} ms`}\n`;
+const step = (id: string, second: number, elapsed: number, wait: number) =>
+    `${new Date(BASE + second * 1000).toISOString()} INFO  thalamus-harness: step render session=${id} elapsed_ms=${elapsed} wait_ms=${wait} entries=421 view=3 cached=false\n`;
+const answer = (id: string, second: number, calls = "setup_ms=- ride_ms=-") =>
+    `${new Date(BASE + second * 1000).toISOString()} INFO  thalamus-harness: step answer session=${id} elapsed_ms=167 bring_in_ms=54 surface_ms=2 rides_ms=0 compaction_ms=108 limits_ms=1 ${calls}\n`;
+const savedSession = (id: string) => JSON.parse(readFileSync(join(root, "state.json"), "utf8")).sessions[id];
 async function run(now = BASE + 100_000) {
     return runLatencySentinel({ files: [path], stateFile: join(root, "state.json"), db: join(root, "absent.db"), connectionFile: "", send: false, now: () => now, load: () => [1, 2, 3], stdout: () => {}, stderr: () => {} });
 }
@@ -23,6 +29,8 @@ test("fixture positives fire for each event kind and quiet session does not", as
         "ses_slow:single", "ses_timeout2:timeout", "ses_timeout3:timeout", "ses_timeout:timeout",
     ].sort());
     expect(result.alerts[0]).toMatchObject({ p50: 13000, p90: 13000, max: 13000, moduleP50: 3000, pluginP50: 10000, load: [1, 2, 3] });
+    expect(formatAlerts(result.alerts)).toContain("worst pass 13.0 s (module 3.0 s)");
+    expect(result.alerts[0]).not.toHaveProperty("runnerMax");
     expect((await run()).alerts).toHaveLength(0);
 });
 test("p90 over ten passes, module climb over twenty, and quiet controls", async () => {
@@ -38,9 +46,7 @@ test("p90 over ten passes, module climb over twenty, and quiet controls", async 
     expect(result.alerts.some((a) => a.sessionId === "ses_climb" && a.kind === "module_climb")).toBe(true);
     expect(result.alerts.some((a) => a.sessionId === "ses_quiet")).toBe(false);
 });
-test("a runner's step render lines count as passes, with the step answer wait as module time", async () => {
-    const step = (id: string, second: number, elapsed: number, wait: number) =>
-        `${new Date(BASE + second * 1000).toISOString()} INFO  thalamus-harness: step render session=${id} elapsed_ms=${elapsed} wait_ms=${wait} entries=421 view=3 cached=false\n`;
+test("a runner's unpaired step render lines count as passes with unknown module time and runner wait", async () => {
     writeFileSync(path, [
         step("ses_slowstep", 0, 13_500, 13_000),
         step("019de471-4fdc-762d-9286-624dfad0b5fe", 1, 14_000, 200),
@@ -50,7 +56,81 @@ test("a runner's step render lines count as passes, with the step answer wait as
     expect(result.alerts.map((a) => `${a.sessionId}:${a.kind}`).sort()).toEqual([
         "019de471-4fdc-762d-9286-624dfad0b5fe:single", "ses_slowstep:single",
     ]);
-    expect(result.alerts.find((a) => a.sessionId === "ses_slowstep")).toMatchObject({ moduleP50: 13_000, pluginP50: 500 });
+    expect(result.alerts.find((a) => a.sessionId === "ses_slowstep")).toMatchObject({ moduleP50: null, runnerP50: 13_000, pluginP50: 500 });
+    expect(formatAlerts(result.alerts)).toContain("worst pass 13.5 s: runner wait 13.0 s (not split), plugin 0.5 s");
+    expect(savedSession("ses_slowstep").passes[0]).toMatchObject({ module: null, runner: 13_000 });
+});
+test("paired runner passes split numeric Setup and ride round trips from runner work", async () => {
+    writeFileSync(path, answer("ses_split", 0, "setup_ms=25 ride_ms=75").replace("thalamus-harness:", "answer-worker:") + step("ses_split", .2, 13_500, 13_000));
+    const result = await run();
+    expect(result.alerts[0]).toMatchObject({ moduleP50: 100, moduleP90: 100, moduleMax: 100,
+        runnerP50: 12_900, runnerP90: 12_900, runnerMax: 12_900, pluginP50: 500 });
+    expect(savedSession("ses_split").passes[0]).toMatchObject({ module: 100, runner: 12_900 });
+    expect(formatAlerts(result.alerts)).toContain("worst pass 13.5 s: runner 12.9 s, module 0.1 s, plugin 0.5 s");
+});
+test("paired runner passes with no module calls have known zero module time", async () => {
+    writeFileSync(path, answer("ses_zero", 0) + step("ses_zero", .2, 13_500, 13_000));
+    const result = await run();
+    expect(result.alerts[0]).toMatchObject({ moduleP50: 0, moduleMax: 0, runnerMax: 13_000, pluginMax: 500 });
+    expect(formatAlerts(result.alerts)).toContain("worst pass 13.5 s: runner 13.0 s, module 0.0 s, plugin 0.5 s");
+});
+test("a dash counts as zero beside a numeric module call and runner time never goes negative", async () => {
+    writeFileSync(path, answer("ses_setup", 0, "setup_ms=100 ride_ms=-") + step("ses_setup", .2, 13_500, 80)
+        + answer("ses_ride", 1, "setup_ms=- ride_ms=30") + step("ses_ride", 1.2, 13_500, 100));
+    const result = await run();
+    expect(result.alerts[0]).toMatchObject({ moduleMax: 100, runnerMax: 0, pluginMax: 13_420 });
+    expect(result.alerts[1]).toMatchObject({ moduleMax: 30, runnerMax: 70, pluginMax: 13_400 });
+});
+test("old-format answers without Setup and ride fields leave the runner wait unsplit", async () => {
+    writeFileSync(path, answer("ses_old", 0, "") + step("ses_old", .2, 13_500, 13_000));
+    const result = await run();
+    expect(result.alerts[0]).toMatchObject({ moduleMax: null, runnerMax: 13_000, pluginMax: 500 });
+    expect(formatAlerts(result.alerts)).toContain("runner wait 13.0 s (not split)");
+});
+test("answers more than sixty seconds before a render cannot supply module time", async () => {
+    writeFileSync(path, answer("ses_stale", 0, "setup_ms=100 ride_ms=20") + step("ses_stale", 60.001, 13_500, 13_000));
+    const result = await run();
+    expect(result.alerts[0]).toMatchObject({ moduleMax: null, runnerMax: 13_000 });
+    expect(savedSession("ses_stale").passes[0]).toMatchObject({ module: null, runner: 13_000 });
+});
+test("pairing consumes only the newest preceding unpaired answer of the same session", async () => {
+    writeFileSync(path, answer("ses_pair", 0, "setup_ms=10 ride_ms=1")
+        + answer("ses_other", .1, "setup_ms=900 ride_ms=1")
+        + answer("ses_pair", .2, "setup_ms=20 ride_ms=2")
+        + step("ses_pair", .3, 200, 100) + step("ses_pair", .4, 200, 100) + step("ses_pair", .5, 200, 100));
+    await run();
+    expect(savedSession("ses_pair").passes.map((p: { module: number | null }) => p.module)).toEqual([22, 11, null]);
+});
+test("an answer survives the state watermark until a render in the next invocation", async () => {
+    writeFileSync(path, answer("ses_resume", 0, "setup_ms=10 ride_ms=20"));
+    expect((await run()).alerts).toHaveLength(0);
+    appendFileSync(path, step("ses_resume", 60, 13_500, 13_000));
+    expect((await run()).alerts[0]).toMatchObject({ moduleMax: 30, runnerMax: 12_970 });
+});
+test("CKCRED's slow pass attributes its wait to the runner, not the module", async () => {
+    writeFileSync(path, answer("ses_ckcred", 0, "setup_ms=0 ride_ms=-") + step("ses_ckcred", .2, 18_300, 18_100));
+    const result = await run();
+    const text = formatAlerts(result.alerts.map((alert) => ({ ...alert, name: "CKCRED" })));
+    expect(text).toContain("- CKCRED: 1 slow pass; worst pass 18.3 s: runner 18.1 s, module 0.0 s, plugin 0.2 s;");
+    expect(text).not.toContain("module 18.1 s");
+});
+test("runner time climbing never fires module_climb for known or unknown module time", async () => {
+    writeFileSync(path, Array.from({ length: 20 }, (_, i) => {
+        const wait = 8 + i * 160;
+        return answer("ses_known", i, "setup_ms=1 ride_ms=-") + step("ses_known", i + .2, wait + 20, wait)
+            + step("ses_unknown", i + .3, wait + 20, wait)
+            + answer("ses_module", i, `setup_ms=${wait} ride_ms=-`) + step("ses_module", i + .4, wait + 20, wait);
+    }).join(""));
+    expect((await run()).alerts.filter((alert) => alert.kind === "module_climb").map((alert) => alert.sessionId)).toEqual(["ses_module"]);
+});
+test("version-one state from before runner splitting loads without a false module climb", async () => {
+    const trend = Array.from({ length: 20 }, (_, i) => ({ at: BASE + i * 1000, elapsed: 4_000, module: 100 + i * 100 }));
+    writeFileSync(join(root, "state.json"), JSON.stringify({ version: 1, files: {}, sent: {},
+        sessions: { ses_legacy: { passes: trend.slice(-10), trend, lastAt: BASE + 19_000 } } }));
+    writeFileSync(path, step("ses_legacy", 20, 50, 45));
+    expect((await run()).alerts).toEqual([]);
+    expect(savedSession("ses_legacy").trend).toEqual([]);
+    expect(savedSession("ses_legacy").passes[0]).toMatchObject({ module: null, runner: 1_200 });
 });
 test("watermark resumes partial lines, handles rotation and re-alerts only at 50% or six hours", async () => {
     writeFileSync(path, line("ses_slow", 0, 13000).trimEnd());
@@ -131,7 +211,8 @@ test("--summary CLI reads rotated logs and filters the window without sending or
     const stateFile = join(root, "state.json");
     const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "transform-latency-sentinel.ts"),
         "--summary", "--opencode-log", path, "--pi-log", join(root, "missing-pi"),
-        "--module-log", join(root, "missing-module"), "--db", join(root, "missing-db"),
+        "--module-log", join(root, "missing-module"), "--harness-log", join(root, "missing-harness"),
+        "--pi-runner-log", join(root, "missing-runner"), "--db", join(root, "missing-db"),
         "--state-file", stateFile, "--since", "2026-09-28T19:00:00Z", "--until", "2026-09-28T20:00:00Z"]);
     expect(run.exitCode).toBe(0);
     expect(JSON.parse(run.stdout.toString()).declines).toEqual([
