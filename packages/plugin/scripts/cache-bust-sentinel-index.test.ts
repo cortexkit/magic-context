@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,25 +71,31 @@ test("one run shares one source listing across sessions and batches", async () =
 test("40 sessions of three batches fit a listing-cost budget over 20,000 names", async () => {
     const { sessions, options } = fixture(40, 65, 20_000);
     const scanMetrics = metrics();
-    // Charge the measured 600ms per listing and 0.01ms per small file operation.
-    // Per-batch listings would consume 72s, beyond the sentinel's 30s budget.
-    const clock = () => 1_000_000 + scanMetrics.listings * 600 +
-        (scanMetrics.directoryStats + scanMetrics.fileStats + scanMetrics.metaReads + scanMetrics.bodyReads) / 100;
-    const counters = await runSentinelOnce(options, {
-        scanMetrics, now: clock, listActiveSessions: () => sessions, loadDecisions: () => [],
-        stdout: () => {}, stderr: () => {},
-    });
-    console.info(JSON.stringify({ sessions: 40, batches: 120, names: 20_000, ...scanMetrics, elapsedBudgetMs: clock() - 1_000_000 }));
+    // A stationary clock cannot expire the shared listing. Count real reads,
+    // rather than pricing filesystem operations using one machine's latency.
+    const listing = spyOn(fs, "readdirSync");
+    let counters;
+    let dumpListings;
+    try {
+        counters = await runSentinelOnce(options, {
+            scanMetrics, now: () => 1_000_000, listActiveSessions: () => sessions, loadDecisions: () => [],
+            stdout: () => {}, stderr: () => {},
+        });
+        dumpListings = listing.mock.calls.filter(([path]) => String(path) === options.anthropicDir).length;
+    } finally { listing.mockRestore(); }
+    console.info(JSON.stringify({ sessions: 40, batches: 120, names: 20_000, ...scanMetrics, dumpListings }));
     expect(counters).toMatchObject({ sessions: 40, requests: 2_600, filesExamined: 2_600, bounded: false });
     expect(scanMetrics.listings).toBe(1);
+    expect(dumpListings).toBe(1);
     expect(scanMetrics.directoryStats).toBe(121);
     // Each session loads 34 + 33 + 1 bodies, including comparison context. Only
     // those metadata files are statted, never the unrelated directory entries.
     expect(scanMetrics.fileStats).toBe(40 * 68);
     expect(scanMetrics.metaReads).toBe(40 * 65);
     expect(scanMetrics.bodyReads).toBe(40 * 68);
-    expect(clock() - 1_000_000).toBeLessThan(options.maxRunMs!);
-});
+    // Creating 20,000 real entries can be slow on a loaded filesystem. Only
+    // operation counts, not a wall-clock deadline, define this regression.
+}, 0);
 
 function analysisOptions(options: CacheBustSentinelOptions, sessionId: string): OpenCodeCacheBustAnalysisOptions {
     return {
