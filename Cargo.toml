@@ -21,11 +21,9 @@ warm-commands = [
 
 [workspace.dependencies]
 # Published commons crates use their current lockfile versions from crates.io.
-# No git source belongs here: a source no workspace member uses is never
-# locked, and build machines that bundle dependencies from Cargo.lock refuse a
-# manifest that names one. The retired crates in crates_old/ used two:
-# cortexkit-cache-core from commons (85c105dfc10dfcd02360ef31b07b4bc67dea41f8)
-# and subc-core from subconscious (90295ece040258c77ea1f1f1d727109c5eaab13f).
+# The retired crates in crates_old/ used cortexkit-cache-core from a commons
+# commit (85c105dfc10dfcd02360ef31b07b4bc67dea41f8); no member uses it, so it
+# is not listed here.
 cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.2"
@@ -33,11 +31,20 @@ cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
 cortexkit-tokens = "0.1"
 
 # Published subc wire/SDK crates use crates.io.
+#
+# subc-core is the daemon itself. No workspace member depends on it, so Cargo
+# never locks it; the line is here on purpose, as the one place that pins the
+# daemon revision the integration tests build (scripts/cargo-lock-pins.py reads
+# it, and preflight fails without it). This revision matches daemon 0.39.0.
+# A build machine that accepts only git sources found in Cargo.lock refuses
+# the manifest because of this line: remove it in that run's working tree,
+# uncommitted, and never in a commit.
 subc-protocol = "=0.34.1"
 subc-control = "=0.34.0"
 subc-transport = "=0.15.0"
 subc-client-rs = "=0.33.0"
 subc-os = "=0.1.26"
+subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece040258c77ea1f1f1d727109c5eaab13f" }
 
 
 # The compaction contract (compaction-provider/v2, compaction-runner/v1).
