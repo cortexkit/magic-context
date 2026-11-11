@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import * as appliedProjection from "../../features/magic-context/memory/applied-projection";
+import * as storage from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database, isSqliteTransactionOpen } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 import { materializeM0 } from "./inject-compartments";
 
 // materializeM0 opens two transactions of its own: a read snapshot for its
@@ -18,13 +21,15 @@ import { materializeM0 } from "./inject-compartments";
 
 const SESSION = "materialize-nesting-session";
 const databases: Database[] = [];
+const directories: Array<() => void> = [];
 
 afterEach(() => {
     for (const db of databases.splice(0)) closeQuietly(db);
+    for (const cleanup of directories.splice(0)) cleanup();
 });
 
-function store(): Database {
-    const db = new Database(":memory:");
+function store(path = ":memory:"): Database {
+    const db = new Database(path);
     initializeDatabase(db);
     getOrCreateSessionMeta(db, SESSION);
     appendCompartments(db, SESSION, [
@@ -260,3 +265,81 @@ const BASE_STATEMENTS = {
     count: 77,
     sha256: "afe634e609ef4c78e49fdbaa08a0a1736dc86274bdda2a920f5369c45d15a480",
 };
+
+// The write section's helper must return holding the write lock, whichever way
+// it opened the section: its hold clock and the writer-admission fence assume
+// it. Another connection proves it: it cannot take the write lock once the
+// section has begun, before the section writes anything.
+describe("materializeM0 write section admission", () => {
+    const callers: Array<[string, (db: Database, run: () => void) => void]> = [
+        ["with no transaction open", (_db, run) => run()],
+        [
+            "inside a caller's write transaction",
+            (db, run) => {
+                try {
+                    db.transaction(() => {
+                        run();
+                        throw new Error("roll back");
+                    }).immediate();
+                } catch (error) {
+                    if (String(error) !== "Error: roll back") throw error;
+                }
+            },
+        ],
+        [
+            "inside a caller's transaction that has only read",
+            (db, run) => {
+                try {
+                    db.transaction(() => {
+                        db.prepare("SELECT COUNT(*) FROM session_meta").get();
+                        run();
+                        throw new Error("roll back");
+                    }).deferred();
+                } catch (error) {
+                    if (String(error) !== "Error: roll back") throw error;
+                }
+            },
+        ],
+    ];
+    for (const [name, call] of callers) {
+        it(`holds the write lock ${name}`, () => {
+            const temp = createTestTempDir("materialize-nesting-");
+            directories.push(temp.cleanup);
+            const db = store(join(temp.dir, "context.db"));
+            const other = new Database(join(temp.dir, "context.db"));
+            other.exec("PRAGMA busy_timeout = 0");
+            // The write section's first statements read the stale-check markers,
+            // before it writes anything: check the lock at the first of them.
+            const real = storage.getMaxM0MutationId;
+            let inputsRead = false;
+            let otherWriter = "not attempted";
+            const spy = spyOn(storage, "getMaxM0MutationId").mockImplementation((...args) => {
+                if (inputsRead && otherWriter === "not attempted") {
+                    try {
+                        other.exec("BEGIN IMMEDIATE");
+                        other.exec("ROLLBACK");
+                        otherWriter = "admitted";
+                    } catch (error) {
+                        otherWriter = /locked|busy/i.test(String(error))
+                            ? "refused"
+                            : String(error);
+                    }
+                }
+                return real(...args);
+            });
+            try {
+                call(db, () =>
+                    fold(db, {
+                        afterM0InputsReadForTest: () => {
+                            inputsRead = true;
+                        },
+                    }),
+                );
+            } finally {
+                spy.mockRestore();
+                other.close();
+            }
+            expect(otherWriter).toBe("refused");
+        });
+    }
+});
