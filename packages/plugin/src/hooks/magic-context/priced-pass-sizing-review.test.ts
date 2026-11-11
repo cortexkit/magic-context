@@ -68,6 +68,7 @@ describe("the priced-pass plan reads the parked materialization trigger the pass
                 historyRebuilt: false,
                 alreadyRanThisTurn: false,
                 forceTriggerPermitted: permissions.force,
+                materializationTriggerPermitted: permissions.materialization,
             },
             { percentage: 50, fromEstimate: false },
         );

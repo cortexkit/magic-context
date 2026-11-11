@@ -122,7 +122,10 @@ describe("a priced pass is sized without the reasoning earlier passes removed", 
 // pass; the plan a priced pass is sized from must read the same one, or it
 // counts a request with rewrites the pass will not make.
 describe("the priced-pass plan reads the parked force trigger the pass decision reads", () => {
-    type Row = Omit<PricedPassPlanInput, "db" | "sessionId" | "forceTriggerPermitted"> & {
+    type Row = Omit<
+        PricedPassPlanInput,
+        "db" | "sessionId" | "forceTriggerPermitted" | "materializationTriggerPermitted"
+    > & {
         percentage: number;
         fromEstimate: boolean;
     };
@@ -152,18 +155,29 @@ describe("the priced-pass plan reads the parked force trigger the pass decision 
                                             historyRebuilt: false,
                                             alreadyRanThisTurn: false,
                                         });
-    const plan = (db: ContextDatabase, row: Row, forceTriggerPermitted?: boolean) =>
+    /** Trigger-parking permissions; an omitted one is not passed to the plan. */
+    type Permissions = { force?: boolean; materialization?: boolean };
+    const plan = (db: ContextDatabase, row: Row, permissions: Permissions = {}) =>
         planPricedPass(
             {
                 ...row,
                 db,
                 sessionId: SESSION,
-                ...(forceTriggerPermitted === undefined ? {} : { forceTriggerPermitted }),
+                ...(permissions.force === undefined
+                    ? {}
+                    : { forceTriggerPermitted: permissions.force }),
+                ...(permissions.materialization === undefined
+                    ? {}
+                    : { materializationTriggerPermitted: permissions.materialization }),
             },
             { percentage: row.percentage, fromEstimate: row.fromEstimate },
         );
-    /** The pass decision for the same pass, with no ride the plan cannot know. */
-    const decision = (row: Row, forceTriggerPermitted: boolean) =>
+    /**
+     * The pass decision for the same pass, with no ride the plan cannot know. A
+     * withheld materialization permission clears the flush and the request
+     * before the decision, as the postprocess phase does.
+     */
+    const decision = (row: Row, { force = true, materialization = true }: Permissions = {}) =>
         decidePassMutation(
             {
                 fullFeatureMode: row.fullFeatureMode,
@@ -173,15 +187,15 @@ describe("the priced-pass plan reads the parked force trigger the pass decision 
                 forceMaterializationPercentage: row.forceMaterializationPercentage,
                 contextUsageFromEstimate: row.fromEstimate,
                 emergencyInputSample: () => 0,
-                forceTriggerPermitted,
+                forceTriggerPermitted: force,
                 servedShapeRepair: false,
                 rewritingSignedPrefix: false,
                 foldBustsServedPrefix: row.folds,
                 firstRenderBust: row.firstRender,
-                explicitFlush: row.explicitFlush,
+                explicitFlush: row.explicitFlush && materialization,
                 publishedHistory: false,
                 historyRebuiltThisPass: row.historyRebuilt,
-                materializationRequested: row.materializationRequested,
+                materializationRequested: row.materializationRequested && materialization,
                 alreadyRanThisTurn: row.alreadyRanThisTurn,
                 signedThinkingHold: row.signedThinkingHold,
             },
@@ -193,8 +207,9 @@ describe("the priced-pass plan reads the parked force trigger the pass decision 
         const mismatches = rows.flatMap((row) =>
             flags.flatMap((permitted) => {
                 const allowed =
-                    decision(row, permitted).publishedWorkDrainAllowed && !row.signedThinkingHold;
-                return plan(db, row, permitted).editsWholePrefix === allowed
+                    decision(row, { force: permitted }).publishedWorkDrainAllowed &&
+                    !row.signedThinkingHold;
+                return plan(db, row, { force: permitted }).editsWholePrefix === allowed
                     ? []
                     : [{ ...row, permitted, allowed }];
             }),
@@ -206,12 +221,12 @@ describe("the priced-pass plan reads the parked force trigger the pass decision 
         const db = database();
         const changed = rows.filter(
             (row) =>
-                JSON.stringify(plan(db, row, false)) !== JSON.stringify(plan(db, row)) ||
-                JSON.stringify(plan(db, row, true)) !== JSON.stringify(plan(db, row)),
+                JSON.stringify(plan(db, row, { force: false })) !== JSON.stringify(plan(db, row)) ||
+                JSON.stringify(plan(db, row, { force: true })) !== JSON.stringify(plan(db, row)),
         );
         // Omitting the permission still means permitted, and a parked trigger
         // matters only in the force band below 95% on a provider reading.
-        expect(JSON.stringify(rows.map((row) => plan(db, row, true)))).toBe(
+        expect(JSON.stringify(rows.map((row) => plan(db, row, { force: true })))).toBe(
             JSON.stringify(rows.map((row) => plan(db, row))),
         );
         expect(
@@ -237,11 +252,64 @@ describe("the priced-pass plan reads the parked force trigger the pass decision 
                 !row.explicitFlush &&
                 !row.compactionOff,
         )!;
-        expect(decision(frozen, false).publishedWorkDrainAllowed).toBe(false);
-        expect(plan(db, frozen, false)).toEqual({
+        expect(decision(frozen, { force: false }).publishedWorkDrainAllowed).toBe(false);
+        expect(plan(db, frozen, { force: false })).toEqual({
             editsWholePrefix: false,
             clearsReasoning: false,
         });
+        expect(plan(db, frozen).editsWholePrefix).toBe(true);
+        expect(changed).toContainEqual(frozen);
+    });
+    // The same holds for a materialization trigger parked behind kept signed
+    // thinking: on a later frozen pass the postprocess phase clears the
+    // `/ctx-flush` and the materialization request before it decides.
+    it("predicts the whole-prefix rewrite the decision allows with a parked materialization trigger", () => {
+        const db = database();
+        const mismatches = rows.flatMap((row) =>
+            flags.flatMap((force) =>
+                flags.flatMap((materialization) => {
+                    const permissions = { force, materialization };
+                    const allowed =
+                        decision(row, permissions).publishedWorkDrainAllowed &&
+                        !row.signedThinkingHold;
+                    return plan(db, row, permissions).editsWholePrefix === allowed
+                        ? []
+                        : [{ ...row, ...permissions, allowed }];
+                }),
+            ),
+        );
+        expect(mismatches).toEqual([]);
+    });
+
+    it("changes the plan only where a parked trigger withholds the flush", () => {
+        const db = database();
+        expect(JSON.stringify(rows.map((row) => plan(db, row, { materialization: true })))).toBe(
+            JSON.stringify(rows.map((row) => plan(db, row))),
+        );
+        const changed = rows.filter(
+            (row) =>
+                JSON.stringify(plan(db, row, { materialization: false })) !==
+                JSON.stringify(plan(db, row)),
+        );
+        // Only a pass that has a flush or a materialization request to withhold.
+        expect(
+            changed.filter((row) => !row.explicitFlush && !row.materializationRequested),
+        ).toEqual([]);
+        // The frozen pass without a hold whose only rebuild is the parked flush.
+        const frozen = rows.find(
+            (row) =>
+                row.percentage === 50 &&
+                !row.fromEstimate &&
+                row.schedulerDecision === "defer" &&
+                row.fullFeatureMode &&
+                !row.signedThinkingHold &&
+                !row.folds &&
+                !row.firstRender &&
+                row.explicitFlush &&
+                !row.compactionOff,
+        )!;
+        expect(decision(frozen, { materialization: false }).publishedWorkDrainAllowed).toBe(false);
+        expect(plan(db, frozen, { materialization: false }).editsWholePrefix).toBe(false);
         expect(plan(db, frozen).editsWholePrefix).toBe(true);
         expect(changed).toContainEqual(frozen);
     });
