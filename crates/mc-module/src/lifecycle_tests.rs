@@ -63,6 +63,9 @@ mod embedding_search_tests;
 #[path = "transcript_behind_tests.rs"]
 mod transcript_behind_tests;
 
+#[path = "session_named_read_tests.rs"]
+mod named_read_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

@@ -2,10 +2,30 @@
 
 use cortexkit_role_compaction::read::{Detail, Entry, ReadRequest, Select, SessionRef};
 
-use crate::client::RunnerClient;
+use crate::client::{ClientError, RunnerClient};
 
 /// How many bytes one page asks for at most.
 const PAGE_BYTES: u64 = 1 << 20;
+
+/// A later contract version states the runner's ceiling on names in one read:
+/// 256. Split at that ceiling so runners enforcing it do not refuse the read.
+const NAMED_READ_MAX: usize = 256;
+
+/// Read any number of names in full, sequentially, retaining reply order.
+/// A failed request fails the whole read rather than returning partial entries.
+pub async fn named<C: RunnerClient, N: Clone>(
+    client: &C,
+    session: &SessionRef,
+    names: Vec<N>,
+    select: impl Fn(Vec<N>) -> Select,
+) -> Result<Vec<Entry>, ClientError> {
+    let mut entries = Vec::new();
+    for chunk in names.chunks(NAMED_READ_MAX) {
+        let request = ReadRequest::new(select(chunk.to_vec()), Detail::Full);
+        entries.extend(client.read(session, request).await?.entries);
+    }
+    Ok(entries)
+}
 
 /// The messages with ordinals from `from` up to, not including, `until`,
 /// oldest first. `stop` ends the read early once it returns true for the
@@ -54,10 +74,11 @@ pub async fn by_tags<C: RunnerClient>(
     session: &SessionRef,
     tags: Vec<u64>,
 ) -> Result<Vec<Entry>, String> {
-    let request = ReadRequest::new(Select::Tags { tags }, Detail::Full);
-    client
-        .read(session, request)
+    named(client, session, tags, |tags| Select::Tags { tags })
         .await
-        .map(|page| page.entries)
         .map_err(|error| format!("session.read: {error:?}"))
 }
+
+#[cfg(test)]
+#[path = "reads_tests.rs"]
+mod tests;

@@ -4809,10 +4809,9 @@ impl Session {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            let request = ReadRequest::new(Select::Mids { mids }, Detail::Full);
-            match client.read(&self.key, request).await {
-                Ok(page) => {
-                    for entry in page.entries {
+            match crate::reads::named(client, &self.key, mids, |mids| Select::Mids { mids }).await {
+                Ok(entries) => {
+                    for entry in entries {
                         for part in entry.parts {
                             let key = (entry.mid.clone(), part.id.clone());
                             // Only text read from the part the index holds.
