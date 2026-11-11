@@ -19,7 +19,7 @@ pub const TOKEN_FILE_NAME: &str = "dashboard-token";
 pub const MIN_TOKEN_LEN: usize = 32;
 pub const MAX_TOKEN_LEN: usize = 512;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum TokenFile {
     /// No file at the path: keep today's per-process random token.
     Missing,
@@ -27,6 +27,18 @@ pub enum TokenFile {
     Loaded(String),
     /// The file exists but was refused; the reason is safe to print.
     Rejected(&'static str),
+}
+
+/// Hand-written so a `dbg!`, a debug log or a failed `assert_eq!` can never
+/// print the token; the other variants carry nothing secret.
+impl std::fmt::Debug for TokenFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenFile::Missing => f.write_str("Missing"),
+            TokenFile::Loaded(_) => f.write_str("Loaded(<redacted>)"),
+            TokenFile::Rejected(reason) => f.debug_tuple("Rejected").field(reason).finish(),
+        }
+    }
 }
 
 /// `dashboard-token` in the storage directory the plugin uses on every platform,
@@ -475,11 +487,15 @@ mod macos_acl {
 
     pub(super) fn check_owner_only(file: &File) -> Result<(), &'static str> {
         let me = current_user_uuid()?;
+        // SAFETY: `errno` is thread-local and writable; clearing it first means a
+        // NULL return that failed to set it cannot be misread as "no ACL" below.
+        unsafe { *libc::__error() = 0 };
         // SAFETY: the file handle stays open for the whole call.
         let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
         if acl.is_null() {
             // Ordinary case: no extended ACL at all, so the mode bits checked
-            // by the caller are the whole story. Anything else is unreadable.
+            // by the caller are the whole story. Anything else -- including a
+            // failure that left errno untouched -- is unreadable.
             return match std::io::Error::last_os_error().kind() {
                 ErrorKind::NotFound => Ok(()),
                 _ => Err(UNREADABLE),
@@ -754,7 +770,8 @@ mod macos_acl_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         // Guard against the entry being rejected by chmod in some other way.
-        let listing = Command::new("ls").arg("-le").arg(path).output().unwrap();
+        // `-d` so a directory's own entry is listed instead of its contents.
+        let listing = Command::new("ls").arg("-led").arg(path).output().unwrap();
         let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
         assert!(
             listing.contains("user:") || listing.contains("group:"),
@@ -850,11 +867,53 @@ mod macos_acl_tests {
     }
 
     #[test]
+    fn foreign_grant_after_a_harmless_first_entry_is_refused() {
+        let dir = tempdir().unwrap();
+        let path = write_0600(dir.path());
+        // `chmod +a` puts new entries first, so the foreign grant goes in first
+        // and the harmless deny lands in front of it: the grant is entry 1.
+        add_entry(&path, "user:nobody allow read");
+        add_entry(&path, "user:root deny read");
+        let listing = Command::new("ls").arg("-le").arg(&path).output().unwrap();
+        let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+        assert!(
+            listing.contains(" 0: user:root deny read")
+                && listing.contains(" 1: user:nobody allow read"),
+            "entries are not in the order this case needs:\n{listing}"
+        );
+        assert_eq!(
+            read_token_file(&path),
+            TokenFile::Rejected("other users can reach it through its access-control list")
+        );
+    }
+
+    #[test]
+    fn inherited_entry_that_applies_to_the_file_is_refused() {
+        let dir = tempdir().unwrap();
+        // The directory hands this grant down to files created in it; on the
+        // file it is marked inherited but not inherit-only, so it applies.
+        add_entry(dir.path(), "user:nobody allow read,file_inherit");
+        let path = write_0600(dir.path());
+        let listing = Command::new("ls").arg("-le").arg(&path).output().unwrap();
+        let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+        assert!(
+            listing.contains("user:nobody inherited allow read"),
+            "the file did not inherit the entry:\n{listing}"
+        );
+        assert_eq!(
+            read_token_file(&path),
+            TokenFile::Rejected("other users can reach it through its access-control list")
+        );
+    }
+
+    #[test]
     fn entry_count_comes_from_the_filesec_size() {
         // KAUTH_FILESEC_SIZE(count) = header + count * entry, measured against
-        // acl_size() on this platform for 1, 2, 3, 5 and 7 entries.
-        assert_eq!(macos_acl::entry_count(68), Some(1));
-        assert_eq!(macos_acl::entry_count(212), Some(7));
+        // acl_size() on this platform for 1, 2, 3, 4, 5 and 6 entries
+        // (68, 92, 116, 140, 164, 188).
+        for (size, count) in [(68, 1), (92, 2), (116, 3), (140, 4), (164, 5), (188, 6)] {
+            assert_eq!(macos_acl::entry_count(size), Some(count));
+        }
         // Too small to hold even the header, or a size that is not a whole
         // number of entries, means the list cannot be trusted.
         assert_eq!(macos_acl::entry_count(43), None);
@@ -866,6 +925,20 @@ mod macos_acl_tests {
 #[cfg(test)]
 mod content_tests {
     use super::*;
+
+    #[test]
+    fn debug_output_never_contains_the_token() {
+        let token = "Abcdefghijklmnopqrstuvwxyz0123456789-._~";
+        let loaded = format!("{:?}", TokenFile::Loaded(token.to_string()));
+        assert_eq!(loaded, "Loaded(<redacted>)");
+        let pretty = format!("{:#?}", TokenFile::Loaded(token.to_string()));
+        assert!(!pretty.contains(token));
+        assert_eq!(format!("{:?}", TokenFile::Missing), "Missing");
+        assert_eq!(
+            format!("{:?}", TokenFile::Rejected("it is a directory")),
+            "Rejected(\"it is a directory\")"
+        );
+    }
 
     fn abs(tail: &str) -> PathBuf {
         if cfg!(windows) {
@@ -947,6 +1020,85 @@ mod content_tests {
     }
 }
 
+/// Linux POSIX ACLs are not invisible the way macOS extended entries are: an
+/// effective entry sets the mask, the mask is the group permission bits, and the
+/// 0600 check therefore refuses it. These tests pin that down with a real
+/// `setfacl` entry instead of leaving it as an argument. Skipped where
+/// `setfacl` is not installed.
+#[cfg(all(test, target_os = "linux"))]
+mod posix_acl_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    const GOOD: &str = "Abcdefghijklmnopqrstuvwxyz0123456789-._~";
+    const NOT_0600: &str = "it must have owner-only permissions (0600)";
+
+    fn has_setfacl() -> bool {
+        Command::new("setfacl")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    fn setfacl(path: &Path, args: &[&str]) {
+        let out = Command::new("setfacl")
+            .args(args)
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "setfacl {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn write_0600(dir: &Path) -> PathBuf {
+        let path = dir.join(TOKEN_FILE_NAME);
+        fs::write(&path, GOOD).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn effective_named_user_entry_is_refused() {
+        if !has_setfacl() {
+            eprintln!("skipped: setfacl is not installed, so the POSIX ACL case is not tested");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = write_0600(dir.path());
+        setfacl(&path, &["-m", "u:nobody:r"]);
+        // The entry is effective, so the mask grants read and the group bits
+        // say so: the 0600 check is what refuses the file.
+        assert_eq!(mode(&path), 0o640);
+        assert_eq!(read_token_file(&path), TokenFile::Rejected(NOT_0600));
+    }
+
+    #[test]
+    fn named_user_entry_with_an_empty_mask_is_accepted() {
+        if !has_setfacl() {
+            eprintln!("skipped: setfacl is not installed, so the POSIX ACL case is not tested");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = write_0600(dir.path());
+        setfacl(&path, &["-m", "u:nobody:r"]);
+        // With the mask empty the entry is listed but grants nothing, and the
+        // mode bits are back to 0600.
+        setfacl(&path, &["-m", "m::---"]);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(read_token_file(&path), TokenFile::Loaded(GOOD.to_string()));
+    }
+}
+
 /// Windows cases build each access list from SDDL and apply it to the file with
 /// a protected DACL, so the result does not depend on what the temp directory
 /// happens to inherit. Run on a real Windows host (see the PR for the CI run).
@@ -959,14 +1111,15 @@ mod windows_tests {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
     use tempfile::tempdir;
-    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+        GetSecurityDescriptorDacl, GetTokenInformation, TokenElevation, TokenUser, ACL,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -987,16 +1140,17 @@ mod windows_tests {
             );
             let mut buffer = vec![0u64; 64];
             let mut len = 0u32;
-            assert_ne!(
-                GetTokenInformation(
-                    token,
-                    TokenUser,
-                    buffer.as_mut_ptr() as *mut c_void,
-                    (buffer.len() * 8) as u32,
-                    &mut len,
-                ),
-                0
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * 8) as u32,
+                &mut len,
             );
+            // The SID was copied into `buffer`, so the handle can go now, before
+            // an assertion could unwind past it.
+            CloseHandle(token);
+            assert_ne!(ok, 0);
             let sid = (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
             let mut text = null_mut();
             assert_ne!(ConvertSidToStringSidW(sid, &mut text), 0);
@@ -1004,6 +1158,30 @@ mod windows_tests {
             let out = String::from_utf16(std::slice::from_raw_parts(text, len)).unwrap();
             LocalFree(text as _);
             out
+        }
+    }
+
+    /// Whether this process runs with an elevated token. `icacls /setowner`
+    /// needs SeRestorePrivilege, which only an elevated caller can enable.
+    fn process_is_elevated() -> bool {
+        unsafe {
+            let mut token = null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                0
+            );
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elevation as *mut TOKEN_ELEVATION as *mut c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            CloseHandle(token);
+            assert_ne!(ok, 0);
+            elevation.TokenIsElevated != 0
         }
     }
 
@@ -1152,28 +1330,57 @@ mod windows_tests {
 
     /// Changing the owner to another principal needs SeRestorePrivilege, which
     /// `icacls /setowner` enables for an elevated caller (CI runners are).
+    /// Only a non-elevated caller may skip: if the process *is* elevated and the
+    /// owner still could not be set, the case is not being exercised and the
+    /// test must go red rather than quiet.
+    ///
+    /// That also means the foreign-owner refusal is untested in a non-elevated run.
     #[test]
     fn file_owned_by_another_principal_is_refused() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(TOKEN_FILE_NAME);
         fs::write(&path, GOOD).unwrap();
-        let status = std::process::Command::new("icacls")
+        let output = std::process::Command::new("icacls")
             .arg(&path)
             .args(["/setowner", "*S-1-5-32-545"])
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success(), "icacls /setowner needs an elevated shell");
+        if !output.status.success() {
+            let detail = format!(
+                "stdout: {} stderr: {}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            assert!(
+                !process_is_elevated(),
+                "icacls /setowner failed even though this process is elevated, so the \
+                 foreign-owner refusal is not being exercised: {detail}"
+            );
+            eprintln!(
+                "skipped: not elevated, so the foreign-owner refusal is not tested in \
+                 this run: {detail}"
+            );
+            return;
+        }
         assert_eq!(read_token_file(&path), TokenFile::Rejected(NOT_OWNER));
     }
 
-    /// Needs the symlink privilege (elevated shell or Developer Mode).
+    /// Needs the symlink privilege (elevated shell or Developer Mode). Same rule
+    /// as the owner test: only a non-elevated caller may skip.
     #[test]
     fn symlink_is_refused_even_to_a_good_target() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("real-token");
         fs::write(&target, GOOD).unwrap();
         let link = dir.path().join(TOKEN_FILE_NAME);
-        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        if let Err(err) = std::os::windows::fs::symlink_file(&target, &link) {
+            assert!(
+                !process_is_elevated(),
+                "symlink creation failed even though this process is elevated: {err}"
+            );
+            eprintln!("skipped: not elevated, symlink refusal not tested this run: {err}");
+            return;
+        }
         assert_eq!(
             read_token_file(&target),
             TokenFile::Loaded(GOOD.to_string())

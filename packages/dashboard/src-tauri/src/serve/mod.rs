@@ -194,20 +194,20 @@ async fn run_async(options: ServeOptions) -> Result<(), String> {
     }
 
     println!("Magic Context Dashboard serve mode listening on {addr}");
-    match &stable_token_path {
-        // A stable token outlives the process, so it is never printed (stdout of
-        // a service lands in journald or `docker logs`) nor passed to the browser
-        // launcher (its argv is readable by other local users).
-        Some(path) => println!("{}", stable_launch_hint(options.host, options.port, path)),
-        None => {
-            println!("Open this URL: {url}");
+    announce_launch(
+        options.host,
+        options.port,
+        &url,
+        stable_token_path.as_deref(),
+        &mut std::io::stdout(),
+        |url| {
             if has_gui_display() {
-                if let Err(err) = open::that(&url) {
+                if let Err(err) = open::that(url) {
                     eprintln!("Could not open the browser automatically: {err}");
                 }
             }
-        }
-    }
+        },
+    );
 
     let app = build_router(Arc::new(AppState::new()), &options, token);
     axum::serve(listener, app)
@@ -566,6 +566,38 @@ fn resolve_token(
     }
 }
 
+/// Tells the user how to open the dashboard. With a stable token (`stable_path`
+/// set) only the address and the file are written and `launch` is never
+/// called: the token outlives the process, so it must not reach stdout (a
+/// service's stdout lands in journald or `docker logs`) nor the browser
+/// launcher (its argv is readable by other local users). With a per-process
+/// token the full URL is written and handed to `launch`. Separate from
+/// `run_async` so a test covers exactly what startup prints.
+fn announce_launch(
+    host: IpAddr,
+    port: u16,
+    url: &str,
+    stable_path: Option<&std::path::Path>,
+    out: &mut impl std::io::Write,
+    launch: impl FnOnce(&str),
+) {
+    match stable_path {
+        Some(path) => {
+            if let Err(err) = writeln!(out, "{}", stable_launch_hint(host, port, path)) {
+                // The URL is the only way in for a stable token, so a lost write
+                // must not be silent.
+                eprintln!("warning: could not print the dashboard address: {err}");
+            }
+        }
+        None => {
+            if let Err(err) = writeln!(out, "Open this URL: {url}") {
+                eprintln!("warning: could not print the dashboard address: {err}");
+            }
+            launch(url);
+        }
+    }
+}
+
 /// What to print instead of the URL when the token is stable: the address and
 /// where the token lives, never the token itself.
 fn stable_launch_hint(host: IpAddr, port: u16, path: &std::path::Path) -> String {
@@ -834,6 +866,53 @@ mod tests {
         assert_ne!(fallback, stable);
         assert_eq!(fallback.len(), 64);
         assert_eq!(source, None);
+    }
+
+    #[test]
+    fn startup_with_a_stable_token_never_prints_it_or_launches() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dashboard-token");
+        let stable = "Abcdefghijklmnopqrstuvwxyz0123456789-._~";
+        std::fs::write(&path, format!("{stable}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (token, source) = resolve_token(Some(&path)).unwrap();
+        // The case is only meaningful if the file was actually loaded.
+        assert_eq!(
+            (token.as_str(), source.as_deref()),
+            (stable, Some(path.as_path()))
+        );
+
+        let url = launch_url(DEFAULT_HOST, 9077, &token);
+        let mut out = Vec::new();
+        let mut launched = false;
+        announce_launch(
+            DEFAULT_HOST,
+            9077,
+            &url,
+            source.as_deref(),
+            &mut out,
+            |_| launched = true,
+        );
+        let printed = String::from_utf8(out).unwrap();
+        assert!(!printed.contains(stable), "token printed:\n{printed}");
+        assert!(printed.contains("#token=<token>"));
+        assert!(!launched, "the browser launcher was called");
+    }
+
+    #[test]
+    fn startup_with_a_random_token_prints_and_launches_the_url() {
+        let url = launch_url(DEFAULT_HOST, 9077, "abc");
+        let mut out = Vec::new();
+        let mut launched = None;
+        announce_launch(DEFAULT_HOST, 9077, &url, None, &mut out, |u| {
+            launched = Some(u.to_string())
+        });
+        assert!(String::from_utf8(out).unwrap().contains(&url));
+        assert_eq!(launched.as_deref(), Some(url.as_str()));
     }
 
     #[test]
