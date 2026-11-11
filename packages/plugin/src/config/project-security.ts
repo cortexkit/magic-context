@@ -332,6 +332,8 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *  - `fail_closed_blocking` — a repo must not un-block (or force-block) the
  *    loud inoperability gate; only the user may restore silent degrade.
  *  - `debug_rpc` — a repo must not enable process heap capture or memory diagnostics.
+ *  - `dashboard` — a repo must not point the desktop dashboard at files to read
+ *    (`dashboard.opencode_db_paths`); every dashboard setting is user-level.
  *  - `allow_home_project` — only the user may opt a home-directory session
  *    into a durable project identity.
  *  - `output_reserve` — only the user may change process-wide window geometry.
@@ -422,6 +424,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.debug_rpc;
         warnings.push(
             "Ignoring debug_rpc from project config (security: only user-level config may enable process heap diagnostics).",
+        );
+    }
+
+    if ("dashboard" in projectRaw) {
+        delete projectRaw.dashboard;
+        warnings.push(
+            "Ignoring dashboard from project config (security: only user-level config may point the dashboard at session stores to read).",
         );
     }
 

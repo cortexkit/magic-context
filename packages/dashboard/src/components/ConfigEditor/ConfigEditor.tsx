@@ -24,7 +24,9 @@ import ProtectedTools from "./ProtectedTools";
 import { PER_MODEL_KEYS, type PerModelValues } from "./per-model-overrides";
 import RadioButtonGroup from "./RadioButtonGroup";
 import SearchPicker from "./SearchPicker";
+import SessionStores from "./SessionStores";
 import StringList from "./StringList";
+import { configuredStorePaths } from "./session-stores";
 import { structuredConfigSaveContent } from "./structured-save";
 import ToolDescriptions, { normalizeToolDescriptions } from "./ToolDescriptions";
 import "./config-editor.css";
@@ -236,8 +238,12 @@ const CONFIG_SECTIONS = [
   "Dreamer schedule",
   "Prompt surface",
   "Smart notes",
+  "Session stores",
   "Advanced",
 ];
+
+// Sections whose every setting is user-only; a project form does not list them.
+const USER_ONLY_SECTIONS = new Set(["Session stores"]);
 
 // ── ConfigForm component ────────────────────────────────────
 
@@ -667,7 +673,11 @@ function ConfigForm(props: {
         <div class="config-workspace">
           <nav class="config-section-index" aria-label="Config sections">
             <span class="config-index-eyebrow">Settings</span>
-            <For each={CONFIG_SECTIONS}>
+            <For
+              each={CONFIG_SECTIONS.filter(
+                (section) => isUserScope() || !USER_ONLY_SECTIONS.has(section),
+              )}
+            >
               {(section, index) => (
                 <button
                   type="button"
@@ -2080,6 +2090,28 @@ function ConfigForm(props: {
                   </div>
                 );
               })()}
+              <Show when={isUserScope()}>
+                <div class="config-card full-width" hidden={activeSection() !== "Session stores"}>
+                  <div class="config-card-header">
+                    <span class="config-card-icon">🗄️</span>
+                    <span class="config-card-title">Session stores</span>
+                  </div>
+                  <div class="config-card-content">
+                    <SessionStores
+                      savedContent={props.content}
+                      configured={configuredStorePaths(
+                        getNestedValue(formData(), "dashboard.opencode_db_paths"),
+                      )}
+                      onChange={(entries) =>
+                        handleFieldChange(
+                          "dashboard.opencode_db_paths",
+                          entries.length ? entries : undefined,
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              </Show>
             </div>
           </section>
         </div>

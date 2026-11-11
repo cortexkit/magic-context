@@ -2718,6 +2718,20 @@
         "connection_file"
       ]
     },
+    "dashboard": {
+      "description": "Desktop dashboard settings. USER-LEVEL ONLY: a project config cannot point the dashboard at files.",
+      "type": "object",
+      "properties": {
+        "opencode_db_paths": {
+          "description": "Extra OpenCode session stores the desktop dashboard reads, besides your own OpenCode store and the CortexKit runner's stores (which it finds by itself). Each entry is an absolute path to an opencode.db file or to the folder that holds it; Windows paths such as C:\\Users\\me\\opencode work too. Relative paths and {env:}/{file:} tokens are refused. The dashboard only reads these files. USER-LEVEL ONLY — ignored in project config for security.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "shadow_embedding": {
       "default": {
         "enabled": false

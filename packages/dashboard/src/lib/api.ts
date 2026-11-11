@@ -521,6 +521,11 @@ export async function getProjectConfigs(): Promise<import("./types").ProjectConf
   return invoke("get_project_configs");
 }
 
+/** Every OpenCode store the dashboard reads or was asked to read. */
+export async function getOpencodeStores(): Promise<import("./types").OpenCodeStoreRow[]> {
+  return invoke("get_opencode_stores");
+}
+
 export async function saveProjectConfig(projectPath: string, content: string): Promise<void> {
   return invoke("save_project_config", { projectPath, content });
 }

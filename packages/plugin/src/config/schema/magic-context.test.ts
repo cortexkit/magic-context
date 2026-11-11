@@ -699,6 +699,46 @@ describe("MagicContextConfigSchema", () => {
     });
 
     describe("validation", () => {
+        it("accepts absolute dashboard store paths and refuses relative or token paths", () => {
+            const paths = [
+                "/srv/runner/opencode.db",
+                "/srv/runner",
+                "C:\\Users\\me\\opencode\\opencode.db",
+                "D:/stores/opencode",
+                "\\\\server\\share\\opencode.db",
+            ];
+            const parsed = MagicContextConfigSchema.parse({
+                dashboard: { opencode_db_paths: paths },
+            });
+            expect(parsed.dashboard?.opencode_db_paths).toEqual(paths);
+
+            for (const bad of [
+                "opencode.db",
+                "./stores/opencode.db",
+                "~/stores/opencode.db",
+                "",
+                "{env:HOME}/opencode.db",
+                "/srv/{file:path}",
+            ]) {
+                const result = MagicContextConfigSchema.safeParse({
+                    dashboard: { opencode_db_paths: [bad] },
+                });
+                expect(result.success).toBe(false);
+            }
+            const token = MagicContextConfigSchema.safeParse({
+                dashboard: { opencode_db_paths: ["{env:HOME}/opencode.db"] },
+            });
+            expect(token.error?.issues.map((issue) => issue.message).join("\n")).toContain(
+                "does not expand {env:} or {file:} tokens",
+            );
+            const relative = MagicContextConfigSchema.safeParse({
+                dashboard: { opencode_db_paths: ["stores/opencode.db"] },
+            });
+            expect(relative.error?.issues.map((issue) => issue.message).join("\n")).toContain(
+                "must be absolute paths",
+            );
+        });
+
         it("rejects an unknown transform mode", () => {
             expect(() => MagicContextConfigSchema.parse({ transform_mode: "wasm" })).toThrow();
         });
