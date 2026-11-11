@@ -90,15 +90,8 @@ pub(super) fn move_in(
         _ => None,
     });
     let tag_checkpoint = db
-        .with_connection(|conn| {
-            conn.query_row(
-                "SELECT COALESCE(MAX(tag_number),0) FROM tags WHERE session_id=?1 AND harness=?2",
-                params![target.session, target.harness],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|n| n.max(0) as u64)
-            .map_err(|e| e.to_string())
-        })?
+        .with_connection(|conn| tag_floor(conn, &target.harness, &target.session))?
+        .0
         .max(request.tag_floor.unwrap_or(0));
     // Save only the destination key. Source views, pending requests to drop
     // parts and tag state remain untouched so a rollback can restore them.

@@ -175,6 +175,18 @@ pub fn fence_key(harness: &str, session: &str) -> String {
     format!("mode3_move:{harness}:{session}")
 }
 
+/// Return the stored tag floor and row count for one harness and session.
+/// Both offline reads and move checkpoints use this query so imports cannot
+/// reuse a number that the standalone plugin already assigned.
+pub fn tag_floor(conn: &Connection, harness: &str, session: &str) -> Result<(u64, u64), String> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(tag_number), 0), COUNT(*) FROM tags WHERE session_id = ?1 AND harness = ?2",
+        params![session, harness],
+        |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get::<_, u64>(1)?)),
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub fn move_in(
     db: ContextDb,
     store: &Store,
@@ -323,16 +335,9 @@ pub fn move_in(
         cortexkit_role_compaction::view::EditOp::Cut { through } => Some(through.as_str()),
         _ => None,
     });
-    let tag_checkpoint: u64 = db
-        .with_connection(|conn| {
-            conn.query_row(
-            "SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = ?1 AND harness = ?2",
-            params![key.session, key.harness],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|max| max.max(0) as u64)
-        .map_err(|error| error.to_string())
-        })?
+    let tag_checkpoint = db
+        .with_connection(|conn| tag_floor(conn, &key.harness, &key.session))?
+        .0
         .max(request.tag_floor.unwrap_or(0));
     store
         .save(key, &session.durable())

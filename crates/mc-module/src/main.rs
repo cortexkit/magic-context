@@ -25,6 +25,9 @@ use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    if std::env::args().nth(1).as_deref() == Some("tag-floor") {
+        return tag_floor();
+    }
     if std::env::args().skip(1).any(|arg| arg == "--version") {
         println!("{}", mc_module::version_line());
         return Ok(());
@@ -167,6 +170,52 @@ fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
     )?;
     let summary = mc_module::rekey::rekey_runner(&store_path(&context), &context, &request)?;
     println!("{}", serde_json::to_string(&summary)?);
+    Ok(())
+}
+
+fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
+    const HELP: &str = "Usage: ck-mc tag-floor --harness <harness> --session <session id>";
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{HELP}");
+        return Ok(());
+    }
+    let usage = || -> ! {
+        eprintln!("{HELP}");
+        std::process::exit(2);
+    };
+    let (mut harness, mut session) = (None, None);
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let slot = match arg.as_str() {
+            "--harness" => &mut harness,
+            "--session" => &mut session,
+            _ => usage(),
+        };
+        let value = args
+            .next()
+            .filter(|value| !value.is_empty() && !value.starts_with('-'))
+            .unwrap_or_else(|| usage());
+        if slot.replace(value).is_some() {
+            usage();
+        }
+    }
+    let harness = harness.unwrap_or_else(|| usage());
+    let session = session.unwrap_or_else(|| usage());
+    let path = context_db_path();
+    if !path.try_exists()? {
+        return Err("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.".into());
+    }
+    // ContextDb startup writes to the shared store. Move preparation needs
+    // this read without module startup or opening mode3.db.
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let (tag_floor, tags) = mc_module::move_in::tag_floor(&conn, &harness, &session)?;
+    println!(
+        "{}",
+        serde_json::json!({"harness": harness, "session": session, "tag_floor": tag_floor, "tags": tags})
+    );
     Ok(())
 }
 
