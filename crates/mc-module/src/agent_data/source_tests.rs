@@ -35,14 +35,44 @@ const PROJECT: &str = "git:proj";
 const MIB: usize = 1024 * 1024;
 
 /// Engram's session door as the source sees it: one append-only stream per
-/// session, fully copied to the cloud as soon as it is written.
+/// session, copied to the cloud as soon as it is written unless `lagging`.
 #[derive(Default)]
 struct Door {
     streams: HashMap<String, Vec<u8>>,
+    /// How far each stream is in the cloud.
+    cloud: HashMap<String, usize>,
+    /// Each stream's trim floor.
+    floors: HashMap<String, usize>,
+    /// Admitted bytes stay behind in the cloud until a `session.cover`.
+    lagging: bool,
+    /// A `session.cover` uploads nothing.
+    cover_stuck: bool,
     /// How many more `session.admit` calls succeed; `None` for all.
     admits_left: Option<usize>,
+    /// Refusals for the next `session.admit` calls, in order, each with
+    /// whether the page lands anyway.
+    admit_refusals: Vec<(&'static str, bool)>,
+    /// `offset_mismatch` leaves out `expectedOffset`.
+    omit_expected: bool,
+    /// The next `session.offsets` reports this durable end instead.
+    stale_offsets: Option<usize>,
+    /// The next `session.read` finds the floor raised to this first.
+    raise_floor_on_read: Option<usize>,
     /// Every admitted page: session, offset, length.
     admitted: Vec<(String, u64, usize)>,
+    /// Every read's start.
+    reads: Vec<u64>,
+    /// Every call: method and deadline.
+    calls: Vec<(String, std::time::Duration)>,
+}
+
+impl Door {
+    fn count(&self, method: &str) -> usize {
+        self.calls
+            .iter()
+            .filter(|(called, _)| called == method)
+            .count()
+    }
 }
 
 /// The runner, Entorhinal and the door, as a move's source meets them.
@@ -98,47 +128,118 @@ impl RunnerClient for Mover {
         })
     }
 
-    async fn door_call(&self, method: &str, params: Value) -> Result<Value, DoorRefusal> {
+    async fn door_call(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: std::time::Duration,
+    ) -> Result<Value, DoorRefusal> {
         let hook = self.on_door.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
         }
         let mut door = self.door.lock().unwrap();
+        door.calls.push((method.to_owned(), deadline));
         let session = params["sessionRef"].as_str().unwrap().to_owned();
-        let length = door.streams.get(&session).map_or(0, Vec::len);
-        let position = |end: usize| json!({"durableOffset": end, "cloudOffset": end});
+        let stream = door.streams.get(&session).cloned().unwrap_or_default();
+        let floor = door.floors.get(&session).copied().unwrap_or(0);
+        let cloud = door.cloud.get(&session).copied().unwrap_or(0);
+        let refusal = |code: &str, detail: Option<Value>| DoorRefusal {
+            code: code.into(),
+            message: format!("the stand-in door refuses {code}"),
+            detail,
+        };
         match method {
-            "session.cover" => Ok(position(length)),
+            "session.offsets" => {
+                let durable = door.stale_offsets.take().unwrap_or(stream.len());
+                Ok(json!({"durableOffset": durable, "cloudOffset": cloud, "added": "ignored"}))
+            }
+            "session.cover" => {
+                assert!(
+                    cloud < stream.len(),
+                    "session.cover called where an offset read was meant: the cloud has the whole stream"
+                );
+                let covered = if door.cover_stuck {
+                    cloud
+                } else {
+                    stream.len()
+                };
+                door.cloud.insert(session, covered);
+                Ok(json!({"durableOffset": stream.len(), "cloudOffset": covered}))
+            }
             "session.admit" => {
-                if door.admits_left == Some(0) {
-                    return Err(DoorRefusal {
-                        code: "lease_unavailable".into(),
-                        message: "the door lost its lease".into(),
-                        detail: None,
-                    });
-                }
-                door.admits_left = door.admits_left.map(|left| left - 1);
                 let from = params["fromOffset"].as_u64().unwrap();
                 let bytes = crate::agent_data::door::unhex(params["bytes"].as_str().unwrap())
                     .expect("admitted bytes are hex");
                 assert!(bytes.len() <= MIB, "a page carries at most 1 MiB");
-                if from != length as u64 {
-                    return Err(DoorRefusal {
-                        code: "offset_mismatch".into(),
-                        message: "the stream ends elsewhere".into(),
-                        detail: Some(json!({"expectedOffset": length})),
-                    });
+                if door.admits_left == Some(0) {
+                    return Err(refusal("lease_unavailable", None));
                 }
-                door.admitted.push((session.clone(), from, bytes.len()));
-                let stream = door.streams.entry(session).or_default();
-                stream.extend(bytes);
-                Ok(position(stream.len()))
+                door.admits_left = door.admits_left.map(|left| left - 1);
+                if from != stream.len() as u64 {
+                    let detail =
+                        (!door.omit_expected).then(|| json!({"expectedOffset": stream.len()}));
+                    return Err(refusal("offset_mismatch", detail));
+                }
+                let refused =
+                    (!door.admit_refusals.is_empty()).then(|| door.admit_refusals.remove(0));
+                if refused.is_none_or(|(_, lands)| lands) {
+                    door.admitted.push((session.clone(), from, bytes.len()));
+                    let lagging = door.lagging;
+                    let stream = door.streams.entry(session.clone()).or_default();
+                    stream.extend(bytes);
+                    let end = stream.len();
+                    if !lagging {
+                        door.cloud.insert(session.clone(), end);
+                    }
+                }
+                if let Some((code, _)) = refused {
+                    return Err(refusal(code, None));
+                }
+                let end = door.streams[&session].len();
+                Ok(
+                    json!({"durableOffset": end, "cloudOffset": door.cloud.get(&session).copied().unwrap_or(0)}),
+                )
+            }
+            "session.digest" => {
+                let end = params["end"].as_u64().unwrap() as usize;
+                if end > stream.len() {
+                    return Err(refusal(
+                        "offset_out_of_range",
+                        Some(json!({"streamEnd": stream.len()})),
+                    ));
+                }
+                if end < floor {
+                    return Err(refusal("below_floor", Some(json!({"floor": floor}))));
+                }
+                Ok(json!({
+                    "end": end,
+                    "digest": sha256(&stream[..end]),
+                    "floor": floor,
+                    "midstate": midstate_at(&stream[..floor]),
+                }))
             }
             "session.read" => {
                 let from = params["fromOffset"].as_u64().unwrap() as usize;
                 let limit = params["limit"].as_u64().unwrap() as usize;
                 assert!(limit <= MIB, "a read asks for at most 1 MiB");
-                let stream = door.streams.get(&session).cloned().unwrap_or_default();
+                door.reads.push(from as u64);
+                let floor = match door.raise_floor_on_read.take() {
+                    Some(raised) => {
+                        door.floors.insert(session.clone(), raised);
+                        raised
+                    }
+                    None => floor,
+                };
+                if from < floor {
+                    return Err(refusal("below_floor", Some(json!({"floor": floor}))));
+                }
+                if from > stream.len() {
+                    return Err(refusal(
+                        "offset_out_of_range",
+                        Some(json!({"streamEnd": stream.len()})),
+                    ));
+                }
                 let bytes = &stream[from..stream.len().min(from + limit)];
                 Ok(json!({
                     "bytes": crate::agent_data::door::hex(bytes),
@@ -150,6 +251,27 @@ impl RunnerClient for Mover {
             other => panic!("the source never calls {other}"),
         }
     }
+}
+
+/// SHA-256's running state after `bytes`, encoded as the door encodes it,
+/// computed with the compression function alone.
+fn midstate_at(bytes: &[u8]) -> Value {
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let full = bytes.len() - bytes.len() % 64;
+    for block in bytes[..full].chunks(64) {
+        sha2::compress256(
+            &mut state,
+            std::slice::from_ref(sha2::digest::generic_array::GenericArray::from_slice(block)),
+        );
+    }
+    let chaining: Vec<u8> = state.iter().flat_map(|word| word.to_be_bytes()).collect();
+    json!({
+        "chaining": crate::agent_data::door::hex(&chaining),
+        "tail": crate::agent_data::door::hex(&bytes[full..]),
+    })
 }
 
 impl Router for Mover {
@@ -1195,4 +1317,201 @@ async fn a_prepare_cut_short_by_a_crash_is_finished_or_undone_by_its_repeat() {
     assert_eq!(reply["items"][0]["frozen"], true);
     assert_eq!(f.moving("s1"), Some((CUT.into(), MovingState::Frozen)));
     assert_eq!(facts(&conn, "pub-s1"), [reserved(0, CUT), applied(1)]);
+}
+
+/// `export` reads where the stream ends with `session.offsets`, never with
+/// `session.cover`. When an admission is refused `offset_mismatch`, it goes
+/// on from the `expectedOffset` the refusal names, and reads the offsets
+/// again only when the refusal names none.
+#[tokio::test]
+async fn export_goes_on_from_the_offset_a_mismatch_names() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    seed(&conn, "s1", &"x".repeat(MIB + MIB / 5));
+    seed(&conn, "s2", "content");
+    f.bind("s1");
+    f.bind("s2");
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.prepare(OTHER_CUT, &["s2"]).await.unwrap();
+    let (s1, s2) = (
+        source::session_ref(&key("s1")),
+        source::session_ref(&key("s2")),
+    );
+    let snapshot1 = std::fs::read(source::snapshot_file(&f.db, CUT, &s1)).unwrap();
+    let snapshot2 = std::fs::read(source::snapshot_file(&f.db, OTHER_CUT, &s2)).unwrap();
+
+    // The first page landed once already, and the door's offsets are read
+    // before that is visible: the admission from byte 0 is refused, and the
+    // export goes on from the offset the refusal names.
+    {
+        let mut door = f.door();
+        door.streams.insert(s1.clone(), snapshot1[..MIB].to_vec());
+        door.cloud.insert(s1.clone(), MIB);
+        door.stale_offsets = Some(0);
+    }
+    f.export(CUT, &["s1"]).await.unwrap();
+    {
+        let door = f.door();
+        assert_eq!(door.streams[&s1], snapshot1);
+        assert_eq!(
+            door.admitted,
+            [
+                (s1.clone(), MIB as u64, MIB),
+                (s1.clone(), 2 * MIB as u64, snapshot1.len() - 2 * MIB),
+            ]
+        );
+        assert_eq!(
+            door.count("session.offsets"),
+            3,
+            "prepare's two, export's one"
+        );
+        assert_eq!(door.count("session.cover"), 0);
+    }
+
+    // A refusal naming no offset: the export reads the offsets again.
+    {
+        let mut door = f.door();
+        door.streams.insert(s2.clone(), snapshot2.clone());
+        door.cloud.insert(s2.clone(), snapshot2.len());
+        door.stale_offsets = Some(0);
+        door.omit_expected = true;
+    }
+    let before = f.door().count("session.offsets");
+    f.export(OTHER_CUT, &["s2"]).await.unwrap();
+    let door = f.door();
+    assert_eq!(door.streams[&s2], snapshot2);
+    assert_eq!(door.count("session.offsets") - before, 2);
+    assert_eq!(door.count("session.cover"), 0);
+}
+
+/// When the cloud lacks part of what earlier moves admitted, `prepare`
+/// asks the door to upload it once with `session.cover`, under its own
+/// ten-minute deadline, and checks again; every other door call keeps 30
+/// seconds. A cover that leaves the cloud behind refuses `unavailable` and
+/// leaves nothing frozen.
+#[tokio::test]
+async fn prepare_waits_once_for_the_cloud_when_it_is_behind() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    seed(&conn, "s1", "content");
+    f.bind("s1");
+    f.door().lagging = true;
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.export(CUT, &["s1"]).await.unwrap();
+    f.abort(CUT, &["s1"]).await.unwrap();
+    let session_ref = source::session_ref(&key("s1"));
+    assert_eq!(f.door().cloud.get(&session_ref).copied().unwrap_or(0), 0);
+    assert_eq!(f.door().count("session.cover"), 0);
+
+    f.door().cover_stuck = true;
+    let refused = f.prepare(OTHER_CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(refused.code, RefusalCode::Unavailable);
+    assert_eq!(f.door().count("session.cover"), 1);
+    assert_eq!(f.moving("s1"), None);
+    assert_eq!(facts(&conn, "pub-s1"), [waiting(0), applied(1)]);
+
+    f.door().cover_stuck = false;
+    f.prepare(OTHER_CUT, &["s1"]).await.unwrap();
+    let door = f.door();
+    assert_eq!(door.count("session.cover"), 2);
+    for (method, deadline) in &door.calls {
+        let expected = if method == "session.cover" {
+            std::time::Duration::from_secs(600)
+        } else {
+            std::time::Duration::from_secs(30)
+        };
+        assert_eq!(*deadline, expected, "{method}");
+    }
+}
+
+/// The cut's digest resumes SHA-256 from the running state the door keeps
+/// at the stream's trim floor and reads only the bytes from the floor on.
+/// When a trim raises the floor during the read, it starts again from the
+/// new floor. The digest still covers every byte of the stream.
+#[tokio::test]
+async fn the_cuts_digest_resumes_from_the_streams_floor() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    seed(&conn, "s1", &"content ".repeat(40));
+    f.bind("s1");
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.export(CUT, &["s1"]).await.unwrap();
+    f.abort(CUT, &["s1"]).await.unwrap();
+    let session_ref = source::session_ref(&key("s1"));
+    let earlier = f.door().streams[&session_ref].clone();
+    assert!(earlier.len() > 200);
+    {
+        let mut door = f.door();
+        door.floors.insert(session_ref.clone(), 70);
+        door.raise_floor_on_read = Some(130);
+    }
+    let reply = f.prepare(OTHER_CUT, &["s1"]).await.unwrap();
+    let snapshot = std::fs::read(source::snapshot_file(&f.db, OTHER_CUT, &session_ref)).unwrap();
+    let mut stream = earlier.clone();
+    stream.extend(&snapshot);
+    assert_eq!(reply["items"][0]["digest"], sha256(&stream));
+    assert_eq!(reply["items"][0]["endOffset"], stream.len());
+    let door = f.door();
+    assert_eq!(door.reads, [70, 130], "nothing below the floor is read");
+    assert_eq!(door.count("session.digest"), 2);
+}
+
+/// A door refusal on `session.admit` is answered by the table in `door.rs`:
+/// a refusal Engram's contract says to retry, or one it does not list, is
+/// `unavailable`; a container this machine no longer writes is
+/// `unknown_ref`; another cut's pending handoff and a fault on this machine
+/// are `invalid_state` at the cut's step. An answer too large for the frame
+/// whose page landed is no refusal: the export goes on.
+#[tokio::test]
+async fn a_refused_admission_is_answered_by_the_doors_table() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    seed(&conn, "s1", "content");
+    f.bind("s1");
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    for (code, expected) in [
+        ("lease_acquiring", RefusalCode::Unavailable),
+        ("a_code_engram_added_later", RefusalCode::Unavailable),
+        ("container_handed_off", RefusalCode::UnknownRef),
+        ("lease_held_elsewhere", RefusalCode::UnknownRef),
+        ("cut_pending_handoff", RefusalCode::InvalidState),
+        ("caller_forbidden", RefusalCode::InvalidState),
+        ("response_too_large", RefusalCode::InvalidState),
+    ] {
+        f.door().admit_refusals = vec![(code, false)];
+        let refused = f.export(CUT, &["s1"]).await.unwrap_err();
+        assert_eq!(refused.code, expected, "{code}");
+        assert!(
+            refused.message.contains(code),
+            "{code}: {}",
+            refused.message
+        );
+        match expected {
+            RefusalCode::UnknownRef => assert_eq!(
+                refused.detail,
+                Some(json!({"ref_kind": "pi-session", "ref": "s1"})),
+                "{code}"
+            ),
+            RefusalCode::InvalidState => {
+                assert_eq!(refused.detail, Some(json!({"step": "prepared"})), "{code}")
+            }
+            _ => assert_eq!(refused.detail, None, "{code}"),
+        }
+        if code == "caller_forbidden" {
+            assert!(
+                refused
+                    .message
+                    .contains("The order of the cut's ops is not the cause"),
+                "{}",
+                refused.message
+            );
+        }
+        assert_eq!(f.status(CUT).await, "prepared", "{code}");
+        assert!(f.door().admitted.is_empty(), "{code}");
+    }
+    // The page landed though its answer was too large: the export reads
+    // the offsets and goes on.
+    f.door().admit_refusals = vec![("response_too_large", true)];
+    f.export(CUT, &["s1"]).await.unwrap();
+    assert_eq!(f.status(CUT).await, "exported");
 }

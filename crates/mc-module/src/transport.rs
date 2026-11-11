@@ -645,19 +645,27 @@ impl RunnerClient for SubcRunnerClient {
         &self,
         method: &str,
         params: Value,
+        deadline: Duration,
     ) -> Result<Value, crate::client::DoorRefusal> {
         use crate::client::DoorRefusal;
         let consumer = self.consumer().await.map_err(DoorRefusal::unavailable)?;
         let reply = consumer
             .call(
+                // Named, not resolved by capability as the other providers
+                // here are: Engram declares no capability for its session
+                // door, and `engram` is a reserved module id the daemon
+                // verifies by launch nonce, so no other process can answer
+                // under it.
                 RouteTarget::InternalService {
                     module_id: "engram".to_owned(),
                     service_id: "session-door".to_owned(),
                 },
+                // Chosen by ck-mc and never attested, so it grants nothing:
+                // the door decides by the route's attested caller alone.
                 BindIdentity::new("agent-data", "agent-data"),
                 wire::encode(method, &params),
                 CallOptions {
-                    timeout: crate::agent_data::door::DEADLINE,
+                    timeout: deadline,
                     ..CallOptions::default()
                 },
             )

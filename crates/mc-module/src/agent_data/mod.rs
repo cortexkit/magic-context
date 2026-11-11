@@ -28,12 +28,15 @@ pub mod door;
 pub mod gate;
 pub mod install;
 pub mod journal;
+pub mod midstate;
 pub mod moved;
 pub mod resolve;
 pub mod service;
 pub mod snapshot;
 pub mod source;
 
+#[cfg(test)]
+mod midstate_tests;
 #[cfg(test)]
 mod moved_tests;
 #[cfg(test)]

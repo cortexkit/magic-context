@@ -94,12 +94,13 @@ pub trait Host: Send + Sync {
     /// machine by `cut`: its worker with the jobs it held, its Setup and its
     /// cached project.
     fn forget(&self, session: &SessionRef, cut: &str);
-    /// One call to Engram's session door: the reply's `result`, or the
-    /// door's refusal.
+    /// One call to Engram's session door, given at most `deadline`: the
+    /// reply's `result`, or the door's refusal.
     fn door(
         &self,
         method: &str,
         params: Value,
+        deadline: Duration,
     ) -> impl Future<Output = Result<Value, DoorRefusal>> + Send;
     /// This module's stream on the door, `reserved:<module id>`.
     fn stream(&self) -> String;

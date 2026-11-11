@@ -15,9 +15,17 @@
 //!    session of the project takes `retryable` facts of every committed
 //!    publication, and the gate cannot stop a turn of another session, so
 //!    the move takes the facts out of reach instead. Nothing but this file
-//!    lets that reservation go: every path that releases or decides an
-//!    `in_flight` fact goes through a second-turn stage key or its stage row,
-//!    and the move's key has none.
+//!    lets that reservation go. When the summarizer's second turn takes
+//!    facts to send, in ck-mc or in a plugin host, it first writes a stage
+//!    row in `memory_stage_attempts` (stage `turn_two`) under a stage key
+//!    built from the project, the publication and the attempt number, then
+//!    marks each fact it takes `in_flight` with that key in
+//!    `reserved_stage_key`. Every path that later lets such a fact go or
+//!    decides it (revoking the send, releasing facts it did not use, giving
+//!    up an unfinished stage, applying the answer) finds the facts by a key
+//!    read from its own stage row or by joining that table on the key. The
+//!    move's key, `agent-data:<cutId>`, has no stage row, so none of those
+//!    paths ever selects a fact the move reserved.
 //! 4. Read the session's rows and the schema version in one read
 //!    transaction, and write the snapshot to a private file beside the
 //!    journal.
@@ -222,9 +230,14 @@ async fn prepare_one<H: Host>(
             file.display()
         ))
     })?;
-    // 5. What earlier moves admitted must be covered before this cut
-    // builds on it.
-    let position = door::cover(host, &session_ref).await?;
+    // 5. What earlier moves admitted must be in the cloud before this cut
+    // builds on it. The door's offsets answer at once; only when the cloud
+    // is behind does prepare wait, once, for the door to upload the rest.
+    let refused = |error| door_refusal(Op::Prepare, r, Step::None, error);
+    let mut position = door::offsets(host, &session_ref).await.map_err(refused)?;
+    if position.cloud_offset < position.durable_offset {
+        position = door::cover(host, &session_ref).await.map_err(refused)?;
+    }
     if position.cloud_offset < position.durable_offset {
         return Err(unavailable(format!(
             "Engram's session door has copied session {session_ref}'s stream to byte {} of {}; prepare again once it has all of it",
@@ -232,7 +245,9 @@ async fn prepare_one<H: Host>(
         )));
     }
     let start = position.durable_offset;
-    let digest = door::digest(host, &session_ref, start, &encoded.bytes).await?;
+    let digest = door::digest(host, &session_ref, start, &encoded.bytes)
+        .await
+        .map_err(refused)?;
     drop(parked);
     let format = format!("{}+context.db/{version}", snapshot::FORMAT);
     Ok((
@@ -290,7 +305,9 @@ pub(crate) async fn export<H: Host>(
                 file.display()
             )));
         }
-        door::admit(host, &one.session_ref, one.start, &bytes).await?;
+        door::admit(host, &one.session_ref, one.start, &bytes)
+            .await
+            .map_err(|error| door_refusal(Op::Export, r, record.step, error))?;
         items.push(ExportedItem::new(&one.session_ref, one.end));
     }
     let prepared = record.prepared.clone();
@@ -601,6 +618,29 @@ fn held_refusal(r: &Ref, held: &HeldFact) -> ErrorBody {
             held.stage.as_deref().unwrap_or("(no stage key)")
         ),
     )
+}
+
+/// What `op` answers for a failed door step, by [`door::answer`]'s table.
+/// `step` is the cut's step when the op started, which `invalid_state`
+/// names.
+fn door_refusal(op: Op, r: &Ref, step: Step, error: door::DoorError) -> ErrorBody {
+    let invalid_state = |message: String| {
+        ErrorBody::with_typed_detail(Detail::InvalidState(InvalidStateDetail::new(step)), message)
+    };
+    let said = error.message.trim_end_matches('.');
+    match door::answer(op, &error.code) {
+        door::Answer::Unavailable => unavailable(error.message),
+        door::Answer::UnknownRef => resolve::unknown_ref(
+            r,
+            &format!("{said}; this machine no longer writes the session's stream on Engram's door"),
+        ),
+        door::Answer::Handoff => invalid_state(format!(
+            "{said}. Another cut of the session's stream waits for its handoff; finish or abort that move first."
+        )),
+        door::Answer::Fault(fix) => invalid_state(format!(
+            "{said}. Fix this on this machine before the session can move: {fix}. The order of the cut's ops is not the cause."
+        )),
+    }
 }
 
 fn busy_refusal(r: &Ref, code: &str, reason: impl Into<String>) -> ErrorBody {

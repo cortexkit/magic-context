@@ -169,14 +169,17 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<String>, String>> + Send {
         async { Err("no catalog".to_owned()) }
     }
-    /// One call to Engram's session door (`session.cover`, `session.admit`,
-    /// `session.read`), for a move's `prepare` and `export`. The answer is
-    /// the reply's `result`; a refusal carries Engram's code and detail.
-    /// Without Engram the door is unavailable, which is the default here.
+    /// One call to Engram's session door (`session.offsets`,
+    /// `session.cover`, `session.admit`, `session.digest`, `session.read`),
+    /// for a move's `prepare` and `export`, given at most `deadline`. The
+    /// answer is the reply's `result`; a refusal carries Engram's code and
+    /// detail. Without Engram the door is unavailable, which is the default
+    /// here.
     fn door_call(
         &self,
         _method: &str,
         _params: serde_json::Value,
+        _deadline: std::time::Duration,
     ) -> impl Future<Output = Result<serde_json::Value, DoorRefusal>> + Send {
         async { Err(DoorRefusal::unavailable("no session door")) }
     }

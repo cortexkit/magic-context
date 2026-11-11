@@ -172,7 +172,12 @@ impl Host for Stand {
 
     fn forget(&self, _session: &SessionRef, _cut: &str) {}
 
-    async fn door(&self, _method: &str, _params: Value) -> Result<Value, DoorRefusal> {
+    async fn door(
+        &self,
+        _method: &str,
+        _params: Value,
+        _deadline: Duration,
+    ) -> Result<Value, DoorRefusal> {
         Err(DoorRefusal::unavailable("no session door in these tests"))
     }
 

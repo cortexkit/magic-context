@@ -1107,8 +1107,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
             .remove(session);
     }
 
-    async fn door(&self, method: &str, params: Value) -> Result<Value, crate::client::DoorRefusal> {
-        self.inner.client.door_call(method, params).await
+    async fn door(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value, crate::client::DoorRefusal> {
+        self.inner.client.door_call(method, params, deadline).await
     }
 
     fn stream(&self) -> String {
