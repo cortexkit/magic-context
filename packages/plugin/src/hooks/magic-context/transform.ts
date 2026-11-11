@@ -281,6 +281,7 @@ import {
     servesThinkingBlock,
 } from "./transform-postprocess-phase";
 import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
+import { ParkedBustTriggers } from "./trigger-parking";
 import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
 import {
     storedHistoryBoundaryPresence,
@@ -3500,6 +3501,15 @@ export function createTransform(deps: TransformDeps) {
                         deps.lastHeuristicsTurnId,
                         sessionId,
                         currentTurnId,
+                    ),
+                    // The postprocess phase withholds the force ride below 95%
+                    // while this pass's frozen head keeps a force trigger parked
+                    // (strict hold policy only); plan the pass the same way.
+                    forceTriggerPermitted: !(
+                        freezeM0M1 &&
+                        signedThinkingPolicy.strict &&
+                        !compactionOff &&
+                        ParkedBustTriggers.load(db, sessionId).reason("force") !== undefined
                     ),
                 };
             } catch (error) {

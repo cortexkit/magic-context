@@ -109,6 +109,13 @@ export interface PricedPassPlanInput {
     /** The history injection was rebuilt on this pass before the postprocess phase. */
     historyRebuilt: boolean;
     alreadyRanThisTurn: boolean;
+    /**
+     * Whether trigger parking still allows the force band its ride. It is false
+     * while a force trigger parked on an earlier frozen pass is still parked
+     * (`ParkedBustTriggers.permissions`), and the postprocess phase passes the
+     * same permission to `decidePassMutation`. Omitted means permitted.
+     */
+    forceTriggerPermitted?: boolean;
 }
 
 /**
@@ -148,6 +155,7 @@ export function planPricedPass(
             percentage: usage.percentage,
             fromEstimate: usage.fromEstimate,
             emergencySample,
+            triggerPermitted: input.forceTriggerPermitted,
         }),
         explicitFlush: input.explicitFlush,
         publishedHistory: false,

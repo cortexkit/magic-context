@@ -19,7 +19,13 @@ import {
 import { addRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { type PricedPassSizingInput, servedRequestForSizing } from "./priced-pass-sizing";
+import { decidePassMutation } from "./pass-mutation-decision";
+import {
+    type PricedPassPlanInput,
+    type PricedPassSizingInput,
+    planPricedPass,
+    servedRequestForSizing,
+} from "./priced-pass-sizing";
 import type { MessageLike } from "./tag-messages";
 
 const SESSION = "priced-pass-sizing-session";
@@ -107,5 +113,136 @@ describe("a priced pass is sized without the reasoning earlier passes removed", 
             clearsReasoning: false,
         });
         expect(reasoningOf(counted)).toEqual(["a1", "a3"]);
+    });
+});
+
+// A force trigger parked on an earlier frozen pass (signed thinking kept, or an
+// unresolved project directory) withholds the force ride below 95% until it is
+// released. The postprocess phase reads that permission when it decides the
+// pass; the plan a priced pass is sized from must read the same one, or it
+// counts a request with rewrites the pass will not make.
+describe("the priced-pass plan reads the parked force trigger the pass decision reads", () => {
+    type Row = Omit<PricedPassPlanInput, "db" | "sessionId" | "forceTriggerPermitted"> & {
+        percentage: number;
+        fromEstimate: boolean;
+    };
+    const flags = [false, true];
+    const rows: Row[] = [];
+    for (const percentage of [0, 50, 70, 86, 90, 95, 99])
+        for (const fromEstimate of flags)
+            for (const schedulerDecision of ["execute", "defer"] as const)
+                for (const fullFeatureMode of flags)
+                    for (const signedThinkingHold of flags)
+                        for (const folds of flags)
+                            for (const firstRender of flags)
+                                for (const explicitFlush of flags)
+                                    for (const compactionOff of flags)
+                                        rows.push({
+                                            percentage,
+                                            fromEstimate,
+                                            schedulerDecision,
+                                            fullFeatureMode,
+                                            signedThinkingHold,
+                                            folds,
+                                            firstRender,
+                                            explicitFlush,
+                                            compactionOff,
+                                            forceMaterializationPercentage: 85,
+                                            materializationRequested: explicitFlush,
+                                            historyRebuilt: false,
+                                            alreadyRanThisTurn: false,
+                                        });
+    const plan = (db: ContextDatabase, row: Row, forceTriggerPermitted?: boolean) =>
+        planPricedPass(
+            {
+                ...row,
+                db,
+                sessionId: SESSION,
+                ...(forceTriggerPermitted === undefined ? {} : { forceTriggerPermitted }),
+            },
+            { percentage: row.percentage, fromEstimate: row.fromEstimate },
+        );
+    /** The pass decision for the same pass, with no ride the plan cannot know. */
+    const decision = (row: Row, forceTriggerPermitted: boolean) =>
+        decidePassMutation(
+            {
+                fullFeatureMode: row.fullFeatureMode,
+                compactionOff: row.compactionOff,
+                schedulerDecision: row.schedulerDecision,
+                contextPercentage: row.percentage,
+                forceMaterializationPercentage: row.forceMaterializationPercentage,
+                contextUsageFromEstimate: row.fromEstimate,
+                emergencyInputSample: () => 0,
+                forceTriggerPermitted,
+                servedShapeRepair: false,
+                rewritingSignedPrefix: false,
+                foldBustsServedPrefix: row.folds,
+                firstRenderBust: row.firstRender,
+                explicitFlush: row.explicitFlush,
+                publishedHistory: false,
+                historyRebuiltThisPass: row.historyRebuilt,
+                materializationRequested: row.materializationRequested,
+                alreadyRanThisTurn: row.alreadyRanThisTurn,
+                signedThinkingHold: row.signedThinkingHold,
+            },
+            () => false,
+        );
+
+    it("predicts the whole-prefix rewrite the decision allows, parked or not", () => {
+        const db = database();
+        const mismatches = rows.flatMap((row) =>
+            flags.flatMap((permitted) => {
+                const allowed =
+                    decision(row, permitted).publishedWorkDrainAllowed && !row.signedThinkingHold;
+                return plan(db, row, permitted).editsWholePrefix === allowed
+                    ? []
+                    : [{ ...row, permitted, allowed }];
+            }),
+        );
+        expect(mismatches).toEqual([]);
+    });
+
+    it("changes the plan only where a parked trigger withholds the force ride", () => {
+        const db = database();
+        const changed = rows.filter(
+            (row) =>
+                JSON.stringify(plan(db, row, false)) !== JSON.stringify(plan(db, row)) ||
+                JSON.stringify(plan(db, row, true)) !== JSON.stringify(plan(db, row)),
+        );
+        // Omitting the permission still means permitted, and a parked trigger
+        // matters only in the force band below 95% on a provider reading.
+        expect(JSON.stringify(rows.map((row) => plan(db, row, true)))).toBe(
+            JSON.stringify(rows.map((row) => plan(db, row))),
+        );
+        expect(
+            changed.filter(
+                (row) =>
+                    row.compactionOff ||
+                    row.fromEstimate ||
+                    row.percentage < 85 ||
+                    row.percentage >= 95,
+            ),
+        ).toEqual([]);
+        // The frozen pass without a hold that nothing else rebuilds: the plan
+        // no longer counts the force ride's whole-prefix rewrite.
+        const frozen = rows.find(
+            (row) =>
+                row.percentage === 90 &&
+                !row.fromEstimate &&
+                row.schedulerDecision === "execute" &&
+                row.fullFeatureMode &&
+                !row.signedThinkingHold &&
+                !row.folds &&
+                !row.firstRender &&
+                !row.explicitFlush &&
+                !row.compactionOff,
+        )!;
+        expect(decision(frozen, false).publishedWorkDrainAllowed).toBe(false);
+        expect(plan(db, frozen, false)).toEqual({
+            editsWholePrefix: false,
+            clearsReasoning: false,
+        });
+        expect(plan(db, frozen).editsWholePrefix).toBe(true);
+        expect(changed).toContainEqual(frozen);
     });
 });
