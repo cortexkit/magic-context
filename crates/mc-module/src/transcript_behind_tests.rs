@@ -1,7 +1,7 @@
-//! A transcript that no longer holds the messages a session's summaries end
-//! on, with no revert reported, holds the session instead of forgetting the
-//! summaries; a revert ck-mc missed still forgets the newest few (see
-//! `IMPLICIT_FORGET_LIMIT`).
+//! With no revert reported, ck-mc forgets at most the newest three summaries
+//! whose last message the transcript no longer holds. A transcript that
+//! fails more of them holds the session instead, with every summary kept
+//! (see `IMPLICIT_FORGET_LIMIT`).
 
 use super::*;
 use cortexkit_role_compaction::ride::RideCause;
@@ -120,12 +120,18 @@ impl Fixture {
     /// 110-message transcript, set up and showing them: the view it handed
     /// over cuts through message 100, and the runner has not confirmed it.
     async fn new(label: &str) -> Self {
+        Self::with_summaries(label, SUMMARIES).await
+    }
+
+    /// [`Fixture::new`] with `count` summaries, covering messages 1 to
+    /// `count * SPAN`.
+    async fn with_summaries(label: &str, count: u64) -> Self {
         let log = Captured::default();
         let guard = log.install();
         let (mut session, client, route, setup, settings) = fixture();
         let dir = scratch(label);
         let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
-        for k in 1..=SUMMARIES {
+        for k in 1..=count {
             let (start, end) = ((k - 1) * SPAN + 1, k * SPAN);
             db.with_connection(|conn| {
                 conn.execute(
@@ -156,7 +162,7 @@ impl Fixture {
         fixture
             .session
             .accept(view.expect("a view showing the summaries"));
-        assert_eq!(fixture.session.cut, Some(SUMMARIES * SPAN));
+        assert_eq!(fixture.session.cut, Some(count * SPAN));
         fixture
     }
 
@@ -336,6 +342,22 @@ async fn a_setup_after_a_missed_revert_of_the_newest_two_summaries_forgets_them(
     assert_eq!(fixture.rows(), 18);
     assert_eq!(fixture.session.summaries.len(), 18);
     assert_eq!(fixture.session.cut, Some(90));
+    assert!(fixture.session.index_ready, "the session is not ready");
+    assert_eq!(fixture.log.lines("ERROR"), 0);
+}
+
+#[tokio::test]
+async fn a_setup_whose_three_summaries_all_fail_forgets_them_all() {
+    // The bound, not a matching summary, decides: a session with only three
+    // summaries forgets them all even against unrelated entries, as before,
+    // since nothing would ever make their messages match again after a real
+    // revert.
+    let mut fixture = Fixture::with_summaries("three-summaries", 3).await;
+    fixture.transcript(unrelated());
+    fixture.set_up().await;
+    assert_eq!(fixture.rows(), 0);
+    assert!(fixture.session.summaries.is_empty());
+    assert_eq!(fixture.session.cut, None);
     assert!(fixture.session.index_ready, "the session is not ready");
     assert_eq!(fixture.log.lines("ERROR"), 0);
 }

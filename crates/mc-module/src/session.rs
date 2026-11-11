@@ -41,14 +41,13 @@ const READ_PAGE_BYTES: u64 = 1 << 20;
 /// longer holds the messages they end on and the runner reported no revert.
 ///
 /// A revert ck-mc did not hear about (its notice was lost, or came while
-/// ck-mc was down) removes the newest messages, so it can reach only the
-/// newest few summaries: an older summary still finds its last message at
-/// its position. A transcript that lost its history (a runner fault that
-/// replaced or truncated it) fails that check for every summary. The
-/// summaries are the only compacted record of that history, and deleting
-/// them on the inference that a revert removed it destroys the record for
-/// good. So when more summaries than this fail, or none matches, ck-mc
-/// forgets nothing and holds the session until a later check finds the
+/// ck-mc was down) looks, from ck-mc's side, exactly like a transcript that
+/// lost its history to a runner fault that replaced or truncated it; only
+/// the runner can say which happened. The summaries are the only compacted
+/// record of that history. This bound limits what the inference can
+/// destroy to the newest three summaries, which the session can summarize
+/// again if their messages turn out to exist. A session that would lose
+/// more is held instead: it forgets nothing until a later check finds the
 /// messages again ([`Session::hold_transcript_behind`]).
 const IMPLICIT_FORGET_LIMIT: usize = 3;
 
@@ -390,23 +389,18 @@ struct SummaryWalk {
     invalid_from: Option<u64>,
     /// How many summaries failed the check before the walk stopped.
     failed: usize,
-    /// The walk stopped at a summary it keeps: one whose last message is
-    /// still at its position, or one without that message's id when no
-    /// revert was reported.
-    anchored: bool,
 }
 
-/// The check that Setup, and a catch-up read that finds the transcript
-/// ending before the cut, make when no revert was reported
-/// ([`Session::check_summaries`]).
+/// The check every Setup makes, and every notice and ride of a held session,
+/// when no revert was reported ([`Session::check_summaries`]).
 enum SummaryCheck {
     /// A read failed, so nothing is known.
     ReadFailed,
-    /// The transcript still holds the session's history. A revert ck-mc did
-    /// not hear about removed the messages from this ordinal on, if set.
+    /// At most [`IMPLICIT_FORGET_LIMIT`] summaries failed. They cover the
+    /// messages from `forget_from` on, which a revert ck-mc did not hear
+    /// about may have removed, and may be forgotten.
     Whole { forget_from: Option<u64> },
-    /// The transcript does not hold what the summaries cover, and a missed
-    /// revert does not explain it: `failed` summaries failed the check.
+    /// More summaries failed than may be forgotten on that inference.
     Behind { failed: usize },
 }
 
@@ -1852,12 +1846,12 @@ impl Session {
         true
     }
 
-    /// The check made when no revert was reported: at Setup, while the
-    /// session is held, and when a catch-up read finds the transcript ending
-    /// before the cut. Walks from the newest summary as a reported revert
-    /// does, but permits forgetting at most [`IMPLICIT_FORGET_LIMIT`]
-    /// summaries, and only when an older one still matches. It reads at
-    /// most one message more than that limit.
+    /// The check made when no revert was reported: at Setup, and before each
+    /// notice and ride while the session is held. Walks from the newest
+    /// summary as a reported revert does, and permits forgetting the
+    /// summaries that failed only while there are at most
+    /// [`IMPLICIT_FORGET_LIMIT`] of them. It reads at most one message more
+    /// than that limit.
     async fn check_summaries<C: RunnerClient>(&self, client: &C) -> SummaryCheck {
         let Some(walk) = self
             .walk_summaries(client, 1, false, Some(IMPLICIT_FORGET_LIMIT + 1))
@@ -1865,7 +1859,7 @@ impl Session {
         else {
             return SummaryCheck::ReadFailed;
         };
-        if walk.failed == 0 || (walk.anchored && walk.failed <= IMPLICIT_FORGET_LIMIT) {
+        if walk.failed <= IMPLICIT_FORGET_LIMIT {
             SummaryCheck::Whole {
                 forget_from: walk.invalid_from,
             }
@@ -1893,7 +1887,6 @@ impl Session {
         let mut walk = SummaryWalk {
             invalid_from: None,
             failed: 0,
-            anchored: false,
         };
         for summary in self
             .summaries
@@ -1906,7 +1899,6 @@ impl Session {
             }
             if summary.end_message_id.is_empty() {
                 if !explicit_revert {
-                    walk.anchored = true;
                     break;
                 }
                 walk.invalid_from = Some(summary.start_message as u64);
@@ -1932,7 +1924,6 @@ impl Session {
             if page.entries.iter().any(|entry| {
                 entry.mid == summary.end_message_id && entry.ordinal == summary.end_message as u64
             }) {
-                walk.anchored = true;
                 break;
             }
             walk.invalid_from = Some(summary.start_message as u64);
@@ -4594,34 +4585,22 @@ impl Session {
                     return false;
                 }
                 // The transcript ends before the cut, and no revert was
-                // reported. Only the check Setup makes may forget summaries
-                // here (see `IMPLICIT_FORGET_LIMIT`), never the inference
-                // that a revert removed everything after the runner's newest
-                // entry.
-                match self.check_summaries(client).await {
-                    SummaryCheck::ReadFailed => return false,
-                    SummaryCheck::Behind { failed } => {
-                        self.hold_transcript_behind(failed, page.head.newest.as_ref());
-                        return false;
-                    }
-                    SummaryCheck::Whole { forget_from } => {
-                        if let Some(ordinal) = forget_from {
-                            self.invalidate_transcript_from(ordinal);
-                        }
-                    }
-                }
-                // The summaries that passed still reach past the runner's
-                // newest entry (one without its last message's id stopped
-                // the check unverified): hold rather than forget them.
-                if self.cut.is_some_and(|cut| runner_newest < cut) {
-                    let failed = self
-                        .summaries
-                        .iter()
-                        .filter(|summary| summary.end_message as u64 > runner_newest)
-                        .count();
-                    self.hold_transcript_behind(failed, page.head.newest.as_ref());
+                // reported: the inference is that a revert removed every
+                // message after the runner's newest entry. It may forget the
+                // summaries that end after that entry only within the bound
+                // Setup's check keeps (see `IMPLICIT_FORGET_LIMIT`); past it,
+                // they would all fail that check too, and the session is
+                // held instead. No read is needed to count them.
+                let past = self
+                    .summaries
+                    .iter()
+                    .filter(|summary| summary.end_message as u64 > runner_newest)
+                    .count();
+                if past > IMPLICIT_FORGET_LIMIT {
+                    self.hold_transcript_behind(past, page.head.newest.as_ref());
                     return false;
                 }
+                self.invalidate_transcript_from(runner_newest + 1);
                 self.restart_index(&mut rebuilt, &mut after);
                 continue;
             }
