@@ -71,13 +71,15 @@ const ATOMIC_REPLACE_FLAGS: u32 = windows_sys::Win32::Storage::FileSystem::MOVEF
     | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn rename_write_through(temporary: &Path, path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
     let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both buffers are NUL-terminated and live for the whole Win32 call.
+    // SAFETY: both pointers come from NUL-terminated wide strings that live until
+    // the Win32 call returns; MoveFileExW only reads these strings.
     if unsafe { MoveFileExW(temporary.as_ptr(), path.as_ptr(), ATOMIC_REPLACE_FLAGS) } == 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -87,7 +89,10 @@ fn rename_write_through(temporary: &Path, path: &Path) -> io::Result<()> {
 
 /// Tighten an existing log tree to 0700 directories and 0600 files on Unix.
 pub fn tighten_tree(root: &Path) -> TightenReport {
+    #[cfg(unix)]
     let mut report = TightenReport::default();
+    #[cfg(not(unix))]
+    let report = TightenReport::default();
     #[cfg(unix)]
     visit(root, &mut report);
     #[cfg(not(unix))]

@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use std::path::PathBuf;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn store_paths(path: &Path) -> Result<Vec<PathBuf>, String> {

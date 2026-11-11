@@ -1,8 +1,12 @@
 //! The offline CLI must work with only mode3.db and reject legacy openers.
 
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::{BufRead, BufReader};
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::{Child, Stdio};
+use std::process::{Command, Output};
 
 use cortexkit_role_compaction::read::SessionRef;
 use mc_module::store::{Durable, Store};
@@ -201,8 +205,10 @@ fn rekey_cli_linux_checks_proc_without_lsof() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct Holder(Child);
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for Holder {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -210,6 +216,7 @@ impl Drop for Holder {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn helper(root: &Path, name: &str) -> Holder {
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--ignored", "--nocapture"])

@@ -281,24 +281,45 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_doc_is_skipped() {
         let dir = tempdir();
         let secret = dir.path().join("secret.txt");
         write_doc(dir.path(), "secret.txt", "TOP SECRET");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, dir.path().join("ARCHITECTURE.md")).unwrap();
         // a symlinked ARCHITECTURE.md must NOT be read (exfil guard); STRUCTURE.md still renders
         write_doc(dir.path(), "STRUCTURE.md", "real struct");
         let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        #[cfg(unix)]
+        assert!(
+            !docs.rendered_block.contains("TOP SECRET"),
+            "symlink exfil blocked"
+        );
+        assert!(docs.rendered_block.contains("real struct"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlinked_doc_is_skipped_on_windows() {
+        let dir = tempdir();
+        let secret = dir.path().join("secret.txt");
+        write_doc(dir.path(), "secret.txt", "TOP SECRET");
+        if let Err(error) =
+            std::os::windows::fs::symlink_file(&secret, dir.path().join("ARCHITECTURE.md"))
         {
-            assert!(
-                !docs.rendered_block.contains("TOP SECRET"),
-                "symlink exfil blocked"
-            );
-            assert!(docs.rendered_block.contains("real struct"));
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("Windows symlink test could not create a symlink on this machine: required privilege is not held (1314)");
+                return;
+            }
+            panic!("could not create document symlink: {error}");
         }
+        write_doc(dir.path(), "STRUCTURE.md", "real struct");
+        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
+        assert!(
+            !docs.rendered_block.contains("TOP SECRET"),
+            "symlink exfil blocked"
+        );
+        assert!(docs.rendered_block.contains("real struct"));
     }
 
     #[test]

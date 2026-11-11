@@ -38,7 +38,11 @@
 //! contract by its id in CONTRACT.md, which ships in the
 //! `cortexkit-role-compaction` crate.
 
-#![forbid(unsafe_code)]
+// Unsafe is forbidden off Windows. Only Windows-only FFI without a safe standard
+// library equivalent may opt in locally, with a SAFETY comment for every call;
+// unsafe is otherwise rejected throughout the crate.
+#![cfg_attr(not(windows), forbid(unsafe_code))]
+#![cfg_attr(windows, deny(unsafe_code))]
 
 pub mod agent_data;
 pub mod app_read;
