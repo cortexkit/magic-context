@@ -6,6 +6,7 @@
 export type SourceLogTemplate = { parts: readonly string[]; slots: readonly string[] };
 const SLOT_KINDS: Record<string, string> = { m: "model", s: "session", i: "message", r: "project", p: "path" };
 const TEMPLATE_DATA = [
+"ck-mc: session \x01: transcript_behind_summaries: \x01 of \x01 summaries end on messages the transcript no longer holds at their position, and the runner reported no revert (the check stops after \x01); the newest summary ends at message \x01 (\x01); the runner's newest entry: \x01. Nothing is forgotten; the session reads, builds and summarizes nothing until a check finds those messages again",
 "prefix trim: boundary \x01; pass=priced; no in-pass trim applied (Refusing to compact a Magic Context hidden child of a disposed plugin instance: the Magic Context plugin instance that started this hidden run was disposed (OpenCode reloaded the plugin), so the run was cancelled; the work is retried on a later run)",
 "prefix trim: boundary \x01; pass=defer; no in-pass trim applied (Refusing to compact a Magic Context hidden child of a disposed plugin instance: the Magic Context plugin instance that started this hidden run was disposed (OpenCode reloaded the plugin), so the run was cancelled; the work is retried on a later run)",
 "prefix trim: boundary \x01; pass=priced; no in-pass trim applied (Refusing a turn of a Magic Context hidden child of a disposed plugin instance: the Magic Context plugin instance that started this hidden run was disposed (OpenCode reloaded the plugin), so the run was cancelled; the work is retried on a later run)",
@@ -192,6 +193,7 @@ const TEMPLATE_DATA = [
 "[magic-context] compaction-marker: deferred candidate preparation for \x01: summary set or frontier changed during discovery; marker unchanged\x020s",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: worker deadline exceeded; marker unchanged, advancement deferred\x020p",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: worker deadline exceeded; marker unchanged, advancement deferred",
+"ck-mc: session \x01: transcript_behind_summaries: the transcript holds the summaries' messages again after \x01 failed checks; the session resumes",
 "history boundary unresolved: prefix trim refused and the untrimmed request estimate \x01 (trusted=\x01) exceeds the context limit \x01; not sending it\x022m",
 "history boundary unresolved: prefix trim refused and the untrimmed request estimate \x01 (trusted=\x01) exceeds the context limit \x01; not sending it",
 "over-window first pass not sent: the request is still about \x01 tokens after this pass, over the \x01-token window (history started at \x01) (MC-H06)",

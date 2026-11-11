@@ -610,6 +610,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                     }
                     Job::Ride(ride, reply) => {
+                        // A held session checks its summaries again first,
+                        // and once they pass reads the transcript here.
+                        if let Some(session) = session.as_mut() {
+                            session.before_ride(inner.client.as_ref(), &ride).await;
+                        }
                         // Past its deadline the runner already sends without
                         // a view: build none.
                         let mut view = if reply.is_closed() {

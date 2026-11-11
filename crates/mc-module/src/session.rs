@@ -36,6 +36,22 @@ use crate::view_builder;
 
 /// How many bytes one catch-up read asks for at most.
 const READ_PAGE_BYTES: u64 = 1 << 20;
+
+/// How many of the newest summaries ck-mc may forget when the transcript no
+/// longer holds the messages they end on and the runner reported no revert.
+///
+/// A revert ck-mc did not hear about (its notice was lost, or came while
+/// ck-mc was down) removes the newest messages, so it can reach only the
+/// newest few summaries: an older summary still finds its last message at
+/// its position. A transcript that lost its history (a runner fault that
+/// replaced or truncated it) fails that check for every summary. The
+/// summaries are the only compacted record of that history, and deleting
+/// them on the inference that a revert removed it destroys the record for
+/// good. So when more summaries than this fail, or none matches, ck-mc
+/// forgets nothing and holds the session until a later check finds the
+/// messages again ([`Session::hold_transcript_behind`]).
+const IMPLICIT_FORGET_LIMIT: usize = 3;
+
 pub struct Session {
     app: crate::app_read::SessionState,
     app_projection: app_projection::Projection,
@@ -71,6 +87,15 @@ pub struct Session {
     scan_counts: crate::summary::chunk::CountCache,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
+    /// Set while the session is held because its transcript does not hold
+    /// the messages its summaries end on, and no revert was reported (see
+    /// [`IMPLICIT_FORGET_LIMIT`]): how many checks have failed since the
+    /// hold began. A held session reads no transcript, builds, offers and
+    /// publishes no view, starts no summary and sends no reminder; every
+    /// Setup, notice and ride first checks the summaries again, and the
+    /// first check that passes resumes it. Not saved: Setup checks again
+    /// after a restart.
+    transcript_behind: Option<u64>,
     /// The runner refused ck-mc as this session's compaction provider
     /// (`compaction_not_permitted`: its plan names another provider or none,
     /// or it no longer holds the session). ck-mc keeps the session's state but
@@ -358,6 +383,33 @@ struct NoticePass {
     head_stale: bool,
 }
 
+/// What walking the summaries from the newest found, reading from the runner
+/// the message each one ends on ([`Session::walk_summaries`]).
+struct SummaryWalk {
+    /// Forget the summaries that cover this ordinal or later ones.
+    invalid_from: Option<u64>,
+    /// How many summaries failed the check before the walk stopped.
+    failed: usize,
+    /// The walk stopped at a summary it keeps: one whose last message is
+    /// still at its position, or one without that message's id when no
+    /// revert was reported.
+    anchored: bool,
+}
+
+/// The check that Setup, and a catch-up read that finds the transcript
+/// ending before the cut, make when no revert was reported
+/// ([`Session::check_summaries`]).
+enum SummaryCheck {
+    /// A read failed, so nothing is known.
+    ReadFailed,
+    /// The transcript still holds the session's history. A revert ck-mc did
+    /// not hear about removed the messages from this ordinal on, if set.
+    Whole { forget_from: Option<u64> },
+    /// The transcript does not hold what the summaries cover, and a missed
+    /// revert does not explain it: `failed` summaries failed the check.
+    Behind { failed: usize },
+}
+
 /// A session's summaries, oldest first (in sequence order), with a revision
 /// that every change moves on. Values derived from the summaries are kept
 /// against the revision they were derived at, instead of being derived again
@@ -517,6 +569,7 @@ impl Session {
             search_reconcile_from: None,
             scan_counts: crate::summary::chunk::CountCache::default(),
             index_ready: true,
+            transcript_behind: None,
             suspended: false,
             child_harness: request.child_harness.clone(),
             view_anchor: request.view_anchor == Some(true),
@@ -886,14 +939,34 @@ impl Session {
         self.project = route.project.clone();
         self.workdir = folder_of(route);
         self.seq = 0;
+        // Before anything is offered, settled or read: a transcript that no
+        // longer holds the summaries' history holds the session here, with
+        // its state as it was.
+        let check = self.check_summaries(client).await;
+        let forget_from = match check {
+            SummaryCheck::Behind { failed } => {
+                self.hold_transcript_behind(failed, request.newest.as_ref());
+                return;
+            }
+            // A failed read proves nothing, so a held session stays held.
+            SummaryCheck::ReadFailed if self.transcript_behind.is_some() => return,
+            SummaryCheck::ReadFailed => None,
+            SummaryCheck::Whole { forget_from } => {
+                self.release_transcript_hold();
+                Some(forget_from)
+            }
+        };
         self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
         // Before anything is offered: a view offered again must meet the
         // floor too.
         self.load_move_floor(client).await;
         self.offer_unconfirmed_again(client).await;
-        if !self.reconcile_summaries(client, 1, false).await {
+        let Some(forget_from) = forget_from else {
             self.index_ready = false;
             return;
+        };
+        if let Some(ordinal) = forget_from {
+            self.invalidate_transcript_from(ordinal);
         }
         let force = !self.index_ready || !self.index.entries().is_empty();
         let after = self.index.base().checked_sub(1).filter(|n| *n > 0);
@@ -940,6 +1013,19 @@ impl Session {
         // the count to 0 and a runner's first notice after it is 1, so this
         // also ignores a notice numbered 0.
         if notice.seq <= self.seq || self.suspended {
+            return None;
+        }
+        // A held session does nothing else until its summaries pass the
+        // check again.
+        if self.transcript_behind.is_some()
+            && !self
+                .resume_if_transcript_whole(
+                    client,
+                    notice.applied_view.as_ref(),
+                    notice.newest.as_ref(),
+                )
+                .await
+        {
             return None;
         }
         let version = self.latest.as_ref().map(|view| view.version);
@@ -1010,7 +1096,10 @@ impl Session {
                         self.search_dirty_from
                             .map_or(*from_ordinal, |old| old.min(*from_ordinal)),
                     );
-                    if !self.reconcile_summaries(client, *from_ordinal, true).await {
+                    if !self
+                        .reconcile_reverted_summaries(client, *from_ordinal)
+                        .await
+                    {
                         self.index_ready = false;
                         return None;
                     }
@@ -1088,7 +1177,8 @@ impl Session {
                 .collect();
             self.index = Index::starting_at(self.cut.unwrap_or(1));
             self.index_ready = self.read_until(client, notice.newest.as_ref(), true).await;
-            if extended == Extend::Diverged {
+            // A read that held the session keeps its state as it was.
+            if extended == Extend::Diverged && self.transcript_behind.is_none() {
                 // A change with no event: clamp to what the new transcript
                 // still shares with the old one.
                 let shared = self
@@ -1743,29 +1833,84 @@ impl Session {
         self.head_stale |= shown;
     }
 
-    /// A notice may be acknowledged before its revert runs, or arrive after
-    /// a read already saw the replacement branch. Validate summary endpoints
-    /// against the current transcript rather than deleting by a stale event.
-    async fn reconcile_summaries<C: RunnerClient>(
+    /// A runner-reported revert (`TranscriptChanged`). The notice may be
+    /// acknowledged before its revert runs, or arrive after a read already
+    /// saw the replacement branch, so the summary endpoints are validated
+    /// against the current transcript rather than deleted by a stale event.
+    /// Every summary from `from` on whose last message is gone is forgotten.
+    async fn reconcile_reverted_summaries<C: RunnerClient>(
         &mut self,
         client: &C,
         from: u64,
-        explicit_revert: bool,
     ) -> bool {
-        let mut invalid_from = None;
+        let Some(walk) = self.walk_summaries(client, from, true, None).await else {
+            return false;
+        };
+        if let Some(ordinal) = walk.invalid_from {
+            self.invalidate_transcript_from(ordinal);
+        }
+        true
+    }
+
+    /// The check made when no revert was reported: at Setup, while the
+    /// session is held, and when a catch-up read finds the transcript ending
+    /// before the cut. Walks from the newest summary as a reported revert
+    /// does, but permits forgetting at most [`IMPLICIT_FORGET_LIMIT`]
+    /// summaries, and only when an older one still matches. It reads at
+    /// most one message more than that limit.
+    async fn check_summaries<C: RunnerClient>(&self, client: &C) -> SummaryCheck {
+        let Some(walk) = self
+            .walk_summaries(client, 1, false, Some(IMPLICIT_FORGET_LIMIT + 1))
+            .await
+        else {
+            return SummaryCheck::ReadFailed;
+        };
+        if walk.failed == 0 || (walk.anchored && walk.failed <= IMPLICIT_FORGET_LIMIT) {
+            SummaryCheck::Whole {
+                forget_from: walk.invalid_from,
+            }
+        } else {
+            SummaryCheck::Behind {
+                failed: walk.failed,
+            }
+        }
+    }
+
+    /// Walk the summaries that cover `from` or later, newest first, reading
+    /// from the runner, by id, the message each one ends on. The walk stops
+    /// at the first summary whose message is still there at its position,
+    /// or after `give_up_after` summaries failed. Without a reported revert
+    /// (`explicit_revert` false), a summary that lacks that message's id
+    /// (older rows may) also stops it: missing metadata alone is not
+    /// evidence of a revert. `None` when a read failed.
+    async fn walk_summaries<C: RunnerClient>(
+        &self,
+        client: &C,
+        from: u64,
+        explicit_revert: bool,
+        give_up_after: Option<usize>,
+    ) -> Option<SummaryWalk> {
+        let mut walk = SummaryWalk {
+            invalid_from: None,
+            failed: 0,
+            anchored: false,
+        };
         for summary in self
             .summaries
             .iter()
             .rev()
             .filter(|summary| summary.end_message as u64 >= from)
         {
+            if give_up_after.is_some_and(|limit| walk.failed >= limit) {
+                break;
+            }
             if summary.end_message_id.is_empty() {
-                // Older rows may lack endpoint metadata. Only an explicit
-                // revert, not that missing metadata alone, invalidates them.
                 if !explicit_revert {
+                    walk.anchored = true;
                     break;
                 }
-                invalid_from = Some(summary.start_message as u64);
+                walk.invalid_from = Some(summary.start_message as u64);
+                walk.failed += 1;
                 continue;
             }
             let request = ReadRequest::new(
@@ -1781,20 +1926,111 @@ impl Session {
                         "ck-mc: session {}: reconciling summaries failed: {error:?}",
                         self.key.session
                     );
-                    return false;
+                    return None;
                 }
             };
             if page.entries.iter().any(|entry| {
                 entry.mid == summary.end_message_id && entry.ordinal == summary.end_message as u64
             }) {
+                walk.anchored = true;
                 break;
             }
-            invalid_from = Some(summary.start_message as u64);
+            walk.invalid_from = Some(summary.start_message as u64);
+            walk.failed += 1;
         }
-        if let Some(ordinal) = invalid_from {
+        Some(walk)
+    }
+
+    /// Hold the session: the transcript does not hold the messages its
+    /// summaries end on, and no reported revert explains it. Nothing is
+    /// forgotten, and the state stays as it is; see `transcript_behind` for
+    /// what a held session does. Logged once per hold, when it begins.
+    fn hold_transcript_behind(&mut self, failed: usize, runner_newest: Option<&Cursor>) {
+        self.index_ready = false;
+        if let Some(checks) = &mut self.transcript_behind {
+            *checks += 1;
+            return;
+        }
+        self.transcript_behind = Some(1);
+        let (end, end_id) = self.summaries.last().map_or((0, ""), |summary| {
+            (summary.end_message, summary.end_message_id.as_str())
+        });
+        let runner = runner_newest.map_or_else(
+            || "not named".to_owned(),
+            |cursor| format!("entry {} ({})", cursor.ordinal, cursor.mid),
+        );
+        tracing::error!(
+            "ck-mc: session {}: transcript_behind_summaries: {failed} of {} summaries end on messages the transcript no longer holds at their position, and the runner reported no revert (the check stops after {}); the newest summary ends at message {end} ({end_id}); the runner's newest entry: {runner}. Nothing is forgotten; the session reads, builds and summarizes nothing until a check finds those messages again",
+            self.key.session,
+            self.summaries.len(),
+            IMPLICIT_FORGET_LIMIT + 1
+        );
+    }
+
+    /// A check passed: a held session resumes. Logged under the same name
+    /// as the hold, so the log shows where each hold ends.
+    fn release_transcript_hold(&mut self) {
+        if let Some(checks) = self.transcript_behind.take() {
+            tracing::info!(
+                "ck-mc: session {}: transcript_behind_summaries: the transcript holds the summaries' messages again after {checks} failed checks; the session resumes",
+                self.key.session
+            );
+        }
+    }
+
+    /// A notice or ride for a held session checks the summaries again first.
+    /// When the check passes, the session leaves the hold and does what
+    /// Setup skipped while it was held: views are settled and offered again,
+    /// and the summaries a missed revert reached are forgotten. The index is
+    /// left not ready, so the caller reads the transcript again from the
+    /// cut. Returns whether the session resumed.
+    async fn resume_if_transcript_whole<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        applied: Option<&AppliedView>,
+        runner_newest: Option<&Cursor>,
+    ) -> bool {
+        let forget_from = match self.check_summaries(client).await {
+            SummaryCheck::Whole { forget_from } => forget_from,
+            SummaryCheck::Behind { failed } => {
+                self.hold_transcript_behind(failed, runner_newest);
+                return false;
+            }
+            SummaryCheck::ReadFailed => return false,
+        };
+        self.release_transcript_hold();
+        self.settle_unconfirmed(applied, &[]);
+        self.load_move_floor(client).await;
+        self.offer_unconfirmed_again(client).await;
+        if let Some(ordinal) = forget_from {
             self.invalidate_transcript_from(ordinal);
         }
+        // Changes the background indexer may have missed while the session
+        // was held are reconciled from the cut, as after a Setup.
+        let base = self.cut.unwrap_or(1);
+        self.search_reconcile_from =
+            Some(self.search_reconcile_from.map_or(base, |old| old.min(base)));
         true
+    }
+
+    /// A ride for a held session: check the summaries again, and once they
+    /// pass, read the transcript now. A ride itself builds only from what
+    /// the index holds, and the session resumes in this pass.
+    pub async fn before_ride<C: RunnerClient>(&mut self, client: &C, ride: &RideRequest) {
+        if self.transcript_behind.is_none() || self.suspended {
+            return;
+        }
+        if !self
+            .resume_if_transcript_whole(client, ride.applied_view.as_ref(), None)
+            .await
+        {
+            return;
+        }
+        self.index = Index::starting_at(self.cut.unwrap_or(1));
+        self.index_ready = self.read_until(client, None, true).await;
+        if self.index_ready && self.runner_differs(ride.applied_view.as_ref()) {
+            self.adopt_runner_view(client).await;
+        }
     }
 
     fn invalidate_transcript_from(&mut self, ordinal: u64) {
@@ -3744,7 +3980,7 @@ impl Session {
     /// restarted ck-mc knows the view may be in the runner's hands. A view
     /// the runner refuses, or a call that fails, puts the state back.
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
-        if self.suspended || self.refuse_oversized(&view) {
+        if self.suspended || self.transcript_behind.is_some() || self.refuse_oversized(&view) {
             return;
         }
         self.accept(view.clone());
@@ -4346,9 +4582,8 @@ impl Session {
                     return false;
                 }
             };
-            if self.cut.is_some_and(|cut| {
-                page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal) < cut
-            }) {
+            let runner_newest = page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal);
+            if self.cut.is_some_and(|cut| runner_newest < cut) {
                 if rebuilt {
                     tracing::info!(
                         "ck-mc: session {}: transcript keeps changing under a read (runner's newest {:?} is before the cut {:?})",
@@ -4358,12 +4593,35 @@ impl Session {
                     );
                     return false;
                 }
-                self.invalidate_transcript_from(
-                    page.head
-                        .newest
-                        .as_ref()
-                        .map_or(1, |cursor| cursor.ordinal + 1),
-                );
+                // The transcript ends before the cut, and no revert was
+                // reported. Only the check Setup makes may forget summaries
+                // here (see `IMPLICIT_FORGET_LIMIT`), never the inference
+                // that a revert removed everything after the runner's newest
+                // entry.
+                match self.check_summaries(client).await {
+                    SummaryCheck::ReadFailed => return false,
+                    SummaryCheck::Behind { failed } => {
+                        self.hold_transcript_behind(failed, page.head.newest.as_ref());
+                        return false;
+                    }
+                    SummaryCheck::Whole { forget_from } => {
+                        if let Some(ordinal) = forget_from {
+                            self.invalidate_transcript_from(ordinal);
+                        }
+                    }
+                }
+                // The summaries that passed still reach past the runner's
+                // newest entry (one without its last message's id stopped
+                // the check unverified): hold rather than forget them.
+                if self.cut.is_some_and(|cut| runner_newest < cut) {
+                    let failed = self
+                        .summaries
+                        .iter()
+                        .filter(|summary| summary.end_message as u64 > runner_newest)
+                        .count();
+                    self.hold_transcript_behind(failed, page.head.newest.as_ref());
+                    return false;
+                }
                 self.restart_index(&mut rebuilt, &mut after);
                 continue;
             }
@@ -4480,6 +4738,11 @@ impl Session {
         client: &C,
         settings: &Settings,
     ) -> (Option<View>, u64) {
+        // `build` makes no view from an index that is not ready (a held
+        // session's included), so nothing is read for one.
+        if !self.index_ready {
+            return (None, 0);
+        }
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
         let wanted: Vec<lanes::PartKey> = lanes::image_results(&self.index, &edited)
             .into_iter()

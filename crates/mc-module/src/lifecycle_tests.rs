@@ -57,6 +57,9 @@ mod head_cache_differential_tests;
 #[path = "embedding_search_tests.rs"]
 mod embedding_search_tests;
 
+#[path = "transcript_behind_tests.rs"]
+mod transcript_behind_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
@@ -445,7 +448,23 @@ fn with_summary(session: &mut Session, dir: &std::path::Path, end: &str) {
 async fn lifecycle_setup_reconciles_a_revert_acknowledged_before_a_crash() {
     let (mut session, client, route, mut request, settings) = fixture();
     let dir = scratch("lost-revert");
-    with_summary(&mut session, &dir, "removed");
+    // Two summaries: the revert removed the message the newer one ends on,
+    // and the older one still ends on message a, at its position. Without
+    // such a summary, the transcript proves nothing and the session is held
+    // instead (see `transcript_behind_tests`).
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness)
+             VALUES ('s1', 1, 1, 1, 'a', 'a', 'kept', 'kept history', 'kept history', 1, 'mock'),
+                    ('s1', 2, 2, 2, 'removed', 'removed', 'undone', 'undone history', 'undone history', 1, 'mock');",
+        )
+        .map_err(|e| e.to_string())
+    })
+    .unwrap();
+    session.db = Some(Arc::new(db));
+    session.features.summarizer = true;
+    session.load_summaries();
     session.index.extend(vec![text(1, "a"), text(2, "removed")]);
     let (view, _) = session.build(&settings, None, false, None);
     session.accept(view.unwrap());
@@ -459,17 +478,25 @@ async fn lifecycle_setup_reconciles_a_revert_acknowledged_before_a_crash() {
     restored
         .setup(&client, &settings, &route, &request, session.features)
         .await;
-    assert!(
-        restored.summaries.is_empty(),
+    assert_eq!(
+        restored
+            .summaries
+            .iter()
+            .map(|summary| summary.end_message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a"],
         "Setup retained undone summaries"
     );
-    assert!(restored
-        .db
-        .as_ref()
-        .unwrap()
-        .compartments("mock", "s1")
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        restored
+            .db
+            .as_ref()
+            .unwrap()
+            .compartments("mock", "s1")
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(restored.head_stale);
     std::fs::remove_dir_all(dir).unwrap();
 }
