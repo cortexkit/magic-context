@@ -1,9 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import {
     deleteUserMemoryCandidates,
+    dismissUserMemory,
     getActiveUserMemories,
     getUserMemoryCandidates,
     insertUserMemory,
@@ -61,6 +62,32 @@ describe("user-memory provenance", () => {
         expect(getActiveUserMemories(db)[0].sourceCandidateIds).toEqual([41]);
         expect(getActiveUserMemories(db)[0].sourceProvenance).toBeNull();
         db.close();
+    });
+});
+
+describe("user-memory dismiss", () => {
+    it("leaves updated_at unchanged on a second dismiss", () => {
+        const db = freshDb();
+        const clock = spyOn(Date, "now").mockReturnValue(1000);
+        try {
+            const id = insertUserMemory(db, "Prefers concise explanations", []);
+            dismissUserMemory(db, id);
+            const before = db
+                .prepare("SELECT status, updated_at FROM user_memories WHERE id = ?")
+                .get(id) as { status: string; updated_at: number };
+            expect(before).toEqual({ status: "dismissed", updated_at: 1000 });
+
+            clock.mockReturnValue(2000);
+            dismissUserMemory(db, id);
+
+            const after = db
+                .prepare("SELECT status, updated_at FROM user_memories WHERE id = ?")
+                .get(id) as { status: string; updated_at: number };
+            expect(after).toEqual(before);
+        } finally {
+            clock.mockRestore();
+            db.close();
+        }
     });
 });
 

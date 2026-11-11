@@ -222,10 +222,10 @@ export function updateUserMemoryContent(db: Database, id: number, content: strin
 }
 
 export function dismissUserMemory(db: Database, id: number): void {
-    db.prepare("UPDATE user_memories SET status = 'dismissed', updated_at = ? WHERE id = ?").run(
-        Date.now(),
-        id,
-    );
+    // Only active-to-dismissed transitions should rewrite the timestamp; repeats leave the profile unchanged.
+    db.prepare(
+        "UPDATE user_memories SET status = 'dismissed', updated_at = ? WHERE id = ? AND status = 'active'",
+    ).run(Date.now(), id);
 }
 
 export function restoreUserMemory(db: Database, id: number): void {

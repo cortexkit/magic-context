@@ -372,6 +372,44 @@ fn dismiss_user_memory_bumps_global_user_profile_not_project_memory_epoch() {
 }
 
 #[test]
+fn dismiss_user_memory_again_or_unknown_id_is_a_no_op() {
+    let mut conn = make_db();
+    conn.execute(
+        "INSERT INTO user_memories (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
+         VALUES ('remember me', 'active', 1, '[]', 1, 1)",
+        [],
+    )
+    .expect("insert user memory");
+    let id = conn.last_insert_rowid();
+    seed_project_state(&conn, "git:project-a", 4, 0);
+
+    db::dismiss_user_memory(&mut conn, id).expect("dismiss");
+    let dismissed = db::get_user_memories(&conn, Some("dismissed")).expect("dismissed set");
+    assert_eq!(dismissed.len(), 1);
+    let updated_at = dismissed[0].updated_at;
+    let version = user_profile_version(&conn, "__global__");
+    assert_eq!(version, 1);
+    assert_eq!(memory_epoch(&conn, "__global__"), 0);
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 4);
+
+    // Let the millisecond clock advance so a redundant timestamp write is observable.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    for dismiss_id in [id, id + 1] {
+        db::dismiss_user_memory(&mut conn, dismiss_id).expect("no-op dismiss");
+
+        let memories = db::get_user_memories(&conn, None).expect("user memories");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, id);
+        assert_eq!(memories[0].status, "dismissed");
+        assert_eq!(memories[0].updated_at, updated_at);
+        assert_eq!(user_profile_version(&conn, "__global__"), version);
+        assert_eq!(user_profile_version(&conn, "git:project-a"), 0);
+        assert_eq!(memory_epoch(&conn, "__global__"), 0);
+        assert_eq!(memory_epoch(&conn, "git:project-a"), 4);
+    }
+}
+
+#[test]
 fn restore_user_memory_returns_row_to_active_set_and_bumps_global_profile() {
     let mut conn = make_db();
     conn.execute(
