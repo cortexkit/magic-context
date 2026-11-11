@@ -1,276 +1,275 @@
-//! What the Cache tab needs from Broca's `run-index.db`, followed across live
-//! polls instead of re-derived from the whole store each time.
-//!
-//! The session list used to group every `export_facts` row by its JSON
-//! session identity and scan every `run_index` row for `state = 'active'`
-//! (no index on either), and each Broca events fetch filtered every fact by
-//! `json_extract(segment_json, '$.session')`. On an 11 GB store that was
-//! 43,000 pages plus a 27 MB temporary sort file per list, and 60,000 pages
-//! per events fetch, every second.
-//!
-//! Both tables only grow at the end: `export_facts.export_seq` is an
-//! AUTOINCREMENT key Broca only appends to, and a `run_index` row is inserted
-//! when a run starts, then updated in place as the run pauses, resumes and
-//! ends. So this index reads facts past the highest `export_seq` it has seen,
-//! `run_index` rows past the highest rowid, and re-reads by rowid only the runs
-//! it last saw open (active or paused). Each session keeps the run ids of its
-//! facts, so its run totals are read through the `export_facts(run_id)` index.
-//!
-//! A full rebuild happens when the store file is replaced, when a table's
-//! keys go backwards, and every `FULL_REBUILD_INTERVAL` as a guard against an
-//! operator tool rewriting rows in place.
+//! Incremental session summaries from Broca's append-only public export.
+//! A cursor belongs to one source instance and epoch; file replacement is also
+//! checked by the caller. No connection or read transaction survives a poll.
 
-use super::table_exists;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-const FULL_REBUILD_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const PAGE_SIZE: usize = 512;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    pub harness: String,
+    pub session: String,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UsageTotals {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+impl UsageTotals {
+    fn add(&mut self, other: &Self) {
+        fn add(total: &mut Option<u64>, value: Option<u64>) {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or_default().saturating_add(value));
+            }
+        }
+        add(&mut self.input_tokens, other.input_tokens);
+        add(&mut self.cached_input_tokens, other.cached_input_tokens);
+        add(&mut self.cache_write_tokens, other.cache_write_tokens);
+        // Broca's output already includes reasoning tokens.
+        add(&mut self.output_tokens, other.output_tokens);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrocaSessionSummary {
+    pub session: SessionIdentity,
+    pub first_activity_ms: Option<u64>,
+    pub last_activity_ms: Option<u64>,
+    pub models: Vec<String>,
+    pub run_count: usize,
+    pub slice_count: usize,
+    pub usage: UsageTotals,
+    pub warm_usage: UsageTotals,
+    pub last_end_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionFact {
+    session: SessionIdentity,
+    provider: String,
+    model: String,
+    usage: UsageTotals,
+    occurred_at_ms: Option<u64>,
+    terminal_reason: Option<String>,
+    #[serde(default)]
+    warm: bool,
+}
 
 #[derive(Debug, Default)]
-struct SessionFacts {
-    /// Newest `occurred_at_ms` among the session's facts; `None` while none
-    /// carries one.
-    activity: Option<i64>,
-    run_ids: BTreeSet<String>,
+struct RunEnd {
+    activity: Option<u64>,
+    // Export order makes equal-time choices deterministic, not chronological.
+    last_seq: i64,
+    reason: Option<String>,
 }
 
 #[derive(Debug)]
-struct OpenRun {
-    identity: Option<String>,
-    state_changed_ms: Option<i64>,
-    active: bool,
+struct SessionFacts {
+    summary: BrocaSessionSummary,
+    runs: HashMap<String, RunEnd>,
+    models: BTreeSet<String>,
 }
 
-/// One listed Broca session: its JSON identity, newest activity, and whether
-/// a run of it is in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ListedSession {
     pub identity: String,
-    pub activity: i64,
-    pub running: bool,
+    pub activity: Option<u64>,
+    pub summary: BrocaSessionSummary,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct BrocaRunIndex {
-    /// Bumped whenever a refresh reads anything new, so `list` can reuse its
-    /// last answer while the store stands still (most polls).
-    generation: u64,
-    list_memo: Option<(u64, usize, Vec<ListedSession>)>,
-    built_at: Option<Instant>,
+    source: Option<(String, i64)>,
     export_seq: i64,
-    run_rowid: i64,
     sessions: HashMap<String, SessionFacts>,
-    open_runs: HashMap<i64, OpenRun>,
+    list_memo: Option<(i64, usize, Vec<ListedSession>)>,
 }
 
-fn is_open(state: &str) -> bool {
-    matches!(state, "active" | "paused")
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct PollStats {
+    pub rows_read: usize,
+    pub skipped_invalid: usize,
 }
 
 impl BrocaRunIndex {
-    /// Reads what the store gained since the last refresh.
-    pub(super) fn refresh(&mut self, conn: &Connection, now: Instant) -> rusqlite::Result<()> {
-        let newest_fact: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(export_seq), 0) FROM export_facts",
+    /// Metadata and pages share one short snapshot so a source reset cannot
+    /// mix the old source's facts into the new source's cursor.
+    pub(super) fn refresh(
+        &mut self,
+        conn: &Connection,
+        _now: Instant,
+    ) -> rusqlite::Result<PollStats> {
+        let transaction = conn.unchecked_transaction()?;
+        let source = transaction.query_row(
+            "SELECT source_instance_id, source_epoch FROM export_meta WHERE id = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )?;
-        let has_run_index = table_exists(conn, "run_index");
-        let newest_run: i64 = if has_run_index {
-            conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM run_index", [], |row| {
-                row.get(0)
-            })?
-        } else {
-            0
-        };
-        let stale = self.built_at.map_or(true, |built| {
-            now.duration_since(built) >= FULL_REBUILD_INTERVAL
-        });
-        if stale || newest_fact < self.export_seq || newest_run < self.run_rowid {
+        if self.source.as_ref() != Some(&source) {
             *self = Self {
-                generation: self.generation + 1,
-                built_at: Some(now),
+                source: Some(source),
                 ..Self::default()
             };
         }
-
-        let mut facts = conn.prepare_cached(
-            "SELECT export_seq, run_id,
-                    json_extract(segment_json, '$.session'),
-                    CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER)
-             FROM export_facts WHERE export_seq > ?1 ORDER BY export_seq",
-        )?;
-        let mut rows = facts.query(params![self.export_seq])?;
-        while let Some(row) = rows.next()? {
-            self.generation += 1;
-            self.export_seq = self.export_seq.max(row.get(0)?);
-            let Some(identity) = row.get::<_, Option<String>>(2)? else {
-                continue;
-            };
-            let session = self.sessions.entry(identity).or_default();
-            session.run_ids.insert(row.get(1)?);
-            if let Some(activity) = row.get::<_, Option<i64>>(3)? {
-                session.activity = Some(session.activity.map_or(activity, |a| a.max(activity)));
-            }
-        }
-        drop(rows);
-
-        if !has_run_index {
-            self.open_runs.clear();
-            return Ok(());
-        }
-        let open_before = self.open_runs_fingerprint();
-        // Runs seen open last time: still open, and with what stamp?
-        let mut by_rowid = conn.prepare_cached(
-            "SELECT CASE WHEN json_valid(session) THEN json(session) END, state_changed_ms, state
-             FROM run_index WHERE rowid = ?1",
-        )?;
-        let open: Vec<i64> = self.open_runs.keys().copied().collect();
-        for rowid in open {
-            let row = by_rowid
-                .query_row(params![rowid], |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()?;
-            match row {
-                Some((identity, state_changed_ms, state)) if is_open(&state) => {
-                    self.open_runs.insert(
-                        rowid,
-                        OpenRun {
-                            identity,
-                            state_changed_ms,
-                            active: state == "active",
-                        },
-                    );
+        let mut stats = PollStats::default();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT export_seq, run_id, segment_json FROM export_facts
+                 WHERE export_seq > ?1 ORDER BY export_seq ASC LIMIT ?2",
+            )?;
+            loop {
+                let mut count = 0;
+                let mut rows = statement.query(params![self.export_seq, PAGE_SIZE])?;
+                while let Some(row) = rows.next()? {
+                    self.export_seq = row.get(0)?;
+                    stats.rows_read += 1;
+                    count += 1;
+                    let json: String = row.get(2)?;
+                    let value = match serde_json::from_str::<serde_json::Value>(&json) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            stats.skipped_invalid += 1;
+                            continue;
+                        }
+                    };
+                    if value["kind"] == "system_one" {
+                        continue;
+                    }
+                    match serde_json::from_value::<SessionFact>(value) {
+                        Ok(fact) => self.add(row.get(1)?, fact),
+                        Err(_) => stats.skipped_invalid += 1,
+                    }
                 }
-                _ => {
-                    self.open_runs.remove(&rowid);
+                if count < PAGE_SIZE {
+                    break;
                 }
             }
         }
-        let mut new_runs = conn.prepare_cached(
-            "SELECT rowid, CASE WHEN json_valid(session) THEN json(session) END,
-                    state_changed_ms, state
-             FROM run_index WHERE rowid > ?1 ORDER BY rowid",
-        )?;
-        let mut rows = new_runs.query(params![self.run_rowid])?;
-        while let Some(row) = rows.next()? {
-            let rowid: i64 = row.get(0)?;
-            self.run_rowid = self.run_rowid.max(rowid);
-            let state: String = row.get(3)?;
-            if is_open(&state) {
-                self.open_runs.insert(
-                    rowid,
-                    OpenRun {
-                        identity: row.get(1)?,
-                        state_changed_ms: row.get(2)?,
-                        active: state == "active",
-                    },
-                );
-            }
+        transaction.commit()?;
+        if stats.skipped_invalid > 0 {
+            eprintln!(
+                "Broca export: skipped {} undecodable rows in this poll",
+                stats.skipped_invalid
+            );
         }
-        if self.open_runs_fingerprint() != open_before {
-            self.generation += 1;
-        }
-        Ok(())
+        Ok(stats)
     }
 
-    fn open_runs_fingerprint(&self) -> Vec<(i64, Option<String>, Option<i64>, bool)> {
-        let mut runs: Vec<_> = self
-            .open_runs
-            .iter()
-            .map(|(rowid, run)| {
-                (
-                    *rowid,
-                    run.identity.clone(),
-                    run.state_changed_ms,
-                    run.active,
-                )
-            })
-            .collect();
-        runs.sort_unstable();
-        runs
+    fn add(&mut self, run_id: String, fact: SessionFact) {
+        // Value's sorted object keys give old callers the same canonical JSON
+        // identity regardless of the writer's member order or extra members.
+        let identity = serde_json::to_value(&fact.session)
+            .expect("serializable session")
+            .to_string();
+        let session = self
+            .sessions
+            .entry(identity)
+            .or_insert_with(|| SessionFacts {
+                summary: BrocaSessionSummary {
+                    session: fact.session,
+                    first_activity_ms: None,
+                    last_activity_ms: None,
+                    models: Vec::new(),
+                    run_count: 0,
+                    slice_count: 0,
+                    usage: UsageTotals::default(),
+                    warm_usage: UsageTotals::default(),
+                    last_end_reason: None,
+                },
+                runs: HashMap::new(),
+                models: BTreeSet::new(),
+            });
+        session
+            .models
+            .insert(format!("{}/{}", fact.provider, fact.model));
+        if fact.warm {
+            session.summary.warm_usage.add(&fact.usage);
+            return;
+        }
+        let summary = &mut session.summary;
+        summary.usage.add(&fact.usage);
+        summary.slice_count += 1;
+        if let Some(time) = fact.occurred_at_ms {
+            summary.first_activity_ms =
+                Some(summary.first_activity_ms.map_or(time, |old| old.min(time)));
+            summary.last_activity_ms =
+                Some(summary.last_activity_ms.map_or(time, |old| old.max(time)));
+        }
+        let run = session.runs.entry(run_id).or_default();
+        run.activity = run.activity.max(fact.occurred_at_ms);
+        run.last_seq = self.export_seq;
+        if fact.terminal_reason.is_some() {
+            run.reason = fact.terminal_reason;
+        }
     }
 
-    /// The listed sessions (see `ranked`), reusing the last answer while
-    /// nothing in the store changed.
     pub(super) fn list(&mut self, limit: usize) -> Vec<ListedSession> {
-        if let Some((generation, cached_limit, listed)) = &self.list_memo {
-            if *generation == self.generation && *cached_limit == limit {
+        if let Some((seq, cached_limit, listed)) = &self.list_memo {
+            if *seq == self.export_seq && *cached_limit == limit {
                 return listed.clone();
             }
         }
-        let listed = self.ranked(limit);
-        self.list_memo = Some((self.generation, limit, listed.clone()));
+        // Rank cheap references first: a store can have thousands of sessions,
+        // but only the visible page needs cloned summaries and model lists.
+        let mut ranked: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|(identity, facts)| (facts.summary.last_activity_ms, identity))
+            .collect();
+        let order = |a: &(Option<u64>, &String), b: &(Option<u64>, &String)| {
+            b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1))
+        };
+        if ranked.len() > limit {
+            ranked.select_nth_unstable_by(limit, order);
+            ranked.truncate(limit);
+        }
+        ranked.sort_unstable_by(order);
+        let listed: Vec<_> = ranked
+            .into_iter()
+            .map(|(activity, identity)| ListedSession {
+                identity: identity.clone(),
+                activity,
+                summary: self.summary(identity).expect("indexed session"),
+            })
+            .collect();
+        self.list_memo = Some((self.export_seq, limit, listed.clone()));
         listed
     }
 
-    /// The `limit` most recently active sessions plus every session with a
-    /// run in progress, newest first. A session's activity is the newest of
-    /// its facts' `occurred_at_ms` and its active runs' `state_changed_ms`; a
-    /// session with neither is not listed. Ties go to the smaller identity.
-    fn ranked(&self, limit: usize) -> Vec<ListedSession> {
-        let mut active: HashMap<&str, Option<i64>> = HashMap::new();
-        for run in self.open_runs.values().filter(|run| run.active) {
-            let Some(identity) = run.identity.as_deref() else {
-                continue;
-            };
-            let stamp = active.entry(identity).or_insert(None);
-            if let Some(changed) = run.state_changed_ms {
-                *stamp = Some(stamp.map_or(changed, |s| s.max(changed)));
-            }
-        }
-        let newest = |a: Option<i64>, b: Option<i64>| match (a, b) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        };
-        // (activity, identity, running) for every listable session. Built
-        // from the index's own map without re-hashing every identity, since
-        // a busy store holds tens of thousands of sessions.
-        let mut ranked: Vec<(i64, &str, bool)> = Vec::with_capacity(self.sessions.len());
-        for (identity, facts) in &self.sessions {
-            let stamp = active.get(identity.as_str()).copied();
-            if let Some(activity) = newest(facts.activity, stamp.flatten()) {
-                ranked.push((activity, identity, stamp.is_some()));
-            }
-        }
-        for (identity, stamp) in &active {
-            if !self.sessions.contains_key(*identity) {
-                if let Some(activity) = stamp {
-                    ranked.push((*activity, identity, true));
-                }
-            }
-        }
-        let order =
-            |a: &(i64, &str, bool), b: &(i64, &str, bool)| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1));
-        if ranked.len() > limit {
-            if limit > 0 {
-                ranked.select_nth_unstable_by(limit - 1, order);
-            }
-            let tail = ranked.split_off(limit);
-            ranked.extend(tail.into_iter().filter(|session| session.2));
-        }
-        ranked.sort_unstable_by(order);
-        ranked
-            .into_iter()
-            .map(|(activity, identity, running)| ListedSession {
-                identity: identity.to_owned(),
-                activity,
-                running,
-            })
-            .collect()
+    pub(super) fn summary(&self, identity: &str) -> Option<BrocaSessionSummary> {
+        let facts = self.sessions.get(identity)?;
+        let mut summary = facts.summary.clone();
+        summary.models = facts.models.iter().cloned().collect();
+        summary.run_count = facts.runs.len();
+        // Broca's undated facts are historical work whose end time was never
+        // recorded. They cannot supersede a dated run or establish a newest
+        // run by export order alone when the whole session is undated.
+        summary.last_end_reason = facts
+            .runs
+            .values()
+            .filter(|run| run.activity.is_some())
+            .max_by_key(|run| (run.activity, run.last_seq))
+            .and_then(|run| run.reason.clone());
+        Some(summary)
     }
 
-    /// The run ids of the session's facts, for an indexed totals query.
     pub(super) fn run_ids(&self, identity: &str) -> Vec<String> {
-        self.sessions
+        let mut ids: Vec<_> = self
+            .sessions
             .get(identity)
-            .map(|facts| facts.run_ids.iter().cloned().collect())
-            .unwrap_or_default()
+            .map(|facts| facts.runs.keys().cloned().collect())
+            .unwrap_or_default();
+        ids.sort_unstable();
+        ids
     }
 }

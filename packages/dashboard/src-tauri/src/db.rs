@@ -1469,6 +1469,8 @@ pub struct SessionCacheStats {
     /// progress; the Cache tab shows it so a list that stops moving mid-turn
     /// is explained rather than silent.
     pub activity_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broca: Option<broca_run_index::BrocaSessionSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -3397,7 +3399,14 @@ fn broca_state_root() -> Option<PathBuf> {
 }
 
 fn open_broca_store(path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = Connection::open_with_flags(
+        format!("{}?mode=ro", opencode_stores::sqlite_file_uri(path)),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
     conn.busy_timeout(std::time::Duration::from_millis(50))?;
     // Any sort that remains stays in memory instead of a temporary file.
     conn.pragma_update(None, "temp_store", "MEMORY")?;
@@ -3455,29 +3464,10 @@ fn load_broca_cache_sessions(limit: usize) -> Vec<CacheSessionListEntry> {
         .unwrap_or_default()
 }
 
-// Every Broca run is started by one of our own systems (Alfonso heads and
-// workers, prefrontal, the historian, the dreamer), so every Broca session is
-// managed and none is filtered out by session-name prefix.
-//
-// Sessions come from `export_facts` (finished runs) and, when the store has
-// it, from `run_index` rows still `active`, so a session whose first run is
-// in progress is listed before any of its runs has finished. Both tables hold
-// the same JSON identity; `json()` normalizes the index's spelling to the one
-// `json_extract` returns for the facts, so one session is one row.
-//
-// A running run's index row is stamped once, when the run starts, and Broca
-// does not touch it again until the run ends; the steps in between are only
-// appended to the session's WAL. The Cache tab refetches a session's events
-// only when its listed activity moves, so a session dated by that stamp alone
-// stayed frozen at whatever its WAL held when it was first listed: a short
-// run (a gather research run) first seen just after `run_started` showed no steps
-// until it finished. With `wal_state_root`, a session with a running run is
-// dated by its live WAL's modification time as well, which moves on every
-// append. Such sessions are fetched past `limit` (there are only a few), so a
-// long run started before newer sessions can still rise into the list.
-//
-// The grouping itself is `BrocaRunIndex::list`, which production keeps across
-// polls; this builds a fresh index from `conn` each call.
+// Broca exports finished work only. Keep all session identities, including
+// folderless sessions; neither a name nor an agent id determines membership.
+// Production retains the export cursor across polls, while this test helper
+// builds a fresh index.
 #[cfg(test)]
 fn load_broca_cache_sessions_from_conn(
     conn: &Connection,
@@ -3491,21 +3481,18 @@ fn load_broca_cache_sessions_from_conn(
 
 fn broca_list_entries(
     listed: Vec<broca_run_index::ListedSession>,
-    wal_state_root: Option<&Path>,
+    _wal_state_root: Option<&Path>,
     limit: usize,
 ) -> Vec<CacheSessionListEntry> {
     let mut sessions = Vec::new();
     for listed in listed {
-        let (session_id, mut activity, running) =
-            (listed.identity, listed.activity, listed.running);
-        if running {
-            if let Some(written) = wal_state_root
-                .zip(broca_wal::SessionIdentity::from_json(&session_id))
-                .and_then(|(root, identity)| live_wal_modified_ms(root, &identity))
-            {
-                activity = activity.max(written);
-            }
-        }
+        let session_id = listed.identity;
+        // Keep undated sessions last without inventing an epoch timestamp.
+        // Their nullable activity is carried separately in the export summary.
+        let activity = listed
+            .activity
+            .and_then(|time| i64::try_from(time).ok())
+            .unwrap_or(i64::MIN);
         let title = serde_json::from_str::<serde_json::Value>(&session_id)
             .ok()
             .and_then(|identity| identity["session"].as_str().map(str::to_owned));
@@ -3519,17 +3506,6 @@ fn broca_list_entries(
     sessions.sort_by_key(|row| std::cmp::Reverse(row.last_activity_ms));
     sessions.truncate(limit);
     sessions
-}
-
-/// When the session's live WAL was last written, in Unix milliseconds, or
-/// `None` when it has no live WAL (not started yet, or already archived).
-fn live_wal_modified_ms(state_root: &Path, identity: &broca_wal::SessionIdentity) -> Option<i64> {
-    let path = state_root
-        .join("wal")
-        .join(format!("{}.wal", identity.addr()));
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    i64::try_from(since_epoch.as_millis()).ok()
 }
 
 fn get_broca_session_cache_events(
@@ -3704,7 +3680,11 @@ fn load_broca_run_totals(
              SELECT run_id, segment_json,
                     ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY export_seq DESC) AS newest
              FROM export_facts
-             WHERE {run_filter} json_extract(segment_json, '$.session') = ?1
+             WHERE {run_filter} json_valid(segment_json)
+                AND COALESCE(json_extract(segment_json, '$.warm'), 0) = 0
+                AND json_extract(segment_json, '$.session.project_root') IS json_extract(?1, '$.project_root')
+                AND json_extract(segment_json, '$.session.harness') = json_extract(?1, '$.harness')
+                AND json_extract(segment_json, '$.session.session') = json_extract(?1, '$.session')
          )
          SELECT run_id,
                 MAX(CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER)) AS activity,
@@ -4667,9 +4647,15 @@ pub fn get_session_cache_stats_from_db(
         .into_iter()
         .map(|row| {
             let key = (row.harness, row.session_id.clone());
-            let broca_note = if row.harness == Harness::Broca {
-                broca_wal::SessionIdentity::from_json(&row.session_id)
-                    .and_then(|identity| broca_wal::session_activity_note(&identity))
+            let broca = if row.harness == Harness::Broca {
+                BROCA_RUN_INDEX
+                    .get()
+                    .and_then(|cache| cache.lock().ok())
+                    .and_then(|cache| {
+                        cache
+                            .as_ref()
+                            .and_then(|(_, _, index)| index.summary(&row.session_id))
+                    })
             } else {
                 None
             };
@@ -4681,7 +4667,14 @@ pub fn get_session_cache_stats_from_db(
                 total_cache_write: 0,
                 total_input: 0,
                 hit_ratio: 0.0,
-                last_timestamp: format_timestamp_iso(row.last_activity_ms),
+                last_timestamp: if broca
+                    .as_ref()
+                    .is_some_and(|summary| summary.last_activity_ms.is_none())
+                {
+                    String::new()
+                } else {
+                    format_timestamp_iso(row.last_activity_ms)
+                },
                 last_activity_ms: row.last_activity_ms,
                 bust_count: 0,
                 managed: is_managed_cache_session(row.harness, &key.1, &detected_managed),
@@ -4690,8 +4683,8 @@ pub fn get_session_cache_stats_from_db(
                 activity_note: (row.harness == Harness::Opencode2)
                     .then_some(opencode_activity_note)
                     .flatten()
-                    .map(str::to_owned)
-                    .or(broca_note),
+                    .map(str::to_owned),
+                broca,
             }
         })
         .collect()
@@ -14188,7 +14181,9 @@ mod broca_cache_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE export_facts (export_seq INTEGER PRIMARY KEY, fact_id TEXT UNIQUE,
-                                        run_id TEXT NOT NULL, segment_json TEXT NOT NULL);",
+                                        run_id TEXT NOT NULL, segment_json TEXT NOT NULL);
+             CREATE TABLE export_meta (id INTEGER PRIMARY KEY, source_instance_id TEXT, source_epoch INTEGER);
+             INSERT INTO export_meta VALUES (1, 'synthetic-db-tests', 1);",
         )
         .unwrap();
         conn
@@ -14853,163 +14848,63 @@ mod broca_cache_tests {
     }
 
     #[test]
-    fn a_session_whose_only_run_is_in_progress_is_listed() {
-        let conn = store();
-        conn.execute_batch(
-            "CREATE TABLE run_index (run_id TEXT PRIMARY KEY, session TEXT NOT NULL,
-                                     state TEXT NOT NULL, state_changed_ms INTEGER);",
-        )
-        .unwrap();
-        let finished = identity("alfonso:finished");
-        let running = identity("alfonso:running");
-        let usage = serde_json::json!({"input_tokens": 1});
-        insert(&conn, "f1", "r1", &finished, 1_000, usage);
-        for (run, session, state, ts) in [
-            ("r1", &finished, "completed", 1_000),
-            // A second run of an already-listed session, now active.
-            ("r2", &finished, "active", 3_000),
-            ("r3", &running, "active", 2_000),
-            ("r4", &identity("alfonso:gone"), "cancelled", 4_000),
-        ] {
-            conn.execute(
-                "INSERT INTO run_index (run_id, session, state, state_changed_ms)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run, session.to_string(), state, ts],
-            )
-            .unwrap();
-        }
-        let sessions = load_broca_cache_sessions_from_conn(&conn, None, 10).unwrap();
-        let listed: Vec<_> = sessions
+    fn broca_export_fixture_run_totals_exclude_warm_usage() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/broca-export-facts/fixture-run-index.db");
+        let reader = open_broca_store(&path).unwrap();
+        let listed = load_broca_cache_sessions_from_conn(&reader, None, 10).unwrap();
+        let head = listed
             .iter()
-            .map(|s| (s.title.as_deref().unwrap(), s.last_activity_ms))
-            .collect();
-        assert_eq!(
-            listed,
-            [("alfonso:finished", 3_000), ("alfonso:running", 2_000)]
-        );
-        // The run index's identity is the same session id the facts give.
-        assert_eq!(sessions[0].session_id, finished.to_string());
-    }
-
-    /// The grouping query the session list ran on every poll before
-    /// `BrocaRunIndex`, kept as the reference the index must agree with.
-    fn reference_list(conn: &Connection, limit: usize) -> Vec<(String, i64, bool)> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT identity, activity, running FROM (
-                     SELECT identity, MAX(activity) AS activity, MAX(running) AS running,
-                            ROW_NUMBER() OVER (ORDER BY MAX(activity) DESC, identity) AS rank
-                     FROM (
-                         SELECT json_extract(segment_json, '$.session') AS identity,
-                                CAST(json_extract(segment_json, '$.occurred_at_ms') AS INTEGER) AS activity,
-                                0 AS running
-                         FROM export_facts
-                         UNION ALL
-                         SELECT CASE WHEN json_valid(session) THEN json(session) END, state_changed_ms, 1
-                         FROM run_index WHERE state = 'active'
-                     )
-                     WHERE identity IS NOT NULL
-                     GROUP BY identity HAVING MAX(activity) IS NOT NULL
-                 )
-                 WHERE rank <= ?1 OR running = 1
-                 ORDER BY activity DESC, identity",
-            )
+            .find(|row| row.title.as_deref() == Some("synthetic-agent-head"))
             .unwrap();
-        stmt.query_map(params![limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
-        })
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
-    }
-
-    fn index_list(
-        index: &mut broca_run_index::BrocaRunIndex,
-        limit: usize,
-    ) -> Vec<(String, i64, bool)> {
-        index
-            .list(limit)
-            .into_iter()
-            .map(|s| (s.identity, s.activity, s.running))
-            .collect()
-    }
-
-    fn run(conn: &Connection, run: &str, session: &serde_json::Value, state: &str, ts: i64) {
-        // Broca's own upsert: a terminal row never reopens, an open one is
-        // updated in place (same rowid).
-        conn.execute(
-            "INSERT INTO run_index (run_id, session, state, state_changed_ms) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(run_id) DO UPDATE SET state = excluded.state,
-                 state_changed_ms = excluded.state_changed_ms
-             WHERE run_index.state IN ('active', 'paused')",
-            params![run, session.to_string(), state, ts],
-        )
-        .unwrap();
+        let rows = load_broca_run_totals(&reader, &head.session_id, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "run-fixture-3");
+        assert_eq!(
+            (
+                rows[0].input_tokens,
+                rows[0].cache_read,
+                rows[0].cache_write,
+                rows[0].total_tokens
+            ),
+            (21, 0, 6, 31)
+        );
+        assert_eq!(rows[0].finish.as_deref(), Some("completed"));
     }
 
     #[test]
-    fn the_run_index_follows_new_facts_and_run_states_like_the_grouping_query() {
-        let conn = store();
-        conn.execute_batch(
-            "CREATE TABLE run_index (run_id TEXT PRIMARY KEY, session TEXT NOT NULL,
-                                     state TEXT NOT NULL, state_changed_ms INTEGER);",
+    fn broca_export_undated_session_remains_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.db");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/broca-export-facts/fixture-run-index.db"
+            ),
+            &path,
         )
         .unwrap();
-        let usage = serde_json::json!({"input_tokens": 1});
-        for (index, name) in ["a", "b", "c", "d"].iter().enumerate() {
-            let ts = 1_000 + index as i64;
-            insert(
-                &conn,
-                &format!("f-{name}"),
-                &format!("r-{name}"),
-                &identity(name),
-                ts,
-                usage.clone(),
-            );
-            run(
-                &conn,
-                &format!("r-{name}"),
-                &identity(name),
-                "completed",
-                ts,
-            );
-        }
-        run(&conn, "r-run", &identity("running"), "active", 500);
-        run(&conn, "r-pause", &identity("paused"), "paused", 600);
-
-        let mut index = broca_run_index::BrocaRunIndex::default();
-        let start = std::time::Instant::now();
-        index.refresh(&conn, start).unwrap();
-        for limit in [2, 10] {
-            assert_eq!(index_list(&mut index, limit), reference_list(&conn, limit));
-        }
-
-        // A new fact, the running run finishing, the paused run resuming, a
-        // new run starting and a fact without a time.
-        insert(&conn, "f-b2", "r-b2", &identity("b"), 5_000, usage.clone());
-        run(&conn, "r-run", &identity("running"), "completed", 5_100);
-        insert(
-            &conn,
-            "f-run",
-            "r-run",
-            &identity("running"),
-            5_100,
-            usage.clone(),
-        );
-        run(&conn, "r-pause", &identity("paused"), "active", 5_200);
-        run(&conn, "r-new", &identity("new"), "active", 5_300);
-        conn.execute(
-            "INSERT INTO export_facts (fact_id, run_id, segment_json) VALUES ('f-x', 'r-x', ?1)",
-            params![serde_json::json!({"session": identity("timeless")}).to_string()],
-        )
-        .unwrap();
-        index
-            .refresh(&conn, start + std::time::Duration::from_secs(1))
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "INSERT INTO export_facts (fact_id, run_id, segment_json)
+            SELECT 'undated-regression', 'undated-run', json_set(segment_json,
+                '$.session.session', 'undated-regression', '$.occurred_at_ms', NULL)
+            FROM export_facts WHERE export_seq = 1;",
+            )
             .unwrap();
-        for limit in [1, 3, 10] {
-            assert_eq!(index_list(&mut index, limit), reference_list(&conn, limit));
-        }
-        assert_eq!(index.run_ids(&identity("b").to_string()), ["r-b", "r-b2"]);
+        let reader = open_broca_store(&path).unwrap();
+        assert!(
+            reader.execute("DELETE FROM export_facts", []).is_err(),
+            "the production opener must be read-only"
+        );
+        let listed = load_broca_cache_sessions_from_conn(&reader, None, 10).unwrap();
+        assert_eq!(listed.len(), 5, "undated finished work must not disappear");
+        assert_eq!(
+            listed.last().unwrap().title.as_deref(),
+            Some("undated-regression")
+        );
+        assert!(reader.is_autocommit());
     }
 
     #[test]
@@ -15028,95 +14923,6 @@ mod broca_cache_tests {
         assert!(other.is_empty());
     }
 
-    fn pages_read(conn: &Connection) -> i64 {
-        let (mut current, mut high) = (0, 0);
-        unsafe {
-            rusqlite::ffi::sqlite3_db_status(
-                conn.handle(),
-                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
-                &mut current,
-                &mut high,
-                1,
-            );
-        }
-        i64::from(current)
-    }
-
-    #[test]
-    fn a_poll_reads_only_what_the_run_index_gained() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run-index.db");
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute_batch(
-                "CREATE TABLE export_facts (export_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                     fact_id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL, segment_json TEXT NOT NULL);
-                 CREATE INDEX export_facts_run_id ON export_facts(run_id);
-                 CREATE TABLE run_index (run_id TEXT PRIMARY KEY, session TEXT NOT NULL,
-                     state TEXT NOT NULL, usage_json TEXT, state_changed_ms INTEGER);",
-            )
-            .unwrap();
-        let padding = "p".repeat(2_000);
-        for index in 0..2_000 {
-            let session = identity(&format!("s{}", index % 200));
-            let segment = serde_json::json!({"session": session, "occurred_at_ms": index,
-                                             "usage": {"input_tokens": 1}, "padding": padding});
-            writer
-                .execute(
-                    "INSERT INTO export_facts (fact_id, run_id, segment_json) VALUES (?1, ?2, ?3)",
-                    params![
-                        format!("f{index}"),
-                        format!("r{index}"),
-                        segment.to_string()
-                    ],
-                )
-                .unwrap();
-            writer
-                .execute(
-                    "INSERT INTO run_index (run_id, session, state, usage_json, state_changed_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        format!("r{index}"),
-                        session.to_string(),
-                        if index % 500 == 0 {
-                            "active"
-                        } else {
-                            "completed"
-                        },
-                        padding,
-                        index
-                    ],
-                )
-                .unwrap();
-        }
-        let mut index = broca_run_index::BrocaRunIndex::default();
-        let start = std::time::Instant::now();
-        let first = open_broca_store(&path).unwrap();
-        index.refresh(&first, start).unwrap();
-        let full = pages_read(&first);
-        assert!(full > 1_000, "the first refresh reads every fact: {full}");
-
-        // Each poll opens a fresh connection, as production does.
-        insert(
-            &writer,
-            "f-new",
-            "r-new",
-            &identity("s7"),
-            9_999,
-            serde_json::json!({}),
-        );
-        let poll = open_broca_store(&path).unwrap();
-        index
-            .refresh(&poll, start + std::time::Duration::from_secs(1))
-            .unwrap();
-        let delta = pages_read(&poll);
-        assert!(
-            delta * 20 < full,
-            "a one-fact poll read {delta} pages, a full read {full}"
-        );
-        assert_eq!(index.list(1)[0].identity, identity("s7").to_string());
-    }
-
     /// Writes `bytes` as the session's live WAL under `root`, last modified
     /// at `modified_ms`.
     fn write_live_wal(root: &Path, identity: &serde_json::Value, bytes: &[u8], modified_ms: u64) {
@@ -15132,120 +14938,6 @@ mod broca_cache_tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-    }
-
-    /// A gather session is listed the moment its run starts, while its WAL
-    /// holds no finished step yet. The run's index row keeps its start time
-    /// until the run ends, so the listed activity must follow the WAL as
-    /// steps are appended: the Cache tab refetches a session's steps only
-    /// when that activity moves, and otherwise showed `0 events` for the
-    /// whole run.
-    #[test]
-    fn a_running_gather_session_is_dated_by_its_wal_and_shows_its_steps() {
-        let started: i64 = 1_790_597_628_357;
-        let conn = store();
-        conn.execute_batch(
-            "CREATE TABLE run_index (run_id TEXT PRIMARY KEY, session TEXT NOT NULL,
-                                     state TEXT NOT NULL, state_changed_ms INTEGER);",
-        )
-        .unwrap();
-        let gather = identity("alfonso:gather-test");
-        let gather_id = gather.to_string();
-        conn.execute(
-            "INSERT INTO run_index (run_id, session, state, state_changed_ms)
-             VALUES ('g1', ?1, 'active', ?2)",
-            params![gather.to_string(), started],
-        )
-        .unwrap();
-        // Two finished sessions newer than the gather's start: with a limit
-        // of 2 the gather only makes the list once its WAL dates it.
-        let usage = serde_json::json!({"input_tokens": 1, "cached_input_tokens": 0});
-        insert(
-            &conn,
-            "f1",
-            "r1",
-            &identity("alfonso:bg_a"),
-            started + 10_000,
-            usage.clone(),
-        );
-        insert(
-            &conn,
-            "f2",
-            "r2",
-            &identity("alfonso:bg_b"),
-            started + 20_000,
-            usage,
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let started_ms = started as u64;
-
-        // Just after run_started: no step has finished yet.
-        write_live_wal(
-            root,
-            &gather,
-            &broca_wal::tests::gather_wal("g1", started_ms, &[], false),
-            started_ms + 5,
-        );
-        let listed = load_broca_cache_sessions_from_conn(&conn, Some(root), 10).unwrap();
-        let row = listed
-            .iter()
-            .find(|row| row.session_id == gather_id)
-            .unwrap();
-        assert_eq!(row.last_activity_ms, started + 5);
-        let first_seen = row.last_activity_ms;
-
-        // Three model steps later.
-        let steps = [
-            (started_ms + 5_700, 6_026, 0),
-            (started_ms + 12_100, 930, 5_632),
-            (started_ms + 24_500, 4_042, 5_632),
-        ];
-        let written = started_ms + 25_000;
-        write_live_wal(
-            root,
-            &gather,
-            &broca_wal::tests::gather_wal("g1", started_ms, &steps, false),
-            written,
-        );
-        let listed = load_broca_cache_sessions_from_conn(&conn, Some(root), 2).unwrap();
-        let titles: Vec<_> = listed
-            .iter()
-            .map(|row| row.title.as_deref().unwrap())
-            .collect();
-        assert_eq!(titles, ["alfonso:gather-test", "alfonso:bg_b"]);
-        assert_eq!(listed[0].last_activity_ms, written as i64);
-        assert!(listed[0].last_activity_ms > first_seen);
-
-        // The refetch that activity change triggers finds every step.
-        let wal_runs = broca_wal::WalCache::default().session_runs(
-            root,
-            &broca_wal::SessionIdentity::from_json(&gather.to_string()).unwrap(),
-        );
-        let events = build_db_cache_events(
-            load_broca_cache_events_from_conn(
-                &conn,
-                &gather.to_string(),
-                wal_runs.as_deref(),
-                None,
-                None,
-            )
-            .unwrap(),
-            false,
-        );
-        assert_eq!(ids(&events), ["g1#1", "g1#2", "g1#3"]);
-        assert!(events
-            .iter()
-            .all(|event| event.cache_reported && !event.cache_write_reported));
-        assert_eq!(events[1].cache_read, 5_632);
-
-        // Without a WAL (or a state root) the run keeps its start time.
-        let listed = load_broca_cache_sessions_from_conn(&conn, None, 10).unwrap();
-        let row = listed
-            .iter()
-            .find(|row| row.session_id == gather_id)
-            .unwrap();
-        assert_eq!(row.last_activity_ms, started);
     }
 
     /// A Broca step's fill is its prompt over the context window its run was

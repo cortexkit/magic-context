@@ -674,6 +674,25 @@ export interface DbCacheEvent {
   model: string | null;
 }
 
+export interface BrocaUsageTotals {
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  cache_write_tokens: number | null;
+  output_tokens: number | null;
+}
+
+export interface BrocaSessionSummary {
+  session: { project_root?: string; harness: string; session: string };
+  first_activity_ms: number | null;
+  last_activity_ms: number | null;
+  models: string[];
+  run_count: number;
+  slice_count: number;
+  usage: BrocaUsageTotals;
+  warm_usage: BrocaUsageTotals;
+  last_end_reason: string | null;
+}
+
 export interface SessionCacheStats {
   harness: Harness;
   session_id: string;
@@ -690,6 +709,7 @@ export interface SessionCacheStats {
   title: string | null;
   /** Set when this session's activity time cannot follow a running turn. */
   activity_note?: string | null;
+  broca?: BrocaSessionSummary | null;
 }
 
 export interface ConfigFile {

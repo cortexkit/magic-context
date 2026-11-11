@@ -1,5 +1,10 @@
 import { truncate } from "../../lib/api";
-import type { DbCacheEvent, Harness, SessionCacheStats } from "../../lib/types";
+import type {
+  BrocaSessionSummary,
+  DbCacheEvent,
+  Harness,
+  SessionCacheStats,
+} from "../../lib/types";
 
 export type HarnessFilter = "all" | Harness;
 
@@ -135,11 +140,51 @@ export function cacheCardSummary(events: DbCacheEvent[]): CacheCardSummary {
   };
 }
 
-/**
- * "1 run" / "3 runs" when every row is a Broca run total, else events, and
- * "no data" for a session with nothing recorded yet (a Broca run that has
- * just started) rather than "0 events".
- */
+/** Whole-session cache-read summary from runs, not cache-refresh attempts or a timeline window. */
+export function brocaCardSummary(summary: BrocaSessionSummary): CacheCardSummary {
+  const usage = summary.usage;
+  const read = usage.cached_input_tokens;
+  if (read === null) return { ...cacheCardSummary([]), title: "No run reported cached tokens" };
+  const total = (usage.input_tokens ?? 0) + read + (usage.cache_write_tokens ?? 0);
+  const ratio = total > 0 ? read / total : 0;
+  return {
+    text: read > 0 ? cachePercentage(ratio) : CACHE_FIGURE_PLACEHOLDER,
+    tone: read > 0 ? "ratio" : "neutral",
+    ratio,
+    title: "Cache reads over total prompt tokens across finished runs",
+    note: null,
+  };
+}
+
+/** Separate projectless identities from every scoped project, even an empty path. */
+export function cacheProjectGroups<T extends SessionCacheStats>(
+  rows: T[],
+): { project: string | null | undefined; rows: T[] }[] {
+  const groups = new Map<string | null | undefined, T[]>();
+  for (const row of rows) {
+    const project = row.broca ? (row.broca.session.project_root ?? null) : undefined;
+    const entries = groups.get(project) ?? [];
+    entries.push(row);
+    groups.set(project, entries);
+  }
+  return [...groups].map(([project, entries]) => ({ project, rows: entries }));
+}
+
+export function brocaCardTooltip(summary: BrocaSessionSummary): string {
+  const lines = [
+    summary.session.session,
+    `harness: ${summary.session.harness}`,
+    `project: ${summary.session.project_root ?? "No project folder"}`,
+    ...summary.models,
+  ];
+  if (summary.first_activity_ms !== null)
+    lines.push(`first: ${new Date(summary.first_activity_ms).toLocaleString()}`);
+  if (summary.last_activity_ms !== null)
+    lines.push(`last: ${new Date(summary.last_activity_ms).toLocaleString()}`);
+  return lines.join("\n");
+}
+
+/** Run totals count as runs, per-step rows as events, and an empty window has no data. */
 export function cacheCardCountLabel(events: DbCacheEvent[]): string {
   if (events.length === 0) return "no data";
   const noun = events.length > 0 && events.every((event) => event.aggregate) ? "run" : "event";
