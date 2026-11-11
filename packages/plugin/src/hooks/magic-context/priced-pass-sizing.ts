@@ -110,8 +110,9 @@ export interface PricedPassPlanInput {
     historyRebuilt: boolean;
     alreadyRanThisTurn: boolean;
     /**
-     * Whether trigger parking still allows the force band its ride. It is false
-     * while a force trigger parked on an earlier frozen pass is still parked
+     * Whether this pass may rebuild the prompt because usage is in the force
+     * band (about 85% or more). It is false while a force-band rebuild that an
+     * earlier frozen pass had to postpone is still parked
      * (`ParkedBustTriggers.permissions`), and the postprocess phase passes the
      * same permission to `decidePassMutation`. Omitted means permitted.
      */

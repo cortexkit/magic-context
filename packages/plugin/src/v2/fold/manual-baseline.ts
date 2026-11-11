@@ -240,8 +240,13 @@ function muralTablePresent(db: Database): boolean {
 }
 
 /**
- * Every project's stored mural, identified without its image: the text hash it
- * was rendered from, when, at what size, by what, and for which memories.
+ * The mural is an image the history head can carry: project memories that did
+ * not fit the text block, drawn as compressed cues. A fold renders it and
+ * records one row per project in `mural_manifest`.
+ *
+ * This returns every project's stored mural, identified without its image: the
+ * text hash it was rendered from, when, at what size, by what, and for which
+ * memories.
  */
 function readMuralIdentities(db: Database): Map<string, string> {
     const identities = new Map<string, string>();

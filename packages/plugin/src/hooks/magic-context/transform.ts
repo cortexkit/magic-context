@@ -3508,8 +3508,9 @@ export function createTransform(deps: TransformDeps) {
                     ),
                     // While this pass's head is frozen (kept signed thinking or an
                     // unresolved project directory) under the strict hold policy,
-                    // the postprocess phase withholds a parked force ride below
-                    // 95% and clears a parked flush or materialization request
+                    // the postprocess phase postpones (parks) the rebuild that
+                    // force-band usage would trigger, below 95%, and clears a
+                    // parked flush or materialization request
                     // (`ParkedBustTriggers.permissions`); plan the pass the same way.
                     forceTriggerPermitted: parked?.reason("force") === undefined,
                     materializationTriggerPermitted:

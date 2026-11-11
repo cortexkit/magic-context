@@ -319,8 +319,10 @@ export function readStoredAppliedProjection(
 
 /**
  * Replace this session's applied tuples with `stored`, verbatim: the same rows,
- * generations and m[0] digests, not a new generation. Call inside the write
- * transaction that also stores the m[0]/m[1] bytes those tuples describe.
+ * generations and digests, not a new generation. The tuples describe the
+ * session's rendered history head: m[0], the frozen baseline message at the
+ * start of the prompt, and m[1], the changes since it was built. Call inside
+ * the write transaction that also stores those two messages' bytes.
  */
 export function replaceStoredAppliedProjection(
     db: Database,

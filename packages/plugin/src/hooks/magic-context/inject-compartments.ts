@@ -2706,8 +2706,9 @@ function beginFoldRead(db: Database, begin: () => void) {
 
 /**
  * The fold's write section (`begin` runs BEGIN IMMEDIATE when no transaction is
- * open). It returns holding the write lock on both paths, so the section's
- * hold clock starts after the writer is admitted.
+ * open). It returns holding the write lock on both paths, so the caller's
+ * measurement of how long the lock is held (for the slow-write log) starts
+ * once the lock is taken and never includes waiting for it.
  */
 function beginFoldWriter(db: Database, begin: () => void) {
     return foldTransaction(db, begin, true);
