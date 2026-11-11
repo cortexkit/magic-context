@@ -36,7 +36,8 @@
 //!   stated, newer or older than before, and none when none is stated. A
 //!   floor that goes away is logged as `signed_floor_regressed`. A floor
 //!   naming an entry the index doesn't hold is left alone: it is either
-//!   before the cut, where the model sees nothing anyway, or not on the
+//!   before the summary cut (the oldest entries a view replaces with the
+//!   history head), where the model sees nothing anyway, or not on the
 //!   transcript ck-mc read, and the next conditions state it again.
 //! - A refusal overrides a statement only when the two contradict. A view
 //!   refused for keeping a signed part at or before ck-mc's floor shows the

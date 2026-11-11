@@ -544,7 +544,9 @@ async fn refused_at_boundary(
     version
 }
 
-/// The view that notice's own pass sent instead.
+/// Check the view the refusing notice's own pass sent instead: newer than
+/// the refused one, carrying the requested drops, and one a runner with no
+/// floor accepts.
 fn retried(session: &Session, client: &Client, refused: u64) {
     let retry = client.offered.lock().unwrap().last().cloned().unwrap();
     assert!(retry.version > refused, "the pass sent a new view");
