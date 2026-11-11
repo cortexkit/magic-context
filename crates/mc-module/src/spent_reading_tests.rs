@@ -516,3 +516,83 @@ async fn spent_saved_state_without_the_field_loads() {
         .iter()
         .all(|pending| pending.before.spent_reading.is_none()));
 }
+
+/// ck-mc restarts after the runner applied the view built on the reading. A
+/// tool call then restores the session's saved state before the runner sets
+/// the session up again; the module keeps such a session compacting and
+/// handles its notices. The next notice repeats the reading the view was
+/// built on, and names the view the runner applies, which is that view. The
+/// repeat is the measurement the view was already built from, exactly as
+/// after a Setup (`spent_the_reading_stays_spent_across_a_restart`), so it
+/// must build nothing: a second view makes the runner send one request under
+/// each view, and the provider writes the cache twice.
+///
+/// Until ck-mc reads the runner's view back, it doesn't know its own newest
+/// view, so the spent reading is not checked against it and the repeat
+/// counts. A reading that names its view is judged by the applied version
+/// the notice reports, which this restart doesn't hide.
+#[tokio::test]
+async fn spent_witness_a_notice_before_setup_after_a_restart_builds_on_the_spent_reading() {
+    let (mut session, client, settings) = worker();
+    let first = built_on_the_reading(&mut session, &client, &settings).await;
+    let request = reading(&session, &client, 2, READING, Some(&first));
+    session.notice(&client, &settings, request).await;
+    assert!(
+        session.reading_stale,
+        "the repeat was not ignored before the restart"
+    );
+    assert!(
+        session.unconfirmed.is_empty(),
+        "the runner applies the view"
+    );
+
+    let (_, _, route, _, _) = fixture();
+    let mut restored = Session::tools_only(&route, None);
+    restored.restore(session.durable());
+    runner_applies(&client, Some(&first));
+    restored.restore_for_tools(&client).await;
+    assert!(restored.compacting());
+    assert_eq!(restored.spent_reading, session.spent_reading);
+
+    restored.queued.insert(("mid".into(), "m1".into()));
+    let request = reading(&restored, &client, 1, READING, Some(&first));
+    restored.notice(&client, &settings, request).await;
+    assert_eq!(
+        offered(&client),
+        vec![first],
+        "a notice after the restart, before Setup, built a second view on the reading the first was built on"
+    );
+}
+
+/// A runner that named a view it had already replaced has its view versions
+/// disregarded until the next Setup: its readings are then judged as if they
+/// named no view (`Session::prompt_views_untrusted`). Such a runner's repeat
+/// of the reading the newest view was built on is the same measurement as a
+/// repeat from a runner that names no view, and must build nothing either.
+#[tokio::test]
+async fn spent_witness_an_untrusted_runner_builds_twice_on_one_reading() {
+    let (mut session, client, settings) = worker();
+    session.prompt_views_untrusted = true;
+    let mut request = reading(&session, &client, 1, READING, None);
+    request.conditions.last_prompt_view = Some(0);
+    session.notice(&client, &settings, request).await;
+    let views = offered(&client);
+    assert_eq!(views.len(), 1, "a reading at the threshold built no view");
+    let first = views[0].clone();
+    assert_eq!(
+        session
+            .spent_reading
+            .map(|spent| (spent.tokens, spent.view)),
+        Some((READING, first.version))
+    );
+
+    session.queued.insert(("mid".into(), "m1".into()));
+    let mut request = reading(&session, &client, 2, READING, Some(&first));
+    request.conditions.last_prompt_view = Some(0);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        offered(&client),
+        vec![first],
+        "a repeat of the reading the view was built on built a second view"
+    );
+}
