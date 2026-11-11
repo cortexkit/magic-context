@@ -511,6 +511,18 @@ impl RunnerClient for SubcRunnerClient {
             )
             .await
             .map_err(|error| match error {
+                // Route-open refusals are NotSent, not Module errors. Keep the
+                // daemon's code so searches can remember an absent Synapse.
+                error
+                    if matches!(
+                        error
+                            .route_open_refusal()
+                            .map(|refusal| refusal.code.as_str()),
+                        Some("unknown_module")
+                    ) =>
+                {
+                    "unknown_module".to_owned()
+                }
                 subc_client_rs::CallError::Module(body) => body.code,
                 subc_client_rs::CallError::OutcomeUnknown(_) => "deadline_exceeded".to_owned(),
                 _ => "missing_synapse".to_owned(),

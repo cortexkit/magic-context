@@ -38,6 +38,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 #[path = "support/rehearsal.rs"]
 mod rehearsal;
 
+#[path = "support/synapse.rs"]
+mod synapse;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A process the test started; killed when the test ends.

@@ -18,6 +18,7 @@
 //! scores), a hosted endpoint when the user configures one, or off.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -475,6 +476,60 @@ pub struct Pinned {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped(pub String);
 
+/// Pin Synapse's catalog unless the daemon recently refused the module by name.
+/// One daemon serves the process, so sessions share the absence, not a model pin.
+pub async fn pin_synapse(
+    catalog: impl Future<Output = Result<Value, String>>,
+) -> Result<Pinned, Skipped> {
+    static CATALOG: SynapseCatalog = SynapseCatalog::new();
+    CATALOG.pin(catalog).await
+}
+
+struct SynapseCatalog {
+    retry_at: Mutex<Option<tokio::time::Instant>>,
+}
+
+impl SynapseCatalog {
+    const fn new() -> Self {
+        Self {
+            retry_at: Mutex::new(None),
+        }
+    }
+
+    async fn pin(
+        &self,
+        catalog: impl Future<Output = Result<Value, String>>,
+    ) -> Result<Pinned, Skipped> {
+        let previous = *self.retry_at.lock().expect("Synapse availability");
+        if previous.is_some_and(|retry_at| tokio::time::Instant::now() < retry_at) {
+            return Err(Skipped("unknown_module".into()));
+        }
+        let result = catalog.await.map_err(Skipped).and_then(pin);
+        let mut retry_at = self.retry_at.lock().expect("Synapse availability");
+        match &result {
+            Ok(_) => *retry_at = None,
+            Err(Skipped(code)) if code == "unknown_module" && *retry_at == previous => {
+                // A restart can look like an absent module for a few seconds.
+                // Probe after 30 seconds; a refusal within 10 minutes of that
+                // retry time backs off for 10 minutes. An older refusal starts
+                // over at 30 seconds so separate restarts do not escalate.
+                // Concurrent refusals from the same probe window count only once.
+                let now = tokio::time::Instant::now();
+                let delay = if previous.is_some_and(|retry_at| {
+                    now.saturating_duration_since(retry_at) < Duration::from_secs(600)
+                }) {
+                    600
+                } else {
+                    30
+                };
+                *retry_at = Some(now + Duration::from_secs(delay));
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
 /// The body of a Synapse reply: the `result` member, refused when it carries
 /// an error.
 fn unwrap_reply(value: Value) -> Result<Value, Skipped> {
@@ -679,6 +734,10 @@ pub fn log_fallback(reason: &str) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rerank/synapse_tests.rs"]
+mod synapse_tests;
 
 #[cfg(test)]
 mod tests {

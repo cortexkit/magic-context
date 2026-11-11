@@ -2414,11 +2414,12 @@ impl Session {
         // Synapse costs no extra retrieval.
         let mut pinned = None;
         if prose && settings.rerank == Reranker::Synapse {
-            match client
-                .synapse_call(&self.key, "models.list", serde_json::json!({}))
-                .await
-                .map_err(Skipped)
-                .and_then(rerank::pin)
+            match rerank::pin_synapse(client.synapse_call(
+                &self.key,
+                "models.list",
+                serde_json::json!({}),
+            ))
+            .await
             {
                 Ok(pin) => pinned = Some(pin),
                 Err(Skipped(reason)) => rerank::log_fallback(&reason),
