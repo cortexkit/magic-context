@@ -100,8 +100,26 @@ const GOLDEN_THEME = {
 
 const DEFAULT_SECTIONS = { context: true, history: true, cache: true, knowledge: true };
 
+/**
+ * The recording stores each colour as `{ rgba: "#rrggbbaa" }`, where the host
+ * hands the sidebar RGBA objects; hex strings are what OpenTUI also accepts.
+ */
+function recordedColours(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    const leaf = (value as { rgba?: unknown }).rgba;
+    if (typeof leaf === "string") return leaf.slice(0, 7);
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+            key,
+            recordedColours(entry),
+        ]),
+    );
+}
+
 function hostTheme(theme: PanelCase["theme"]): Record<string, string> {
-    return theme === "golden" ? GOLDEN_THEME : flattenTheme(recordedThemes.modes[theme], theme);
+    return theme === "golden"
+        ? GOLDEN_THEME
+        : flattenTheme(recordedColours(recordedThemes.modes[theme]), theme);
 }
 
 function hex(color: Rgba): string | null {
