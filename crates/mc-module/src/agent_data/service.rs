@@ -389,9 +389,10 @@ impl Service {
     /// Finish, at startup, every install the journal records as started:
     /// each cut with a session being installed runs its `activate` again, as
     /// a repeat of the request would. It resumes at the install and writes
-    /// the same receipt the driver's own repeat then gets back. This runs in
-    /// every build, moves on or off, because a session being installed is
-    /// refused until its install is finished. A cut that fails stays being
+    /// the same receipt the driver's own repeat then gets back. This runs
+    /// whether or not this build serves moves (the agent-data service can be
+    /// switched off), because a session being installed is refused until its
+    /// install is finished. A cut that fails stays being
     /// installed until the driver repeats `activate` or the next start.
     pub async fn recover<H: Host>(&self, host: &H) {
         let Some(contents) = host.journal().contents() else {

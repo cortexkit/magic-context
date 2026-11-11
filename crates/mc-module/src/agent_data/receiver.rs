@@ -901,9 +901,10 @@ async fn release_one<H: Host>(
 
 /// `abort {refs, cutId}` for a cut `import` staged here. Before `activate`
 /// records the install, the staged files are deleted and the staged gate is
-/// lifted; the cut's record, any tombstone and the baseline stay, so a
-/// session released from here before is still refused `session_moved`
-/// with the holder it had. Once the install is recorded it is finished,
+/// lifted. The cut's record stays, and so do the session's baseline and
+/// its tombstone, the journal's note that the session was released from
+/// here to another machine: a session released from here before is still
+/// refused `session_moved` with the holder it had. Once the install is recorded it is finished,
 /// never undone, so the abort is refused.
 pub(crate) async fn abort<H: Host>(host: &H, cut: &str, record: &Cut) -> Result<Done, ErrorBody> {
     let db = host.context_db();
