@@ -5,7 +5,7 @@ import { parseStepRender, type StepRender } from "./step-render-log";
 
 export interface RunnerDecision {
     at: number;
-    kind: "setup" | "view" | "ride" | "signed_floor" | "summary_start" | "summary_publish" | "no_summary";
+    kind: "setup" | "view" | "view_refused" | "view_unknown" | "view_reoffer_failed" | "stale_reading" | "ride" | "signed_floor" | "summary_start" | "summary_publish" | "no_summary";
     detail: string;
     version?: number;
     line?: string;
@@ -25,11 +25,23 @@ export function parseRunnerDecision(line: string, session: string): RunnerDecisi
     if (body.startsWith("setup (")) return { at, kind: "setup", detail: body, line };
     // Old shape: b99525c82a, crates/mc-module/src/session.rs:3040.
     // Cut-through/no-cut shape: 8c75aafa8d, the same file at :3051.
-    const view = /^view (\d+) accepted \((\d+) edits(?:, (?:cut through (.+)|no cut))?\)$/.exec(body);
+    const view = /^view (\d+) accepted\b/.exec(body);
+    const edits = /^view \d+ accepted \((\d+) edits/.exec(body)?.[1];
+    const cut = /, cut through (.+)\)$/.exec(body)?.[1];
     if (view) return {
         at, kind: "view", version: Number(view[1]), line,
-        detail: `view=${view[1]} edits=${view[2]} cut=${view[3] ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
+        detail: `view=${view[1]} edits=${edits ?? "unlogged"} cut=${cut ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
     };
+    const reoffer = /^(?:runner refused view|unknown answer to view) (\d+) offered again:/.exec(body) ??
+        /^view (\d+) .+; rebuilding instead of offering it again$/.exec(body) ??
+        /^offering view (\d+) again failed:/.exec(body);
+    if (reoffer) return { at, kind: "view_reoffer_failed", version: Number(reoffer[1]), detail: body, line };
+    const refused = /^runner refused view (\d+)(?: at a step boundary)?:/.exec(body);
+    if (refused) return { at, kind: "view_refused", version: Number(refused[1]), detail: body, line };
+    const unknown = /^unknown answer to view (\d+):/.exec(body);
+    if (unknown) return { at, kind: "view_unknown", version: Number(unknown[1]), detail: body, line };
+    if (/^ignoring a prompt of \d+ tokens: reading from view \d+, newest applied \d+.*; waiting for a reading under the current view$/.test(body))
+        return { at, kind: "stale_reading", detail: body, line };
     // b99525c82a, session.rs:1681; Rust Debug preserves causes and optional sizes.
     if (/^ride \[.*\], request (?:Some\(\d+\)|None)/.test(body)) {
         return { at, kind: "ride", detail: body, line };

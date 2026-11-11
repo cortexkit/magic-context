@@ -101,6 +101,7 @@ import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
 import { classifyRunnerStep, formatRunnerStepTiming, type RunnerStepClassification } from "./cache-bust-runner-classification";
+import { emptyRunnerViewAttribution, observeRunnerViewStep, type RunnerViewAttributionState } from "./cache-bust-runner-views";
 import { analyzeRunnerFeed, printRunnerFeedAnalysis } from "./cache-bust-runner-analyzer";
 import { AstrocyteRunnerMeterSource } from "./cache-bust-runner-feed";
 import { loadRunnerHeads } from "./cache-bust-runner-monitor";
@@ -1383,6 +1384,7 @@ export function analyzeSnapshots(
 ): AnalysisRow[] {
     const previousRequestByRoute = new Map<string, Snapshot>();
     const previousRequestBySession = new Map<string, Snapshot>();
+    const runnerViews = new Map<string, RunnerViewAttributionState>();
     const renders = joinRequestsToViews(snaps.map((snapshot) => snapshot.requestTimestampMs), options.runnerEvidence?.renders ?? []);
     // When the reusable prefix was last read in full or written; see
     // refreshesCachedPrefix for which requests move it.
@@ -1454,6 +1456,11 @@ export function analyzeSnapshots(
             joinDecision(reservations[reservationIndex++]);
         }
         const decision = joinDecision(current.requestTimestampMs);
+        let viewAttribution = runnerViews.get(routeKey);
+        if (current.runnerRequest && !isUsageMissing(current)) {
+            if (!viewAttribution) runnerViews.set(routeKey, viewAttribution = emptyRunnerViewAttribution());
+            observeRunnerViewStep(viewAttribution, options.runnerEvidence?.decisions ?? [], current.requestTimestampMs);
+        }
         if (isUsageMissing(current)) {
             const previous = previousMetered;
             const comparison = previous ? compareClientBytes(current, previous, snaps.slice(0, index)) : undefined;
@@ -1547,6 +1554,7 @@ export function analyzeSnapshots(
                     lastTouchAt: Number.isFinite(lastTouch) ? lastTouch : undefined,
                     previousCompletedAt: previous.runnerRequest?.completedAt,
                     scopeChange,
+                    viewAttribution,
                 },
             );
         }

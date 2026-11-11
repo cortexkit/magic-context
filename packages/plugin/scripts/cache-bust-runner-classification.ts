@@ -1,5 +1,12 @@
 import { cachedPrefixFloor } from "./cache-bust-attribution";
 import type { RunnerDecision } from "./cache-bust-runner-log";
+import {
+    creditRunnerViewRewrite,
+    creditRunnerViewsOnExpiry,
+    emptyRunnerViewAttribution,
+    observeRunnerViewStep,
+    type RunnerViewAttributionState,
+} from "./cache-bust-runner-views";
 
 export type RunnerBustClass =
     | "scope_changed"
@@ -74,6 +81,7 @@ export interface RunnerCacheFacts {
     lastTouchAt?: number;
     previousCompletedAt?: number;
     scopeChange?: string;
+    viewAttribution?: RunnerViewAttributionState;
 }
 
 /** Providers refresh the cached prompt when a request starts, so a start-to-start gap needs no expiry margin. */
@@ -83,6 +91,9 @@ export function classifyRunnerStep(
     decisions: readonly RunnerDecision[],
     facts: RunnerCacheFacts = {},
 ): RunnerStepClassification {
+    const views = facts.viewAttribution ?? emptyRunnerViewAttribution();
+    observeRunnerViewStep(views, decisions, previous.at);
+    observeRunnerViewStep(views, decisions, current.at);
     const cacheTtlMs = facts.cacheTtlMs ?? 3_600_000;
     const previousTotal = previous.read + previous.write;
     const window = decisions.filter(
@@ -117,30 +128,6 @@ export function classifyRunnerStep(
             "scope_changed",
             facts.scopeChange ?? `model ${previous.model} → ${current.model}`,
         );
-    const previousVersion = decisions
-        .filter((event) => event.at <= previous.at)
-        .sort((a, b) => a.at - b.at)
-        .flatMap((event) => {
-            if (event.kind === "view" && event.version !== undefined) return [event.version];
-            const applied =
-                event.kind === "setup"
-                    ? /applied view (Some\((\d+)\)|None)/.exec(event.detail)
-                    : undefined;
-            return applied ? [applied[2] ? Number(applied[2]) : 0] : [];
-        })
-        .at(-1);
-    const view = window.find(
-        (event) =>
-            event.kind === "view" &&
-            event.version !== undefined &&
-            previousVersion !== undefined &&
-            event.version > previousVersion,
-    );
-    if (view) return {
-        ...result("view", view.line ?? view.detail),
-        viewVersion: view.version,
-        viewAcceptedAt: view.at,
-    };
     const causes = (event: RunnerDecision): string[] =>
         event.kind === "ride"
             ? (event.detail.match(/^ride \[([^\]]*)\]/)?.[1] ?? "")
@@ -153,27 +140,35 @@ export function classifyRunnerStep(
             causes(event).some((cause) => ["SurfaceChange", "ModelChange"].includes(cause)),
     );
     if (plan) return result("plan_changed", plan.line ?? plan.detail);
+    const lastTouch = Math.max(
+        previous.at,
+        facts.lastTouchAt ?? -Infinity,
+        facts.previousCompletedAt ?? -Infinity,
+    );
+    if (current.at - lastTouch > cacheTtlMs) {
+        const applied = creditRunnerViewsOnExpiry(views, current.at);
+        return result(
+            "expired",
+            `idle ${current.at - lastTouch}ms exceeds lifetime ${cacheTtlMs}ms${applied ? `; ${applied}` : ""}`,
+        );
+    }
+    const view = creditRunnerViewRewrite(views, decisions, current.at);
+    if (view) return {
+        ...result("view", view.evidence),
+        viewVersion: view.view.version,
+        viewAcceptedAt: view.view.at,
+    };
     const forgot = window.find((event) =>
         causes(event).some((cause) =>
             ["CacheExpired", "ChainReset", "TierChange", "AccountChange"].includes(cause),
         ),
     );
     if (forgot) return result("provider_forgot", forgot.line ?? forgot.detail);
-    const lastTouch = Math.max(
-        previous.at,
-        facts.lastTouchAt ?? -Infinity,
-        facts.previousCompletedAt ?? -Infinity,
-    );
-    if (current.at - lastTouch > cacheTtlMs)
-        return result(
-            "expired",
-            `idle ${current.at - lastTouch}ms exceeds lifetime ${cacheTtlMs}ms`,
-        );
     // A handshake does not change a provider's cache key. Without a recorded
     // cause, a restart must not hide a rewrite, including a complete cache miss.
     return result(
         "unexplained",
-        `no model change, higher accepted view, plan change, provider-forgot ride or proven expiry${afterRestart ? "; after a runner restart" : ""}; no other recorded cause`,
+        `no model change, eligible accepted view, plan change, provider-forgot ride or proven expiry${afterRestart ? "; after a runner restart" : ""}; no other recorded cause`,
     );
 }
 

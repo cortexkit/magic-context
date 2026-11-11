@@ -130,13 +130,16 @@ function snapshotsFor(dir: string, session: string) {
 describe("analyze-cache-bust Thalamus runners", () => {
     const piId = "11111111-2222-4333-8444-555555555555";
     const fixture = join(import.meta.dir, "test-fixtures/cache-bust-runners");
-    function setup() {
+    function setup({ initialViewAccepted = true } = {}) {
         const root = mkdtempSync(join(tmpdir(), "cache-bust-runners-"));
         tempDirs.push(root);
         cpSync(fixture, root, { recursive: true });
         for (const module of ["magic-context", "thalamus-harness", "thalamus-pi"]) {
             const log = join(root, module, "logs", `${module}.2026-09-08.log`);
             renameSync(`${log}.txt`, log);
+            if (module === "magic-context" && !initialViewAccepted)
+                writeFileSync(log, readFileSync(log, "utf8").split("\n")
+                    .filter((line) => !/ck-mc: session \S+: view 1 accepted\b/.test(line)).join("\n"));
         }
         const path = join(root, "thalamus-harness/opencode2-server/data/opencode/opencode.db");
         mkdirSync(join(path, ".."), { recursive: true });
@@ -263,7 +266,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
     });
 
     test("runner cache lifetime is configurable and short reads never count uncached input as reuse", () => {
-        const { root, db } = setup(); db.close();
+        const { root, db } = setup({ initialViewAccepted: false }); db.close();
         const { runner, evidence } = analyze(root, "oc2");
         const snaps = __test.runnerSnapshots(runner, []);
         snaps[1]!.usage!.input = 500_000;
@@ -294,7 +297,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
         }
         expect(__test.analyzeSnapshots(snaps, [], { runnerEvidence: evidence })[3]!.verdict).toBe("UNEXPLAINED (no bytes)");
         expect(parseRunnerDecision(`${at} INFO ck-mc: session other: view 3 accepted (2 edits)`, "ses_runner")).toBeNull();
-        expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: runner refused view 3: invalid`, "ses_runner")).toBeNull();
+        expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: runner refused view 3: invalid`, "ses_runner")).toMatchObject({ kind: "view_refused", version: 3 });
         for (const [suffix, cut] of [["", "unlogged"], [", no cut", "none"], [", cut through msg_99", "msg_99"]]) {
             expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: view 3 accepted (2 edits${suffix})`, "ses_runner")!.detail).toBe(`view=3 edits=2 cut=${cut}`);
         }
@@ -317,7 +320,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
     });
 
     test("keep-warm sends touch the cache but never become steps or byte baselines", () => {
-        const { root, db } = setup(); db.close();
+        const { root, db } = setup({ initialViewAccepted: false }); db.close();
         const dir = runnerDumpDirectory(root, "oc2");
         mkdirSync(dir, { recursive: true });
         writeDump(dir, "2026-09-08T11-46-00-000Z-000099-ses_runner-prewarm-cachekeep", "2026-09-08T11:46:00.000Z", "ses_runner", bodyWithBreakpointMessage("KEEPWARM BODY MUST NOT BE A BASELINE"));
@@ -342,7 +345,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
     });
 
     test("OC2 dump-dir override and Pi default dumps reuse the existing byte-diff path", () => {
-        const { root, db } = setup(); db.close();
+        const { root, db } = setup({ initialViewAccepted: false }); db.close();
         for (const kind of ["oc2", "pi"] as const) {
             const dir = kind === "oc2" ? join(root, "override-dumps") : runnerDumpDirectory(root, kind);
             mkdirSync(dir, { recursive: true });

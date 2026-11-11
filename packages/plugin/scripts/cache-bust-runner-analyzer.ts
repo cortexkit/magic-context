@@ -8,6 +8,7 @@ import {
 } from "./cache-bust-runner-classification";
 import type { RunnerFeedRow, RunnerMeterSource } from "./cache-bust-runner-feed";
 import type { RunnerHeads } from "./cache-bust-runner-monitor";
+import { emptyRunnerViewAttribution, type RunnerViewAttributionState } from "./cache-bust-runner-views";
 
 export interface RunnerFeedAnalysisRow {
     row: RunnerFeedRow;
@@ -39,6 +40,7 @@ export async function analyzeRunnerFeed(
         after = page.next;
     } while (true);
     const previous = new Map<string, RunnerMeterStep>();
+    const views = new Map<string, RunnerViewAttributionState>();
     const chains = new Map<string, { rewrites: RunnerViewRewrite[]; classes: RunnerClassification[] }>();
     const rows: RunnerFeedAnalysisRow[] = [];
     for (const row of [...latest.values()].sort((a, b) => a.occurred_at_ms - b.occurred_at_ms)) {
@@ -63,8 +65,10 @@ export async function analyzeRunnerFeed(
         };
         const prior = previous.get(row.harness);
         previous.set(row.harness, step);
+        const viewAttribution = views.get(row.harness) ?? emptyRunnerViewAttribution();
+        views.set(row.harness, viewAttribution);
         const classification: RunnerClassification | undefined = prior
-            ? classifyRunnerStep(prior, step, heads.get(session)?.decisions ?? [])
+            ? classifyRunnerStep(prior, step, heads.get(session)?.decisions ?? [], { viewAttribution })
             : undefined;
         if (classification?.class === "view") {
             const priorChain = chains.get(row.harness);

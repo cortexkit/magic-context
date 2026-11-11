@@ -225,16 +225,18 @@ test("each runner class uses exact causes and start-to-start windows", () => {
     const previous = { at: at - 20_000, model: "claude", read: 250_000, write: 100_000 };
     const current = { at, model: "claude", read: 47_682, write: 305_629 };
     const baseline = event(previous.at - 1, "view 18 accepted (4 edits, no cut)");
+    const credited = () => ({ viewAttribution: { views: [{ at: baseline.at, version: 18,
+        line: baseline.line!, credited: true }], steps: [] } });
     const floor = event(
         at - 1,
         "signed floor moved to msg_42 (message 41); the runner strips signed reasoning at or before it",
     );
-    expect(classifyRunnerStep(previous, current, [baseline, floor]).class).toBe("plan_changed");
+    expect(classifyRunnerStep(previous, current, [baseline, floor], credited()).class).toBe("plan_changed");
     expect(
         classifyRunnerStep(previous, current, [
             baseline,
             event(at - 1, "view 18 accepted (4 edits, no cut)"),
-        ]).class,
+        ], credited()).class,
     ).toBe("unexplained");
     expect(
         classifyRunnerStep(previous, { ...current, read: 64_239, write: 203_464 }, [
@@ -325,7 +327,7 @@ test("04:02 signed floor rewrite is plan_changed, not VIEW, in the store analyze
     ];
     const evidence = {
         decisions: [
-            event(at - 30_000, "view 18 accepted (2 edits, no cut)"),
+            event(at - 31 * HOUR, "view 18 accepted (2 edits, no cut)"),
             event(at - 1, "signed floor moved to msg_42"),
         ],
         renders: [],

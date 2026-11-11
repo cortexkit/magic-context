@@ -15,9 +15,17 @@ import {
     type RunnerMeterSource,
 } from "./cache-bust-runner-feed";
 import { parseRunnerDecision, type RunnerDecision } from "./cache-bust-runner-log";
+import {
+    emptyRunnerViewAttribution,
+    observeRunnerViewStep,
+    pruneRunnerViews,
+    RUNNER_VIEW_RETENTION_MS,
+    syncRunnerViews,
+    type RunnerViewAttributionState,
+} from "./cache-bust-runner-views";
 
 const HOUR = 3_600_000;
-const RETENTION = 30 * HOUR;
+const RETENTION = RUNNER_VIEW_RETENTION_MS;
 export interface RunnerHeadFacts {
     harness: string;
     decisions: RunnerDecision[];
@@ -102,6 +110,7 @@ export interface RunnerObservation extends RunnerClassification {
 interface HeadState {
     last?: RunnerMeterStep;
     rebuildChain?: RunnerViewRewrite[];
+    viewAttribution?: RunnerViewAttributionState;
     seen: Record<string, { at: number; read: number; write: number; cursor: string }>;
     pending: Record<string, PendingRow>;
     summary: RunnerObservation[];
@@ -199,6 +208,16 @@ const monitorSchema = z.object({
         z.object({
             last: meterStepSchema.optional(),
             rebuildChain: z.array(viewRewriteSchema).optional(),
+            viewAttribution: z.object({
+                views: z.array(z.object({
+                    at: nonnegative,
+                    version: nonnegative,
+                    line: z.string(),
+                    credited: z.boolean(),
+                    withdrawnAt: nonnegative.optional(),
+                })),
+                steps: z.array(nonnegative),
+            }).optional(),
             seen: z
                 .record(
                     z.string(),
@@ -438,8 +457,10 @@ export async function scanRunnerFeed(args: {
         if (previous && step.at <= previous.at) continue;
         head.last = step;
         head.seen[id] = { at: step.at, read: step.read, write: step.write, cursor: row.cursor };
+        const viewAttribution = head.viewAttribution ??= emptyRunnerViewAttribution();
+        observeRunnerViewStep(viewAttribution, facts.decisions, step.at);
         if (!previous) continue;
-        const classified = classifyRunnerStep(previous, step, facts.decisions);
+        const classified = classifyRunnerStep(previous, step, facts.decisions, { viewAttribution });
         const observation: RunnerObservation = {
             ...classified,
             step: row.step_ref,
@@ -560,6 +581,14 @@ export async function scanRunnerFeed(args: {
         state.sent[alert.id] = alert.at;
         await args.emit(alert);
     }
+    // A view can be accepted several scans before the next metered row. Save
+    // the acceptance in this monitor's state now: the module log it was read
+    // from can rotate before that row arrives, and the row's rewrite would then
+    // have no recorded cause.
+    for (const [key, head] of Object.entries(state.heads)) {
+        const facts = heads.get(JSON.parse(key)[1]);
+        if (facts) syncRunnerViews(head.viewAttribution ??= emptyRunnerViewAttribution(), facts.decisions, now);
+    }
     pruneRunnerState(state, now);
     return summary;
 }
@@ -571,6 +600,7 @@ export function pruneRunnerState(state: RunnerMonitorState, now: number): void {
             continue;
         }
         head.summary = head.summary.filter((row) => row.at >= now - RETENTION);
+        if (head.viewAttribution) pruneRunnerViews(head.viewAttribution, now);
         if ((head.rebuildChain?.at(-1)?.at ?? Infinity) < now - RETENTION)
             delete head.rebuildChain;
         for (const [id, seen] of Object.entries(head.seen))
