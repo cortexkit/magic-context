@@ -11,6 +11,10 @@ description = "Magic Context as a compaction provider for llm-runners (ck-mc)."
 context-db-timing = ["rusqlite/hooks"]
 # Opt-in CPU attribution; ordinary builds compile the spans away.
 notice-cost-timing = ["nix/resource", "nix/time"]
+# Serve agent-data moves by default. Off, a release build never serves
+# them, whatever MAGIC_CONTEXT_AGENT_DATA says; moves the journal already
+# records are enforced either way (see `agent_data::switch`).
+agent-data = []
 
 [dependencies]
 cortexkit-log = { workspace = true }
@@ -58,6 +62,8 @@ nix = { version = "0.31.3", features = ["fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# The contract's published vectors, for the participant's own tests.
+cortexkit-role-agent-data = { version = "=0.2.4", features = ["test-vectors"] }
 mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"

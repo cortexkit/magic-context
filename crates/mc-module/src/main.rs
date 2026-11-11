@@ -20,7 +20,7 @@ use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
 use mc_module::storage_paths::{context_db_path, store_path};
 use mc_module::store::Store;
-use mc_module::transport::{manifest, Handler, SubcRunnerClient};
+use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
 
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
@@ -81,10 +81,12 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let store = Store::open(&store_path(&context_path))?;
     // Moves are enforced in every build: the journal is read before any
     // session is served, so a session a move holds is refused from the
-    // first request on.
+    // first request on. Serving new moves is a separate switch.
+    let agent_data = mc_module::agent_data::switch_from_environment();
     let journal = Arc::new(Journal::load(mc_module::agent_data::journal::path(
         &context_path,
     )));
+    journal.log_held(agent_data);
     if let Some(data_dir) = context_path.parent() {
         let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
     }
@@ -95,12 +97,13 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(db),
         Some(store),
         journal,
+        agent_data,
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
     let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
-        manifest(&module_id),
+        manifest_for(&module_id, agent_data),
         Handler::new(module.clone()),
     )
     .await?;

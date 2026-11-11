@@ -94,6 +94,10 @@ struct Inner<C> {
     set_up: Mutex<HashSet<SessionRef>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
+    /// The same work counted per session, for a move's `busy`.
+    runs: Arc<crate::agent_data::busy::Runs>,
+    /// The `agent-data` service, when this build serves moves.
+    agent_data: crate::agent_data::Service,
     /// Each session's project, from its Setup route's scope.
     session_projects: Arc<Mutex<HashMap<SessionRef, crate::route::Project>>>,
     /// Projects with recent activity: folder and the last Setup or notice
@@ -117,6 +121,9 @@ enum Job {
         reply: oneshot::Sender<Addition>,
     },
     Idle(oneshot::Sender<()>),
+    /// A move's `busy`: answers whether a view offered to the runner is
+    /// still unconfirmed. Changes nothing.
+    Busy(oneshot::Sender<bool>),
     /// Run the jobs held while a move held the session, once it no longer
     /// does. Changes nothing by itself.
     Resume,
@@ -124,8 +131,13 @@ enum Job {
     AppCheckpoint {
         flush: Option<oneshot::Sender<()>>,
     },
-    /// Boxed: a summary result is much larger than any other job.
-    SummaryFinished(Box<Result<Option<run::Summarized>, String>>),
+    /// Boxed: a summary result is much larger than any other job. The guard
+    /// keeps the run counted for the session until the worker has handled
+    /// the result.
+    SummaryFinished(
+        Box<Result<Option<run::Summarized>, String>>,
+        crate::agent_data::busy::RunGuard,
+    ),
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -139,7 +151,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .unwrap_or_default()
     }
 
-    /// A module whose move journal lives in memory and holds nothing.
+    /// A module whose move journal lives in memory and holds nothing, and
+    /// that serves no moves.
     pub fn new(
         client: C,
         config: impl Into<Config>,
@@ -152,18 +165,21 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             db,
             store,
             Arc::new(crate::agent_data::Journal::in_memory()),
+            false,
         )
     }
 
     /// A module that serves no session a move in `journal` holds. The
     /// journal is read before this is called, so its gate holds from the
-    /// first request on.
+    /// first request on, whether or not `agent_data` is set. `agent_data`
+    /// says whether this module serves moves ([`crate::agent_data::switch`]).
     pub fn with_journal(
         client: C,
         config: impl Into<Config>,
         db: Option<ContextDb>,
         store: Option<Store>,
         journal: Arc<crate::agent_data::Journal>,
+        agent_data: bool,
     ) -> Self {
         let config = Arc::new(config.into());
         let session_projects = Arc::new(Mutex::new(HashMap::new()));
@@ -195,6 +211,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 workers: Mutex::new(HashMap::new()),
                 set_up: Mutex::new(HashSet::new()),
                 summaries_running: Mutex::new(0),
+                runs: Arc::default(),
+                agent_data: crate::agent_data::Service::new(agent_data),
                 session_projects,
                 active_projects: Mutex::new(HashMap::new()),
             }),
@@ -209,6 +227,23 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// The move journal and its gate.
     pub fn journal(&self) -> &Arc<crate::agent_data::Journal> {
         &self.inner.journal
+    }
+
+    /// Whether this module serves moves: its manifest declares the
+    /// `agent-data` service and its requests are served.
+    pub fn agent_data_enabled(&self) -> bool {
+        self.inner.agent_data.enabled()
+    }
+
+    /// One `agent-data` request from `caller`, the principal the daemon
+    /// stamped on its route, answered with the reply's bytes or the
+    /// contract's refusal.
+    pub async fn agent_data(
+        &self,
+        caller: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, cortexkit_role_agent_data::errors::ErrorBody> {
+        self.inner.agent_data.handle(self, caller, body).await
     }
 
     /// An app read, refused for a session a move holds before the
@@ -672,7 +707,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Ok(()) => job,
                 };
                 let settings: Settings = match (&job, &session) {
-                    (Job::Idle(_) | Job::Resume, _) => Settings::default(),
+                    (Job::Idle(_) | Job::Busy(_) | Job::Resume, _) => Settings::default(),
                     (Job::Setup(route, request, _), _) => route_settings(
                         &inner.config,
                         route,
@@ -693,13 +728,27 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 let settings = &settings;
                 let publish_app = !matches!(
                     &job,
-                    Job::Idle(_) | Job::Resume | Job::PreUser { .. } | Job::AppCheckpoint { .. }
+                    Job::Idle(_)
+                        | Job::Busy(_)
+                        | Job::Resume
+                        | Job::PreUser { .. }
+                        | Job::AppCheckpoint { .. }
                 );
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
                     Job::Resume => continue,
+                    Job::Busy(reply) => {
+                        let unconfirmed = session
+                            .as_ref()
+                            .filter(|session| session.compacting())
+                            .is_some_and(|session| !session.durable().unconfirmed.is_empty());
+                        let _ = reply.send(unconfirmed);
+                        // A question changes nothing, so nothing is saved
+                        // or published after it.
+                        continue;
+                    }
                     Job::AppCheckpoint { flush } => {
                         if let Some(session) = &mut session {
                             session.app_checkpoint_if_due(flush.is_some());
@@ -742,11 +791,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 .notice(inner.client.as_ref(), settings, notice)
                                 .await
                             {
-                                start_summary(&inner, own.clone(), request);
+                                start_summary(&inner, own.clone(), request, &held_key);
                             }
                         }
                     }
-                    Job::SummaryFinished(result) => {
+                    Job::SummaryFinished(result, counted) => {
                         if let Some(session) = &mut session {
                             let continuation = session
                                 .summary_finished(
@@ -759,9 +808,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             if let Some(job) = continuation.and_then(|continuation| {
                                 session.turn_two_job(settings, continuation)
                             }) {
-                                start_turn_two(&inner, job);
+                                start_turn_two(&inner, job, &held_key);
                             }
                         }
+                        // The run stops counting only now that its result is
+                        // handled and any second turn it started counts for
+                        // itself.
+                        drop(counted);
                     }
                     Job::Ride(ride, reply) => {
                         // A held session checks its summaries again first,
@@ -928,6 +981,52 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     }
 }
 
+/// The module as the `agent-data` service's host: its journal, its
+/// sessions' workers and summarizer work, its `context.db`, and the
+/// daemon's catalog and Entorhinal through its client.
+impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host for Module<C> {
+    fn journal(&self) -> &crate::agent_data::Journal {
+        &self.inner.journal
+    }
+
+    fn historian_running(&self, session: &SessionRef) -> bool {
+        self.inner.runs.running(session)
+    }
+
+    async fn probe(&self, session: &SessionRef, budget: Duration) -> crate::agent_data::Probe {
+        use crate::agent_data::Probe;
+        let (reply, answer) = oneshot::channel();
+        match self.send(session, Job::Busy(reply)) {
+            Err(ModuleError::UnknownSession) => return Probe::NoWorker,
+            // A worker that stopped cannot say what it was doing.
+            Err(_) => return Probe::NoAnswer,
+            Ok(()) => {}
+        }
+        match tokio::time::timeout(budget, answer).await {
+            Ok(Ok(view_unconfirmed)) => Probe::Answered { view_unconfirmed },
+            Ok(Err(_)) | Err(_) => Probe::NoAnswer,
+        }
+    }
+
+    fn context_db(&self) -> Option<std::path::PathBuf> {
+        self.inner.db.as_ref().map(|db| db.path.clone())
+    }
+
+    async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
+        self.inner.client.resolve_providers(capability).await
+    }
+
+    async fn entorhinal(
+        &self,
+        body: Vec<u8>,
+    ) -> Option<Result<Vec<u8>, crate::client::EntorhinalRefusal>> {
+        self.inner
+            .client
+            .entorhinal_call(&crate::agent_data::resolve::lookup_identity(), body)
+            .await
+    }
+}
+
 /// What a worker does with a job it takes off its queue while a move holds
 /// its session. Setup and notices were answered when they were queued, so
 /// the runner believes ck-mc holds what they carry: they are held, in order,
@@ -942,7 +1041,7 @@ fn hold(
     key: &SessionRef,
 ) -> Option<Job> {
     match job {
-        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(_) => {
+        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) => {
             if held.is_empty() {
                 tracing::info!(
                     "ck-mc: session {}/{}/{}: holding its Setup and notices while a move holds it ({}); they run if the move is aborted",
@@ -967,7 +1066,7 @@ fn hold(
             let _ = reply.send(Addition::default());
             None
         }
-        Job::Idle(_) | Job::Resume | Job::AppCheckpoint { .. } => Some(job),
+        Job::Idle(_) | Job::Busy(_) | Job::Resume | Job::AppCheckpoint { .. } => Some(job),
     }
 }
 
@@ -1009,18 +1108,20 @@ async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>
 }
 
 /// Run the summarizer beside the session's worker, and hand its result back
-/// as a job.
+/// as a job. The run counts for `session` until its result is handled.
 fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
     worker: mpsc::WeakUnboundedSender<Job>,
     request: run::Request,
+    session: &SessionRef,
 ) {
     *inner.summaries_running.lock().expect("summary count") += 1;
+    let counted = inner.runs.start(session);
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
         let result = run::run(inner.client.as_ref(), inner.db.as_deref(), &request).await;
         if let Some(worker) = worker.upgrade() {
-            let _ = worker.send(Job::SummaryFinished(Box::new(result)));
+            let _ = worker.send(Job::SummaryFinished(Box::new(result), counted));
         }
         *inner.summaries_running.lock().expect("summary count") -= 1;
     });
@@ -1029,15 +1130,17 @@ fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
 /// Run the two-pass historian's second turn beside the session's worker.
 /// It writes only memories and candidate rows, never the session's state,
 /// so nothing comes back to the worker; [`Module::idle`] waits for it as for
-/// a summary.
+/// a summary, and it counts for `session` until it ends.
 fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
     job: crate::summary::two_pass::turn_two::Job,
+    session: &SessionRef,
 ) {
     let Some(db) = inner.db.clone() else {
         return;
     };
     *inner.summaries_running.lock().expect("summary count") += 1;
+    let counted = inner.runs.start(session);
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
         let outcome =
@@ -1046,6 +1149,7 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
             "ck-mc: session {}: turn two: {outcome:?}",
             job.owner.session
         );
+        drop(counted);
         *inner.summaries_running.lock().expect("summary count") -= 1;
     });
 }

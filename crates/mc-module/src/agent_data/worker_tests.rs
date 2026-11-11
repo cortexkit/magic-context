@@ -80,6 +80,7 @@ impl Fixture {
             None,
             Some(store),
             journal.clone(),
+            false,
         );
         let key = SessionRef::new("runner", "mock", "head");
         let route = Route {
@@ -384,4 +385,244 @@ async fn every_surface_refuses_a_held_session_at_admission_and_serves_others() {
         .unwrap_err();
     assert_eq!(refused.code, SESSION_MOVED);
     assert_eq!(refused.detail, Some(json!({"holder": "mac-b"})));
+}
+
+/// Run `body` with the log captured, and return what it logged.
+fn logged(body: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Captured::default();
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    text
+}
+
+/// `busy`'s `historian_running` counts a run for its session until the
+/// worker has handled the run's result. A result the worker holds because
+/// a move holds the session keeps counting, so a move never starts while a
+/// result is still to be written.
+#[tokio::test]
+async fn a_summarizer_run_counts_for_its_session_until_its_result_is_handled() {
+    use crate::agent_data::Host;
+    let f = Fixture::new();
+    assert_eq!(f.setup(), Ok(SetupAnswer::Ready));
+    f.module.idle(&f.key).await.unwrap();
+    assert!(!f.module.historian_running(&f.key));
+    f.hold(MovingState::Frozen);
+    let counted = f.module.inner.runs.start(&f.key);
+    f.module
+        .send(
+            &f.key,
+            Job::SummaryFinished(Box::new(Err("the summarizer stopped".into())), counted),
+        )
+        .unwrap();
+    f.module.idle(&f.key).await.unwrap();
+    assert!(
+        f.module.historian_running(&f.key),
+        "a held result still counts"
+    );
+    assert!(!f
+        .module
+        .historian_running(&SessionRef::new("runner", "mock", "other")));
+    f.let_go();
+    f.module.resume(&f.key);
+    f.module.idle(&f.key).await.unwrap();
+    assert!(
+        !f.module.historian_running(&f.key),
+        "handled, it stops counting"
+    );
+    // A result that never reaches a worker stops counting as well.
+    drop(f.module.inner.runs.start(&f.key));
+    assert!(!f.module.historian_running(&f.key));
+}
+
+/// `busy` asks the session's worker whether a view it offered the runner is
+/// still unconfirmed; the worker answers even while a move holds the
+/// session, and a session with no worker here has nothing running.
+#[tokio::test]
+async fn the_sessions_worker_answers_busy_even_while_a_move_holds_it() {
+    use crate::agent_data::{Host, Probe};
+    use cortexkit_role_compaction::view::AppliedView;
+    let f = Fixture::new();
+    let budget = std::time::Duration::from_secs(5);
+    assert_eq!(f.module.probe(&f.key, budget).await, Probe::NoWorker);
+    // Setup offers the runner a view, which the runner took and has not
+    // confirmed applying yet.
+    assert_eq!(f.setup(), Ok(SetupAnswer::Ready));
+    f.module.idle(&f.key).await.unwrap();
+    let pending = f
+        .module
+        .inner
+        .store
+        .as_ref()
+        .unwrap()
+        .load(&f.key)
+        .unwrap()
+        .unconfirmed;
+    let offered = pending.last().expect("Setup offered a view").view.clone();
+    assert_eq!(
+        f.module.probe(&f.key, budget).await,
+        Probe::Answered {
+            view_unconfirmed: true
+        }
+    );
+    // The runner's next notice reports it applies that view.
+    let mut notice = f.notice(1);
+    notice.applied_view = Some(AppliedView::new(offered.version, offered.checksum.clone()));
+    assert_eq!(f.module.notice(&f.key, notice), Ok(NoticeAnswer::Received));
+    f.module.idle(&f.key).await.unwrap();
+    assert_eq!(
+        f.module.probe(&f.key, budget).await,
+        Probe::Answered {
+            view_unconfirmed: false
+        }
+    );
+    f.hold(MovingState::Frozen);
+    assert_eq!(
+        f.module.probe(&f.key, budget).await,
+        Probe::Answered {
+            view_unconfirmed: false
+        }
+    );
+}
+
+/// Frozen, staged and released sessions written by a build with moves on
+/// are still refused after a restart into a build with them off, and the
+/// startup log names each one with its cut and what has to happen next.
+#[tokio::test]
+async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = crate::agent_data::journal::path(&dir.path().join("context.db"));
+    let frozen = SessionRef::new("runner", "mock", "frozen");
+    let staged = SessionRef::new("runner", "mock", "staged");
+    let released = SessionRef::new("runner", "mock", "released");
+    {
+        let journal = Journal::load(path.clone());
+        journal
+            .change(|contents| {
+                for (key, cut, state) in [
+                    (&frozen, "cut-f", Some(MovingState::Frozen)),
+                    (&staged, "cut-s", Some(MovingState::Staged)),
+                    (&released, "cut-r", None),
+                ] {
+                    contents.cuts.insert(
+                        cut.into(),
+                        Cut {
+                            step: if state.is_some() {
+                                Step::Prepared
+                            } else {
+                                Step::Released
+                            },
+                            ..Cut::default()
+                        },
+                    );
+                    let entry = contents.session_mut(&key.runner, &key.harness, &key.session);
+                    match state {
+                        Some(state) => {
+                            entry.moving = Some(Moving {
+                                cut: cut.into(),
+                                state,
+                            })
+                        }
+                        None => {
+                            entry.released = Some(Released {
+                                cut: cut.into(),
+                                holder: "mac-b".into(),
+                            })
+                        }
+                    }
+                }
+            })
+            .unwrap();
+    }
+    // The restart, with moves off.
+    let journal = Arc::new(Journal::load(path));
+    let log = logged(|| journal.log_held(false));
+    let lines: Vec<&str> = log.lines().collect();
+    for (session, cut, remedy) in [
+        (
+            "runner/mock/frozen",
+            "cut-f",
+            "agent-data moves are off in this build, so a build with them on must abort or finish the move",
+        ),
+        (
+            "runner/mock/staged",
+            "cut-s",
+            "agent-data moves are off in this build, so a build with them on must abort or finish the move",
+        ),
+        (
+            "runner/mock/released",
+            "cut-r",
+            "only a move back to this machine serves it here again",
+        ),
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(session) && line.contains(cut) && line.contains(remedy)),
+            "{session}: {log}"
+        );
+    }
+    let with_moves_on = logged(|| journal.log_held(true));
+    assert!(
+        with_moves_on.contains("until Entorhinal aborts or finishes the move"),
+        "{with_moves_on}"
+    );
+    let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+    let module = Module::with_journal(
+        Client,
+        Settings::default(),
+        None,
+        Some(store),
+        journal,
+        false,
+    );
+    assert!(!module.agent_data_enabled());
+    let setup = |key: &SessionRef| {
+        module.setup(
+            Route {
+                session: key.clone(),
+                project: None,
+                workdir: None,
+                agent_id: None,
+            },
+            SetupRequest::new("head", model(), 100_000, 1000, rules(), vec![], 1),
+        )
+    };
+    for (key, cut) in [(&frozen, "cut-f"), (&staged, "cut-s")] {
+        match setup(key) {
+            Err(ModuleError::Gated(gated)) => {
+                assert_eq!(gated.code, SESSION_MOVING);
+                assert_eq!(gated.detail, Some(json!({"cut": cut})));
+            }
+            other => panic!("{key:?}: expected session_moving, got {other:?}"),
+        }
+    }
+    match setup(&released) {
+        Err(ModuleError::Gated(gated)) => {
+            assert_eq!(gated.code, SESSION_MOVED);
+            assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+        }
+        other => panic!("expected session_moved, got {other:?}"),
+    }
+    // A session no move holds is served.
+    assert_eq!(
+        setup(&SessionRef::new("runner", "mock", "free")),
+        Ok(SetupAnswer::Ready)
+    );
 }
