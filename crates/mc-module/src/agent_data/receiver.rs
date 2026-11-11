@@ -21,7 +21,9 @@
 //! 3. Write an undo image of each session that has rows here.
 //! 4. Record every ref as being installed, in one journal write. From here
 //!    on the install is finished, never undone.
-//! 5. Install each snapshot with the offline mover's write plan.
+//! 5. Install each snapshot with the write plan `ck-mc move-in` uses
+//!    ([`crate::move_batches`]): short transactions that each advance a
+//!    saved cursor.
 //! 6. Per ref, once every install is done: drop what this process keeps for
 //!    the session, clear what `mode3.db` holds for it, and make the facts
 //!    the cut holds reserved in its own publications `retryable`.
@@ -374,7 +376,8 @@ async fn check_local(
 /// its notes' projects, and this store's own links and notes of the
 /// session. The guards are triggers on `notes` and `memories` that the
 /// removed Rust transform mode left for projects it managed, and they abort
-/// a note write for such a project unless a switch nothing sets is on.
+/// a note write for such a project unless `context_privilege_state.enabled`
+/// is 1, which nothing in this release sets.
 fn guarded_project(conn: &Connection, incoming: &Snapshot) -> Result<Option<String>, String> {
     let header = &incoming.header;
     let mut projects: BTreeSet<String> = header.project.iter().cloned().collect();
