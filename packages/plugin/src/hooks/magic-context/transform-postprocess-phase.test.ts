@@ -367,6 +367,25 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
 
+/**
+ * The request served before a history refresh. A pass that consumes newly
+ * published history serves a different history head than this one, and that
+ * change gives the pass rewrite permission (the published-history ride). These
+ * fixtures render history through the legacy single-message head, whose change
+ * is proven against the previously served head.
+ */
+const servedBeforeHistoryRefresh = (): readonly unknown[] => [
+    {
+        info: { role: "user" },
+        parts: [
+            {
+                type: "text",
+                text: "<session-history>\nhistory served before this refresh\n</session-history>",
+            },
+        ],
+    },
+];
+
 describe("issue 643 subagent skeleton retirement", () => {
     function fixture(thinking = false, databasePath = ":memory:") {
         db = new Database(databasePath);
@@ -1143,6 +1162,8 @@ describe("postprocess replay-or-refuse", () => {
                         args.historyRebuiltThisPass = true;
                         args.canConsumeDeferredLate = true;
                         args.deferredHistoryWasPendingAtPassStart = true;
+                        // The drain runs only on a pass with rewrite permission.
+                        args.readLastServedMessages = servedBeforeHistoryRefresh;
                         args.pendingCompartmentInjection = {
                             compartmentEndMessage: 1,
                             compartmentEndMessageId: "u1",
@@ -3606,6 +3627,7 @@ describe("deferred compaction marker advance representation", () => {
                 deferredHistoryWasPendingAtPassStart: true,
                 historyRebuiltThisPass: true,
                 canConsumeDeferredLate: true,
+                readLastServedMessages: servedBeforeHistoryRefresh,
                 deferredHistoryRefreshSessions,
                 pendingCompartmentInjection: {
                     block: "",
@@ -3675,6 +3697,7 @@ describe("deferred compaction marker advance representation", () => {
                 deferredHistoryWasPendingAtPassStart: true,
                 historyRebuiltThisPass: true,
                 canConsumeDeferredLate: true,
+                readLastServedMessages: servedBeforeHistoryRefresh,
                 deferredHistoryRefreshSessions: new Set([sessionId]),
                 pendingCompartmentInjection: {
                     block: "",
@@ -3731,6 +3754,7 @@ describe("deferred compaction marker CAS drain", () => {
                         historyRebuiltThisPass: true,
                         canConsumeDeferredLate: true,
                         deferredHistoryWasPendingAtPassStart: true,
+                        readLastServedMessages: servedBeforeHistoryRefresh,
                         deferredHistoryRefreshSessions,
                         pendingCompartmentInjection: {
                             compartmentEndMessage: 1,
@@ -3758,7 +3782,9 @@ describe("deferred compaction marker CAS drain", () => {
                 expect(passOutcome.degradations).toEqual([]);
                 expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");
                 expect(getPendingCompactionMarkerState(db, sessionId)).toEqual(pending);
-                expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+                // The history this pass consumed was served, so its refresh
+                // signal is released; the pending marker alone carries the retry.
+                expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
                 if (unavailableAt === "preparation") expect(prepare).toHaveBeenCalled();
                 else expect(replacementCalls).toBe(1);
             } finally {
@@ -3766,6 +3792,71 @@ describe("deferred compaction marker CAS drain", () => {
             }
         });
     }
+
+    // A pass held for recent signed thinking has no rewrite permission, so a
+    // pending move waits on it exactly as on any other pass without permission.
+    // This fixture serves history without the cached m[0]/m[1] history head; with
+    // it, a held pass also serves that head frozen, which proves nothing about
+    // the pending boundary, so the drain is not entered at all.
+    it("a pass held for signed thinking leaves a pending marker for a later pass with rewrite permission", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        createOpenCodeDbWithoutMessages("postprocess-held-marker-");
+        const sessionId = "ses-marker-held";
+        const pending = { ordinal: 1, endMessageId: "u1", publishedAt: 1 };
+        setPendingCompactionMarkerState(db, sessionId, pending);
+        const messages = [
+            {
+                info: { id: "fresh", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "fresh rebuilt turn" }],
+            },
+        ] as MessageLike[];
+        let replacementCalls = 0;
+        const logs = spyOn(loggerModule, "sessionLog");
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    fullFeatureMode: false,
+                    passOutcome: createPassOutcome(),
+                    activeThinkingPrefixHold: true,
+                    historyRebuiltThisPass: true,
+                    canConsumeDeferredLate: true,
+                    deferredHistoryWasPendingAtPassStart: true,
+                    // Without the hold, this changed history head would give the
+                    // pass rewrite permission.
+                    readLastServedMessages: servedBeforeHistoryRefresh,
+                    deferredHistoryRefreshSessions: new Set([sessionId]),
+                    pendingCompartmentInjection: {
+                        compartmentEndMessage: 1,
+                        compartmentEndMessageId: "u1",
+                        compartmentCount: 1,
+                        renderedText: "rebuilt history",
+                        skippedVisibleMessages: 0,
+                    } as PostTransformArgs["pendingCompartmentInjection"],
+                    compactionMarkerStrategy: {
+                        applyDeferred: () => {
+                            replacementCalls++;
+                            return { kind: "applied", markerOrdinal: 1 };
+                        },
+                        reconcile: () => {},
+                    } as PostTransformArgs["compactionMarkerStrategy"],
+                }),
+            );
+            const lines = logs.mock.calls.map(([, line]) => String(line));
+            const permission = lines.find((line) => line.startsWith("rewrite permission:"));
+            expect(permission).toContain("allowed=false");
+            expect(permission).toContain("thinking_hold=true");
+            expect(
+                lines.some((line) =>
+                    line.includes("compaction-marker drain: pass has no rewrite permission"),
+                ),
+            ).toBe(true);
+            expect(replacementCalls).toBe(0);
+            expect(getPendingCompactionMarkerState(db, sessionId)).toEqual(pending);
+        } finally {
+            logs.mockRestore();
+        }
+    });
 
     // A stand-in discovery worker. It records each start in `<store>.starts`, then
     // holds until `<store>.release` exists, as a long scan of a large session would,
@@ -3863,6 +3954,7 @@ describe("deferred compaction marker CAS drain", () => {
                     historyRebuiltThisPass: true,
                     canConsumeDeferredLate: true,
                     deferredHistoryWasPendingAtPassStart: true,
+                    readLastServedMessages: servedBeforeHistoryRefresh,
                     deferredHistoryRefreshSessions,
                     pendingCompartmentInjection: {
                         compartmentEndMessage: 1,
@@ -3929,7 +4021,9 @@ describe("deferred compaction marker CAS drain", () => {
                 expect(JSON.stringify(messages)).toContain("fresh rebuilt turn");
                 expect(getPendingCompactionMarkerState(db, f.sessionId)).toEqual(f.pending);
                 expect(getPersistedCompactionMarkerState(db, f.sessionId)).toBeNull();
-                expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(true);
+                // The pending marker alone carries the retry; the served
+                // history's refresh signal is released.
+                expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(false);
                 expect(f.deferralLogs()).toBe(attempt);
             }
             // Both passes were served while discovery was still held.
@@ -3972,7 +4066,9 @@ describe("deferred compaction marker CAS drain", () => {
             }
             expect(getPendingCompactionMarkerState(db, f.sessionId)).toEqual(f.pending);
             expect(getPersistedCompactionMarkerState(db, f.sessionId)).toBeNull();
-            expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(true);
+            // The pending marker alone carries the retry; the served history's
+            // refresh signal is released.
+            expect(f.deferredHistoryRefreshSessions.has(f.sessionId)).toBe(false);
             expect(f.hostRows()).toEqual(before);
             expect(f.deferralLogs()).toBe(2);
         } finally {
@@ -4067,6 +4163,7 @@ describe("deferred compaction marker CAS drain", () => {
                 deferredHistoryWasPendingAtPassStart: true,
                 historyRebuiltThisPass: true,
                 canConsumeDeferredLate: true,
+                readLastServedMessages: servedBeforeHistoryRefresh,
                 deferredHistoryRefreshSessions,
                 pendingCompartmentInjection: {
                     block: "",
@@ -15428,6 +15525,7 @@ describe("marker no-wait review witnesses", () => {
                     historyRebuiltThisPass: true,
                     canConsumeDeferredLate: true,
                     deferredHistoryWasPendingAtPassStart: true,
+                    readLastServedMessages: servedBeforeHistoryRefresh,
                     deferredHistoryRefreshSessions,
                     pendingCompartmentInjection: {
                         compartmentEndMessage: ordinal,
@@ -15600,6 +15698,7 @@ describe("marker no-wait review witnesses", () => {
                     historyRebuiltThisPass: true,
                     canConsumeDeferredLate: true,
                     deferredHistoryWasPendingAtPassStart: true,
+                    readLastServedMessages: servedBeforeHistoryRefresh,
                     deferredHistoryRefreshSessions,
                     pendingCompartmentInjection: {
                         compartmentEndMessage: 1,
@@ -15624,7 +15723,9 @@ describe("marker no-wait review witnesses", () => {
                 replayStorage.getCompactionMarkerPublicationState(db, sessionId).pending
                     ?.summaryMessageId,
             ).toBe(intent.summaryMessageId);
-            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+            // The pending marker alone carries the retry; the served history's
+            // refresh signal is released.
+            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
             expect(hostRows()).toEqual(before);
         } finally {
             logs.mockRestore();

@@ -38,7 +38,6 @@ import { getEmbeddingCoverageStatus } from "../../features/magic-context/project
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     getDatabasePersistenceError,
-    getSessionsWithPendingMarker,
     isDatabasePersisted,
     openDatabase,
 } from "../../features/magic-context/storage";
@@ -91,6 +90,7 @@ import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
 import { createSubcModuleClient } from "./module-client";
 import { createModuleToolBackends } from "./module-tool-backends";
+import { rearmPendingCompactionMarkerSignals } from "./pending-marker-rearm";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
@@ -348,17 +348,24 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.liveSessionState?.deferredMaterializationSessions ?? new Set<string>();
 
     // If the process exits after saving pending_compaction_marker_state, reload
-    // both deferred signal sets from that saved state. The next transform pass can
-    // then apply the pending marker exactly like the live publish path would.
+    // the deferred signal sets from that saved state, so a summary published
+    // just before the exit still reaches the history head. A session whose
+    // cached head already renders it gets neither signal: the transform moves
+    // the pending marker on its next pass with rewrite permission.
     try {
-        const sessionsWithPending = getSessionsWithPendingMarker(db);
-        if (sessionsWithPending.length > 0) {
-            for (const sid of sessionsWithPending) {
-                deferredHistoryRefreshSessions.add(sid);
-                deferredMaterializationSessions.add(sid);
-            }
+        const { historyRearmed, markerOnly } = rearmPendingCompactionMarkerSignals(
+            db,
+            deferredHistoryRefreshSessions,
+            deferredMaterializationSessions,
+        );
+        if (historyRearmed > 0) {
             log(
-                `[magic-context] rehydrated ${sessionsWithPending.length} session(s) with pending compaction-marker drain at hook init`,
+                `[magic-context] rehydrated ${historyRearmed} session(s) with pending compaction-marker drain at hook init`,
+            );
+        }
+        if (markerOnly > 0) {
+            log(
+                `[magic-context] ${markerOnly} session(s) with a pending compaction-marker move already serve its history; the move waits for a pass with rewrite permission`,
             );
         }
     } catch (error) {

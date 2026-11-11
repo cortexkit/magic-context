@@ -4317,17 +4317,41 @@ export async function runPostTransformPhase(
     // the same summary representation that this pass will emit.
     let suppressV12HistoryDrain = false;
     let persistedCompactionMarkerState = replaySnapshot?.compactionMarker ?? null;
+    // Whether the marker drain changed which summary row this pass serves right
+    // after the history head. reconcileMarkerRepresentation builds that row from
+    // the persisted marker, so a move replaces it with a row under a new id: a
+    // prefix edit in its own right. A move can land on a pass that rebuilds
+    // nothing else (a pass forced by high context usage that finds nothing else
+    // to change, for one), so the edit is counted on its own rather than through
+    // the history refresh.
+    let markerDrainChangedServedRow = false;
     // The drain never waits for summary discovery. Start it, without waiting, on
     // every pass while a target is pending, so it has usually finished by the
-    // pass that consumes the rebuilt history; Rust mode does the same.
+    // next pass with rewrite permission; Rust mode does the same.
     if (
         replaySnapshot?.pendingCompactionMarker &&
         (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy).applyDeferred ===
             applyDeferredCompactionMarker
     )
         startCompactionMarkerCandidatePreparation(args.sessionId);
-    if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
-        const pending = replaySnapshot?.pendingCompactionMarker ?? null;
+    // A pending marker moves on the first pass that has rewrite permission for
+    // any reason and proves, from what it serves, that the history head covers
+    // the pending boundary and that its prefix trim went through it. Both proofs
+    // read persisted state (the injection boundary, and the trim boundary saved
+    // with the served m[0]/m[1] pair), so the pass need not rebuild history
+    // itself. A postponed move therefore waits for the next pass that rewrites
+    // anyway and never keeps the history refresh signal alive for its own sake:
+    // that signal makes every later execute pass count as a history rebuild.
+    // A pass that consumed history without permission still logs why the move
+    // waits. A head served from a contention fallback proves nothing.
+    const servedHeadIsCurrent =
+        !m0M1Enabled ||
+        (deliveredPrefix?.injected === true &&
+            !deliveredPrefix.materializationContentionRetryExhausted);
+    if (isCacheBustingPass || historyWasConsumedThisPass) {
+        const pending = servedHeadIsCurrent
+            ? (replaySnapshot?.pendingCompactionMarker ?? null)
+            : null;
         if (pending) {
             const pendingCovered = pendingMarkerCoveredByConsumedBoundary(
                 pending,
@@ -4374,6 +4398,18 @@ export async function runPostTransformPhase(
                     args.sessionId,
                     `compaction-marker drain: refusing ordinal ${pending.ordinal} because prefix trim through ${args.pendingCompartmentInjection?.compartmentEndMessageId ?? "<none>"} was not proven; preserving deferred history refresh signal`,
                 );
+            } else if (!isCacheBustingPass) {
+                // Moving the marker changes the summary row served right after
+                // the history head (reconcileMarkerRepresentation rebuilds it from
+                // the persisted marker), which is a change to the cached prefix
+                // like any other. This pass consumed history without rewrite
+                // permission, so it keeps its prefix and the move waits for the
+                // next pass that has permission. The history itself was served,
+                // so its refresh signal is released as on any consuming pass.
+                sessionLog(
+                    args.sessionId,
+                    `compaction-marker drain: pass has no rewrite permission; ordinal ${pending.ordinal} waits for a pass with rewrite permission`,
+                );
             } else {
                 const tMarkerDrain = performance.now();
                 const strategy = args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy;
@@ -4401,12 +4437,11 @@ export async function runPostTransformPhase(
                     case "deferred":
                         // Summary discovery may still be running, observe a new summary
                         // or fail to load its worker. Only marker replacement waits: serve
-                        // the rebuilt request now and retry replacement on a later history
-                        // rebuild.
-                        suppressV12HistoryDrain = true;
+                        // the rebuilt request now; the next pass with rewrite permission
+                        // finds the pending marker and retries.
                         sessionLog(
                             args.sessionId,
-                            "compaction-marker drain: candidate preparation deferred; preserving deferred history refresh signal",
+                            "compaction-marker drain: candidate preparation deferred; pending marker kept for the next pass with rewrite permission",
                         );
                         break;
                     case "applied":
@@ -4418,6 +4453,13 @@ export async function runPostTransformPhase(
                             args.db,
                             args.sessionId,
                         );
+                        // An already-current or stale-skip outcome writes nothing,
+                        // but a concurrent writer may have moved the marker since
+                        // this pass read it; either way only a different summary
+                        // id changes the served row.
+                        markerDrainChangedServedRow =
+                            (persistedCompactionMarkerState?.summaryMessageId ?? null) !==
+                            (replaySnapshot?.compactionMarker?.summaryMessageId ?? null);
                         if (
                             clearPendingCompactionMarkerAfterSuccessfulDrain({
                                 db: args.db,
@@ -4430,6 +4472,22 @@ export async function runPostTransformPhase(
                         }
                         break;
                     case "retryable-failure":
+                        if (outcome.cut === "definitely-no-cut") {
+                            // The host store's marker rows are exactly as before, so the
+                            // host keeps loading the same messages and this pass's own
+                            // trim removes them again on every later pass. Serve the
+                            // rebuilt request and retry the move on the next pass with
+                            // rewrite permission, as for a deferral. Refusing would replay
+                            // an older request while this pass's m[1] refresh, drops and
+                            // trim are already saved, and the next pass serves those: two
+                            // rewrites of the cached prefix instead of one.
+                            sessionLog(
+                                args.sessionId,
+                                `compaction-marker drain: marker unchanged (reason=${isSqliteLockContentionError(outcome.error) ? "busy-writer" : "left-unchanged"}); serving rebuilt history and keeping the pending marker for the next pass with rewrite permission:`,
+                                outcome.error,
+                            );
+                            break;
+                        }
                         failPass("compaction-marker-drain-failure", outcome.error);
                         sessionLog(
                             args.sessionId,
@@ -4747,7 +4805,8 @@ export async function runPostTransformPhase(
         convertedToolSkeletonsDidMutate ||
         m0RematerializedThisPass ||
         (m0M1InjectedThisPass && historyWasConsumedThisPass) ||
-        historyWasConsumedThisPass;
+        historyWasConsumedThisPass ||
+        markerDrainChangedServedRow;
     // The proactive thinking strip rides the shared bust permission only, so a
     // defer pass never originates a strip.
     const proactiveThinkingStripPermitted = isCacheBustingPass && !activeThinkingPrefixHold;
@@ -5132,6 +5191,7 @@ export async function runPostTransformPhase(
         m0RematerializedThisPass ||
         (m0M1InjectedThisPass && historyWasConsumedThisPass) ||
         historyWasConsumedThisPass ||
+        markerDrainChangedServedRow ||
         pendingOpsDidMutate ||
         heuristicOrReasoningEditBesidesTrim ||
         emergency ||

@@ -3567,6 +3567,34 @@ export function getSessionsWithPendingMarker(db: Database): string[] {
     return rows.map((r) => r.session_id);
 }
 
+/**
+ * Whether the cached m[0]/m[1] pair already renders the history that a
+ * session's pending compaction marker summarizes. The pair records the last
+ * compartment end it rendered (`cached_m0_last_baseline_end_message_id`); the
+ * history is covered when that compartment ends at or after the pending
+ * marker's boundary. The next pass serves this cached pair, so a covered
+ * history needs no further refresh: only the marker move is outstanding.
+ */
+export function cachedHeadCoversPendingCompactionMarker(db: Database, sessionId: string): boolean {
+    const pending = getPendingCompactionMarkerState(db, sessionId);
+    if (!pending) return false;
+    const head = db
+        .prepare(
+            `SELECT length(cached_m0_bytes) > 0 AND length(cached_m1_bytes) > 0 AS complete,
+                    cached_m0_last_baseline_end_message_id AS baseline
+               FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as { complete: number | null; baseline: string | null } | null;
+    if (head?.complete !== 1 || !head.baseline) return false;
+    if (head.baseline === pending.endMessageId) return true;
+    const rendered = db
+        .prepare(
+            "SELECT MAX(end_message) AS endMessage FROM compartments WHERE session_id = ? AND end_message_id = ?",
+        )
+        .get(sessionId, head.baseline) as { endMessage: number | null } | null;
+    return typeof rendered?.endMessage === "number" && rendered.endMessage >= pending.ordinal;
+}
+
 export function setSessionWorkMetrics(
     db: Database,
     sessionId: string,

@@ -72,7 +72,8 @@ export type MarkerUpdateOutcome =
           /**
            * Omitted means the host marker's commit status is unknown. Only a confirmed
            * unchanged marker keeps the previous last-known-good request (LKG)
-           * eligible for replay.
+           * eligible for replay, and lets a rebuilding pass serve its own request
+           * and retry the move later instead of being refused.
            */
           cut?: "definitely-no-cut" | "uncertain";
       };
