@@ -24,14 +24,19 @@
 //! journal records.
 
 pub mod busy;
+pub mod door;
 pub mod gate;
 pub mod install;
 pub mod journal;
+pub mod midstate;
 pub mod moved;
 pub mod resolve;
 pub mod service;
 pub mod snapshot;
+pub mod source;
 
+#[cfg(test)]
+mod midstate_tests;
 #[cfg(test)]
 mod moved_tests;
 #[cfg(test)]
@@ -43,7 +48,7 @@ mod tests;
 
 pub use gate::{Gate, Gated, SESSION_MOVED, SESSION_MOVING};
 pub use journal::Journal;
-pub use service::{Host, Probe, Service};
+pub use service::{Host, Park, Parked, Probe, Service};
 
 use std::path::Path;
 

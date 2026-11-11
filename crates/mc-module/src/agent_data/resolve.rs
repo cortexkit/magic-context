@@ -117,13 +117,16 @@ pub(crate) async fn session<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Er
     let session = SessionRef::new(runner, harness, id);
     if let Err(gated) = host.journal().gate().check(&session) {
         if gated.code == SESSION_MOVED {
-            return Err(unknown_ref(r, "the session was moved to another machine"));
+            return Err(unknown_ref(
+                r,
+                &format!("session_moved: {}", gated.message.trim_end_matches('.')),
+            ));
         }
     }
     Ok(session)
 }
 
-fn unknown_ref(r: &Ref, why: &str) -> ErrorBody {
+pub(crate) fn unknown_ref(r: &Ref, why: &str) -> ErrorBody {
     ErrorBody::with_typed_detail(
         Detail::UnknownRef(UnknownRefDetail::new(&r.ref_kind, &r.r#ref)),
         format!(

@@ -127,6 +127,18 @@ enum Job {
     /// Run the jobs held while a move held the session, once it no longer
     /// does. Changes nothing by itself.
     Resume,
+    /// A move's `prepare`: report whether a view offered to the runner is
+    /// still unconfirmed, then take no further job until `until` resolves,
+    /// so nothing of the session runs while the move freezes and reads it.
+    Park {
+        at: oneshot::Sender<bool>,
+        until: oneshot::Receiver<()>,
+    },
+    /// The session was released to another machine by this cut: drop the
+    /// jobs held during the move, with a log line, and stop the worker.
+    Discard {
+        cut: String,
+    },
     /// A timer queues a checkpoint job without owning the session or writing to storage.
     AppCheckpoint {
         flush: Option<oneshot::Sender<()>>,
@@ -707,7 +719,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Ok(()) => job,
                 };
                 let settings: Settings = match (&job, &session) {
-                    (Job::Idle(_) | Job::Busy(_) | Job::Resume, _) => Settings::default(),
+                    (
+                        Job::Idle(_)
+                        | Job::Busy(_)
+                        | Job::Resume
+                        | Job::Park { .. }
+                        | Job::Discard { .. },
+                        _,
+                    ) => Settings::default(),
                     (Job::Setup(route, request, _), _) => route_settings(
                         &inner.config,
                         route,
@@ -731,6 +750,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::Idle(_)
                         | Job::Busy(_)
                         | Job::Resume
+                        | Job::Park { .. }
+                        | Job::Discard { .. }
                         | Job::PreUser { .. }
                         | Job::AppCheckpoint { .. }
                 );
@@ -740,14 +761,28 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 match job {
                     Job::Resume => continue,
                     Job::Busy(reply) => {
-                        let unconfirmed = session
-                            .as_ref()
-                            .filter(|session| session.compacting())
-                            .is_some_and(|session| !session.durable().unconfirmed.is_empty());
-                        let _ = reply.send(unconfirmed);
+                        let _ = reply.send(view_unconfirmed(session.as_ref()));
                         // A question changes nothing, so nothing is saved
                         // or published after it.
                         continue;
+                    }
+                    Job::Park { at, until } => {
+                        // Wait only for a `prepare` still waiting for us; one
+                        // that gave up dropped its end of `until` too.
+                        if at.send(view_unconfirmed(session.as_ref())).is_ok() {
+                            let _ = until.await;
+                        }
+                        continue;
+                    }
+                    Job::Discard { cut } => {
+                        tracing::info!(
+                            "ck-mc: session {}/{}/{} was released to another machine by agent-data cut {cut}; discarding the {} Setup, notice and summary jobs held during the move",
+                            held_key.runner,
+                            held_key.harness,
+                            held_key.session,
+                            held.len()
+                        );
+                        break;
                     }
                     Job::AppCheckpoint { flush } => {
                         if let Some(session) = &mut session {
@@ -1025,6 +1060,65 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
             .entorhinal_call(&crate::agent_data::resolve::lookup_identity(), body)
             .await
     }
+
+    async fn park(&self, session: &SessionRef, budget: Duration) -> crate::agent_data::Park {
+        use crate::agent_data::{Park, Parked};
+        let (at, reached) = oneshot::channel();
+        let (release, until) = oneshot::channel();
+        match self.send(session, Job::Park { at, until }) {
+            Err(ModuleError::UnknownSession) => return Park::NoWorker,
+            Err(_) => return Park::NoAnswer,
+            Ok(()) => {}
+        }
+        match tokio::time::timeout(budget, reached).await {
+            Ok(Ok(view_unconfirmed)) => Park::Parked(Parked {
+                view_unconfirmed,
+                release,
+            }),
+            Ok(Err(_)) | Err(_) => Park::NoAnswer,
+        }
+    }
+
+    fn resume(&self, session: &SessionRef) {
+        let _ = self.send(session, Job::Resume);
+    }
+
+    fn forget(&self, session: &SessionRef, cut: &str) {
+        let worker = self
+            .inner
+            .workers
+            .lock()
+            .expect("worker map")
+            .remove(session);
+        if let Some(worker) = worker {
+            let _ = worker.send(Job::Discard {
+                cut: cut.to_owned(),
+            });
+        }
+        self.inner
+            .set_up
+            .lock()
+            .expect("setup sessions")
+            .remove(session);
+        self.inner
+            .session_projects
+            .lock()
+            .expect("session projects")
+            .remove(session);
+    }
+
+    async fn door(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value, crate::client::DoorRefusal> {
+        self.inner.client.door_call(method, params, deadline).await
+    }
+
+    fn stream(&self) -> String {
+        self.inner.client.door_stream()
+    }
 }
 
 /// What a worker does with a job it takes off its queue while a move holds
@@ -1066,8 +1160,20 @@ fn hold(
             let _ = reply.send(Addition::default());
             None
         }
-        Job::Idle(_) | Job::Busy(_) | Job::Resume | Job::AppCheckpoint { .. } => Some(job),
+        Job::Idle(_)
+        | Job::Busy(_)
+        | Job::Resume
+        | Job::Park { .. }
+        | Job::Discard { .. }
+        | Job::AppCheckpoint { .. } => Some(job),
     }
+}
+
+/// Whether a view the session offered the runner is still unconfirmed.
+fn view_unconfirmed(session: Option<&Session>) -> bool {
+    session
+        .filter(|session| session.compacting())
+        .is_some_and(|session| !session.durable().unconfirmed.is_empty())
 }
 
 /// Give `session` its memory context: the one stored for it,
@@ -1179,6 +1285,10 @@ mod app_snapshot_tests;
 #[cfg(test)]
 #[path = "agent_data/worker_tests.rs"]
 mod agent_data_worker_tests;
+
+#[cfg(test)]
+#[path = "agent_data/source_tests.rs"]
+mod agent_data_source_tests;
 
 #[cfg(test)]
 mod config_tests {
