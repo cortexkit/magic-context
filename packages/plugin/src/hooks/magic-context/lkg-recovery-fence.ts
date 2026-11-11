@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { lstatSync, readFileSync, rmdirSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getMagicContextStorageDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
@@ -123,6 +123,7 @@ function publishRecord(record: Omit<Fence, "checksum">): void {
             lkgRecoveryFencePath(record.sessionId),
             JSON.stringify({ ...record, checksum: hash(JSON.stringify(payload(record))) }),
             () => observer?.("temp-synced"),
+            `${lkgRecoveryFencePath(record.sessionId)}.tmp`,
         );
         if (record.state === "dirty") observer?.("dirty");
         remember(record.sessionId, {
@@ -141,6 +142,8 @@ function publishRecord(record: Omit<Fence, "checksum">): void {
             writeStorageFileDurableAtomicSync(
                 lkgRecoveryFencePath(record.sessionId),
                 JSON.stringify({ ...dirty, checksum: hash(JSON.stringify(payload(dirty))) }),
+                undefined,
+                `${lkgRecoveryFencePath(record.sessionId)}.tmp`,
             );
         }
         remember(record.sessionId, { state: "invalid", record: null });
@@ -201,10 +204,8 @@ function locked<T>(sessionId: string, work: () => T): T {
     ioObserver?.("mutex");
     return withStorageFileMutex(`${lkgRecoveryFencePath(sessionId)}.locks`, () => {
         const path = lkgRecoveryFencePath(sessionId);
-        for (const name of readdirSync(dirname(path))) {
-            if (name.startsWith(`${basename(path)}.`) && name.endsWith(".tmp"))
-                rmSync(join(dirname(path), name), { force: true });
-        }
+        // The mutex prevents concurrent use of the temp name. A folder listing is not necessary.
+        rmSync(`${path}.tmp`, { force: true });
         return work();
     });
 }
