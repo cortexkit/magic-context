@@ -58,6 +58,12 @@ pub struct Durable {
     /// are ignored until the next Setup.
     #[serde(default)]
     pub prompt_views_untrusted: bool,
+    /// The prompt size the newest view was built on, so a restart doesn't
+    /// take a repeat of it, from before any request under that view was
+    /// measured, for new pressure. Left out of the saved text while there is
+    /// none, so other sessions' rows don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_reading: Option<crate::session::SpentReading>,
     /// Keep notice counts across restarts; rides never supply them.
     #[serde(default, skip_serializing_if = "crate::prompt_notes::Notes::is_empty")]
     pub notes: crate::prompt_notes::Notes,

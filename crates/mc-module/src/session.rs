@@ -133,6 +133,9 @@ pub struct Session {
     /// such reading would switch off every pressure decision for good, so
     /// until the next Setup readings are judged as if they named no view.
     prompt_views_untrusted: bool,
+    /// The prompt size the newest view was built on, against which a reading
+    /// that names no view is judged (see the `spent_reading` module).
+    spent_reading: Option<SpentReading>,
     /// Parts the model asked to drop, held for the next view.
     queued: BTreeSet<(String, String)>,
     /// The age sweep's bookmark from the previous pass with permission to
@@ -353,6 +356,10 @@ struct Before {
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    /// Left out of the saved text while there is none, so rows saved before
+    /// it existed and rows of runners that send no reading don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spent_reading: Option<SpentReading>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -576,6 +583,7 @@ impl Session {
             reading_stale: false,
             ignored_reading: None,
             prompt_views_untrusted: false,
+            spent_reading: None,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
@@ -740,6 +748,7 @@ impl Session {
             reading_stale: self.reading_stale,
             ignored_reading: self.ignored_reading,
             prompt_views_untrusted: self.prompt_views_untrusted,
+            spent_reading: self.spent_reading,
             notes: self.notes.clone(),
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
@@ -785,6 +794,7 @@ impl Session {
         self.reading_stale = durable.reading_stale;
         self.ignored_reading = durable.ignored_reading;
         self.prompt_views_untrusted = durable.prompt_views_untrusted;
+        self.spent_reading = durable.spent_reading;
         self.notes = durable.notes;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
@@ -990,6 +1000,7 @@ impl Session {
         if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
         }
+        self.settle_spent_reading(request.applied_view.as_ref());
         if let Some(view) = &self.latest {
             self.view_validation.prime(self.index.entries(), view);
         }
@@ -1312,8 +1323,11 @@ impl Session {
     /// a view while a request is in flight, and that request's size arrives
     /// after the new view went out. Acting on it would build a second view
     /// for pressure the first one already relieved, and rewrite the cache
-    /// again for nothing. A reading with no view version is used as it is:
-    /// the runner could not tie it to a request.
+    /// again for nothing. A reading with no view version is judged only
+    /// against the prompt size the newest view was built on
+    /// ([`Session::judge_spent_reading`]): the runner could not tie it to a
+    /// request, and a repeat of that size is the measurement the view was
+    /// already built from.
     ///
     /// A reading older than a view the runner accepted from ck-mc but does
     /// not apply yet is stale for the same reason ([`Session::newest_accepted`]):
@@ -1348,7 +1362,11 @@ impl Session {
         applied_view: Option<&AppliedView>,
     ) {
         self.reading_stale = false;
-        let (Some(tokens), Some(view)) = reading_of(&self.conditions) else {
+        let (Some(tokens), view) = reading_of(&self.conditions) else {
+            return;
+        };
+        let Some(view) = view else {
+            self.judge_spent_reading(previous, tokens, applied_view);
             return;
         };
         if self.prompt_views_untrusted {
@@ -4222,6 +4240,7 @@ impl Session {
             notice_reclaim_bookmark: Some(self.notice_reclaim_bookmark),
             summary_unshown: self.summary_unshown,
             pending_keep: self.next_keep.take(),
+            spent_reading: self.spent_reading,
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -4248,6 +4267,7 @@ impl Session {
             self.caveman = next;
         }
         self.version = self.version.max(view.version);
+        self.spend_reading(view.version);
         self.apply_cut(&view);
         self.latest = Some(view);
     }
@@ -4444,6 +4464,7 @@ impl Session {
         if before.pending_keep.is_some() {
             self.pending_keep = before.pending_keep;
         }
+        self.spent_reading = before.spent_reading;
         self.baseline = before.baseline;
         self.fold_due = before.fold_due;
         self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
@@ -4510,6 +4531,7 @@ impl Session {
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
         match client.applied_view(&self.key).await {
             Ok(answer) => {
+                self.keep_spent_reading_for(&answer);
                 // The runner's own answer is what it applies now. It replaces
                 // the newest version rather than raising it: a runner whose
                 // state went back (a restore) measures under the view it
@@ -5156,6 +5178,10 @@ mod retired_history_tests {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[path = "spent_reading.rs"]
+mod spent_reading;
+pub use spent_reading::SpentReading;
 
 #[path = "app_read/projection.rs"]
 mod app_projection;
