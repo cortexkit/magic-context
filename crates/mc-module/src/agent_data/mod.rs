@@ -4,8 +4,9 @@
 //! Entorhinal moves an agent by asking every module that holds data for it
 //! to stop that data at a cut, ship it through Engram's session door, and
 //! bring it up on the other machine. For ck-mc a move covers, per runner
-//! session, its summaries, session notes, waiting second-turn facts and
-//! project link in `context.db`.
+//! session, its summaries, session notes, project link, and the facts its
+//! summarizer extracted that still wait for the summarizer's second turn to
+//! reconcile them with project memory, all in `context.db`.
 //!
 //! While a session moves, nothing may change or read it half-way. The
 //! [`journal`] records every move durably, and its [`gate`] refuses the
