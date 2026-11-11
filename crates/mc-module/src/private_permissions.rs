@@ -50,7 +50,10 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         };
         let result = file.write_all(bytes).and_then(|()| file.sync_all());
         drop(file);
+        #[cfg(not(windows))]
         let result = result.and_then(|()| fs::rename(&temporary, path));
+        #[cfg(windows)]
+        let result = result.and_then(|()| rename_write_through(&temporary, path));
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
@@ -60,6 +63,26 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         io::ErrorKind::AlreadyExists,
         "could not allocate a private temporary file",
     ))
+}
+
+#[cfg(windows)]
+// The rename must be on disk before the caller acts on the new file.
+const ATOMIC_REPLACE_FLAGS: u32 = windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+
+#[cfg(windows)]
+fn rename_write_through(temporary: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both buffers are NUL-terminated and live for the whole Win32 call.
+    if unsafe { MoveFileExW(temporary.as_ptr(), path.as_ptr(), ATOMIC_REPLACE_FLAGS) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Tighten an existing log tree to 0700 directories and 0600 files on Unix.
@@ -107,11 +130,40 @@ fn visit(path: &Path, report: &mut TightenReport) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    #[test]
+    fn atomic_write_replaces_unicode_path_without_leaving_temporary_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("日誌-café-🦀.json");
+        fs::write(&path, b"old bytes that are longer than the replacement").unwrap();
+
+        write_file_atomic(&path, b"new bytes").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new bytes");
+        let entries: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries, vec![path]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_flags_require_write_through_and_replace_existing() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        assert_ne!(ATOMIC_REPLACE_FLAGS & MOVEFILE_WRITE_THROUGH, 0);
+        assert_ne!(ATOMIC_REPLACE_FLAGS & MOVEFILE_REPLACE_EXISTING, 0);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn logs_are_tightened_without_following_symlinks() {
         let root = tempfile::tempdir().unwrap();

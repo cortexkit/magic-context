@@ -60,6 +60,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.

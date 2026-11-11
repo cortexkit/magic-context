@@ -357,8 +357,8 @@ fn write(path: &Path, contents: &Contents) -> io::Result<()> {
     sync_folder(path)
 }
 
-/// Make the rename itself durable. Windows has no handle to sync a folder
-/// through; its rename is already durable once it returns.
+/// Make the rename itself durable. Windows has no folder handle to sync here;
+/// the atomic write asks for a write-through rename there instead.
 fn sync_folder(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(folder) = path.parent() {
