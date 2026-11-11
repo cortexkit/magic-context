@@ -61,7 +61,7 @@
  *   --limit <N>      only the last N requests in range
  *   --cache-ttl <d>  override prior same-route body's stated breakpoint TTL
  *                    (fallback: 1h for runners, 5m for plugin-host dumps)
- *   --source <kind> auto (default), dumps (OC1/Broca), oc2, or pi
+ *   --source <kind> auto (default), dumps (OC1/Broca), oc2, pi, or astrocyte (24h feed)
  *   --dump-dir <p>  override the runner's dump directory
  *   --runner-data-dir <p> override the CortexKit data root (for offline fixtures)
  *   --show-diff      print before/after snippet of the first-diverging segment
@@ -100,10 +100,16 @@ import { DumpScanIndex, type DumpScanMetrics, listDumpFiles } from "./cache-bust
 import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
+import { classifyRunnerStep, type RunnerClassification } from "./cache-bust-runner-classification";
+import { analyzeRunnerFeed, printRunnerFeedAnalysis } from "./cache-bust-runner-analyzer";
+import { AstrocyteRunnerMeterSource } from "./cache-bust-runner-feed";
+import { loadRunnerHeads } from "./cache-bust-runner-monitor";
+import { SubcClient } from "@cortexkit/subc-client";
+import { getDataDir } from "../src/shared/data-path";
 
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
-type MeterVerdict = ByteVerdict | "SHORT" | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)";
+type MeterVerdict = ByteVerdict | "SHORT" | "LATENCY" | "UNMETERED" | "EXPIRED" | "VIEW" | "UNEXPLAINED (no bytes)" | "PLAN_CHANGED" | "PROVIDER_FORGOT" | "SCOPE_CHANGED";
 type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED" | "N/A";
 
 interface Segment extends NormalizedMessage {
@@ -130,7 +136,8 @@ interface Args {
     allRows: boolean;
     help: boolean;
     mcLogPath?: string;
-    source: "auto" | "dumps" | "oc2" | "pi";
+    source: "auto" | "dumps" | "oc2" | "pi" | "astrocyte";
+    connectionFile?: string;
     runnerDataDir: string;
     dumpDir?: string;
     excludeKeepWarm?: boolean;
@@ -237,6 +244,7 @@ export interface AnalysisRow {
     divergenceClass?: CacheBustDivergenceClass;
     decision?: CacheBustDecisionAttribution;
     runnerDecisions?: RunnerDecision[];
+    runnerClassification?: RunnerClassification;
     renderedView?: number | null;
     viewJoin?: "time" | "unmatched";
     comparisonNote?: string;
@@ -301,6 +309,7 @@ function parseArgs(argv: string[]): Args {
         "--source",
         "--runner-data-dir",
         "--dump-dir",
+        "--connection-file",
     ]);
     let positionalSession = "";
     for (let index = 0; index < args.length; index += 1) {
@@ -341,7 +350,7 @@ function parseArgs(argv: string[]): Args {
         throw new Error(`Invalid --meter ${meterRaw}; expected anthropic, openai, or gemini`);
     }
     const source = getOpt("--source") ?? (singleDir ? "dumps" : "auto");
-    if (!["auto", "dumps", "oc2", "pi"].includes(source)) throw new Error(`Invalid --source ${source}`);
+    if (!["auto", "dumps", "oc2", "pi", "astrocyte"].includes(source)) throw new Error(`Invalid --source ${source}`);
     return {
         sessionPrefix: getOpt("--session") ?? positionalSession,
         mcLogPath: getOpt("--mc-log"),
@@ -358,6 +367,7 @@ function parseArgs(argv: string[]): Args {
         source: source as Args["source"],
         runnerDataDir: getOpt("--runner-data-dir") ?? DEFAULT_RUNNER_DATA_DIR,
         dumpDir: getOpt("--dump-dir"),
+        connectionFile: getOpt("--connection-file"),
     };
 }
 
@@ -1163,7 +1173,7 @@ export function analyzeOpenCodeCacheBustSession(
         const timestampMs = Date.parse(row.current.createdAt);
             if (!Number.isFinite(timestampMs) || !inWindow(row.current)) return [];
         // This sentinel API reads dump pairs only, not runner meter-only rows.
-        if (row.verdict === "EXPIRED" || row.verdict === "VIEW" || row.verdict === "UNEXPLAINED (no bytes)") {
+        if (row.verdict === "PLAN_CHANGED" || row.verdict === "PROVIDER_FORGOT" || row.verdict === "SCOPE_CHANGED" || row.verdict === "EXPIRED" || row.verdict === "VIEW" || row.verdict === "UNEXPLAINED (no bytes)") {
             throw new Error("Runner-only verdict in OpenCode dump analysis");
         }
         const segment =
@@ -1432,6 +1442,7 @@ export function analyzeSnapshots(
             ? runnerDecisionsBetween(options.runnerEvidence, previousAt, joinedAt, render?.view)
             : undefined;
         const requestFields = {
+            runnerClassification: undefined as RunnerClassification | undefined,
             ...(current.runnerRequest ? {
                 runnerDecisions: runnerDecisions?.all, renderedView: render?.view,
                 viewJoin: render ? "time" as const : "unmatched" as const,
@@ -1515,7 +1526,8 @@ export function analyzeSnapshots(
         const rebust: boolean =
             previousShortRead && current.usage.cacheRead <= previous.usage.cacheRead;
         const noBytes = current.bytesMissing || previous.bytesMissing;
-        const shortRead: boolean = rebust || comparableRead < meterFloor;
+        const shortRead: boolean = current.runnerRequest && current.usage.provider === "anthropic"
+            ? comparableRead < meterFloor : rebust || comparableRead < meterFloor;
         previousShortRead = shortRead;
         const reading = {
             read: current.usage.cacheRead,
@@ -1526,7 +1538,19 @@ export function analyzeSnapshots(
         if (lastTouch !== undefined && lastTouch > (prefixRefreshedAtMs ?? -Infinity)) prefixRefreshedAtMs = lastTouch;
         const previousRequestAt = snaps[index - 1]?.requestTimestampMs ?? previous.requestTimestampMs;
         const runnerGapMs = current.requestTimestampMs - Math.max(previousRequestAt, lastTouch ?? -Infinity);
-        if (shortRead && scopeChange) {
+        if (current.runnerRequest && shortRead) {
+            requestFields.runnerClassification = classifyRunnerStep(
+                { at: previous.requestTimestampMs, model: previous.runnerRequest?.model ?? previous.wireModel ?? "", read: previous.usage.cacheRead, write: previous.usage.cacheCreation ?? 0 },
+                { at: current.requestTimestampMs, model: current.runnerRequest.model, read: current.usage.cacheRead, write: current.usage.cacheCreation ?? 0 },
+                options.runnerEvidence?.decisions ?? [], {
+                    cacheTtlMs: options.cacheTtlMs ?? previousRouteRequest?.statedCacheTtlMs,
+                    lastTouchAt: Number.isFinite(lastTouch) ? lastTouch : undefined,
+                    previousCompletedAt: previous.runnerRequest?.completedAt,
+                    scopeChange,
+                },
+            );
+        }
+        if (shortRead && scopeChange && !noBytes) {
             const scopePrevious = previousSessionRequest ?? previous;
             rows.push({
                 current, previous: scopePrevious, divergenceIndex: -1, verdict: "SHORT",
@@ -1548,17 +1572,22 @@ export function analyzeSnapshots(
         const comparisonPrevious = comparison.previous;
         // Once a runner's cache has expired, changing bytes cannot incur an
         // additional cache miss. Preserve the diff as evidence, not a bust.
-        if (current.runnerRequest && shortRead && runnerGapMs > cacheTtlMs) {
+        if (current.runnerRequest && shortRead) {
+            const classification = requestFields.runnerClassification!;
+            const verdicts = { scope_changed: "SCOPE_CHANGED", view: "VIEW", plan_changed: "PLAN_CHANGED", provider_forgot: "PROVIDER_FORGOT", expired: "EXPIRED", unexplained: "UNEXPLAINED (no bytes)" } as const;
+            if (noBytes || classification.class === "expired") {
             rows.push({ current, previous, divergenceIndex: noBytes ? -1 : divergenceIndex,
-                ...(noBytes ? {} : { byteVerdict }), verdict: "EXPIRED", shortRead, meterFloor,
+                ...(noBytes ? {} : { byteVerdict }), verdict: verdicts[classification.class ?? "unexplained"], shortRead, meterFloor,
                 comparableRead, epsilon, prevTotal, idleGapMs: runnerGapMs,
-                divergenceClass: "idle_cache_expiry", ...requestFields });
+                ...(classification.class === "expired" ? { divergenceClass: "idle_cache_expiry" as const } : {}),
+                rewrittenTokens: classification.rewrittenTokens, ...requestFields });
             previousMetered = current;
             previousMeteredDecision = decision;
             latencyReference = undefined;
             previousBustDivergenceIndex = undefined;
             if (refreshesCachedPrefix(reading, { shortRead, explicitBreakpoints })) prefixRefreshedAtMs = current.requestTimestampMs;
             continue;
+            }
         }
         if (noBytes) {
             // Without both wire bodies, identical empty segment arrays prove
@@ -1797,8 +1826,11 @@ Sources (runner meters are auto-detected by exact session id):
   Runners:   ck-mc daily logs plus step_render logs; nearest-time request/view join.
              OC2 dumps: thalamus-harness/opencode2-server/tmp/opencode-anthropic-auth-dumps.
              Pi dumps: thalamus-pi/anthropic-auth-dumps. Bodies are read in place.
-             Without both bodies: EXPIRED, VIEW, or UNEXPLAINED (no bytes).
-             Keep-warm sends touch the cache but are never steps or byte baselines.
+              Without both bodies: SCOPE_CHANGED, VIEW, PLAN_CHANGED, PROVIDER_FORGOT,
+              EXPIRED, or UNEXPLAINED (no bytes). Setup alone is never a cause.
+              Keep-warm sends touch the cache but are never steps or byte baselines.
+  Astrocyte: --source astrocyte reads the daemon's usage.steps.read feed (24h);
+             Anthropic meters and ck-mc logs, no request bodies or runner stores.
   Anthropic: <tmp>/opencode-anthropic-auth-dumps (OPENCODE_ANTHROPIC_AUTH_DUMP_DIR)
              system + messages[] bodies; explicit read/write cache meters.
   OpenAI:    <tmp>/opencode-openai-auth-dumps (OPENCODE_OPENAI_AUTH_DUMP_DIR)
@@ -1815,7 +1847,8 @@ a named reason (meter_missing / wire_family_unsupported) and exit 2 instead of
 printing a clean result.
 
 Options:
-  --source <kind>       auto (default), dumps (OC1/Broca), oc2, or pi
+  --source <kind>       auto (default), dumps (OC1/Broca), oc2, pi, or astrocyte
+  --connection-file <p> daemon connection file for the astrocyte source
   --runner-data-dir <p> CortexKit data root (default: ~/.local/share/cortexkit)
   --dump-dir <path>     override the runner dump directory
   --mc-log <path>       override ck-mc daily logs, or legacy scheduler log fallback
@@ -1831,7 +1864,7 @@ Options:
   --all-busts           list every diverging message
   --all-rows            also print STABLE and UNMETERED rows`;
 
-function main(): void {
+async function main(): Promise<void> {
     const opts = parseArgs(process.argv);
     if (opts.help) {
         console.log(HELP);
@@ -1840,6 +1873,18 @@ function main(): void {
     if (!opts.sessionPrefix) {
         console.error(HELP);
         process.exit(1);
+    }
+    if (opts.source === "astrocyte") {
+        const client = await SubcClient.connect({ connectionFile: opts.connectionFile ?? join(getDataDir(), "cortexkit/run/subc-connection.json"), handshakeTimeoutMs: 2000 });
+        try {
+            const now = Date.now();
+            const rows = await analyzeRunnerFeed(new AstrocyteRunnerMeterSource(async () => client),
+                loadRunnerHeads(opts.runnerDataDir, now, opts.mcLogPath), opts.sessionPrefix,
+                { since: opts.since ? Date.parse(resolveTimeBound(opts.since, now)!) : undefined,
+                    until: opts.until ? Date.parse(resolveTimeBound(opts.until, now)!) : undefined });
+            printRunnerFeedAnalysis(rows);
+        } finally { client.close(); }
+        return;
     }
     const runner = opts.source === "dumps" ? undefined : loadRunnerSession(
         opts.runnerDataDir, opts.sessionPrefix, opts.source === "auto" ? undefined : opts.source,
@@ -1949,6 +1994,7 @@ function main(): void {
                 console.log(`${fmtTime(row.current.createdAt)} | ${row.verdict} | read=${row.current.usage?.cacheRead ?? "unavailable"} write=${row.current.usage?.cacheCreation ?? "unavailable"} input=${row.current.usage?.input ?? "unavailable"} floor=${row.meterFloor ?? "—"} gap=${row.idleGapMs === undefined ? "—" : `${(row.idleGapMs / 60_000).toFixed(1)}m`} | bytes unavailable | view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
                 if (row.divergenceClass === "cache_scope_changed") console.log(`          └─ cache_scope_changed: ${row.comparisonNote}`);
                 printProviderCacheMiss(row);
+                if (row.runnerClassification) console.log(`          └─ ${row.runnerClassification.class}: ${row.runnerClassification.evidence}`);
                 for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
             }
             continue;
@@ -2009,6 +2055,7 @@ function main(): void {
             console.log(`          └─ divergence-class: ${row.divergenceClass}`);
         }
         if (runner) {
+            if (row.runnerClassification) console.log(`          └─ runner-class: ${row.runnerClassification.class}; ${row.runnerClassification.evidence}`);
             console.log(`          └─ view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
             for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
         }
@@ -2060,7 +2107,7 @@ function main(): void {
             );
         }
     } else if (runner && rows.some((row) => row.current.bytesMissing || row.previous?.bytesMissing)) {
-        console.log(`No-bytes short reads: ${["EXPIRED", "VIEW", "UNEXPLAINED (no bytes)"].map((verdict) => `${verdict}=${rows.filter((row) => row.verdict === verdict).length}`).join(", ")}. Byte-attributed metered busts: ${bustCount}.`);
+        console.log(`No-bytes short reads: ${["EXPIRED", "VIEW", "PLAN_CHANGED", "PROVIDER_FORGOT", "SCOPE_CHANGED", "UNEXPLAINED (no bytes)"].map((verdict) => `${verdict}=${rows.filter((row) => row.verdict === verdict).length}`).join(", ")}. Byte-attributed metered busts: ${bustCount}.`);
     } else if (bustCount === 0 && shortCount > 0) {
         console.log(`No byte-attributed metered busts; ${shortCount} metered short read(s) without a demonstrated byte rewrite across ${snaps.length} request(s).`);
     } else if (bustCount === 0) {
@@ -2144,4 +2191,4 @@ export const __test = {
     keepWarmTouches,
 };
 
-if (import.meta.main) main();
+if (import.meta.main) await main();

@@ -278,18 +278,18 @@ describe("analyze-cache-bust Thalamus runners", () => {
         expect(run.stdout.toString()).toContain("EXPIRED=0");
     });
 
-    test("only new accepted views, Setup and rides explain short reads; summaries alone do not", () => {
+    test("setup is annotation and provider-forgot rides have their own class; summaries alone do not explain reads", () => {
         const { root, db } = setup(); db.close();
         const { runner, evidence } = analyze(root, "oc2");
         const snaps = __test.runnerSnapshots(runner, []);
         const at = "2026-09-08T11:48:59.000Z";
-        for (const body of [
-            "setup (opencode, preset full, model anthropic/claude, window 1000000, reserve 32000, applied view Some(2))",
-            "ride [OverLimit, CacheExpired], request Some(50000) tokens, last prompt Some(49000), applied view Some(2)",
-        ]) {
+        for (const [body, verdict] of [
+            ["setup (opencode, preset full, model anthropic/claude, window 1000000, reserve 32000, applied view Some(2))", "UNEXPLAINED (no bytes)"],
+            ["ride [OverLimit, CacheExpired], request Some(50000) tokens, last prompt Some(49000), applied view Some(2)", "PROVIDER_FORGOT"],
+        ] as const) {
             const event = parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: ${body}`, "ses_runner")!;
             const row = __test.analyzeSnapshots(snaps, [], { runnerEvidence: { ...evidence, decisions: [...evidence.decisions, event] } })[3]!;
-            expect(row.verdict).toBe("VIEW");
+            expect(row.verdict).toBe(verdict);
             expect(row.runnerDecisions!.at(-1)!.detail).toBe(body);
         }
         expect(__test.analyzeSnapshots(snaps, [], { runnerEvidence: evidence })[3]!.verdict).toBe("UNEXPLAINED (no bytes)");
@@ -313,7 +313,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
         const unseen = parseRunnerDecision("2026-09-08T11:48:59.000Z INFO ck-mc: session ses_runner: view 99 accepted (1 edits)", "ses_runner")!;
         const row = __test.analyzeSnapshots(__test.runnerSnapshots(runner, []), [], { runnerEvidence: { ...evidence, decisions: [...evidence.decisions, unseen] } })[3]!;
         expect(row.renderedView).toBe(2);
-        expect(row.verdict).toBe("UNEXPLAINED (no bytes)");
+        expect(row.verdict).toBe("VIEW");
     });
 
     test("keep-warm sends touch the cache but never become steps or byte baselines", () => {
@@ -356,6 +356,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
             const output = run.stdout.toString();
             expect(output).toContain(`Source: ${kind}; files read:`);
             expect(output).toContain("BUST (meter)");
+            expect(output).toContain("runner-class: unexplained;");
             expect(output).toContain("segment diff @char");
             expect(output).toContain(dir);
             expect(output).toContain("read=100 (write=12,000");
@@ -378,15 +379,15 @@ describe("analyze-cache-bust Thalamus runners", () => {
         expect(__test.analyzeSnapshots(snapshots)[1]!.byteVerdict).toBeUndefined();
     });
 
-    test("meter-only requests retain the Anthropic repeated-short-read rule without inferring bytes", () => {
+    test("meter-only runner requests use the exact previous read plus write floor without a repeated-short-read override", () => {
         const { root, db } = setup(); db.close();
         const { runner } = analyze(root, "oc2");
         runner.requests[1]!.usage!.cacheWrite = 0;
         runner.requests[2]!.usage!.cacheWrite = 0;
         const rows = __test.analyzeSnapshots(__test.runnerSnapshots(runner, []));
         expect(rows[2]!.meterFloor).toBe(36);
-        expect(rows[2]!.shortRead).toBe(true);
-        expect(rows[2]!.verdict).toBe("UNEXPLAINED (no bytes)");
+        expect(rows[2]!.shortRead).toBe(false);
+        expect(rows[2]!.verdict).toBe("STABLE");
         expect(rows[2]!.byteVerdict).toBeUndefined();
     });
 
@@ -397,7 +398,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
         runner.requests[2]!.provider = "unknown";
         runner.requests[2]!.model = "unknown-model";
         const snaps = __test.runnerSnapshots(runner, []);
-        expect(__test.analyzeSnapshots(snaps).map((row) => row.verdict)).toEqual(["BASE", "UNMETERED", "UNMETERED", "UNEXPLAINED (no bytes)"]);
+        expect(__test.analyzeSnapshots(snaps).map((row) => row.verdict)).toEqual(["BASE", "UNMETERED", "UNMETERED", "EXPIRED"]);
         expect(__test.meterCoverage(snaps).refusals).toHaveLength(2);
     });
 });

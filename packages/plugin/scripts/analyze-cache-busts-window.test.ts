@@ -107,6 +107,9 @@ test("OpenCode no-deadline windows match full loads without opening old or futur
         .map((row) => {
             if (
                 row.verdict === "EXPIRED" ||
+                row.verdict === "PLAN_CHANGED" ||
+                row.verdict === "PROVIDER_FORGOT" ||
+                row.verdict === "SCOPE_CHANGED" ||
                 row.verdict === "VIEW" ||
                 row.verdict === "UNEXPLAINED (no bytes)"
             ) {

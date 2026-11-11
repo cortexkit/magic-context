@@ -53,7 +53,7 @@ import { Database } from "bun:sqlite";
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { type ManagedCallOptions, SubcClient } from "@cortexkit/subc-client";
 
 import { loadPluginConfig } from "../src/config";
@@ -75,6 +75,9 @@ import {
     isThresholdedThreadClass,
 } from "./cache-bust-attribution";
 import { type CacheBustScanProgress, parseScanCursor } from "./cache-bust-scan";
+import { DEFAULT_RUNNER_DATA_DIR } from "./cache-bust-runner-sources";
+import { AstrocyteRunnerMeterSource, type RunnerMeterSource } from "./cache-bust-runner-feed";
+import { emptyRunnerState, headsWithoutMeter, loadRunnerHeads, parseRunnerMonitorState, pruneRunnerState, scanRunnerFeed, type RunnerHeads, type RunnerMonitorState, type RunnerRunSummary } from "./cache-bust-runner-monitor";
 
 const STATE_VERSION = 1;
 const BUST_WINDOW_MS = 120_000;
@@ -115,6 +118,7 @@ export interface CacheBustSentinelOptions {
     ompDir?: string;
     ledgerDir?: string;
     bodiesDir?: string;
+    runnerDataDir?: string;
 }
 
 interface SentinelScanOptions extends CacheBustSentinelOptions {
@@ -141,6 +145,7 @@ export interface CacheBustEvent {
     session_id: string;
     directory: string;
     occurred_at_ms: number;
+    urgency?: "normal" | "high";
     payload: {
         session: string;
         at: string;
@@ -181,8 +186,8 @@ export type AgentDeliverOutcome =
     | (AgentDeliverReply & { accepted: false; reason: "dedup" });
 
 export interface CacheBustTransport {
-    record(event: CacheBustEvent): Promise<unknown>;
-    recordLag?(notice: { deliveryId: string; content: string }): Promise<unknown>;
+    record(event: CacheBustEvent, timeoutMs?: number): Promise<unknown>;
+    recordLag?(notice: { deliveryId: string; content: string }, timeoutMs?: number): Promise<unknown>;
     close?(): void | Promise<void>;
 }
 
@@ -231,6 +236,7 @@ export interface CacheBustSentinelState {
     deliveries: Record<string, SentDeliveryState>;
     suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number; windowStartMs?: number; reason?: "stale" }>;
     lag?: { startedAtMs: number; consecutiveRuns: number; notified: boolean; lagMs: number; pendingFiles: number };
+    runner?: RunnerMonitorState;
 }
 
 export interface BustWindow {
@@ -255,6 +261,7 @@ export interface SentinelCounters {
     sendRefused: number;
     filesExamined: number;
     bounded: boolean;
+    runner?: RunnerRunSummary;
 }
 
 interface SentinelRunDeps {
@@ -278,6 +285,8 @@ interface SentinelRunDeps {
     transport?: CacheBustTransport;
     stdout?: (line: string) => void;
     stderr?: (line: string) => void;
+    runnerSource?: RunnerMeterSource;
+    runnerHeads?: RunnerHeads;
 }
 
 export class CacheBustSentinelInputError extends Error {
@@ -410,6 +419,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
         }
         state.lag = lag as unknown as NonNullable<CacheBustSentinelState["lag"]>;
     }
+    if (root.runner !== undefined) state.runner = parseRunnerMonitorState(root.runner);
     for (const [deliveryId, raw] of Object.entries(deliveries)) {
         const row = recordValue(raw);
         const committedOrder = finiteNonnegative(row?.committedOrder);
@@ -463,6 +473,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         "--omp-dir",
         "--ledger-dir",
         "--bodies-dir",
+        "--runner-data-dir",
     ]);
     const values = new Map<string, string>();
     for (let index = 0; index < args.length; index += 1) {
@@ -517,6 +528,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         ompDir: values.get("--omp-dir"),
         ledgerDir: values.get("--ledger-dir"),
         bodiesDir: values.get("--bodies-dir"),
+        runnerDataDir: values.get("--runner-data-dir") ?? DEFAULT_RUNNER_DATA_DIR,
     };
 }
 
@@ -1116,7 +1128,7 @@ export function agentDeliverRequest(
             content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}${event.payload.cause ? `; cause=${event.payload.cause}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
             one_way: true,
         },
-        urgency: "high",
+        urgency: event.urgency ?? "high",
     };
 }
 
@@ -1217,7 +1229,11 @@ export class SubcWakeEventTransport implements CacheBustTransport {
         return this.clientPromise;
     }
 
-    async record(event: CacheBustEvent): Promise<unknown> {
+    runnerSource(): RunnerMeterSource {
+        return new AstrocyteRunnerMeterSource(() => this.client());
+    }
+
+    async record(event: CacheBustEvent, timeoutMs = 15_000): Promise<unknown> {
         const client = await this.client();
         const projectRoot =
             isAbsolute(event.directory) && existsSync(event.directory)
@@ -1235,7 +1251,7 @@ export class SubcWakeEventTransport implements CacheBustTransport {
                         session: event.session_id,
                     },
                     consumerIdentity: null,
-                    timeoutMs: 15_000,
+                    timeoutMs,
                 },
             );
         } catch (error) {
@@ -1254,7 +1270,7 @@ export class SubcWakeEventTransport implements CacheBustTransport {
         client?.close();
     }
 
-    async recordLag(notice: { deliveryId: string; content: string }): Promise<unknown> {
+    async recordLag(notice: { deliveryId: string; content: string }, timeoutMs = 15_000): Promise<unknown> {
         const client = await this.client();
         const request: AgentDeliverRequest = {
             agent_id: this.agentId, delivery_id: notice.deliveryId, urgency: "normal",
@@ -1263,7 +1279,7 @@ export class SubcWakeEventTransport implements CacheBustTransport {
         };
         return await client.call(this.moduleId, AGENT_DELIVER_METHOD, request, {
             identity: { project_root: process.cwd(), harness: SENTINEL_FROM_HARNESS, session: SENTINEL_FROM_SESSION_ID },
-            consumerIdentity: null, timeoutMs: 15_000,
+            consumerIdentity: null, timeoutMs,
         });
     }
 }
@@ -1361,6 +1377,10 @@ export async function runSentinelOnce(
     const nowMs = clock();
     const maxWakeAgeMs = maxWakeAgeMsFor(options);
     const deadlineMs = nowMs + (options.maxRunMs ?? 30_000);
+    // Dump scans run first and own two thirds of the shared budget. A slow
+    // runner service therefore cannot consume the OpenCode 1 scan's slot.
+    const legacyDeadlineMs = deps.runnerSource || existsSync(options.connectionFile)
+        ? nowMs + (options.maxRunMs ?? 30_000) * 2 / 3 : deadlineMs;
     const stdout = deps.stdout ?? console.log;
     const stderr = deps.stderr ?? console.error;
     const state = loadSentinelState(options.stateFile);
@@ -1387,7 +1407,7 @@ export async function runSentinelOnce(
         const scanQueue = [...sessions];
         for (let batchIndex = 0; batchIndex < scanQueue.length; batchIndex += 1) {
             const batchNowMs = clock();
-            if (batchNowMs >= deadlineMs) {
+            if (batchNowMs >= legacyDeadlineMs) {
                 counters.bounded = true;
                 break;
             }
@@ -1404,7 +1424,7 @@ export async function runSentinelOnce(
                 session,
                 sinceExclusiveMs,
                 decisions,
-                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: deadlineMs, scanNow: clock, scanMetrics: deps.scanMetrics, scanIndex },
+                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: legacyDeadlineMs, scanNow: clock, scanMetrics: deps.scanMetrics, scanIndex },
             );
             counters.filesExamined += analysis.filesExamined ?? 0;
             const requests = analysis.requests.filter(
@@ -1591,6 +1611,59 @@ export async function runSentinelOnce(
                 } else stdout(JSON.stringify({ kind: "cache_bust_sentinel_lag_notice", ...notice }));
             }
         } else if (state.lag) state.lag.consecutiveRuns = 0;
+        const runner = state.runner ??= emptyRunnerState();
+        let runnerHeads = deps.runnerHeads ?? new Map();
+        let runnerDeliveryFailed = false;
+        const feedTransport = transport instanceof SubcWakeEventTransport ? transport : new SubcWakeEventTransport(
+            options.connectionFile, options.wakeModuleId, options.wakeAgentId, options.wakeFromAgent);
+        const runnerNotice = async (content: string, suffix: string): Promise<void> => {
+            const notice = { deliveryId: `cache-bust-runner:${runner.blindSince}:${suffix}`, content };
+            if (transport?.recordLag) {
+                try { parseAgentDeliverReply(await transport.recordLag(notice, Math.max(1, Math.min(15_000, deadlineMs - clock())))); }
+                catch (error) { stderr(JSON.stringify({ kind: "runner_notice_refused", error: errorMessage(error) })); }
+            } else stdout(JSON.stringify({ kind: "cache_bust_sentinel_lag_notice", ...notice }));
+        };
+        try {
+            if (clock() < deadlineMs) {
+                const root = options.runnerDataDir ?? dirname(options.databasePath);
+                runnerHeads = deps.runnerHeads ?? loadRunnerHeads(root, nowMs, options.mcLogPath, clock, deadlineMs);
+                counters.runner = await scanRunnerFeed({ state: runner, source: deps.runnerSource ?? feedTransport.runnerSource(),
+                    heads: runnerHeads,
+                    root, now: nowMs, clock, deadline: deadlineMs, wakeAge: maxWakeAgeMs,
+                    emit: async (alert) => {
+                        const event: CacheBustEvent = { source_module: "magic-context", kind: "cache_bust", vendor_event_id: alert.id,
+                            session_id: alert.session, directory: root, occurred_at_ms: alert.at, urgency: alert.urgency,
+                            payload: { session: alert.session, at: new Date(alert.at).toISOString(), rewritten_tokens: alert.rewrittenTokens,
+                                divergence_class: alert.class, first_divergence: alert.detail, analyzer_cmd: alert.analyzer } };
+                        saveSentinelState(options.stateFile, state);
+                        if (!transport) { stdout(JSON.stringify(event)); counters.dryRun++; return; }
+                        try {
+                            const reply = parseAgentDeliverReply(await transport.record(event, Math.max(1, Math.min(15_000, deadlineMs - clock()))));
+                            recordReply(counters, reply);
+                            if (reply.accepted) state.deliveries[event.vendor_event_id] = { disposition: reply.disposition, committedOrder: reply.committed_order };
+                        } catch (error) {
+                            if (errorCode(error) !== "peer_delivery_refused") { runnerDeliveryFailed = true; throw error; }
+                            counters.sendRefused++;
+                        }
+                    } });
+                if (runner.blindNotified) await runnerNotice("Runner cache-bust lane recovered; usage.steps.read is readable again.", "recovered");
+                runner.failures = 0; delete runner.blindSince; delete runner.blindNotified;
+            }
+        } catch (error) {
+            if (runnerDeliveryFailed) throw error;
+            runner.failures++; runner.blindSince ??= nowMs;
+            counters.runner = { judged: 0, not_metered: 0, skipped: 0, bounded: false, gaps: 0, failure: errorMessage(error), heads_without_meter: headsWithoutMeter(runner, runnerHeads, nowMs), late_revisions: 0, late_token_revisions: 0 };
+            if (runner.failures >= 5 && !runner.blindNotified) {
+                runner.blindNotified = true;
+                saveSentinelState(options.stateFile, state);
+                await runnerNotice(`Runner cache-bust lane is blind after ${runner.failures} failed runs: ${errorMessage(error)}. Existing dump/session lanes still run.`, "blind");
+            }
+        } finally {
+            counters.runner ??= { judged: 0, not_metered: 0, skipped: 0, bounded: true, gaps: 0,
+                heads_without_meter: headsWithoutMeter(runner, runnerHeads, nowMs), late_revisions: 0, late_token_revisions: 0 };
+            pruneRunnerState(runner, nowMs);
+            if (feedTransport !== transport) await feedTransport.close();
+        }
     } finally {
         // Keep batch progress in memory until the end of the run: rewriting the
         // complete state after each batch would multiply I/O while draining a
