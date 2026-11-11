@@ -11,9 +11,14 @@ export interface CompactionOffSidebarRow {
  * percentage, because native compaction acts on the model window instead.
  */
 export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string {
-    if (snapshot.contextLimit <= 0) return "Context: unknown · native compaction";
+    return `Context: ${nativeCompactionUsage(snapshot)}`;
+}
+
+/** The usage half of {@link nativeCompactionContextLabel}, for a labelled row. */
+export function nativeCompactionUsage(snapshot: SidebarSnapshot): string {
+    if (snapshot.contextLimit <= 0) return "unknown · native compaction";
     const percentage = (snapshot.inputTokens / snapshot.contextLimit) * 100;
-    return `Context: ${percentage.toFixed(1)}% · native compaction`;
+    return `${percentage.toFixed(1)}% · native compaction`;
 }
 
 export function compactionOffSidebarRows(snapshot: SidebarSnapshot): CompactionOffSidebarRow[] {

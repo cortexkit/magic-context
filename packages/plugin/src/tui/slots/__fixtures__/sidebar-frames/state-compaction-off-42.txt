@@ -1,0 +1,12 @@
+ ▼ MAGIC CONTEXT                  v0.49.35
+                                          
+Context                                   
+Usage            55.4% · native compaction
+Notes                                    2
+Archived compartments                    3
+                                          
+Prompt cache                              
+Cache built                        29h ago
+                                          
+Knowledge                                 
+Memories                       225 · 7 new

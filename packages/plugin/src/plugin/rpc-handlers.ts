@@ -72,6 +72,7 @@ import {
     setSessionWorkMetricsCarry,
 } from "../features/magic-context/work-metrics-carry-storage";
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
+import { getProactiveCompartmentTriggerPercentage } from "../hooks/magic-context/compartment-trigger";
 import {
     type EmbedHistoryDeps,
     pauseEmbedHistoryDrain,
@@ -107,6 +108,7 @@ import { hiddenModelCooldowns } from "../shared/hidden-model-cooldown";
 import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
+import { getSdkModelName } from "../shared/models-dev-cache";
 import { resolveOpenCodeDbPath } from "../shared/opencode-db-path";
 import { pluginPackageVersion } from "../shared/plugin-package-version";
 import { canonicalProjectDirectory } from "../shared/project-directory-key";
@@ -207,6 +209,47 @@ function resolveConfigValue<T>(
     return defaultValue;
 }
 
+/**
+ * The session's newest recorded summarizer run with the model its linked
+ * invocation used. Older stores without the run tables report no run.
+ */
+function readHistorianLastRun(
+    db: Database,
+    sessionId: string,
+): SidebarSnapshot["historianLastRun"] {
+    try {
+        const row = db
+            .prepare<
+                [string],
+                {
+                    created_at: number;
+                    status: string;
+                    provider_id: string | null;
+                    model_id: string | null;
+                }
+            >(
+                `SELECT r.created_at, r.status, i.provider_id, i.model_id
+                 FROM historian_runs r
+                 LEFT JOIN subagent_invocations i ON i.id = r.subagent_invocation_id
+                 WHERE r.session_id = ?
+                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+            )
+            .get(sessionId);
+        if (!row) return null;
+        const model = row.model_id
+            ? ((row.provider_id ? getSdkModelName(row.provider_id, row.model_id) : undefined) ??
+              row.model_id)
+            : undefined;
+        return {
+            at: Number(row.created_at),
+            outcome: row.status === "failed" ? "failed" : "ok",
+            ...(model === undefined ? {} : { model }),
+        };
+    } catch {
+        return null;
+    }
+}
+
 // Exported for test access. Production code reaches this via the
 // "sidebar-snapshot" RPC handler registered below.
 export function buildSidebarSnapshot(
@@ -275,6 +318,23 @@ export function buildSidebarSnapshot(
                 .get(projectIdentity);
             memoryCount = memRow?.count ?? 0;
         }
+
+        // The history head carries the memories that existed when it was last
+        // rebuilt; memories created since then reach the model on the next one.
+        const cacheBuiltAt =
+            typeof meta?.cached_m0_materialized_at === "number"
+                ? meta.cached_m0_materialized_at
+                : null;
+        let newMemoryCount: number | undefined;
+        if (projectIdentity && cacheBuiltAt !== null) {
+            const newRow = db
+                .prepare<[string, number], { count: number }>(
+                    "SELECT COUNT(*) as count FROM memories WHERE project_path = ? AND status = 'active' AND created_at > ?",
+                )
+                .get(projectIdentity, cacheBuiltAt);
+            newMemoryCount = newRow?.count ?? 0;
+        }
+        const historianLastRun = readHistorianLastRun(db, sessionId);
 
         let pendingOpsCount = 0;
         try {
@@ -409,6 +469,12 @@ export function buildSidebarSnapshot(
             executeThreshold = thresholdDetail.percentage;
             executeThresholdClamped = thresholdDetail.clamped === true;
         }
+        // Subagent sessions and compaction-off mode never start the summarizer,
+        // so they have no next start to show.
+        const nextSummaryPercentage =
+            compactionEnabled && !meta?.is_subagent
+                ? getProactiveCompartmentTriggerPercentage(executeThreshold)
+                : undefined;
 
         // Native compaction watches the model's full window, not Magic Context's
         // output-reserved budget or execute threshold. Resolve the same catalog
@@ -475,6 +541,11 @@ export function buildSidebarSnapshot(
             ...(tailHygiene === undefined ? {} : { tailHygiene }),
             executeThreshold,
             executeThresholdClamped,
+            ...(nextSummaryPercentage === undefined ? {} : { nextSummaryPercentage }),
+            historianFailureCount: Number(meta?.historian_failure_count ?? 0),
+            historianLastRun,
+            cacheBuiltAt,
+            ...(newMemoryCount === undefined ? {} : { newMemoryCount }),
             newWorkTokens,
             totalInputTokens,
             recompProgress: (() => {

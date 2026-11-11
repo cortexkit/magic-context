@@ -1,0 +1,11 @@
+ ▼ MAGIC CONTEXT                  v0.49.35
+                                          
+Context                                   
+ctx no reading                            
+Next summary at                        61%
+                                          
+History                                   
+Historian                             idle
+                                          
+Knowledge                                 
+Memories                                12

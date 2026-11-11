@@ -3,7 +3,35 @@ title: TUI Sidebar
 description: Persist the OpenCode sidebar's collapsed state, reorder it, rename the header, and show or hide sections.
 ---
 
-In OpenCode's TUI, Magic Context renders a live sidebar — context breakdown, historian status, memory counts, queue and dreamer state. Click the header (`▼ Magic Context`) to collapse it to a compact summary, or expand it again.
+In OpenCode's TUI, Magic Context renders a live sidebar panel in the same style as the other CortexKit plugins:
+
+```text
+ ▼ MAGIC CONTEXT                  v0.49.35
+
+Context
+ctx ██████░░░░ 45% left          483K/872K
+Next summary at                 61% · +49K
+
+History
+Historian                             idle
+Last run                    1h55m ago · ok
+Model                     Gemini 3.8 Flash
+
+Prompt cache
+Cache built                        29h ago
+
+Knowledge
+Memories                       225 · 7 new
+```
+
+- **Context** — how much of the session's usable window is in use (the bar fills with use; the figure is what is left), and the usage at which the next summary starts with the tokens until then. The bar turns to the warning colour at your execute threshold and to the error colour in the force band above it. With `compaction.enabled: false` this section shows the window usage under native compaction, notes and archived compartments instead.
+- **History** — whether the historian is idle, running or failing, when it last ran and how that run ended, and the model it used.
+- **Prompt cache** — how long ago the session's history head was last rebuilt.
+- **Knowledge** — the project's active memories, and how many arrived since that rebuild.
+
+While `/ctx-recomp`, an upgrade, `/ctx-embed` or `/ctx-wrapup` runs, a section with its progress appears as well. Click the header to collapse the panel to one row (`ctx  45% left ●`), or expand it again. The token breakdown, dreamer state and queue are in `/ctx-status`.
+
+On OpenCode 1 the sidebar needs OpenCode 1.18.4 or later. On older releases the TUI part shows one notice and does not load; context management and the `/ctx-*` commands keep working.
 
 The sidebar is enabled by the setup wizard, which adds the TUI plugin entry to `~/.config/opencode/tui.jsonc`. If you removed it (or skipped setup), run `npx @cortexkit/magic-context@latest doctor` to add it back. Removing the entry from `tui.jsonc` disables the sidebar permanently — Magic Context never re-adds it on its own.
 
@@ -34,15 +62,14 @@ The file is **shared** across CortexKit OpenCode plugins — one top-level key p
     "collapsed": false,
 
     "header": {
-      "label": "Magic Context"
+      "label": "MAGIC CONTEXT"
     },
 
     "sections": {
-      "historian": true,
-      "memory": true,
-      "status": true,
-      "dreamer": true,
-      "stats": true
+      "context": true,
+      "history": true,
+      "cache": true,
+      "knowledge": true
     }
   }
 }
@@ -57,10 +84,10 @@ The file is **shared** across CortexKit OpenCode plugins — one top-level key p
 | `startCollapsed` | `false` | Whether the sidebar starts collapsed when there's no remembered state. |
 | `rememberCollapsed` | `true` | Persist collapse/expand across restarts. When `true`, clicking the header writes `collapsed` back to this file. |
 | `collapsed` | — | The remembered collapse state. Managed automatically when `rememberCollapsed` is on; you can also set it by hand. |
-| `header.label` | `"Magic Context"` | Rename the sidebar header. |
-| `sections.*` | all `true` | Show or hide each expanded-view section: **historian** (compartments, facts, recomp progress), **memory** (memories, injected count), **status** (queue, notes, smart notes), **dreamer** (last run), **stats** (total tokens). |
+| `header.label` | `"MAGIC CONTEXT"` | Rename the sidebar header. |
+| `sections.*` | all `true` | Show or hide each expanded-view section: **context** (usage bar, next summary), **history** (historian state, last run, model), **cache** (prompt cache rebuild time), **knowledge** (memories). Keys from earlier releases (`historian`, `memory`, `status`, `dreamer`, `stats`) are ignored. |
 
-The header and the context-usage bar always render — only the listed sections can be hidden.
+The header always renders, and the progress section appears whenever a rebuild runs — only the listed sections can be hidden.
 
 ## Live reload
 

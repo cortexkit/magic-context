@@ -15,6 +15,7 @@ import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
+import { unsupportedTuiHostMessage } from "./host-floor"
 
 const DEFAULT_TOAST_DURATION_MS = 5000
 let unifiedToastDurationMs = DEFAULT_TOAST_DURATION_MS
@@ -640,6 +641,18 @@ async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
 }
 
 const tui: TuiPlugin = async (api, _options, meta) => {
+    // The sidebar is drawn with OpenTUI features older OpenCode 1 releases do
+    // not bundle. Decline the whole TUI part with one line rather than mount a
+    // panel that may throw inside the host; the server part is unaffected.
+    const unsupportedHost = unsupportedTuiHostMessage(api.app?.version)
+    if (unsupportedHost) {
+        try {
+            api.ui.toast({ message: unsupportedHost, variant: "warning", duration: DEFAULT_TOAST_DURATION_MS })
+        } catch {
+            console.error(`[magic-context] ${unsupportedHost}`)
+        }
+        return
+    }
     const directory = api.state.path.directory ?? ""
     // A conflicted installation intentionally has no server. Gate before RPC
     // discovery or socket startup so disabled installs perform no idle work.

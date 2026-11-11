@@ -27,6 +27,7 @@ import {
     collectNpmReleaseAgeWarnings,
     compareVersions,
     describeAutoUpdateStall,
+    describeOpenCode1SidebarRequirement,
     describeOpenCode2SessionAPIRequirement,
     describeOpenCodeDatabaseDoctorCheck,
     findUndeclaredConfiguredVariants,
@@ -1211,6 +1212,21 @@ it("treats an absent plugin as informational and fails an old installed OpenCode
         message: describeOpenCode2SessionAPIRequirement("2.0.21"),
     });
     expect(getOpenCodePluginHostStatus("OpenCode 2.0.22", "2.0.22", true)).toBeNull();
+});
+
+it("warns that the sidebar needs OpenCode 1.18.4 on an older installed OpenCode 1 host", () => {
+    expect(describeOpenCode1SidebarRequirement("1.18.3")).toBe(
+        "OpenCode host 1.18.3; the Magic Context sidebar needs OpenCode 1.18.4 or newer. Context management and the /ctx-* commands still run.",
+    );
+    for (const version of ["1.18.3", "1.17.10"]) {
+        expect(getOpenCodePluginHostStatus(`OpenCode ${version}`, version, true)).toEqual({
+            status: "warn",
+            message: describeOpenCode1SidebarRequirement(version),
+        });
+    }
+    for (const version of ["1.18.4", "1.18.30", "1.19.3"]) {
+        expect(getOpenCodePluginHostStatus(`OpenCode ${version}`, version, true)).toBeNull();
+    }
 });
 
 describe("doctor CLI version comparison", () => {

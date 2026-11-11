@@ -1074,6 +1074,117 @@ describe("buildSidebarSnapshot — host work metrics", () => {
     });
 });
 
+describe("buildSidebarSnapshot — sidebar panel fields", () => {
+    test("reports the next summary start, the last summarizer run, the rebuild time and new memories", async () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-panel-fields";
+            const builtAt = Date.now() - 60 * 60_000;
+            db.prepare(
+                "INSERT INTO session_meta (session_id, cached_m0_materialized_at, historian_failure_count) VALUES (?, ?, ?)",
+            ).run(sessionId, builtAt, 2);
+            const identity = resolveProjectIdentity(process.cwd());
+            const older = insertMemory(db, {
+                projectPath: identity,
+                category: "USER_DIRECTIVES",
+                content: "Carried by the current history head",
+            });
+            insertMemory(db, {
+                projectPath: identity,
+                category: "USER_DIRECTIVES",
+                content: "Arrived after the rebuild",
+            });
+            db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(
+                builtAt - 1,
+                older.id,
+            );
+            const invocation = db
+                .prepare(
+                    "INSERT INTO subagent_invocations (session_id, harness, subagent, provider_id, model_id, started_at, ended_at, status) VALUES (?, 'opencode', 'historian', 'google', 'gemini-3.8-flash', ?, ?, 'completed')",
+                )
+                .run(sessionId, builtAt, builtAt + 1000);
+            db.prepare(
+                "INSERT INTO historian_runs (session_id, subagent_invocation_id, run_kind, status, created_at) VALUES (?, ?, 'incremental', 'success', ?)",
+            ).run(sessionId, Number(invocation.lastInsertRowid), builtAt + 2000);
+            clearModelsDevCache();
+            await refreshModelLimitsFromApi({
+                config: {
+                    providers: async () => ({
+                        data: {
+                            providers: [
+                                {
+                                    id: "google",
+                                    models: {
+                                        "gemini-3.8-flash": {
+                                            name: "Gemini 3.8 Flash",
+                                            limit: { context: 1_000_000, output: 65_536 },
+                                        },
+                                    },
+                                },
+                            ],
+                        },
+                    }),
+                },
+            } as never);
+
+            const snapshot = buildSidebarSnapshot(
+                db,
+                sessionId,
+                process.cwd(),
+                undefined,
+                undefined,
+                {
+                    execute_threshold_percentage: 70,
+                },
+            );
+
+            // The pressure trigger starts two points below the execute threshold.
+            expect(snapshot.nextSummaryPercentage).toBe(68);
+            expect(snapshot.historianFailureCount).toBe(2);
+            expect(snapshot.historianLastRun).toEqual({
+                at: builtAt + 2000,
+                outcome: "ok",
+                model: "Gemini 3.8 Flash",
+            });
+            expect(snapshot.cacheBuiltAt).toBe(builtAt);
+            expect(snapshot.memoryCount).toBe(2);
+            expect(snapshot.newMemoryCount).toBe(1);
+        } finally {
+            clearModelsDevCache();
+            closeQuietly(db);
+        }
+    });
+
+    test("has no next summary for a subagent or with compaction off, and no run before the first", () => {
+        const db = createTestDb();
+        try {
+            db.prepare("INSERT INTO session_meta (session_id, is_subagent) VALUES (?, 1)").run(
+                "ses-child",
+            );
+            db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-off");
+
+            const child = buildSidebarSnapshot(db, "ses-child", process.cwd());
+            const off = buildSidebarSnapshot(
+                db,
+                "ses-off",
+                process.cwd(),
+                undefined,
+                undefined,
+                undefined,
+                false,
+            );
+
+            expect(child.nextSummaryPercentage).toBeUndefined();
+            expect(off.nextSummaryPercentage).toBeUndefined();
+            expect(child.historianLastRun).toBeNull();
+            expect(child.cacheBuiltAt).toBeNull();
+            expect(child.newMemoryCount).toBeUndefined();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildSidebarSnapshot — stale build error state", () => {
     test("surfaces the persisted stale-build failure in the sidebar snapshot", () => {
         const db = createTestDb();

@@ -86,8 +86,8 @@ describe("readTuiPreferencesFile (tolerant)", () => {
 
 describe("watchTuiPreferences", () => {
     test("notifies when the initial read resolves after an atomic replacement", async () => {
-        const previous = `{"magic-context":{"sections":{"memory":true}}}\n`;
-        const next = `{"magic-context":{"sections":{"memory":false}}}\n`;
+        const previous = `{"magic-context":{"sections":{"knowledge":true}}}\n`;
+        const next = `{"magic-context":{"sections":{"knowledge":false}}}\n`;
         await writeFile(file, previous, "utf8");
 
         let resolveInitialRead!: (text: string) => void;
@@ -107,11 +107,11 @@ describe("watchTuiPreferences", () => {
             },
         });
 
-        const observed = new Promise<{ memory: boolean }>((resolve) => {
+        const observed = new Promise<{ knowledge: boolean }>((resolve) => {
             const stop = watchTuiPreferences(() => {
                 void readTuiPreferencesFile().then((root) => {
                     stop();
-                    resolve({ memory: resolveMagicContextPrefs(root).sections.memory });
+                    resolve({ knowledge: resolveMagicContextPrefs(root).sections.knowledge });
                 });
             });
         });
@@ -126,7 +126,7 @@ describe("watchTuiPreferences", () => {
             observed,
             new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
         ]);
-        expect(result).toEqual({ memory: false });
+        expect(result).toEqual({ knowledge: false });
     });
 });
 
@@ -143,14 +143,34 @@ describe("resolveMagicContextPrefs (per-key validation)", () => {
                 order: "nope",
                 rememberCollapsed: 1,
                 collapsed: true,
-                sections: { historian: false, memory: "bad" },
+                sections: { history: false, knowledge: "bad" },
             },
         });
         expect(prefs.order).toBe(DEFAULT_SLOT_ORDER); // bad → default
         expect(prefs.rememberCollapsed).toBe(true); // bad → default true
         expect(prefs.collapsed).toBe(true); // valid bool preserved
-        expect(prefs.sections.historian).toBe(false); // valid bool preserved
-        expect(prefs.sections.memory).toBe(true); // bad → default true
+        expect(prefs.sections.history).toBe(false); // valid bool preserved
+        expect(prefs.sections.knowledge).toBe(true); // bad → default true
+    });
+
+    test("section keys from the earlier panel are ignored without affecting the new ones", () => {
+        const prefs = resolveMagicContextPrefs({
+            "magic-context": {
+                sections: {
+                    historian: false,
+                    memory: false,
+                    status: false,
+                    dreamer: false,
+                    stats: false,
+                },
+            },
+        });
+        expect(prefs.sections).toEqual({
+            context: true,
+            history: true,
+            cache: true,
+            knowledge: true,
+        });
     });
 
     test("order clamps to -10000..10000", () => {

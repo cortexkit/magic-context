@@ -77,6 +77,12 @@ interface CachedModelMetadata {
     outputLimit?: number;
     /** Provider metadata says the model accepts image input. Unknown is false. */
     vision?: boolean;
+    /**
+     * The catalog's display name, such as `Gemini 3.8 Flash`. Kept in memory
+     * only: the persisted cold-start file carries limits, so a name is known
+     * once the first refresh after startup lands.
+     */
+    name?: string;
 }
 
 // Proven-separate allowlist only. Unknown providers reserve by default because
@@ -283,6 +289,7 @@ function setCachedModelMetadata(
     model:
         | {
               limit?: ModelLimit;
+              name?: unknown;
               experimental?: { modes?: Record<string, unknown> };
               capabilities?: unknown;
               modalities?: unknown;
@@ -323,6 +330,7 @@ function setCachedModelMetadata(
         inputLimit: isSaneLimit(inputLimit) ? inputLimit : undefined,
         outputLimit: isFinitePositive(outputLimit) ? outputLimit : undefined,
         vision,
+        name: typeof model?.name === "string" && model.name.trim() !== "" ? model.name : undefined,
     };
     cache.set(key, value);
 
@@ -594,6 +602,11 @@ export function modelSupportsVision(providerID: string, modelID: string): boolea
 export function getSdkOutputLimit(providerID: string, modelID: string): number | undefined {
     loadPersistedApiCacheOnce();
     return lookupMetadataWithTagFallback(apiCache, providerID, modelID)?.outputLimit;
+}
+
+/** The catalog display name of a model, or undefined before a refresh has named it. */
+export function getSdkModelName(providerID: string, modelID: string): string | undefined {
+    return lookupMetadataWithTagFallback(apiCache, providerID, modelID)?.name;
 }
 
 export function getSdkInputLimit(providerID: string, modelID: string): number | undefined {

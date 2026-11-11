@@ -73,8 +73,9 @@
     "sharp": "^0.35.0"
   },
   "devDependencies": {
-    "@opentui/core": "^0.4.2",
-    "@opentui/solid": "^0.4.2",
+    "@cortexkit/opencode-sidebar": "0.2.0",
+    "@opentui/core": "^0.4.5",
+    "@opentui/solid": "^0.4.5",
     "solid-js": "1.9.12",
     "@opencode/plugin": "2.0.22",
     "@opencode/ai": "2.0.22",
@@ -108,8 +109,8 @@
   ],
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0",
-    "@opentui/core": ">=0.4.2",
-    "@opentui/solid": ">=0.4.2",
+    "@opentui/core": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5",
     "solid-js": "^1.9.12"
   },
   "peerDependenciesMeta": {

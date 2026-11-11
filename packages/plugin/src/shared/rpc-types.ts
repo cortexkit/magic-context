@@ -131,6 +131,34 @@ export interface SidebarSnapshot {
      * Absent when no clamp occurred.
      */
     executeThresholdClamped?: boolean;
+    /**
+     * Usage percentage at which the summarizer's pressure trigger next starts a
+     * run for this session: the execute threshold less the trigger's proactive
+     * offset. Absent when the summarizer cannot run here (compaction off, or a
+     * subagent session) and on servers older than this field.
+     */
+    nextSummaryPercentage?: number;
+    /**
+     * The newest recorded summarizer run for this session: when it ended, whether
+     * it succeeded, and the display name of the model it used when known. Null
+     * when the session has no recorded run; absent on older servers.
+     */
+    historianLastRun?: {
+        at: number;
+        outcome: "ok" | "failed";
+        model?: string;
+    } | null;
+    /**
+     * When the session's history head (m[0]) was last rebuilt. Null before the
+     * first rebuild; absent on older servers.
+     */
+    cacheBuiltAt?: number | null;
+    /**
+     * Active project memories created after `cacheBuiltAt`, which the current
+     * history head does not carry yet. Absent when there is no rebuild time and
+     * on older servers.
+     */
+    newMemoryCount?: number;
     /** Rust module cache boundary state, when the session uses Rust authority mode. */
     boundaryPresent?: boolean;
     coverageOrdinal?: number | null;

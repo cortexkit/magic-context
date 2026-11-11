@@ -10,6 +10,18 @@ const sourceRoot = join(pluginRoot, "src/tui");
 const outputRoot = join(pluginRoot, "src/tui-compiled");
 const runtimeSpecifiers: Set<string> = new Set(TUI_RUNTIME_SPECIFIERS);
 
+/**
+ * Packages that ship Solid TSX source instead of JavaScript, compiled into the
+ * output tree beside our own files. `@cortexkit/opencode-sidebar` asks every
+ * consumer to do this: loaded from node_modules, its JSX would skip the Solid
+ * transform and bind no host runtime. Imports of the package name in our
+ * sources are rewritten to the compiled copy, so the published plugin needs no
+ * runtime dependency on it.
+ */
+const VENDORED_TSX_PACKAGES: ReadonlyMap<string, string> = new Map([
+    ["@cortexkit/opencode-sidebar", join(outputRoot, "vendor/opencode-sidebar.tsx")],
+]);
+
 type TransformSolidSource = (
     code: string,
     options: {
@@ -185,11 +197,25 @@ async function compileTsx(
     const compiled = await transformSolidSource(code, {
         filename: sourceFile,
         moduleName: runtimeModuleId("@opentui/solid"),
-        resolvePath: (specifier: string) =>
-            runtimeSpecifiers.has(specifier) ? runtimeModuleId(specifier) : null,
+        resolvePath: (specifier: string) => {
+            if (runtimeSpecifiers.has(specifier)) return runtimeModuleId(specifier);
+            const vendored = VENDORED_TSX_PACKAGES.get(specifier);
+            return vendored ? relativeImport(outputFile, vendored) : null;
+        },
     });
 
     return writeIfChanged(outputFile, redirectBuiltinImports(compiled, exportSets, sourceFile));
+}
+
+/** An extensionless `./`-relative specifier from one output file to another. */
+function relativeImport(fromFile: string, toFile: string): string {
+    const path = relative(dirname(fromFile), toFile).replace(/\.tsx?$/, "");
+    return path.startsWith(".") ? path : `./${path}`;
+}
+
+/** The TSX entry a vendored package's `exports` names for `import`. */
+function vendoredSourceFile(specifier: string): string {
+    return fileURLToPath(import.meta.resolve(specifier));
 }
 
 const transformSolidSource = await loadTransformSolidSource();
@@ -223,6 +249,15 @@ for (const sourceFile of files) {
     }
 }
 
+for (const [specifier, outputFile] of VENDORED_TSX_PACKAGES) {
+    expectedOutputs.add(outputFile);
+    const sourceFile = vendoredSourceFile(specifier);
+    if (!sourceFile.endsWith(".tsx")) {
+        throw new Error(`${specifier} resolved to ${sourceFile}, not the TSX source this build compiles`);
+    }
+    if (await compileTsx(transformSolidSource, sourceFile, outputFile, runtimeExportSets)) written++;
+}
+
 let stale = 0;
 for (const existing of await listSourceFiles(outputRoot)) {
     if (expectedOutputs.has(existing)) continue;
@@ -231,5 +266,5 @@ for (const existing of await listSourceFiles(outputRoot)) {
 }
 
 console.log(
-    `build-tui: checked ${files.length} file(s), wrote ${written}, unchanged ${files.length - written} in ${relative(pluginRoot, outputRoot)}${stale ? ` (removed ${stale} stale)` : ""}`,
+    `build-tui: checked ${files.length + VENDORED_TSX_PACKAGES.size} file(s), wrote ${written}, unchanged ${files.length + VENDORED_TSX_PACKAGES.size - written} in ${relative(pluginRoot, outputRoot)}${stale ? ` (removed ${stale} stale)` : ""}`,
 );

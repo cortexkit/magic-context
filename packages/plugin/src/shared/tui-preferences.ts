@@ -76,12 +76,13 @@ export interface MagicContextTuiPrefs {
     header: {
         label: string;
     };
+    // One switch per section of the expanded panel. Keys from earlier panel
+    // layouts are ignored.
     sections: {
-        historian: boolean;
-        memory: boolean;
-        status: boolean;
-        dreamer: boolean;
-        stats: boolean;
+        context: boolean;
+        history: boolean;
+        cache: boolean;
+        knowledge: boolean;
     };
 }
 
@@ -93,13 +94,12 @@ export const DEFAULT_PREFS: MagicContextTuiPrefs = {
     startCollapsed: false,
     rememberCollapsed: true,
     collapsed: null,
-    header: { label: "Magic Context" },
+    header: { label: "MAGIC CONTEXT" },
     sections: {
-        historian: true,
-        memory: true,
-        status: true,
-        dreamer: true,
-        stats: true,
+        context: true,
+        history: true,
+        cache: true,
+        knowledge: true,
     },
 };
 
@@ -138,11 +138,10 @@ export function resolveMagicContextPrefs(root: Record<string, unknown>): MagicCo
             label: label(header.label, d.header.label, 24),
         },
         sections: {
-            historian: bool(sections.historian, d.sections.historian),
-            memory: bool(sections.memory, d.sections.memory),
-            status: bool(sections.status, d.sections.status),
-            dreamer: bool(sections.dreamer, d.sections.dreamer),
-            stats: bool(sections.stats, d.sections.stats),
+            context: bool(sections.context, d.sections.context),
+            history: bool(sections.history, d.sections.history),
+            cache: bool(sections.cache, d.sections.cache),
+            knowledge: bool(sections.knowledge, d.sections.knowledge),
         },
     };
 }
