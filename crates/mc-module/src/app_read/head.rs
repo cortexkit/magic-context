@@ -1,5 +1,6 @@
-//! The head is captured only when a view changes. Splitting and counting belong
-//! to the app-read thread, not to a session's steady-state notice work.
+//! The head is captured only when a view changes. Splitting it into sections
+//! and counting tokens run on the app-read thread when an app asks, never in
+//! the work a session does for each step of its runner.
 use super::{error, Refusal, Snapshot};
 use crate::count::Counter;
 use crate::summary::head::{Baseline, Form, M0_ID, M1_EMPTY, M1_ID};
@@ -61,6 +62,12 @@ impl ReadState {
                 }))
             })
             .collect::<Vec<_>>();
+        // The baseline's metadata (which summaries and corrections it holds)
+        // is kept only when it describes the baseline text this view inserts:
+        // either both are the ones the previous head held, or the text equals
+        // the baseline's own rendering. A runner restored to an older view
+        // inserts an older text, and items taken from a newer baseline would
+        // then name summaries that text does not show.
         let baseline = baseline.filter(|baseline| {
             previous.is_some_and(|head| {
                 head.baseline
