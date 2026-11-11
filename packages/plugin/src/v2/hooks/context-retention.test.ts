@@ -7,7 +7,7 @@ async function observeRequest(fixture: Oc2ContextFixture) {
     return new WeakRef(draft.messages);
 }
 
-test("releases large context message arrays between requests while the hook stays registered", async () => {
+async function requestArraysReleased() {
     const fixture = await oc2ContextFixture(800, { area: "issue-800", temporal: false });
     try {
         for (const row of fixture.rows) row.text += prose.repeat(512);
@@ -23,9 +23,23 @@ test("releases large context message arrays between requests while the hook stay
             await new Promise<void>((resolve) => setImmediate(resolve));
             Bun.gc(true);
         }
-        expect(first.deref()).toBeUndefined();
-        expect(second.deref()).toBeUndefined();
+        return { first: first.deref() === undefined, second: second.deref() === undefined };
     } finally {
         await fixture.cleanup();
     }
+}
+
+test("releases large context message arrays between requests while the hook stays registered", async () => {
+    // A failing heap snapshot showed only an internal runtime root to a completed
+    // pass result, with no JavaScript holder. Use independent fresh fixtures rather
+    // than retrying collection of the same arrays when the collector keeps one alive.
+    // A hook retaining the latest request fails every attempt: its second array is
+    // checked before cleanup or any later hook pass could replace that request.
+    let released = { first: false, second: false };
+    for (let attempt = 0; attempt < 3; attempt++) {
+        released = await requestArraysReleased();
+        if (released.first && released.second) break;
+    }
+    expect(released.first).toBe(true);
+    expect(released.second).toBe(true);
 }, 30000);
