@@ -42,11 +42,13 @@ cortexkit-role-step-transform-provider = "=0.5.0"
 # Routing picks a summarizer model the session's own runner can run; ck-mc
 # has no model chain of its own and never falls back to the session's model.
 cortexkit-role-routing = "=0.5.7"
+# A session moves between machines through the agent-data/v1 contract.
+cortexkit-role-agent-data = "=0.2.4"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
 # published request and reply types.
-cortexkit-agent-identity = "=0.1.0"
-cortexkit-project-identity = "=0.1.3"
+cortexkit-agent-identity = "=0.1.2"
+cortexkit-project-identity = "=0.1.4"
 # Profile versions compare as semantic versions.
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
