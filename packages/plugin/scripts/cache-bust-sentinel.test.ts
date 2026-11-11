@@ -26,6 +26,8 @@ import {
     CacheBustSentinelInputError,
     type CacheBustSentinelOptions,
     cacheBustWindowId,
+    DEFAULT_MAX_WAKE_AGE_MS,
+    enumerateActiveSessions,
     eventForWindow,
     groupBustWindows,
     loadSentinelState,
@@ -1070,6 +1072,115 @@ describe("agent.deliver contract", () => {
 });
 
 describe("cache-bust sentinel runs", () => {
+    test.each([undefined, 10 * 60_000])("enumeration applies the wake horizon %p and clears an expired session's cursor once", async (maxWakeAgeMs) => {
+        const directory = temporaryDirectory("cache-bust-sentinel-enumeration-");
+        const runOptions = { ...options(join(directory, "state.json")),
+            databasePath: join(directory, "context.db"), maxWakeAgeMs };
+        const now = 10 * 24 * 60 * 60_000;
+        const horizon = maxWakeAgeMs ?? DEFAULT_MAX_WAKE_AGE_MS;
+        const rows = [
+            { sessionId: "ses_old", harness: "opencode", activityMs: now - horizon - 1 },
+            { sessionId: "ses_recent", harness: "pi", activityMs: now - horizon + 1 },
+            { sessionId: "ses_boundary", harness: "opencode", activityMs: now - horizon },
+            { sessionId: "ses_cursor", harness: "pi", activityMs: now - horizon - 1 },
+            { sessionId: "ses_analyzed", harness: "opencode", activityMs: now - 1 },
+            { sessionId: "ses_new", harness: "opencode", activityMs: now - 1 },
+        ];
+        const db = new Database(runOptions.databasePath);
+        try {
+            db.run("CREATE TABLE session_projects (session_id TEXT, harness TEXT, project_path TEXT, updated_at INTEGER)");
+            db.run("CREATE TABLE session_meta (session_id TEXT, harness TEXT, last_response_time INTEGER)");
+            for (const row of rows) {
+                db.run("INSERT INTO session_projects VALUES (?, ?, ?, ?)",
+                    [row.sessionId, row.harness, "dir:fixture", row.harness === "pi" ? 0 : row.activityMs]);
+                db.run("INSERT INTO session_meta VALUES (?, ?, ?)",
+                    [row.sessionId, row.harness, row.harness === "pi" ? row.activityMs : 0]);
+            }
+        } finally { db.close(false); }
+        const state = __test.defaultState();
+        for (const row of rows.filter((row) => row.sessionId !== "ses_new")) {
+            state.sessions[row.sessionId] = { lastAnalyzedRequestTimestampMs: row.activityMs - 1 };
+        }
+        state.sessions.ses_analyzed.lastAnalyzedRequestTimestampMs = now - 1;
+        state.sessions.ses_analyzed.lastScannedAtMs = now - 1;
+        state.sessions.ses_cursor.scanCursor = "expired-backlog";
+        saveSentinelState(runOptions.stateFile, state);
+        expect(enumerateActiveSessions(state, now, runOptions).map((row) => row.sessionId).sort())
+            .toEqual(["ses_cursor", "ses_new", "ses_recent"]);
+
+        const scanned: string[] = [];
+        const deps = {
+            now: () => now, loadDecisions: () => [],
+            analyzeSession: async (session: ActiveCacheBustSession) => {
+                scanned.push(session.sessionId);
+                return { requests: [], highWaterMarkMs: null };
+            }, stdout: () => {}, stderr: () => {},
+        };
+        await runSentinelOnce(runOptions, deps);
+        expect(scanned.sort()).toEqual(["ses_cursor", "ses_new", "ses_recent"]);
+        const saved = loadSentinelState(runOptions.stateFile);
+        expect(saved.sessions.ses_cursor.scanCursor).toBeUndefined();
+        expect(enumerateActiveSessions(saved, now, runOptions).map((row) => row.sessionId).sort())
+            .toEqual(["ses_new", "ses_recent"]);
+        await runSentinelOnce(runOptions, deps);
+        expect(scanned.filter((sessionId) => sessionId === "ses_cursor")).toHaveLength(1);
+    });
+
+    test("prunes only old idle session entries while retaining wake and lag deduplication state", async () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-prune-");
+        const runOptions = options(join(directory, "state.json"));
+        const day = 24 * 60 * 60_000;
+        const now = 3 * day;
+        const old = { lastAnalyzedRequestTimestampMs: 1, lastScannedAtMs: now - day - 1 };
+        const window = { startMs: 1, lastBustMs: 2 };
+        const state = __test.defaultState();
+        state.sessions = {
+            ses_idle: { ...old },
+            ses_legacy: { lastAnalyzedRequestTimestampMs: 1 },
+            ses_zero_pending: { ...old, pendingFiles: 0 },
+            ses_cursor: { ...old, scanCursor: "unfinished" },
+            ses_pending: { ...old, pendingFiles: 3, oldestPendingTimestampMs: now - 20 * 60_000 },
+            ses_open: { ...old, openWindow: window },
+            ses_backfill: { ...old, backfillWindow: window },
+            ses_recent: { ...old, lastScannedAtMs: now - 1 },
+            ses_boundary: { ...old, lastScannedAtMs: now - day },
+        };
+        const eventId = cacheBustWindowId("ses_idle", 1);
+        state.windows["ses_idle:1"] = { divergenceClass: "unaccounted_rewrite", lastEventId: eventId, eventIds: [eventId] };
+        state.deliveries[eventId] = { disposition: "delivered", committedOrder: 42 };
+        state.suppressedWindows["ses_idle:2"] = { divergenceClass: "no_mc_pass_row", rewrittenTokens: 80_000,
+            windowStartMs: 2, reason: "stale" };
+        state.lag = { startedAtMs: now - day, consecutiveRuns: 3, notified: true, lagMs: 20 * 60_000, pendingFiles: 3 };
+        saveSentinelState(runOptions.stateFile, state);
+        const output: string[] = [];
+        let clock = now;
+        await runSentinelOnce(runOptions, {
+            now: () => clock, listActiveSessions: () => { clock += 1; return []; },
+            stdout: (line) => output.push(line), stderr: () => {},
+        });
+        const saved = loadSentinelState(runOptions.stateFile);
+        expect(Object.keys(saved.sessions).sort()).toEqual([
+            "ses_backfill", "ses_boundary", "ses_cursor", "ses_open", "ses_pending", "ses_recent",
+        ]);
+        expect(saved.sessions.ses_boundary.lastScannedAtMs).toBe(now - day);
+        expect(saved.windows).toEqual(state.windows);
+        expect(saved.deliveries).toEqual(state.deliveries);
+        expect(saved.suppressedWindows).toEqual(state.suppressedWindows);
+        expect(saved.lag).toEqual({ ...state.lag, consecutiveRuns: 4, lagMs: 20 * 60_000 + 1 });
+        expect(output).toEqual([]);
+
+        let resumedSince: number | undefined;
+        await runSentinelOnce(runOptions, {
+            now: () => clock, listActiveSessions: () => [{ ...activeSession, sessionId: "ses_idle", activityMs: clock }],
+            loadDecisions: () => [], analyzeSession: async (_, since) => {
+                resumedSince = since;
+                return { requests: [], highWaterMarkMs: null };
+            }, stdout: () => {}, stderr: () => {},
+        });
+        expect(resumedSince).toBe(clock - runOptions.lookbackMs);
+        expect(loadSentinelState(runOptions.stateFile).windows).toEqual(state.windows);
+    });
+
     test("saves its state once per run, and keeps a failed run's progress", async () => {
         // The state file covers every session ever seen and a run walks thousands
         // of them, so saving after each session rewrote gigabytes an hour.
@@ -1125,7 +1236,7 @@ describe("cache-bust sentinel runs", () => {
         const runOptions = { ...options(stateFile), maxRunMs: 10 };
         expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
         expect(sent).toEqual(["ses_one"]);
-        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
+        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(false);
         expect(sent).toEqual(["ses_one", "ses_two"]);
     });
     test("alerts on a second bust that a later run sees after the reclaim it follows", async () => {

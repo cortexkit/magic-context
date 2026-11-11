@@ -89,14 +89,17 @@ test("stale backfill below the thread threshold still records an observation and
     const opts = { ...options(), lookbackMs: 30 * minute };
     const start = 60 * minute;
     let now = start;
+    let batches = 0;
     const logs: Array<Record<string, unknown>> = [];
-    await runSentinelOnce(opts, { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
-        analyzeSession: async () => { now += 2 * minute; return {
+    const counters = await runSentinelOnce(opts, { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
+        analyzeSession: async () => { batches++; now += 2 * minute; return {
             requests: [{ ...request(start - 29 * minute, "full_body_no_baseline"), rewrittenTokens: 1_000 }],
             highWaterMarkMs: start - 29 * minute, scanBounded: true, scanCursor: "backlog",
             pendingFiles: 4, oldestPendingTimestampMs: start - 28 * minute }; },
         transport: { record: async () => { throw new Error("must not wake"); } }, stdout: () => {},
         stderr: (line) => logs.push(JSON.parse(line)) });
+    expect(counters.bounded).toBe(true);
+    expect(batches).toBe(1);
     const state = loadSentinelState(opts.stateFile);
     expect(Object.values(state.suppressedWindows)).toEqual([
         { divergenceClass: "full_body_no_baseline", rewrittenTokens: 1_000, windowStartMs: start - 29 * minute, reason: "stale" },
@@ -150,16 +153,17 @@ test("backfilling a long bust streak retains its delivery ID instead of waking a
     const opts = { ...options(), lookbackMs: 30 * minute };
     const now = 60 * minute;
     const events: CacheBustEvent[] = [];
-    let run = 0;
+    let batch = 0;
     const deps = { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
         analyzeSession: async () => {
-            run++;
-            const times = run === 1 ? [40, 41, 42, 43, 44, 45] : run === 2 ? [35, 36, 37, 38, 39] : [31, 32, 33, 34];
+            batch++;
+            const times = batch === 1 ? [40, 41, 42, 43, 44, 45] : batch === 2 ? [35, 36, 37, 38, 39] : [31, 32, 33, 34];
             return { requests: times.map((value) => request(value * minute)), highWaterMarkMs: 45 * minute,
-                scanBounded: run < 3, scanCursor: run < 3 ? JSON.stringify({ head: "head", before: `batch${3 - run}`, highWaterMarkMs: 45 * minute }) : undefined };
+                scanBounded: batch < 3, scanCursor: batch < 3 ? JSON.stringify({ head: "head", before: `batch${3 - batch}`, highWaterMarkMs: 45 * minute }) : undefined };
         }, transport: { record: async (event: CacheBustEvent) => { events.push(event); return { disposition: "delivered", committed_order: events.length }; } },
         stdout: () => {}, stderr: () => {} };
-    for (let i = 0; i < 3; i++) await runSentinelOnce(opts, deps);
+    expect((await runSentinelOnce(opts, deps)).bounded).toBe(false);
+    expect(batch).toBe(3);
     expect(events).toHaveLength(1);
     expect(loadSentinelState(opts.stateFile).sessions[session.sessionId].lastAnalyzedRequestTimestampMs).toBe(45 * minute);
 });
@@ -167,33 +171,34 @@ test("backfilling a long bust streak retains its delivery ID instead of waking a
 test("backfill remembers the partial first streak even when a later streak ends the batch", async () => {
     const opts = { ...options(), lookbackMs: 30 * minute };
     const now = 60 * minute;
-    let run = 0;
+    let batch = 0;
     const events: CacheBustEvent[] = [];
     const stable = { ...request(44 * minute), verdict: "STABLE" as const, divergenceClass: undefined };
     const deps = { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
         analyzeSession: async () => {
-            run++;
-            return { requests: run === 1 ? [request(40 * minute), request(41 * minute), stable, request(45 * minute)]
-                : [request(38 * minute), request(39 * minute)], highWaterMarkMs: 45 * minute, scanBounded: run === 1,
-                scanCursor: run === 1 ? JSON.stringify({ head: "head", before: "before", highWaterMarkMs: 45 * minute }) : undefined };
+            batch++;
+            return { requests: batch === 1 ? [request(40 * minute), request(41 * minute), stable, request(45 * minute)]
+                : [request(38 * minute), request(39 * minute)], highWaterMarkMs: 45 * minute, scanBounded: batch === 1,
+                scanCursor: batch === 1 ? JSON.stringify({ head: "head", before: "before", highWaterMarkMs: 45 * minute }) : undefined };
         }, transport: { record: async (event: CacheBustEvent) => { events.push(event); return { disposition: "delivered", committed_order: events.length }; } },
         stdout: () => {}, stderr: () => {} };
-    await runSentinelOnce(opts, deps);
+    expect((await runSentinelOnce(opts, deps)).bounded).toBe(false);
+    expect(batch).toBe(2);
     expect(events).toHaveLength(2);
     await runSentinelOnce(opts, deps);
     expect(events).toHaveLength(2);
 });
 
 test("lag persists and prints a line, sends once after three runs, and resets after catch-up", async () => {
-    const opts = options();
-    const now = 60 * minute;
+    const opts = { ...options(), maxRunMs: 1 };
+    let now = 60 * minute;
     let bounded = true;
     const notices: Array<{ deliveryId: string; content: string }> = [];
     const logs: Array<Record<string, unknown>> = [];
     const deps = { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
-        analyzeSession: async () => ({ requests: [], highWaterMarkMs: null, scanBounded: bounded,
+        analyzeSession: async () => { now += 1; return { requests: [], highWaterMarkMs: null, scanBounded: bounded,
             scanCursor: bounded ? "fixture-cursor" : undefined, pendingFiles: bounded ? 70 : 0,
-            oldestPendingTimestampMs: bounded ? now - 20 * minute : undefined }),
+            oldestPendingTimestampMs: bounded ? now - 20 * minute : undefined }; },
         transport: { record: async () => {}, recordLag: async (notice: { deliveryId: string; content: string }) => {
             notices.push(notice); return { disposition: "delivered", committed_order: notices.length }; } },
         stdout: () => {}, stderr: (line: string) => logs.push(JSON.parse(line)) };
@@ -210,7 +215,8 @@ test("lag persists and prints a line, sends once after three runs, and resets af
     await runSentinelOnce(opts, deps);
     expect(loadSentinelState(opts.stateFile).lag).toBeUndefined();
     bounded = true;
-    for (let i = 0; i < 3; i++) await runSentinelOnce(opts, { ...deps, now: () => now + minute });
+    now += minute;
+    for (let i = 0; i < 3; i++) await runSentinelOnce(opts, deps);
     expect(notices).toHaveLength(2);
     expect(notices[1].deliveryId).not.toBe(notices[0].deliveryId);
 });
@@ -220,11 +226,12 @@ test("quiet lag delivery uses normal urgency and a refusal is logged without ret
     const transport = new SubcWakeEventTransport("fixture", "module", "agent", "sentinel", async () => ({
         call: async (_, __, params) => { requests.push(params); throw new Error("refused urgency"); }, close: () => {},
     }));
-    const opts = options();
+    const opts = { ...options(), maxRunMs: 1 };
+    let now = 60 * minute;
     const logs: string[] = [];
-    const deps = { now: () => 60 * minute, listActiveSessions: () => [session], loadDecisions: () => [],
-        analyzeSession: async () => ({ requests: [], highWaterMarkMs: null, scanBounded: true, scanCursor: "fixture",
-            pendingFiles: 100, oldestPendingTimestampMs: 40 * minute }), transport,
+    const deps = { now: () => now, listActiveSessions: () => [session], loadDecisions: () => [],
+        analyzeSession: async () => { now += 1; return { requests: [], highWaterMarkMs: null, scanBounded: true, scanCursor: "fixture",
+            pendingFiles: 100, oldestPendingTimestampMs: now - 20 * minute }; }, transport,
         stdout: () => {}, stderr: (line: string) => logs.push(line) };
     for (let i = 0; i < 4; i++) await runSentinelOnce(opts, deps);
     expect(requests).toHaveLength(1);

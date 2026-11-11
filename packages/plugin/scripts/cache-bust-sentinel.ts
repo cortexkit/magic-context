@@ -82,6 +82,7 @@ const MIN_INTERVAL_MS = 60_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_LOOKBACK_MS = 5 * 60_000;
 export const DEFAULT_MAX_WAKE_AGE_MS = 30 * 60_000;
+const IDLE_SESSION_RETENTION_MS = 24 * 60 * 60_000;
 const DEFAULT_WAKE_MODULE_ID = "prefrontal-core";
 const DEFAULT_WAKE_AGENT_ID = "agent_b613e5cf2ee55b8c";
 const DEFAULT_WAKE_FROM_AGENT = "mc-cache-bust-sentinel";
@@ -280,6 +281,22 @@ function defaultState(): CacheBustSentinelState {
     return { version: STATE_VERSION, sessions: {}, windows: {}, deliveries: {}, suppressedWindows: {} };
 }
 
+function maxWakeAgeMsFor(options: Pick<CacheBustSentinelOptions, "maxWakeAgeMs">): number {
+    return options.maxWakeAgeMs ?? DEFAULT_MAX_WAKE_AGE_MS;
+}
+
+function pruneIdleSessionState(state: CacheBustSentinelState, runStartMs: number): void {
+    // Keep delivery IDs and observations of suppressed cache-bust streaks even
+    // after forgetting idle progress; rediscovering a session must not repeat
+    // an agent notification.
+    for (const [sessionId, session] of Object.entries(state.sessions)) {
+        if (!session.scanCursor && !session.pendingFiles && !session.openWindow && !session.backfillWindow &&
+            (session.lastScannedAtMs === undefined || session.lastScannedAtMs < runStartMs - IDLE_SESSION_RETENTION_MS)) {
+            delete state.sessions[sessionId];
+        }
+    }
+}
+
 function finiteNonnegative(value: unknown): number | undefined {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
@@ -470,7 +487,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         lookbackMs,
         maxWakeAgeMs: values.has("--max-wake-age-ms")
             ? parsePositiveInteger(values.get("--max-wake-age-ms"), "--max-wake-age-ms")
-            : DEFAULT_MAX_WAKE_AGE_MS,
+            : maxWakeAgeMsFor({}),
         maxRunMs: values.has("--max-run-ms")
             ? parsePositiveInteger(values.get("--max-run-ms"), "--max-run-ms")
             : 30_000,
@@ -505,6 +522,7 @@ export function enumerateActiveSessions(
     options: CacheBustSentinelOptions,
 ): ActiveCacheBustSession[] {
     if (!existsSync(options.databasePath)) return [];
+    const wakeHorizonMs = nowMs - maxWakeAgeMsFor(options);
     const db = new Database(options.databasePath, { readonly: true });
     try {
         if (!tableExists(db, "session_projects") || !tableExists(db, "session_meta")) return [];
@@ -530,7 +548,9 @@ export function enumerateActiveSessions(
             const since =
                 state.sessions[sessionId]?.lastAnalyzedRequestTimestampMs ??
                 nowMs - options.lookbackMs;
-            return activityMs > since || state.sessions[sessionId]?.scanCursor
+            // A completed session's last activity can outlive its last request;
+            // only recent activity or unfinished scans justify another batch.
+            return activityMs > Math.max(since, wakeHorizonMs) || state.sessions[sessionId]?.scanCursor
                 ? [{ sessionId, harness, projectPath, activityMs }] : [];
         });
     } finally {
@@ -1327,7 +1347,7 @@ export async function runSentinelOnce(
 ): Promise<SentinelCounters> {
     const clock = deps.now ?? Date.now;
     const nowMs = clock();
-    const maxWakeAgeMs = options.maxWakeAgeMs ?? DEFAULT_MAX_WAKE_AGE_MS;
+    const maxWakeAgeMs = maxWakeAgeMsFor(options);
     const deadlineMs = nowMs + (options.maxRunMs ?? 30_000);
     const stdout = deps.stdout ?? console.log;
     const stderr = deps.stderr ?? console.error;
@@ -1349,16 +1369,21 @@ export async function runSentinelOnce(
         : null;
 
     try {
-        for (const session of sessions) {
-            if (clock() >= deadlineMs) {
+        // Requeue unfinished sessions behind the rest of the pass so every
+        // session's newest batch comes before another session's older backlog.
+        const scanQueue = [...sessions];
+        for (let batchIndex = 0; batchIndex < scanQueue.length; batchIndex += 1) {
+            const batchNowMs = clock();
+            if (batchNowMs >= deadlineMs) {
                 counters.bounded = true;
                 break;
             }
+            const session = scanQueue[batchIndex];
             const priorSession = state.sessions[session.sessionId];
             const priorScanCursor = priorSession?.scanCursor;
             const sinceExclusiveMs =
-                priorSession ? Math.max(priorSession.lastAnalyzedRequestTimestampMs, nowMs - maxWakeAgeMs)
-                    : nowMs - options.lookbackMs;
+                priorSession ? Math.max(priorSession.lastAnalyzedRequestTimestampMs, batchNowMs - maxWakeAgeMs)
+                    : batchNowMs - options.lookbackMs;
             staleBacklog ||= Boolean(priorSession?.scanCursor && priorSession.oldestPendingTimestampMs !== undefined &&
                 priorSession.oldestPendingTimestampMs < sinceExclusiveMs);
             const decisions = (deps.loadDecisions ?? loadSessionDecisions)(session, options);
@@ -1369,19 +1394,18 @@ export async function runSentinelOnce(
                 { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: deadlineMs, scanNow: clock },
             );
             counters.filesExamined += analysis.filesExamined ?? 0;
-            counters.bounded ||= analysis.scanBounded ?? false;
             const requests = analysis.requests.filter(
                 (request) =>
                     request.session === session.sessionId &&
                     request.timestampMs > sinceExclusiveMs &&
-                    request.timestampMs <= nowMs,
+                    request.timestampMs <= batchNowMs,
             );
             counters.requests += requests.length;
             const sessionState: SessionWatermarkState = priorSession ?? {
                 lastAnalyzedRequestTimestampMs: sinceExclusiveMs,
             };
             sessionState.lastAnalyzedRequestTimestampMs = Math.max(sessionState.lastAnalyzedRequestTimestampMs, sinceExclusiveMs);
-            sessionState.lastScannedAtMs = nowMs;
+            sessionState.lastScannedAtMs = batchNowMs;
             const windows = groupBustWindows(requests, sessionState.openWindow, sessionState.backfillWindow);
             counters.bustWindows += windows.length;
             for (const window of windows) {
@@ -1494,7 +1518,7 @@ export async function runSentinelOnce(
                 );
             }
             const highWater =
-                analysis.highWaterMarkMs !== null && analysis.highWaterMarkMs <= nowMs
+                analysis.highWaterMarkMs !== null && analysis.highWaterMarkMs <= batchNowMs
                     ? analysis.highWaterMarkMs
                     : requests.length > 0
                       ? Math.max(...requests.map((request) => request.timestampMs))
@@ -1516,13 +1540,17 @@ export async function runSentinelOnce(
                     eventStartMs: earliest.eventStartMs ?? earliest.startMs, threadRewrittenTokens: windowRewrittenTokens(earliest) };
             } else if (!analysis.scanBounded || movedBackfill) delete sessionState.backfillWindow;
             state.sessions[session.sessionId] = sessionState;
-            if (analysis.scanBounded || clock() >= deadlineMs) {
-                counters.bounded = true;
-                break;
+            if (analysis.scanBounded || analysis.pendingFiles) {
+                // An unchanged, empty scan cannot drain its backlog. Leave it
+                // for the next run instead of spinning until the deadline.
+                if (analysis.scanCursor === priorScanCursor && analysis.requests.length === 0) {
+                    counters.bounded = true;
+                } else scanQueue.push(session);
             }
         }
         const pending = Object.values(state.sessions).filter((session) => session.pendingFiles);
         const pendingFiles = pending.reduce((sum, session) => sum + (session.pendingFiles ?? 0), 0);
+        counters.bounded ||= pendingFiles > 0;
         const oldest = Math.min(...pending.map((session) => session.oldestPendingTimestampMs ?? nowMs));
         const lagMs = Math.max(0, clock() - oldest);
         const lagging = staleBacklog || (counters.bounded && lagMs > maxWakeAgeMs / 2);
@@ -1551,15 +1579,14 @@ export async function runSentinelOnce(
             }
         } else if (state.lag) state.lag.consecutiveRuns = 0;
     } finally {
-        // Session watermarks are not saved after each session; this end-of-run
-        // write saves them, while alert sends still save the state before and
-        // after each send. The state file covers every session the sentinel has
-        // seen (over a megabyte), and a run walks thousands of them, so a
-        // per-session save rewrote gigabytes an hour. Saving here also keeps the
-        // progress of a run that throws. An abrupt exit before this write can lose
+        // Keep batch progress in memory until the end of the run: rewriting the
+        // complete state after each batch would multiply I/O while draining a
+        // backlog. Alert sends still save IDs before and outcomes after sending.
+        // Saving here also keeps the progress of a run that throws. An abrupt exit can lose
         // watermark updates or an in-flight delivery outcome; the next run then
         // re-reads those requests, but it never emits the same event id again,
         // because each event id is saved before it is sent.
+        pruneIdleSessionState(state, nowMs);
         saveSentinelState(options.stateFile, state);
         await transport?.close?.();
     }
