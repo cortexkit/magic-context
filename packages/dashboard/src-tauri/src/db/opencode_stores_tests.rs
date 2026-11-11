@@ -514,7 +514,8 @@ fn paths_with_uri_characters_open_immutable() {
 
 // ── Readers over the list ─────────────────────────────────────────────────
 
-/// An OpenCode 1 store whose one session holds one cache event.
+/// An OpenCode 1 store with one session holding one assistant message with
+/// token counts, which the Cache tab counts as a cache event.
 fn opencode1_store(path: &Path, session: &str, updated: i64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let conn = Connection::open(path).unwrap();
