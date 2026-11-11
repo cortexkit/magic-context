@@ -1,5 +1,6 @@
-//! The source's calls to Engram's session door: `session.offsets`,
-//! `session.cover`, `session.admit`, `session.digest` and `session.read`.
+//! The calls to Engram's session door: on the source `session.offsets`,
+//! `session.cover`, `session.admit`, `session.digest` and `session.read`, and
+//! on the receiver `session.read` bound to a sealed cut ([`read_cut`]).
 //!
 //! The door keeps one append-only stream per caller and session. It names
 //! the stream after the route's attested caller (`reserved:<module id>`)
@@ -95,6 +96,86 @@ pub enum Answer {
 }
 
 use Answer::{Fault, Handoff, Unavailable, UnknownRef};
+
+/// What the receiver answers for a failed cut-bound read, after Engram's
+/// refusal table for `session.read` with a `cutId`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutAnswer {
+    /// `cut_not_ready`: the door cannot serve the cut yet, because its
+    /// manifest is not published or not in the cloud yet. The driver
+    /// retries within the step.
+    NotReady,
+    /// `unavailable`: the same request may succeed later.
+    Unavailable,
+    /// The cut's bytes do not check out against what the cut recorded:
+    /// `digest_mismatch` where the op may say so.
+    Mismatch,
+    /// A fault on this machine that retrying cannot clear.
+    Fault(&'static str),
+}
+
+/// Per door code, what the receiver answers for a cut-bound read. A code
+/// the table does not name is answered `unavailable`, as on the source.
+const CUT_ANSWERS: &[(&str, CutAnswer)] = &[
+    ("not_found", CutAnswer::NotReady),
+    ("cut_not_published", CutAnswer::NotReady),
+    ("unavailable", CutAnswer::Unavailable),
+    ("lease_unavailable", CutAnswer::Unavailable),
+    ("lease_acquiring", CutAnswer::Unavailable),
+    // The source's prepare named this session's stream in the cut, so a
+    // manifest without it is one the door may still be catching up on.
+    ("cut_item_missing", CutAnswer::Unavailable),
+    ("verify_failed", CutAnswer::Mismatch),
+    ("stream_digest_mismatch", CutAnswer::Mismatch),
+    (
+        "invalid_request",
+        CutAnswer::Fault(
+            "ck-mc sent the door a request it does not accept; update ck-mc or Engram",
+        ),
+    ),
+    (
+        "caller_forbidden",
+        CutAnswer::Fault(
+            "the daemon must bind ck-mc to the door unscoped, as its own attested module",
+        ),
+    ),
+    (
+        "stream_label_too_long",
+        CutAnswer::Fault(
+            "ck-mc's module id is too long for a door stream; run it under a shorter id",
+        ),
+    ),
+    (
+        "record_too_large",
+        CutAnswer::Fault("ck-mc asked the door for more than a page; update ck-mc"),
+    ),
+    (
+        "response_too_large",
+        CutAnswer::Fault("the door's answer did not fit its frame; update Engram"),
+    ),
+    (
+        "offset_out_of_range",
+        CutAnswer::Fault("the session's stream is shorter than the cut; check it on Engram"),
+    ),
+    (
+        "below_floor",
+        CutAnswer::Fault(
+            "the session's stream kept being trimmed while the cut was read; stop its trims",
+        ),
+    ),
+    (
+        "midstate_malformed",
+        CutAnswer::Fault("the door's running hash cannot be read; update ck-mc or Engram"),
+    ),
+];
+
+/// What the receiver answers for a cut-bound read that failed with `code`.
+pub fn cut_answer(code: &str) -> CutAnswer {
+    CUT_ANSWERS
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map_or(CutAnswer::Unavailable, |(_, answer)| *answer)
+}
 
 /// Per door code, what `prepare` and what `export` answer, after Engram's
 /// stream and retention refusal tables: their Retry rows are answered
@@ -441,6 +522,155 @@ async fn read<H: Host>(
         offset = page.end_offset;
     }
     Ok(())
+}
+
+/// A page of `session.read` bound to a cut: the page, the cut's end and
+/// digest for the session's stream, and the stream's floor with the running
+/// hash state there.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CutPage {
+    bytes: String,
+    from_offset: u64,
+    end_offset: u64,
+    stream_end: u64,
+    digest: String,
+    floor: u64,
+    midstate: Midstate,
+}
+
+/// What a sealed cut holds of a session's stream, as the door serves it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutBytes {
+    /// The stream's trim floor: `bytes` start here.
+    pub floor: u64,
+    /// Where the cut ends the stream.
+    pub end: u64,
+    /// The SHA-256 the cut recorded for the stream's bytes up to `end`.
+    pub digest: String,
+    /// The stream's bytes from `floor` to `end`.
+    pub bytes: Vec<u8>,
+}
+
+/// Read the session's stream as the sealed cut `cut` holds it, from the
+/// stream's floor to the cut's end, and check the bytes against the digest
+/// the cut recorded: the door's running hash at the floor, resumed over the
+/// bytes read, must give it. The first read starts at byte 0; a stream
+/// trimmed above that refuses it `below_floor` naming the floor, and the
+/// read starts again there. So does a page reporting another floor than
+/// the first one, since a trim moved it meanwhile.
+pub async fn read_cut<H: Host>(
+    host: &H,
+    session_ref: &str,
+    cut: &str,
+) -> Result<CutBytes, DoorError> {
+    let mut from = 0;
+    'restart: for _ in 0..=FLOOR_RETRIES {
+        let mut bytes = Vec::new();
+        // The floor, end, digest and running hash the first page reported.
+        let mut bound: Option<(u64, u64, String, Midstate)> = None;
+        let mut offset = from;
+        loop {
+            let limit = match &bound {
+                Some((_, end, _, _)) if offset == *end => break,
+                Some((_, end, _, _)) => (end - offset).min(PAGE as u64),
+                None => PAGE as u64,
+            };
+            let answer = host
+                .door(
+                    "session.read",
+                    json!({"sessionRef": session_ref, "fromOffset": offset, "limit": limit, "cutId": cut}),
+                    DEADLINE,
+                )
+                .await;
+            let answer = match answer {
+                Ok(answer) => answer,
+                Err(refusal) if refusal.code == "below_floor" => {
+                    match refusal
+                        .detail
+                        .as_ref()
+                        .and_then(|detail| detail.get("floor"))
+                        .and_then(Value::as_u64)
+                    {
+                        Some(floor) if floor > offset => {
+                            from = floor;
+                            continue 'restart;
+                        }
+                        _ => return Err(DoorError::refused("session.read", &refusal)),
+                    }
+                }
+                Err(refusal) => return Err(DoorError::refused("session.read", &refusal)),
+            };
+            let page: CutPage = decode("session.read", answer)?;
+            let read = unhex(&page.bytes).ok_or_else(|| {
+                DoorError::retry("the door's session.read answer carries bytes that are not hex")
+            })?;
+            if page.from_offset != offset
+                || read.is_empty()
+                || read.len() as u64 > limit
+                || page.end_offset != offset + read.len() as u64
+                || page.end_offset > page.stream_end
+            {
+                return Err(DoorError::retry(format!(
+                    "the door answered session {session_ref}'s bytes from {offset} in cut {cut} with another range"
+                )));
+            }
+            match &bound {
+                None if page.floor != from => {
+                    // The read must start at the floor, where the running
+                    // hash the door reports stands.
+                    from = page.floor;
+                    continue 'restart;
+                }
+                None => {
+                    bound = Some((page.floor, page.stream_end, page.digest, page.midstate));
+                }
+                Some((floor, end, digest, _)) => {
+                    if page.stream_end != *end || page.digest != *digest {
+                        return Err(DoorError::retry(format!(
+                            "the door changed cut {cut}'s end or digest for session {session_ref} between two pages"
+                        )));
+                    }
+                    if page.floor != *floor {
+                        from = page.floor;
+                        continue 'restart;
+                    }
+                }
+            }
+            bytes.extend(read);
+            offset = page.end_offset;
+        }
+        let (floor, end, digest, midstate) = bound.expect("a read ends only after a page");
+        let mut hash = Resumed::from_midstate(&midstate, floor).map_err(|why| {
+            DoorError::new(
+                "midstate_malformed",
+                format!(
+                    "the door's running hash for session {session_ref} cannot be resumed: {why}"
+                ),
+            )
+        })?;
+        hash.update(&bytes);
+        if hash.finish() != digest {
+            return Err(DoorError::new(
+                "stream_digest_mismatch",
+                format!(
+                    "session {session_ref}'s stream bytes up to {end} do not hash to the digest cut {cut} recorded for them"
+                ),
+            ));
+        }
+        return Ok(CutBytes {
+            floor,
+            end,
+            digest,
+            bytes,
+        });
+    }
+    Err(DoorError::new(
+        "below_floor",
+        format!(
+            "session {session_ref}'s stream was trimmed {FLOOR_RETRIES} times while cut {cut} was read"
+        ),
+    ))
 }
 
 async fn call<H: Host>(

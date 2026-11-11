@@ -105,6 +105,9 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
+    // An install a move started before a crash is finished in every build:
+    // its sessions are refused until it is.
+    module.spawn_move_recovery();
     let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest_for(&module_id, agent_data),

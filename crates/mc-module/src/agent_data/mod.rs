@@ -30,6 +30,7 @@ pub mod install;
 pub mod journal;
 pub mod midstate;
 pub mod moved;
+pub mod receiver;
 pub mod resolve;
 pub mod service;
 pub mod snapshot;

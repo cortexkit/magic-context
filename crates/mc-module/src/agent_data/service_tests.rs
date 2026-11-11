@@ -172,6 +172,20 @@ impl Host for Stand {
 
     fn forget(&self, _session: &SessionRef, _cut: &str) {}
 
+    fn reset(&self, _session: &SessionRef, _cut: &str) {}
+
+    fn active(&self, _session: &SessionRef) -> bool {
+        false
+    }
+
+    fn state_rows(&self, _session: &SessionRef) -> Result<Value, String> {
+        Ok(json!({}))
+    }
+
+    fn clear_state(&self, _session: &SessionRef) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn door(
         &self,
         _method: &str,

@@ -38,7 +38,8 @@ use cortexkit_role_compaction::read::SessionRef;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::journal::{Contents, Cut, Journal, Receipt};
+use super::journal::{Contents, Cut, Journal, MovingState, Receipt};
+use super::snapshot;
 use crate::client::{DoorRefusal, EntorhinalRefusal};
 
 /// The stores `describe` declares, each with its sync class: the session's
@@ -94,6 +95,20 @@ pub trait Host: Send + Sync {
     /// machine by `cut`: its worker with the jobs it held, its Setup and its
     /// cached project.
     fn forget(&self, session: &SessionRef, cut: &str);
+    /// Drop everything this process keeps for a session whose rows `cut`
+    /// just replaced with another machine's copy: its worker with the jobs
+    /// it held, its Setup, and the cached project of the session under any
+    /// runner, since context reads match the session by harness and id.
+    fn reset(&self, session: &SessionRef, cut: &str);
+    /// Whether the session has a worker in this process: a Setup started
+    /// it, and only a move's release or install drops it.
+    fn active(&self, session: &SessionRef) -> bool;
+    /// Every row `mode3.db` holds for the session, per table, for an undo
+    /// image; an empty object when it holds none.
+    fn state_rows(&self, session: &SessionRef) -> Result<Value, String>;
+    /// Delete every row `mode3.db` holds for the session, in one
+    /// transaction.
+    fn clear_state(&self, session: &SessionRef) -> Result<(), String>;
     /// One call to Engram's session door, given at most `deadline`: the
     /// reply's `result`, or the door's refusal.
     fn door(
@@ -166,6 +181,8 @@ pub(crate) enum After {
     Forget(SessionRef, String),
     /// Delete a folder of move files nothing names any more.
     Remove(PathBuf),
+    /// Say that a session a move installed here is served again.
+    Activated(SessionRef, String),
 }
 
 fn carry_out<H: Host>(host: &H, after: Vec<After>) {
@@ -182,6 +199,13 @@ fn carry_out<H: Host>(host: &H, after: Vec<After>) {
                 );
                 host.forget(&session, &cut);
             }
+            After::Activated(session, cut) => tracing::info!(
+                cut = %cut,
+                "ck-mc: session {}/{}/{} is activated by agent-data cut {cut} and served again from the rows the move installed",
+                session.runner,
+                session.harness,
+                session.session
+            ),
             After::Remove(folder) => match std::fs::remove_dir_all(&folder) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -244,7 +268,9 @@ impl Service {
             Request::Describe(_) => describe(host).await,
             Request::Busy(busy) => super::busy::busy(host, &busy.refs).await,
             Request::Status(status) => status_reply(host.journal(), status.cut_id.as_str()),
-            Request::Diverged(_) => Err(not_served_yet(op)),
+            Request::Diverged(diverged) => {
+                super::receiver::diverged(host, diverged.cut_id.as_str(), &diverged.refs).await
+            }
             _ => self
                 .keyed_then(host.journal(), &request, |cut| run(host, &request, cut))
                 .await
@@ -359,15 +385,84 @@ impl Service {
             })?;
         Ok((reply, after))
     }
+
+    /// Finish, at startup, every install the journal records as started:
+    /// each cut with a session being installed runs its `activate` again, as
+    /// a repeat of the request would. It resumes at the install and writes
+    /// the same receipt the driver's own repeat then gets back. This runs in
+    /// every build, moves on or off, because a session being installed is
+    /// refused until its install is finished. A cut that fails stays being
+    /// installed until the driver repeats `activate` or the next start.
+    pub async fn recover<H: Host>(&self, host: &H) {
+        let Some(contents) = host.journal().contents() else {
+            return;
+        };
+        let cuts: std::collections::BTreeSet<String> = contents
+            .sessions
+            .iter()
+            .filter_map(|entry| entry.moving.as_ref())
+            .filter(|moving| moving.state == MovingState::Activating)
+            .map(|moving| moving.cut.clone())
+            .collect();
+        for cut in cuts {
+            let Some(refs) = contents
+                .cuts
+                .get(&cut)
+                .and_then(|record| record.refs.clone())
+            else {
+                tracing::error!(
+                    cut = %cut,
+                    "ck-mc: agent-data cut {cut} has sessions being installed but no record of its refs; they stay refused session_moving until the journal is repaired"
+                );
+                continue;
+            };
+            let params = serde_json::json!({"refs": refs, "cutId": cut});
+            let request = match Request::decode(Op::Activate.method(), &params) {
+                Ok(request) => request,
+                Err(refusal) => {
+                    tracing::error!(
+                        cut = %cut,
+                        "ck-mc: agent-data cut {cut}'s install cannot be resumed: its recorded refs do not make an activate request ({})",
+                        refusal.message
+                    );
+                    continue;
+                }
+            };
+            tracing::info!(
+                cut = %cut,
+                "ck-mc: finishing the install of agent-data cut {cut}, which the last run of ck-mc started"
+            );
+            match self
+                .keyed_then(host.journal(), &request, |record| {
+                    run(host, &request, record)
+                })
+                .await
+            {
+                Ok((_, after)) => {
+                    carry_out(host, after);
+                    tracing::info!(
+                        cut = %cut,
+                        "ck-mc: agent-data cut {cut} is activated; its sessions are served again"
+                    );
+                }
+                Err(refusal) => tracing::warn!(
+                    cut = %cut,
+                    "ck-mc: the install of agent-data cut {cut} could not be finished ({}: {}); its sessions stay refused session_moving until activate is sent again or ck-mc starts again",
+                    refusal.code.as_str(),
+                    refusal.message
+                ),
+            }
+        }
+    }
 }
 
 /// What a state-changing op does once the step machine allows it: the
-/// source's ops, and an abort, which on a machine that never saw the cut
-/// touches no data and only records the cut aborted, so a delayed
-/// `prepare` or `import` for it is refused afterwards. The receiver's ops
-/// are not served yet.
+/// source's ops, the receiver's, and an abort, which goes to the side that
+/// started the cut here. An abort of a cut never seen here touches no data
+/// and only records the cut aborted, so a delayed `prepare` or `import` for
+/// it is refused afterwards.
 async fn run<H: Host>(host: &H, request: &Request, cut: Option<Cut>) -> Result<Done, ErrorBody> {
-    use super::source;
+    use super::{receiver, source};
     match request {
         Request::Prepare(prepare) => {
             source::prepare(host, prepare.cut_id.as_str(), &prepare.refs).await
@@ -380,7 +475,20 @@ async fn run<H: Host>(host: &H, request: &Request, cut: Option<Cut>) -> Result<D
             let cut = cut.expect("the step machine lets release run only after export");
             source::release(host, release.cut_id.as_str(), &cut, &release.holder).await
         }
-        Request::Abort(abort) => source::abort(host, abort.cut_id.as_str(), cut.as_ref()).await,
+        Request::Import(import) => {
+            receiver::import(host, import.cut_id.as_str(), &import.refs).await
+        }
+        Request::Activate(activate) => {
+            let cut = cut.expect("the step machine lets activate run only after import");
+            let digest = snapshot::sha256_hex(receipt(request, b"").request.as_bytes());
+            receiver::activate(host, activate.cut_id.as_str(), &cut, digest).await
+        }
+        Request::Abort(abort) => match cut {
+            Some(cut) if cut.step == Step::Imported => {
+                receiver::abort(host, abort.cut_id.as_str(), &cut).await
+            }
+            _ => source::abort(host, abort.cut_id.as_str()).await,
+        },
         _ => Err(not_served_yet(request.op())),
     }
 }

@@ -65,9 +65,7 @@ use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
 use super::busy::{self, HeldFact};
 use super::journal::{self, Contents, Cut, Journal, Moving, MovingState, Prepared, Released};
-use super::service::{
-    canonical, journal_unreadable, not_served_yet, After, Done, Host, Park, Parked,
-};
+use super::service::{canonical, journal_unreadable, After, Done, Host, Park, Parked};
 use super::{door, moved, resolve, snapshot};
 use crate::context_db::SCHEMA_VERSION;
 
@@ -384,13 +382,8 @@ pub(crate) async fn release<H: Host>(
 /// unfreezes its sessions and records the cut aborted; the snapshot files
 /// are deleted and the held jobs run once that write is durable. A cut
 /// never seen here froze nothing, so its abort touches no data.
-pub(crate) async fn abort<H: Host>(
-    host: &H,
-    cut: &str,
-    record: Option<&Cut>,
-) -> Result<Done, ErrorBody> {
+pub(crate) async fn abort<H: Host>(host: &H, cut: &str) -> Result<Done, ErrorBody> {
     let contents = host.journal().contents().ok_or_else(journal_unreadable)?;
-    let step = record.map_or(Step::None, |record| record.step);
     let mut frozen = Vec::new();
     for entry in &contents.sessions {
         match &entry.moving {
@@ -400,13 +393,20 @@ pub(crate) async fn abort<H: Host>(
                     &entry.harness,
                     &entry.session,
                 )),
-            // The receiver's abort is not served by this build yet.
-            Some(moving) if moving.cut == cut => return Err(not_served_yet(Op::Abort)),
+            // The service sends a cut `import` started here to the
+            // receiver's abort, so a session staged or being installed by
+            // a cut at any other step was written into the journal by hand.
+            Some(moving) if moving.cut == cut => {
+                return Err(unavailable(format!(
+                    "session {}/{}/{} is {} by cut {cut}, which this machine did not import; the journal was changed by hand",
+                    entry.runner,
+                    entry.harness,
+                    entry.session,
+                    moving.state.describe()
+                )))
+            }
             _ => {}
         }
-    }
-    if step == Step::Imported {
-        return Err(not_served_yet(Op::Abort));
     }
     let db = host.context_db();
     if let (Some(db), false) = (&db, frozen.is_empty()) {
@@ -660,7 +660,7 @@ fn door_refusal(op: Op, r: &Ref, step: Step, error: door::DoorError) -> ErrorBod
 #[path = "door_tests.rs"]
 mod door_tests;
 
-fn busy_refusal(r: &Ref, code: &str, reason: impl Into<String>) -> ErrorBody {
+pub(crate) fn busy_refusal(r: &Ref, code: &str, reason: impl Into<String>) -> ErrorBody {
     let reason = reason.into();
     ErrorBody::with_typed_detail(
         Detail::Busy(BusyDetail::new(vec![BusyRef::new(
@@ -807,7 +807,7 @@ fn release_reservation(conn: &mut Connection, key: &str) -> Result<usize, String
 
 /// Run `work` on a blocking thread over a `context.db` connection of its
 /// own.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     db: &Path,
     work: impl FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
 ) -> Result<T, ErrorBody> {
@@ -826,7 +826,7 @@ async fn blocking<T: Send + 'static>(
 /// release, must be on disk before the journal records what follows from
 /// it, or a power loss could leave facts reserved under a cut the journal
 /// says was aborted.
-fn connect(db: &Path) -> Result<Connection, String> {
+pub(crate) fn connect(db: &Path) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(
         db,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -840,7 +840,7 @@ fn connect(db: &Path) -> Result<Connection, String> {
 }
 
 /// The SHA-256 of a snapshot's body, after its header.
-fn body_digest(bytes: &[u8]) -> Option<String> {
+pub(crate) fn body_digest(bytes: &[u8]) -> Option<String> {
     let length = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
     let body = bytes.get(4usize.checked_add(length)?..)?;
     Some(snapshot::sha256_hex(body))
@@ -850,14 +850,14 @@ fn same_rows(a: &SessionRef, b: &SessionRef) -> bool {
     a.harness == b.harness && a.session == b.session
 }
 
-fn label(session: &SessionRef) -> String {
+pub(crate) fn label(session: &SessionRef) -> String {
     format!("{}/{}/{}", session.runner, session.harness, session.session)
 }
 
-fn no_store() -> ErrorBody {
+pub(crate) fn no_store() -> ErrorBody {
     unavailable("ck-mc has no context.db here, so it holds no session rows to move.")
 }
 
-fn unavailable(message: impl Into<String>) -> ErrorBody {
+pub(crate) fn unavailable(message: impl Into<String>) -> ErrorBody {
     ErrorBody::new(RefusalCode::Unavailable, message)
 }

@@ -334,6 +334,124 @@ impl Store {
         Ok(false)
     }
 
+    /// Every row this store holds for the session, per table, with the
+    /// long texts its state refers to: what a move's undo image keeps of it.
+    /// A blob is written as `{"blob": <hex>}`.
+    pub fn session_rows(&self, key: &SessionRef) -> Result<serde_json::Value, String> {
+        use rusqlite::types::ValueRef;
+        use serde_json::{json, Map, Value};
+        let connection = self.lock();
+        let mut tables = Map::new();
+        for table in session_tables(&connection).map_err(|e| e.to_string())? {
+            let quoted = table.replace('"', "\"\"");
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT * FROM \"{quoted}\" WHERE runner=?1 AND harness=?2 AND session=?3"
+                ))
+                .map_err(|e| e.to_string())?;
+            let names: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let rows = statement
+                .query_map(params![key.runner, key.harness, key.session], |row| {
+                    let mut object = Map::new();
+                    for (index, name) in names.iter().enumerate() {
+                        let value = match row.get_ref(index)? {
+                            ValueRef::Null => Value::Null,
+                            ValueRef::Integer(number) => number.into(),
+                            ValueRef::Real(number) => number.into(),
+                            ValueRef::Text(text) => String::from_utf8_lossy(text).into(),
+                            ValueRef::Blob(blob) => json!({
+                                "blob": blob.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                            }),
+                        };
+                        object.insert(name.clone(), value);
+                    }
+                    Ok(Value::Object(object))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            if !rows.is_empty() {
+                tables.insert(table, Value::Array(rows));
+            }
+        }
+        let mut texts = connection
+            .prepare(
+                "SELECT t.id, t.text FROM state_texts t JOIN state_text_refs r ON r.id = t.id
+                 WHERE r.runner=?1 AND r.harness=?2 AND r.session=?3 ORDER BY t.id",
+            )
+            .map_err(|e| e.to_string())?;
+        let texts = texts
+            .query_map(params![key.runner, key.harness, key.session], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    Value::String(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Map<_, _>, _>>()
+            .map_err(|e| e.to_string())?;
+        if !texts.is_empty() {
+            tables.insert("state_texts".to_owned(), Value::Object(texts));
+        }
+        Ok(Value::Object(tables))
+    }
+
+    /// Delete every row this store holds for the session, in one
+    /// transaction, with the long texts no other session refers to. A move
+    /// does this when it installs another machine's copy of the session:
+    /// what was kept here describes views of the rows the install replaced.
+    /// The store's memory of its last save and of the texts it wrote is
+    /// dropped too, since both may name rows that are gone.
+    pub fn clear_session(&self, key: &SessionRef) -> Result<(), String> {
+        let mut saved = self.last_saved.lock().expect("last saved session state");
+        let mut cached = self.text_cache.lock().expect("store text cache");
+        let mut connection = self.lock();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("session {}: clearing its state failed: {e}", key.session))?;
+        let retired: Vec<String> = transaction
+            .prepare("SELECT id FROM state_text_refs WHERE runner=?1 AND harness=?2 AND session=?3")
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![key.runner, key.harness, key.session], |row| {
+                        row.get(0)
+                    })?
+                    .collect()
+            })
+            .map_err(|e| e.to_string())?;
+        for table in session_tables(&transaction).map_err(|e| e.to_string())? {
+            let quoted = table.replace('"', "\"\"");
+            transaction
+                .execute(
+                    &format!(
+                        "DELETE FROM \"{quoted}\" WHERE runner=?1 AND harness=?2 AND session=?3"
+                    ),
+                    params![key.runner, key.harness, key.session],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        for id in &retired {
+            transaction
+                .execute(
+                    "DELETE FROM state_texts WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM state_text_refs WHERE id=?1)",
+                    [id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        transaction
+            .commit()
+            .map_err(|e| format!("session {}: clearing its state failed: {e}", key.session))?;
+        if saved.as_ref().is_some_and(|(old, _)| old == key) {
+            *saved = None;
+        }
+        *cached = Default::default();
+        Ok(())
+    }
+
     pub fn load(&self, key: &SessionRef) -> Option<Durable> {
         let connection = self.lock();
         let text: Option<String> = connection

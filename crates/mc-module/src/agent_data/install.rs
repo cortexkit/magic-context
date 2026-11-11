@@ -56,6 +56,11 @@ pub fn resume(conn: &mut Connection, key: &str) -> Result<bool, String> {
     move_batches::resume(conn, key)
 }
 
+/// Whether the install staged under `key` has applied its last batch.
+pub fn done(conn: &Connection, key: &str) -> Result<bool, String> {
+    Ok(move_batches::record(conn, key)?.is_some_and(|record| record["state"] == "done"))
+}
+
 /// Check that this store can hold every row of `incoming`: each carried
 /// column exists, and none of the store's NOT NULL columns is null in the
 /// body. The decoder already checked the rows against the moved list.

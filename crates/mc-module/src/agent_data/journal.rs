@@ -125,9 +125,16 @@ pub struct Cut {
     /// already name the new holder by then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepared: Vec<Prepared>,
+    /// Receiver: what `import` staged for each ref, in the order of the
+    /// cut's refs. `activate` installs these snapshots, so neither it nor a
+    /// restart asks Entorhinal or the door again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<Prepared>,
 }
 
-/// One ref's session as `prepare` cut it on the source.
+/// One ref's session and its snapshot in the session's stream: as
+/// `prepare` cut it on the source, or as `import` staged it on the
+/// receiver.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prepared {
@@ -147,7 +154,7 @@ pub struct Prepared {
     /// The SHA-256 of the stream's bytes up to `end`, which the cut seals.
     pub digest: String,
     /// The SHA-256 of the snapshot's body: the session's baseline once the
-    /// snapshot is exported.
+    /// snapshot is exported on the source or installed on the receiver.
     pub body: String,
 }
 
@@ -162,6 +169,7 @@ impl Default for Cut {
             undo_images: BTreeMap::new(),
             activate_request: None,
             prepared: Vec::new(),
+            imported: Vec::new(),
         }
     }
 }

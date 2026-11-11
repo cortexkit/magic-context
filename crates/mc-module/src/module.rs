@@ -134,10 +134,12 @@ enum Job {
         at: oneshot::Sender<bool>,
         until: oneshot::Receiver<()>,
     },
-    /// The session was released to another machine by this cut: drop the
-    /// jobs held during the move, with a log line, and stop the worker.
+    /// The session was released to another machine by this cut, or its rows
+    /// were replaced with another machine's copy (`replaced`): drop the jobs
+    /// held during the move, with a log line, and stop the worker.
     Discard {
         cut: String,
+        replaced: bool,
     },
     /// A timer queues a checkpoint job without owning the session or writing to storage.
     AppCheckpoint {
@@ -322,6 +324,51 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// with no worker holds nothing.
     pub fn resume(&self, session: &SessionRef) {
         let _ = self.send(session, Job::Resume);
+    }
+
+    /// Finish, in the background, every install of a move the journal
+    /// records as started ([`crate::agent_data::Service::recover`]). It
+    /// runs at every start, whether or not this build serves moves.
+    pub fn spawn_move_recovery(&self) {
+        let module = self.clone();
+        tokio::spawn(async move { module.inner.agent_data.recover(&module).await });
+    }
+
+    /// Drop what this process keeps for a session a move took over: its
+    /// worker, which discards the jobs it held, its Setup, and its cached
+    /// project. For a session whose rows were `replaced` by an install, the
+    /// cached project of the session under any runner goes too: context
+    /// reads match a session by harness and id, and prefer that cache to
+    /// the installed project link.
+    fn drop_session(&self, session: &SessionRef, cut: &str, replaced: bool) {
+        let worker = self
+            .inner
+            .workers
+            .lock()
+            .expect("worker map")
+            .remove(session);
+        if let Some(worker) = worker {
+            let _ = worker.send(Job::Discard {
+                cut: cut.to_owned(),
+                replaced,
+            });
+        }
+        self.inner
+            .set_up
+            .lock()
+            .expect("setup sessions")
+            .remove(session);
+        self.inner
+            .session_projects
+            .lock()
+            .expect("session projects")
+            .retain(|key, _| {
+                if replaced {
+                    !(key.harness == session.harness && key.session == session.session)
+                } else {
+                    key != session
+                }
+            });
     }
 
     /// Context reads use a separate read-only worker so they cannot delay session work.
@@ -774,9 +821,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                         continue;
                     }
-                    Job::Discard { cut } => {
+                    Job::Discard { cut, replaced } => {
+                        let what = if replaced {
+                            "had its rows replaced with another machine's copy"
+                        } else {
+                            "was released to another machine"
+                        };
                         tracing::info!(
-                            "ck-mc: session {}/{}/{} was released to another machine by agent-data cut {cut}; discarding the {} Setup, notice and summary jobs held during the move",
+                            "ck-mc: session {}/{}/{} {what} by agent-data cut {cut}; discarding the {} Setup, notice and summary jobs held during the move",
                             held_key.runner,
                             held_key.harness,
                             held_key.session,
@@ -1084,27 +1136,33 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
     }
 
     fn forget(&self, session: &SessionRef, cut: &str) {
-        let worker = self
-            .inner
+        self.drop_session(session, cut, false);
+    }
+
+    fn reset(&self, session: &SessionRef, cut: &str) {
+        self.drop_session(session, cut, true);
+    }
+
+    fn active(&self, session: &SessionRef) -> bool {
+        self.inner
             .workers
             .lock()
             .expect("worker map")
-            .remove(session);
-        if let Some(worker) = worker {
-            let _ = worker.send(Job::Discard {
-                cut: cut.to_owned(),
-            });
+            .contains_key(session)
+    }
+
+    fn state_rows(&self, session: &SessionRef) -> Result<Value, String> {
+        match &self.inner.store {
+            Some(store) => store.session_rows(session),
+            None => Ok(Value::Object(Default::default())),
         }
-        self.inner
-            .set_up
-            .lock()
-            .expect("setup sessions")
-            .remove(session);
-        self.inner
-            .session_projects
-            .lock()
-            .expect("session projects")
-            .remove(session);
+    }
+
+    fn clear_state(&self, session: &SessionRef) -> Result<(), String> {
+        match &self.inner.store {
+            Some(store) => store.clear_session(session),
+            None => Ok(()),
+        }
     }
 
     async fn door(
@@ -1289,6 +1347,10 @@ mod agent_data_worker_tests;
 #[cfg(test)]
 #[path = "agent_data/source_tests.rs"]
 mod agent_data_source_tests;
+
+#[cfg(test)]
+#[path = "agent_data/receiver_tests.rs"]
+mod agent_data_receiver_tests;
 
 #[cfg(test)]
 mod config_tests {

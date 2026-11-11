@@ -197,14 +197,19 @@ impl Local {
 /// read transaction.
 pub fn local(conn: &mut Connection, incoming: &Snapshot) -> Result<Local, String> {
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    let harness = &incoming.header.harness;
-    let session = &incoming.header.session;
-    let local = Local {
-        fingerprint: fingerprint(&tx, harness, session)?,
-        colliding: colliding(&tx, incoming)?,
-    };
+    let local = local_on(&tx, incoming)?;
     tx.finish().map_err(|error| error.to_string())?;
     Ok(local)
+}
+
+/// [`local`], read on `conn` inside whatever transaction it has open.
+pub fn local_on(conn: &Connection, incoming: &Snapshot) -> Result<Local, String> {
+    let harness = &incoming.header.harness;
+    let session = &incoming.header.session;
+    Ok(Local {
+        fingerprint: fingerprint(conn, harness, session)?,
+        colliding: colliding(conn, incoming)?,
+    })
 }
 
 /// Rows outside the session's selection that hold a key `incoming`'s
@@ -649,6 +654,52 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
         }
     }
     Ok(Snapshot { header, rows })
+}
+
+/// Where the last snapshot starts in `stream`, a run of whole snapshots one
+/// after the other, as a session's stream on the door holds one per move.
+/// A snapshot says how long its header is and how many rows its body has,
+/// one line each, so each is skipped without decoding its rows. The stream
+/// must hold whole snapshots up to its last byte: a cut ends a stream right
+/// after the snapshot its `prepare` appended.
+pub fn last_in_stream(stream: &[u8]) -> Result<usize, String> {
+    let mut at = 0;
+    loop {
+        let start = at;
+        let length = stream
+            .get(at..at + 4)
+            .ok_or("the stream ends inside a snapshot's header length")?;
+        let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+        let header = stream
+            .get(at + 4..at + 4 + length)
+            .ok_or("the stream ends inside a snapshot's header")?;
+        // Only the row counts are read here, so an earlier move's snapshot
+        // of another version is skipped as long as it counts its rows.
+        let header: Value = serde_json::from_slice(header)
+            .map_err(|error| format!("a snapshot header in the stream cannot be read: {error}"))?;
+        let lines = header
+            .get("rows")
+            .and_then(Value::as_object)
+            .ok_or("a snapshot header in the stream counts no rows")?
+            .values()
+            .try_fold(0u64, |sum, count| {
+                count
+                    .as_u64()
+                    .and_then(|count| sum.checked_add(count))
+                    .ok_or("a snapshot header in the stream has a malformed row count")
+            })?;
+        at += 4 + length;
+        for _ in 0..lines {
+            let end = stream[at..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or("the stream ends inside a snapshot's body")?;
+            at += end + 1;
+        }
+        if at == stream.len() {
+            return Ok(start);
+        }
+    }
 }
 
 fn check_row(

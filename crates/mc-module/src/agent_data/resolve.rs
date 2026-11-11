@@ -55,6 +55,22 @@ pub fn lookup_identity() -> SessionRef {
 /// released to another machine. A lookup that fails is `unavailable`, which
 /// the driver retries.
 pub(crate) async fn session<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, ErrorBody> {
+    let session = lookup(host, r).await?;
+    if let Err(gated) = host.journal().gate().check(&session) {
+        if gated.code == SESSION_MOVED {
+            return Err(unknown_ref(
+                r,
+                &format!("session_moved: {}", gated.message.trim_end_matches('.')),
+            ));
+        }
+    }
+    Ok(session)
+}
+
+/// The session a ref names, by Entorhinal's binding alone, whatever this
+/// machine holds of it. The receiver resolves refs this way: a session
+/// released from here earlier is the one a move back brings home.
+pub(crate) async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, ErrorBody> {
     let Some(owner) = owner(&r.ref_kind) else {
         return Err(unknown_ref(r, "ck-mc holds no ref of this kind"));
     };
@@ -114,16 +130,7 @@ pub(crate) async fn session<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Er
             "the ref's session runs under another module than its kind's owner",
         ));
     }
-    let session = SessionRef::new(runner, harness, id);
-    if let Err(gated) = host.journal().gate().check(&session) {
-        if gated.code == SESSION_MOVED {
-            return Err(unknown_ref(
-                r,
-                &format!("session_moved: {}", gated.message.trim_end_matches('.')),
-            ));
-        }
-    }
-    Ok(session)
+    Ok(SessionRef::new(runner, harness, id))
 }
 
 pub(crate) fn unknown_ref(r: &Ref, why: &str) -> ErrorBody {
