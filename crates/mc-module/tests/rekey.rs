@@ -57,6 +57,55 @@ fn fixture(root: &Path) {
         .unwrap();
 }
 
+/// A move journal beside the context database naming session `pi/s`.
+fn journal(root: &Path, entry: serde_json::Value) {
+    let folder = root.join("agent-data");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut entry = entry;
+    entry["runner"] = "old".into();
+    entry["harness"] = "pi".into();
+    entry["session"] = "s".into();
+    std::fs::write(
+        folder.join("journal.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "format": "mc-agent-data-journal/1",
+            "sessions": [entry],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn rekey_cli_refuses_a_session_a_move_holds_with_its_code_and_cut() {
+    let _guard = CLI_TEST_LOCK.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path());
+    for (entry, expected) in [
+        (
+            serde_json::json!({"moving": {"cut": "cut-1", "state": "frozen"}}),
+            "session_moving: cut cut-1",
+        ),
+        (
+            serde_json::json!({"released": {"cut": "cut-2", "holder": "mac-b"}}),
+            "session_moved: cut cut-2",
+        ),
+    ] {
+        journal(root.path(), entry);
+        for dry in [true, false] {
+            let output = run(root.path(), if dry { &["--dry-run"] } else { &[] });
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{stderr}");
+            assert!(stderr.contains(expected), "{stderr}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+    let store = Store::open(&root.path().join("mode3.db")).unwrap();
+    assert!(store.load(&SessionRef::new("old", "pi", "s")).is_some());
+    assert!(store.load(&SessionRef::new("new", "pi", "s")).is_none());
+    assert!(!root.path().join("must-not-open-context.db").exists());
+}
+
 #[test]
 fn rekey_cli_dry_run_and_write_need_no_context_database() {
     let _guard = CLI_TEST_LOCK.lock().unwrap();

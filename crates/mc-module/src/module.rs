@@ -15,7 +15,7 @@
 //! [`crate::upkeep`]) runs on a timer of its own, for every project a
 //! session used in the last hour, one project at a time.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,6 +57,8 @@ pub enum ModuleError {
     Stopped,
     /// A tool call failed; the text is for the model.
     Tool(String),
+    /// A move holds the session ([`crate::agent_data`]).
+    Gated(crate::agent_data::Gated),
 }
 
 pub struct Module<C> {
@@ -85,6 +87,9 @@ struct Inner<C> {
     db: Option<Arc<ContextDb>>,
     /// Where each session's own decisions survive a restart.
     store: Option<Arc<Store>>,
+    /// Which sessions a move holds. Checked before a job is queued or a
+    /// worker created, and again when a worker takes a job off its queue.
+    journal: Arc<crate::agent_data::Journal>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
     set_up: Mutex<HashSet<SessionRef>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
@@ -112,6 +117,9 @@ enum Job {
         reply: oneshot::Sender<Addition>,
     },
     Idle(oneshot::Sender<()>),
+    /// Run the jobs held while a move held the session, once it no longer
+    /// does. Changes nothing by itself.
+    Resume,
     /// A timer queues a checkpoint job without owning the session or writing to storage.
     AppCheckpoint {
         flush: Option<oneshot::Sender<()>>,
@@ -131,11 +139,31 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .unwrap_or_default()
     }
 
+    /// A module whose move journal lives in memory and holds nothing.
     pub fn new(
         client: C,
         config: impl Into<Config>,
         db: Option<ContextDb>,
         store: Option<Store>,
+    ) -> Self {
+        Self::with_journal(
+            client,
+            config,
+            db,
+            store,
+            Arc::new(crate::agent_data::Journal::in_memory()),
+        )
+    }
+
+    /// A module that serves no session a move in `journal` holds. The
+    /// journal is read before this is called, so its gate holds from the
+    /// first request on.
+    pub fn with_journal(
+        client: C,
+        config: impl Into<Config>,
+        db: Option<ContextDb>,
+        store: Option<Store>,
+        journal: Arc<crate::agent_data::Journal>,
     ) -> Self {
         let config = Arc::new(config.into());
         let session_projects = Arc::new(Mutex::new(HashMap::new()));
@@ -144,6 +172,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             store.as_ref().map(|s| s.path.clone()),
             config.clone(),
             session_projects.clone(),
+            journal.gate().clone(),
         );
         let app_read = crate::app_read::AppRead::new(
             store.as_ref().map(|s| s.path.clone()),
@@ -162,6 +191,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 config,
                 db: db.map(Arc::new),
                 store: store.map(Arc::new),
+                journal,
                 workers: Mutex::new(HashMap::new()),
                 set_up: Mutex::new(HashSet::new()),
                 summaries_running: Mutex::new(0),
@@ -174,6 +204,77 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// App requests read an independent projection, never a session job.
     pub fn app_read(&self) -> &crate::app_read::AppRead {
         &self.inner.app_read
+    }
+
+    /// The move journal and its gate.
+    pub fn journal(&self) -> &Arc<crate::agent_data::Journal> {
+        &self.inner.journal
+    }
+
+    /// An app read, refused for a session a move holds before the
+    /// projection is asked.
+    pub async fn app_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
+        self.app_gate(&params)?;
+        self.inner.app_read.read(method, params).await
+    }
+
+    /// An app watch, refused when it names a session a move holds.
+    pub async fn app_watch(
+        &self,
+        caller: String,
+        params: Value,
+    ) -> Result<crate::app_read::Subscription, cortexkit_role_compaction::wire::Refusal> {
+        self.app_gate(&params)?;
+        self.inner.app_read.watch(caller, params).await
+    }
+
+    /// Check every session an app request names: `session` for the session
+    /// reads, `scope.session` for a search, `sessions` for a watch. A
+    /// malformed name is left for the projection to refuse with its own
+    /// error. App reads serve rows every runner of a session shares, so any
+    /// entry with the session's harness and id refuses them.
+    fn app_gate(&self, params: &Value) -> Result<(), cortexkit_role_compaction::wire::Refusal> {
+        let gate = self.inner.journal.gate();
+        let named = [
+            params.get("session"),
+            params.get("scope").and_then(|scope| scope.get("session")),
+        ];
+        let listed = params
+            .get("sessions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for session in named.into_iter().flatten().chain(listed) {
+            let (Some(harness), Some(id)) = (
+                session.get("harness").and_then(Value::as_str),
+                session.get("session").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            gate.check_any_runner(harness, id)
+                .map_err(|gated| gated.refusal())?;
+        }
+        Ok(())
+    }
+
+    /// Refuse a session a move holds, before any job is queued for it.
+    fn admit(&self, session: &SessionRef) -> Result<(), ModuleError> {
+        self.inner
+            .journal
+            .gate()
+            .check(session)
+            .map_err(ModuleError::Gated)
+    }
+
+    /// Run the jobs the session's worker held while a move held the
+    /// session. Jobs stay held while the move still holds it; a session
+    /// with no worker holds nothing.
+    pub fn resume(&self, session: &SessionRef) {
+        let _ = self.send(session, Job::Resume);
     }
 
     /// Context reads use a separate read-only worker so they cannot delay session work.
@@ -229,6 +330,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// `compaction.setup` for the session `route` is bound to. Answers at
     /// once; the session reads its transcript afterwards, on its worker.
     pub fn setup(&self, route: Route, request: SetupRequest) -> Result<SetupAnswer, ModuleError> {
+        self.admit(&route.session)?;
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
         self.inner.client.runner_setup(&route.session.runner);
@@ -267,6 +369,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         session: &SessionRef,
         request: NoticeRequest,
     ) -> Result<NoticeAnswer, ModuleError> {
+        self.admit(session)?;
         if !self
             .inner
             .set_up
@@ -294,6 +397,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         session: &SessionRef,
         request: RideRequest,
     ) -> Result<RideAnswer, ModuleError> {
+        self.admit(session)?;
         let deadline = Duration::from_millis(request.deadline_ms);
         let (reply, answer) = oneshot::channel();
         self.send(session, Job::Ride(request, reply))?;
@@ -327,6 +431,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         name: &str,
         input: Value,
     ) -> Result<String, ModuleError> {
+        self.admit(&route.session)?;
         let (reply, answer) = oneshot::channel();
         let worker = {
             let mut workers = self.inner.workers.lock().expect("worker map");
@@ -348,8 +453,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
 
     /// The `pre_user` hook: what to add to a person's message, within
     /// [`PRE_USER_BUDGET`]. A session ck-mc does not know, or an answer that
-    /// misses the budget, adds nothing: the message is never held up.
+    /// misses the budget, adds nothing: the message is never held up. The
+    /// hook cannot refuse, so a session a move holds gets nothing added.
     pub async fn pre_user(&self, session: &SessionRef, text: &str, now: u64) -> Addition {
+        if self.admit(session).is_err() {
+            return Addition::default();
+        }
         let (reply, answer) = oneshot::channel();
         let job = Job::PreUser {
             text: text.to_owned(),
@@ -418,13 +527,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             // Only sessions registered in this process belong to this upkeep
             // scope. After a restart their persisted summaries wait until the
             // session registers again; a harness name alone never proves ownership.
+            // A session a move holds is skipped: its rows are being moved.
             let owned = || {
                 self.inner
                     .session_projects
                     .lock()
                     .expect("session projects")
                     .iter()
-                    .filter(|(_, project)| project.id == id)
+                    .filter(|(key, project)| {
+                        project.id == id
+                            && self
+                                .inner
+                                .journal
+                                .gate()
+                                .check_any_runner(&key.harness, &key.session)
+                                .is_ok()
+                    })
                     .map(|(key, _)| (key.harness.clone(), key.session.clone()))
                     .collect()
             };
@@ -510,6 +628,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         // Weak, so the worker's own handle never keeps it alive.
         let own = jobs.downgrade();
         tokio::spawn(async move {
+            let held_key = key.clone();
             let _search_guard = inner
                 .search
                 .as_ref()
@@ -517,9 +636,43 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut session: Option<Session> = None;
             let mut saved: Option<crate::store::Durable> = None;
             let mut retry_save = false;
-            while let Some(job) = receiver.recv().await {
+            // Jobs a move held, in the order they arrived, and the jobs to
+            // run before the queue's next one once it no longer holds them.
+            let mut held: VecDeque<Job> = VecDeque::new();
+            let mut ready: VecDeque<Job> = VecDeque::new();
+            loop {
+                let job = match ready.pop_front() {
+                    Some(job) => job,
+                    None => match receiver.recv().await {
+                        Some(job) => job,
+                        None => break,
+                    },
+                };
+                let job = match inner.journal.gate().check(&held_key) {
+                    Err(gated) => match hold(job, &gated, &mut held, &held_key) {
+                        Some(job) => job,
+                        None => continue,
+                    },
+                    Ok(()) if !held.is_empty() => {
+                        // The move let the session go: what it held runs
+                        // first, in order, then this job and the rest.
+                        tracing::info!(
+                            "ck-mc: session {}/{}/{}: running {} jobs held during a move",
+                            held_key.runner,
+                            held_key.harness,
+                            held_key.session,
+                            held.len()
+                        );
+                        let rest = std::mem::take(&mut ready);
+                        ready.extend(held.drain(..));
+                        ready.push_back(job);
+                        ready.extend(rest);
+                        continue;
+                    }
+                    Ok(()) => job,
+                };
                 let settings: Settings = match (&job, &session) {
-                    (Job::Idle(_), _) => Settings::default(),
+                    (Job::Idle(_) | Job::Resume, _) => Settings::default(),
                     (Job::Setup(route, request, _), _) => route_settings(
                         &inner.config,
                         route,
@@ -540,12 +693,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 let settings = &settings;
                 let publish_app = !matches!(
                     &job,
-                    Job::Idle(_) | Job::PreUser { .. } | Job::AppCheckpoint { .. }
+                    Job::Idle(_) | Job::Resume | Job::PreUser { .. } | Job::AppCheckpoint { .. }
                 );
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
+                    Job::Resume => continue,
                     Job::AppCheckpoint { flush } => {
                         if let Some(session) = &mut session {
                             session.app_checkpoint_if_due(flush.is_some());
@@ -774,6 +928,49 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     }
 }
 
+/// What a worker does with a job it takes off its queue while a move holds
+/// its session. Setup and notices were answered when they were queued, so
+/// the runner believes ck-mc holds what they carry: they are held, in order,
+/// and run if the move is aborted. A summary result is held with them, so it
+/// never writes rows the move is reading. A ride gets no view, a tool call
+/// the move's refusal, and `pre_user` nothing. `Some` hands back a job that
+/// runs as usual: a barrier, a checkpoint of the app projection, or a wake.
+fn hold(
+    job: Job,
+    gated: &crate::agent_data::Gated,
+    held: &mut VecDeque<Job>,
+    key: &SessionRef,
+) -> Option<Job> {
+    match job {
+        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(_) => {
+            if held.is_empty() {
+                tracing::info!(
+                    "ck-mc: session {}/{}/{}: holding its Setup and notices while a move holds it ({}); they run if the move is aborted",
+                    key.runner,
+                    key.harness,
+                    key.session,
+                    gated.cut.as_deref().unwrap_or("journal unreadable")
+                );
+            }
+            held.push_back(job);
+            None
+        }
+        Job::Ride(_, reply) => {
+            let _ = reply.send(None);
+            None
+        }
+        Job::Tool { reply, .. } => {
+            let _ = reply.send(Err(ModuleError::Gated(gated.clone())));
+            None
+        }
+        Job::PreUser { reply, .. } => {
+            let _ = reply.send(Addition::default());
+            None
+        }
+        Job::Idle(_) | Job::Resume | Job::AppCheckpoint { .. } => Some(job),
+    }
+}
+
 /// Give `session` its memory context: the one stored for it,
 /// or one read from Entorhinal now and stored for good. A session without a
 /// folder has none, and its new memories stay unplaced.
@@ -874,6 +1071,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "app_read/deadline_tests.rs"]
 mod app_snapshot_tests;
+
+#[cfg(test)]
+#[path = "agent_data/worker_tests.rs"]
+mod agent_data_worker_tests;
 
 #[cfg(test)]
 mod config_tests {

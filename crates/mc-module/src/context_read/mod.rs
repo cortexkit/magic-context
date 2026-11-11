@@ -44,6 +44,7 @@ impl ContextRead {
         store: Option<PathBuf>,
         config: Arc<Config>,
         projects: Projects,
+        gate: Arc<crate::agent_data::Gate>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Command>();
         std::thread::Builder::new()
@@ -54,6 +55,7 @@ impl ContextRead {
                     store,
                     config,
                     projects,
+                    gate,
                 };
                 while let Ok((body, reply)) = rx.recv() {
                     let _ = reply.send(reader.read(&body));
@@ -94,6 +96,8 @@ struct Reader {
     store: Option<PathBuf>,
     config: Arc<Config>,
     projects: Projects,
+    /// Sessions a move holds are refused before any store is read.
+    gate: Arc<crate::agent_data::Gate>,
 }
 
 fn unavailable() -> Refusal {
@@ -133,6 +137,12 @@ impl Reader {
         )?;
         let harness = string(session, "harness")?;
         let session = string(session, "session")?;
+        // A context read names no runner, and context.db keys a session's
+        // rows by harness and session id, so any move of that session
+        // refuses it.
+        self.gate
+            .check_any_runner(harness, session)
+            .map_err(|gated| gated.refusal())?;
         let budget = p
             .get("budget_tokens")
             .and_then(Value::as_u64)

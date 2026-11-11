@@ -6,6 +6,7 @@ fn reader() -> Reader {
         store: None,
         config: Arc::new(crate::pass::Settings::default().into()),
         projects: Default::default(),
+        gate: Default::default(),
     }
 }
 

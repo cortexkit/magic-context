@@ -819,7 +819,7 @@ impl Handler {
         }
         let params = envelope.get("params").cloned().unwrap_or(Value::Null);
         if method == "context.watch" {
-            let mut subscription = self.module.app_read().watch(caller.quota(), params).await?;
+            let mut subscription = self.module.app_watch(caller.quota(), params).await?;
             loop {
                 let notice = tokio::select! {
                     _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
@@ -832,7 +832,7 @@ impl Handler {
                 }
             }
         }
-        let value = self.module.app_read().read(method, params).await?;
+        let value = self.module.app_request(method, params).await?;
         let bytes = crate::app_read::result_bytes(value);
         if bytes.len() > 512 * 1024 {
             return Err(Refusal::new(
@@ -1133,6 +1133,7 @@ fn refusal(error: ModuleError) -> Refusal {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&name);
             Refusal::new(&error.code, error.message, None)
         }
+        ModuleError::Gated(gated) => gated.refusal(),
         other => Refusal::new("internal", format!("{other:?}"), None),
     }
 }

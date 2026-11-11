@@ -40,6 +40,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_data;
 pub mod app_read;
 pub mod calibration;
 pub mod catalog;

@@ -152,3 +152,78 @@ fn explicit_paths_are_shared_by_startup_and_move_in() {
             .exists());
     }
 }
+
+#[test]
+fn move_in_refuses_a_session_a_move_holds_with_its_code_and_cut() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    use cortexkit_role_compaction::read::{Cursor, SessionRef};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::ModelRef;
+
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data/cortexkit/magic-context");
+    std::fs::create_dir_all(data.join("agent-data")).unwrap();
+    drop(mc_module::context_db::ContextDb::create_for_tests(&data.join("context.db")).unwrap());
+    let target = SessionRef::new("mock-runner", "opencode2", "s1");
+    let request = serde_json::json!({
+        "session": target,
+        "preset": "head",
+        "project": null,
+        "model": ModelRef::new("test", "model"),
+        "context_window": 100_000,
+        "output_reserve": 1000,
+        "rules": ProviderRules::new(SignedParts::None, EditCost::Suffix),
+        "newest": Cursor::new(1, "m1", "d"),
+        "now": 1,
+        // The plugin kept the session under OpenCode 1's harness.
+        "source_harness": "opencode",
+    });
+    // Held under the runner's harness, then under the plugin's.
+    for (harness, entry, expected) in [
+        (
+            "opencode2",
+            serde_json::json!({"released": {"cut": "cut-r", "holder": "mac-b"}}),
+            "session_moved: cut cut-r",
+        ),
+        (
+            "opencode",
+            serde_json::json!({"moving": {"cut": "cut-m", "state": "staged"}}),
+            "session_moving: cut cut-m",
+        ),
+    ] {
+        let mut entry = entry;
+        entry["runner"] = "another-runner".into();
+        entry["harness"] = harness.into();
+        entry["session"] = "s1".into();
+        std::fs::write(
+            data.join("agent-data/journal.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "format": "mc-agent-data-journal/1",
+                "sessions": [entry],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut child = command(root.path())
+            .arg("move-in")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success(), "{}", stderr(&output));
+        assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+        assert!(output.stdout.is_empty());
+        let store = mc_module::store::Store::open(&data.join("mode3.db")).unwrap();
+        assert!(store.load(&target).is_none());
+    }
+}

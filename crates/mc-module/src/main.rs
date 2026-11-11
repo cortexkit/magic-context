@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use std::sync::Arc;
 
+use mc_module::agent_data::Journal;
 use mc_module::child_scopes::ChildScopes;
 use mc_module::config::{Config, Loader};
 use mc_module::context_db::ContextDb;
@@ -78,15 +79,22 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let context_path = context_db_path();
     let db = open_context_db(&context_path)?;
     let store = Store::open(&store_path(&context_path))?;
+    // Moves are enforced in every build: the journal is read before any
+    // session is served, so a session a move holds is refused from the
+    // first request on.
+    let journal = Arc::new(Journal::load(mc_module::agent_data::journal::path(
+        &context_path,
+    )));
     if let Some(data_dir) = context_path.parent() {
         let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
     }
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
-    let module = Module::new(
+    let module = Module::with_journal(
         SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes)),
         Config::Files(Loader::from_environment()),
         Some(db),
         Some(store),
+        journal,
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
@@ -109,6 +117,26 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
     let db = open_context_db(&context_path)?;
     let store = Store::open(&store_path(&context_path))?;
     let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
+    // The session's rows are rewritten under both the harness it runs as and
+    // the one the plugin kept it under; a move holding either is refused.
+    let source_harness = request
+        .source_harness
+        .as_deref()
+        .unwrap_or(&request.session.harness);
+    let source_session = request
+        .source_session
+        .as_deref()
+        .unwrap_or(&request.session.session);
+    mc_module::agent_data::refuse_offline(
+        &context_path,
+        [
+            (
+                request.session.harness.as_str(),
+                request.session.session.as_str(),
+            ),
+            (source_harness, source_session),
+        ],
+    )?;
     let moved = mc_module::move_in::move_in(
         db,
         &store,
@@ -127,6 +155,13 @@ fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     let request = mc_module::rekey::Request::parse(args)?;
     let context = context_db_path();
+    mc_module::agent_data::refuse_offline(
+        &context,
+        request
+            .sessions
+            .iter()
+            .map(|session| (request.harness.as_str(), session.as_str())),
+    )?;
     let summary = mc_module::rekey::rekey_runner(&store_path(&context), &context, &request)?;
     println!("{}", serde_json::to_string(&summary)?);
     Ok(())
