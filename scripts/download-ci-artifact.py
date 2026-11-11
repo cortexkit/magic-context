@@ -109,9 +109,12 @@ def artifact_metadata(args, token):
         # A rerun can leave earlier immutable artifacts with the same name; use the newest ID.
         artifact_id = str(max(matches, key=lambda item: item["id"])["id"])
 
+    # The id comes from a listing or from the wait step, which just saw the artifact. GitHub can
+    # answer 404 for such an id for a moment, so a 404 here is retried; a wrong id fails after the retries.
     metadata = retry_call(
         lambda: request_json(base + f"/actions/artifacts/{quote(str(artifact_id), safe='')}", token),
         f"artifact metadata for {args.artifact_name or artifact_id}",
+        extra_retryable_statuses=(404,),
     )
     if metadata.get("expired"):
         raise DownloadError(f"artifact not downloaded: artifact {artifact_id} is expired")
@@ -271,17 +274,37 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(download.call_count, 4)
         extract.assert_not_called()
 
-    def test_lookup_404_fails_immediately_for_metadata_and_inventory(self):
-        for artifact_id, artifact_name in (("42", None), (None, "build")):
-            with self.subTest(artifact_id=artifact_id, artifact_name=artifact_name):
-                args = argparse.Namespace(artifact_id=artifact_id, artifact_name=artifact_name,
-                                          api_url="https://api.example.invalid", repository="owner/repo",
-                                          run_id="123")
-                missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
-                with mock.patch(f"{__name__}.request_json", side_effect=missing) as lookup:
-                    with self.assertRaisesRegex(DownloadError, r"failed immediately \(HTTP 404"):
-                        artifact_metadata(args, "token")
-                self.assertEqual(lookup.call_count, 1)
+    def test_inventory_404_fails_immediately(self):
+        args = argparse.Namespace(artifact_id=None, artifact_name="build",
+                                  api_url="https://api.example.invalid", repository="owner/repo",
+                                  run_id="123")
+        missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+        with mock.patch(f"{__name__}.request_json", side_effect=missing) as lookup:
+            with self.assertRaisesRegex(DownloadError, r"failed immediately \(HTTP 404"):
+                artifact_metadata(args, "token")
+        self.assertEqual(lookup.call_count, 1)
+
+    def test_metadata_404_for_a_known_id_retries_then_succeeds(self):
+        args = argparse.Namespace(artifact_id="42", artifact_name=None,
+                                  api_url="https://api.example.invalid", repository="owner/repo",
+                                  run_id="123")
+        missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+        found = {"id": 42, "name": "build"}
+        with mock.patch(f"{__name__}.request_json", side_effect=[missing, found]) as lookup, \
+             mock.patch(f"{__name__}.RETRY_DELAYS", (0, 0, 0)):
+            self.assertEqual(artifact_metadata(args, "token")[1], found)
+        self.assertEqual(lookup.call_count, 2)
+
+    def test_metadata_404_for_a_wrong_id_fails_after_the_retries(self):
+        args = argparse.Namespace(artifact_id="42", artifact_name=None,
+                                  api_url="https://api.example.invalid", repository="owner/repo",
+                                  run_id="123")
+        missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+        with mock.patch(f"{__name__}.request_json", side_effect=missing) as lookup, \
+             mock.patch(f"{__name__}.RETRY_DELAYS", (0, 0, 0)):
+            with self.assertRaisesRegex(DownloadError, r"artifact metadata for 42: failed after 4 attempts \(HTTP 404"):
+                artifact_metadata(args, "token")
+        self.assertEqual(lookup.call_count, 4)
 
     def test_expected_digest_is_checked(self):
         contents = b"verified artifact archive"
