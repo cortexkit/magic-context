@@ -18,6 +18,7 @@ const DEEP_MERGED_SECTIONS = [
   "storage",
   "compaction",
   "pi",
+  "dashboard",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {

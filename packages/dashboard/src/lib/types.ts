@@ -712,6 +712,23 @@ export interface ModelCatalogs {
   opencodeError?: string | null;
 }
 
+/** Where a listed OpenCode store came from. */
+export type OpenCodeStoreOrigin = "default" | "runner" | "configured";
+
+/** One OpenCode session store the dashboard reads or was asked to read. */
+export interface OpenCodeStoreRow {
+  path: string;
+  origin: OpenCodeStoreOrigin;
+  /** The file exists. */
+  found: boolean;
+  /** The dashboard reads this store. */
+  read: boolean;
+  /** Why the store is not read. */
+  note?: string | null;
+  /** For a configured store, the entry exactly as written in the config. */
+  configured_value?: string | null;
+}
+
 export interface ProjectConfigEntry {
   project_name: string;
   worktree: string;

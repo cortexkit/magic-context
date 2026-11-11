@@ -63,6 +63,19 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("debug_rpc"))).toBe(true);
     });
 
+    it("strips dashboard.opencode_db_paths from project config (user-tier only)", () => {
+        const raw: Record<string, unknown> = {
+            dashboard: { opencode_db_paths: ["/srv/other/opencode.db"] },
+            dreamer: { model: "x" },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("dashboard" in raw).toBe(false);
+        expect(raw.dreamer).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("Ignoring dashboard from project config"))).toBe(
+            true,
+        );
+    });
+
     it("strips allow_home_project from project config (user-tier only)", () => {
         const raw: Record<string, unknown> = {
             allow_home_project: true,

@@ -1,5 +1,8 @@
 //! Memory list/stats queries must stay correct when `memory_embeddings` holds
 //! multiple rows per memory (one per embedding model).
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -62,6 +65,7 @@ const EMBED_BLOB: &[u8] = &[0u8; 8];
 
 #[test]
 fn get_memories_dedupes_when_multiple_model_embeddings_exist() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db();
     conn.execute(
@@ -93,6 +97,7 @@ fn get_memories_dedupes_when_multiple_model_embeddings_exist() {
 
 #[test]
 fn get_memory_stats_counts_distinct_memories_with_embeddings() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db();
     conn.execute(

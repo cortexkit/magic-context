@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,6 +12,7 @@ use magic_context_dashboard_lib::project_names::{
 
 #[tokio::test]
 async fn configured_connection_file_is_used_for_startup_and_refresh() {
+    isolated_home();
     let server = fake(Behavior::Answer).await;
     let root = tempfile::tempdir().unwrap();
     let config_home = root.path().join("config");
@@ -222,6 +227,7 @@ async fn fake(behavior: Behavior) -> FakeEntorhinal {
 
 #[tokio::test]
 async fn startup_enumerates_once_and_manual_refresh_updates_cache() {
+    isolated_home();
     let server = fake(Behavior::Answer).await;
     let cache = ProjectNameCache::default();
     let ((), ()) = tokio::join!(
@@ -266,6 +272,7 @@ async fn startup_enumerates_once_and_manual_refresh_updates_cache() {
 
 #[tokio::test]
 async fn absent_connection_file_makes_no_connection_or_call() {
+    isolated_home();
     let server = fake(Behavior::Answer).await;
     std::fs::remove_file(&server.path).unwrap();
     let cache = ProjectNameCache::default();
@@ -283,6 +290,7 @@ async fn absent_connection_file_makes_no_connection_or_call() {
 
 #[tokio::test]
 async fn unloaded_entorhinal_makes_no_module_call_and_is_cached_until_refresh() {
+    isolated_home();
     let server = fake(Behavior::UnknownModule).await;
     let cache = ProjectNameCache::default();
     cache.initialize(&server.path).await;
@@ -313,26 +321,31 @@ async fn assert_deadline(behavior: Behavior) {
 
 #[tokio::test]
 async fn handshake_that_never_completes_is_bounded() {
+    isolated_home();
     assert_deadline(Behavior::HangHandshake).await;
 }
 
 #[tokio::test]
 async fn route_that_never_opens_is_bounded() {
+    isolated_home();
     assert_deadline(Behavior::HangRoute).await;
 }
 
 #[tokio::test]
 async fn late_enumeration_is_discarded() {
+    isolated_home();
     assert_deadline(Behavior::LateReply).await;
 }
 
 #[tokio::test]
 async fn reply_that_never_completes_is_bounded() {
+    isolated_home();
     assert_deadline(Behavior::HangReply).await;
 }
 
 #[tokio::test]
 async fn malformed_reply_clears_names_without_failing_refresh() {
+    isolated_home();
     let server = fake(Behavior::Answer).await;
     let cache = ProjectNameCache::default();
     cache.initialize(&server.path).await;

@@ -83,6 +83,8 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "compaction.enabled",
   "pi.subagent_extensions",
   "system_prompt_injection.enabled",
+  // Session stores (user tab only)
+  "dashboard.opencode_db_paths",
 ];
 
 /**

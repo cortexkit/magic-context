@@ -835,3 +835,46 @@
   border-color: var(--error-border);
   color: var(--error-text);
 }
+
+/* Session stores: one row per OpenCode store the dashboard reads. Paths are
+   long and users copy them, so they wrap anywhere and stay selectable. */
+.config-store-table {
+  min-width: 640px;
+}
+
+.config-store-table th:first-child {
+  width: 50%;
+}
+
+.config-store-table th:nth-child(2) {
+  width: 16%;
+}
+
+.config-store-table th:last-child {
+  width: 120px;
+}
+
+.config-store-path {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.config-store-status.is-ok {
+  color: var(--green);
+}
+
+.config-store-status.is-problem {
+  color: var(--amber);
+}
+
+.config-store-status.is-pending {
+  color: var(--text-secondary);
+}
+
+.config-store-error {
+  color: var(--red);
+}

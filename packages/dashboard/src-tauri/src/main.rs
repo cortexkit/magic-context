@@ -99,6 +99,7 @@ fn main() {
             commands::get_config,
             commands::save_config,
             commands::get_project_configs,
+            commands::get_opencode_stores,
             commands::save_project_config,
             magic_context_dashboard_lib::config::read_pi_config,
             magic_context_dashboard_lib::config::write_pi_config,

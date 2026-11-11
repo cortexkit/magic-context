@@ -786,6 +786,28 @@ function expandConfigPath(value: string): string {
     return trimmed;
 }
 
+/**
+ * True for an absolute path on POSIX (`/srv/x`) or Windows (`C:\x`, `C:/x`,
+ * `\\server\share`). Checked by shape rather than with `node:path`, so a
+ * config written for one platform validates the same way on another.
+ */
+export function isAbsoluteStorePath(value: string): boolean {
+    return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+const DashboardStorePathSchema = z
+    .string()
+    .trim()
+    .min(1)
+    .refine((value) => !/\{(env|file):/.test(value), {
+        message:
+            "dashboard.opencode_db_paths does not expand {env:} or {file:} tokens; write the absolute path",
+    })
+    .refine(isAbsoluteStorePath, {
+        message:
+            "dashboard.opencode_db_paths entries must be absolute paths to an opencode.db file or the folder that holds it",
+    });
+
 const BaseEmbeddingConfigSchema = z
     .object({
         provider: z
@@ -1041,6 +1063,11 @@ export interface SubcConfig {
     connection_file: string;
 }
 
+export interface DashboardConfig {
+    /** Extra OpenCode stores the dashboard reads: absolute paths to an opencode.db or its folder. */
+    opencode_db_paths?: string[];
+}
+
 export interface ShadowEmbeddingConfig {
     enabled: boolean;
 }
@@ -1214,6 +1241,8 @@ export interface MagicContextConfig {
     subc?: SubcConfig;
     /** Developer-only Synapse shadow lane switch. */
     shadow_embedding?: ShadowEmbeddingConfig;
+    /** Desktop dashboard settings. USER config only. */
+    dashboard?: DashboardConfig;
     memory: {
         enabled: boolean;
         injection_budget_tokens: number;
@@ -1566,6 +1595,19 @@ export const MagicContextConfigSchema = z
             })
             .optional()
             .describe("User-only Synapse daemon connection settings."),
+        dashboard: z
+            .object({
+                opencode_db_paths: z
+                    .array(DashboardStorePathSchema)
+                    .optional()
+                    .describe(
+                        "Extra OpenCode session stores the desktop dashboard reads, besides your own OpenCode store and the CortexKit runner's stores (which it finds by itself). Each entry is an absolute path to an opencode.db file or to the folder that holds it; Windows paths such as C:\\Users\\me\\opencode work too. Relative paths and {env:}/{file:} tokens are refused. The dashboard only reads these files. USER-LEVEL ONLY — ignored in project config for security.",
+                    ),
+            })
+            .optional()
+            .describe(
+                "Desktop dashboard settings. USER-LEVEL ONLY: a project config cannot point the dashboard at files.",
+            ),
         shadow_embedding: z
             .object({
                 enabled: z

@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use std::sync::{Mutex, OnceLock};
 
 use magic_context_dashboard_lib::db;
@@ -224,6 +228,7 @@ fn seed_workspace_member(
 
 #[test]
 fn workspace_schema_ready_false_before_v34() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_pre_v34();
     assert!(!workspaces::workspace_schema_ready(&conn).unwrap());
@@ -232,6 +237,7 @@ fn workspace_schema_ready_false_before_v34() {
 
 #[test]
 fn workspace_schema_ready_false_at_v34_without_share_column() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_v34();
     assert!(!workspaces::workspace_schema_ready(&conn).unwrap());
@@ -240,6 +246,7 @@ fn workspace_schema_ready_false_at_v34_without_share_column() {
 
 #[test]
 fn workspace_schema_ready_requires_share_categories_column() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_v35_missing_share_column();
     assert!(!workspaces::workspace_schema_ready(&conn).unwrap());
@@ -247,6 +254,7 @@ fn workspace_schema_ready_requires_share_categories_column() {
 
 #[test]
 fn workspace_schema_ready_true_at_v35() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_v35();
     assert!(workspaces::workspace_schema_ready(&conn).unwrap());
@@ -254,6 +262,7 @@ fn workspace_schema_ready_true_at_v35() {
 
 #[test]
 fn workspace_schema_ready_ignores_fork_rows_until_upstream_migration_arrives() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_fork_only();
     assert!(!workspaces::workspace_schema_ready(&conn).unwrap());
@@ -269,6 +278,7 @@ fn workspace_schema_ready_ignores_fork_rows_until_upstream_migration_arrives() {
 
 #[test]
 fn workspace_crud_round_trip() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let id = workspaces::create_workspace(&mut conn, "  team-alpha  ").expect("create");
@@ -288,6 +298,7 @@ fn workspace_crud_round_trip() {
 
 #[test]
 fn workspace_refuses_the_user_home_directory() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = seed_workspace(&conn, "pool");
@@ -317,6 +328,7 @@ fn workspace_refuses_the_user_home_directory() {
 
 #[test]
 fn list_workspaces_returns_normalized_share_categories() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_v35();
     let ws = seed_workspace(&conn, "w");
@@ -335,6 +347,7 @@ fn list_workspaces_returns_normalized_share_categories() {
 
 #[test]
 fn apply_workspace_changes_multiple_add_remove_single_epoch_fanout() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     seed_epoch(&conn, "git:a", 10);
@@ -366,6 +379,7 @@ fn apply_workspace_changes_multiple_add_remove_single_epoch_fanout() {
 
 #[test]
 fn apply_workspace_changes_rename_only_does_not_bump_member_epochs() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     seed_epoch(&conn, "git:m", 5);
@@ -389,6 +403,7 @@ fn apply_workspace_changes_rename_only_does_not_bump_member_epochs() {
 
 #[test]
 fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_json() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     seed_epoch(&conn, "git:a", 1);
@@ -426,6 +441,7 @@ fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_js
 
 #[test]
 fn apply_workspace_changes_validates_against_final_staged_members() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = seed_workspace(&conn, "w");
@@ -452,6 +468,7 @@ fn apply_workspace_changes_validates_against_final_staged_members() {
 
 #[test]
 fn apply_workspace_changes_rejects_identity_in_both_add_and_remove() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = seed_workspace(&conn, "w");
@@ -472,6 +489,7 @@ fn apply_workspace_changes_rejects_identity_in_both_add_and_remove() {
 
 #[test]
 fn apply_workspace_changes_rejects_unknown_share_categories() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = seed_workspace(&conn, "w");
@@ -491,6 +509,7 @@ fn apply_workspace_changes_rejects_unknown_share_categories() {
 
 #[test]
 fn display_name_unique_within_workspace() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
@@ -510,6 +529,7 @@ fn display_name_unique_within_workspace() {
 
 #[test]
 fn memory_status_restore_widens_epoch_fan_out() {
+    isolated_home();
     let _g = env_lock();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("context.db");
@@ -539,6 +559,7 @@ fn memory_status_restore_widens_epoch_fan_out() {
 
 #[test]
 fn enumerate_memory_projects_includes_workspace_only_member() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
@@ -550,6 +571,7 @@ fn enumerate_memory_projects_includes_workspace_only_member() {
 
 #[test]
 fn workspace_filter_paths_union_members() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
@@ -573,6 +595,7 @@ fn workspace_filter_paths_union_members() {
 
 #[test]
 fn empty_workspace_filter_returns_no_memories_or_stats() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     // A workspace with ZERO members. There ARE global memories in the DB.
@@ -605,6 +628,7 @@ fn empty_workspace_filter_returns_no_memories_or_stats() {
 
 #[test]
 fn rename_workspace_does_not_bump_member_epochs() {
+    isolated_home();
     let _g = env_lock();
     let mut conn = make_db_v35();
     let ws = workspaces::create_workspace(&mut conn, "before").unwrap();
@@ -622,6 +646,7 @@ fn rename_workspace_does_not_bump_member_epochs() {
 
 #[test]
 fn enumerate_memory_projects_includes_non_git_dir_project() {
+    isolated_home();
     let _g = env_lock();
     let conn = make_db_v35();
     conn.execute(
