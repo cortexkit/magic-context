@@ -53,7 +53,6 @@ import {
 } from "@magic-context/core/shared/opencode-db-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
-import { MIN_OPENCODE1_SIDEBAR_VERSION } from "@magic-context/core/tui/host-floor";
 import { parse, stringify } from "comment-json";
 import {
     isDevPathPluginEntry,
@@ -1037,19 +1036,11 @@ export function describeOpenCode2SessionAPIRequirement(hostVersion: string): str
     return `OpenCode host ${hostVersion}; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.`;
 }
 
-/**
- * On OpenCode 1 releases older than the sidebar's floor the plugin's TUI part
- * declines to load; its server part still runs.
- */
-export function describeOpenCode1SidebarRequirement(hostVersion: string): string {
-    return `OpenCode host ${hostVersion}; the Magic Context sidebar needs OpenCode ${MIN_OPENCODE1_SIDEBAR_VERSION} or newer. Context management and the /ctx-* commands still run.`;
-}
-
 export function getOpenCodePluginHostStatus(
     hostLabel: string,
     hostVersion: string,
     installed: boolean,
-): { status: "info" | "warn" | "fail"; message: string } | null {
+): { status: "info" | "fail"; message: string } | null {
     if (!installed) {
         return {
             status: "info",
@@ -1064,12 +1055,6 @@ export function getOpenCodePluginHostStatus(
             status: "fail",
             message: describeOpenCode2SessionAPIRequirement(hostVersion),
         };
-    }
-    if (
-        openCodeHostGenerationFromVersion(hostVersion) === "v1" &&
-        compareVersions(hostVersion, MIN_OPENCODE1_SIDEBAR_VERSION) === -1
-    ) {
-        return { status: "warn", message: describeOpenCode1SidebarRequirement(hostVersion) };
     }
     return null;
 }
@@ -1792,7 +1777,6 @@ export async function runDoctor(
           )
         : null;
     if (hostPluginStatus?.status === "info") log.info(hostPluginStatus.message);
-    else if (hostPluginStatus?.status === "warn") log.warn(hostPluginStatus.message);
     else if (hostPluginStatus?.status === "fail") fail(hostPluginStatus.message);
     else if (magicContextInstalled && hostGeneration === "v2") {
         log.info(describeOpenCode2SessionAPIRequirement(activeInstallation.version));

@@ -31,8 +31,6 @@ Memories                       225 · 7 new
 
 While `/ctx-recomp`, an upgrade, `/ctx-embed` or `/ctx-wrapup` runs, a section with its progress appears as well. Click the header to collapse the panel to one row (`ctx  45% left ●`), or expand it again. The token breakdown, dreamer state and queue are in `/ctx-status`.
 
-On OpenCode 1 the sidebar needs OpenCode 1.18.4 or later. On older releases the TUI part shows one notice and does not load; context management and the `/ctx-*` commands keep working.
-
 The sidebar is enabled by the setup wizard, which adds the TUI plugin entry to `~/.config/opencode/tui.jsonc`. If you removed it (or skipped setup), run `npx @cortexkit/magic-context@latest doctor` to add it back. Removing the entry from `tui.jsonc` disables the sidebar permanently — Magic Context never re-adds it on its own.
 
 By default the sidebar reopens expanded every time you restart. To make the collapsed state (and a few other preferences) stick, add a `magic-context` entry to a **shared** TUI preferences file.
