@@ -68,7 +68,7 @@
  *   --all-busts      list every diverging segment, not just the first
  *   --all-rows       also print STABLE and UNMETERED rows
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -96,6 +96,7 @@ import {
 } from "./cache-bust-body-sources";
 
 import { withSchedulerLogFallback } from "./cache-bust-scheduler-log";
+import { DumpScanIndex, type DumpScanMetrics, listDumpFiles } from "./cache-bust-dump-index";
 import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
@@ -133,6 +134,8 @@ interface Args {
     runnerDataDir: string;
     dumpDir?: string;
     excludeKeepWarm?: boolean;
+    scanMetrics?: DumpScanMetrics;
+    scanIndex?: DumpScanIndex;
 }
 
 interface MeterUsage {
@@ -253,6 +256,9 @@ export interface OpenCodeCacheBustAnalysisOptions {
     scanCursor?: string;
     scanDeadlineMs?: number;
     scanNow?: () => number;
+    scanMetrics?: DumpScanMetrics;
+    /** Share only names and small metadata across batches of one sentinel run. */
+    scanIndex?: DumpScanIndex;
     /**
      * Overrides the cache lifetime the previous same-route request stated. When
      * that request states none, the fallback is five minutes for plugin-host
@@ -391,6 +397,10 @@ function sessionMatches(candidate: string, prefix: string): boolean {
     return candidate.startsWith(prefix) || prefix.startsWith(visibleHead);
 }
 
+export function createOpenCodeDumpScanIndex(metrics?: DumpScanMetrics): DumpScanIndex {
+    return new DumpScanIndex(parseDumpFilename, metrics);
+}
+
 function buildSegments(
     body: Json,
     provider?: BodyProvider,
@@ -479,13 +489,13 @@ function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
             totalBytes: 0,
             dumpCount: 0,
         };
-        const files = readdirSync(first.sourceDir)
+        const files = (args.scanIndex?.contextFiles(first.sourceDir, first.session) ?? listDumpFiles(first.sourceDir, args.scanMetrics))
             .filter((file) => file.endsWith(".meta.json"))
             .flatMap((file) => {
                 const name = parseDumpFilename(file);
                 if (name && name.session !== first.session) return [];
                 try {
-                    const meta = JSON.parse(readFileSync(join(first.sourceDir, file), "utf8")) as Json;
+                    const meta = readDumpMetadata(first.sourceDir, file, args);
                     if (!name && String(meta.session ?? "") !== first.session) return [];
                     return [{
                         file,
@@ -730,19 +740,40 @@ function artifactPaths(
     return { bodyPath, responsePath };
 }
 
+function readDumpMetadata(directory: string, file: string, opts: Args): Json {
+    const read = (): Json => {
+        if (opts.scanMetrics) opts.scanMetrics.metaReads += 1;
+        const meta = JSON.parse(readFileSync(join(directory, file), "utf8")) as Json;
+        if (!opts.scanIndex) return meta;
+        // Retain only fields the analyzer uses, not exporter previews of the body.
+        const files = asJson(meta.files);
+        const thread = asJson(asJson(meta.body)?.thread)?.type;
+        return {
+            session: String(meta.session ?? ""), createdAt: String(meta.createdAt ?? ""),
+            step: finiteNumber(meta.step) ? meta.step : undefined,
+            wire_family: typeof meta.wire_family === "string" ? meta.wire_family : undefined,
+            route: typeof meta.route === "string" ? meta.route : undefined,
+            files: { body: typeof files?.body === "string" ? files.body : undefined,
+                response: typeof files?.response === "string" ? files.response : undefined },
+            body: { thread: { type: thread === "create" || thread === "continue" ? thread : undefined } },
+        };
+    };
+    return opts.scanIndex ? opts.scanIndex.metadata(directory, file, read) : read();
+}
+
 function discoverDumpCandidates(opts: Args): DumpCandidate[] {
     const candidates = new Map<string, DumpCandidate>();
     const since = resolveTimeBound(opts.since);
     const until = resolveTimeBound(opts.until);
     for (const source of opts.sources) {
         if (!existsSync(source.dir)) continue;
-        for (const metaFile of readdirSync(source.dir).filter((file) =>
+        for (const metaFile of listDumpFiles(source.dir, opts.scanMetrics).filter((file) =>
             file.endsWith(".meta.json"),
         )) {
             const parsedName = parseDumpFilename(metaFile);
             let meta: Json;
             try {
-                meta = JSON.parse(readFileSync(join(source.dir, metaFile), "utf8")) as Json;
+                meta = readDumpMetadata(source.dir, metaFile, opts);
             } catch {
                 continue;
             }
@@ -756,6 +787,7 @@ function discoverDumpCandidates(opts: Args): DumpCandidate[] {
             if (!bodyPath) continue;
             let bodyStat: ReturnType<typeof statSync>;
             try {
+                if (opts.scanMetrics) opts.scanMetrics.fileStats += 1;
                 bodyStat = statSync(bodyPath);
             } catch {
                 continue;
@@ -786,7 +818,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
     const since = resolveTimeBound(opts.since);
     const until = resolveTimeBound(opts.until);
     const snapshots: Snapshot[] = [];
-    for (const metaFile of selectedFiles ?? readdirSync(candidate.source.dir).filter((file) =>
+    for (const metaFile of selectedFiles ?? listDumpFiles(candidate.source.dir, opts.scanMetrics).filter((file) =>
         file.endsWith(".meta.json"),
     )) {
         if (opts.excludeKeepWarm && metaFile.includes("prewarm-cachekeep")) continue;
@@ -794,7 +826,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
         if (dumpName && dumpName.session !== candidate.session) continue;
         let meta: Json;
         try {
-            meta = JSON.parse(readFileSync(join(candidate.source.dir, metaFile), "utf8")) as Json;
+            meta = readDumpMetadata(candidate.source.dir, metaFile, opts);
         } catch {
             continue;
         }
@@ -813,6 +845,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args, selectedFi
                 : undefined;
         const familyProvider = wireFamily ? WIRE_FAMILY_PROVIDERS[wireFamily] : undefined;
         try {
+            if (opts.scanMetrics) opts.scanMetrics.bodyReads += 1;
             const rawBody = readFileSync(bodyPath);
             const body = JSON.parse(rawBody.toString("utf8")) as Json;
             const normalized = buildSegments(
@@ -874,12 +907,12 @@ function loadWindowDumpSnapshots(
 ): Snapshot[] {
     const indexed: { candidate: DumpCandidate; file: string; createdAt: string; sequence: number }[] = [];
     for (const candidate of discoverDumpCandidates(args).filter((entry) => entry.session === options.sessionId)) {
-        for (const file of readdirSync(candidate.source.dir)) {
+        for (const file of listDumpFiles(candidate.source.dir, args.scanMetrics)) {
             if (!file.endsWith(".meta.json")) continue;
             const name = parseDumpFilename(file);
             if (name && name.session !== options.sessionId) continue;
             try {
-                const meta = JSON.parse(readFileSync(join(candidate.source.dir, file), "utf8")) as Json;
+                const meta = readDumpMetadata(candidate.source.dir, file, args);
                 if (!name && String(meta.session ?? "") !== options.sessionId) continue;
                 const createdAt = name?.createdAt ?? String(meta.createdAt ?? "");
                 const timestamp = Date.parse(createdAt);
@@ -969,7 +1002,7 @@ function runnerSnapshots(runner: RunnerSession, dumps: readonly Snapshot[], forc
 }
 
 function keepWarmTouches(sources: readonly DumpSource[], session: string): { at: number; file: string }[] {
-    return sources.flatMap((source) => !existsSync(source.dir) ? [] : readdirSync(source.dir).flatMap((file) => {
+    return sources.flatMap((source) => !existsSync(source.dir) ? [] : listDumpFiles(source.dir).flatMap((file) => {
         if (!file.includes("prewarm-cachekeep") || !file.endsWith(".meta.json")) return [];
         const parsed = parseDumpFilename(file);
         const path = join(source.dir, file);
@@ -1042,8 +1075,13 @@ export function analyzeOpenCodeCacheBustSession(
         allBusts: false,
         allRows: true,
         help: false,
+        scanMetrics: options.scanMetrics,
+        scanIndex: options.scanIndex,
     };
     const scanNow = options.scanNow ?? Date.now;
+    if (options.scanIndex) {
+        for (const dir of new Set(sources.map((source) => source.dir))) options.scanIndex.refresh(dir, scanNow());
+    }
     let filesExamined = 0;
     let nextCursor: string | undefined;
     let scanBounded = false;
@@ -1063,8 +1101,10 @@ export function analyzeOpenCodeCacheBustSession(
         : (() => {
             // Read the newest request group first, preserving chronological pairs
             // within each group. New arrivals must not wait behind an old backlog.
-            const indexed = sources.flatMap((source) => existsSync(source.dir)
-                ? readdirSync(source.dir).flatMap((file) => {
+            const indexed = sources.flatMap((source) => options.scanIndex
+                ? options.scanIndex.entries(source.dir, options.sessionId).map((entry) => ({ ...entry, source }))
+                : existsSync(source.dir)
+                ? listDumpFiles(source.dir, options.scanMetrics).flatMap((file) => {
                     if (!file.endsWith(".meta.json")) return [];
                     const parsed = parseDumpFilename(file);
                     if (!parsed || parsed.session !== options.sessionId) return [];

@@ -63,7 +63,8 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { resolveOpenCodeDbPath } from "../src/shared/opencode-db-path";
-import { analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
+import { analyzeOpenCodeCacheBustSession, createOpenCodeDumpScanIndex } from "./analyze-cache-busts";
+import type { DumpScanIndex, DumpScanMetrics } from "./cache-bust-dump-index";
 import {
     type AnalyzedCacheRequest,
     type CacheBustDecisionAttribution,
@@ -114,6 +115,14 @@ export interface CacheBustSentinelOptions {
     ompDir?: string;
     ledgerDir?: string;
     bodiesDir?: string;
+}
+
+interface SentinelScanOptions extends CacheBustSentinelOptions {
+    scanCursor?: string;
+    scanDeadlineMs?: number;
+    scanNow?: () => number;
+    scanMetrics?: DumpScanMetrics;
+    scanIndex?: DumpScanIndex;
 }
 
 export interface ActiveCacheBustSession {
@@ -249,6 +258,7 @@ export interface SentinelCounters {
 }
 
 interface SentinelRunDeps {
+    scanMetrics?: DumpScanMetrics;
     now?: () => number;
     listActiveSessions?: (
         state: CacheBustSentinelState,
@@ -259,7 +269,7 @@ interface SentinelRunDeps {
         session: ActiveCacheBustSession,
         sinceExclusiveMs: number,
         decisions: readonly CacheBustDecisionAttribution[],
-        options: CacheBustSentinelOptions,
+        options: SentinelScanOptions,
     ) => Promise<CacheBustSessionAnalysis & CacheBustScanProgress>;
     loadDecisions?: (
         session: ActiveCacheBustSession,
@@ -877,7 +887,7 @@ async function analyzeActiveSession(
     session: ActiveCacheBustSession,
     sinceExclusiveMs: number,
     decisions: readonly CacheBustDecisionAttribution[],
-    options: CacheBustSentinelOptions & { scanCursor?: string; scanDeadlineMs?: number; scanNow?: () => number },
+    options: SentinelScanOptions,
 ): Promise<CacheBustSessionAnalysis & CacheBustScanProgress> {
     if (session.harness === "opencode") {
         const analysis = analyzeOpenCodeCacheBustSession({
@@ -887,6 +897,8 @@ async function analyzeActiveSession(
             scanCursor: options.scanCursor,
             scanDeadlineMs: options.scanDeadlineMs,
             scanNow: options.scanNow,
+            scanMetrics: options.scanMetrics,
+            scanIndex: options.scanIndex,
             anthropicDir: options.anthropicDir,
             mcLogPath: options.mcLogPath,
             openaiDir: options.openaiDir,
@@ -1355,6 +1367,7 @@ export async function runSentinelOnce(
     const listSessions = deps.listActiveSessions ?? enumerateActiveSessions;
     const sessions = orderSessionsForScan(listSessions(state, nowMs, options), state);
     const counters = emptyCounters();
+    const scanIndex = createOpenCodeDumpScanIndex(deps.scanMetrics);
     counters.sessions = sessions.length;
     let staleBacklog = false;
     stderr(JSON.stringify({ kind: "cache_bust_sentinel_start", at: new Date(nowMs).toISOString() }));
@@ -1391,7 +1404,7 @@ export async function runSentinelOnce(
                 session,
                 sinceExclusiveMs,
                 decisions,
-                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: deadlineMs, scanNow: clock },
+                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: deadlineMs, scanNow: clock, scanMetrics: deps.scanMetrics, scanIndex },
             );
             counters.filesExamined += analysis.filesExamined ?? 0;
             const requests = analysis.requests.filter(
