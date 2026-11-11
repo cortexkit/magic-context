@@ -6,7 +6,7 @@ Where a page and the code disagree, the code is right; fix the page.
 
 | Page | Covers |
 |---|---|
-| [rust-module.md](rust-module.md) | The `ck-mc` subc module, who calls it, the bridge's state sync, ordinal mapping and transport, the module store and rollback, tool facades, serializer profiles, the module historian. |
+| [rust-module.md](rust-module.md) | The `ck-mc` subc module for sessions in an llm-runner: the contracts it talks through, where its code is, how a pass runs, its two stores, and how it is tested and placed. |
 | [opencode-2.md](opencode-2.md) | The OpenCode 2 adapter: hooks, store reader, fold ownership, hidden completions, TUI seam, refusals, host limitations, store-generation rebase. |
 | [pi.md](pi.md) | Pi and OMP: detection, LKG, pressure, system entries, clone inheritance, the subagent runner, the refusal guard. `packages/pi-plugin/PARITY.md` lists every deliberate divergence. |
 | [reclaim.md](reclaim.md) | Tags and tag identity, `ctx_reduce` drops, placeholders and skeletons, age reclaim, smart drops, emergency tiers, strip-and-replay, caveman compression. |

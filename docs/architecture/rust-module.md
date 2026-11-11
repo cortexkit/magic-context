@@ -1,73 +1,68 @@
 # The Rust module (ck-mc)
 
-The Rust workspace in `crates/` re-implements the cache-stability transform and the historian as `ck-mc`, a module of the subconscious daemon (subc). ck-mc serves sessions through its step-transform provider. Its callers are Claude Code through the Thalamus gateway, Broca workers, and OpenCode or Pi sessions that the CortexKit harness bridges to ck-mc. The in-tree OpenCode and Pi plugins run the TypeScript transform; they do not send their passes to ck-mc.
+`ck-mc` is Magic Context for sessions that live in an llm-runner instead of a host with the plugin (mode 3 in [ARCHITECTURE.md](../../ARCHITECTURE.md)). It is a module of the subconscious daemon (subc), built from `crates/mc-module`. The runner holds the conversation and renders every request. ck-mc decides how the history is shortened and says so as a **view**: a list of edits (the history head, drops, placeholders, the cut) that the runner applies to every request until a newer view replaces it.
+
+The TypeScript transform is the specification. ck-mc must make the same decisions, lane for lane; the differences it is allowed are listed, with their reasons, in `crates/mc-module/src/pass_decision_tests.rs`, which checks ck-mc against a decision table generated from the TypeScript gates.
+
+## What it talks to
+
+ck-mc reaches a runner only through published contracts, and no Magic Context policy runs in the runner:
+
+- **Compaction provider** (`cortexkit-role-compaction`): Setup when a session attaches, a notice after each step, a ride when the runner is about to rewrite the provider cache anyway or the next request would not fit, and the views ck-mc publishes in reply.
+- **Step-transform provider**: the `pre_user` hook, which adds a time marker and a memory hint to a person's message before the runner stores it (`pre_user.rs`).
+- **Tool provider**: `tool.catalog` and `role.describe` declare the five tools (`ctx_reduce`, `ctx_expand`, `ctx_note`, `ctx_memory`, `ctx_search`) and the guidance text; the runner forwards the tool calls (`catalog.rs`).
+- **llm-runner** (`cortexkit-role-llm-runner`), called by ck-mc: `session.entries` to read messages it has not seen, `session.applied_view` and `session.apply_view` to learn and set the view outside a step, and `session.send` to run its summarizer in a child session on the same runner.
+- **Routing** (`routing/v1`): ck-mc never picks a model. It states what a run needs, and the routing provider answers a model (`routing.rs`).
+
+Two read-only services answer other modules without touching a session's work: app reads for the desktop and phone apps (`app_read/`: the context map, summaries, search, the reason for the last cache rewrite) and context reads for the speech module (`context_read/`).
 
 ## Where the code is
 
-- `crates/mc-module/src/lib.rs`: request routing, tool facades, session operations, state sync and health.
-- `crates/mc-module/src/main.rs`: module entry point under subc.
-- `crates/mc-module/src/providers/`: the step-transform provider. `compaction.rs` runs the compaction steps, `step_transform.rs` answers host declarations and hooks, `historian.rs` is the provider historian worker, `resident*.rs` is the resident engine, and `codec_*.rs` translate each harness's messages.
-- `crates/mc-module/src/transform.rs`, `injection.rs`, `m0_compose.rs`, `m1_compose.rs`, `boundary.rs`: the transform engine and `m[0]`/`m[1]` rendering, mirroring the TypeScript runtime.
-- `crates/mc-module/src/historian.rs`, `historian_producer.rs`, `historian_chunk.rs`, `historian_validate.rs`: the module historian.
-- `crates/mc-module/src/codec/`, `healing.rs`: harness codecs and serializer profiles.
-- `crates/mc-store/src/lib.rs`: the module's SQLite store (`store.db`), its migrations and row-version compare-and-set. `crates/mc-store/src/single_store_schema.rs`: the single-store layout and its refusal.
-- `crates/mc-core/`: the pass classifier (`classify`, which plans a pass) and the decay math. `crates/mc-tokenizer/`: the byte-BPE token estimator.
-- `packages/plugin/src/host-runner.ts`, `packages/plugin/src/hooks/magic-context/host-runner/`: the OpenCode bridge adapter that the harness loads (see [host-runner.md](../integrations/host-runner.md)). `packages/pi-plugin/src/bridge-adapter-pi.ts`: the Pi bridge adapter.
-- `packages/plugin/src/hooks/magic-context/module-transport.ts`, `module-wire.ts`, `module-state-sync.ts`: transport, ordinal mapping and state sync for the bridge adapters.
+Paths are under `crates/mc-module/src/`.
 
-## Who calls the module
+| File | Role |
+|---|---|
+| `lib.rs`, `main.rs` | Crate overview and the binary: serve under subc, or run an offline command (`move-in`, `rekey-runner`). |
+| `transport.rs`, `module.rs` | The subc handler and the router. Every session has one worker that runs its jobs in order, so session state needs no lock. Notices are acknowledged before their work runs; rides and tool calls wait for their answer. |
+| `session.rs` | One session's state and everything that happens to it: Setup, notices, rides, refusals, summaries arriving. |
+| `pass.rs` | The pass decision: when a session may build a new view. |
+| `lanes.rs` | The kinds of reduction a view carries: queued drops, the age sweep (old tool output and old notices), duplicate and superseded output, reasoning clearing, text compression of old messages, the emergency drop. |
+| `view_builder.rs` | Builds the next view from the previous one and checks it with the functions the runner uses (`cortexkit-compaction-view`), so ck-mc never publishes a view the runner would refuse. |
+| `index.rs` | A compact index of the transcript from the last cut on. It grows from notices and reads; ck-mc never walks the whole conversation per step. |
+| `summary/` | The summarizer: trigger, chunking, prompt, validation, the history head (`head.rs`), and the two-pass run that reconciles new facts with the project's memories (`two_pass/`). |
+| `reduce.rs`, `expand.rs`, `notes.rs`, `memory_tool.rs`, `search/` | The five tools. Argument rules and reply text are the TypeScript tools', so an agent reads the same in both. |
+| `nudges.rs` | Reminders to call `ctx_reduce`. |
+| `store.rs`, `store_text.rs` | ck-mc's own store, `mode3.db`. |
+| `context_db.rs` | Access to `context.db`, the store shared with the plugin. |
+| `memory_context/`, `memory_profile/`, `memory_sync/`, `workspace.rs` | A session's project, workspace and memory profile; sync of new memories to the backup service. |
+| `upkeep.rs`, `embedding.rs`, `chunk_embedding.rs` | Background project work: memory and commit vectors, commit indexing. |
+| `signed_floor.rs`, `move_floor.rs` | Two entries a view must respect. The signed floor: some models sign their reasoning against the bytes before it, so the runner strips that reasoning up to a recorded entry whenever the request's tool list changes, and ck-mc must not count or edit what is already gone. The move floor: the entry a moved session's first view cut through. |
+| `move_in.rs`, `move_renumber.rs`, `rekey.rs` | Offline tools: move a session from a standalone host or another runner, and rename a runner in the store. |
+| `calibration.rs`, `count.rs`, `tokens.rs`, `prompt_notes.rs` | Token estimates and window geometry, including the notes a runner sends outside the transcript. |
 
-Rust transform mode is retired. In that mode the in-tree plugin sent each pass's full message array to ck-mc. The plugins ignore `transform_mode` and `rust_pipeline`; the OpenCode plugin logs one warning.
+`crates/mc-tokenizer` is the token estimator. `crates/mc-mock-runner` is a runner used only by tests. `crates_old/` holds the 0.49.x module (the retired Rust transform mode and its store); nothing builds it into a release.
 
-ck-mc answers the step contract: `compaction.setup`, `compaction.step`, `compaction.view.read`, `transform.declare` and `transform.hook`. `lib.rs` sends these methods to `providers/`. The callers are:
+## How a pass runs
 
-- **Claude Code**, through the Thalamus gateway.
-- **Broca workers.**
-- **OpenCode and Pi sessions that the CortexKit harness bridges to ck-mc.** For OpenCode, the harness loads `@cortexkit/opencode-magic-context/host-runner`; for Pi, it uses the Pi bridge adapter. The bridge keeps its durable record in `context.db`. [host-runner.md](../integrations/host-runner.md) describes that adapter.
+A pass runs on a Setup, a notice or a ride, never on every step. A step that gets no new view is a cache hit by construction, because the runner re-applies the same view.
 
-## The bridge's host side
+1. The notice or ride brings the newest usage reading and names the entries that changed. ck-mc reads only what it has not seen and updates its index.
+2. `pass.rs` decides whether this pass may rebuild: usage at the execute threshold with no summary on its way, a ride that says the request's bytes change anyway or the request would not fit, or usage in the force band (at or above `max(85%, execute threshold + 2)`), where a pass stops waiting for a summary. A ride that only says the provider lost its cache permits nothing. A reading taken under an older view than the one the runner now applies is treated as stale.
+3. On a permitted pass every lane with work contributes its edits, and `view_builder.rs` publishes them as one view. A summary that finished earlier lands in the same view: the history head is re-rendered and the cut moves.
+4. The runner accepts or refuses the view. A refusal names its reason; ck-mc sets aside only what the refusal names and keeps everything else queued.
 
-The bridge adapters use three TypeScript pieces to talk to ck-mc:
+The summarizer runs beside the session's worker, since a run can take minutes. Its result comes back as a job of its own.
 
-1. **State sync** (`module-state-sync.ts`). The host keeps a set of watermarks per session: compartment sequence, newest memory id, `m[0]` mutation id, memory-mutation id, todo-state hash, project memory epoch, user-profile version, workspace fingerprint and reasoning-cleared-through tag. When they match what the module last acknowledged, nothing is sent. Otherwise the changed rows go to the module, paged to stay under the subc frame limit (64 MiB body, 16 MiB envelope headroom, 64 KiB continuation chunks for large values). A pending `m[0]` mutation is reported separately because it forces a fold.
-2. **Ordinal mapping** (`module-wire.ts`, `resolveOrdinalsForModule`). The module addresses messages by absolute ordinal in the host store. A per-session memo maps message ids to ordinals, with page checkpoints. A warm memo that covers every wire id is trusted without a store read. New ids are resolved by reading ordinal pages of 500 rows after the last anchor. If the store count no longer adds up (a message was removed), the walk resumes from progressively older checkpoints instead of re-reading the session. A lifecycle event such as a message removal sets a verify flag, so the next pass checks the store even when the memo looks complete. A conflict the rewind cannot repair clears the memo and fails the pass loudly.
-3. **Transport** (`module-transport.ts`, using `SubcClient` and `RouteHandle` from `@cortexkit/subc-client`). Requests for one session run one at a time, in order, on a lane for that session. Connection backoff escalates from 1 s to 30 s; a call waits through at most 12 s of remaining backoff before it fails.
+## Stores
 
-## Module store
+- **`context.db`** is shared with every standalone plugin: summaries, memories, notes and the search index. ck-mc never migrates it. The TypeScript plugin owns the schema, and ck-mc opens it only at exactly the version the build was compiled against; any other version is refused by name. Writes are short `BEGIN IMMEDIATE` transactions.
+- **`mode3.db`** is ck-mc's own (`store.rs`, schema version in `SCHEMA_VERSION`): per session, the decisions that are not in the runner's transcript or view and must survive a restart, such as held drops and the state of the last view. Views themselves are not kept: after a restart ck-mc takes the runner's current view from the runner. A `mode3.db` newer than the build is refused without being changed. A running module holds a shared lock on `mode3.db.lock`, so an offline tool refuses to run while the module does.
 
-The module keeps its own store, `store.db`, in the same data directory as `context.db` (`~/.local/share/cortexkit/magic-context/`). `crates/mc-store` owns its schema through its own migration chain, independent of the `context.db` versions, and every durable transition is a compare-and-set on a row version. Notable tables are `mc_pass_trace` (a durable audit of receive, complete and reject events per pass) and `mc_reduce_command_ledger` (command-id idempotency for `ctx_reduce` drops). `context.db` and `store.db` form one consistency unit: restore both from the same backup or neither.
+Back up and restore the two together. If `mode3.db` names summaries that `context.db` no longer has, ck-mc trusts `context.db`: it moves the cut back to the summaries that exist, rebuilds the head, and lets the summarizer cover those messages again.
 
-Project data (memories, notes, compartments, user memories, primer candidates and workspaces) lives in `context.db`. The module attaches to `context.db` and writes those rows there. `store.db` keeps the module's private session and cache state. An older `store.db` that still holds those rows needs the one-time single-store migration. Until it runs, the module refuses every request except `echo` with `single_store_migration_required`, which the plugin and the CLI show as `MC-C14`. `magic-context doctor single-store migrate` runs the migration offline.
+## Testing and placing
 
-### Rollback
-
-A ck-mc rollback is the previous binary **together with** `context.db` and `store.db` restored from the same backup. `scripts/backup-live-stores.sh` snapshots both in one run for this purpose.
-
-Rolling back only the binary across a store migration is refused. `McStore::open` compares the highest version recorded in `store.db` with the newest migration the binary carries. When the store is ahead, the open fails with `McStoreError::StoreAheadOfBinary { db_version, binary_max }` before it reads or writes a row. Older builds logged this case and continued. That half-worked: migration 53 moved note ownership into triggers that read a row an older binary never fills, so note inserts and deletes failed later without naming the cause.
-
-The refusal is terminal until the module restarts on a store it knows:
-
-- `ck health magic-context` reports `failing`, with `storage_state: open_refused_store_ahead`, both versions (`store_db_version`, `binary_max_store_version`) and the remediation.
-- Every request lane except `echo` answers with a `store_ahead_of_binary` error frame. Its detail is `{reason_code, db_version, binary_max}`.
-- Facade tools answer with the user-facing sentence: "Magic Context refused to start: its store (store.db) is at schema vN but this ck-mc build only knows up to vM. Update ck-mc, or roll back by restoring ck-mc together with context.db and store.db from the same backup. (MC-C13)".
-- The plugin's module transport (`module-transport.ts`) maps the code to `StoreAheadOfBinaryError`, so a bridged pass refuses the turn with the same sentence.
-
-A store that is older than the binary still migrates forward on open, and a store at the binary's own version opens as before.
-
-## Tool facades
-
-The module exposes MCP-style facades for all five tools (`ctx_memory`, `ctx_search`, `ctx_expand`, `ctx_reduce`, `ctx_note`), which is how Claude Code reaches them.
-
-## Serializer profiles and epochs
-
-Each request names a serializer profile (`healing.rs`): `opencode-aisdk`, `pi`, `claude-code-anthropic`, and the owned runner profiles. Harness codecs in `codec/` translate harness JSON to canonical wire messages and back. Every shipping profile rebuilds the provider request from the transformed array, so all of them allow tail reclaim as well as prefix folding.
-
-Byte-affecting format changes are coordinated through epochs in `lib.rs` (`MEMORY_RENDER_FORMAT_EPOCH`, `COMPARTMENT_RENDER_FORMAT_EPOCH`, per-profile epochs, `TAGGER_FEATURE_EPOCH`). They are folded into the request's render configuration; any change forces one HARD fold so each session crosses a format change once. Consumers read the epochs at attach through `session.status` and refuse to serve on a mismatch.
-
-## The module historian
-
-The module runs its own historian (`historian.rs`), with the same trigger, protected-tail boundary and validation rules as the TypeScript one (see [historian.md](historian.md)). The caller sends its resolved historian model chain with each request (`historian_model_chain`). The producer (`historian_producer.rs`) asks for at most 32,000 output tokens and waits up to 600 s per run. Each skipped fire is recorded durably with a typed cause (`HistorianNoFireCause`: already in progress, below the proactive floor, drain budget spent, no models, and so on) so status can say why nothing happened.
-
-A transform in emergency may wait for historian work it started, but those waits share one 20 s budget (`TRANSFORM_HISTORIAN_FOLLOWUP_BUDGET`) so they cannot stack past the caller's deadline. `session.wrapup` runs rounds of up to 600 s each within an overall budget of 3,800 s (`MAX_WRAPUP_REQUEST_BUDGET`) and returns a machine-readable disposition (`completed`, `nothing_to_compact`, `already_in_progress`, `failed`). It works from a cached snapshot of the session's last full transform. Only the full-array `transform` route of the retired mode records that snapshot, so a session served through the step contract gets the retryable reason `transform_not_observed` instead. Other session operations are `session.status`, `session.recomp`, `session.flush` and `session.delete`, which removes the session's rows from the store.
-
-On store open during a daemon restart, the module retries the store lease for up to 60 s; an individual request waits at most 500 ms for an in-flight open before refusing.
+- `cargo test -p mc-module` runs the unit tests and the scenario suite (`tests/scenarios/`), which drives whole sessions against the mock runner.
+- `scripts/wire-gate.sh` runs `tests/wire.rs` against a real subc daemon and the mock runner.
+- Pinned bytes: `testdata/` holds goldens generated from the TypeScript plugin (the summarizer prompt, the history head, decay, the tool catalog) and the sample replies the apps decode. A change that moves one of them is a change to what models or apps receive.
+- `scripts/place-ck-mc.sh` places a signed build: it keeps the previous binary as rollback, checks both store versions, restarts the module and verifies what is running.
