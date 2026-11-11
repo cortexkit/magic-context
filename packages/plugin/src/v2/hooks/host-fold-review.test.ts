@@ -192,15 +192,11 @@ test("a refused manual compact leaves the frozen baseline unchanged", async () =
             .run(f.session);
         await f.restart();
         const after = await f.pass();
-        console.log(
-            "refused fold state",
-            JSON.stringify({
-                before,
-                afterRefusal,
-                requestUnchangedAfterReload: after.bytes === served.bytes,
-            }),
-        );
         expect(afterRefusal).toEqual(before);
+        // The boundary column alone missed a head whose payloads moved out of
+        // session_meta: the request after the refused compaction must be the
+        // request served before it, byte for byte.
+        expect(after.bytes).toBe(served.bytes);
     } finally {
         write.mockRestore();
         await f.cleanup();
