@@ -602,8 +602,8 @@ async fn signed_floor_a_refused_floor_the_runner_keeps_naming_is_ignored_until_i
 /// The runner stops applying its floor without saying why: it refuses the
 /// view built under it and, in the same notice, names no floor. ck-mc holds
 /// none. When a later notice names the same floor again, ck-mc takes it,
-/// although it is not newer than the one it had. (The review witness below
-/// performs a real undo.)
+/// although it is not newer than the one it had. A real undo is performed
+/// in `signed_floor_review_a_refusal_after_ck_mc_followed_the_floor_away_costs_no_drops`.
 #[tokio::test]
 async fn signed_floor_a_refusal_with_no_floor_named_then_the_same_floor_named_again() {
     let captured = Captured::default();
