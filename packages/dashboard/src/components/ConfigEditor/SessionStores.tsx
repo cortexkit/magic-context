@@ -106,7 +106,12 @@ export default function SessionStores(props: {
             setError(null);
           }}
         />
-        <button type="submit" class="btn sm" disabled={!draft().trim()}>
+        <button
+          type="submit"
+          class="btn sm"
+          aria-label="Add session store"
+          disabled={!draft().trim()}
+        >
           + Add
         </button>
       </form>

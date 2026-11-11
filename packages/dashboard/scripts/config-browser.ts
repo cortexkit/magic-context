@@ -31,6 +31,7 @@ const fixture = `{
   } },
   "prompt_surface": { "models": { "anthropic/*": "full", "openrouter/qwen/qwen3-235b-a22b": "light" } },
   "pi": { "subagent_extensions": ["extensions/project-specific-tooling.ts", "npm:@cortexkit/example-extension"] },
+  "dashboard": { "opencode_db_paths": ["/Volumes/Archive/opencode"] },
   "future_operator_setting": { "keep_spacing" :  42, },
 }
 `.replaceAll("\n", "\r\n");
@@ -52,6 +53,11 @@ const preload = `(() => {
       if (cmd === 'save_config') { config = args.content; window.__fixtureSaved = config; return null; }
       if (cmd === 'get_model_catalogs') return ${JSON.stringify(catalogs)};
       if (cmd === 'get_opencode_install_state') return 'cli';
+      if (cmd === 'get_opencode_stores') return [
+        { path: '/fixture/home/.local/share/opencode/opencode.db', origin: 'default', found: true, read: true, note: null, configured_value: null },
+        { path: '/fixture/home/.local/share/cortexkit/thalamus-harness/opencode2-server/data/opencode/opencode.db', origin: 'runner', found: true, read: true, note: null, configured_value: null },
+        { path: '/Volumes/Archive/opencode/opencode.db', origin: 'configured', found: false, read: false, note: 'Not found.', configured_value: '/Volumes/Archive/opencode' },
+      ];
       if (cmd === 'get_db_health') return { found: true, path: '/fixture/context.db', size_bytes: 1, tables: [], error: null };
       if (cmd === 'plugin:updater|check') return null;
       return [];
@@ -138,7 +144,7 @@ try {
     await waitFor('.config-section-panel');
     await assert(`${size} clean save is disabled`, "document.querySelector('.config-save').disabled");
     await assert(`${size} config path stays on one line with full hover text`, "(()=>{const e=document.querySelector('.config-file-meta code'),s=getComputedStyle(e);return e.title===e.textContent && s.whiteSpace==='nowrap' && s.textOverflow==='ellipsis'})()");
-    for (const name of ["General", "Context window", "History", "Memory & search", "Background models", "Dreamer schedule", "Prompt surface", "Advanced"]) {
+    for (const name of ["General", "Context window", "History", "Memory & search", "Background models", "Dreamer schedule", "Prompt surface", "Session stores", "Advanced"]) {
       await section(name);
       const slug = name.toLowerCase().replaceAll(/[^a-z]+/g, "-").replace(/-$/, "");
       await assert(`${size} ${name} single-column rows`, `[...document.querySelectorAll('.config-card-content')].filter(e=>e.getClientRects().length).every(e=>getComputedStyle(e).flexDirection==='column')`);
@@ -171,6 +177,23 @@ try {
         await capture(`${size}-${slug}-${page}`);
       }
     }
+    await section("Session stores");
+    await assert(`${size} session stores list every store with its source`, "[...document.querySelectorAll('.config-store-table tbody tr')].map(r=>r.children[1].textContent).join('|')==='Default|CortexKit runner|Configured'");
+    await assert(`${size} session store paths are selectable`, "[...document.querySelectorAll('.config-store-path')].every(e=>getComputedStyle(e).userSelect==='text')");
+    await assert(`${size} only configured stores can be removed`, "document.querySelectorAll('.config-store-table [aria-label^=\"Remove session store\"]').length===1");
+    await input('[aria-label="New session store path"]', "relative/opencode.db");
+    await click('[aria-label="Add session store"]');
+    await assert(`${size} a relative store path is refused`, "document.querySelector('.config-store-error').textContent.includes('absolute path') && document.querySelector('.config-save').disabled");
+    await input('[aria-label="New session store path"]', "/srv/runner-copy/opencode.db");
+    await click('[aria-label="Add session store"]');
+    await assert(`${size} an added store shows as not saved and marks the form dirty`, "document.querySelectorAll('.config-store-table tbody tr').length===4 && document.querySelector('.config-store-table tbody tr:last-child').textContent.includes('Not saved yet') && !document.querySelector('.config-save').disabled");
+    for (const theme of ["dark", "light"]) {
+      await evaluate(`document.documentElement.setAttribute('data-theme', ${JSON.stringify(theme)})`);
+      await capture(`${size}-session-stores-${theme}`);
+    }
+    await evaluate("document.documentElement.setAttribute('data-theme', 'dark')");
+    await click('[aria-label="Remove session store /srv/runner-copy/opencode.db"]');
+    await assert(`${size} removing the added store leaves nothing to save`, "document.querySelectorAll('.config-store-table tbody tr').length===3 && document.querySelector('.config-save').disabled");
     await section("Context window");
     await click('[aria-label="Help: Cache TTL"]');
     await assert(`${size} help portal and keyboard focus`, "!!document.querySelector('.config-help-popover') && !document.querySelector('.config-help-popover').closest('.config-editor') && document.activeElement.tagName==='A'");

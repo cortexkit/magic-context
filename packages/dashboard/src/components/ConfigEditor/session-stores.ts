@@ -79,3 +79,21 @@ export function configuredStorePaths(value: unknown): string[] {
     ? value.filter((entry): entry is string => typeof entry === "string")
     : [];
 }
+
+/**
+ * The `dashboard` block after the configured paths change to `entries`. Other
+ * keys in the block are kept; when nothing is left the block is removed, so
+ * adding and then removing a path leaves the file as it was.
+ */
+export function dashboardWithStorePaths(
+  current: unknown,
+  entries: readonly string[],
+): Record<string, unknown> | undefined {
+  const rest: Record<string, unknown> =
+    current && typeof current === "object" && !Array.isArray(current)
+      ? { ...(current as Record<string, unknown>) }
+      : {};
+  delete rest.opencode_db_paths;
+  if (entries.length > 0) return { ...rest, opencode_db_paths: [...entries] };
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}

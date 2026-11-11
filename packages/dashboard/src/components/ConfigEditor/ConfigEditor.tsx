@@ -26,7 +26,7 @@ import RadioButtonGroup from "./RadioButtonGroup";
 import SearchPicker from "./SearchPicker";
 import SessionStores from "./SessionStores";
 import StringList from "./StringList";
-import { configuredStorePaths } from "./session-stores";
+import { configuredStorePaths, dashboardWithStorePaths } from "./session-stores";
 import { structuredConfigSaveContent } from "./structured-save";
 import ToolDescriptions, { normalizeToolDescriptions } from "./ToolDescriptions";
 import "./config-editor.css";
@@ -2104,8 +2104,8 @@ function ConfigForm(props: {
                       )}
                       onChange={(entries) =>
                         handleFieldChange(
-                          "dashboard.opencode_db_paths",
-                          entries.length ? entries : undefined,
+                          "dashboard",
+                          dashboardWithStorePaths(getNestedValue(formData(), "dashboard"), entries),
                         )
                       }
                     />

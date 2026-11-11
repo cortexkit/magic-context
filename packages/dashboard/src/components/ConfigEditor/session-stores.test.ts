@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { OpenCodeStoreRow } from "../../lib/types";
 import {
   configuredStorePaths,
+  dashboardWithStorePaths,
   isAbsoluteStorePath,
   sessionStoreViews,
   storePathError,
@@ -98,10 +99,26 @@ describe("session stores section", () => {
     expect(added).toContain('["/srv/a","C:\\\\stores"]');
 
     const removed = structuredConfigSaveContent(added, {
-      dashboard: { opencode_db_paths: undefined },
+      dashboard: dashboardWithStorePaths({ opencode_db_paths: ["/srv/a", "C:\\stores"] }, []),
       enabled: true,
     });
-    expect(removed).toContain("// my stores");
     expect(removed).not.toContain("opencode_db_paths");
+    expect(removed).toContain('"enabled": true');
+  });
+
+  it("keeps other dashboard keys and drops an emptied block", () => {
+    expect(dashboardWithStorePaths({ other: 1, opencode_db_paths: ["/a"] }, [])).toEqual({
+      other: 1,
+    });
+    expect(dashboardWithStorePaths({ opencode_db_paths: ["/a"] }, [])).toBeUndefined();
+    expect(dashboardWithStorePaths(undefined, ["/b"])).toEqual({ opencode_db_paths: ["/b"] });
+    // Adding then removing a path before saving leaves no change to save.
+    const untouched = '{\n  // mine\n  "enabled": true,\n}\n';
+    expect(
+      structuredConfigSaveContent(untouched, {
+        enabled: true,
+        dashboard: dashboardWithStorePaths(dashboardWithStorePaths(undefined, ["/x"]), []),
+      }),
+    ).toBe(untouched);
   });
 });
