@@ -21,8 +21,10 @@ warm-commands = [
 
 [workspace.dependencies]
 # Published commons crates use their current lockfile versions from crates.io.
-# cache-core is not published, so pin the source to an immutable commit.
-cortexkit-cache-core = { git = "https://github.com/cortexkit/commons", rev = "85c105dfc10dfcd02360ef31b07b4bc67dea41f8" }
+# No git source belongs here: a source no workspace member uses is never
+# locked, and build machines that bundle dependencies from Cargo.lock refuse a
+# manifest that names one. The retired crates in crates_old/ used
+# cortexkit-cache-core from a commons commit (85c105dfc10dfcd02360ef31b07b4bc67dea41f8).
 cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.2"
