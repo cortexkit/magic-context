@@ -41,6 +41,10 @@ import {
 	piResponsesAssistantTexts,
 	piResponsesWireTexts,
 } from "./pi-dispatch-responses-history";
+import {
+	type PiDispatchRowDiagnostic,
+	piDispatchRowDiagnostic,
+} from "./pi-dispatch-row-diagnostic";
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 import { piToolCallPairing } from "./pi-dispatch-tool-pairing";
 
@@ -58,6 +62,8 @@ interface MessageStructure {
 	exactImages?: readonly string[];
 	wireContent?: unknown;
 	wireRole?: unknown;
+	/** Physical row references, collected only by the foreign-row alignment reader. */
+	wireRows?: unknown[];
 	idlessCalls?: boolean[];
 	idlessResults?: boolean[];
 	/** JSON [text, phase] pairs for every assistant text block, retained in wire order. */
@@ -100,6 +106,23 @@ export interface PiPreparedStructure {
 	anthropicOptional?: PiAnthropicOptionalPlan;
 }
 
+/** The successful comparator alignment, never a second interpretation of its rules. */
+export interface PiDispatchAlignedRow {
+	role: MessageStructure["role"];
+	calls: readonly string[];
+	results: readonly string[];
+	source?: unknown;
+	exactText?: string;
+	systemText?: readonly string[];
+	wire: readonly unknown[];
+	hasImages?: boolean;
+}
+
+type StructureAlignment = readonly {
+	expected: MessageStructure;
+	actual: MessageStructure;
+}[];
+
 interface PiDateReminderPlan {
 	cwd?: string;
 	plan?: PiAnthropicOptionalPlan;
@@ -117,6 +140,11 @@ const dateReminderPlans = new WeakMap<
 
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
+const rowDiagnostics = new WeakMap<MessageStructure, PiDispatchRowDiagnostic>();
+const preparedSources = new WeakMap<
+	PiPreparedStructure,
+	{ messages: readonly unknown[]; rows: ReadonlyMap<number, MessageStructure> }
+>();
 
 /**
  * Neutral user nudge Oh My Pi's Anthropic converter inserts between adjacent
@@ -224,6 +252,7 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	)
 		return undefined;
 	const row: MessageStructure = { role, calls: [], results: [] };
+	rowDiagnostics.set(row, piDispatchRowDiagnostic(role, message.content));
 	if (ORPHAN_NOTE in message && typeof message.content === "string") {
 		if (message.content.length > 32 * 1024 * 1024) return undefined;
 		row.exactText = message.content;
@@ -1084,6 +1113,7 @@ function buildPiPreparedStructure(
 				}
 			: {}),
 	};
+	preparedSources.set(prepared, { messages: projectedMessages, rows: byIndex });
 	if (host === "omp" && PI_DATE_REMINDER_APIS.has(model?.api ?? ""))
 		dateReminderPlans.set(prepared, {
 			...(modelsContinuePad ? { plan: { rows: baseRows, promotable } } : {}),
@@ -1093,6 +1123,16 @@ function buildPiPreparedStructure(
 			developerRole: object(model?.compat)?.supportsDeveloperRole === true,
 		});
 	return prepared;
+}
+
+/** Read user sources only when a foreign-row mismatch needs tag binding. */
+export function* piPreparedUserSources(
+	prepared: PiPreparedStructure | undefined,
+): Generator<unknown> {
+	const source = prepared && preparedSources.get(prepared);
+	if (!source) return;
+	for (const [index, row] of source.rows)
+		if (row.role === "user") yield source.messages[index];
 }
 
 function responsesLane(api: string | undefined): boolean {
@@ -1108,12 +1148,17 @@ function payloadStructure(
 	ollama = false,
 	responsesItems = false,
 	imageProjection = false,
+	trackRows = false,
 ): MessageStructure[] | undefined {
 	const body = object(payload);
 	if (!body) return undefined;
 	const google = piGoogleConversation(payload);
 	if (google)
-		return googleStructure(google.contents as unknown[], imageProjection);
+		return googleStructure(
+			google.contents as unknown[],
+			imageProjection,
+			trackRows,
+		);
 	const bedrock = body.inferenceConfig !== undefined;
 	if (body.messages === undefined && typeof body.input === "string")
 		return [{ role: "user", calls: [], results: [] }];
@@ -1171,6 +1216,18 @@ function payloadStructure(
 				rows.push(assistant);
 			}
 			assistant.calls.push(message.call_id);
+			if (trackRows) {
+				assistant.wireRows ??= [];
+				assistant.wireRows.push(value);
+			}
+			const diagnostic = rowDiagnostics.get(assistant);
+			rowDiagnostics.set(assistant, {
+				role: "assistant",
+				parts: (diagnostic?.parts ?? 0) + 1,
+				kinds: (diagnostic?.kinds ?? 0) | 4,
+				chars: diagnostic?.chars ?? 0,
+				injector: "none",
+			});
 			continue;
 		}
 		if (
@@ -1182,7 +1239,16 @@ function payloadStructure(
 			].includes(String(message.type))
 		) {
 			if (typeof message.call_id !== "string") return undefined;
-			rows.push({ role: "toolResult", calls: [], results: [message.call_id] });
+			rows.push({
+				role: "toolResult",
+				calls: [],
+				results: [message.call_id],
+				...(trackRows ? { wireRows: [value] } : {}),
+			});
+			rowDiagnostics.set(
+				rows[rows.length - 1],
+				piDispatchRowDiagnostic("toolResult", message.output),
+			);
 			if (imageProjection)
 				rows[rows.length - 1].images = piWireImages(message.output);
 			continue;
@@ -1203,6 +1269,7 @@ function payloadStructure(
 					results: [""],
 					resultNames: [message.tool_name],
 					idlessResults: [true],
+					...(trackRows ? { wireRows: [value] } : {}),
 					...(imageProjection
 						? { images: piWireImages(message.content, message.images) }
 						: {}),
@@ -1214,6 +1281,7 @@ function payloadStructure(
 				role: "toolResult",
 				calls: [],
 				results: [message.tool_call_id],
+				...(trackRows ? { wireRows: [value] } : {}),
 				...(imageProjection
 					? {
 							images: piWireImages(
@@ -1241,6 +1309,7 @@ function payloadStructure(
 						role: "toolResult",
 						calls: [],
 						results: [id],
+						...(trackRows ? { wireRows: [value] } : {}),
 						...(imageProjection
 							? {
 									images: piWireImages(
@@ -1249,13 +1318,26 @@ function payloadStructure(
 								}
 							: {}),
 					});
+					rowDiagnostics.set(
+						rows[rows.length - 1],
+						piDispatchRowDiagnostic(
+							"toolResult",
+							bedrock ? block.toolResult?.content : block.content,
+						),
+					);
 				}
 				if (imageProjection) {
 					const images = piWireImages(
 						message.content.filter((block) => !results.includes(block)),
 					);
 					if (images.length)
-						rows.push({ role: "user", calls: [], results: [], images });
+						rows.push({
+							role: "user",
+							calls: [],
+							results: [],
+							images,
+							...(trackRows ? { wireRows: [value] } : {}),
+						});
 				}
 				continue;
 			}
@@ -1263,6 +1345,7 @@ function payloadStructure(
 		const row = messageStructure(message);
 		if (!row) return undefined;
 		row.wireContent = message.content;
+		if (trackRows) row.wireRows = [value];
 		if (imageProjection)
 			row.images = piWireImages(
 				message.content,
@@ -1312,6 +1395,10 @@ function payloadStructure(
 		) {
 			const previous = rows[rows.length - 1];
 			previous.calls.push(...row.calls);
+			if (trackRows) {
+				previous.wireRows ??= [];
+				previous.wireRows.push(value);
+			}
 			if (responsesItems)
 				previous.responseTexts?.push(...(row.responseTexts ?? []));
 		} else rows.push(row);
@@ -1322,6 +1409,7 @@ function payloadStructure(
 function googleStructure(
 	contents: unknown[],
 	imageProjection = false,
+	trackRows = false,
 ): MessageStructure[] | undefined {
 	if (contents.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
@@ -1336,6 +1424,7 @@ function googleStructure(
 			...(imageProjection ? { images: piWireImages(message.parts) } : {}),
 			wireRole: message.role,
 			wireContent: message.parts,
+			...(trackRows ? { wireRows: [value] } : {}),
 		};
 		const results: MessageStructure[] = [];
 		for (const value of message.parts) {
@@ -1366,7 +1455,22 @@ function googleStructure(
 					calls: [],
 					results: [(result.id as string) ?? ""],
 					resultNames: [result.name],
+					...(trackRows ? { wireRows: [value] } : {}),
 					...(imageProjection ? { images: piWireImages(result.parts) } : {}),
+				});
+				rowDiagnostics.set(results[results.length - 1], {
+					role: "tool-result",
+					parts: 1,
+					kinds: 8,
+					chars:
+						typeof result.response === "string"
+							? result.response.length
+							: Object.values(object(result.response) ?? {}).reduce<number>(
+									(count, value) =>
+										count + (typeof value === "string" ? value.length : 0),
+									0,
+								),
+					injector: "none",
 				});
 			}
 		}
@@ -1375,7 +1479,13 @@ function googleStructure(
 		if (results.length) {
 			rows.push(...results);
 			if (imageProjection && row.images?.length)
-				rows.push({ role: "user", calls: [], results: [], images: row.images });
+				rows.push({
+					role: "user",
+					calls: [],
+					results: [],
+					images: row.images,
+					...(trackRows ? { wireRows: [value] } : {}),
+				});
 		} else rows.push(row);
 	}
 	return rows;
@@ -1531,7 +1641,17 @@ function countAnthropicOptionalAlignments(
 	) => StructureComparison | undefined,
 	reminders?: ReadonlySet<MessageStructure>,
 	firstUser = -1,
+	onAlignment?: (rows: StructureAlignment) => void,
 ): number {
+	type Path = {
+		expected: MessageStructure;
+		actual: MessageStructure;
+		previous?: Path;
+	};
+	const paths = onAlignment
+		? new Map<number, Map<string, Path | undefined>>()
+		: undefined;
+	let completePath: Path | undefined;
 	const pad: MessageStructure = {
 		role: "user",
 		calls: [],
@@ -1566,6 +1686,7 @@ function countAnthropicOptionalAlignments(
 		previous: string | undefined,
 		at: number,
 		count: number,
+		path?: Path,
 	) => {
 		let bucket = states.get(index);
 		if (!bucket) {
@@ -1574,6 +1695,14 @@ function countAnthropicOptionalAlignments(
 		}
 		const key = `${previous ?? ""}|${at}`;
 		bucket.set(key, Math.min(2, (bucket.get(key) ?? 0) + count));
+		if (paths) {
+			let traces = paths.get(index);
+			if (!traces) {
+				traces = new Map();
+				paths.set(index, traces);
+			}
+			if (!traces.has(key)) traces.set(key, path);
+		}
 	};
 	let complete = 0;
 	const advance = (
@@ -1581,10 +1710,13 @@ function countAnthropicOptionalAlignments(
 		previous: string | undefined,
 		at: number,
 		count: number,
+		path?: Path,
 	) => {
+		let placedPath = path;
 		// Place the current row once its successor is known, then a pad when
 		// both are assistants.
 		const place = (next: number | undefined): number | undefined => {
+			placedPath = path;
 			if (current < 0) return at;
 			let after = at + 1;
 			while (after < wire.length && reminders?.has(wire[after])) after++;
@@ -1595,13 +1727,22 @@ function countAnthropicOptionalAlignments(
 				: next === undefined
 					? undefined
 					: role(next);
-			if (!matches(final(current, previous, nextRole), at)) return undefined;
+			const expected = final(current, previous, nextRole);
+			if (!matches(expected, at)) return undefined;
+			if (onAlignment)
+				placedPath = { expected, actual: wire[at], previous: placedPath };
 			if (
 				!controls &&
 				role(current) === "assistant" &&
 				nextRole === "assistant"
 			) {
 				if (!matches(pad, after)) return undefined;
+				if (onAlignment)
+					placedPath = {
+						expected: pad,
+						actual: wire[after],
+						previous: placedPath,
+					};
 				after++;
 			}
 			return after;
@@ -1614,6 +1755,7 @@ function countAnthropicOptionalAlignments(
 					current < 0 ? undefined : wire[after - 1]?.role,
 					after,
 					count,
+					placedPath,
 				);
 			if (!base[next].optionalThinking) return;
 		}
@@ -1629,8 +1771,16 @@ function countAnthropicOptionalAlignments(
 			(after === wire.length - 1 &&
 				wire[after - 1]?.role === "assistant" &&
 				isAnthropicContinuePadRow(wire[after]))
-		)
+		) {
 			complete = Math.min(2, complete + count);
+			completePath = placedPath;
+			if (onAlignment && after === wire.length - 1)
+				completePath = {
+					expected: pad,
+					actual: wire[after],
+					previous: completePath,
+				};
+		}
 	};
 	advance(-1, undefined, 0, 1);
 	for (let index = 0; index < base.length && complete < 2; index++) {
@@ -1640,8 +1790,22 @@ function countAnthropicOptionalAlignments(
 		for (const [key, count] of bucket) {
 			const split = key.lastIndexOf("|");
 			const previous = key.slice(0, split) || undefined;
-			advance(index, previous, Number(key.slice(split + 1)), count);
+			advance(
+				index,
+				previous,
+				Number(key.slice(split + 1)),
+				count,
+				paths?.get(index)?.get(key),
+			);
 		}
+		paths?.delete(index);
+	}
+	if (complete === 1 && onAlignment) {
+		const trace: { expected: MessageStructure; actual: MessageStructure }[] =
+			[];
+		for (let path = completePath; path; path = path.previous)
+			trace.push({ expected: path.expected, actual: path.actual });
+		onAlignment(trace.reverse());
 	}
 	return complete;
 }
@@ -1655,7 +1819,34 @@ export function piPreparedStructureMismatch(
 		actual: number;
 		trimmed: number;
 	}) => void,
+	onAlignment?: (rows: readonly PiDispatchAlignedRow[]) => void,
 ): string | undefined {
+	const receipt = prepared && preparedSources.get(prepared);
+	const sourceByCalls =
+		onAlignment && receipt
+			? new Map(
+					[...receipt.rows].map(([index, row]) => [
+						row.calls,
+						receipt.messages[index],
+					]),
+				)
+			: undefined;
+	const aligned = onAlignment
+		? (pairs: StructureAlignment) =>
+				onAlignment(
+					pairs.map(({ expected, actual }) => ({
+						role: expected.role,
+						calls: expected.calls,
+						results: expected.results,
+						source: sourceByCalls?.get(expected.calls),
+						exactText: expected.exactText,
+						systemText: expected.systemText,
+						wire: actual.wireRows ?? [],
+						hasImages:
+							!!expected.exactImages?.length || !!expected.images?.length,
+					})),
+				)
+		: undefined;
 	const plan = prepared && dateReminderPlans.get(prepared);
 	// Synthetic reminders always follow an existing conversation message, never
 	// the instruction prefix that the normal structural parser leaves out.
@@ -1683,7 +1874,15 @@ export function piPreparedStructureMismatch(
 	} catch {
 		// The guarded structural reader below supplies the safe exception detail.
 	}
-	const mismatch = preparedStructureMismatch(payload, prepared, onImageTrim);
+	const mismatch = preparedStructureMismatch(
+		payload,
+		prepared,
+		onImageTrim,
+		undefined,
+		undefined,
+		undefined,
+		aligned,
+	);
 	if (!mismatch) return mismatch;
 	try {
 		if (!prepared || !plan) return mismatch;
@@ -1719,7 +1918,15 @@ export function piPreparedStructureMismatch(
 			);
 			return filtered === undefined
 				? mismatch
-				: preparedStructureMismatch(filtered, prepared, onImageTrim);
+				: preparedStructureMismatch(
+						filtered,
+						prepared,
+						onImageTrim,
+						undefined,
+						undefined,
+						undefined,
+						aligned,
+					);
 		}
 		const messages = object(payload)?.messages;
 		if (!Array.isArray(messages)) return mismatch;
@@ -1739,6 +1946,7 @@ export function piPreparedStructureMismatch(
 			false,
 			!!prepared.imageBudget &&
 				piWireImageCount(payload) < prepared.imageBudget.count,
+			!!aligned,
 		);
 		if (!wire) return mismatch;
 		const reminders = new Set(
@@ -1775,6 +1983,7 @@ export function piPreparedStructureMismatch(
 			reminders,
 			wire,
 			plan.firstUser,
+			aligned,
 		);
 	} catch {
 		return mismatch;
@@ -1792,6 +2001,7 @@ function preparedStructureMismatch(
 	reminders?: ReadonlySet<MessageStructure>,
 	reminderWire?: readonly MessageStructure[],
 	firstUser?: number,
+	onAlignment?: (rows: StructureAlignment) => void,
 ): string | undefined {
 	// Where the comparison was when something threw, plus the built-in error
 	// class. Both are fixed vocabularies, so an exception's message or a
@@ -1827,6 +2037,7 @@ function preparedStructureMismatch(
 				ollama,
 				responses && !!prepared?.responsesMessages,
 				imageProjection,
+				!!onAlignment,
 			);
 		const chat =
 			!!body &&
@@ -2005,6 +2216,7 @@ function preparedStructureMismatch(
 				compareRow,
 				reminders,
 				firstUser,
+				onAlignment,
 			);
 			if (alignments > 1)
 				return structureDetail(0, expectedRows, rows, "alignment");
@@ -2050,6 +2262,24 @@ function preparedStructureMismatch(
 		// the prepared turn even where the all-present rows above raised nothing.
 		if (optionalPlan)
 			return structureDetail(0, expectedRows, rows, "alignment");
+		if (onAlignment) {
+			const actual = rows;
+			const pairs = expectedRows.map((expected, index) => ({
+				expected,
+				actual: actual[index],
+			}));
+			if (rows.length > expectedRows.length)
+				pairs.push({
+					expected: {
+						role: "user",
+						calls: [],
+						results: [],
+						exactText: ANTHROPIC_CONTINUE_PAD_TEXT,
+					},
+					actual: rows[rows.length - 1],
+				});
+			onAlignment(pairs);
+		}
 		if (imageProjection && imageBudget)
 			onImageTrim?.({
 				planned: imageBudget.count,
@@ -2072,6 +2302,108 @@ function preparedStructureMismatch(
 				: "unknown";
 		return `${structureDetail(row, expectedRows, rows, "exception")} stage=${stage} error=${name}`;
 	}
+}
+
+/** Count conversation rows with exactly the provider reader used by the guard. */
+export function piDispatchRowCount(
+	payload: unknown,
+	prepared: PiPreparedStructure | undefined,
+): number | undefined {
+	try {
+		const body = object(payload);
+		return payloadStructure(
+			payload,
+			prepared?.api === "ollama-chat",
+			body?.messages === undefined &&
+				Array.isArray(body?.input) &&
+				!!prepared?.responsesMessages,
+		)?.length;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Conservative upper bound only: optional rows may disappear, never require a search. */
+export function piPreparedDispatchRowLimit(
+	prepared: PiPreparedStructure | undefined,
+): number | undefined {
+	if (!prepared || prepared.structuralSkipReason) return undefined;
+	return Math.max(
+		prepared.messages.length,
+		prepared.chatMessages?.length ?? 0,
+		prepared.responsesMessages?.length ?? 0,
+		...(prepared.responsesAlternatives ?? []).map((rows) => rows.length),
+		// Optional Anthropic rows can move developer text into system rows and
+		// introduce neutral "Continue." user nudges between assistants. Overcount
+		// rather than reject a valid normalization before search.
+		prepared.anthropicOptional
+			? prepared.anthropicOptional.rows.length * 2 + 1
+			: 0,
+	);
+}
+
+/** Bounded, content-free window using the same normalized rows as the refusal. */
+export function piDispatchMismatchDiagnostic(
+	payload: unknown,
+	prepared: PiPreparedStructure | undefined,
+	mismatch: string,
+): {
+	row: number;
+	expected: PiDispatchRowDiagnostic[];
+	actual: PiDispatchRowDiagnostic[];
+	firstInjectorRow: number;
+	firstInjectorKind: PiDispatchRowDiagnostic["injector"];
+} {
+	const row = Number(/^row=(\d+) /u.exec(mismatch)?.[1] ?? 0);
+	const summarize = (
+		rows: readonly MessageStructure[] | undefined,
+		index: number,
+	): PiDispatchRowDiagnostic => {
+		const value = rows?.[index];
+		if (!value)
+			return piDispatchRowDiagnostic(rows ? "missing" : "unknown", undefined);
+		return (
+			rowDiagnostics.get(value) ??
+			piDispatchRowDiagnostic(value.role, value.wireContent ?? value.exactText)
+		);
+	};
+	let expected = prepared?.messages;
+	let actual: MessageStructure[] | undefined;
+	try {
+		const body = object(payload);
+		const responses =
+			body?.messages === undefined && Array.isArray(body?.input);
+		if (responses) expected = prepared?.responsesMessages ?? expected;
+		else if (
+			Array.isArray(body?.messages) &&
+			prepared?.chatMessages &&
+			body?.system === undefined &&
+			body?.inferenceConfig === undefined
+		)
+			expected = prepared.chatMessages;
+		actual = payloadStructure(
+			payload,
+			prepared?.api === "ollama-chat",
+			responses && !!prepared?.responsesMessages,
+		);
+	} catch {
+		// A diagnostic must not replace the original fail-closed refusal.
+	}
+	const indices = [row - 1, row, row + 1];
+	const firstInjectorRow =
+		actual?.findIndex(
+			(_, index) => summarize(actual, index).injector !== "none",
+		) ?? -1;
+	return {
+		row,
+		expected: indices.map((index) => summarize(expected, index)),
+		actual: indices.map((index) => summarize(actual, index)),
+		firstInjectorRow,
+		firstInjectorKind:
+			firstInjectorRow < 0
+				? "none"
+				: summarize(actual, firstInjectorRow).injector,
+	};
 }
 
 /** Check the latest turn as well as every preceding role and ordered tool ID. */

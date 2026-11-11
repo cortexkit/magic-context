@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 
 for (const name of [
 	"issue 820: real OMP 18.13.2 replies after simulated local midnight",
-	"issue 820: real OMP still refuses a non-reminder extra row after midnight",
+	"issue 820: real OMP still refuses leaked session content after midnight",
 ]) {
 	test(name, () => {
 		// Bun reuses test workers, which can retain SQLite descriptors from earlier

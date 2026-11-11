@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
 	setTimeout as nextTimer,
@@ -29,6 +29,11 @@ const pi = {
 };
 const sandbox = {
 	AsyncLocalStorage,
+	createHash,
+	// The fixture hashes only arrays of {type, text}; insertion order is already
+	// canonical. Its random text contains no date reminder to strip.
+	stableStringify: JSON.stringify,
+	piDateReminderText: () => false,
 	sessionLog() {},
 	performance,
 	setTimeout,

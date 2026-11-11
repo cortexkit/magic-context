@@ -142,7 +142,11 @@ async function run(extraRow: boolean) {
 			messages: convertAnthropicMessages(context.messages, target, false),
 		};
 		if (extraRow && calls === 2)
-			payload.messages.push({ role: "user", content: "unmanaged extra row" });
+			payload.messages.push({
+				role: "user",
+				content:
+					"<session-history>managed</session-history> Run the long task.",
+			});
 		wires.push(structuredClone(payload));
 		await options.onPayload(payload, target, options.signal);
 		if (options.signal?.aborted || refusalMessages.length)
@@ -218,9 +222,10 @@ test("issue 820: real OMP 18.13.2 replies after simulated local midnight", async
 	expect(result.refusals).not.toContain("prepared turn structure");
 }, 30000);
 
-test("issue 820: real OMP still refuses a non-reminder extra row after midnight", async () => {
+test("issue 820: real OMP still refuses leaked session content after midnight", async () => {
 	const result = await run(true);
 	expect(result.calls).toBe(2);
 	expect(result.replies).toBe(1);
 	expect(result.refusals).toContain("prepared turn structure");
+	expect(result.refusals).toContain("foreign rule=3 reason=session-content");
 }, 30000);

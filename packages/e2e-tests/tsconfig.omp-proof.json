@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["scripts/omp-18.18.6-dispatch-proof.ts", "scripts/pi-superpowers-control.ts"]
+}

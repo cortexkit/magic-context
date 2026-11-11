@@ -1,19 +1,36 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { join } from "node:path";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
+import { loadPersistedLkgSlot } from "@magic-context/core/hooks/magic-context/lkg-persist";
 import {
 	getSlot,
 	resetLkgSlotsForTest,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
-
+import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
+import {
+	clearContextHandlerSession,
+	__test as contextTest,
+	registerPiContextHandler,
+} from "./context-handler";
+import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	createPiLkgCoordinator,
 	type PiLkgCaptureTiming,
 	resolvePiLkgOutputEntryIds,
 } from "./pi-lkg";
 import { assertPiRawFallbackFits } from "./pi-raw-fallback";
+import { readPiCommittedServedNumbers } from "./pi-served-identities";
+import { flushPiServedArrayLedger } from "./served-array-ledger";
+import {
+	createFakePi,
+	createTestDb,
+	fakeContext,
+	userMessage,
+} from "./test-utils.test";
 
 function message(content: string): Record<string, unknown> {
 	return { role: "user", content, timestamp: 1 };
@@ -50,6 +67,119 @@ afterEach(() => {
 	for (const db of databases) closeQuietly(db);
 	databases.length = 0;
 });
+
+for (const api of ["google-generative-ai", "anthropic-messages"]) {
+	it(`${api}: real handler publishes only managed rows and replays them before late extension insertion`, async () => {
+		const { dir: root, cleanup } = createTestTempDir("pi-foreign-publication-");
+		const prior = [process.env.XDG_DATA_HOME, process.env.XDG_CONFIG_HOME];
+		process.env.XDG_DATA_HOME = root;
+		process.env.XDG_CONFIG_HOME = root;
+		__setPiHarnessKindForTesting("omp");
+		const db = createTestDb(join(root, "context.db"));
+		const sessionId = `foreign-write-${api}`;
+		const fake = createFakePi();
+		Object.assign(fake.pi, {
+			appendEntry: () => undefined,
+			getAllTools: () => [],
+			getActiveTools: () => [],
+		});
+		let raw = [userMessage("persist this own prompt", 1)];
+		const ctx = Object.assign(fakeContext(sessionId, root, ["entry"], raw), {
+			model: {
+				api,
+				provider: "test",
+				id: "test",
+				contextWindow: 100000,
+				maxTokens: 4096,
+			},
+			getSystemPrompt: () => "system",
+		});
+		const entries = () => [{ type: "message", id: "entry", message: raw[0] }];
+		Object.assign(ctx.sessionManager, {
+			getEntries: entries,
+			getBranch: entries,
+		});
+		registerPiContextHandler(fake.pi as never, { db });
+		const recoveryLines: string[] = [];
+		const restoreRecovery = contextTest.setLkgRecoveryLogObserverForTests(
+			(line) => recoveryLines.push(line),
+		);
+		const context = fake.handlers.get("context")!;
+		const dispatch = fake.handlers.get("before_provider_request")!;
+		const serve = async () => {
+			raw = [userMessage("persist this own prompt", 1)];
+			const result = (await context(
+				{ messages: raw } as never,
+				ctx as never,
+			)) as { messages: Record<string, unknown>[] };
+			// A later context hook creates a new array, as Superpowers does. The
+			// real handler and guarded dispatch, not this test, own all persistence.
+			const late = [
+				{ role: "user", content: "FOREIGN_BOOTSTRAP_NEVER_PERSIST" },
+				...result.messages,
+			];
+			const payload =
+				api === "google-generative-ai"
+					? {
+							contents: late.map((row) => ({
+								role: row.role,
+								parts:
+									typeof row.content === "string"
+										? [{ text: row.content }]
+										: (row.content as { text: string }[]).map((part) => ({
+												text: part.text,
+											})),
+							})),
+						}
+					: { system: "system", max_tokens: 100, messages: late };
+			expect(dispatch({ payload } as never, ctx as never)).toBeUndefined();
+			await new Promise((resolve) => setImmediate(resolve));
+			return result;
+		};
+		let locker: Database | undefined;
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const first = await serve();
+			const saved = loadPersistedLkgSlot(db, sessionId)?.jsonPrefix;
+			expect(saved).toBe(JSON.stringify(first.messages));
+			expect(saved).toContain("§1§ persist this own prompt");
+			expect(saved).not.toContain("FOREIGN_BOOTSTRAP_NEVER_PERSIST");
+			expect(readPiCommittedServedNumbers(db, sessionId)).toEqual([1]);
+			locker = new Database(join(root, "context.db"));
+			db.exec("PRAGMA busy_timeout=0");
+			locker.exec("BEGIN IMMEDIATE");
+			let recovered: Awaited<ReturnType<typeof serve>>;
+			try {
+				recovered = await serve();
+			} catch (cause) {
+				throw new Error(recoveryLines.join("\n"), { cause });
+			}
+			expect(recoveryLines.join("\n")).toContain("LKG replay served");
+			expect(recovered.messages).toEqual(first.messages);
+			expect(getSlot(sessionId)?.jsonPrefix).toBe(saved);
+			expect(loadPersistedLkgSlot(db, sessionId)?.jsonPrefix).toBe(saved);
+			expect(readPiCommittedServedNumbers(db, sessionId)).toEqual([1]);
+		} finally {
+			restoreRecovery();
+			if (locker) {
+				locker.exec("ROLLBACK");
+				closeQuietly(locker);
+			}
+			flushPiServedArrayLedger();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			__setPiHarnessKindForTesting(undefined);
+			for (const [index, key] of [
+				"XDG_DATA_HOME",
+				"XDG_CONFIG_HOME",
+			].entries()) {
+				if (prior[index] === undefined) delete process.env[key];
+				else process.env[key] = prior[index];
+			}
+			cleanup();
+		}
+	});
+}
 
 describe("Pi incremental LKG capture", () => {
 	it("detaches exact nested output fields and rejects same-length in-place rewrites", () => {

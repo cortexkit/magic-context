@@ -7,6 +7,23 @@ function object(value: unknown): Record<string, unknown> | undefined {
 }
 
 const DEVELOPER_ORIGIN = Symbol("custom developer history");
+export const PI_HISTORY_ORIGIN = Symbol("native history source");
+
+// Native file rows opt in only after real serializer or real-host coverage.
+// On other routes, leave fileMention unreadable so the guard keeps its earlier
+// structural-check skip for that session, rather than guessing the provider rows.
+const CHECKED_FILE_MENTION_APIS = new Set([
+	"anthropic-messages",
+	"openai-completions",
+	"openai-responses",
+	"azure-openai-responses",
+	"openai-codex-responses",
+	"google-generative-ai",
+	"google-vertex",
+	"google-gemini-cli",
+	"bedrock-converse-stream",
+	"ollama-chat",
+]);
 
 /** Preserve custom messages' developer origin even when their wire role is user. */
 export function piIsDeveloperHistory(
@@ -27,6 +44,48 @@ export function piAgentHistory(
 		const message = object(value);
 		if (!message) return [value];
 		if (message.role === "user") return [piOmpUserHistory(message)];
+		if (message.role === "fileMention") {
+			if (!api || !CHECKED_FILE_MENTION_APIS.has(api)) return [value];
+			if (!Array.isArray(message.files)) return [value];
+			const text = message.files.filter((file) => !object(file)?.image);
+			const images = message.files.flatMap((file) =>
+				object(file)?.image ? [object(file)!.image] : [],
+			);
+			// OMP 18.18.6 splits text files into a user-attributed developer row
+			// and image files into a user row. Only their shapes are needed here;
+			// exact file envelopes are indexed lazily by the foreign-row guard.
+			return [
+				...(text.length
+					? [
+							{
+								...message,
+								role: "user",
+								attribution: "user",
+								content: [{ type: "text", text: "File mention context" }],
+								[DEVELOPER_ORIGIN]: true,
+								[PI_HISTORY_ORIGIN]: { ...message, files: text },
+							},
+						]
+					: []),
+				...(images.length
+					? [
+							{
+								...message,
+								role: "user",
+								attribution: "user",
+								content: [
+									{ type: "text", text: "Image file context" },
+									...images,
+								],
+								[PI_HISTORY_ORIGIN]: {
+									...message,
+									files: message.files.filter((file) => object(file)?.image),
+								},
+							},
+						]
+					: []),
+			];
+		}
 		if (message.role === "compactionSummary") {
 			// With blocks, OMP sends the summary literally; without blocks it renders a
 			// nonempty context envelope even for an empty summary. Only row shape is
@@ -37,6 +96,7 @@ export function piAgentHistory(
 				{
 					...message,
 					role: "user",
+					[PI_HISTORY_ORIGIN]: message,
 					content:
 						message.blocks !== undefined
 							? [
@@ -71,6 +131,7 @@ export function piAgentHistory(
 				{
 					...message,
 					role: "user",
+					[PI_HISTORY_ORIGIN]: message,
 					content: [
 						{
 							type: "text",
