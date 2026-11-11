@@ -158,11 +158,12 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
         async { Err("unavailable".to_owned()) }
     }
-    /// The module ids the daemon's catalog lists as providing
-    /// `capability`, for a move's `describe`. An error is a reason for the
-    /// log. Without a daemon the catalog cannot be read, which is the
-    /// default here.
-    fn resolve_providers(
+    /// The ids of the modules that would answer a route for `capability`
+    /// now: in the daemon's catalog with the claim, ready, and verified by
+    /// their launch nonce ([`crate::agent_data::service::ready_participants`]),
+    /// for a move's `describe`. An error is a reason for the log. Without a
+    /// daemon the catalog cannot be read, which is the default here.
+    fn ready_participants(
         &self,
         _capability: &str,
     ) -> impl Future<Output = Result<Vec<String>, String>> + Send {

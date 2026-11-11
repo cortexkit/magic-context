@@ -69,8 +69,10 @@ pub trait Host: Send + Sync {
     fn probe(&self, session: &SessionRef, budget: Duration) -> impl Future<Output = Probe> + Send;
     /// Where `context.db` is, when the module has one.
     fn context_db(&self) -> Option<PathBuf>;
-    /// The module ids the daemon's catalog lists for `capability`.
-    fn resolve_providers(
+    /// The ids of the modules that would answer a route for `capability`
+    /// now: listed in the daemon's catalog with the claim, ready, and
+    /// verified by their launch nonce ([`ready_participants`]).
+    fn ready_participants(
         &self,
         capability: &str,
     ) -> impl Future<Output = Result<Vec<String>, String>> + Send;
@@ -331,15 +333,19 @@ fn allowed(op: Op, refusal: ErrorBody) -> ErrorBody {
 }
 
 /// `describe`. The kinds are computed on every call from the catalog: a
-/// kind is declared only while the module that owns it lists
-/// `agent-data/v1`, because Entorhinal lets a move go ahead once some
-/// participant covers every ref, and a session moved by Magic Context alone
-/// would arrive without its transcript. When the catalog cannot be read,
-/// nothing is declared, for the same reason.
+/// kind is declared only while its owner would answer now, that is while
+/// the catalog lists the owner as an `agent-data/v1` participant that is
+/// ready and verified. Entorhinal lets a move go ahead once some
+/// participant covers every ref, so a kind declared while its owner cannot
+/// answer would let a session move by Magic Context alone and arrive
+/// without its transcript. The catalog cannot rule out the owner stopping
+/// between this read and Entorhinal's call to it; the move's later steps
+/// then fail at that owner. When the catalog cannot be read, or does not
+/// answer in time, nothing is declared, for the same reason.
 async fn describe<H: Host>(host: &H) -> Result<Vec<u8>, ErrorBody> {
     let providers = match tokio::time::timeout(
         CATALOG_BUDGET,
-        host.resolve_providers(contract::PROVIDES),
+        host.ready_participants(contract::PROVIDES),
     )
     .await
     {
@@ -367,6 +373,33 @@ async fn describe<H: Host>(host: &H) -> Result<Vec<u8>, ErrorBody> {
         .map(|(name, class)| Store::new(*name, *class))
         .collect();
     Ok(canonical(&DescribeReply::new(ref_kinds, stores, false)))
+}
+
+/// The ids of the modules in `catalog` that claim `capability` and would
+/// answer a route now: `ready`, which is the condition the daemon checks
+/// before it opens a route to a module, and `nonce_verified`, so the module
+/// is the one the daemon launched under that id and not another process
+/// using its name. A module that is stopped or not yet reconnected is not
+/// in the catalog at all.
+pub fn ready_participants(
+    catalog: &[subc_client_rs::CatalogEntry],
+    capability: &str,
+) -> Vec<String> {
+    let mut ids: Vec<String> = catalog
+        .iter()
+        .filter(|entry| {
+            entry.ready
+                && entry.nonce_verified
+                && entry
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|claims| claims.provides.iter().any(|claim| claim == capability))
+        })
+        .map(|entry| entry.module_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// `status`: the step the cut has reached here, `none` for a cut never seen.
@@ -430,10 +463,11 @@ pub(crate) fn canonical<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
     serde_jcs::to_vec(value).expect("replies serialize")
 }
 
-/// One async lock per cut. Ops on one cut run one at a time, also across
-/// their calls to Engram's session door, the daemon's catalog and
-/// Entorhinal; ops on different cuts never wait for each other. A lock
-/// nobody holds or waits for is dropped the next time a lock is taken.
+/// One async lock per cut (one move attempt). Ops on one cut run one at a
+/// time, also across their calls to Engram's session door, the daemon's
+/// catalog and Entorhinal; ops on different cuts never wait for each other.
+/// A lock nobody holds or waits for is dropped the next time a lock is
+/// taken.
 #[derive(Default)]
 struct CutLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
 

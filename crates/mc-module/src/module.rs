@@ -1012,8 +1012,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
         self.inner.db.as_ref().map(|db| db.path.clone())
     }
 
-    async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
-        self.inner.client.resolve_providers(capability).await
+    async fn ready_participants(&self, capability: &str) -> Result<Vec<String>, String> {
+        self.inner.client.ready_participants(capability).await
     }
 
     async fn entorhinal(
