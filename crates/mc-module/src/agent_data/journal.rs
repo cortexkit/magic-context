@@ -100,7 +100,9 @@ impl Contents {
 #[serde(deny_unknown_fields)]
 pub struct Cut {
     pub step: Step,
-    /// The ref set the cut started with; every later op must name it.
+    /// The data this cut moves. A ref names one piece of an agent's data a
+    /// module holds, here one runner session. The set is fixed when the cut
+    /// starts, and every later step of the move must name the same set.
     #[serde(default)]
     pub refs: Option<Refs>,
     /// The reply to each state-changing op, by op name, so a repeat of the
