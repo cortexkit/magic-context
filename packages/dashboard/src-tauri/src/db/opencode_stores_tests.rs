@@ -514,6 +514,68 @@ fn paths_with_uri_characters_open_immutable() {
 
 // ── Readers over the list ─────────────────────────────────────────────────
 
+/// An OpenCode 1 store whose one session holds one cache event.
+fn opencode1_store(path: &Path, session: &str, updated: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session (
+             id TEXT PRIMARY KEY, title TEXT, time_updated INTEGER NOT NULL,
+             time_archived INTEGER, parent_id TEXT);
+         CREATE TABLE message (
+             id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+             time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session VALUES (?1, ?1, ?2, NULL, NULL)",
+        params![session, updated],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+        params![
+            format!("m-{session}"),
+            session,
+            updated,
+            r#"{"role":"assistant","tokens":{"total":10,"input":5}}"#
+        ],
+    )
+    .unwrap();
+}
+
+#[test]
+fn newer_sessions_of_another_harness_in_a_second_store_do_not_hide_the_wanted_ones() {
+    let root = Root::new();
+    opencode1_store(&root.default_store(), "ses-v1", 100);
+    let newer: Vec<(String, String, i64)> = (0..20)
+        .map(|index| {
+            (
+                format!("ses-v2-{index:02}"),
+                "runner".to_string(),
+                1_000 + index,
+            )
+        })
+        .collect();
+    let newer: Vec<(&str, &str, i64)> = newer
+        .iter()
+        .map(|(id, title, at)| (id.as_str(), title.as_str(), *at))
+        .collect();
+    opencode2_store(&root.runner_folder().join("opencode.db"), &newer);
+    root.write_roots(&roots_json(&root.runner_folder(), serde_json::json!([])));
+
+    let listed: Vec<String> =
+        get_session_cache_stats_from_db(10, true, false, Some(Harness::Opencode))
+            .into_iter()
+            .map(|row| row.session_id)
+            .collect();
+    assert_eq!(listed, vec!["ses-v1"]);
+    assert_eq!(
+        get_session_cache_stats_from_db(10, true, false, Some(Harness::Opencode2)).len(),
+        10
+    );
+}
+
 #[test]
 fn two_stores_merge_in_the_session_list_cache_list_and_cache_events() {
     let root = Root::new();

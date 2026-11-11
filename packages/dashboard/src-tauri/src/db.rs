@@ -4014,20 +4014,24 @@ fn with_opencode_list_caches<T: Send>(
 /// session row (see `OPENCODE2_ACTIVITY_FALLBACK_NOTE`). Served from each
 /// store's `OpenCodeListCache`, which reads only what changed since the
 /// previous poll. A session id found in two stores (a copied store) is
-/// listed once, from the store listed first.
+/// listed once, from the store listed first. Only rows of a harness `include`
+/// accepts are kept, before the merged list is cut to `limit`: one store's
+/// newer sessions of another harness must not push the wanted ones out.
 fn load_recent_opencode_cache_sessions(
     limit: usize,
     hidden_subagent_ids: &HashSet<String>,
+    include: impl Fn(Harness) -> bool,
 ) -> (Vec<CacheSessionListEntry>, Option<&'static str>) {
     let per_store = with_opencode_list_caches(|_, cache| {
         cache.recent_sessions(limit, hidden_subagent_ids, std::time::Instant::now())
     });
-    merge_opencode_cache_lists(per_store, limit)
+    merge_opencode_cache_lists(per_store, limit, include)
 }
 
 fn merge_opencode_cache_lists(
     per_store: Vec<(Vec<CacheSessionListEntry>, Option<&'static str>)>,
     limit: usize,
+    include: impl Fn(Harness) -> bool,
 ) -> (Vec<CacheSessionListEntry>, Option<&'static str>) {
     let mut seen = HashSet::new();
     let mut sessions = Vec::new();
@@ -4036,7 +4040,7 @@ fn merge_opencode_cache_lists(
         note = note.or(store_note);
         sessions.extend(
             rows.into_iter()
-                .filter(|row| seen.insert(row.session_id.clone())),
+                .filter(|row| include(row.harness) && seen.insert(row.session_id.clone())),
         );
     }
     sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity_ms));
@@ -4549,10 +4553,7 @@ pub fn get_session_cache_stats_from_db(
             // store's generation decides whether its rows are OpenCode or
             // OpenCode 2, so rows of the other generation are dropped here.
             if includes_harness(Harness::Opencode) || includes_harness(Harness::Opencode2) {
-                let (mut rows, note) =
-                    load_recent_opencode_cache_sessions(limit, &hidden_opencode_ids);
-                rows.retain(|row| includes_harness(row.harness));
-                (rows, note)
+                load_recent_opencode_cache_sessions(limit, &hidden_opencode_ids, includes_harness)
             } else {
                 (Vec::new(), None)
             }
