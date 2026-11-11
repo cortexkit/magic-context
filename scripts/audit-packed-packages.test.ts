@@ -7,11 +7,17 @@ const advisory = (id: string) => ({
     title: "toml-node advisory",
     url: `https://github.com/advisories/${id}`,
 });
-const TOML_ADVISORIES = ["GHSA-4qx8-w7c3-pj3p", "GHSA-9j65-hcg3-gc64", "GHSA-9qmh-m7c6-f92p"].map(
-    advisory,
-);
+const TOML_ADVISORIES = [
+    "GHSA-4qx8-w7c3-pj3p",
+    "GHSA-9j65-hcg3-gc64",
+    "GHSA-9qmh-m7c6-f92p",
+    "GHSA-h895-cgqg-jf52",
+].map(advisory);
 
-/** The shape npm audit reported for the packed plugin on 2026-10-23. */
+/**
+ * The shape npm audit reports for the packed plugin: three advisories since
+ * 2026-10-23 and the prototype-pollution one since 2026-11-11.
+ */
 function tomlChain(): NonNullable<AuditReport["vulnerabilities"]> {
     return {
         toml: { severity: "high", via: [...TOML_ADVISORIES] },

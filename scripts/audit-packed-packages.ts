@@ -33,7 +33,9 @@ export type AuditReport = {
  * dependency path. Every other high or critical finding still fails the audit.
  *
  * toml <= 5.0.0: three CPU denial-of-service bugs in `toml.parse()` on crafted
- * input. It reaches users only through OpenCode's plugin package:
+ * input, and one prototype-pollution bug when it parses a crafted document
+ * (GHSA-h895-cgqg-jf52, which npm's audit began reporting on 2026-11-11). It
+ * reaches users only through OpenCode's plugin package:
  * `@opencode-ai/plugin` -> `effect` -> `toml`. No published `@opencode-ai/plugin`
  * depends on a fixed `effect`, and npm overrides in our package do not apply to
  * the projects that install it. Magic Context never parses TOML. Remove this
@@ -61,6 +63,7 @@ export const ACCEPTED_ADVISORIES = [
             "https://github.com/advisories/GHSA-4qx8-w7c3-pj3p",
             "https://github.com/advisories/GHSA-9j65-hcg3-gc64",
             "https://github.com/advisories/GHSA-9qmh-m7c6-f92p",
+            "https://github.com/advisories/GHSA-h895-cgqg-jf52",
         ],
         // Packages allowed to be flagged only because they depend on the package above.
         dependentPath: ["effect", "@opencode-ai/plugin"],
