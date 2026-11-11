@@ -173,7 +173,18 @@ async fn run_async(options: ServeOptions) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| format!("Failed to bind {addr}: {err}"))?;
-    let (token, stable_token_path) = resolve_token(token_file::default_token_path().as_deref())?;
+    let token_path = token_file::default_token_path();
+    if token_path.is_none() {
+        // A variable the user set but that cannot name an absolute directory:
+        // say so, or the file they just created looks silently ignored.
+        if let Some(reason) = token_file::default_token_path_warning() {
+            eprintln!(
+                "Warning: {reason}; {} is not read and this process uses a random token.",
+                token_file::TOKEN_FILE_NAME
+            );
+        }
+    }
+    let (token, stable_token_path) = resolve_token(token_path.as_deref())?;
     let url = launch_url(options.host, options.port, &token);
 
     if options.allow_remote && !options.host.is_loopback() {

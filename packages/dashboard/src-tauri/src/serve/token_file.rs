@@ -5,9 +5,10 @@
 //! storage directory themselves. The file is honoured only when it is opened
 //! without following a symlink, is a regular file, is owner-only (Unix: owned
 //! by the current user with mode exactly `0600` and no access-control entry that
-//! grants another user; Windows: owned by the current user and accessible only
-//! to that user, SYSTEM and Administrators), and its
-//! trimmed contents are a URL-safe token of `MIN_TOKEN_LEN..=MAX_TOKEN_LEN`
+//! grants another user; Windows: owned by a trusted principal — the current
+//! user, SYSTEM or Administrators, because an elevated shell creates the file
+//! under one of those — and with access granted to no one but those three), and
+//! its trimmed contents are a URL-safe token of `MIN_TOKEN_LEN..=MAX_TOKEN_LEN`
 //! characters. Anything else is ignored with a warning that names the failed
 //! check and never the contents, and the process keeps the random token.
 
@@ -44,19 +45,49 @@ pub fn default_token_path() -> Option<PathBuf> {
     )
 }
 
+/// Why `default_token_path` produced no path, when a variable the user set is
+/// the reason. Serve mode prints this, so an override that cannot name an
+/// absolute directory explains itself instead of silently dropping a token file
+/// the user just created.
+pub fn default_token_path_warning() -> Option<&'static str> {
+    warning_from(
+        std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR"),
+        std::env::var_os("XDG_DATA_HOME"),
+        dirs::home_dir(),
+    )
+}
+
+fn warning_from(
+    storage_dir: Option<OsString>,
+    xdg_data_home: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Option<&'static str> {
+    if token_path_from(storage_dir.clone(), xdg_data_home.clone(), home).is_some() {
+        return None;
+    }
+    if storage_dir.and_then(non_blank).is_some() {
+        return Some("ignoring MAGIC_CONTEXT_STORAGE_DIR because it is not an absolute path");
+    }
+    if xdg_data_home.and_then(non_blank).is_some() {
+        return Some("ignoring XDG_DATA_HOME because it is not an absolute path");
+    }
+    None
+}
+
+fn non_blank(value: OsString) -> Option<PathBuf> {
+    match value.to_str() {
+        Some(text) => Some(text.trim())
+            .filter(|t| !t.is_empty())
+            .map(PathBuf::from),
+        None => Some(PathBuf::from(value)),
+    }
+}
+
 fn token_path_from(
     storage_dir: Option<OsString>,
     xdg_data_home: Option<OsString>,
     home: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let non_blank = |value: OsString| -> Option<PathBuf> {
-        match value.to_str() {
-            Some(text) => Some(text.trim())
-                .filter(|t| !t.is_empty())
-                .map(PathBuf::from),
-            None => Some(PathBuf::from(value)),
-        }
-    };
     let dir = match storage_dir.and_then(non_blank) {
         Some(explicit) => explicit,
         None => xdg_data_home
@@ -863,6 +894,29 @@ mod content_tests {
             token_path_from(Some("rel".into()), os(&abs("xdg")), Some(abs("home"))),
             None
         );
+    }
+
+    #[test]
+    fn a_relative_override_explains_why_the_token_file_is_ignored() {
+        assert_eq!(
+            warning_from(Some("rel".into()), os(&abs("xdg")), Some(abs("home"))),
+            Some("ignoring MAGIC_CONTEXT_STORAGE_DIR because it is not an absolute path")
+        );
+        assert_eq!(
+            warning_from(Some("  ".into()), Some("rel".into()), Some(abs("home"))),
+            Some("ignoring XDG_DATA_HOME because it is not an absolute path")
+        );
+    }
+
+    #[test]
+    fn nothing_is_said_when_the_path_resolves_or_no_variable_can_be_blamed() {
+        assert_eq!(
+            warning_from(os(&abs("store")), os(&abs("xdg")), Some(abs("home"))),
+            None
+        );
+        // No variable set and no home directory: nothing the user can fix by
+        // editing a variable, so the startup output stays quiet.
+        assert_eq!(warning_from(None, None, None), None);
     }
 
     #[test]
