@@ -1459,9 +1459,10 @@ async fn the_cuts_digest_resumes_from_the_streams_floor() {
 /// A door refusal on `session.admit` is answered by the table in `door.rs`:
 /// a refusal Engram's contract says to retry, or one it does not list, is
 /// `unavailable`; a container this machine no longer writes is
-/// `unknown_ref`; another cut's pending handoff and a fault on this machine
-/// are `invalid_state` at the cut's step. An answer too large for the frame
-/// whose page landed is no refusal: the export goes on.
+/// `unknown_ref`; another cut's pending handoff is `invalid_state` at the
+/// cut's step, and a permanent fault is `participant_failed` with a
+/// diagnostic reason. An answer too large for the frame whose page landed
+/// is no refusal: the export goes on.
 #[tokio::test]
 async fn a_refused_admission_is_answered_by_the_doors_table() {
     let f = Fixture::new();
@@ -1475,8 +1476,8 @@ async fn a_refused_admission_is_answered_by_the_doors_table() {
         ("container_handed_off", RefusalCode::UnknownRef),
         ("lease_held_elsewhere", RefusalCode::UnknownRef),
         ("cut_pending_handoff", RefusalCode::InvalidState),
-        ("caller_forbidden", RefusalCode::InvalidState),
-        ("response_too_large", RefusalCode::InvalidState),
+        ("caller_forbidden", RefusalCode::ParticipantFailed),
+        ("response_too_large", RefusalCode::ParticipantFailed),
     ] {
         f.door().admit_refusals = vec![(code, false)];
         let refused = f.export(CUT, &["s1"]).await.unwrap_err();
@@ -1495,6 +1496,11 @@ async fn a_refused_admission_is_answered_by_the_doors_table() {
             RefusalCode::InvalidState => {
                 assert_eq!(refused.detail, Some(json!({"step": "prepared"})), "{code}")
             }
+            RefusalCode::ParticipantFailed => assert_eq!(
+                refused.participant_failed_detail().unwrap().unwrap().reason,
+                Some(format!("session_door:{code} at prepared")),
+                "{code}"
+            ),
             _ => assert_eq!(refused.detail, None, "{code}"),
         }
         if code == "caller_forbidden" {

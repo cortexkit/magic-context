@@ -86,13 +86,11 @@ pub enum Answer {
     /// `invalid_state` at the cut's step: another cut of the session's
     /// container waits for its handoff.
     Handoff,
-    /// `invalid_state` at the cut's step, for a fault on this machine that
+    /// `participant_failed` for a fault on this machine that
     /// retrying cannot clear: ck-mc's own request, its binding to the door,
-    /// or a stream that does not check out. The agent-data contract has no
-    /// code for a fault on the participant's side, and a participant may
-    /// not invent one; `invalid_state` makes the driver abort, where
-    /// `unavailable` would keep the session frozen while it retried. If the
-    /// contract gains such a code, only these rows change.
+    /// or a stream that does not check out. Unlike `invalid_state`, this
+    /// does not blame the caller's op order; unlike `unavailable`, it stops
+    /// the driver from retrying a permanent fault with the session frozen.
     Fault(&'static str),
 }
 

@@ -51,7 +51,8 @@ use std::time::Duration;
 
 use cortexkit_role_agent_data::busy::reason_codes;
 use cortexkit_role_agent_data::errors::{
-    BusyDetail, BusyRef, Detail, ErrorBody, InvalidStateDetail, RefusalCode,
+    BusyDetail, BusyRef, Detail, ErrorBody, InvalidStateDetail, ParticipantFailedDetail,
+    RefusalCode,
 };
 use cortexkit_role_agent_data::export::{ExportReply, ExportedItem};
 use cortexkit_role_agent_data::prepare::{PrepareReply, PreparedItem};
@@ -621,8 +622,8 @@ fn held_refusal(r: &Ref, held: &HeldFact) -> ErrorBody {
 }
 
 /// What `op` answers for a failed door step, by [`door::answer`]'s table.
-/// `step` is the cut's step when the op started, which `invalid_state`
-/// names.
+/// `step` is the cut's step when the op started, named in `invalid_state`
+/// detail or in a permanent fault's diagnostic reason.
 fn door_refusal(op: Op, r: &Ref, step: Step, error: door::DoorError) -> ErrorBody {
     let invalid_state = |message: String| {
         ErrorBody::with_typed_detail(Detail::InvalidState(InvalidStateDetail::new(step)), message)
@@ -637,11 +638,32 @@ fn door_refusal(op: Op, r: &Ref, step: Step, error: door::DoorError) -> ErrorBod
         door::Answer::Handoff => invalid_state(format!(
             "{said}. Another cut of the session's stream waits for its handoff; finish or abort that move first."
         )),
-        door::Answer::Fault(fix) => invalid_state(format!(
-            "{said}. Fix this on this machine before the session can move: {fix}. The order of the cut's ops is not the cause."
-        )),
+        door::Answer::Fault(fix) => {
+            let message = format!(
+                "{said}. Fix this on this machine before the session can move: {fix}. The order of the cut's ops is not the cause."
+            );
+            if op == Op::Activate {
+                // An older driver decodes participant_failed as unknown on
+                // activate and aborts instead of holding the cut as a fork
+                // for the operator to resolve. Keep the old refusal until
+                // those drivers support the new code.
+                return invalid_state(message);
+            }
+            ErrorBody::with_participant_failed_detail(
+                ParticipantFailedDetail::new(format!(
+                    "session_door:{} at {}",
+                    error.code,
+                    step.as_str()
+                )),
+                message,
+            )
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod door_tests;
 
 fn busy_refusal(r: &Ref, code: &str, reason: impl Into<String>) -> ErrorBody {
     let reason = reason.into();
