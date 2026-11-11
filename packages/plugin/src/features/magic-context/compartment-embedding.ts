@@ -12,7 +12,7 @@ import {
 } from "./compartment-chunk-embedding";
 import {
     contentSha256,
-    embedItemsForProject,
+    embedItemsWindowBounded,
     enqueueShadowEmbeddingItems,
     getProjectChunkEmbeddingModelId,
     getProjectEmbeddingMaxInputTokens,
@@ -110,7 +110,7 @@ export async function embedAndStoreCompartmentChunks(
                 continue;
             }
 
-            const result = await embedItemsForProject(
+            const result = await embedItemsWindowBounded(
                 projectPath,
                 windows.map((window) => ({
                     id: `chunk:${compartment.id}:${window.windowIndex}`,
@@ -120,6 +120,7 @@ export async function embedAndStoreCompartmentChunks(
                 undefined,
                 db,
                 sessionId,
+                { stopOnIncompleteSlice: true },
             );
             if (!result) continue;
             if (

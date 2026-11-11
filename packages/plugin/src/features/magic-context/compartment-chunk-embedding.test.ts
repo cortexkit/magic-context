@@ -70,7 +70,7 @@ class CapturingEmbeddingProvider implements EmbeddingProvider {
         texts: string[],
         _signal?: AbortSignal,
         _purpose?: EmbeddingPurpose,
-    ): Promise<Float32Array[]> {
+    ): Promise<(Float32Array | null)[]> {
         this.texts.push(...texts);
         return texts.map(() => new Float32Array([1, 0]));
     }
@@ -635,6 +635,107 @@ describe("compartment chunk embedding core", () => {
                     currentChunkModelId("/repo/publish"),
                 ),
             ).toHaveLength(1);
+        } finally {
+            _resetProjectEmbeddingRegistryForTests();
+            closeQuietly(db);
+        }
+    });
+
+    test.each([
+        "success",
+        "all-null second slice",
+        "partial second slice",
+    ])("publish helper bounds five windows and persists atomically: %s", async (outcome) => {
+        const db = createDb();
+        const embeddedTexts: string[] = [];
+        const calls: string[][] = [];
+        const sessionId = "ses-publish-bounded";
+        const projectPath = "/repo/publish-bounded";
+        const lines = Array.from({ length: 5 }, (_, index) => `[${index + 1}] U: alpha beta gamma`);
+        try {
+            const provider = new CapturingEmbeddingProvider(embeddedTexts);
+            const embedBatch = provider.embedBatch.bind(provider);
+            spyOn(provider, "embedBatch").mockImplementation(async (texts) => {
+                calls.push([...texts]);
+                expect(
+                    db.prepare("SELECT COUNT(*) AS count FROM compartment_chunk_embeddings").get(),
+                ).toEqual({ count: 0 });
+                if (calls.length === 2 && outcome !== "success") {
+                    return texts.map((_, index) =>
+                        outcome === "partial second slice" && index === 0
+                            ? new Float32Array([1, 0])
+                            : null,
+                    );
+                }
+                return embedBatch(texts);
+            });
+            _setTestProviderFactoryForProject(() => provider);
+            recordSessionProjectIdentity(db, sessionId, projectPath);
+            registerProjectEmbedding(
+                db,
+                projectPath,
+                {
+                    provider: "local",
+                    model: "mock-local",
+                    max_input_tokens: Math.ceil(
+                        (estimateTokens(lines[0]) + 1) / CHUNK_WINDOW_SAFETY_RATIO,
+                    ),
+                },
+                { memoryEnabled: true, gitCommitEnabled: false },
+                projectPath,
+            );
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 5,
+                    startMessageId: "u1",
+                    endMessageId: "u5",
+                    title: "Five publish windows",
+                    content: "P1 content",
+                    p1: "P1 content",
+                },
+            ]);
+            const compartment = getCompartments(db, sessionId)[0];
+            for (let index = 0; index < lines.length; index++) {
+                insertFtsRow(db, sessionId, index + 1, "user", "alpha beta gamma");
+            }
+
+            await embedAndStoreCompartmentChunks(db, sessionId, projectPath, [
+                {
+                    id: compartment.id,
+                    startMessage: 1,
+                    endMessage: 5,
+                    sourceChunkText: lines.join("\n"),
+                },
+            ]);
+
+            expect(calls).toEqual(
+                outcome === "success"
+                    ? [lines.slice(0, 2), lines.slice(2, 4), lines.slice(4)]
+                    : [lines.slice(0, 2), lines.slice(2, 4)],
+            );
+            const rows = await loadCompartmentChunkEmbeddingsForSearch(
+                db,
+                sessionId,
+                projectPath,
+                currentChunkModelId(projectPath),
+            );
+            if (outcome === "success") {
+                expect(rows.map((row) => row.windowIndex)).toEqual([0, 1, 2, 3, 4]);
+                expect(rows.every((row) => row.compartmentId === compartment.id)).toBe(true);
+            } else {
+                expect(rows).toHaveLength(0);
+                expect(
+                    loadUnembeddedSessionChunkCandidates(
+                        db,
+                        projectPath,
+                        sessionId,
+                        currentChunkModelId(projectPath),
+                        1,
+                    ).map((candidate) => candidate.id),
+                ).toEqual([compartment.id]);
+            }
         } finally {
             _resetProjectEmbeddingRegistryForTests();
             closeQuietly(db);
