@@ -115,9 +115,11 @@ pub struct Durable {
     pub move_floor: Option<crate::session::MoveFloor>,
     /// The entry id of the runner's signed floor: after a tool-set change on
     /// a model whose signed reasoning is bound to the request prefix, the
-    /// runner strips signed reasoning at or before this entry. It only moves
-    /// forward, so a restart keeps it. Left out of the saved text while there
-    /// is none, so other sessions' rows don't change.
+    /// runner strips signed reasoning at or before this entry. It is the
+    /// floor the runner last stated (or none, after a refusal showed the
+    /// runner does not apply it), so a restart starts from it. Left out of
+    /// the saved text while there is none, so other sessions' rows don't
+    /// change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_floor: Option<String>,
 }

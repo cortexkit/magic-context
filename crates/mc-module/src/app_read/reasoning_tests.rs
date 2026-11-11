@@ -288,4 +288,8 @@ fn app_read_reasoning_leaves_out_signed_reasoning_at_or_before_the_floor() {
     session.conditions.signed_floor = Some(cortexkit_role_compaction::SignedFloor::new("m202"));
     session.take_signed_floor();
     assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 0);
+    // The runner states no floor: all of it is sent, and counted, again.
+    session.conditions.signed_floor = None;
+    session.take_signed_floor();
+    assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 800);
 }
