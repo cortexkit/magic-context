@@ -843,6 +843,35 @@ export function resolveTransformHostSeams(
 // signed-fit refusal, check later requests against the model window even if thinking was omitted.
 const SIGNED_FIT_REFUSED_MARKER = "signed_fit:refused:v1";
 
+// A deferred callback created inside the transform keeps its parent lexical scopes,
+// including the request's messages, alive until the timer fires. Build it outside
+// the pass with only numeric counts and the long-lived routing maps instead.
+function deferredTokenAttribution(
+    db: ContextDatabase,
+    sessionId: string,
+    counts: Pick<
+        SessionMeta,
+        "lastInputTokens" | "systemPromptTokens" | "conversationTokens" | "toolCallTokens"
+    >,
+    projectIdentity: string | undefined,
+    route: AttributionRoute | undefined,
+): HostTokenPass["readAttribution"] {
+    return (blocks) =>
+        buildOpenCodeTokenAttribution(
+            db,
+            sessionId,
+            {
+                last_input_tokens: counts.lastInputTokens,
+                system_prompt_tokens: counts.systemPromptTokens,
+                conversation_tokens: counts.conversationTokens,
+                tool_call_tokens: counts.toolCallTokens,
+            },
+            { projectIdentity },
+            route,
+            blocks,
+        ).buckets;
+}
+
 export function createTransform(deps: TransformDeps) {
     const signedThinkingPolicy = resolveSignedThinkingHoldPolicy(deps.signedThinkingHold);
     registerSystemDateRefresh(deps.historyRefreshSessions);
@@ -4877,25 +4906,23 @@ export function createTransform(deps: TransformDeps) {
                 projectIdentity: passProjectIdentity,
                 injectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 memoryBlockCount: sessionMeta.memoryBlockCount ?? 0,
-                readAttribution: (blocks) =>
-                    buildOpenCodeTokenAttribution(
-                        db,
-                        sessionId,
-                        {
-                            last_input_tokens: sessionMeta.lastInputTokens,
-                            system_prompt_tokens: sessionMeta.systemPromptTokens,
-                            conversation_tokens: conversationTokens,
-                            tool_call_tokens: toolCallTokens,
-                        },
-                        { projectIdentity: passProjectIdentity },
-                        deps.liveModelBySession && deps.agentBySession
-                            ? {
-                                  liveModelBySession: deps.liveModelBySession,
-                                  agentBySession: deps.agentBySession,
-                              }
-                            : undefined,
-                        blocks,
-                    ).buckets,
+                readAttribution: deferredTokenAttribution(
+                    db,
+                    sessionId,
+                    {
+                        lastInputTokens: sessionMeta.lastInputTokens,
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        conversationTokens,
+                        toolCallTokens,
+                    },
+                    passProjectIdentity,
+                    deps.liveModelBySession && deps.agentBySession
+                        ? {
+                              liveModelBySession: deps.liveModelBySession,
+                              agentBySession: deps.agentBySession,
+                          }
+                        : undefined,
+                ),
             });
         passReturned = true;
         deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted);
@@ -4926,8 +4953,8 @@ export { resolveHistoryBudgetTokens } from "./render-options";
 
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";
-import { scheduleHostTokenBreakdown } from "./host-token-breakdown";
-import { buildOpenCodeTokenAttribution } from "./session-token-attribution";
+import { type HostTokenPass, scheduleHostTokenBreakdown } from "./host-token-breakdown";
+import { type AttributionRoute, buildOpenCodeTokenAttribution } from "./session-token-attribution";
 import {
     beginSystemDateRequest,
     bindSystemDateRequest,
