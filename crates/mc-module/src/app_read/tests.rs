@@ -41,6 +41,7 @@ pub(super) fn replica(context: Option<Connection>) -> Replica {
         context,
         watches: watch::Hub::new(),
         heads: HashMap::new(),
+        head_warnings: Default::default(),
     }
 }
 pub(super) fn request(extra: Value) -> Value {

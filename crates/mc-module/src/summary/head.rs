@@ -29,7 +29,7 @@ use crate::memory;
 pub(crate) const M0_ID: &str = "magic-context:m0";
 pub(crate) const M1_ID: &str = "magic-context:m1";
 const HISTORY_EMPTY: &str = "<session-history></session-history>";
-const M1_EMPTY: &str =
+pub(crate) const M1_EMPTY: &str =
     "<session-history-since>(no new content since last materialization)</session-history-since>";
 /// Newer memories and profile lines in `m[1]` get this share of their
 /// budgets; the rest waits for the next fold.

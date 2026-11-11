@@ -2,7 +2,7 @@
 //! to the app-read thread, not to a session's steady-state notice work.
 use super::{error, Refusal, Snapshot};
 use crate::count::Counter;
-use crate::summary::head::{Baseline, Form, M0_ID, M1_ID};
+use crate::summary::head::{Baseline, Form, M0_ID, M1_EMPTY, M1_ID};
 use cortexkit_role_compaction::view::{EditOp, InsertedImage, View};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -97,13 +97,24 @@ impl ReadState {
 
 pub(crate) fn read(snapshot: &Snapshot, state: Option<&ReadState>) -> Result<Value, Refusal> {
     let breakdown = snapshot.breakdown.without_summaries();
+    read_breakdown(breakdown, state)
+}
+
+pub(super) fn not_ready() -> Refusal {
+    error(
+        "head_not_ready",
+        "The session has not set up with its runner since the module started.",
+    )
+}
+
+pub(super) fn read_breakdown(
+    breakdown: &Value,
+    state: Option<&ReadState>,
+) -> Result<Value, Refusal> {
     let managed = breakdown["managed"]["value"].as_bool().unwrap_or(false);
     let state = state.filter(|state| state.ready);
     if managed && state.is_none() {
-        return Err(error(
-            "head_not_ready",
-            "The session has not set up with its runner since the module started.",
-        ));
+        return Err(not_ready());
     }
     let head = state.and_then(|state| state.offered.as_ref().or(state.confirmed.as_ref()));
     let applied = head.is_some_and(|head| {
@@ -169,17 +180,25 @@ fn split(text: &str, delta: bool) -> Result<Vec<(&'static str, &str)>, Refusal> 
             continue;
         }
         let close = format!("</{tag}>");
-        let end = rest.find(&close).ok_or_else(unavailable)? + close.len();
+        let Some(end) = rest.find(&close).map(|end| end + close.len()) else {
+            break;
+        };
+        let after = &rest[end..];
+        let separator = if delta { "\n" } else { "\n\n" };
+        if !after.is_empty() && !after.starts_with(separator) {
+            break;
+        }
         sections.push((kind, &rest[..end]));
-        rest = &rest[end..];
+        rest = after;
         if !rest.is_empty() {
-            rest = rest
-                .strip_prefix(if delta { "\n" } else { "\n\n" })
-                .ok_or_else(unavailable)?;
+            rest = &rest[separator.len()..];
+            if rest.is_empty() {
+                sections.push(("other", rest));
+            }
         }
     }
     if !rest.is_empty() {
-        return Err(unavailable());
+        sections.push(("other", rest));
     }
     Ok(sections)
 }
@@ -191,7 +210,7 @@ fn unavailable() -> Refusal {
 fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal> {
     let delta = slot.id == M1_ID;
     let mut message = json!({"slot":if delta {"delta"} else {"baseline"},"tokens":counter.count(&slot.text),"sections":[]});
-    if delta && !slot.text.starts_with("<session-history-since>\n") {
+    if delta && slot.text == M1_EMPTY {
         message["empty"] = json!(true);
         message["placeholder"] = json!(slot.text);
         return Ok(message);
@@ -223,7 +242,9 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
                 }
             }
             "memory" => {
-                section["items"] = json!(memory_items(text, counter));
+                if let Some(items) = memory_items(text, counter) {
+                    section["items"] = json!(items);
+                }
             }
             "memory_updates" => {
                 if let Some(baseline) = &head.baseline {
@@ -259,19 +280,35 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn memory_items(text: &str, counter: Counter) -> Vec<Value> {
+fn memory_items(text: &str, counter: Counter) -> Option<Vec<Value>> {
+    // Shared memories have unindented continuation lines, so their boundaries
+    // cannot be proved once one appears. Continuations that all look like new
+    // memory starts remain indistinguishable without renderer-recorded boundaries.
+    static START: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^#([0-9]+)(?: \[(.*?)\])?: ").expect("memory start")
+    });
     let mut category = "";
     let mut items: Vec<Value> = Vec::new();
+    let mut ids = std::collections::HashSet::new();
     for line in text.lines().skip(1) {
         if line.starts_with('<') {
             if !line.starts_with("</") {
                 category = line.trim_start_matches('<').trim_end_matches('>');
             }
-        } else if let Some((id, _)) = line.strip_prefix('#').and_then(|line| line.split_once(':')) {
-            if let Ok(id) = id.parse::<i64>() {
-                items.push(json!({"id":id,"category":unescape(category),"text":line}));
+        } else if let Some(start) = START.captures(line) {
+            let id = start[1].parse::<i64>().ok()?;
+            if !ids.insert(id) {
+                return None;
             }
+            let mut item = json!({"id":id,"category":unescape(category),"text":line});
+            if let Some(source) = start.get(2) {
+                item["source"] = json!(unescape(source.as_str()));
+            }
+            items.push(item);
         } else if let Some(item) = items.last_mut() {
+            if item.get("source").is_some() {
+                return None;
+            }
             item["text"] = json!(format!(
                 "{}\n{line}",
                 item["text"].as_str().expect("memory text")
@@ -281,7 +318,7 @@ fn memory_items(text: &str, counter: Counter) -> Vec<Value> {
     for item in &mut items {
         item["tokens"] = json!(counter.count(item["text"].as_str().expect("memory text")));
     }
-    items
+    Some(items)
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 pub(crate) mod head;
+pub(crate) mod idle;
 pub(crate) mod persistence;
 mod search;
 mod states;
@@ -316,7 +317,13 @@ enum Command {
     #[cfg(test)]
     Publish(Box<Snapshot>),
     Update(Update),
+    ForgetHead(SessionRef),
     Read(String, Value, oneshot::Sender<Result<Value, Refusal>>),
+    RunnerHead(
+        Value,
+        cortexkit_role_compaction::view::AppliedViewAnswer,
+        oneshot::Sender<Result<Value, Refusal>>,
+    ),
     Watch(
         String,
         Value,
@@ -335,6 +342,7 @@ struct Replica {
     context: Option<Connection>,
     watches: watch::Hub,
     heads: HashMap<SessionRef, head::ReadState>,
+    head_warnings: std::cell::RefCell<HashSet<(SessionRef, u64)>>,
 }
 
 impl AppRead {
@@ -365,6 +373,7 @@ impl AppRead {
                     context,
                     watches: watch::Hub::new(),
                     heads: HashMap::new(),
+                    head_warnings: Default::default(),
                 };
                 replica.load();
                 while let Ok(command) = rx.recv() {
@@ -372,8 +381,12 @@ impl AppRead {
                         #[cfg(test)]
                         Command::Publish(snapshot) => replica.publish(*snapshot),
                         Command::Update(update) => replica.update(update),
+                        Command::ForgetHead(key) => replica.forget_head(&key),
                         Command::Read(method, params, reply) => {
                             let _ = reply.send(replica.read(&method, &params));
+                        }
+                        Command::RunnerHead(params, answer, reply) => {
+                            let _ = reply.send(replica.runner_head(&params, answer));
                         }
                         Command::Watch(caller, params, reply) => {
                             let result = replica.subscribe(caller, &params);
@@ -395,10 +408,26 @@ impl AppRead {
         let _ = self.tx.send(Command::Update(update));
     }
 
+    pub(crate) fn forget_head(&self, key: &SessionRef) {
+        let _ = self.tx.send(Command::ForgetHead(key.clone()));
+    }
+
     pub async fn read(&self, method: &str, params: Value) -> Result<Value, Refusal> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::Read(method.to_owned(), params, tx))
+            .map_err(|_| unavailable())?;
+        rx.await.map_err(|_| unavailable())?
+    }
+
+    async fn runner_head(
+        &self,
+        params: Value,
+        answer: cortexkit_role_compaction::view::AppliedViewAnswer,
+    ) -> Result<Value, Refusal> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RunnerHead(params, answer, tx))
             .map_err(|_| unavailable())?;
         rx.await.map_err(|_| unavailable())?
     }
@@ -413,6 +442,32 @@ impl AppRead {
 }
 
 impl Replica {
+    fn forget_head(&mut self, key: &SessionRef) {
+        self.heads.remove(key);
+        self.head_warnings
+            .borrow_mut()
+            .retain(|(session, _)| session != key);
+    }
+
+    fn warn_head(&self, key: &SessionRef, result: &Value) {
+        let version = result["as_of"]["view"].as_u64();
+        let other = result["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["sections"].as_array().is_some_and(|sections| {
+                    sections.iter().any(|section| section["kind"] == "other")
+                })
+            })
+        });
+        if let Some(version) = version.filter(|_| other) {
+            if self
+                .head_warnings
+                .borrow_mut()
+                .insert((key.clone(), version))
+            {
+                tracing::warn!("ck-mc: session {}: context.head view {} has an unrecognized section; serving its remaining text unsplit",key.session,version);
+            }
+        }
+    }
     fn load(&mut self) {
         let Some(conn) = &self.store else {
             return;
@@ -672,9 +727,20 @@ impl Replica {
             return self.search(p);
         }
         let key = session(p.get("session").unwrap_or(&Value::Null))?;
-        let snapshot = self.locate(&key)?;
+        let snapshot = match self.locate(&key) {
+            Err(refusal)
+                if method == "context.head"
+                    && refusal.code == "store_unavailable"
+                    && self.known.contains(&key) =>
+            {
+                return Err(head::not_ready())
+            }
+            result => result?,
+        };
         if method == "context.head" {
-            return head::read(snapshot, self.heads.get(&key));
+            let result = head::read(snapshot, self.heads.get(&key))?;
+            self.warn_head(&key, &result);
+            return Ok(result);
         }
         let mut fields = match method {
             "session_data.read" => {

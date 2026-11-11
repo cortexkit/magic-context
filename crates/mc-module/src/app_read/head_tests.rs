@@ -101,6 +101,123 @@ fn snapshot() -> Snapshot {
     crate::session::Session::app_sample_snapshot()
 }
 
+fn with_other(mut state: ReadState) -> ReadState {
+    let previous = state.offered.take().unwrap();
+    let m0 = format!(
+        "{}\n\n<future-block>Unrecognized but preserved.</future-block>",
+        previous.slots[0].text
+    );
+    let mut baseline = previous.baseline.as_ref().unwrap().as_ref().clone();
+    baseline.m0 = m0.clone();
+    let view = View::seal(
+        8,
+        head_ops(
+            &m0,
+            &previous.slots[1].text,
+            previous.slots[0].image.clone(),
+        )
+        .into_iter()
+        .map(|op| Edit::new(8, op))
+        .collect(),
+    );
+    state.record(&view, Some(Arc::new(baseline)), "provider/model");
+    state.confirm(8);
+    state
+}
+
+fn shared_block(content: &str, duplicate: bool) -> String {
+    let workspace = crate::workspace::Workspace {
+        own: "own".into(),
+        members: vec!["own".into(), "shared".into()],
+        names: BTreeMap::from([("shared".into(), "Related & project".into())]),
+        canonical: BTreeMap::from([
+            ("own".into(), "own".into()),
+            ("shared".into(), "shared".into()),
+        ]),
+        ..Default::default()
+    };
+    let memories = [
+        StoredMemory {
+            id: 1,
+            project_path: "own".into(),
+            category: "PROJECT_RULES".into(),
+            content: "Keep the prefix stable.\nCheck the original bytes.".into(),
+            ..Default::default()
+        },
+        StoredMemory {
+            id: if duplicate { 1 } else { 2 },
+            project_path: "shared".into(),
+            category: "PROJECT_RULES".into(),
+            content: content.into(),
+            ..Default::default()
+        },
+    ];
+    crate::memory::render_workspace_block(&memories, "project-memory", Some(&workspace))
+}
+
+fn with_memory_block(mut state: ReadState, block: &str) -> ReadState {
+    let previous = state.offered.take().unwrap();
+    let m0 = split(&previous.slots[0].text, false)
+        .unwrap()
+        .iter()
+        .map(|(kind, text)| if *kind == "memory" { block } else { text })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut baseline = previous.baseline.as_ref().unwrap().as_ref().clone();
+    baseline.m0 = m0.clone();
+    let view = View::seal(
+        9,
+        head_ops(
+            &m0,
+            &previous.slots[1].text,
+            previous.slots[0].image.clone(),
+        )
+        .into_iter()
+        .map(|op| Edit::new(9, op))
+        .collect(),
+    );
+    state.record(&view, Some(Arc::new(baseline)), "provider/model");
+    state.confirm(9);
+    state
+}
+
+#[test]
+fn shared_memory_items_name_sources_but_omit_ambiguous_boundaries() {
+    for (content, duplicate, known) in [
+        ("Use shared constraints.", false, true),
+        (
+            "Use shared constraints.\nA plain continuation.",
+            false,
+            false,
+        ),
+        ("Use shared constraints.", true, false),
+    ] {
+        let block = shared_block(content, duplicate);
+        let state = with_memory_block(rendered(false, true, false).0, &block);
+        let result = read(&snapshot(), Some(&state)).unwrap();
+        let section = result["messages"][0]["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["kind"] == "memory")
+            .unwrap();
+        assert_eq!(section["text"], block);
+        if known {
+            let items = section["items"].as_array().unwrap();
+            assert_eq!(items.len(), 2);
+            assert!(items[0].get("source").is_none());
+            assert!(items[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("\n  Check the original bytes."));
+            assert_eq!(items[1]["source"], "Related & project");
+            assert_eq!(items[1]["id"], 2);
+        } else {
+            assert!(section.get("items").is_none());
+        }
+    }
+}
+
 fn reconstruct(message: &Value) -> String {
     if message["empty"] == true {
         return message["placeholder"].as_str().unwrap().into();
@@ -192,6 +309,62 @@ fn unknown_sessions_and_not_ready_are_refused_without_rendering() {
 }
 
 #[test]
+fn unrecognized_sections_preserve_bytes_warn_once_and_release_with_the_head() {
+    let state = with_other(rendered(true, false, false).0);
+    let expected = state.offered.as_ref().unwrap().slots[0].text.clone();
+    let weak = Arc::downgrade(state.offered.as_ref().unwrap());
+    let mut replica = super::super::tests::replica(None);
+    let key = replica.snapshots.keys().next().unwrap().clone();
+    replica.heads.insert(key.clone(), state);
+    for _ in 0..2 {
+        let result = replica
+            .read("context.head", &json!({"session":key}))
+            .unwrap();
+        let message = &result["messages"][0];
+        assert_eq!(reconstruct(message), expected);
+        let other = message["sections"].as_array().unwrap().last().unwrap();
+        assert_eq!(other["kind"], "other");
+        assert!(other.get("items").is_none());
+    }
+    assert_eq!(replica.head_warnings.borrow().len(), 1);
+    replica.forget_head(&key);
+    assert!(replica.heads.is_empty());
+    assert!(replica.head_warnings.borrow().is_empty());
+    assert!(weak.upgrade().is_none());
+    assert!(
+        replica.snapshots.contains_key(&key),
+        "historical projections retain their existing lifetime"
+    );
+}
+
+#[test]
+fn malformed_or_reordered_sections_remain_lossless_but_invalid_delta_envelopes_refuse() {
+    for text in [
+        "<user-profile>x</user-profile>\n\n<project-docs>later</project-docs>",
+        "<session-history>missing close",
+        "<session-history></session-history>attached",
+        "<session-history></session-history>\n\n",
+    ] {
+        let parts = split(text, false).unwrap();
+        assert_eq!(
+            parts
+                .iter()
+                .map(|(_, text)| *text)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            text
+        );
+        assert_eq!(parts.last().unwrap().0, "other");
+    }
+    let delta = "<session-history-since>\n<new-block>kept</new-block>\n</session-history-since>";
+    assert_eq!(
+        split(delta, true).unwrap(),
+        vec![("other", "<new-block>kept</new-block>")]
+    );
+    assert!(split("not a delta envelope", true).is_err());
+}
+
+#[test]
 fn mismatched_attribution_is_omitted_and_counts_follow_the_serving_model() {
     let (mut state, texts) = rendered(true, false, true);
     let counter = Counter::for_model(Some("anthropic/claude-opus-5-5"));
@@ -264,12 +437,20 @@ fn samples_v11() {
         "head-no-mural",
         "head-not-ready",
         "head-no-items",
+        "head-other",
+        "head-shared",
     ] {
         let (mut state, _) = rendered(
             name != "head-no-mural",
             name == "head-empty-delta",
             name == "head-no-items",
         );
+        if name == "head-other" {
+            state = with_other(state);
+        }
+        if name == "head-shared" {
+            state = with_memory_block(state, &shared_block("Use shared constraints.", false));
+        }
         if name == "head-pending-view" {
             state.confirmed = None;
         }
@@ -329,10 +510,7 @@ fn samples_v11() {
     );
 }
 
-#[test]
-fn head_read_cost_for_one_thousand_summaries() {
-    let (mut state, _) = rendered(false, true, false);
-    let old = state.offered.take().unwrap();
+fn large_head(memory_count: i64, image: Option<InsertedImage>) -> (View, Arc<Baseline>) {
     let summaries = (1..=1000)
         .map(|sequence| StoredCompartment {
             sequence,
@@ -344,31 +522,49 @@ fn head_read_cost_for_one_thousand_summaries() {
             ..Default::default()
         })
         .collect::<Vec<_>>();
+    let memories = (1..=memory_count)
+        .map(|id| StoredMemory {
+            id,
+            category: "PROJECT_RULES".into(),
+            content: format!("Verified memory {id}: preserve the cached request prefix."),
+            importance: Some(90),
+            status: "active".into(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
     let inputs = Inputs {
-        counter: old.counter,
+        counter: Counter::for_model(Some("provider/model")),
         summaries: &summaries,
         docs: "",
         profile: &[],
         profile_max_id: 0,
-        memories: &[],
+        memories: &memories,
         workspace: None,
         gone: &[],
         history_budget_tokens: 1_000_000,
         history_local_budget_tokens: 1_000_000,
-        memory_budget_tokens: 4000,
+        memory_budget_tokens: 1_000_000,
         profile_budget_tokens: 1000,
     };
-    let baseline = fold(&inputs, None);
+    let baseline = fold(&inputs, image.as_ref().map(|_| "tiny-mural"));
     assert_eq!(baseline.summary_items.len(), 1000);
+    assert_eq!(baseline.shown.len(), memory_count as usize);
     let (m1, baseline, _) = delta(&baseline, &inputs);
     let view = View::seal(
         9,
-        head_ops(&baseline.m0, &m1, None)
+        head_ops(&baseline.m0, &m1, image)
             .into_iter()
             .map(|op| Edit::new(9, op))
             .collect(),
     );
-    state.record(&view, Some(Arc::new(baseline)), "provider/model");
+    (view, Arc::new(baseline))
+}
+
+#[test]
+fn head_read_cost_for_one_thousand_summaries() {
+    let (view, baseline) = large_head(0, None);
+    let mut state = ReadState::default();
+    state.record(&view, Some(baseline), "provider/model");
     let snapshot = snapshot();
     let started = std::time::Instant::now();
     let result = read(&snapshot, Some(&state)).unwrap();
@@ -378,4 +574,71 @@ fn head_read_cost_for_one_thousand_summaries() {
         started.elapsed().as_micros(),
         bytes.len()
     );
+}
+
+#[test]
+fn head_resident_cost_shares_one_thousand_summary_and_two_thousand_memory_records() {
+    let image = rendered(true, true, false)
+        .0
+        .offered
+        .as_ref()
+        .unwrap()
+        .slots[0]
+        .image
+        .clone();
+    let (view, baseline) = large_head(2000, image);
+    let mut state = ReadState::default();
+    let started = std::time::Instant::now();
+    state.record(&view, Some(baseline.clone()), "provider/model");
+    let capture_us = started.elapsed().as_micros();
+    let head = state.offered.as_ref().unwrap();
+    assert!(Arc::ptr_eq(head.baseline.as_ref().unwrap(), &baseline));
+    let payload = head
+        .slots
+        .iter()
+        .map(|slot| slot.text.len() + slot.image.as_ref().map_or(0, |image| image.data.len()))
+        .sum::<usize>();
+    let arc_header = 2 * std::mem::size_of::<usize>();
+    let owned = std::mem::size_of::<ReadState>()
+        + std::mem::size_of::<Head>()
+        + arc_header
+        + head.slots.capacity() * std::mem::size_of::<Arc<Slot>>()
+        + head
+            .slots
+            .iter()
+            .map(|slot| {
+                std::mem::size_of::<Slot>()
+                    + arc_header
+                    + slot.id.capacity()
+                    + slot.text.capacity()
+                    + slot.image.as_ref().map_or(0, |image| {
+                        image.media_type.capacity() + image.data.capacity()
+                    })
+            })
+            .sum::<usize>();
+    let rss = || {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix("VmRSS:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .map(|kib| kib * 1024)
+                })
+            })
+    };
+    let before = rss();
+    let residents = (0..64)
+        .map(|_| {
+            let mut state = ReadState::default();
+            state.record(&view, Some(baseline.clone()), "provider/model");
+            state
+        })
+        .collect::<Vec<_>>();
+    let resident_per_head = before
+        .zip(rss())
+        .map(|(before, after)| after.saturating_sub(before) / residents.len());
+    println!("context.head 1000 summaries + 2000 memories + tiny mural: capture {capture_us} us; owned payload {payload} bytes; allocations including structures {owned} bytes (allocator bookkeeping excluded); measured incremental RSS/head over 64 captures: {resident_per_head:?} bytes");
+    assert_eq!(residents.len(), 64);
 }

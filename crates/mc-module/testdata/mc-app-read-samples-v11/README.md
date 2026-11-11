@@ -53,6 +53,12 @@ rows map to sections as follows:
 | Compartments | `history` | `history` |
 | Memories | `memory`, `memory_mural` | `memory_updates` |
 
+`other` is a lossless fallback for text whose section wrapper is newer than
+this reader, reordered, or incomplete. It carries the unparsed remainder of
+the message as one final section, without `items`. Show its text even when no
+desktop row recognizes it. The same reconstruction rules below still apply;
+an unfamiliar section must not hide the rest of the head.
+
 `items` on `project_docs` gives each file's `name`, `text` (file wrapper
 included), and `tokens`. `history` items give `compartment_id`, `tier`, and
 `tokens`, using the same ids and tiers as the token breakdown: tier 1 is full
@@ -65,6 +71,13 @@ unknown, not an empty section. For example, a runner restored to an older
 baseline snapshot can still supply exact text even when that snapshot's
 summary/correction metadata is no
 longer available. Docs and memory items can be read from their text directly.
+
+A shared-workspace memory item also has `source`, the project label from its
+rendered `#id [source]: fact` line; an absent `source` means the project's own
+memory. Own-project continuation lines are indented and remain in the item's
+text. If any shared memory has an unindented continuation line, or two parsed
+items have the same id, the entire memory section omits `items`: its boundaries
+cannot be attributed safely. Its section text remains unchanged.
 
 The `memory_mural` section has `image: {media_type, sha256, data, tokens}`.
 `data` is base64; `sha256` hashes the decoded image bytes. `image.tokens` is
@@ -92,15 +105,26 @@ they are not the time the window opened. They are omitted when unknown.
 
 A worker or reader has `managed: true` and `messages: []`: it has no head.
 A suspended or tools-only session has `managed: false` and `messages: []`.
-After a module restart, a session that has not set up with its runner is
+After a module restart, an idle session may not have set up with the module
+yet. Opening the window then asks the runner for its applied view, with a
+three-second deadline. This read creates no session worker and does not cache
+the answer. A Magic Context view is served with `applied: true`; no applied
+view produces `view: null` and `messages: []`. Stored metadata is used only
+when its baseline matches the returned text. The size-reading fields can be
+absent for sessions with no saved breakdown.
+
+An unavailable runner route, a timeout, or another provider's applied view is
 refused with `head_not_ready`, message "The session has not set up with its
-runner since the module started." This is retryable after Setup; stored
-baselines alone cannot prove what the runner applies.
+runner since the module started." This is retryable by reopening the window
+or after Setup; stored baselines alone cannot prove what the runner applies.
 
 The new samples cover every section and the mural (`head.json`); all three
 delta blocks; an empty delta; an unconfirmed view; worker and suspended
 sessions; no mural; unavailable per-item attribution (`head-no-items.json`);
-and the retryable refusal (`head-not-ready.json`). The image is a tiny PNG.
+the retryable refusal (`head-not-ready.json`); and a future baseline block
+preserved as `other` (`head-other.json`). The image is a tiny PNG.
+`head-shared.json` includes an own-project memory and a single-line shared
+memory whose item names its source project.
 
 Regenerate deliberately from the workspace root:
 

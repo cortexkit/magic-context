@@ -268,7 +268,21 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         params: Value,
     ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
         self.app_gate(&params)?;
-        self.inner.app_read.read(method, params).await
+        if method != "context.head" {
+            return self.inner.app_read.read(method, params).await;
+        }
+        let result = self.inner.app_read.read(method, params.clone()).await;
+        match result {
+            Err(refusal) if method == "context.head" && refusal.code == "head_not_ready" => {
+                crate::app_read::idle::fetch(
+                    &self.inner.app_read,
+                    self.inner.client.as_ref(),
+                    params,
+                )
+                .await
+            }
+            result => result,
+        }
     }
 
     /// An app watch, refused when it names a session a move holds.
@@ -335,12 +349,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     }
 
     /// Drop what this process keeps for a session a move took over: its
-    /// worker, which discards the jobs it held, its Setup, and its cached
-    /// project. For a session whose rows were `replaced` by an install, the
+    /// worker, which discards the jobs it held, its Setup, its cached
+    /// project, and the request head captured for app reads. For a session whose rows were `replaced` by an install, the
     /// cached project of the session under any runner goes too: context
     /// reads match a session by harness and id, and prefer that cache to
     /// the installed project link.
     fn drop_session(&self, session: &SessionRef, cut: &str, replaced: bool) {
+        // The head the app reads show was captured from views of the rows the
+        // move took away or replaced.
+        self.inner.app_read.forget_head(session);
         let worker = self
             .inner
             .workers
