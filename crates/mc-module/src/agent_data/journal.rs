@@ -121,6 +121,20 @@ pub struct Cut {
     pub activate_request: Option<String>,
 }
 
+/// A cut no op has recorded anything for yet.
+impl Default for Cut {
+    fn default() -> Self {
+        Self {
+            step: Step::None,
+            refs: None,
+            receipts: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
+            undo_images: BTreeMap::new(),
+            activate_request: None,
+        }
+    }
+}
+
 /// A state-changing op's request and the exact reply it was given.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,7 +262,6 @@ impl Journal {
         let contents = match read(&path) {
             Ok(contents) => {
                 gate.rebuild(&contents);
-                log_held(&contents);
                 Some(contents)
             }
             Err(reason) => {
@@ -264,6 +277,16 @@ impl Journal {
             path: Some(path),
             contents: Mutex::new(contents),
             gate,
+        }
+    }
+
+    /// Name, at startup, every session a move still holds and what has to
+    /// happen for it to be served again. `agent_data` says whether this
+    /// build serves moves: without it, a session a move holds stays refused
+    /// until a build that does aborts or finishes the move.
+    pub fn log_held(&self, agent_data: bool) {
+        if let Some(contents) = self.contents() {
+            log_held(&contents, agent_data);
         }
     }
 
@@ -346,17 +369,23 @@ fn sync_folder(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Name, at startup, every session a move still holds and what has to
-/// happen for it to be served again.
-fn log_held(contents: &Contents) {
+fn log_held(contents: &Contents, agent_data: bool) {
     for entry in &contents.sessions {
         let session = format!("{}/{}/{}", entry.runner, entry.harness, entry.session);
         match (&entry.moving, &entry.released) {
+            (Some(moving), _) if agent_data => tracing::warn!(
+                session = %session,
+                cut = %moving.cut,
+                state = moving.state.describe(),
+                "ck-mc: session {session} is {} by agent-data cut {} and is refused session_moving until Entorhinal aborts or finishes the move",
+                moving.state.describe(),
+                moving.cut
+            ),
             (Some(moving), _) => tracing::warn!(
                 session = %session,
                 cut = %moving.cut,
                 state = moving.state.describe(),
-                "ck-mc: session {session} is {} by agent-data cut {} and is refused session_moving; a build with agent-data on must abort or finish the move",
+                "ck-mc: session {session} is {} by agent-data cut {} and is refused session_moving; agent-data moves are off in this build, so a build with them on must abort or finish the move",
                 moving.state.describe(),
                 moving.cut
             ),
@@ -364,7 +393,7 @@ fn log_held(contents: &Contents) {
                 session = %session,
                 cut = %released.cut,
                 holder = %released.holder,
-                "ck-mc: session {session} was released to {} by agent-data cut {} and is refused session_moved here",
+                "ck-mc: session {session} was released to {} by agent-data cut {} and is refused session_moved here; only a move back to this machine serves it here again",
                 released.holder,
                 released.cut
             ),

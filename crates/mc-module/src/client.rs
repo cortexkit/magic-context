@@ -158,6 +158,16 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
         async { Err("unavailable".to_owned()) }
     }
+    /// The module ids the daemon's catalog lists as providing
+    /// `capability`, for a move's `describe`. An error is a reason for the
+    /// log. Without a daemon the catalog cannot be read, which is the
+    /// default here.
+    fn resolve_providers(
+        &self,
+        _capability: &str,
+    ) -> impl Future<Output = Result<Vec<String>, String>> + Send {
+        async { Err("no catalog".to_owned()) }
+    }
 }
 
 /// Entorhinal's refusal of a context read.

@@ -53,94 +53,119 @@ use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The module's manifest: a tool provider, which is the role runners open
-/// their compaction routes to.
+/// The module's manifest with moves off ([`manifest_for`]).
 pub fn manifest(module_id: &str) -> ModuleManifest {
-    ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
-        .provides(vec![
-            ProviderRole::ToolProvider {
-                tools: vec![Tool {
-                    name: "ctx_reduce".into(),
-                    description: Some(format!(
-                        "Drop tagged items you no longer need ({COMPACTION_PROVIDES})."
-                    )),
-                    execution_mode: ExecutionMode::Mutating,
-                    schema: json!({
-                        "type": "object",
-                        "properties": {"drop": {"type": "string"}},
-                        "required": ["drop"],
-                    }),
-                }],
-                identity_scope: vec![IdentityScope::Session],
-                concurrency: Concurrency::ModuleManaged,
-                emits_push: false,
-                sub_supervises: false,
-            },
-            ProviderRole::InternalService {
-                service_id: crate::context_read::ROLE.0.into(),
-                transport: subc_protocol::manifest::InternalTransport::Bulk,
-                agent_facing: false,
-                operations: crate::context_read::OPS
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
-            },
-            ProviderRole::InternalService {
-                service_id: crate::app_read::ROLE.0.into(),
-                transport: subc_protocol::manifest::InternalTransport::Bulk,
-                agent_facing: false,
-                operations: [
-                    "session_data.read",
-                    "context.watch",
-                    "context.states",
-                    "context.compartment",
-                    "context.cache_why",
-                    "context.search",
-                ]
+    manifest_for(module_id, false)
+}
+
+/// The module's manifest: a tool provider, which is the role runners open
+/// their compaction routes to, and its internal services. With
+/// `agent_data` on it also declares the `agent-data` service and claims
+/// `agent-data/v1`: Entorhinal finds participants in the catalog by the
+/// claim, and the daemon opens a route only to a service the module
+/// declares, so a participant needs both. With it off, neither is there.
+pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
+    let mut provides = vec![
+        ProviderRole::ToolProvider {
+            tools: vec![Tool {
+                name: "ctx_reduce".into(),
+                description: Some(format!(
+                    "Drop tagged items you no longer need ({COMPACTION_PROVIDES})."
+                )),
+                execution_mode: ExecutionMode::Mutating,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"drop": {"type": "string"}},
+                    "required": ["drop"],
+                }),
+            }],
+            identity_scope: vec![IdentityScope::Session],
+            concurrency: Concurrency::ModuleManaged,
+            emits_push: false,
+            sub_supervises: false,
+        },
+        ProviderRole::InternalService {
+            service_id: crate::context_read::ROLE.0.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: crate::context_read::OPS
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            },
-            // The phone reaches ck-mc through Callosum, which relays only
-            // management-surface operations, so the reads it uses are also
-            // declared there, as queries.
-            ProviderRole::ManagementSurface {
-                operations: MANAGEMENT_APP_METHODS
-                    .iter()
-                    .map(|method| subc_protocol::manifest::ManagementOperation {
-                        name: (*method).into(),
-                        kind: subc_protocol::manifest::ManagementOperationKind::Query,
-                        description: None,
-                    })
-                    .collect(),
-                config_schema: json!({ "type": "object" }),
-                observability: Vec::new(),
-                identity_scope: Vec::new(),
-                concurrency: Concurrency::ModuleManaged,
-            },
-        ])
+        },
+        ProviderRole::InternalService {
+            service_id: crate::app_read::ROLE.0.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: [
+                "session_data.read",
+                "context.watch",
+                "context.states",
+                "context.compartment",
+                "context.cache_why",
+                "context.search",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        },
+    ];
+    if agent_data {
+        provides.push(ProviderRole::InternalService {
+            service_id: cortexkit_role_agent_data::SERVICE_ID.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: cortexkit_role_agent_data::REQUIRED_OPS
+                .iter()
+                .map(|op| (*op).to_owned())
+                .collect(),
+        });
+    }
+    // The phone reaches ck-mc through Callosum, which relays only
+    // management-surface operations, so the reads it uses are also
+    // declared there, as queries.
+    provides.push(ProviderRole::ManagementSurface {
+        operations: MANAGEMENT_APP_METHODS
+            .iter()
+            .map(|method| subc_protocol::manifest::ManagementOperation {
+                name: (*method).into(),
+                kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                description: None,
+            })
+            .collect(),
+        config_schema: json!({ "type": "object" }),
+        observability: Vec::new(),
+        identity_scope: Vec::new(),
+        concurrency: Concurrency::ModuleManaged,
+    });
+    let mut claims = vec![
+        COMPACTION_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
+        // The runner sends its signed floor (reasoning it strips after
+        // a tool-set change) only to providers declaring this.
+        cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
+        "mc-app-read/v1".to_owned(),
+        "mc-context-read/v1".to_owned(),
+        // Core finds tool providers and step-transform providers in
+        // the daemon's module catalog by these claims, before it calls
+        // `role.describe`. Without them core composes Magic Context
+        // into no plan: no tools, no compaction, no `pre_user` hook.
+        cortexkit_role_tool_provider::PROVIDES.to_owned(),
+        step::PROVIDES.to_owned(),
+        subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
+        subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
+    ];
+    if agent_data {
+        claims.push(cortexkit_role_agent_data::PROVIDES.to_owned());
+    }
+    ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
+        .provides(provides)
         // The daemon puts a scope's folder and project on a route's stamp
         // only for a provider that asks; they are where a session's project
         // comes from.
         .capabilities(Some(CapabilityDeclarations {
-            provides: vec![
-                COMPACTION_PROVIDES.to_owned(),
-                cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
-                // The runner sends its signed floor (reasoning it strips after
-                // a tool-set change) only to providers declaring this.
-                cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
-                cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
-                "mc-app-read/v1".to_owned(),
-                "mc-context-read/v1".to_owned(),
-                // Core finds tool providers and step-transform providers in
-                // the daemon's module catalog by these claims, before it calls
-                // `role.describe`. Without them core composes Magic Context
-                // into no plan: no tools, no compaction, no `pre_user` hook.
-                cortexkit_role_tool_provider::PROVIDES.to_owned(),
-                step::PROVIDES.to_owned(),
-                subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
-                subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
-            ],
+            provides: claims,
             requires: Vec::new(),
             must_never_reach: Vec::new(),
         }))
@@ -597,6 +622,16 @@ impl RunnerClient for SubcRunnerClient {
         }
         engram_result(value)
     }
+
+    /// The module ids that claim `capability` in the daemon's catalog, by
+    /// the same lookup routing uses to find its provider.
+    async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
+        let consumer = self.consumer().await?;
+        consumer
+            .resolve_providers(capability)
+            .await
+            .map_err(|error| format!("{error:?}"))
+    }
 }
 
 /// Engram answers a device-streams call as `{"result": <answer>}`; a
@@ -634,6 +669,9 @@ pub struct Handler {
     bound: Mutex<HashMap<u16, Bound>>,
     app_bound: Mutex<HashMap<u16, AppCaller>>,
     context_bound: Mutex<std::collections::HashSet<u16>>,
+    /// Every bound `agent-data` route, by channel, with the caller the
+    /// daemon stamped on it.
+    agent_data_bound: Mutex<HashMap<u16, String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -673,6 +711,52 @@ const MANAGEMENT_APP_METHODS: &[&str] = &[
     "context.search",
     "context.watch",
 ];
+
+/// Whether a route is opened to the `agent-data` service: by its target or
+/// by the role it declares.
+fn agent_data_route(request: &RouteBindRequest) -> bool {
+    matches!(&request.target, RouteTarget::InternalService { service_id, .. } if service_id == cortexkit_role_agent_data::SERVICE_ID)
+        || request
+            .role_versions
+            .as_ref()
+            .is_some_and(|roles| roles.contains_key(cortexkit_role_agent_data::ROLE))
+}
+
+/// An `agent-data` route is bound only on ck-mc's own service, and only for
+/// the caller the contract admits. The caller is the principal the daemon
+/// stamped on the bind, never anything the caller says, and it is checked
+/// again on every request before the request is decoded.
+fn agent_data_admission(
+    request: &RouteBindRequest,
+) -> Result<String, cortexkit_role_agent_data::errors::ErrorBody> {
+    use cortexkit_role_agent_data::errors::{ErrorBody, RefusalCode};
+    let target = matches!(&request.target,
+        RouteTarget::InternalService { module_id, service_id }
+        if module_id == crate::MODULE_ID && service_id == cortexkit_role_agent_data::SERVICE_ID);
+    let caller = principal_text(request.principal.as_ref());
+    if !target || !cortexkit_role_agent_data::caller_admitted(&caller) {
+        return Err(ErrorBody::new(
+            RefusalCode::CallerForbidden,
+            format!(
+                "Only {} may open an agent-data route to ck-mc.",
+                cortexkit_role_agent_data::ADMITTED_CALLER
+            ),
+        ));
+    }
+    Ok(caller)
+}
+
+/// A principal as the agent-data contract spells callers:
+/// `reserved:<module id>`, `direct` or `unverified`; empty when the daemon
+/// stamped none.
+fn principal_text(principal: Option<&Principal>) -> String {
+    match principal {
+        Some(Principal::Reserved { module_id }) => format!("reserved:{module_id}"),
+        Some(Principal::Direct) => "direct".to_owned(),
+        Some(Principal::Unverified) => "unverified".to_owned(),
+        None => String::new(),
+    }
+}
 
 fn context_admission(request: &RouteBindRequest) -> Result<(), Refusal> {
     let target = matches!(&request.target,
@@ -783,7 +867,25 @@ impl Handler {
             bound: Mutex::default(),
             app_bound: Mutex::default(),
             context_bound: Mutex::default(),
+            agent_data_bound: Mutex::default(),
         }
+    }
+
+    /// An `agent-data` request on `channel`, when that channel is a bound
+    /// `agent-data` route: the reply's bytes or the contract's refusal.
+    /// `None` for any other channel.
+    async fn agent_data(
+        &self,
+        channel: u16,
+        body: &[u8],
+    ) -> Option<Result<Vec<u8>, cortexkit_role_agent_data::errors::ErrorBody>> {
+        let caller = self
+            .agent_data_bound
+            .lock()
+            .expect("agent-data routes")
+            .get(&channel)
+            .cloned()?;
+        Some(self.module.agent_data(&caller, body).await)
     }
 
     async fn app(
@@ -1158,6 +1260,33 @@ impl ModuleHandler for Handler {
             .lock()
             .expect("context routes")
             .remove(&request.handle.channel);
+        self.agent_data_bound
+            .lock()
+            .expect("agent-data routes")
+            .remove(&request.handle.channel);
+        // First: app admission below takes every other internal-service
+        // route and would judge Entorhinal as an app caller. With moves off
+        // an agent-data route goes on like a route to any service ck-mc
+        // does not declare, and is refused the same way.
+        if self.module.agent_data_enabled() && agent_data_route(request) {
+            return match agent_data_admission(request) {
+                Ok(caller) => {
+                    self.agent_data_bound
+                        .lock()
+                        .expect("agent-data routes")
+                        .insert(request.handle.channel, caller);
+                    BindDecision::accept()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target = ?request.target,
+                        principal = ?request.principal,
+                        "ck-mc refused an agent-data route at bind: only reserved:entorhinal may open one"
+                    );
+                    BindDecision::reject(error.code.as_str(), error.message)
+                }
+            };
+        }
         if matches!(&request.target, RouteTarget::InternalService { service_id, .. } if service_id == crate::context_read::ROLE.0)
             || request
                 .role_versions
@@ -1289,6 +1418,24 @@ impl ModuleHandler for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        // Before any other route: a move's request never reaches a session,
+        // app or context handler.
+        if let Some(answer) = self.agent_data(ctx.route_handle().channel, &body).await {
+            return match answer {
+                Ok(reply) => HandlerOutcome::Response(reply),
+                Err(refusal) => match refusal.detail {
+                    Some(detail) => HandlerOutcome::ErrorWithDetail {
+                        code: refusal.code.as_str().to_owned(),
+                        message: refusal.message,
+                        detail,
+                    },
+                    None => HandlerOutcome::Error {
+                        code: refusal.code.as_str().to_owned(),
+                        message: refusal.message,
+                    },
+                },
+            };
+        }
         let context = self
             .context_bound
             .lock()
@@ -1346,6 +1493,10 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
 #[cfg(test)]
 #[path = "transport_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "agent_data/transport_tests.rs"]
+mod agent_data_transport_tests;
 
 #[cfg(test)]
 mod config_tests {
