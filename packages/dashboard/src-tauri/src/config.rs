@@ -405,7 +405,7 @@ pub fn discover_project_configs() -> Vec<ProjectConfigEntry> {
 pub fn discover_project_configs_with_db(
     context_db_path: Option<&PathBuf>,
     data_home: &Path,
-    _config_home: &Path,
+    config_home: &Path,
     overrides: &crate::db::OpenCodeDbOverrides,
 ) -> Vec<ProjectConfigEntry> {
     // ── 1. Collect project worktrees from context.db ──────────────
@@ -415,10 +415,17 @@ pub fn discover_project_configs_with_db(
     let mut worktree_map: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new(); // worktree_path → display_name
 
-    let opencode_db = crate::db::resolve_opencode_db_path_for(data_home, overrides);
+    // Every OpenCode store the dashboard reads, resolved from the given
+    // folders rather than the process environment.
+    let (_, opencode_stores) = crate::db::store_list_for(
+        data_home,
+        overrides,
+        &crate::db::parse_runner_roots(&crate::db::runner_roots_path(data_home)),
+        &crate::db::configured_store_values(&resolve_user_config_path(config_home)),
+    );
     if let Some(db_path) = context_db_path {
         if let Ok(conn) = crate::db::open_readonly(db_path) {
-            if let Ok(projects) = crate::db::get_projects_for_config(&conn, opencode_db.as_ref()) {
+            if let Ok(projects) = crate::db::get_projects_for_config(&conn, &opencode_stores) {
                 for p in &projects {
                     if let Some(path) = &p.path {
                         if !path.is_empty() {
@@ -430,10 +437,16 @@ pub fn discover_project_configs_with_db(
         }
     }
 
-    // ── 2. Enrich from the resolved OpenCode DB (names + extra projects) ──
-    if let Some(ref opencode_path) = opencode_db {
-        if let Ok((conn, _generation)) = crate::db::open_opencode_readonly(opencode_path) {
-            collect_opencode_db_projects(&conn, &mut worktree_map);
+    // ── 2. Enrich from the OpenCode stores (names + extra projects) ──
+    for store in &opencode_stores {
+        if let Ok(found) = crate::db::read_store(&store.path, |conn| {
+            let mut found = std::collections::BTreeMap::new();
+            collect_opencode_db_projects(conn, &mut found);
+            found
+        }) {
+            for (worktree, name) in found {
+                worktree_map.entry(worktree).or_insert(name);
+            }
         }
     }
 

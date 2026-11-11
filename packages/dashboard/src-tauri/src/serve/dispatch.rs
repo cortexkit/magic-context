@@ -817,6 +817,10 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                 &crate::db::opencode_overrides(),
             ))
         }
+        "get_opencode_stores" => {
+            parse_args::<NoArgs>(args)?;
+            json(crate::db::opencode_store_rows())
+        }
         "save_project_config" => {
             let a: SaveProjectConfigArgs = parse_args(args)?;
             json(

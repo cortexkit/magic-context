@@ -727,6 +727,13 @@ pub fn get_project_configs(state: State<'_, AppState>) -> Vec<config::ProjectCon
     )
 }
 
+/// Every OpenCode store the dashboard reads or was asked to read, for the
+/// Config screen's "Session stores" section.
+#[tauri::command(async)]
+pub fn get_opencode_stores() -> Vec<db::OpenCodeStoreRow> {
+    db::opencode_store_rows()
+}
+
 #[tauri::command(async)]
 pub fn save_project_config(project_path: String, content: String) -> Result<(), String> {
     config::write_project_config(&project_path, &content)

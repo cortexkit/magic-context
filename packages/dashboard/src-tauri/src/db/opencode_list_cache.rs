@@ -25,11 +25,12 @@
 //! shows up within that minute. OpenCode 2's `session_v2` list is already
 //! one seek per session, so it is simply re-run when the store changed.
 
+use super::opencode_stores::{open_store, StoreConnection, StoreOpenError};
 use super::{
     filter_opencode_cache_candidates, load_recent_opencode_cache_sessions_with_cache,
-    open_readonly, opencode_cache_activity_note, opencode_generation_harness,
-    opencode_store_generations, table_exists, CacheSessionListEntry, OpenCodeCachePresenceCache,
-    OpenCodeSessions, OpenCodeStoreGeneration,
+    opencode_cache_activity_note, opencode_generation_harness, opencode_store_generations,
+    table_exists, CacheSessionListEntry, OpenCodeCachePresenceCache, OpenCodeSessions,
+    OpenCodeStoreGeneration,
 };
 use crate::broca_wal::file_identity;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -257,10 +258,14 @@ fn hidden_fingerprint(hidden: &HashSet<String>) -> u64 {
     })
 }
 
+/// The list for one store. It keeps its connection between polls, but never
+/// a read snapshot: every statement is finished or reset before a poll
+/// returns (see `release_open_reads`), so the store's owner can always
+/// checkpoint.
 pub(super) struct OpenCodeListCache {
     path: PathBuf,
     file_key: Option<(u64, u64)>,
-    conn: Connection,
+    store: StoreConnection,
     data_version: Option<i64>,
     v1: Option<V1Index>,
     snapshot: Option<Snapshot>,
@@ -268,18 +273,18 @@ pub(super) struct OpenCodeListCache {
 }
 
 impl OpenCodeListCache {
-    pub(super) fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = open_readonly(&path.to_path_buf())?;
+    pub(super) fn open(path: &Path) -> Result<Self, StoreOpenError> {
+        let store = open_store(path)?;
         // A sort that remains (OpenCode 2's ordering) stays in memory rather
         // than spilling to a temporary file.
-        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        store.conn.pragma_update(None, "temp_store", "MEMORY")?;
         Ok(Self {
             path: path.to_path_buf(),
             file_key: std::fs::metadata(path)
                 .ok()
                 .as_ref()
                 .and_then(file_identity),
-            conn,
+            store,
             data_version: None,
             v1: None,
             snapshot: None,
@@ -287,7 +292,10 @@ impl OpenCodeListCache {
         })
     }
 
-    /// True when this cache still reads the file now at `path`.
+    /// True when this cache still reads the file now at `path`, opened the
+    /// way a fresh open would open it. An immutable connection never sees a
+    /// change through `PRAGMA data_version`, so a changed file, or WAL files
+    /// appearing because the owner started, means opening it again.
     pub(super) fn serves(&self, path: &Path) -> bool {
         self.path == path
             && std::fs::metadata(path)
@@ -295,11 +303,28 @@ impl OpenCodeListCache {
                 .as_ref()
                 .and_then(file_identity)
                 == self.file_key
+            && self.store.mode_current()
+    }
+
+    /// Ends any statement or transaction left open by the poll that just ran,
+    /// and reports whether that poll's reads can be trusted (an immutable
+    /// store that changed meanwhile cannot).
+    pub(super) fn finish_poll(&self) -> bool {
+        self.store.release_open_reads();
+        self.store.unchanged()
+    }
+
+    /// Whether the store holds a session with this id, as of the last poll.
+    pub(super) fn owns(&self, session_id: &str) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.owners.owner(session_id).is_some())
     }
 
     /// Brings the snapshot up to the store's current committed state.
     fn refresh(&mut self, now: Instant) -> rusqlite::Result<&mut Snapshot> {
         let version: i64 = self
+            .store
             .conn
             .query_row("PRAGMA data_version", [], |row| row.get(0))?;
         let full_scan_due = self
@@ -308,13 +333,13 @@ impl OpenCodeListCache {
             .is_some_and(|index| index.full_scan_due(now));
         if self.data_version != Some(version) || self.snapshot.is_none() || full_scan_due {
             self.snapshot = None;
-            let generations = opencode_store_generations(&self.conn)?;
+            let generations = opencode_store_generations(&self.store.conn)?;
             let mut owners = HashMap::new();
             let mut children = HashSet::new();
             if generations.contains(&OpenCodeStoreGeneration::V1)
-                && table_exists(&self.conn, "session")
+                && table_exists(&self.store.conn, "session")
             {
-                V1Index::refresh(&mut self.v1, &self.conn, now)?;
+                V1Index::refresh(&mut self.v1, &self.store.conn, now)?;
                 if let Some(index) = &self.v1 {
                     for (id, row) in &index.rows {
                         owners.insert(id.clone(), OpenCodeStoreGeneration::V1);
@@ -327,9 +352,10 @@ impl OpenCodeListCache {
                 self.v1 = None;
             }
             if generations.contains(&OpenCodeStoreGeneration::V2)
-                && table_exists(&self.conn, "session_v2")
+                && table_exists(&self.store.conn, "session_v2")
             {
                 let mut stmt = self
+                    .store
                     .conn
                     .prepare_cached("SELECT id, parent_id FROM session_v2")?;
                 let mut cursor = stmt.query([])?;
@@ -346,7 +372,7 @@ impl OpenCodeListCache {
             }
             let note = generations
                 .iter()
-                .find_map(|&generation| opencode_cache_activity_note(&self.conn, generation));
+                .find_map(|&generation| opencode_cache_activity_note(&self.store.conn, generation));
             self.snapshot = Some(Snapshot {
                 owners: OpenCodeSessions {
                     generations,
@@ -395,7 +421,7 @@ impl OpenCodeListCache {
                 (OpenCodeStoreGeneration::V1, Some(index)) => {
                     let candidates = index.candidates(&snapshot.owners);
                     filter_opencode_cache_candidates(
-                        &self.conn,
+                        &self.store.conn,
                         generation,
                         limit,
                         hidden_subagent_ids,
@@ -410,7 +436,7 @@ impl OpenCodeListCache {
                     )
                 }
                 _ => load_recent_opencode_cache_sessions_with_cache(
-                    &self.conn,
+                    &self.store.conn,
                     generation,
                     limit,
                     hidden_subagent_ids,
@@ -507,7 +533,7 @@ mod tests {
         }
 
         fn uncached(&self, limit: usize, hidden: &HashSet<String>) -> Vec<(String, i64)> {
-            let conn = open_readonly(&self.path).unwrap();
+            let conn = super::super::open_readonly(&self.path).unwrap();
             ids(load_recent_opencode_cache_sessions_uncached(&conn, limit, hidden).0)
         }
     }
@@ -522,7 +548,7 @@ mod tests {
         let (mut current, mut high) = (0, 0);
         unsafe {
             rusqlite::ffi::sqlite3_db_status(
-                cache.conn.handle(),
+                cache.store.conn.handle(),
                 rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
                 &mut current,
                 &mut high,

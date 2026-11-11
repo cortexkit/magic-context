@@ -306,19 +306,73 @@ pub fn opencode_overrides() -> OpenCodeDbOverrides {
     }
 }
 
-pub fn resolve_opencode_db_path_for(
-    data_home: &Path,
-    overrides: &OpenCodeDbOverrides,
-) -> Option<PathBuf> {
-    let resolution = resolve_opencode_db_for(data_home, overrides);
-    (resolution.path != Path::new(":memory:") && resolution.path.exists())
-        .then_some(resolution.path)
+mod opencode_stores;
+pub(crate) use opencode_stores::{
+    configured_store_values, parse_runner_roots, read_store, readable_opencode_stores,
+    runner_roots_path, store_list_for, ReadableStore,
+};
+pub use opencode_stores::{opencode_store_rows, OpenCodeStoreRow, StoreOrigin};
+
+/// Runs `read` on every readable OpenCode store, in store-list order, with
+/// that store's session index, and returns what each read produced. A store
+/// that cannot be opened, or whose generation is unknown, is skipped.
+fn for_each_opencode_store<T>(
+    stores: &[ReadableStore],
+    mut read: impl FnMut(&ReadableStore, &Connection, &OpenCodeSessions) -> T,
+) -> Vec<T> {
+    stores
+        .iter()
+        .filter_map(|store| {
+            read_store(&store.path, |conn| {
+                let sessions = resolve_opencode_sessions(conn).ok()?;
+                Some(read(store, conn, &sessions))
+            })
+            .ok()
+            .flatten()
+        })
+        .collect()
 }
 
-pub fn resolve_opencode_db_path() -> Option<PathBuf> {
-    let data_home = data_home();
-    let overrides = opencode_overrides();
-    resolve_opencode_db_path_for(&data_home, &overrides)
+/// Runs `read` on the first store, in store-list order, that holds
+/// `session_id`. Session ids are unique across OpenCode stores; when a copied
+/// store holds the same id twice, the store listed first wins, which is the
+/// same store the merged lists show the session from. The index passed to
+/// `read` knows only this session's owner, found with one primary-key probe
+/// per generation rather than a scan of every session id.
+fn with_opencode_session_store<T>(
+    session_id: &str,
+    mut read: impl FnMut(&Connection, OpenCodeStoreGeneration) -> T,
+) -> Option<T> {
+    readable_opencode_stores().iter().find_map(|store| {
+        read_store(&store.path, |conn| {
+            let generation = opencode_session_owner(conn, session_id).ok()??;
+            Some(read(conn, generation))
+        })
+        .ok()
+        .flatten()
+    })
+}
+
+/// The generation that owns `session_id` in this store, if any: the latest
+/// generation whose session table holds the id, as `resolve_opencode_sessions`
+/// decides for every id.
+fn opencode_session_owner(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<OpenCodeStoreGeneration>, rusqlite::Error> {
+    for &generation in opencode_store_generations(conn)?.iter().rev() {
+        let table = opencode_session_table(generation);
+        if table_exists(conn, table)
+            && conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                [session_id],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Ok(Some(generation));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,14 +454,6 @@ fn opencode_store_generations(
     Ok(generations)
 }
 
-fn open_opencode_sessions(
-    path: &PathBuf,
-) -> Result<(Connection, OpenCodeSessions), rusqlite::Error> {
-    let conn = open_readonly(path)?;
-    let sessions = resolve_opencode_sessions(&conn)?;
-    Ok((conn, sessions))
-}
-
 #[cfg(test)]
 fn opencode_store_generation(
     conn: &Connection,
@@ -436,15 +482,6 @@ fn opencode_store_generation(
             "OpenCode store generation is unknown; refusing generation-specific database access",
         ),
     )))
-}
-
-pub fn open_opencode_readonly(
-    path: &PathBuf,
-) -> Result<(Connection, OpenCodeStoreGeneration), rusqlite::Error> {
-    let conn = open_readonly(path)?;
-    let resolved = resolve_opencode_sessions(&conn)?;
-    let generation = *resolved.generations.last().expect("resolved generation");
-    Ok((conn, generation))
 }
 
 /// The session table for one generation. Converted stores retain `session`
@@ -1978,20 +2015,33 @@ pub fn load_raw_db_cache_events(
     limit: usize,
     since_timestamp: Option<i64>,
 ) -> Result<Vec<RawDbCacheEvent>, rusqlite::Error> {
-    let Some(opencode_db_path) = resolve_opencode_db_path() else {
-        return Ok(Vec::new());
-    };
-
-    let (conn, sessions) = open_opencode_sessions(&opencode_db_path)?;
     let mut events = Vec::new();
-    for &generation in &sessions.generations {
-        events.extend(load_raw_db_cache_events_for_generation(
-            &conn,
-            &sessions,
-            generation,
-            limit,
-            since_timestamp,
-        )?);
+    let mut seen_sessions: HashSet<String> = HashSet::new();
+    for store_events in for_each_opencode_store(&readable_opencode_stores(), |_, conn, sessions| {
+        let mut store_events = Vec::new();
+        for &generation in &sessions.generations {
+            store_events.extend(load_raw_db_cache_events_for_generation(
+                conn,
+                sessions,
+                generation,
+                limit,
+                since_timestamp,
+            )?);
+        }
+        Ok::<_, rusqlite::Error>((
+            store_events,
+            sessions.owners.keys().cloned().collect::<Vec<_>>(),
+        ))
+    }) {
+        let (store_events, store_sessions) = store_events?;
+        // A session id held by an earlier store (a copied store) is read
+        // from that store only, like every other merged reader.
+        events.extend(
+            store_events
+                .into_iter()
+                .filter(|event| !seen_sessions.contains(&event.session_id)),
+        );
+        seen_sessions.extend(store_sessions);
     }
     events.sort_by_key(|event| std::cmp::Reverse(event.timestamp));
     events.truncate(limit.saturating_mul(10));
@@ -2732,39 +2782,47 @@ fn build_db_cache_events_with_overrides(
         .map(|((_, sid), _)| sid.clone())
         .collect();
     if !oc_session_ids.is_empty() {
-        if let Some(opencode_db_path) = resolve_opencode_db_path() {
-            if let Ok((conn, resolved)) = open_opencode_sessions(&opencode_db_path) {
-                for &generation in &resolved.generations {
-                    let first_event_sql = match generation {
-                        OpenCodeStoreGeneration::V1 => FIRST_OPENCODE_CACHE_EVENT_SQL,
-                        OpenCodeStoreGeneration::V2 => FIRST_OPENCODE2_CACHE_EVENT_SQL,
-                    };
-                    let harness = match generation {
-                        OpenCodeStoreGeneration::V1 => Harness::Opencode,
-                        OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-                    };
-                    if let Ok(mut stmt) = conn.prepare(first_event_sql) {
-                        for sid in &oc_session_ids {
-                            if !resolved.owns(sid, generation) {
-                                continue;
-                            }
-                            let db_earliest = stmt
-                                .query_row(params![&sid], |row| row.get::<_, i64>(0))
-                                .optional()
-                                .ok()
-                                .flatten();
-                            let window_earliest =
-                                earliest_ts_in_window.get(&(harness, sid.clone()));
-                            if db_earliest
-                                .zip(window_earliest)
-                                .is_some_and(|(db, window)| *window <= db)
-                            {
-                                true_first_sessions.insert((harness, sid.clone()));
-                            }
+        let mut claimed: HashSet<String> = HashSet::new();
+        for found in for_each_opencode_store(&readable_opencode_stores(), |_, conn, resolved| {
+            let mut found: Vec<(Harness, String, Option<i64>)> = Vec::new();
+            for &generation in &resolved.generations {
+                let first_event_sql = match generation {
+                    OpenCodeStoreGeneration::V1 => FIRST_OPENCODE_CACHE_EVENT_SQL,
+                    OpenCodeStoreGeneration::V2 => FIRST_OPENCODE2_CACHE_EVENT_SQL,
+                };
+                let harness = opencode_generation_harness(generation);
+                if let Ok(mut stmt) = conn.prepare(first_event_sql) {
+                    for sid in &oc_session_ids {
+                        if !resolved.owns(sid, generation) {
+                            continue;
                         }
+                        let db_earliest = stmt
+                            .query_row(params![&sid], |row| row.get::<_, i64>(0))
+                            .optional()
+                            .ok()
+                            .flatten();
+                        found.push((harness, sid.clone(), db_earliest));
                     }
                 }
             }
+            found
+        }) {
+            // The store listed first answers for a session id it holds.
+            let mut store_claims = Vec::new();
+            for (harness, sid, db_earliest) in found {
+                if claimed.contains(&sid) {
+                    continue;
+                }
+                store_claims.push(sid.clone());
+                let window_earliest = earliest_ts_in_window.get(&(harness, sid.clone()));
+                if db_earliest
+                    .zip(window_earliest)
+                    .is_some_and(|(db, window)| *window <= db)
+                {
+                    true_first_sessions.insert((harness, sid));
+                }
+            }
+            claimed.extend(store_claims);
         }
     }
 
@@ -3883,39 +3941,105 @@ type OpenCodeCachePresenceCache = HashMap<String, (i64, bool)>;
 
 mod opencode_list_cache;
 
-static OPENCODE_LIST_CACHE: OnceLock<Mutex<Option<opencode_list_cache::OpenCodeListCache>>> =
+type OpenCodeListCacheSlot = Arc<Mutex<Option<opencode_list_cache::OpenCodeListCache>>>;
+
+/// One list cache per store, keyed by the store's path.
+static OPENCODE_LIST_CACHES: OnceLock<Mutex<HashMap<PathBuf, OpenCodeListCacheSlot>>> =
     OnceLock::new();
 
-/// Runs `f` on the process-wide OpenCode list cache for the current store,
-/// (re)opening it when the store path or file changed. `None` when there is
-/// no OpenCode store or it cannot be opened.
-fn with_opencode_list_cache<T>(
-    f: impl FnOnce(&mut opencode_list_cache::OpenCodeListCache) -> T,
-) -> Option<T> {
-    let path = resolve_opencode_db_path()?;
-    let mut guard = OPENCODE_LIST_CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()?;
-    if !guard.as_ref().is_some_and(|cache| cache.serves(&path)) {
-        *guard = None;
-        *guard = Some(opencode_list_cache::OpenCodeListCache::open(&path).ok()?);
+/// Runs `f` on the process-wide list cache of every readable OpenCode store,
+/// (re)opening a cache when its store's file changed, and returns the
+/// results in store-list order. Caches of stores no longer listed are
+/// dropped. With more than one store, each runs on its own thread, so a large
+/// second store delays the poll by its own read time instead of adding to
+/// the first store's.
+fn with_opencode_list_caches<T: Send>(
+    f: impl Fn(&ReadableStore, &mut opencode_list_cache::OpenCodeListCache) -> T + Sync,
+) -> Vec<T> {
+    let stores = readable_opencode_stores();
+    let slots: Vec<(ReadableStore, OpenCodeListCacheSlot)> = {
+        let Ok(mut caches) = OPENCODE_LIST_CACHES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        else {
+            return Vec::new();
+        };
+        caches.retain(|path, _| stores.iter().any(|store| &store.path == path));
+        stores
+            .into_iter()
+            .map(|store| {
+                let slot = caches.entry(store.path.clone()).or_default().clone();
+                (store, slot)
+            })
+            .collect()
+    };
+    let run = |(store, slot): &(ReadableStore, OpenCodeListCacheSlot)| -> Option<T> {
+        let mut guard = slot.lock().ok()?;
+        if !guard
+            .as_ref()
+            .is_some_and(|cache| cache.serves(&store.path))
+        {
+            *guard = None;
+            *guard = Some(opencode_list_cache::OpenCodeListCache::open(&store.path).ok()?);
+        }
+        let cache = guard.as_mut()?;
+        let value = f(store, cache);
+        if cache.finish_poll() {
+            Some(value)
+        } else {
+            // An immutable store changed under this poll: drop what it read.
+            *guard = None;
+            None
+        }
+    };
+    if slots.len() <= 1 {
+        return slots.iter().filter_map(run).collect();
     }
-    guard.as_mut().map(f)
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = slots
+            .iter()
+            .map(|slot| scope.spawn(move || run(slot)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
 }
 
-/// The recent OpenCode sessions for the Cache tab, plus a note to show when
-/// OpenCode 2 sessions can only be dated by their session row (see
-/// `OPENCODE2_ACTIVITY_FALLBACK_NOTE`). Served from `OpenCodeListCache`,
-/// which reads only what changed since the previous poll.
+/// The recent OpenCode sessions for the Cache tab, merged across stores,
+/// plus a note to show when OpenCode 2 sessions can only be dated by their
+/// session row (see `OPENCODE2_ACTIVITY_FALLBACK_NOTE`). Served from each
+/// store's `OpenCodeListCache`, which reads only what changed since the
+/// previous poll. A session id found in two stores (a copied store) is
+/// listed once, from the store listed first.
 fn load_recent_opencode_cache_sessions(
     limit: usize,
     hidden_subagent_ids: &HashSet<String>,
 ) -> (Vec<CacheSessionListEntry>, Option<&'static str>) {
-    with_opencode_list_cache(|cache| {
+    let per_store = with_opencode_list_caches(|_, cache| {
         cache.recent_sessions(limit, hidden_subagent_ids, std::time::Instant::now())
-    })
-    .unwrap_or((Vec::new(), None))
+    });
+    merge_opencode_cache_lists(per_store, limit)
+}
+
+fn merge_opencode_cache_lists(
+    per_store: Vec<(Vec<CacheSessionListEntry>, Option<&'static str>)>,
+    limit: usize,
+) -> (Vec<CacheSessionListEntry>, Option<&'static str>) {
+    let mut seen = HashSet::new();
+    let mut sessions = Vec::new();
+    let mut note = None;
+    for (rows, store_note) in per_store {
+        note = note.or(store_note);
+        sessions.extend(
+            rows.into_iter()
+                .filter(|row| seen.insert(row.session_id.clone())),
+        );
+    }
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity_ms));
+    sessions.truncate(limit);
+    (sessions, note)
 }
 
 /// The same list from one connection with nothing kept between calls: the
@@ -4287,13 +4411,11 @@ pub fn load_cache_session_titles(
         .map(|(_, sid)| sid.clone())
         .collect();
     if !opencode_ids.is_empty() {
-        if let Some(path) = resolve_opencode_db_path() {
-            if let Ok((conn, resolved)) = open_opencode_sessions(&path) {
+        for store_titles in
+            for_each_opencode_store(&readable_opencode_stores(), |_, conn, resolved| {
+                let mut store_titles = Vec::new();
                 for &generation in &resolved.generations {
-                    let harness = match generation {
-                        OpenCodeStoreGeneration::V1 => Harness::Opencode,
-                        OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-                    };
+                    let harness = opencode_generation_harness(generation);
                     let placeholders = vec!["?"; opencode_ids.len()].join(",");
                     let sql = format!(
                         "SELECT id, COALESCE(title, '') FROM {} WHERE id IN ({placeholders})",
@@ -4307,12 +4429,17 @@ pub fn load_cache_session_titles(
                         {
                             for (sid, title) in rows.flatten() {
                                 if !title.is_empty() && resolved.owns(&sid, generation) {
-                                    titles.insert((harness, sid), title);
+                                    store_titles.push(((harness, sid), title));
                                 }
                             }
                         }
                     }
                 }
+                store_titles
+            })
+        {
+            for (key, title) in store_titles {
+                titles.entry(key).or_insert(title);
             }
         }
     }
@@ -4656,22 +4783,16 @@ fn get_opencode_session_cache_events(
     limit: Option<usize>,
     since_timestamp: Option<i64>,
 ) -> Vec<DbCacheEvent> {
-    let Some(opencode_db_path) = resolve_opencode_db_path() else {
-        return Vec::new();
-    };
-    let Ok((conn, sessions)) = open_opencode_sessions(&opencode_db_path) else {
-        return Vec::new();
-    };
-    let Some(generation) = sessions.owner(session_id) else {
-        return Vec::new();
-    };
-    get_opencode_session_cache_events_from_conn(
-        &conn,
-        generation,
-        session_id,
-        limit,
-        since_timestamp,
-    )
+    with_opencode_session_store(session_id, |conn, generation| {
+        get_opencode_session_cache_events_from_conn(
+            conn,
+            generation,
+            session_id,
+            limit,
+            since_timestamp,
+        )
+    })
+    .unwrap_or_default()
 }
 
 fn get_opencode_session_cache_events_from_conn(
@@ -4932,59 +5053,53 @@ pub struct ProjectInfo {
     pub path: Option<String>, // resolved filesystem path, if found
 }
 
-/// Resolve context project identities only against the supplied store and OpenCode path.
+/// Resolve context project identities only against the supplied store and OpenCode stores.
 /// Config discovery must not scan the operator's other session directories.
-pub fn get_projects_for_config(
+pub(crate) fn get_projects_for_config(
     conn: &Connection,
-    opencode_path: Option<&PathBuf>,
+    opencode_stores: &[ReadableStore],
 ) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
     let mut projects = get_project_identities(conn)?;
     let identities = load_session_identity_map_from_conn(conn);
     let mut paths = HashMap::new();
     let mut names = HashMap::new();
-    if let Some(path) = opencode_path {
-        if let Ok((opencode, resolved)) = open_opencode_sessions(path) {
-            for &generation in &resolved.generations {
-                let harness = match generation {
-                    OpenCodeStoreGeneration::V1 => Harness::Opencode,
-                    OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-                };
-                if let Ok(mut stmt) = opencode.prepare(&format!(
-                    "SELECT id, directory FROM {} WHERE directory IS NOT NULL AND directory != ''",
-                    opencode_session_table(generation)
-                )) {
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    }) {
-                        for (session_id, directory) in rows.flatten() {
-                            if !resolved.owns(&session_id, generation) {
-                                continue;
-                            }
-                            let identity =
-                                lookup_session_identity(&identities, harness, &session_id);
-                            if !identity.is_empty() {
-                                paths.insert(directory, identity);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Ok(mut stmt) = opencode.prepare("SELECT name, worktree FROM project") {
+    for_each_opencode_store(opencode_stores, |_, opencode, resolved| {
+        for &generation in &resolved.generations {
+            let harness = opencode_generation_harness(generation);
+            if let Ok(mut stmt) = opencode.prepare(&format!(
+                "SELECT id, directory FROM {} WHERE directory IS NOT NULL AND directory != ''",
+                opencode_session_table(generation)
+            )) {
                 if let Ok(rows) = stmt.query_map([], |row| {
-                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 }) {
-                    for (name, path) in rows.flatten() {
-                        if let Some(name) = name.filter(|name| !name.is_empty()) {
-                            names.insert(path.clone(), name);
+                    for (session_id, directory) in rows.flatten() {
+                        if !resolved.owns(&session_id, generation) {
+                            continue;
                         }
-                        paths
-                            .entry(path.clone())
-                            .or_insert_with(|| normalize_stored_project_path(&path));
+                        let identity = lookup_session_identity(&identities, harness, &session_id);
+                        if !identity.is_empty() {
+                            paths.insert(directory, identity);
+                        }
                     }
                 }
             }
         }
-    }
+        if let Ok(mut stmt) = opencode.prepare("SELECT name, worktree FROM project") {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for (name, path) in rows.flatten() {
+                    if let Some(name) = name.filter(|name| !name.is_empty()) {
+                        names.insert(path.clone(), name);
+                    }
+                    paths
+                        .entry(path.clone())
+                        .or_insert_with(|| normalize_stored_project_path(&path));
+                }
+            }
+        }
+    });
     for project in &mut projects {
         if let Some((path, _)) = paths
             .iter()
@@ -5167,38 +5282,31 @@ fn enumerate_memory_projects_with_names(
 fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, String)> {
     let mut dirs = Vec::new();
 
-    if let Some(oc) = resolve_opencode_db_path() {
-        if let Ok((conn, resolved)) = open_opencode_sessions(&oc) {
-            for &generation in &resolved.generations {
-                let harness = match generation {
-                    OpenCodeStoreGeneration::V1 => Harness::Opencode,
-                    OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-                };
-                if let Ok(mut stmt) = conn.prepare(&format!(
-                    "SELECT id, COALESCE(directory, '')
+    for_each_opencode_store(&readable_opencode_stores(), |_, conn, resolved| {
+        for &generation in &resolved.generations {
+            let harness = opencode_generation_harness(generation);
+            if let Ok(mut stmt) = conn.prepare(&format!(
+                "SELECT id, COALESCE(directory, '')
                  FROM {}
                  WHERE directory IS NOT NULL AND directory != ''",
-                    opencode_session_table(generation)
-                )) {
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    }) {
-                        for row in rows.flatten() {
-                            let (session_id, dir) = row;
-                            if !resolved.owns(&session_id, generation) {
-                                continue;
-                            }
-                            let identity =
-                                lookup_session_identity(identities, harness, &session_id);
-                            if !identity.is_empty() {
-                                dirs.push((identity, dir));
-                            }
+                opencode_session_table(generation)
+            )) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for (session_id, dir) in rows.flatten() {
+                        if !resolved.owns(&session_id, generation) {
+                            continue;
+                        }
+                        let identity = lookup_session_identity(identities, harness, &session_id);
+                        if !identity.is_empty() {
+                            dirs.push((identity, dir));
                         }
                     }
                 }
             }
         }
-    }
+    });
 
     for (harness, sessions) in [
         (Harness::Pi, pi_sessions::scan_pi_session_dir()),
@@ -5283,57 +5391,52 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
     let session_identities = load_session_identity_map();
     let identity_by_dir = session_identity_by_directory(&session_identities);
 
-    if let Some(opencode_db_path) = resolve_opencode_db_path() {
-        if let Ok((conn, resolved)) = open_opencode_sessions(&opencode_db_path) {
-            for &generation in &resolved.generations {
-                let harness = match generation {
-                    OpenCodeStoreGeneration::V1 => Harness::Opencode,
-                    OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-                };
-                if let Ok(mut stmt) = conn.prepare(&format!(
-                    "SELECT p.name, p.worktree, COUNT(s.id)
+    for_each_opencode_store(&readable_opencode_stores(), |_, conn, resolved| {
+        for &generation in &resolved.generations {
+            let harness = opencode_generation_harness(generation);
+            if let Ok(mut stmt) = conn.prepare(&format!(
+                "SELECT p.name, p.worktree, COUNT(s.id)
                  FROM project p LEFT JOIN {} s ON s.project_id = p.id
                  GROUP BY p.id, p.name, p.worktree",
-                    if generation == OpenCodeStoreGeneration::V1
-                        && resolved.generations.contains(&OpenCodeStoreGeneration::V2)
-                    {
-                        "(SELECT * FROM session WHERE id NOT IN (SELECT id FROM session_v2))"
-                    } else {
-                        opencode_session_table(generation)
-                    }
-                )) {
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    }) {
-                        for (name, worktree, count) in rows.flatten() {
-                            if let Some(allowed_paths) = project_paths_filter {
-                                if !allowed_paths.contains(&worktree) {
-                                    continue;
-                                }
-                            }
-                            let Some(identity) = identity_by_dir.get(&worktree).cloned() else {
+                if generation == OpenCodeStoreGeneration::V1
+                    && resolved.generations.contains(&OpenCodeStoreGeneration::V2)
+                {
+                    "(SELECT * FROM session WHERE id NOT IN (SELECT id FROM session_v2))"
+                } else {
+                    opencode_session_table(generation)
+                }
+            )) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }) {
+                    for (name, worktree, count) in rows.flatten() {
+                        if let Some(allowed_paths) = project_paths_filter {
+                            if !allowed_paths.contains(&worktree) {
                                 continue;
-                            };
-                            let entry = groups.entry(identity).or_default();
-                            if !name.is_empty() {
-                                entry.opencode_name = Some(name);
                             }
-                            entry.opencode_path = Some(worktree);
-                            if count > 0 {
-                                entry.harnesses.insert(harness);
-                            }
-                            entry.session_count =
-                                entry.session_count.saturating_add(count.max(0) as u32);
                         }
+                        let Some(identity) = identity_by_dir.get(&worktree).cloned() else {
+                            continue;
+                        };
+                        let entry = groups.entry(identity).or_default();
+                        if !name.is_empty() {
+                            entry.opencode_name = Some(name);
+                        }
+                        entry.opencode_path = Some(worktree);
+                        if count > 0 {
+                            entry.harnesses.insert(harness);
+                        }
+                        entry.session_count =
+                            entry.session_count.saturating_add(count.max(0) as u32);
                     }
                 }
             }
         }
-    }
+    });
 
     let mut pi_counts: HashMap<(Harness, String), (String, u32)> = HashMap::new();
     for (harness, sessions) in [
@@ -6985,23 +7088,27 @@ pub fn get_sessions(conn: &Connection) -> Result<Vec<SessionSummary>, rusqlite::
 }
 
 pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
-    let Some(opencode_db_path) = resolve_opencode_db_path() else {
-        return Vec::new();
-    };
-    let Ok((conn, sessions)) = open_opencode_sessions(&opencode_db_path) else {
-        return Vec::new();
-    };
-    sessions
-        .generations
-        .iter()
-        .flat_map(|&generation| {
-            list_opencode_sessions_for_generation(&conn, &sessions, generation, filter)
-        })
-        .collect()
+    // A session id held by two stores (a copied store) is listed once, from
+    // the store listed first.
+    let mut seen = HashSet::new();
+    for_each_opencode_store(&readable_opencode_stores(), |store, conn, sessions| {
+        sessions
+            .generations
+            .iter()
+            .flat_map(|&generation| {
+                list_opencode_sessions_for_generation(conn, store, sessions, generation, filter)
+            })
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .filter(|row| seen.insert(row.session_id.clone()))
+    .collect()
 }
 
 fn list_opencode_sessions_for_generation(
     conn: &Connection,
+    store: &ReadableStore,
     sessions: &OpenCodeSessions,
     generation: OpenCodeStoreGeneration,
     filter: &SessionFilter,
@@ -7061,7 +7168,8 @@ fn list_opencode_sessions_for_generation(
             &directory
         };
         let identity = lookup_session_identity(&session_identities, harness, &session_id);
-        let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false);
+        let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false)
+            || store.flags_as_helper(&session_id);
         // Friendly label: the named project wins; otherwise the directory's
         // basename. Never show a bare "/" (the global-project worktree) when the
         // session actually ran in a real directory.
@@ -7335,11 +7443,28 @@ fn load_subagent_map_from_conn(
 /// child. That column is the host's structural subagent signal and is present
 /// even when Magic Context has no `session_meta` row yet (or the row was
 /// mislabelled). Empty-string parent_id is treated as primary, matching the
-/// plugin fallback. Served from `OpenCodeListCache`, which tracks parents as
-/// it follows the session table, instead of a full scan per poll.
+/// plugin fallback. Served from each store's `OpenCodeListCache`, which
+/// tracks parents as it follows the session table, instead of a full scan
+/// per poll.
+///
+/// This is also where a store's own helper sessions are added (see
+/// `ReadableStore::flags_as_helper`): sessions a runner store says Magic
+/// Context owns are flagged like children, in that store only.
 fn load_opencode_store_child_session_ids() -> HashSet<String> {
-    with_opencode_list_cache(|cache| cache.child_session_ids(std::time::Instant::now()))
-        .unwrap_or_default()
+    with_opencode_list_caches(|store, cache| {
+        let now = std::time::Instant::now();
+        let mut flagged = cache.child_session_ids(now);
+        flagged.extend(
+            store
+                .helper_session_ids()
+                .filter(|id| cache.owns(id))
+                .map(str::to_string),
+        );
+        flagged
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn mark_opencode_store_children_as_subagents(flags: &mut HashMap<(Harness, String), bool>) {
@@ -7372,14 +7497,11 @@ pub fn get_session_messages(
 ) -> Result<Vec<SessionMessageRow>, rusqlite::Error> {
     match harness {
         Harness::Opencode | Harness::Opencode2 => {
-            let Some(opencode_db_path) = resolve_opencode_db_path() else {
-                return Ok(Vec::new());
-            };
-            let (conn, sessions) = open_opencode_sessions(&opencode_db_path)?;
-            match sessions.owner(session_id) {
-                Some(generation) => load_opencode_messages(&conn, generation, session_id),
-                None => Ok(Vec::new()),
-            }
+            Ok(with_opencode_session_store(session_id, |conn, generation| {
+                load_opencode_messages(conn, generation, session_id)
+            })
+            .transpose()?
+            .unwrap_or_default())
         }
         Harness::Pi | Harness::Omp => {
             let Some(path) = find_pi_session_path_for_harness(harness, session_id) else {
@@ -7408,36 +7530,63 @@ pub fn get_opencode_session_detail(
     conn: Option<&Connection>,
     session_id: &str,
 ) -> Result<Option<SessionDetail>, rusqlite::Error> {
-    let Some(opencode_db_path) = resolve_opencode_db_path() else {
-        return Ok(None);
-    };
-    let (oc_conn, sessions) = open_opencode_sessions(&opencode_db_path)?;
-    let Some(generation) = sessions.owner(session_id) else {
-        return Ok(None);
-    };
-    let row = oc_conn.query_row(
-        &format!(
-            "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
+    // Read everything this needs from the OpenCode store in one short visit,
+    // then close it before reading Magic Context's own store.
+    let found = with_opencode_session_store(session_id, |oc_conn, generation| {
+        let row = oc_conn.query_row(
+            &format!(
+                "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
                 COALESCE(s.directory, ''),
                 COALESCE(json_object('id', s.id, 'title', s.title, 'directory', s.directory), '{{}}')
          FROM {} s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
-            opencode_session_table(generation)
-        ),
-        [session_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        },
-    );
-    let Ok((session_id, title, project_name, worktree, directory, data_json)) = row else {
+                opencode_session_table(generation)
+            ),
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        );
+        let Ok(row) = row else {
+            return None;
+        };
+        // Cheap row counts for badge rendering. Both are O(rows-in-session) at
+        // worst but use only INTEGER aggregates (no JSON extraction or part-table
+        // join), so they're <20ms even for 37k-message sessions.
+        let (message_table, cache_predicate) = match generation {
+            OpenCodeStoreGeneration::V1 => (
+                "message",
+                "json_extract(data, '$.role') = 'assistant' AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0",
+            ),
+            OpenCodeStoreGeneration::V2 => (
+                "session_message",
+                "type = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL",
+            ),
+        };
+        let messages_count_sql =
+            format!("SELECT COUNT(*) FROM {message_table} WHERE session_id = ?1");
+        let messages_count: i64 = oc_conn
+            .query_row(&messages_count_sql, [session_id], |row| row.get(0))
+            .unwrap_or(0);
+        let cache_events_count_sql = format!(
+            "SELECT COUNT(*) FROM {message_table} WHERE session_id = ?1 AND {cache_predicate}"
+        );
+        let cache_events_count: i64 = oc_conn
+            .query_row(&cache_events_count_sql, [session_id], |row| row.get(0))
+            .unwrap_or(0);
+        Some((row, generation, messages_count, cache_events_count))
+    })
+    .flatten();
+    let Some((row, generation, messages_count, cache_events_count)) = found else {
         return Ok(None);
     };
+    let (session_id, title, project_name, worktree, directory, data_json) = row;
     // Prefer s.directory over p.worktree for identity/display: OpenCode buckets
     // git-repo sessions that had no remote/commit at creation under the `global`
     // project (worktree "/"), and the plugin keys identity off session.directory —
@@ -7447,31 +7596,7 @@ pub fn get_opencode_session_detail(
     } else {
         directory
     };
-
-    // Cheap row counts for badge rendering. Both are O(rows-in-session) at
-    // worst but use only INTEGER aggregates (no JSON extraction or part-table
-    // join), so they're <20ms even for 37k-message sessions.
-    let (harness, message_table, cache_predicate) = match generation {
-        OpenCodeStoreGeneration::V1 => (
-            Harness::Opencode,
-            "message",
-            "json_extract(data, '$.role') = 'assistant' AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0",
-        ),
-        OpenCodeStoreGeneration::V2 => (
-            Harness::Opencode2,
-            "session_message",
-            "type = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL",
-        ),
-    };
-    let messages_count_sql = format!("SELECT COUNT(*) FROM {message_table} WHERE session_id = ?1");
-    let messages_count: i64 = oc_conn
-        .query_row(&messages_count_sql, [&session_id], |row| row.get(0))
-        .unwrap_or(0);
-    let cache_events_count_sql =
-        format!("SELECT COUNT(*) FROM {message_table} WHERE session_id = ?1 AND {cache_predicate}");
-    let cache_events_count: i64 = oc_conn
-        .query_row(&cache_events_count_sql, [&session_id], |row| row.get(0))
-        .unwrap_or(0);
+    let harness = opencode_generation_harness(generation);
 
     let compartments = conn
         .map(|c| get_compartments(c, &session_id))
@@ -7786,38 +7911,30 @@ fn resolve_session_info(
         return result;
     }
 
-    let Some(opencode_db) = resolve_opencode_db_path() else {
-        return result;
-    };
-
-    let (conn, resolved) = match open_opencode_sessions(&opencode_db) {
-        Ok(value) => value,
-        Err(_) => return result,
-    };
     let session_identities = load_session_identity_map();
-    for &generation in &resolved.generations {
-        let Ok(mut stmt) = conn.prepare(&format!(
-            "SELECT s.id, COALESCE(s.title, '') FROM {} s",
-            opencode_session_table(generation)
-        )) else {
-            continue;
-        };
-        let harness = match generation {
-            OpenCodeStoreGeneration::V1 => Harness::Opencode,
-            OpenCodeStoreGeneration::V2 => Harness::Opencode2,
-        };
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) {
-            for (session_id, title) in rows.flatten() {
-                if !resolved.owns(&session_id, generation) {
-                    continue;
+    for_each_opencode_store(&readable_opencode_stores(), |_, conn, resolved| {
+        for &generation in &resolved.generations {
+            let Ok(mut stmt) = conn.prepare(&format!(
+                "SELECT s.id, COALESCE(s.title, '') FROM {} s",
+                opencode_session_table(generation)
+            )) else {
+                continue;
+            };
+            let harness = opencode_generation_harness(generation);
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for (session_id, title) in rows.flatten() {
+                    if !resolved.owns(&session_id, generation) || result.contains_key(&session_id) {
+                        continue;
+                    }
+                    let identity =
+                        lookup_session_identity(&session_identities, harness, &session_id);
+                    result.insert(session_id, (title, identity));
                 }
-                let identity = lookup_session_identity(&session_identities, harness, &session_id);
-                result.insert(session_id, (title, identity));
-            }
-        };
-    }
+            };
+        }
+    });
 
     result
 }
@@ -7884,36 +8001,39 @@ pub fn get_compartments(
     drop(stmt);
     tx.commit()?;
 
-    // Resolve message timestamps from OpenCode DB
-    if let Some(opencode_db_path) = resolve_opencode_db_path() {
-        if let Ok((oc_conn, resolved)) = open_opencode_sessions(&opencode_db_path) {
-            if let Some(generation) = resolved.owner(session_id) {
-                let message_table = match generation {
-                    OpenCodeStoreGeneration::V1 => "message",
-                    OpenCodeStoreGeneration::V2 => "session_message",
-                };
-                let timestamp_sql =
-                    format!("SELECT time_created FROM {message_table} WHERE id = ?1");
-                for comp in compartments.iter_mut() {
-                    if let Some(ref start_id) = comp.start_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![start_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.start_time = ts;
-                        }
-                    }
-                    if let Some(ref end_id) = comp.end_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![end_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.end_time = ts;
-                        }
-                    }
-                }
+    // Resolve message timestamps from the OpenCode store that holds the session.
+    let times = with_opencode_session_store(session_id, |oc_conn, generation| {
+        let message_table = match generation {
+            OpenCodeStoreGeneration::V1 => "message",
+            OpenCodeStoreGeneration::V2 => "session_message",
+        };
+        let timestamp_sql = format!("SELECT time_created FROM {message_table} WHERE id = ?1");
+        let time_of = |id: &Option<String>| {
+            id.as_ref().and_then(|id| {
+                oc_conn
+                    .query_row(&timestamp_sql, rusqlite::params![id], |row| {
+                        row.get::<_, Option<i64>>(0)
+                    })
+                    .ok()
+            })
+        };
+        compartments
+            .iter()
+            .map(|comp| {
+                (
+                    time_of(&comp.start_message_id),
+                    time_of(&comp.end_message_id),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Some(times) = times {
+        for (comp, (start, end)) in compartments.iter_mut().zip(times) {
+            if let Some(start) = start {
+                comp.start_time = start;
+            }
+            if let Some(end) = end {
+                comp.end_time = end;
             }
         }
     }
@@ -9712,13 +9832,23 @@ mod session_history_slice_tests {
             CREATE TABLE session_meta_chunks(session_id TEXT,column_name TEXT,chunk TEXT,body BLOB);
             INSERT INTO session_meta_chunks VALUES ('changed','memory_block_ids','-1',X''),('changed','memory_block_ids','0',CAST('[1]' AS BLOB));
             BEGIN IMMEDIATE;").unwrap();
-        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(),1);
+        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(), 1);
         assert!(!conn.is_autocommit());
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM session_meta_chunks",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM session_meta_chunks", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         conn.execute_batch("ROLLBACK").unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM session_meta_chunks",[],|r|r.get::<_,i64>(0)).unwrap(),2);
-        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(),1);
-        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(),0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM session_meta_chunks", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(), 1);
+        assert_eq!(super::invalidate_all_memory_block_caches(&conn).unwrap(), 0);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM session_render_cache WHERE session_id='null-only' AND value IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM session_render_cache WHERE cache_key='cached_m0_mural_data_url'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     }
@@ -15410,6 +15540,7 @@ mod converted_opencode_store_tests {
             .flat_map(|&generation| {
                 list_opencode_sessions_for_generation(
                     &conn,
+                    &ReadableStore::for_tests(root.path().join("opencode.db")),
                     &resolved,
                     generation,
                     &SessionFilter::default(),
