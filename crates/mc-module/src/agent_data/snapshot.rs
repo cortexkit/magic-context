@@ -602,10 +602,12 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
     if !body.is_empty() && body.last() != Some(&b'\n') {
         return Err("the snapshot body does not end with a newline".to_owned());
     }
-    for line in body
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
+    // Every line holds one row; an empty line is malformed.
+    let lines: Vec<&[u8]> = body
+        .strip_suffix(b"\n")
+        .map(|lines| lines.split(|byte| *byte == b'\n').collect())
+        .unwrap_or_default();
+    for line in lines {
         let (name, row): (String, Map<String, Value>) = serde_json::from_slice(line)
             .map_err(|error| format!("a snapshot row cannot be read: {error}"))?;
         let index = names
