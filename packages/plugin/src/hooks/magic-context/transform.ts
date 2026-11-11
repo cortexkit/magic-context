@@ -4119,9 +4119,9 @@ export function createTransform(deps: TransformDeps) {
                     let recovery: string;
                     if (emergencyRecoveryArmed && emergencyRecoveryOrigin !== null) {
                         // Recovery ran on this pass. Whether it made room is read
-                        // from what changed, not from the estimate, which an
-                        // execute pass may count differently from the pass
-                        // that armed it.
+                        // from what changed, not from the token estimate: the
+                        // estimate can differ between passes over the same
+                        // conversation, so a lower figure is no proof of room.
                         const madeRoom =
                             compartmentPhase.published ||
                             postTransformResult.droppedCount > 0 ||

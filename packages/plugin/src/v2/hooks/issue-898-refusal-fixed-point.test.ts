@@ -200,7 +200,7 @@ describe("issue 898: a message without an id does not stop the history cut", () 
     }, 120_000);
 
     test("a boundary the host serves under an earlier id, a reminder after it and queued drops: cut and sent", async () => {
-        // The state closest to the reporter's that the adapter can produce: the
+        // A state the adapter can produce with all of these at once: the
         // summary ends on a stored step the host renders no message for (it
         // produced no content), so the request carries it under the nearest
         // earlier served row; a reminder without an id sits after it; drops
@@ -374,7 +374,7 @@ async function uncutSession(seed: number) {
     f.providerFold(2);
     // Turns served while the request still fits measure the system prompt and
     // the route's tool definitions, so later passes size the request with a
-    // trusted estimate, as on the reporter's long-running session.
+    // trusted estimate.
     f.respond(10);
     f.user(`Turn C: ${prose.repeat(10)}`, 60_000);
     await f.pass();
