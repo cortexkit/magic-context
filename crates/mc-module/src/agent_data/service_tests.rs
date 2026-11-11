@@ -334,6 +334,45 @@ fn vector_file(name: &str) -> Value {
     serde_json::from_str(contract::vectors::file(name).unwrap()).unwrap()
 }
 
+#[test]
+fn the_published_participant_failed_vectors_decode_and_pin_driver_actions() {
+    use contract::errors::{driver_action_for, DriverAction};
+
+    let vectors = vector_file("participant-failed.json");
+    for case in vectors["op_additions"].as_array().unwrap() {
+        let op = Op::from_method(&format!("agent_data.{}", case["op"].as_str().unwrap())).unwrap();
+        for code in case["codes"].as_array().unwrap() {
+            assert!(may_refuse(
+                op,
+                &RefusalCode::from_code(code.as_str().unwrap())
+            ));
+        }
+    }
+    for case in vectors["refusals"].as_array().unwrap() {
+        let op = Op::from_method(&format!("agent_data.{}", case["op"].as_str().unwrap())).unwrap();
+        let body: ErrorBody = serde_json::from_value(case["body"].clone()).unwrap();
+        assert_eq!(
+            body.code,
+            RefusalCode::ParticipantFailed,
+            "{}",
+            case["name"]
+        );
+        assert_eq!(serde_json::to_value(&body).unwrap(), case["body"]);
+        body.participant_failed_detail().unwrap();
+        let expected = match case["driver"].as_str().unwrap() {
+            "abort" => DriverAction::Abort,
+            "terminal_for_step" => DriverAction::TerminalForStep,
+            other => panic!("unknown vector driver action: {other}"),
+        };
+        assert_eq!(
+            driver_action_for(op, &body.code),
+            expected,
+            "{}",
+            case["name"]
+        );
+    }
+}
+
 /// Seed the journal with a cut at `step`, started with `names`.
 fn seed(journal: &Journal, cut: &str, step: Step, names: &[&str]) {
     let started = Refs::new(
