@@ -1,1 +1,1 @@
-Wire vectors copied from cortexkit-usage-steps 0.2.6, commons commit eaa2b406 (invented identities; unknown members are intentionally tolerated).
+Wire vectors for the usage step feed, copied from the `cortexkit-usage-steps` crate, version 0.2.6 (in the CortexKit commons repository, under `crates/cortexkit-usage-steps`). The identities in them are invented. They contain members this repository's decoder does not know, on purpose: the decoder must tolerate them.
