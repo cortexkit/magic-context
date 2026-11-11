@@ -68,6 +68,44 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Writes `content` to the new file `path` without this process ever holding a
+/// handle open for writing on it.
+///
+/// Linux refuses to execute a file that any process has open for writing
+/// ("Text file busy"). Tests run on parallel threads, and a thread that spawns
+/// a subprocess while another thread is writing a stub passes a copy of that
+/// write handle to its child, which keeps it until the child's own exec. The
+/// writing thread can close the file, rename it and try to run it inside that
+/// window, and the run fails. A helper process does the writing instead, so
+/// no thread of this process has a write handle to leak.
+#[cfg(unix)]
+fn write_staged(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let mut input = writer.stdin.take().expect("piped stdin");
+    input.write_all(content.as_bytes())?;
+    // Closing the pipe ends `cat`; the file is closed when the helper exits.
+    drop(input);
+    let status = writer.wait()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "stub writer exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_staged(path: &Path, content: &str) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()
+}
+
 /// Returns the path of an executable named `name` whose bytes are `content`,
 /// creating it only when no identical file exists yet. The path is
 /// `<temp>/magic-context-test-bin/<dir_prefix><first 16 hex of sha256(name, content)>/<name>`,
@@ -111,10 +149,7 @@ pub fn write_test_executable(name: &str, content: &str, dir_prefix: &str) -> Pat
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&staging)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
+        write_staged(&staging, content)?;
         make_executable(&staging)?;
         fs::rename(&staging, &target)
     })();
