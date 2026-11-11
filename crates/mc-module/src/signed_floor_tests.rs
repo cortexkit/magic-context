@@ -603,3 +603,211 @@ async fn signed_floor_follows_the_runner_away_and_back_across_a_refusal() {
     assert_eq!(session.signed_floor.as_deref(), Some("floor"));
     assert_eq!(captured.count(CONTRADICTED), 0);
 }
+
+// Witnesses from the independent review of the floor-following change. Each
+// fails while the defect it names stands; see
+// `.cortexkit/internal-docs/audits/signed-floor-follow-review.md`.
+
+/// On a route whose signed reasoning is bound: signed reasoning in `early`,
+/// before the floor's entry, and in three steps after it, then a prompt.
+/// Reasoning clearing with a budget of one step drops `s4/r` and `s5/r`
+/// under the floor; `early/r` is the floor's to strip and `s6/r` is exempt
+/// as the newest step's.
+fn gap_transcript() -> Vec<Entry> {
+    let step = |ordinal: u64, mid: &str| {
+        let reasoning = Part::new(
+            "r",
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(32_000),
+            },
+        )
+        .with_seal(cortexkit_role_compaction::part::Seal::Signed);
+        Entry::new(ordinal, mid, Role::Assistant, ordinal, vec![reasoning])
+    };
+    vec![
+        text(1, "task"),
+        step(2, "early"),
+        text(3, "floor"),
+        step(4, "s4"),
+        step(5, "s5"),
+        step(6, "s6"),
+        text(7, "next"),
+    ]
+}
+
+/// A session on [`gap_transcript`] whose Setup names `floor`, with settings
+/// that clear reasoning over one step's worth.
+async fn gap_set_up() -> (Session, Client, Settings) {
+    let (mut session, client, route, mut request, settings) = fixture();
+    request.rules = ProviderRules::new(SignedParts::Bound, EditCost::Suffix);
+    *client.entries.lock().unwrap() = gap_transcript();
+    request.newest = gap_transcript().last().map(cursor);
+    request = request.with_signed_floor(SignedFloor::new("floor"), true);
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    assert!(session.index_ready);
+    assert_eq!(session.signed_floor(), Some(3));
+    let settings = Settings {
+        keep_reasoning_tokens: 10_000,
+        protected_tokens: Some(0),
+        ..Settings::default()
+    };
+    (session, client, settings)
+}
+
+fn drops(view: &View, mid: &str) -> bool {
+    view.edits.iter().any(
+        |edit| matches!(&edit.op, EditOp::Drop { mid: m, part: Some(p) } if m == mid && p == "r"),
+    )
+}
+
+/// Build the reasoning-clearing view under the floor and return it with the
+/// refusal a runner that applies no floor gives it. That runner keeps
+/// `early/r`, so the dropped `s4/r` and `s5/r` leave a gap between two kept
+/// signed parts, which invalidates the later one, `s6/r` (signed parts may
+/// be left out only as an oldest or newest run): the part it names is after
+/// ck-mc's floor.
+fn gap_view(session: &mut Session, settings: &Settings) -> (View, ViewRefusal) {
+    let (view, _) = session.build(settings, None, false, None);
+    let view = view.expect("reasoning clearing builds a view");
+    assert!(drops(&view, "s4") && drops(&view, "s5"), "{view:?}");
+    assert!(!drops(&view, "early") && !drops(&view, "s6"), "{view:?}");
+    let broken = cortexkit_compaction_view::rules::check(
+        session.index.entries(),
+        &view.edits,
+        &session.conditions.rules,
+        cortexkit_compaction_view::rules::Floor::none(),
+    )
+    .expect_err("a runner that applies no floor refuses the view");
+    assert!(
+        matches!(&broken, RuleBreak::SignedPartInvalid { mid, part } if mid == "s6" && part == "r"),
+        "the runner names the kept part after the gap: {broken:?}"
+    );
+    (view, ViewRefusal::Rule(broken))
+}
+
+/// A runner that does not apply ck-mc's floor refuses a view built under
+/// it, naming the first part its own check finds invalid. When the floor's
+/// fault shows as a gap, that part is after the floor, and ck-mc neither
+/// drops its floor nor spares the view's drops: the reasoning drops are set
+/// aside for good, and later views keep relying on the floor.
+#[tokio::test]
+async fn signed_floor_review_a_gap_refusal_naming_a_part_after_the_floor_still_disproves_it() {
+    let (mut session, client, settings) = gap_set_up().await;
+    let (view, refusal) = gap_view(&mut session, &settings);
+    *client.refuse.lock().unwrap() = true;
+    *client.refusal.lock().unwrap() = Some(refusal);
+    session.publish(&client, view).await;
+    // Both at once, so a failure shows the floor kept and the drops set
+    // aside together.
+    assert_eq!(
+        (session.signed_floor.as_deref(), session.failed_parts.clone()),
+        (None, BTreeSet::new()),
+        "the refusal shows the runner does not strip early/r: ck-mc should drop its floor, and the reasoning drops were not at fault"
+    );
+    *client.refuse.lock().unwrap() = false;
+    let (retry, _) = session.build(&settings, None, false, None);
+    let retry = retry.expect("reasoning clearing builds again");
+    check_without_floor(&session, &retry);
+}
+
+/// The same refusal reported at a step boundary, in the notice whose
+/// conditions name no floor (the runner stopped applying it, for example
+/// after an undo took the floor's entry off its path). The notice takes the
+/// floor away, but the refusal is judged first, against the floor still
+/// held, and its drops pay for the floor's fault.
+#[tokio::test]
+async fn signed_floor_review_a_gap_refusal_in_a_notice_naming_no_floor_sets_nothing_aside() {
+    let (mut session, client, settings) = gap_set_up().await;
+    let (view, refusal) = gap_view(&mut session, &settings);
+    let version = view.version;
+    session.publish(&client, view).await;
+    let mut request = notice(&session, 1, gap_transcript().last().map(cursor));
+    request.conditions.signed_floor = None;
+    request.events.push(Event::ViewRefused { version, refusal });
+    session.notice(&client, &settings, request).await;
+    assert_eq!(session.signed_floor, None, "the notice names none");
+    assert!(
+        session.failed_parts.is_empty(),
+        "the floor was at fault, not the reasoning drops, yet they are set aside: {:?}",
+        session.failed_parts
+    );
+}
+
+/// A notice whose newest entry is `newest` of [`bound_transcript`], with no
+/// usage reading, so its pass builds nothing, naming `floor` as the signed
+/// floor.
+fn quiet_notice(session: &Session, seq: u64, newest: usize, floor: Option<&str>) -> NoticeRequest {
+    let mut request = notice(session, seq, Some(cursor(&bound_transcript()[newest - 1])));
+    request.conditions.signed_floor = floor.map(SignedFloor::new);
+    request.conditions.last_prompt_tokens = None;
+    request
+}
+
+/// A view built under the floor is accepted. Before the runner first serves
+/// it, the person undoes back to before the floor's entry: the runner
+/// applies no floor and names none, and ck-mc follows. At the next step the
+/// runner refuses the view for keeping `thought/r`. The view relied on a
+/// floor that has since gone, so its drops were not at fault, but the
+/// refusal is judged against the floor ck-mc holds now (none) and counts
+/// against the model's requested drops (`refused_once`). A redo brings the
+/// floor back, and a second undo before the next view is served makes it a
+/// second refusal against them, which forgets them.
+#[tokio::test]
+async fn signed_floor_review_a_refusal_after_ck_mc_followed_the_floor_away_costs_no_drops() {
+    let (mut session, client, _, _, settings) = bound_set_up(Some("floor")).await;
+    let mut seq = 0;
+    for round in 0..2 {
+        let (view, _) = session.build(&settings, None, false, None);
+        let view = view.expect("the requested drops build a view");
+        assert!(keeps_thought(&view), "round {round}: kept under the floor");
+        let version = view.version;
+        session.publish(&client, view).await;
+        assert_eq!(client.offered.lock().unwrap().len(), round + 1);
+        // Undo back to `thought`: the floor's entry leaves the transcript.
+        *client.entries.lock().unwrap() = bound_transcript()[..3].to_vec();
+        seq += 1;
+        let mut undo = quiet_notice(&session, seq, 3, None);
+        undo.events
+            .push(Event::TranscriptChanged { from_ordinal: 4 });
+        session.notice(&client, &settings, undo).await;
+        assert!(session.index_ready, "round {round}");
+        assert_eq!(session.signed_floor, None, "round {round}");
+        assert_eq!(
+            client.offered.lock().unwrap().len(),
+            round + 1,
+            "round {round}: no view replaces the accepted one"
+        );
+        // The next step is the first to serve the view: refused.
+        seq += 1;
+        let mut refused = quiet_notice(&session, seq, 3, None);
+        refused.events.push(Event::ViewRefused {
+            version,
+            refusal: thought_refused(),
+        });
+        session.notice(&client, &settings, refused).await;
+        // Redo: the floor's entry is back, and the runner names it again.
+        *client.entries.lock().unwrap() = bound_transcript();
+        seq += 1;
+        session
+            .notice(
+                &client,
+                &settings,
+                quiet_notice(&session, seq, 6, Some("floor")),
+            )
+            .await;
+        assert_eq!(session.signed_floor(), Some(4), "round {round}");
+    }
+    assert_eq!(
+        session.queued,
+        requested(),
+        "the model's requested drops were forgotten for refusals the floor caused"
+    );
+    assert!(
+        session.refused_once.is_empty(),
+        "{:?}",
+        session.refused_once
+    );
+}
