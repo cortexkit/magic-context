@@ -204,12 +204,13 @@ try {
     await evaluate("document.querySelector('.config-section-panel h2').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
     await assert(`${size} help closes on outside click`, "!document.querySelector('.config-help-popover')");
     await section("General");
-    await click('[aria-label="Output Language"]');
+    // The trigger's accessible name carries its value ("Output Language: …"), so match the prefix.
+    await click('button[aria-label^="Output Language:"]');
     await input('[aria-label="Search Output Language"]', "Turkish");
     await assert(`${size} language filters by name`, "[...document.querySelectorAll('.model-select-option')].some(e=>e.textContent==='Turkish (tr)') && document.querySelectorAll('.model-select-option').length===2");
     await capture(`${size}-language-picker`);
     await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter" }, sid);
-    await assert(`${size} language selection stores code and marks dirty`, "document.querySelector('[aria-label=\"Output Language\"]').textContent.includes('Turkish (tr)') && !document.querySelector('.config-save').disabled");
+    await assert(`${size} language selection stores code and marks dirty`, "document.querySelector('button[aria-label^=\"Output Language:\"]').textContent.includes('Turkish (tr)') && !document.querySelector('.config-save').disabled");
     await section("Background models");
     await click('[aria-label="Primary variant"]');
     await assert(`${size} variant choices match selected model`, "[...document.querySelectorAll('.model-select-option')].map(e=>e.textContent.trim()).join('|')==='Use harness default|low|high|adaptive'");

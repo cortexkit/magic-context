@@ -1,8 +1,13 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use magic_context_dashboard_lib::db;
 use rusqlite::{params, Connection};
 
 #[test]
 fn reads_project_mural_and_degrades_without_v64_table() {
+    isolated_home();
     let conn = Connection::open_in_memory().expect("open test db");
     assert!(db::get_mural(&conn, Some("/project"))
         .expect("pre-v64 query")

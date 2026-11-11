@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use magic_context_dashboard_lib::db;
 use magic_context_dashboard_lib::project_identity::normalize_stored_project_path;
 use rusqlite::{params, Connection};
@@ -241,6 +245,7 @@ fn seed_project_state(conn: &Connection, project_path: &str, memory_epoch: i64, 
 
 #[test]
 fn archive_memory_status_is_audited_and_bumps_epoch_with_delta() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
     seed_project_state(&conn, "git:project-a", 9, 0);
@@ -263,6 +268,7 @@ fn archive_memory_status_is_audited_and_bumps_epoch_with_delta() {
 
 #[test]
 fn restore_memory_status_keeps_epoch_bump_with_mutation_log() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "archived");
     seed_project_state(&conn, "git:project-a", 9, 0);
@@ -275,6 +281,7 @@ fn restore_memory_status_keeps_epoch_bump_with_mutation_log() {
 
 #[test]
 fn pin_active_to_permanent_bumps_epoch_with_mutation_log() {
+    isolated_home();
     // Pinning updates search-cache state and queues a held prompt delta;
     // selection order changes only at the next natural baseline rebuild.
     let mut conn = make_db();
@@ -289,6 +296,7 @@ fn pin_active_to_permanent_bumps_epoch_with_mutation_log() {
 
 #[test]
 fn unpin_permanent_to_active_bumps_epoch_with_mutation_log() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "permanent");
     seed_project_state(&conn, "git:project-a", 9, 0);
@@ -301,6 +309,7 @@ fn unpin_permanent_to_active_bumps_epoch_with_mutation_log() {
 
 #[test]
 fn no_op_status_change_does_not_bump_epoch() {
+    isolated_home();
     // active -> active changes nothing in the baseline; no bump, no log.
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
@@ -314,6 +323,7 @@ fn no_op_status_change_does_not_bump_epoch() {
 
 #[test]
 fn bulk_archive_status_has_one_audited_decision_and_one_epoch() {
+    isolated_home();
     let mut conn = make_db();
     let first = insert_memory(&conn, "git:project-a", "active");
     let second = insert_memory(&conn, "git:project-a", "permanent");
@@ -346,6 +356,7 @@ fn bulk_archive_status_has_one_audited_decision_and_one_epoch() {
 
 #[test]
 fn bulk_delete_archives_rows_in_one_undoable_decision() {
+    isolated_home();
     let mut conn = make_db();
     let first = insert_memory(&conn, "git:project-a", "active");
     let second = insert_memory(&conn, "git:project-a", "active");
@@ -441,6 +452,7 @@ fn bulk_delete_archives_rows_in_one_undoable_decision() {
 
 #[test]
 fn dismiss_user_memory_bumps_global_user_profile_not_project_memory_epoch() {
+    isolated_home();
     let mut conn = make_db();
     conn.execute(
         "INSERT INTO user_memories (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
@@ -461,6 +473,7 @@ fn dismiss_user_memory_bumps_global_user_profile_not_project_memory_epoch() {
 
 #[test]
 fn restore_user_memory_returns_row_to_active_set_and_bumps_global_profile() {
+    isolated_home();
     let mut conn = make_db();
     conn.execute(
         "INSERT INTO user_memories (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
@@ -485,6 +498,7 @@ fn restore_user_memory_returns_row_to_active_set_and_bumps_global_profile() {
 
 #[test]
 fn restore_user_memory_of_active_row_is_a_no_op_without_bump() {
+    isolated_home();
     let mut conn = make_db();
     conn.execute(
         "INSERT INTO user_memories (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
@@ -515,6 +529,7 @@ fn restore_user_memory_of_active_row_is_a_no_op_without_bump() {
 
 #[test]
 fn promote_user_memory_candidate_maps_columns_and_bumps_global_profile() {
+    isolated_home();
     let mut conn = make_db();
     conn.execute(
         "INSERT INTO user_memory_candidates
@@ -553,6 +568,7 @@ fn promote_user_memory_candidate_maps_columns_and_bumps_global_profile() {
 
 #[test]
 fn session_fact_update_and_delete_bump_session_facts_version() {
+    isolated_home();
     let mut conn = make_db();
     conn.execute("INSERT INTO session_meta (session_id) VALUES ('s1')", [])
         .expect("insert meta");
@@ -584,6 +600,7 @@ fn session_fact_version(conn: &Connection, session_id: &str) -> i64 {
 
 #[test]
 fn routine_memory_mutation_does_not_clear_memory_block_caches() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
     conn.execute(
@@ -617,6 +634,7 @@ fn routine_memory_mutation_does_not_clear_memory_block_caches() {
 
 #[test]
 fn bulk_update_refuses_invalid_status_without_sql_side_effects() {
+    isolated_home();
     let mut conn = make_db();
     let target = insert_memory(&conn, "git:project-a", "active");
     let other = insert_memory(&conn, "git:project-a", "active");
@@ -642,6 +660,7 @@ fn bulk_update_refuses_invalid_status_without_sql_side_effects() {
 
 #[test]
 fn update_memory_content_has_history_and_epoch_with_delta() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
     seed_project_state(&conn, "git:project-a", 11, 0);
@@ -659,6 +678,7 @@ fn update_memory_content_has_history_and_epoch_with_delta() {
 
 #[test]
 fn invalidate_all_memory_block_caches_clears_m0_m1_and_mutation_cursor() {
+    isolated_home();
     let conn = make_db();
     conn.execute(
         "INSERT INTO session_meta
@@ -683,6 +703,7 @@ fn invalidate_all_memory_block_caches_clears_m0_m1_and_mutation_cursor() {
 
 #[test]
 fn raw_path_memory_mutation_uses_directory_fallback_identity() {
+    isolated_home();
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("context.db");
     {
@@ -705,6 +726,7 @@ fn raw_path_memory_mutation_uses_directory_fallback_identity() {
 
 #[test]
 fn get_smart_notes_tolerates_null_project_path_rows() {
+    isolated_home();
     // Regression: the notes table holds session-scoped notes with a NULL
     // project_path (most notes). resolve_paths_for_table_filter did
     // `SELECT DISTINCT project_path` into a non-Option String and threw
@@ -734,6 +756,7 @@ fn get_smart_notes_tolerates_null_project_path_rows() {
 
 #[test]
 fn test_update_memory_category_success() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
     seed_project_state(&conn, "git:project-a", 11, 0);
@@ -759,6 +782,7 @@ fn test_update_memory_category_success() {
 
 #[test]
 fn update_memory_category_noop_does_not_bump_epoch() {
+    isolated_home();
     // Changing a memory to its CURRENT category must not bump any epoch (that
     // would force a needless hard fold across every workspace member).
     let mut conn = make_db();
@@ -781,6 +805,7 @@ fn update_memory_category_noop_does_not_bump_epoch() {
 
 #[test]
 fn test_update_memory_category_collision() {
+    isolated_home();
     let mut conn = make_db();
     // Insert two memories in project-a:
     // Memory 1: category CONSTRAINTS, content "same content", hash "hash-1"
@@ -823,6 +848,7 @@ fn test_update_memory_category_collision() {
 
 #[test]
 fn test_update_memory_category_invalid() {
+    isolated_home();
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
 
@@ -843,6 +869,7 @@ fn test_update_memory_category_invalid() {
 
 #[test]
 fn managed_memory_update_is_rejected_by_the_database_guard() {
+    isolated_home();
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("context.db");
     {

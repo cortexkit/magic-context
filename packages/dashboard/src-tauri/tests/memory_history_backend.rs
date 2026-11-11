@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use magic_context_dashboard_lib::{db, memory_bridge};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -17,6 +21,7 @@ fn edit_request() -> Value {
 
 #[tokio::test]
 async fn ts_owned_dashboard_edit_works_without_any_host_process() {
+    isolated_home();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("context.db");
     let conn = fixture(&path);
@@ -39,6 +44,7 @@ async fn ts_owned_dashboard_edit_works_without_any_host_process() {
 
 #[tokio::test]
 async fn module_owned_idle_host_keeps_history_readable_and_refuses_without_sql_fallback() {
+    isolated_home();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("context.db");
     let mut conn = fixture(&path);
@@ -89,6 +95,7 @@ async fn module_owned_idle_host_keeps_history_readable_and_refuses_without_sql_f
 
 #[tokio::test]
 async fn review_module_bridge_authenticates_and_never_falls_back_after_http_refusal() {
+    isolated_home();
     use std::io::{Read, Write};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("context.db");
@@ -267,6 +274,7 @@ fn canonical_state(conn: &Connection) -> Value {
 
 #[tokio::test]
 async fn dashboard_undoes_typescript_operations_atomically_without_rebuilding_cache() {
+    isolated_home();
     for operation in ["edit", "merge", "replaces", "new", "conflict"] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("context.db");

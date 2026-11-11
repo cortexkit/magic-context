@@ -3,9 +3,16 @@
 //! A store is one `opencode.db` file. The dashboard reads an ordered list of
 //! them and merges what it finds:
 //!
-//! 1. the user's own store, resolved exactly as before (`OPENCODE_DB`, the
-//!    channel variables, else the newest `opencode*.db` under
-//!    `<data home>/opencode/`);
+//! 1. the user's own store, resolved exactly as before:
+//!    - `OPENCODE_DB`, when set, names the file (a relative path is taken
+//!      from `<data home>/opencode/`);
+//!    - else OpenCode's release channel decides the file name. Each channel
+//!      of an OpenCode build (`dev`, `local`, a nightly and so on) keeps its
+//!      own `opencode-<channel>.db`, while `latest`, `beta` and `prod` share
+//!      `opencode.db`. `OPENCODE_CHANNEL` names the channel, and
+//!      `OPENCODE_DISABLE_CHANNEL_DB=1` (or `true`) forces `opencode.db`;
+//!    - with neither variable set, the most recently written `opencode.db`
+//!      or `opencode-<channel>.db` in `<data home>/opencode/` is used;
 //! 2. the stores the CortexKit runner publishes in
 //!    `<data home>/cortexkit/thalamus-harness/opencode-sessions/roots.json`,
 //!    one per root, each root's `path` being the folder that holds
@@ -424,6 +431,14 @@ fn cached_parse<T: Clone>(
 
 /// Test builds never fall back to the real home folder for these sources: a
 /// test that sets no `XDG_*` folder must not read the user's own files.
+///
+/// This covers only the crate's own unit tests: `cfg!(test)` is false when
+/// an integration test under `tests/` links the library, which is built as
+/// for normal use there. Those tests get the same protection from
+/// `tests/support/isolated_home.rs`, which every one of them calls first and
+/// which points every folder variable at a throwaway home. It does not cover
+/// the default store's own resolution (`OPENCODE_DB`, `XDG_DATA_HOME`, else
+/// the home folder), which has never been guarded here.
 fn source_root(variable: &str) -> bool {
     !cfg!(test) || std::env::var_os(variable).is_some()
 }

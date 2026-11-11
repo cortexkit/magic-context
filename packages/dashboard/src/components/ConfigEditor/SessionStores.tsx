@@ -60,10 +60,7 @@ export default function SessionStores(props: {
                     <span class={`config-store-status is-${view.tone}`}>{view.status}</span>
                   </td>
                   <td>
-                    <Show
-                      when={view.configuredIndex !== undefined}
-                      fallback={<span class="config-store-fixed">Found automatically</span>}
-                    >
+                    <Show when={view.configuredIndex !== undefined}>
                       <button
                         type="button"
                         class="config-icon-btn"

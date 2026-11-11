@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use std::path::{Path, PathBuf};
 
 use magic_context_dashboard_lib::project_identity::{
@@ -14,6 +18,7 @@ fn expected_dir_identity(path: &Path) -> String {
 #[test]
 #[cfg(unix)]
 fn logical_absolute_matches_node_path_resolve_matrix() {
+    isolated_home();
     let cwd = Path::new("/tmp/cwd/project");
     let cases = [
         ("/foo/bar", "/foo/bar"),
@@ -36,6 +41,7 @@ fn logical_absolute_matches_node_path_resolve_matrix() {
 
 #[test]
 fn normalize_stored_project_path_preserves_identity_values() {
+    isolated_home();
     assert_eq!(normalize_stored_project_path("git:abc123"), "git:abc123");
     assert_eq!(
         normalize_stored_project_path("dir:deadbeef0000"),
@@ -49,6 +55,7 @@ fn normalize_stored_project_path_preserves_identity_values() {
 
 #[test]
 fn normalize_stored_project_path_hashes_raw_paths_as_directory_fallback() {
+    isolated_home();
     let dir = tempfile::tempdir().expect("tempdir");
     assert_eq!(
         normalize_stored_project_path(dir.path().to_str().expect("utf8 tempdir")),
@@ -66,6 +73,7 @@ struct ParityFixture {
 #[test]
 #[cfg(unix)]
 fn cross_language_identity_parity_fixture_matches_directory_fallback_contract() {
+    isolated_home();
     // Fixture outputs are generated from the TypeScript production contract for
     // non-git directories: path.resolve(input), then MD5 over the resolved path
     // string truncated to 12 hex characters.

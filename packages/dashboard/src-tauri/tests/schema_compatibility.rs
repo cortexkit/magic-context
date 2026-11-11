@@ -1,3 +1,7 @@
+#[path = "support/isolated_home.rs"]
+mod isolated_home;
+use isolated_home::isolated_home;
+
 use magic_context_dashboard_lib::{db, db_capabilities, memory_bridge, memory_history, workspaces};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -48,6 +52,7 @@ fn edit(ids: &[i64], field: &str, value: &str, revision: i64, operation: &str) -
 
 #[test]
 fn capability_cache_is_connection_local_and_objects_override_ledger() {
+    isolated_home();
     let (_directory, path) = fixture(95);
     let conn = db::open_readonly(&path).unwrap();
     let caps = db_capabilities::get(&conn).unwrap();
@@ -80,6 +85,7 @@ fn capability_cache_is_connection_local_and_objects_override_ledger() {
 
 #[test]
 fn both_schemas_list_memories_sessions_compartments_workspaces_and_projects() {
+    isolated_home();
     for version in [95, 105] {
         let (_directory, path) = fixture(version);
         if version == 95 {
@@ -148,6 +154,7 @@ fn both_schemas_list_memories_sessions_compartments_workspaces_and_projects() {
 
 #[tokio::test]
 async fn schema95_edit_archive_bulk_archive_keep_legacy_side_effects_without_history() {
+    isolated_home();
     let (_directory, path) = fixture(95);
     let mut conn = db::open_readwrite(&path).unwrap();
     conn.execute(
@@ -263,6 +270,7 @@ async fn schema95_edit_archive_bulk_archive_keep_legacy_side_effects_without_his
 
 #[tokio::test]
 async fn schema95_history_and_undo_are_refused_before_later_schema_queries() {
+    isolated_home();
     let (_directory, path) = fixture(95);
     for (method, request) in [
         ("memory.history", json!({"projectPath":"git:compat"})),
@@ -313,6 +321,7 @@ async fn schema95_history_and_undo_are_refused_before_later_schema_queries() {
 
 #[tokio::test]
 async fn schema105_edits_reject_stale_revisions_and_keep_history_undo_and_safety() {
+    isolated_home();
     let (_directory, path) = fixture(105);
     let conn = Connection::open(&path).unwrap();
     conn.execute("UPDATE memories SET safety_critical=1 WHERE id=1", [])
@@ -396,6 +405,7 @@ async fn schema105_edits_reject_stale_revisions_and_keep_history_undo_and_safety
 
 #[tokio::test]
 async fn partial_modern_schema_never_uses_legacy_writer() {
+    isolated_home();
     let (_directory, path) = fixture(95);
     let conn = Connection::open(&path).unwrap();
     conn.execute(
@@ -425,6 +435,7 @@ async fn partial_modern_schema_never_uses_legacy_writer() {
 
 #[tokio::test]
 async fn missing_safety_column_disables_modern_writes_without_legacy_fallback() {
+    isolated_home();
     let (_directory, path) = fixture(105);
     Connection::open(&path)
         .unwrap()
@@ -448,6 +459,7 @@ async fn missing_safety_column_disables_modern_writes_without_legacy_fallback() 
 
 #[test]
 fn score_capability_requires_watermark_column_and_does_not_query_partial_tables() {
+    isolated_home();
     let (_directory, path) = fixture(95);
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("CREATE TABLE compartment_score_selections(session_id TEXT,compartment_id INTEGER,sequence INTEGER,revision_id INTEGER);
@@ -464,6 +476,7 @@ fn score_capability_requires_watermark_column_and_does_not_query_partial_tables(
 
 #[test]
 fn schema105_compartments_keep_effective_and_applied_scores_separate() {
+    isolated_home();
     let (_directory, path) = fixture(105);
     let conn = db::open_readwrite(&path).unwrap();
     // Encode this fixture row explicitly so a bug in score identity construction

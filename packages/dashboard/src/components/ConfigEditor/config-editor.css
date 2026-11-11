@@ -871,8 +871,7 @@
   color: var(--amber);
 }
 
-.config-store-status.is-pending,
-.config-store-fixed {
+.config-store-status.is-pending {
   color: var(--text-secondary);
 }
 
