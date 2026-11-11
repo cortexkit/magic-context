@@ -277,9 +277,12 @@ pub struct Session {
     /// A pass held its view back because the view could not meet the move
     /// floor, and no view has met it since: the hold is logged only once.
     move_floor_held: bool,
-    /// The entry id of the runner's signed floor, the newest ck-mc has taken
+    /// The entry id of the runner's signed floor, as ck-mc last took it
     /// (see the `signed_floor` module). The runner strips signed reasoning at or before it.
     signed_floor: Option<String>,
+    /// A floor a refusal showed the runner does not apply, while the
+    /// runner's conditions keep naming it. Not saved.
+    disproved_floor: Option<signed_floor::Disproved>,
 }
 
 /// A view the runner took (an `apply_view` it accepted, or a ride's answer)
@@ -619,6 +622,7 @@ impl Session {
             move_floor: None,
             move_floor_held: false,
             signed_floor: None,
+            disproved_floor: None,
         }
     }
 
@@ -920,6 +924,9 @@ impl Session {
         self.tools_only = false;
         self.suspended = false;
         self.conditions = conditions_of(request);
+        // Setup is the runner's statement afresh: a floor a refusal showed
+        // it contradicting is taken again if this Setup names it.
+        self.disproved_floor = None;
         // Setup carries no reading, so none is stale. A runner that named
         // views it had already replaced is trusted again: Setup starts its
         // reports afresh.
@@ -4003,7 +4010,20 @@ impl Session {
                     }
                     _ => false,
                 };
-                self.roll_back(view.version, !stale, refusal_part(&refusal));
+                // A signed part kept at or before ck-mc's signed floor: the
+                // runner does not apply that floor, so ck-mc's copy of it was
+                // at fault, not the drops the view carried. They stay queued,
+                // with no refusal counted against them; the apps still show
+                // the view as refused.
+                let floor_at_fault = self.refusal_disproves_floor(view.version, &refusal);
+                self.roll_back(
+                    view.version,
+                    !stale && !floor_at_fault,
+                    refusal_part(&refusal),
+                );
+                if floor_at_fault {
+                    self.app_view_status(view.version, "refused");
+                }
                 self.reset_transcript_retry();
             }
             // An answer the contract may add later leaves the outcome
@@ -4093,7 +4113,14 @@ impl Session {
                     view.version,
                     policy_members(&view)
                 );
-                self.roll_back(oldest, true, None);
+                // As for a view refused when first handed over: a signed
+                // part kept at or before ck-mc's floor puts the fault on the
+                // floor, not on the drops.
+                let floor_at_fault = self.refusal_disproves_floor(view.version, &refusal);
+                self.roll_back(oldest, !floor_at_fault, None);
+                if floor_at_fault {
+                    self.app_view_status(oldest, "refused");
+                }
                 self.reset_transcript_retry();
             }
             Ok(other) => {
@@ -4293,19 +4320,27 @@ impl Session {
             })
             .min_by_key(|(version, _)| *version)
         {
-            let moved =
-                TranscriptRefusal::of(refusal).or_else(|| self.new_signed_part(*version, refusal));
+            // A signed part kept at or before ck-mc's signed floor: the
+            // runner does not apply that floor, so ck-mc's copy of it was at
+            // fault, and the retry, built without it, pays no penalty.
+            let floor_at_fault = self.refusal_disproves_floor(*version, refusal);
+            let moved = if floor_at_fault {
+                None
+            } else {
+                TranscriptRefusal::of(refusal).or_else(|| self.new_signed_part(*version, refusal))
+            };
             // FinalTurnRemoved depends on the newest entry; UnknownMessage
             // can follow a revert. Neither blames a drop when an accepted
             // view first loses that race. Only its immediate retry pays the
             // usual refusal penalty if the same reason repeats. A new signed
             // part never pays it: the part did not exist when ck-mc built
             // the view, so no repeat can be ck-mc's own fault.
-            let guard = match moved {
-                None => true,
-                Some(TranscriptRefusal::NewSignedPart) => false,
-                Some(kind) => self.transcript_retry == Some((kind, *version)),
-            };
+            let guard = !floor_at_fault
+                && match moved {
+                    None => true,
+                    Some(TranscriptRefusal::NewSignedPart) => false,
+                    Some(kind) => self.transcript_retry == Some((kind, *version)),
+                };
             self.roll_back(*version, guard, refusal_part(refusal));
             // Retrying skips drop penalties, not the refusal status shown
             // in the apps' view history.
