@@ -27,6 +27,9 @@ mod stale_reading_review_tests;
 #[path = "stale_reading_accepted_tests.rs"]
 mod stale_reading_accepted_tests;
 
+#[path = "spent_reading_tests.rs"]
+mod spent_reading_tests;
+
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
@@ -74,6 +77,9 @@ struct Client {
     /// `session.apply_view` fails as a call does when the connection to the
     /// runner drops.
     fail_apply: Mutex<bool>,
+    /// `session.applied_view` fails as a call does when the connection to
+    /// the runner drops.
+    fail_applied_view: Mutex<bool>,
     capabilities: crate::runner_capabilities::RunnerCapabilities,
     descriptions: Mutex<VecDeque<Result<Value, crate::client::ClientError>>>,
 }
@@ -153,6 +159,9 @@ impl RunnerClient for Client {
         &self,
         _: &SessionRef,
     ) -> Result<AppliedViewAnswer, crate::client::ClientError> {
+        if *self.fail_applied_view.lock().unwrap() {
+            return Err(crate::client::ClientError::new("connection lost"));
+        }
         Ok(self.applied.lock().unwrap().clone().unwrap_or_default())
     }
     async fn send(

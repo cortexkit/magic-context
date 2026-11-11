@@ -118,8 +118,11 @@ pub struct Session {
     /// view the runner accepted and will render next. A runner can take a
     /// view while a request is in flight; that request's size arrives after
     /// the new view went out, and says nothing about the requests the new
-    /// view makes. Until a reading under the current view arrives, every
-    /// pressure decision treats usage as unknown ([`Session::pressure`]).
+    /// view makes. A reading that names no view is stale when it repeats a
+    /// size from before the newest view: the one that view was built on, or
+    /// one ignored as older than it (see the `spent_reading` module). Until
+    /// a current reading arrives, every pressure decision treats usage as
+    /// unknown ([`Session::pressure`]).
     reading_stale: bool,
     /// The stale reading last ignored that was older than `newest_applied`:
     /// its prompt size, the view version it named, and the `newest_applied`
@@ -133,6 +136,10 @@ pub struct Session {
     /// such reading would switch off every pressure decision for good, so
     /// until the next Setup readings are judged as if they named no view.
     prompt_views_untrusted: bool,
+    /// The prompt sizes from before the newest view: the one it was built on,
+    /// and one ignored as older than it. A reading that names no view is
+    /// judged against them (see the `spent_reading` module).
+    spent_reading: Option<SpentReading>,
     /// Parts the model asked to drop, held for the next view.
     queued: BTreeSet<(String, String)>,
     /// The age sweep's bookmark from the previous pass with permission to
@@ -353,6 +360,10 @@ struct Before {
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    /// Left out of the saved text while there is none, so rows saved before
+    /// it existed and rows of runners that send no reading don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spent_reading: Option<SpentReading>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -576,6 +587,7 @@ impl Session {
             reading_stale: false,
             ignored_reading: None,
             prompt_views_untrusted: false,
+            spent_reading: None,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             next_reclaim_bookmark: None,
@@ -740,6 +752,7 @@ impl Session {
             reading_stale: self.reading_stale,
             ignored_reading: self.ignored_reading,
             prompt_views_untrusted: self.prompt_views_untrusted,
+            spent_reading: self.spent_reading,
             notes: self.notes.clone(),
             queued: self.queued.clone(),
             reclaim_bookmark: self.reclaim_bookmark,
@@ -785,6 +798,7 @@ impl Session {
         self.reading_stale = durable.reading_stale;
         self.ignored_reading = durable.ignored_reading;
         self.prompt_views_untrusted = durable.prompt_views_untrusted;
+        self.spent_reading = durable.spent_reading;
         self.notes = durable.notes;
         self.queued = durable.queued;
         self.reclaim_bookmark = durable.reclaim_bookmark;
@@ -990,6 +1004,7 @@ impl Session {
         if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
         }
+        self.settle_spent_reading(request.applied_view.as_ref());
         if let Some(view) = &self.latest {
             self.view_validation.prime(self.index.entries(), view);
         }
@@ -1208,6 +1223,10 @@ impl Session {
         // so the view's cut message is in the index.
         if self.runner_differs(notice.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
+            // The reading was judged before ck-mc knew its own newest view.
+            if self.judge_spent_reading_after_adoption(previous, notice.applied_view.as_ref()) {
+                self.notes.measured = previous_notes;
+            }
         }
         self.forget_missing();
         // A stale reading changes no pressure state: the emergency latch and
@@ -1312,8 +1331,12 @@ impl Session {
     /// a view while a request is in flight, and that request's size arrives
     /// after the new view went out. Acting on it would build a second view
     /// for pressure the first one already relieved, and rewrite the cache
-    /// again for nothing. A reading with no view version is used as it is:
-    /// the runner could not tie it to a request.
+    /// again for nothing. A reading with no view version is judged only
+    /// against the prompt sizes the newest view was built on or ignored
+    /// ([`Session::judge_spent_reading`]): the runner could not tie it to a
+    /// request, and a repeat of such a size is a measurement from before the
+    /// view. So is every reading while the runner's view versions are
+    /// disregarded (`prompt_views_untrusted`, below).
     ///
     /// A reading older than a view the runner accepted from ck-mc but does
     /// not apply yet is stale for the same reason ([`Session::newest_accepted`]):
@@ -1332,10 +1355,11 @@ impl Session {
     /// Repeats of the reading last ignored stay ignored. A different reading
     /// older than the same applied view means the runner named a replaced
     /// view for a request it sent later; from then until the next Setup its
-    /// view versions are disregarded (`prompt_views_untrusted`), and that
-    /// reading counts. A reading stale only against an accepted view is
-    /// never part of that check: the view a reading names is right there,
-    /// and only the runner's applying of accepted views can be at fault.
+    /// view versions are disregarded (`prompt_views_untrusted`): its readings
+    /// are judged as if they named no view, and that reading counts. A
+    /// reading stale only against an accepted view is never part of that
+    /// check: the view a reading names is right there, and only the runner's
+    /// applying of accepted views can be at fault.
     ///
     /// The stored conditions keep the last reading that was current, not the
     /// stale one, so the apps keep showing the usage they showed rather than
@@ -1348,12 +1372,13 @@ impl Session {
         applied_view: Option<&AppliedView>,
     ) {
         self.reading_stale = false;
+        if let Some(tokens) = self.unversioned_reading() {
+            self.judge_spent_reading(previous, tokens, applied_view);
+            return;
+        }
         let (Some(tokens), Some(view)) = reading_of(&self.conditions) else {
             return;
         };
-        if self.prompt_views_untrusted {
-            return;
-        }
         let applied = self.newest_applied;
         let accepted = self.newest_accepted(applied_view);
         if view >= applied.max(accepted) {
@@ -1380,6 +1405,7 @@ impl Session {
             self.ignored_reading = Some((tokens, view, applied));
         }
         self.reading_stale = true;
+        self.note_older_reading(tokens, view);
         let accepted_note = if accepted > applied {
             format!(", accepted {accepted}")
         } else {
@@ -4222,6 +4248,7 @@ impl Session {
             notice_reclaim_bookmark: Some(self.notice_reclaim_bookmark),
             summary_unshown: self.summary_unshown,
             pending_keep: self.next_keep.take(),
+            spent_reading: self.spent_reading,
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -4248,6 +4275,7 @@ impl Session {
             self.caveman = next;
         }
         self.version = self.version.max(view.version);
+        self.spend_reading(view.version);
         self.apply_cut(&view);
         self.latest = Some(view);
     }
@@ -4444,6 +4472,7 @@ impl Session {
         if before.pending_keep.is_some() {
             self.pending_keep = before.pending_keep;
         }
+        self.spent_reading = before.spent_reading;
         self.baseline = before.baseline;
         self.fold_due = before.fold_due;
         self.head_stale |= undone.iter().any(|pending| pending.before.head_stale);
@@ -4510,6 +4539,7 @@ impl Session {
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
         match client.applied_view(&self.key).await {
             Ok(answer) => {
+                self.keep_spent_reading_for(&answer);
                 // The runner's own answer is what it applies now. It replaces
                 // the newest version rather than raising it: a runner whose
                 // state went back (a restore) measures under the view it
@@ -5156,6 +5186,10 @@ mod retired_history_tests {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[path = "spent_reading.rs"]
+mod spent_reading;
+pub use spent_reading::SpentReading;
 
 #[path = "app_read/projection.rs"]
 mod app_projection;

@@ -328,6 +328,11 @@ async fn audit_cache_loss_rearms_emergency_when_no_batch_can_land_yet() {
     notice.newest = Some(cursor(&new));
     notice.entries = vec![new];
     notice.applied_view = Some(first.applied());
+    // The request after the ride was measured: a new reading, still in the
+    // force band (90.5% of the 100,000 usable tokens; the band starts at
+    // 85%). A repeat of the 90,000 the first view was built on would be the
+    // same measurement, which drives no pass.
+    notice.conditions = conditions(&setup, 90_500);
     session.notice(&runner, &settings, notice).await;
     // Correct behavior drops the now-unprotected 2,500-token result in a new
     // emergency batch. The previous cache-loss ride ended the spent episode.
