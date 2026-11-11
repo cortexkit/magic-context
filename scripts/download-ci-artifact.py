@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -53,8 +54,8 @@ def describe_error(error):
     return f"{type(error).__name__}: {error}"
 
 
-def retry_call(operation, label, pause=time.sleep):
-    """Retry only transient transport failures, with four bounded attempts."""
+def retry_call(operation, label, pause=time.sleep, *, extra_retryable_statuses=()):
+    """Retry transient transport failures and explicitly allowed HTTP statuses."""
     for attempt in range(MAX_ATTEMPTS):
         try:
             return operation()
@@ -62,7 +63,8 @@ def retry_call(operation, label, pause=time.sleep):
             detail = describe_error(error)
             if isinstance(error, HTTPError):
                 error.close()
-            if not is_transient(error):
+            if not (is_transient(error) or
+                    isinstance(error, HTTPError) and error.code in extra_retryable_statuses):
                 raise DownloadError(f"{label}: failed immediately ({detail})") from error
             if attempt == MAX_ATTEMPTS - 1:
                 raise DownloadError(f"{label}: failed after {MAX_ATTEMPTS} attempts ({detail})") from error
@@ -178,7 +180,17 @@ def download_artifact(args):
                 download_archive(archive_url, token, archive_path)
                 verify_digest(archive_path, metadata.get("digest"))
 
-            retry_call(fetch_and_verify, f"artifact download for {metadata.get('name', artifact_id)}")
+            label = f"artifact download for {metadata.get('name', artifact_id)}"
+            try:
+                # The lookup proved the artifact exists; GitHub can serve its archive later than its metadata.
+                retry_call(fetch_and_verify, label, extra_retryable_statuses=(404,))
+            except DownloadError as error:
+                if isinstance(error.__cause__, HTTPError) and error.__cause__.code == 404:
+                    raise DownloadError(
+                        f"{label}: metadata was found but its archive stayed unavailable "
+                        f"after {MAX_ATTEMPTS} attempts ({describe_error(error.__cause__)})"
+                    ) from error
+                raise
             extract_archive(archive_path, destination)
     except DownloadError as error:
         if str(error).startswith("artifact not downloaded:"):
@@ -212,6 +224,65 @@ def main():
 
 
 class RetryTests(unittest.TestCase):
+    def test_archive_404_retries_then_succeeds(self):
+        args = argparse.Namespace(artifact_id="42", artifact_name=None, api_url="https://api.example.invalid",
+                                  repository="owner/repo", path="unused")
+        metadata = {"id": 42, "name": "build"}
+        missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+        with mock.patch.dict(os.environ, GH_TOKEN="token"), \
+             mock.patch(f"{__name__}.request_json", return_value=metadata) as lookup, \
+             mock.patch(f"{__name__}.download_archive", side_effect=[missing, None]) as download, \
+             mock.patch(f"{__name__}.verify_digest"), \
+             mock.patch(f"{__name__}.extract_archive") as extract, \
+             mock.patch(f"{__name__}.RETRY_DELAYS", (0, 0, 0)):
+            self.assertEqual(download_artifact(args), metadata)
+        self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(download.call_count, 2)
+        extract.assert_called_once()
+
+    def test_archive_403_fails_immediately(self):
+        args = argparse.Namespace(artifact_id="42", artifact_name=None, api_url="https://api.example.invalid",
+                                  repository="owner/repo", path="unused")
+        forbidden = HTTPError("https://api.example.invalid", 403, "Forbidden", Message(), None)
+        with mock.patch.dict(os.environ, GH_TOKEN="token"), \
+             mock.patch(f"{__name__}.request_json", return_value={"id": 42, "name": "build"}), \
+             mock.patch(f"{__name__}.download_archive", side_effect=forbidden) as download, \
+             mock.patch(f"{__name__}.extract_archive") as extract:
+            with self.assertRaisesRegex(DownloadError, r"failed immediately \(HTTP 403 Forbidden\)"):
+                download_artifact(args)
+        self.assertEqual(download.call_count, 1)
+        extract.assert_not_called()
+
+    def test_archive_404_exhaustion_explains_metadata_was_found(self):
+        args = argparse.Namespace(artifact_id="42", artifact_name=None, api_url="https://api.example.invalid",
+                                  repository="owner/repo", path="unused")
+        missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+        with mock.patch.dict(os.environ, GH_TOKEN="token"), \
+             mock.patch(f"{__name__}.request_json", return_value={"id": 42, "name": "build"}), \
+             mock.patch(f"{__name__}.download_archive", side_effect=missing) as download, \
+             mock.patch(f"{__name__}.extract_archive") as extract, \
+             mock.patch(f"{__name__}.RETRY_DELAYS", (0, 0, 0)):
+            with self.assertRaisesRegex(
+                DownloadError,
+                r"artifact download for build: metadata was found but its archive stayed unavailable "
+                r"after 4 attempts \(HTTP 404 Not Found\)",
+            ):
+                download_artifact(args)
+        self.assertEqual(download.call_count, 4)
+        extract.assert_not_called()
+
+    def test_lookup_404_fails_immediately_for_metadata_and_inventory(self):
+        for artifact_id, artifact_name in (("42", None), (None, "build")):
+            with self.subTest(artifact_id=artifact_id, artifact_name=artifact_name):
+                args = argparse.Namespace(artifact_id=artifact_id, artifact_name=artifact_name,
+                                          api_url="https://api.example.invalid", repository="owner/repo",
+                                          run_id="123")
+                missing = HTTPError("https://api.example.invalid", 404, "Not Found", Message(), None)
+                with mock.patch(f"{__name__}.request_json", side_effect=missing) as lookup:
+                    with self.assertRaisesRegex(DownloadError, r"failed immediately \(HTTP 404"):
+                        artifact_metadata(args, "token")
+                self.assertEqual(lookup.call_count, 1)
+
     def test_expected_digest_is_checked(self):
         contents = b"verified artifact archive"
         with tempfile.TemporaryDirectory() as temporary:
