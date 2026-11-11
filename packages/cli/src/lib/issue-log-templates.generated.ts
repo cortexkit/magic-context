@@ -481,6 +481,7 @@ const TEMPLATE_DATA = [
 "historian publish refused: sequence=\x01 side=\x01 missing_id=\x01; raw snapshot changed during the historian run\x022i",
 "historian no-op: prompt still cannot fit the historian model (\x01); waiting for a model or window change",
 "mc-module: emergency drop: fixed floor ~\x01 already exceeds ceiling \x01; tool drops cannot reach the target",
+"historian skipped a filtered-noise marker for ordinals \x01-\x01: its end row \x01 is no longer in the host store\x022i",
 "mc-module: WARN MC_DRIVE_FAULT=transform_timeout active — stalling transform request by \x01 ms for drive",
 "pending ops WILL APPLY — reason=deferred_publication, pendingOps=not loaded (deferred pass) context=\x01%",
 "[magic-context] compaction-marker consistency check skipped: reason=opencode_db_missing path=\x01 source=\x01\x020p",
