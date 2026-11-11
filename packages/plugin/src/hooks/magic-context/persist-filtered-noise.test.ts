@@ -120,3 +120,35 @@ it("does not persist empty, zero-width or incompletely observed ranges as filter
         db.close();
     }
 });
+
+it("does not persist a filtered-noise marker whose end row the host dropped after the chunk was read", () => {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const sessionId = "noise-end-dropped";
+    const messages = [
+        {
+            ordinal: 1,
+            id: "m1",
+            role: "assistant",
+            parts: [{ type: "reasoning", text: "noise" }],
+        },
+        {
+            ordinal: 2,
+            id: "m2",
+            role: "assistant",
+            parts: [{ type: "reasoning", text: "noise" }],
+        },
+    ];
+    const unregister = setRawMessageProvider(sessionId, { readMessages: () => messages });
+    try {
+        const chunk = readSessionChunk(sessionId, 1000, 1, 3);
+        // The host removes the interrupted step the chunk ended on.
+        messages.splice(1, 1);
+        expect(persistFilteredNoise(db, sessionId, chunk, 3)).toBe(false);
+        expect(getCompartments(db, sessionId)).toHaveLength(0);
+    } finally {
+        unregister();
+        db.close();
+    }
+});

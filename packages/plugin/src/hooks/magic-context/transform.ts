@@ -124,6 +124,13 @@ import {
 } from "./final-wire-token-estimate";
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
+import {
+    forgetHistoryBoundaryRecovery,
+    historyBoundaryRecoveryStateKey,
+    inputMessagesKey,
+    isHistoryBoundaryRecoveryExhausted,
+    markHistoryBoundaryRecoveryExhausted,
+} from "./history-boundary-recovery";
 import type { LiveModelBySession } from "./hook-handlers";
 import { forgetHostCheckpointPass, revertHostCheckpointPass } from "./host-checkpoint-ride";
 import type { HostRowReclaim } from "./host-served-rows";
@@ -270,6 +277,8 @@ import {
 import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
 import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
 import {
+    type HistoryBoundaryRefusalRemedy,
+    historyBoundaryRefusalCause,
     storedHistoryBoundaryPresence,
     UnresolvedHistoryBoundaryError,
 } from "./unresolved-history-boundary";
@@ -832,9 +841,11 @@ export function createTransform(deps: TransformDeps) {
     // finished a pass in the new mode yet. The flag outlives a pass that fails
     // before its thinking strip is recorded, so the retry still strips.
     const compactionModeTransitionPending = new Set<string>();
+    // Called when a session is deleted, on both hosts.
     const clearSessionLogState = (sessionId: string): void => {
         prefixHoldLogTurnIds.delete(sessionId);
         clearDiagnosticLogState(sessionId);
+        forgetHistoryBoundaryRecovery(sessionId);
     };
     // Sessions whose history was clearly over the model's window, with no
     // Magic Context state to send in its place, on a pass that could not bring
@@ -1524,6 +1535,7 @@ export function createTransform(deps: TransformDeps) {
                     } else {
                         clearDetectedContextLimit(db, sessionId);
                         clearEmergencyRecovery(db, sessionId);
+                        forgetHistoryBoundaryRecovery(sessionId);
                     }
                     // Clear the in-memory usage map so loadContextUsage recomputes.
                     deps.contextUsageMap.delete(sessionId);
@@ -1605,9 +1617,17 @@ export function createTransform(deps: TransformDeps) {
         let overflowStateMutatedThisPass = false;
         let recoveryNoEligibleHeadCount =
             earlyStateSnapshot.protectedTail.recoveryNoEligibleHeadCount;
-        let emergencyRecoveryOrigin: "provider_overflow" | "proactive_model_shrink" | null = null;
+        let emergencyRecoveryOrigin:
+            | "provider_overflow"
+            | "proactive_model_shrink"
+            | "history_boundary_over_window"
+            | null = null;
         let usagePercentageSynthetic = false;
-
+        // The host's input identity and, on a pass that starts with recovery
+        // armed, the recovery state it starts from; a refused history cut
+        // compares them with the state the pass ends on.
+        const passInputKey = inputMessagesKey(messages);
+        let recoveryStateKeyAtPassStart: string | null = null;
         // Overflow-triggered emergency recovery: if a prior provider response
         // included a context-overflow error, the event handler persisted
         // needs_emergency_recovery=1. On the very next transform pass we bump
@@ -1699,8 +1719,31 @@ export function createTransform(deps: TransformDeps) {
                 const overflowState = overflowStateMutatedThisPass
                     ? getOverflowState(db, sessionId)
                     : earlyStateSnapshot.overflow;
-                emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
-                emergencyRecoveryOrigin = overflowState.emergencyRecoveryOrigin;
+                if (overflowState.needsEmergencyRecovery) {
+                    recoveryStateKeyAtPassStart = historyBoundaryRecoveryStateKey(
+                        db,
+                        sessionId,
+                        passInputKey,
+                    );
+                }
+                // Recovery armed because the history could not be cut stays idle
+                // while the session is in the exact state an earlier recovery pass
+                // ended on without making room: running it again would repeat that
+                // pass, summarizer call included (see history-boundary-recovery.ts).
+                const recoveryIdle =
+                    overflowState.needsEmergencyRecovery &&
+                    overflowState.emergencyRecoveryOrigin === "history_boundary_over_window" &&
+                    isHistoryBoundaryRecoveryExhausted(sessionId, recoveryStateKeyAtPassStart);
+                if (recoveryIdle) {
+                    sessionLog(
+                        sessionId,
+                        "transform: recovery for an uncut history already ran on this exact state and made no room; idle until the conversation, its summaries or its dropped tool output change",
+                    );
+                }
+                emergencyRecoveryArmed = overflowState.needsEmergencyRecovery && !recoveryIdle;
+                emergencyRecoveryOrigin = recoveryIdle
+                    ? null
+                    : overflowState.emergencyRecoveryOrigin;
                 if (contextUsageEarly.percentage < 80 && !overflowState.needsEmergencyRecovery) {
                     resetProtectedTailNoEligibleHead(db, sessionId);
                     recoveryNoEligibleHeadCount = 0;
@@ -1711,6 +1754,7 @@ export function createTransform(deps: TransformDeps) {
                 recoveryNoHeadEscapeActive = noHeadEscape;
                 if (
                     overflowState.needsEmergencyRecovery &&
+                    !recoveryIdle &&
                     contextUsageEarly.percentage < 95 &&
                     !noHeadEscape
                 ) {
@@ -1723,7 +1767,10 @@ export function createTransform(deps: TransformDeps) {
                         percentage: 95,
                     };
                     usagePercentageSynthetic = true;
-                } else if (recoveryNoHeadEscapeActive && deps.client) {
+                } else if (recoveryNoHeadEscapeActive && !recoveryIdle && deps.client) {
+                    // Not while recovery is idle on an exhausted state: that pass
+                    // ends in a refusal naming /ctx-flush, and this notice would
+                    // contradict it.
                     void withoutSqliteTransformPass(() =>
                         sendStatusNotification(
                             deps.client,
@@ -4022,10 +4069,46 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
             }
-            // The prefix trim could not find the history boundary, so the whole
+            const currentModelKeyForRecovery = deps.getModelKey?.(sessionId);
+            // A recovery pass that is not sent leaves recovery armed, so the next
+            // turn continues it; only a recovery pass whose request fits clears
+            // it (below). Something this pass ran may have cleared it already (a
+            // historian run that found nothing to summarize at low real
+            // pressure), so a refusing pass arms it again with its own origin.
+            const keepRecoveryArmed = (): void => {
+                if (!emergencyRecoveryArmed || emergencyRecoveryOrigin === null) return;
+                try {
+                    if (getOverflowState(db, sessionId).needsEmergencyRecovery) return;
+                    recordOverflowDetected(
+                        db,
+                        sessionId,
+                        undefined,
+                        currentModelKeyForRecovery,
+                        emergencyRecoveryOrigin,
+                    );
+                } catch (error) {
+                    throw new EmergencyFailClosedError("Emergency recovery re-arm failed", {
+                        cause: error,
+                    });
+                }
+                sessionLog(
+                    sessionId,
+                    `transform: recovery was cleared during a pass that is not sent; armed again (${emergencyRecoveryOrigin}) for the next turn`,
+                );
+            };
+            // The prefix trim could not place the history boundary, so the whole
             // window is about to go out uncut. That is harmless while it fits and
-            // a guaranteed provider rejection when it does not; in the second case
-            // stop, so the wrapper replays the last good request or refuses.
+            // a guaranteed provider rejection when it does not. In the second
+            // case the request is not sent, and the locally measured overflow
+            // takes the road a provider rejection takes: overflow recovery is
+            // armed, so the next pass summarizes older history and drops old tool
+            // output before sizing the request again, and a newly published
+            // summary moves the boundary. A recovery pass that still cannot cut
+            // or fit keeps recovery armed while it is making room; one that
+            // changed nothing records that state, and the refusal on it is final
+            // until the conversation changes (see history-boundary-recovery.ts).
+            // Only a trusted estimate arms recovery: an uncalibrated one proves
+            // too little to spend a summarizer call on.
             if (postTransformResult.prefixTrimStatus === "refused") {
                 const untrimmed =
                     finalWireEstimate ??
@@ -4038,14 +4121,62 @@ export function createTransform(deps: TransformDeps) {
                         sessionId,
                     });
                 if (untrimmed.tokens > boundaryContextLimit) {
+                    const stateKey = historyBoundaryRecoveryStateKey(db, sessionId, passInputKey);
+                    let remedy: HistoryBoundaryRefusalRemedy = "flush";
+                    let recovery: string;
+                    if (emergencyRecoveryArmed && emergencyRecoveryOrigin !== null) {
+                        // Recovery ran on this pass. Whether it made room is read
+                        // from what changed, not from the token estimate: the
+                        // estimate can differ between passes over the same
+                        // conversation, so a lower figure is no proof of room.
+                        const madeRoom =
+                            compartmentPhase.published ||
+                            postTransformResult.droppedCount > 0 ||
+                            postTransformResult.emergencyReclaimedTokens > 0 ||
+                            (stateKey !== null &&
+                                recoveryStateKeyAtPassStart !== null &&
+                                stateKey !== recoveryStateKeyAtPassStart);
+                        if (madeRoom) {
+                            keepRecoveryArmed();
+                            remedy = "send-again";
+                            recovery = `${emergencyRecoveryOrigin} recovery made room this pass but not enough; it stays armed for the next turn`;
+                        } else {
+                            if (stateKey !== null)
+                                markHistoryBoundaryRecoveryExhausted(sessionId, stateKey);
+                            recovery = `${emergencyRecoveryOrigin} recovery ran this pass and made no room; it stays idle on this state`;
+                        }
+                    } else if (!untrimmed.trusted) {
+                        recovery = "the estimate is not calibrated, so recovery is not armed";
+                    } else if (isHistoryBoundaryRecoveryExhausted(sessionId, stateKey)) {
+                        recovery = "recovery already ran on this exact state and made no room";
+                    } else {
+                        try {
+                            recordOverflowDetected(
+                                db,
+                                sessionId,
+                                undefined,
+                                currentModelKeyForRecovery,
+                                "history_boundary_over_window",
+                            );
+                            remedy = "send-again";
+                            recovery =
+                                "overflow recovery armed (history_boundary_over_window) for the next pass";
+                        } catch (error) {
+                            recovery = `arming overflow recovery failed: ${getErrorMessage(error)}`;
+                        }
+                    }
                     sessionLog(
                         sessionId,
-                        `history boundary unresolved: prefix trim refused and the untrimmed request estimate ${untrimmed.tokens} (trusted=${untrimmed.trusted}) exceeds the context limit ${boundaryContextLimit}; not sending it`,
+                        `history boundary unresolved: prefix trim refused (${postTransformResult.prefixTrimRefusal ?? "no reason recorded"}) and the untrimmed request estimate ${untrimmed.tokens} (trusted=${untrimmed.trusted}) exceeds the context limit ${boundaryContextLimit}; not sending it; ${recovery}`,
                     );
                     throw new UnresolvedHistoryBoundaryError(
                         untrimmed.tokens,
                         boundaryContextLimit,
-                        storedHistoryBoundaryPresence(db, sessionId),
+                        historyBoundaryRefusalCause(
+                            postTransformResult.prefixTrimRefusal,
+                            storedHistoryBoundaryPresence(db, sessionId),
+                        ),
+                        remedy,
                     );
                 }
             }
@@ -4093,33 +4224,6 @@ export function createTransform(deps: TransformDeps) {
                     `over-window first pass reduced: the request is about ${servedTokens} tokens (history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
                 );
             }
-            const currentModelKeyForRecovery = deps.getModelKey?.(sessionId);
-            // A recovery pass that is not sent leaves recovery armed, so the next
-            // turn continues it; only a recovery pass whose request fits clears
-            // it (below). Something this pass ran may have cleared it already (a
-            // historian run that found nothing to summarize at low real
-            // pressure), so a refusing pass arms it again with its own origin.
-            const keepRecoveryArmed = (): void => {
-                if (!emergencyRecoveryArmed || emergencyRecoveryOrigin === null) return;
-                try {
-                    if (getOverflowState(db, sessionId).needsEmergencyRecovery) return;
-                    recordOverflowDetected(
-                        db,
-                        sessionId,
-                        undefined,
-                        currentModelKeyForRecovery,
-                        emergencyRecoveryOrigin,
-                    );
-                } catch (error) {
-                    throw new EmergencyFailClosedError("Emergency recovery re-arm failed", {
-                        cause: error,
-                    });
-                }
-                sessionLog(
-                    sessionId,
-                    `transform: recovery was cleared during a pass that is not sent; armed again (${emergencyRecoveryOrigin}) for the next turn`,
-                );
-            };
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
                 ? historianJoinFailClosedMessage({
                       timedOut: true,
@@ -4195,6 +4299,7 @@ export function createTransform(deps: TransformDeps) {
             });
             if (emergencyFailClosed.disarm) {
                 clearEmergencyRecovery(db, sessionId);
+                forgetHistoryBoundaryRecovery(sessionId);
                 sessionLog(
                     sessionId,
                     `emergency disarm: trusted final-wire ${emergencyFailClosed.disarm.finalWireTokens} under limit ${emergencyFailClosed.disarm.provenLimitTokens}`,
@@ -4211,6 +4316,7 @@ export function createTransform(deps: TransformDeps) {
                 // failed) is still sent, and recovery is left to the existing
                 // disarms.
                 clearEmergencyRecovery(db, sessionId);
+                forgetHistoryBoundaryRecovery(sessionId);
                 sessionLog(
                     sessionId,
                     `transform: recovery request admitted: about ${recoveryServedRequest.tokens} tokens, within ${recoveryServedRequest.lineTokens} of ${recoveryWindowTokens}; ${emergencyRecoveryOrigin} recovery ends`,

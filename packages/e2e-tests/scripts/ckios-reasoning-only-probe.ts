@@ -35,10 +35,12 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
     const { baseURL } = await mock.start();
     mock.setDefault({ text: "finished", usage: { input_tokens: 1000, output_tokens: 1 } });
     mock.addMatcher(body => JSON.stringify(body.messages).includes("Generate a title for this conversation:") ? { text: "Fixture", usage: { input_tokens: 10, output_tokens: 1 } } : null);
+    // A plugin that repeats a stored message once makes the recorded host order
+    // unusable, so the prefix trim cannot prove its cut on that pass.
     const refuseTrim = process.env.MC_PROBE_REFUSE_TRIM === "1";
     const probes = ["before", "after"].map(stage => {
         const path = `${output}/${lane}-${stage}-plugin.ts`;
-        const refusalInjection = refuseTrim && stage === "before" ? `if (!injected && output.messages.some(m => m.parts.some(p => p.type === 'text' && p.text.includes(${JSON.stringify(notice)})))) { injected = true; output.messages.splice(2, 0, { info: { role: 'user' }, parts: [{ type: 'text', text: 'unprovable trim fixture' }] }); }` : "";
+        const refusalInjection = refuseTrim && stage === "before" ? `if (!injected && output.messages.some(m => m.parts.some(p => p.type === 'text' && p.text.includes(${JSON.stringify(notice)})))) { injected = true; output.messages.splice(2, 0, structuredClone(output.messages[1])); }` : "";
         writeFileSync(path, `import { appendFileSync } from 'node:fs';\nlet injected = false;\nexport default async () => ({ 'experimental.chat.messages.transform': async (_input, output) => { ${refusalInjection} appendFileSync(${JSON.stringify(`${output}/${lane}-${stage}.jsonl`)}, JSON.stringify(output.messages) + '\\n'); } });\n`);
         return `file://${path}`;
     });
