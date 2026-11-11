@@ -642,13 +642,8 @@ fn door_refusal(op: Op, r: &Ref, step: Step, error: door::DoorError) -> ErrorBod
             let message = format!(
                 "{said}. Fix this on this machine before the session can move: {fix}. The order of the cut's ops is not the cause."
             );
-            if op == Op::Activate {
-                // An older driver decodes participant_failed as unknown on
-                // activate and aborts instead of holding the cut as a fork
-                // for the operator to resolve. Keep the old refusal until
-                // those drivers support the new code.
-                return invalid_state(message);
-            }
+            // On activate the driver holds the cut as a fork for the operator
+            // to resolve; on the earlier steps it aborts the move.
             ErrorBody::with_participant_failed_detail(
                 ParticipantFailedDetail::new(format!(
                     "session_door:{} at {}",

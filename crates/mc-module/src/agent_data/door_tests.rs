@@ -20,6 +20,7 @@ fn permanent_fault(code: &str) {
     for (op, step, step_name) in [
         (Op::Prepare, Step::None, "none"),
         (Op::Export, Step::Prepared, "prepared"),
+        (Op::Activate, Step::Imported, "imported"),
     ] {
         let body = refused(op, step, code);
         assert_eq!(body.code, RefusalCode::ParticipantFailed, "{op:?}: {code}");
@@ -97,29 +98,6 @@ fn midstate_malformed_is_a_permanent_participant_fault() {
 #[test]
 fn stream_digest_mismatch_is_a_permanent_participant_fault() {
     permanent_fault("stream_digest_mismatch");
-}
-
-#[test]
-fn activate_keeps_permanent_door_faults_compatible_with_older_drivers() {
-    for code in [
-        "invalid_request",
-        "caller_forbidden",
-        "stream_label_too_long",
-        "record_too_large",
-        "response_too_large",
-        "offset_mismatch",
-        "offset_out_of_range",
-        "below_floor",
-        "digest_unindexed",
-        "stream_diverged",
-        "midstate_malformed",
-        "stream_digest_mismatch",
-    ] {
-        let body = refused(Op::Activate, Step::Imported, code);
-        assert_eq!(body.code, RefusalCode::InvalidState, "{code}");
-        assert_eq!(body.detail, Some(json!({"step": "imported"})), "{code}");
-        assert!(may_refuse(Op::Activate, &body.code));
-    }
 }
 
 #[test]
