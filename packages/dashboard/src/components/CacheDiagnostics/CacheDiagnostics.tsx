@@ -30,7 +30,6 @@ import {
   cacheCardSummary,
   cacheEventPercentage,
   cacheHarnessOptions,
-  cacheProjectGroups,
   cacheRatioTitle,
   cacheSessionHeader,
   cacheSessionVisible,
@@ -655,103 +654,83 @@ export default function CacheDiagnostics() {
         </Show>
         <Show when={filteredStats().length > 0}>
           <div class="section-eyebrow">Recent sessions</div>
-          <For each={cacheProjectGroups(filteredStats())}>
-            {(group) => (
-              <div>
-                <Show when={group.project !== undefined}>
-                  <div class="section-eyebrow">{group.project ?? "No project folder"}</div>
-                </Show>
-                <div ref={measureCardRow} class="cache-card-row" style={{ gap: `${CARD_GAP}px` }}>
-                  <For each={group.rows}>
-                    {(stat) => {
-                      const isActive = () => {
-                        const selected = selectedSession();
-                        return (
-                          selected?.sessionId === stat.session_id &&
-                          selected.harness === stat.harness
-                        );
-                      };
-                      const label = stat.broca
-                        ? {
-                            name: stat.broca.session.session,
-                            id: null,
-                            owner: null,
-                            tooltip: brocaCardTooltip(stat.broca),
-                          }
-                        : sessionLabel(stat.harness, stat.session_id, stat.title);
-                      // Every Broca session is managed, so only the exception is
-                      // marked: an unmanaged card listed because the toggle is on.
-                      const unmanaged = isManagedFilterableHarness(stat.harness) && !stat.managed;
-                      return (
-                        <button
-                          type="button"
-                          class={`cache-card ${isActive() ? "active" : ""}`}
-                          style={
-                            stat.broca
-                              ? {
-                                  "max-width": `calc((100% - ${(filteredStats().length - 1) * CARD_GAP}px) / ${filteredStats().length})`,
-                                }
-                              : undefined
-                          }
-                          aria-pressed={isActive()}
-                          onClick={() => {
-                            // Select-only: clicking a card focuses that session's
-                            // window. Clicking the already-active card is a no-op
-                            // (there is no combined/merged view to toggle back to).
-                            if (!isActive()) {
-                              selectSession({ harness: stat.harness, sessionId: stat.session_id });
-                            }
-                          }}
-                        >
-                          {/* Every line of a card is one fixed-height, non-wrapping
+          <div ref={measureCardRow} class="cache-card-row" style={{ gap: `${CARD_GAP}px` }}>
+            <For each={filteredStats()}>
+              {(stat) => {
+                const isActive = () => {
+                  const selected = selectedSession();
+                  return (
+                    selected?.sessionId === stat.session_id && selected.harness === stat.harness
+                  );
+                };
+                const label = stat.broca
+                  ? {
+                      name: stat.broca.session.session,
+                      id: null,
+                      owner: null,
+                      tooltip: brocaCardTooltip(stat.broca),
+                    }
+                  : sessionLabel(stat.harness, stat.session_id, stat.title);
+                // Every Broca session is managed, so only the exception is
+                // marked: an unmanaged card listed because the toggle is on.
+                const unmanaged = isManagedFilterableHarness(stat.harness) && !stat.managed;
+                return (
+                  <button
+                    type="button"
+                    class={`cache-card ${isActive() ? "active" : ""}`}
+                    aria-pressed={isActive()}
+                    onClick={() => {
+                      // Select-only: clicking a card focuses that session's
+                      // window. Clicking the already-active card is a no-op
+                      // (there is no combined/merged view to toggle back to).
+                      if (!isActive()) {
+                        selectSession({ harness: stat.harness, sessionId: stat.session_id });
+                      }
+                    }}
+                  >
+                    {/* Every line of a card is one fixed-height, non-wrapping
                         line, so cards in the row stay one height whatever
                         they show. */}
-                          <span class="cache-card-name" title={label.tooltip}>
-                            <Show
-                              when={label.name}
-                              fallback={<span class="id-text">{label.id}</span>}
-                            >
-                              {label.name}
-                            </Show>
-                          </span>
-                          <span class="cache-card-meta" title={label.tooltip}>
-                            <HarnessBadge harness={stat.harness} />
-                            <Show when={label.owner}>
-                              {(owner) => <span class="quiet-label">{owner()}</span>}
-                            </Show>
-                            <Show when={label.name && label.id}>
-                              <span class="id-text">{label.id}</span>
-                            </Show>
-                            <Show when={unmanaged}>
-                              <span class="quiet-label">unmanaged</span>
-                            </Show>
-                          </span>
-                          <span
-                            class="cache-card-figure"
-                            title={stat.summary.title}
-                            style={{ color: figureColor(stat.summary) }}
-                          >
-                            {stat.summary.text}
-                          </span>
-                          <span class="cache-card-foot" title={stat.summary.title}>
-                            <span>{stat.countLabel}</span>
-                            <Show when={stat.summary.note}>
-                              {(note) => <span class="cache-card-note">{note()}</span>}
-                            </Show>
-                            <Show when={stat.bust_count > 0}>
-                              <span class="cache-card-busts">
-                                {stat.bust_count} {stat.bust_count === 1 ? "bust" : "busts"}
-                              </span>
-                            </Show>
-                          </span>
-                        </button>
-                      );
-                    }}
-                  </For>
-                </div>
-              </div>
-            )}
-          </For>
+                    <span class="cache-card-name" title={label.tooltip}>
+                      <Show when={label.name} fallback={<span class="id-text">{label.id}</span>}>
+                        {label.name}
+                      </Show>
+                    </span>
+                    <span class="cache-card-meta" title={label.tooltip}>
+                      <HarnessBadge harness={stat.harness} />
+                      <Show when={label.owner}>
+                        {(owner) => <span class="quiet-label">{owner()}</span>}
+                      </Show>
+                      <Show when={label.name && label.id}>
+                        <span class="id-text">{label.id}</span>
+                      </Show>
+                      <Show when={unmanaged}>
+                        <span class="quiet-label">unmanaged</span>
+                      </Show>
+                    </span>
+                    <span
+                      class="cache-card-figure"
+                      title={stat.summary.title}
+                      style={{ color: figureColor(stat.summary) }}
+                    >
+                      {stat.summary.text}
+                    </span>
+                    <span class="cache-card-foot" title={stat.summary.title}>
+                      <span>{stat.countLabel}</span>
+                      <Show when={stat.summary.note}>
+                        {(note) => <span class="cache-card-note">{note()}</span>}
+                      </Show>
+                      <Show when={stat.bust_count > 0}>
+                        <span class="cache-card-busts">
+                          {stat.bust_count} {stat.bust_count === 1 ? "bust" : "busts"}
+                        </span>
+                      </Show>
+                    </span>
+                  </button>
+                );
+              }}
+            </For>
+          </div>
         </Show>
       </div>
 

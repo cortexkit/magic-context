@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { BrocaSessionSummary, SessionCacheStats } from "../../lib/types";
-import { brocaCardSummary, brocaCardTooltip, cacheProjectGroups } from "./cache-diagnostics-model";
+import type { BrocaSessionSummary } from "../../lib/types";
+import { brocaCardSummary, brocaCardTooltip } from "./cache-diagnostics-model";
 
 const head: BrocaSessionSummary = {
   session: { harness: "synthetic-agent-harness", session: "synthetic-agent-head" },
@@ -18,23 +18,6 @@ const head: BrocaSessionSummary = {
   },
   last_end_reason: "completed",
 };
-
-const row = (broca: BrocaSessionSummary): SessionCacheStats => ({
-  harness: "broca",
-  session_id: JSON.stringify(broca.session),
-  title: broca.session.session,
-  event_count: 0,
-  total_cache_read: 0,
-  total_cache_write: 0,
-  total_input: 0,
-  hit_ratio: 0,
-  last_timestamp: "",
-  last_activity_ms: broca.last_activity_ms ?? Number.MIN_SAFE_INTEGER,
-  bust_count: 0,
-  managed: true,
-  is_subagent: false,
-  broca,
-});
 
 describe("Broca export cards", () => {
   test("warm cache reads never enter the ordinary cache figure", () => {
@@ -70,18 +53,17 @@ describe("Broca export cards", () => {
     expect(summary.tone).toBe("neutral");
     expect(summary.note).toBeNull();
   });
-  test("folderless sessions form their own group, not an empty path", () => {
-    const groups = cacheProjectGroups([
-      row(head),
-      row({ ...head, session: { ...head.session, project_root: "" } }),
-      row({ ...head, session: { ...head.session, project_root: "/synthetic/project-b" } }),
-      row(head),
-    ]);
-    expect(groups.map((group) => [group.project, group.rows.length])).toEqual([
-      [null, 2],
-      ["", 1],
-      ["/synthetic/project-b", 1],
-    ]);
+  test("tooltips distinguish folderless and scoped sessions with the same name", () => {
+    const folderless = brocaCardTooltip(head);
+    const scoped = brocaCardTooltip({
+      ...head,
+      session: { ...head.session, project_root: "/synthetic/project-b" },
+    });
+    expect(folderless).toContain("project: No project folder");
+    expect(scoped).toContain("project: /synthetic/project-b");
+    expect(scoped).not.toContain("No project folder");
+    expect(folderless.split("\n")[0]).toBe("synthetic-agent-head");
+    expect(scoped.split("\n")[0]).toBe("synthetic-agent-head");
   });
   test("tooltip names the folderless identity and models without inventing an epoch time", () => {
     const text = brocaCardTooltip({ ...head, first_activity_ms: null, last_activity_ms: null });

@@ -156,20 +156,6 @@ export function brocaCardSummary(summary: BrocaSessionSummary): CacheCardSummary
   };
 }
 
-/** Separate projectless identities from every scoped project, even an empty path. */
-export function cacheProjectGroups<T extends SessionCacheStats>(
-  rows: T[],
-): { project: string | null | undefined; rows: T[] }[] {
-  const groups = new Map<string | null | undefined, T[]>();
-  for (const row of rows) {
-    const project = row.broca ? (row.broca.session.project_root ?? null) : undefined;
-    const entries = groups.get(project) ?? [];
-    entries.push(row);
-    groups.set(project, entries);
-  }
-  return [...groups].map(([project, entries]) => ({ project, rows: entries }));
-}
-
 export function brocaCardTooltip(summary: BrocaSessionSummary): string {
   const lines = [
     summary.session.session,
