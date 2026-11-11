@@ -1,4 +1,5 @@
 pub mod dispatch;
+mod token_file;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -172,7 +173,7 @@ async fn run_async(options: ServeOptions) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| format!("Failed to bind {addr}: {err}"))?;
-    let token = generate_token()?;
+    let (token, stable_token_path) = resolve_token(token_file::default_token_path().as_deref())?;
     let url = launch_url(options.host, options.port, &token);
 
     if options.allow_remote && !options.host.is_loopback() {
@@ -182,11 +183,18 @@ async fn run_async(options: ServeOptions) -> Result<(), String> {
     }
 
     println!("Magic Context Dashboard serve mode listening on {addr}");
-    println!("Open this URL: {url}");
-
-    if has_gui_display() {
-        if let Err(err) = open::that(&url) {
-            eprintln!("Could not open the browser automatically: {err}");
+    match &stable_token_path {
+        // A stable token outlives the process, so it is never printed (stdout of
+        // a service lands in journald or `docker logs`) nor passed to the browser
+        // launcher (its argv is readable by other local users).
+        Some(path) => println!("{}", stable_launch_hint(options.host, options.port, path)),
+        None => {
+            println!("Open this URL: {url}");
+            if has_gui_display() {
+                if let Err(err) = open::that(&url) {
+                    eprintln!("Could not open the browser automatically: {err}");
+                }
+            }
         }
     }
 
@@ -525,6 +533,38 @@ fn parse_port(value: &str) -> Result<u16, String> {
     Ok(port)
 }
 
+/// The stable token from `dashboard-token` when it passes every check, together
+/// with that file's path; otherwise a fresh per-process random token (the
+/// default when no file exists) and `None`.
+fn resolve_token(
+    path: Option<&std::path::Path>,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
+    let Some(path) = path else {
+        return Ok((generate_token()?, None));
+    };
+    match token_file::read_token_file(path) {
+        token_file::TokenFile::Loaded(token) => Ok((token, Some(path.to_path_buf()))),
+        token_file::TokenFile::Missing => Ok((generate_token()?, None)),
+        token_file::TokenFile::Rejected(reason) => {
+            eprintln!(
+                "Warning: ignoring {} because {reason}; using a random per-process token instead.",
+                path.display()
+            );
+            Ok((generate_token()?, None))
+        }
+    }
+}
+
+/// What to print instead of the URL when the token is stable: the address and
+/// where the token lives, never the token itself.
+fn stable_launch_hint(host: IpAddr, port: u16, path: &std::path::Path) -> String {
+    format!(
+        "Using the stable token from {}.\nOpen this URL with that file's contents as the token: {}",
+        path.display(),
+        launch_url(host, port, "<token>")
+    )
+}
+
 fn generate_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes)
@@ -746,6 +786,52 @@ mod tests {
         let token = generate_token().expect("token");
         assert_eq!(token.len(), 64);
         assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn resolve_token_without_file_generates_random_token() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dashboard-token");
+        let (first, first_path) = resolve_token(Some(&path)).expect("token");
+        let (second, _) = resolve_token(Some(&path)).expect("token");
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, second);
+        assert_eq!(first_path, None);
+
+        let (no_path, no_path_source) = resolve_token(None).expect("token");
+        assert_eq!(no_path.len(), 64);
+        assert_eq!(no_path_source, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_token_uses_owner_only_file_and_falls_back_otherwise() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dashboard-token");
+        let stable = "s".repeat(40);
+        std::fs::write(&path, format!("{stable}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            resolve_token(Some(&path)).unwrap(),
+            (stable.clone(), Some(path.clone()))
+        );
+        assert_eq!(resolve_token(Some(&path)).unwrap().0, stable);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (fallback, source) = resolve_token(Some(&path)).unwrap();
+        assert_ne!(fallback, stable);
+        assert_eq!(fallback.len(), 64);
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn stable_launch_hint_never_contains_the_token() {
+        let path =
+            std::path::Path::new("/home/u/.local/share/cortexkit/magic-context/dashboard-token");
+        let hint = stable_launch_hint(DEFAULT_HOST, 9077, path);
+        assert!(hint.contains("http://127.0.0.1:9077/#token=<token>"));
+        assert!(hint.contains(&path.display().to_string()));
     }
 
     #[test]
