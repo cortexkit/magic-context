@@ -1,5 +1,6 @@
 import {
     classifyRunnerStep,
+    formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
 } from "./cache-bust-runner-classification";
@@ -77,11 +78,11 @@ export function printRunnerFeedAnalysis(
     print = console.log,
 ): void {
     print(
-        "time(UTC) | harness | model | read | written | previous total | class | evidence | feed verdict",
+        "time(UTC) | harness | model | read | written | previous total | class | idle / previous step | evidence | feed verdict",
     );
     for (const { row, classification, note } of rows) {
         print(
-            `${new Date(row.occurred_at_ms).toISOString()} | ${row.harness} | ${row.model ?? "—"} | ${row.cache_read ?? "—"} | ${row.cache_write ?? "—"} | ${classification?.previousTotal ?? "—"} | ${classification?.class ?? (classification?.healthy ? "healthy" : note)} | ${classification?.evidence ?? note} | ${row.verdict}`,
+            `${new Date(row.occurred_at_ms).toISOString()} | ${row.harness} | ${row.model ?? "—"} | ${row.cache_read ?? "—"} | ${row.cache_write ?? "—"} | ${classification?.previousTotal ?? "—"} | ${classification?.class ?? (classification?.healthy ? "healthy" : note)} | ${formatRunnerStepTiming(classification)} | ${classification?.evidence ?? note} | ${row.verdict}`,
         );
     }
     print(

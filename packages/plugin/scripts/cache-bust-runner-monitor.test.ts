@@ -133,10 +133,10 @@ test("each runner class uses exact causes and start-to-start windows", () => {
             .class,
     ).toBe("unexplained");
     expect(
-        classifyRunnerStep(previous, { ...current, at: previous.at + 65 * MINUTE }, []).class,
+        classifyRunnerStep(previous, { ...current, at: previous.at + 60 * MINUTE }, []).class,
     ).toBe("unexplained");
     expect(
-        classifyRunnerStep(previous, { ...current, at: previous.at + 65 * MINUTE + 1 }, []).class,
+        classifyRunnerStep(previous, { ...current, at: previous.at + 60 * MINUTE + 1 }, []).class,
     ).toBe("expired");
     const restart = classifyRunnerStep(previous, { ...current, read: 0 }, [event(at - 1, setup)]);
     expect(restart).toMatchObject({ class: "unexplained", afterRestart: true });
@@ -145,6 +145,35 @@ test("each runner class uses exact causes and start-to-start windows", () => {
         healthy: true,
         rewrittenTokens: 0,
     });
+});
+
+test("60-minute live expiry is explained without a margin, but a 59-minute gap is not", async () => {
+    const previousAt = Date.parse("2026-11-11T11:04:52.782Z");
+    const currentAt = Date.parse("2026-11-11T12:05:14.335Z");
+    const previous = { at: previousAt, model: "claude", read: 500_000, write: 0 };
+    const current = { at: currentAt, model: "claude", read: 47_682, write: 445_598 };
+    expect(classifyRunnerStep(previous, current, []).class).toBe("expired");
+    expect(
+        classifyRunnerStep(previous, { ...current, at: previousAt + 59 * MINUTE }, []).class,
+    ).toBe("unexplained");
+    const s = scan(
+        [row("head", previousAt, 500_000, 0), row("head", currentAt, 47_682, 445_598)],
+        facts(),
+        currentAt + 1000,
+    );
+    await s.run();
+    await s.run();
+    expect(s.alerts).toHaveLength(0);
+    const analyzed = await analyzeRunnerFeed(
+        source([row("head", previousAt, 500_000, 0), row("head", currentAt, 47_682, 445_598)]),
+        facts(),
+        "head",
+    );
+    const output: string[] = [];
+    printRunnerFeedAnalysis(analyzed, (line) => output.push(line));
+    expect(output.join("\n")).toContain(
+        "expired | idle=60.4; previous_step=2026-11-11T11:04:52.782Z",
+    );
 });
 
 test("04:02 signed floor rewrite is plan_changed, not VIEW, in the store analyzer", () => {
@@ -337,6 +366,39 @@ test("plan changes require three different heads within ten minutes and wake onc
     }
 });
 
+test("unexplained wakes show idle time and the other recently affected heads", async () => {
+    const ids = ["head-0", "head-1", "head-2"];
+    const s = scan(
+        ids.flatMap((id, index) => {
+            const at = NOW - (4 - index) * MINUTE;
+            return [row(id, at - 59 * MINUTE, 100_000, 0), row(id, at)];
+        }),
+        facts(ids),
+    );
+    await s.run();
+    await s.run();
+    expect(s.alerts).toHaveLength(3);
+    expect(s.alerts[0]!.detail).toContain("also_unexplained_last_10m=0");
+    expect(s.alerts[1]!.detail).toContain("also_unexplained_last_10m=1: opencode/head-0");
+    expect(s.alerts[2]!.detail).toContain(
+        "also_unexplained_last_10m=2: opencode/head-0, opencode/head-1",
+    );
+    expect(s.alerts[2]!.detail).toContain("idle=59.0; previous_step=2026-11-11T03:09:00.000Z");
+    const legacy = JSON.parse(JSON.stringify(s.state));
+    delete legacy.unexplained;
+    for (const head of Object.values(legacy.heads) as {
+        summary: { previousStepAt?: number; idleGapMs?: number }[];
+    }[]) {
+        for (const observation of head.summary) {
+            delete observation.previousStepAt;
+            delete observation.idleGapMs;
+        }
+    }
+    expect(parseRunnerMonitorState(legacy).unexplained).toEqual([]);
+    pruneRunnerState(s.state, NOW + 11 * MINUTE);
+    expect(s.state.unexplained).toEqual([]);
+});
+
 test("rate break uses prior day buckets, emits one episode and ignores quiet windows", async () => {
     for (const count of [5, 9]) {
         const ids = Array.from({ length: 10 + count }, (_, i) => `head-${i}`);
@@ -360,6 +422,28 @@ test("rate break uses prior day buckets, emits one episode and ignores quiet win
         pruneRunnerState(s.state, s.args.now);
         expect(Object.keys(s.state.rates)).toHaveLength(0);
     }
+});
+
+test("historical rate break stays unreported until the next fresh sample wakes once", async () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `head-${i}`);
+    const history = ids.slice(0, 19).flatMap((id, i) => {
+        const at = i < 10 ? NOW - 10 * HOUR + i * MINUTE : NOW - HOUR + i * 1000;
+        return [
+            row(id, at - 70 * MINUTE, 100_000, 0),
+            row(id, at, i < 9 ? 100_000 : 0, i < 9 ? 0 : 100_000),
+        ];
+    });
+    const s = scan(history, facts(ids));
+    await s.run();
+    await s.run();
+    expect(s.alerts).toHaveLength(0);
+    expect(Object.values(s.state.rates).every((rate) => rate.episode === undefined)).toBe(true);
+    s.args.source = source([row("head-19", NOW - 70 * MINUTE, 100_000, 0), row("head-19")]);
+    await s.run();
+    await s.run();
+    await s.run();
+    expect(s.alerts.filter((alert) => alert.class === "rate_break")).toHaveLength(1);
+    expect(Object.values(s.state.rates)[0]!.episode).toBe(NOW - 1000);
 });
 
 test("cursor expiry restarts from retained feed, records a gap, and old rows build state without waking", async () => {
@@ -405,6 +489,9 @@ test("analyzer feed uses the shared classifier, deduplicates revisions and print
     const output: string[] = [];
     printRunnerFeedAnalysis(rows, (line) => output.push(line));
     expect(output.join("\n")).toContain("47682 | 305629 | 100000 | plan_changed");
+    expect(output.join("\n")).toContain(
+        "plan_changed | idle=1.0; previous_step=2026-11-11T04:09:00.000Z",
+    );
     expect(output.join("\n")).toContain("signed floor moved to msg_42");
 });
 

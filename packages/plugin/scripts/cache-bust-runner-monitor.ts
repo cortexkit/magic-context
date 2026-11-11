@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
     classifyRunnerStep,
+    formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
 } from "./cache-bust-runner-classification";
@@ -124,6 +125,7 @@ export interface RunnerMonitorState {
     heads: Record<string, HeadState>;
     rates: Record<string, RateState>;
     plans: { session: string; at: number; observation: RunnerObservation; harness: string }[];
+    unexplained: { session: string; at: number; harness: string }[];
     planEpisode?: number;
     sent: Record<string, number>;
 }
@@ -134,6 +136,7 @@ export const emptyRunnerState = (): RunnerMonitorState => ({
     heads: {},
     rates: {},
     plans: [],
+    unexplained: [],
     sent: {},
 });
 const nonnegative = z.number().finite().nonnegative();
@@ -159,6 +162,8 @@ const observationSchema = z.object({
     previousTotal: nonnegative,
     evidence: z.string(),
     afterRestart: z.boolean(),
+    previousStepAt: nonnegative.optional(),
+    idleGapMs: nonnegative.optional(),
     step: z.string(),
     at: nonnegative,
     read: nonnegative,
@@ -215,6 +220,9 @@ const monitorSchema = z.object({
         }),
     ),
     planEpisode: nonnegative.optional(),
+    unexplained: z
+        .array(z.object({ session: z.string(), at: nonnegative, harness: z.string() }))
+        .default([]),
     sent: z.record(z.string(), nonnegative),
 });
 export function parseRunnerMonitorState(value: unknown): RunnerMonitorState {
@@ -276,7 +284,7 @@ function alertFor(
         rewrittenTokens: observation.rewrittenTokens,
         analyzer,
         urgency: "high",
-        detail: `session=${row.session}; harness=${row.harness}; runner=${harness}; model=${row.model}; UTC=${new Date(observation.at).toISOString()}; read=${observation.read}; written=${observation.written}; previous_total=${observation.previousTotal}; class=${observation.class}; ${observation.evidence}`,
+        detail: `session=${row.session}; harness=${row.harness}; runner=${harness}; model=${row.model}; UTC=${new Date(observation.at).toISOString()}; read=${observation.read}; written=${observation.written}; previous_total=${observation.previousTotal}; class=${observation.class}; ${formatRunnerStepTiming(observation)}; ${observation.evidence}`,
     };
 }
 
@@ -421,10 +429,21 @@ export async function scanRunnerFeed(args: {
         const fresh = now - step.at <= args.wakeAge;
         if (fresh) head.summary.push(observation);
         const alert = alertFor(row, observation, facts.harness, args.root);
-        const emit = async (event: RunnerAlert): Promise<void> => {
-            if (!fresh || state.sent[event.id]) return;
+        if (classified.class === "unexplained" && fresh) {
+            state.unexplained = state.unexplained.filter(
+                (recent) => recent.at >= step.at - 600_000 && recent.session !== row.session,
+            );
+            const others = state.unexplained.filter(
+                (recent) => recent.at < step.at && heads.has(recent.session),
+            );
+            alert.detail += `; also_unexplained_last_10m=${others.length}${others.length ? `: ${others.map((recent) => `${recent.harness}/${recent.session}`).join(", ")}` : ""}`;
+            state.unexplained.push({ session: row.session, at: step.at, harness: row.harness });
+        }
+        const emit = async (event: RunnerAlert): Promise<boolean> => {
+            if (!fresh || state.sent[event.id]) return false;
             state.sent[event.id] = step.at;
             await args.emit(event);
+            return true;
         };
         if (classified.class === "unexplained" && classified.rewrittenTokens >= 20_000)
             await emit(alert);
@@ -468,7 +487,7 @@ export async function scanRunnerFeed(args: {
             );
             const share = (items: RateSample[]): number =>
                 items.filter((sample) => sample.healthy).length / items.length;
-            if (current.length >= 8 && share(current) > 0.8) delete rate.episode;
+            if (fresh && current.length >= 8 && share(current) > 0.8) delete rate.episode;
             if (
                 rate.episode === undefined &&
                 current.length >= 8 &&
@@ -476,13 +495,13 @@ export async function scanRunnerFeed(args: {
                 baseline.length >= 8 &&
                 share(baseline) >= 0.8
             ) {
-                rate.episode = step.at;
-                await emit({
+                const emitted = await emit({
                     ...alert,
                     id: `runner-rate:${key}:${step.at}`,
                     class: "rate_break",
                     detail: `${alert.detail}; rate_break source=${source.id} harness=${row.harness} provider=${row.provider}; 3h warm=${current.filter((sample) => sample.healthy).length}/${current.length}; previous 24h warm=${baseline.filter((sample) => sample.healthy).length}/${baseline.length}`,
                 });
+                if (emitted) rate.episode = step.at;
             }
         }
     }
@@ -511,6 +530,7 @@ export function pruneRunnerState(state: RunnerMonitorState, now: number): void {
             if (Number(hour) * HOUR < now - RETENTION) delete rate.buckets[hour];
     }
     state.plans = state.plans.filter((plan) => plan.at >= now - 600_000);
+    state.unexplained = state.unexplained.filter((recent) => recent.at >= now - 600_000);
     if (!state.plans.length) delete state.planEpisode;
     for (const [id, at] of Object.entries(state.sent))
         if (at < now - RETENTION) delete state.sent[id];

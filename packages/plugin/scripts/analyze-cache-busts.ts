@@ -100,7 +100,7 @@ import { DumpScanIndex, type DumpScanMetrics, listDumpFiles } from "./cache-bust
 import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
-import { classifyRunnerStep, type RunnerClassification } from "./cache-bust-runner-classification";
+import { classifyRunnerStep, formatRunnerStepTiming, type RunnerClassification } from "./cache-bust-runner-classification";
 import { analyzeRunnerFeed, printRunnerFeedAnalysis } from "./cache-bust-runner-analyzer";
 import { AstrocyteRunnerMeterSource } from "./cache-bust-runner-feed";
 import { loadRunnerHeads } from "./cache-bust-runner-monitor";
@@ -1994,7 +1994,7 @@ async function main(): Promise<void> {
                 console.log(`${fmtTime(row.current.createdAt)} | ${row.verdict} | read=${row.current.usage?.cacheRead ?? "unavailable"} write=${row.current.usage?.cacheCreation ?? "unavailable"} input=${row.current.usage?.input ?? "unavailable"} floor=${row.meterFloor ?? "—"} gap=${row.idleGapMs === undefined ? "—" : `${(row.idleGapMs / 60_000).toFixed(1)}m`} | bytes unavailable | view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
                 if (row.divergenceClass === "cache_scope_changed") console.log(`          └─ cache_scope_changed: ${row.comparisonNote}`);
                 printProviderCacheMiss(row);
-                if (row.runnerClassification) console.log(`          └─ ${row.runnerClassification.class}: ${row.runnerClassification.evidence}`);
+                if (row.runnerClassification) console.log(`          └─ ${row.runnerClassification.class} | ${formatRunnerStepTiming(row.runnerClassification)} | ${row.runnerClassification.evidence}`);
                 for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
             }
             continue;
@@ -2055,7 +2055,7 @@ async function main(): Promise<void> {
             console.log(`          └─ divergence-class: ${row.divergenceClass}`);
         }
         if (runner) {
-            if (row.runnerClassification) console.log(`          └─ runner-class: ${row.runnerClassification.class}; ${row.runnerClassification.evidence}`);
+            if (row.runnerClassification) console.log(`          └─ runner-class: ${row.runnerClassification.class}; ${formatRunnerStepTiming(row.runnerClassification)}; ${row.runnerClassification.evidence}`);
             console.log(`          └─ view=${row.renderedView ?? "none"} (join=${row.viewJoin})`);
             for (const event of row.runnerDecisions ?? []) console.log(`          └─ ck-mc ${event.kind}: ${event.detail}`);
         }

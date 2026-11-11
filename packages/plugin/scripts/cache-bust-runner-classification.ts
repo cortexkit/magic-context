@@ -23,6 +23,8 @@ export interface RunnerClassification {
     previousTotal: number;
     evidence: string;
     afterRestart: boolean;
+    previousStepAt?: number;
+    idleGapMs?: number;
 }
 
 export interface RunnerCacheFacts {
@@ -32,7 +34,7 @@ export interface RunnerCacheFacts {
     scopeChange?: string;
 }
 
-/** Start-to-start windows deliberately require an extra five minutes before calling a cache expired. */
+/** Providers refresh the cached prompt when a request starts, so a start-to-start gap needs no expiry margin. */
 export function classifyRunnerStep(
     previous: RunnerMeterStep,
     current: RunnerMeterStep,
@@ -49,6 +51,8 @@ export function classifyRunnerStep(
         previousTotal,
         rewrittenTokens: Math.max(0, previousTotal - current.read),
         afterRestart,
+        previousStepAt: previous.at,
+        idleGapMs: current.at - previous.at,
     };
     if (
         current.read >= cachedPrefixFloor({ read: previous.read, write: previous.write, input: 0 })
@@ -114,16 +118,10 @@ export function classifyRunnerStep(
         facts.lastTouchAt ?? -Infinity,
         facts.previousCompletedAt ?? -Infinity,
     );
-    const safety =
-        facts.cacheTtlMs !== undefined ||
-        facts.lastTouchAt !== undefined ||
-        facts.previousCompletedAt !== undefined
-            ? 0
-            : 300_000;
-    if (current.at - lastTouch > cacheTtlMs + safety)
+    if (current.at - lastTouch > cacheTtlMs)
         return result(
             "expired",
-            `idle ${current.at - lastTouch}ms exceeds lifetime ${cacheTtlMs}ms${safety ? " plus 5 minutes (completion time unavailable)" : ""}`,
+            `idle ${current.at - lastTouch}ms exceeds lifetime ${cacheTtlMs}ms`,
         );
     // A handshake does not change a provider's cache key. Without a recorded
     // cause, a restart must not hide a rewrite, including a complete cache miss.
@@ -131,4 +129,10 @@ export function classifyRunnerStep(
         "unexplained",
         `no model change, higher accepted view, plan change, provider-forgot ride or proven expiry${afterRestart ? "; after a runner restart" : ""}; no other recorded cause`,
     );
+}
+
+export function formatRunnerStepTiming(
+    timing?: Pick<RunnerClassification, "previousStepAt" | "idleGapMs">,
+): string {
+    return `idle=${timing?.idleGapMs === undefined ? "—" : (timing.idleGapMs / 60_000).toFixed(1)}; previous_step=${timing?.previousStepAt === undefined ? "—" : new Date(timing.previousStepAt).toISOString()}`;
 }
