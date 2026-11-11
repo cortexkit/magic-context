@@ -225,59 +225,138 @@ function headOf(head: StoredHead): ServedHead {
     };
 }
 
+/** A project's stored mural row, read as stored, and the identity it replaced. */
+interface StagedMural {
+    projectPath: string;
+    /** Identity of the row before the render; null when the project had none. */
+    before: string | null;
+    row: Record<string, Value>;
+}
+
+function muralTablePresent(db: Database): boolean {
+    return !!db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mural_manifest'")
+        .get();
+}
+
 /**
- * Render with the normal materializer, but publish what it stored only after
- * host admission.
+ * Every project's stored mural, identified without its image: the text hash it
+ * was rendered from, when, at what size, by what, and for which memories.
+ */
+function readMuralIdentities(db: Database): Map<string, string> {
+    const identities = new Map<string, string>();
+    if (!muralTablePresent(db)) return identities;
+    for (const row of db
+        .prepare(
+            "SELECT project_path, content_hash, rendered_at, model, memory_ids_json, width, height FROM mural_manifest",
+        )
+        .all() as Array<Record<string, Value>>) {
+        const { project_path, ...identity } = row;
+        identities.set(String(project_path), JSON.stringify(identity));
+    }
+    return identities;
+}
+
+/** The mural rows the render wrote: projects whose stored identity changed. */
+function readRenderedMurals(db: Database, before: Map<string, string>): StagedMural[] {
+    const murals: StagedMural[] = [];
+    for (const [projectPath, identity] of readMuralIdentities(db)) {
+        if (before.get(projectPath) === identity) continue;
+        murals.push({
+            projectPath,
+            before: before.get(projectPath) ?? null,
+            row: db
+                .prepare("SELECT * FROM mural_manifest WHERE project_path = ?")
+                .get(projectPath) as Record<string, Value>,
+        });
+    }
+    return murals;
+}
+
+/**
+ * Store the mural rows the render wrote, verbatim. A row that another fold
+ * replaced in the meantime is left alone: it was rendered from the project's
+ * memories as they stood later, and the mural renderer compares its in-memory
+ * render with the stored row before reusing either.
+ */
+function writeRenderedMurals(db: Database, murals: readonly StagedMural[]): void {
+    if (murals.length === 0) return;
+    const current = readMuralIdentities(db);
+    for (const mural of murals) {
+        if ((current.get(mural.projectPath) ?? null) !== mural.before) continue;
+        const columns = Object.keys(mural.row);
+        db.prepare(
+            `INSERT INTO mural_manifest (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})
+             ON CONFLICT(project_path) DO UPDATE SET ${columns
+                 .filter((column) => column !== "project_path")
+                 .map((column) => `${column} = excluded.${column}`)
+                 .join(", ")}`,
+        ).run(...columns.map((column) => mural.row[column] ?? null));
+    }
+}
+
+/**
+ * Render a manual compaction's history head with the normal materializer, and
+ * keep it aside until the host admits the compaction.
  *
- * The materializer commits a complete new head. Right after it, with no await
- * in between, the head it replaced is put back in one write transaction, so the
- * store serves the old head for as long as the host takes to admit the
- * compaction: a refusal, a reader in the meantime and a process that stops
- * there all see the old head. `commit` then writes the rendered head in one
- * write transaction, unless the stored head changed in the meantime.
+ * The render runs inside one write transaction that is always rolled back,
+ * whether it succeeds or throws. Inside it, the stored head is read before the
+ * render (`before`) and after it (the staged head and the summary). Rolling the
+ * transaction back means nothing the render wrote is ever committed: until
+ * `commit` runs, the store holds the previous head, so a refused compaction, a
+ * process that stops at any point, and another reader all see that head. No
+ * step puts an old head back, so there is no such step that can fail.
  *
- * If putting the old head back fails (a busy database, say), the error
- * propagates and the hook refuses the compaction. The store then keeps the new
- * head the materializer committed, together with its own markers.
- *
- * Every read and write here runs in a write (IMMEDIATE) transaction: the reads
- * are a few rows on the rare manual-compaction path, and reading the rendered
- * head in the same transaction that puts the old one back leaves no gap
- * between them for another writer.
+ * `commit` writes the staged head verbatim in its own write transaction, unless
+ * the stored head changed while the host admitted the compaction. It also
+ * stores the mural rows the render wrote, so the next fold reuses that render.
+ * The render is never run again.
  */
 export function stageManualBaseline(db: Database, sessionID: string, render: () => string) {
-    const layout = layoutOf(db, readMeta(db, sessionID));
-    const before = db.transaction(() => readHead(db, sessionID, layout)).immediate();
-    const headBefore = headOf(before);
-    let summary: string;
-    let staged: StoredHead | null = null;
-    let rendered = false;
-    let committed = false;
+    const stage: {
+        value?: {
+            layout: HeadLayout;
+            before: StoredHead;
+            summary: string;
+            staged: StoredHead;
+            murals: StagedMural[];
+        };
+    } = {};
+    const rolledBack = new Error("The manual compaction stage is rolled back by design");
     try {
-        summary = render();
-        rendered = true;
-    } finally {
-        staged = db
-            .transaction(() => {
-                const current = rendered ? readHead(db, sessionID, layout) : null;
-                writeHead(db, sessionID, layout, before);
-                return current;
-            })
-            .immediate();
+        db.transaction(() => {
+            const layout = layoutOf(db, readMeta(db, sessionID));
+            const before = readHead(db, sessionID, layout);
+            const murals = readMuralIdentities(db);
+            const summary = render();
+            stage.value = {
+                layout,
+                before,
+                summary,
+                staged: readHead(db, sessionID, layout),
+                murals: readRenderedMurals(db, murals),
+            };
+            throw rolledBack;
+        }).immediate();
+    } catch (error) {
+        if (error !== rolledBack) throw error;
     }
-    const stagedHeadParts = staged;
-    if (!stagedHeadParts) throw new Error("Manual compaction baseline was not staged");
-    const stagedHead = headOf(stagedHeadParts);
+    if (!stage.value) throw new Error("Manual compaction baseline was not staged");
+    const { layout, before, summary, staged, murals } = stage.value;
+    const headBefore = headOf(before);
+    const stagedHead = headOf(staged);
     const beforeKey = headKey(layout, before);
+    let committed = false;
     return {
         summary,
-        boundaryID: stagedHeadParts.meta.cached_m0_last_baseline_end_message_id as string | null,
+        boundaryID: staged.meta.cached_m0_last_baseline_end_message_id as string | null,
         commit() {
             db.transaction(() => {
                 // Do not overwrite a head changed while host storage yielded.
                 if (headKey(layout, readHead(db, sessionID, layout)) !== beforeKey)
                     throw new Error("Manual compaction baseline changed during admission");
-                writeHead(db, sessionID, layout, stagedHeadParts);
+                writeHead(db, sessionID, layout, staged);
+                writeRenderedMurals(db, murals);
             }).immediate();
             committed = true;
         },

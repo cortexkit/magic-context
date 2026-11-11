@@ -292,7 +292,7 @@ export interface StoredAppliedProjection {
 
 /**
  * Read this session's applied tuples (every project path) exactly as stored, so
- * a caller that must undo a HARD fold's projection can put them back verbatim.
+ * a caller can keep a HARD fold's projection aside and store it verbatim later.
  * Null when the store has no projection tables.
  */
 export function readStoredAppliedProjection(
@@ -320,7 +320,7 @@ export function readStoredAppliedProjection(
 /**
  * Replace this session's applied tuples with `stored`, verbatim: the same rows,
  * generations and m[0] digests, not a new generation. Call inside the write
- * transaction that also puts back the m[0]/m[1] bytes those tuples describe.
+ * transaction that also stores the m[0]/m[1] bytes those tuples describe.
  */
 export function replaceStoredAppliedProjection(
     db: Database,

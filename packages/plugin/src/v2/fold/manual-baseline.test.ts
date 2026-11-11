@@ -1,25 +1,32 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as appliedProjection from "../../features/magic-context/memory/applied-projection";
 import {
     writeHardProjection,
     writeSoftProjection,
 } from "../../features/magic-context/memory/applied-projection";
 import type { Memory } from "../../features/magic-context/memory/types";
 import { runMigrations } from "../../features/magic-context/migrations";
+import { getMural, upsertMural } from "../../features/magic-context/mural/storage-mural";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     ensureSessionMetaRow,
     persistCachedM0,
 } from "../../features/magic-context/storage-meta-shared";
 import { writeSessionRenderCache } from "../../features/magic-context/storage-session-cache";
-import { writeSessionMetaCollection } from "../../features/magic-context/storage-session-collections";
+import {
+    readSessionMetaCollection,
+    writeSessionMetaCollection,
+} from "../../features/magic-context/storage-session-collections";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { stageManualBaseline } from "./manual-baseline";
 
-test("manual baseline staging restores every cache field until admission commits", () => {
+const realReadStoredAppliedProjection = appliedProjection.readStoredAppliedProjection;
+
+test("manual baseline staging holds back every cache field until admission commits", () => {
     const db = new Database(":memory:");
     try {
         db.exec(`CREATE TABLE session_meta (
@@ -188,6 +195,7 @@ function storedHead(db: Database) {
 test("on a current store, staging holds back every part of the head until admission commits it", () => {
     const store = currentStore();
     const { db } = store;
+    const fresh = new Database(store.path);
     try {
         storeHead(db, "old", 1, [7]);
         const before = storedHead(db);
@@ -199,17 +207,26 @@ test("on a current store, staging holds back every part of the head until admiss
         });
         expect(staged.summary).toBe("new m0");
         expect(staged.boundaryID).toBe("row2");
-        // Every part changed in the render, and every part is back.
+        // Every part changed in the render, and none of it was committed: this
+        // connection and a fresh one both read the old head byte for byte, the
+        // projection generation included.
         for (const part of ["markers", "payloads", "memoryBlockIds", "snapshots", "rows"] as const)
             expect(rendered?.[part]).not.toEqual(before[part]);
         expect(storedHead(db)).toEqual(before);
+        expect(storedHead(fresh)).toEqual(before);
+        // The collection cache this connection keeps does not serve the
+        // rolled-back id manifest either.
+        expect(readSessionMetaCollection(db, "s", "memory_block_ids")).toBe("[7]");
         expect(staged.headCommit().changed).toBe(false);
         staged.commit();
         // The commit publishes exactly what the render stored, the projection's
         // generation included; nothing is rendered again.
         expect(storedHead(db)).toEqual(rendered!);
+        expect(storedHead(fresh)).toEqual(rendered!);
+        expect(readSessionMetaCollection(db, "s", "memory_block_ids")).toBe("[7,9]");
         expect(staged.headCommit()).toEqual({ changed: true, previousCoverage: 1 });
     } finally {
+        fresh.close();
         store.close();
     }
 });
@@ -226,7 +243,8 @@ test("the commit accepts a re-encoded but equal head and refuses a really change
         storeHead(db, "old", 1, [7, 8]);
         const upgrade = `${UPGRADE}|m0-memory-ids:[7,8]|request-tool-definitions:old`;
         // Re-encoded: the same marker fields in another order, the same ids in
-        // another order, and the same m[1] bytes stored as text instead of a blob.
+        // another order and repeated, the same m[1] bytes stored as text instead
+        // of a blob, and the projection's memory block with its keys reordered.
         const equal = stage();
         db.transaction(() => {
             writeSessionRenderCache(
@@ -235,8 +253,11 @@ test("the commit accepts a re-encoded but equal head and refuses a really change
                 "cached_m0_upgrade_state",
                 `${UPGRADE}|request-tool-definitions:old|m0-memory-ids:[7,8]`,
             );
-            writeSessionMetaCollection(db, "s", "memory_block_ids", "[8,7]");
+            writeSessionMetaCollection(db, "s", "memory_block_ids", "[8,7,7]");
             writeSessionRenderCache(db, "s", "cached_m1_bytes", "old m1");
+            db.prepare(
+                "UPDATE memory_applied_snapshots SET hard_memory_block = ? WHERE session_id = 's'",
+            ).run('{"newMemories":"old","updateLines":[]}');
         }).immediate();
         expect(() => equal.commit()).not.toThrow();
         expect(storedHead(db).payloads).toContainEqual({
@@ -244,9 +265,10 @@ test("the commit accepts a re-encoded but equal head and refuses a really change
             value: `${UPGRADE}|m0-memory-ids:[7,9]|request-tool-definitions:new`,
         });
 
-        // Really changed: one marker field, the id set, the m[1] bytes, or a
-        // projection write (its generation advances) each refuse the commit
-        // and leave the concurrent write in place.
+        // Really changed: one marker field, the id set, the m[1] bytes, a value
+        // in the projection's memory block, or a projection write (its
+        // generation advances) each refuse the commit and leave the concurrent
+        // write in place.
         storeHead(db, "old", 1, [7, 8]);
         const changes: Array<[string, () => void]> = [
             [
@@ -263,6 +285,15 @@ test("the commit accepts a re-encoded but equal head and refuses a really change
             [
                 "m[1] bytes",
                 () => writeSessionRenderCache(db, "s", "cached_m1_bytes", Buffer.from("old m1!")),
+            ],
+            [
+                "projection memory block",
+                () =>
+                    db
+                        .prepare(
+                            "UPDATE memory_applied_snapshots SET hard_memory_block = ? WHERE session_id = 's'",
+                        )
+                        .run('{"newMemories":"other","updateLines":[]}'),
             ],
             [
                 "projection generation",
@@ -315,32 +346,122 @@ test("the commit accepts a re-encoded but equal head and refuses a really change
     }
 });
 
-// A busy database can refuse the transaction that puts the old head back after
-// the render committed the new one. The hook must then refuse the compaction,
-// and the store must hold one consistent head: the new head with its own
-// markers, exactly as the render committed it.
-test("when the old head cannot be put back, staging fails and the new head stays whole", () => {
+// The whole stage is one write transaction. When another connection holds the
+// write lock, the stage fails before anything renders, the hook refuses the
+// compaction, and the store is untouched.
+test("when the stage cannot take the write lock, nothing renders and the store is unchanged", () => {
     const store = currentStore();
     const { db } = store;
     const other = new Database(store.path);
     try {
         storeHead(db, "old", 1, [7]);
+        const before = storedHead(db);
         db.exec("PRAGMA busy_timeout = 0");
-        let rendered: ReturnType<typeof storedHead> | undefined;
+        other.exec("PRAGMA busy_timeout = 0");
+        other.exec("BEGIN IMMEDIATE");
+        let renders = 0;
         expect(() =>
             stageManualBaseline(db, "s", () => {
+                renders++;
                 storeHead(db, "new", 2, [7, 9]);
-                rendered = storedHead(db);
-                // Another connection takes the write lock before the restore.
-                other.exec("PRAGMA busy_timeout = 0");
-                other.exec("BEGIN IMMEDIATE");
                 return "new m0";
             }),
         ).toThrow(/locked|busy/i);
         other.exec("ROLLBACK");
-        expect(storedHead(db)).toEqual(rendered!);
+        expect(renders).toBe(0);
+        expect(storedHead(db)).toEqual(before);
     } finally {
         other.close();
+        store.close();
+    }
+});
+
+// A render that throws, or a failure right after it, rolls the stage back with
+// everything the render wrote.
+test("a stage that fails during or right after the render leaves the store unchanged", () => {
+    const store = currentStore();
+    const { db } = store;
+    try {
+        storeHead(db, "old", 1, [7]);
+        const before = storedHead(db);
+        expect(() =>
+            stageManualBaseline(db, "s", () => {
+                storeHead(db, "new", 2, [7, 9]);
+                throw new Error("render refused");
+            }),
+        ).toThrow("render refused");
+        expect(storedHead(db)).toEqual(before);
+        const read = spyOn(appliedProjection, "readStoredAppliedProjection");
+        let reads = 0;
+        read.mockImplementation((...args) => {
+            // The second read is the rendered head's, right after the render.
+            if (++reads === 2) throw new Error("read after render failed");
+            return realReadStoredAppliedProjection(...args);
+        });
+        try {
+            expect(() =>
+                stageManualBaseline(db, "s", () => {
+                    storeHead(db, "new", 2, [7, 9]);
+                    return "new m0";
+                }),
+            ).toThrow("read after render failed");
+        } finally {
+            read.mockRestore();
+        }
+        expect(storedHead(db)).toEqual(before);
+    } finally {
+        store.close();
+    }
+});
+
+// The render stores the project's mural row (a project-wide cache of the
+// rendered image) together with the head. The stage rolls that write back too,
+// so the commit stores it, unless another fold replaced the row meanwhile.
+test("the commit stores the mural row the render wrote, unless another fold replaced it", () => {
+    const store = currentStore();
+    const { db } = store;
+    const mural = (hash: string) => ({
+        projectPath: "git:project",
+        image: Buffer.from(`png ${hash}`),
+        contentHash: hash,
+        renderedAt: hash.length,
+        model: "deterministic",
+        memoryIds: [7],
+        width: 1092,
+        height: 1092,
+    });
+    const stage = () =>
+        stageManualBaseline(db, "s", () => {
+            storeHead(db, "new", 2, [7, 9]);
+            upsertMural(db, mural("rendered"));
+            return "new m0";
+        });
+    try {
+        // No row before: the render's row appears only with the commit.
+        storeHead(db, "old", 1, [7]);
+        const first = stage();
+        expect(getMural(db, "git:project")).toBeNull();
+        first.commit();
+        expect(getMural(db, "git:project")).toEqual(mural("rendered"));
+
+        // An older row: the stage keeps it, the commit replaces it.
+        storeHead(db, "old", 1, [7]);
+        upsertMural(db, mural("older"));
+        const second = stage();
+        expect(getMural(db, "git:project")).toEqual(mural("older"));
+        second.commit();
+        expect(getMural(db, "git:project")).toEqual(mural("rendered"));
+
+        // Another fold stored a newer row during admission: it stays, and the
+        // head is still committed.
+        storeHead(db, "old", 1, [7]);
+        upsertMural(db, mural("older"));
+        const third = stage();
+        upsertMural(db, mural("newer one"));
+        third.commit();
+        expect(getMural(db, "git:project")).toEqual(mural("newer one"));
+        expect(third.headCommit().changed).toBe(true);
+    } finally {
         store.close();
     }
 });

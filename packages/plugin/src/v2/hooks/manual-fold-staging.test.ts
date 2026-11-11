@@ -185,44 +185,143 @@ test("the head an admitted manual compact commits is the head the next request s
     }
 }, 60000);
 
-// The old head is put back in one write transaction right after the render. If
-// that transaction fails (a busy database, say), the compaction is refused and
-// the store keeps one consistent head: the new one with its own markers. It
-// must never keep the new payloads under the old markers.
-test("a manual compact whose old head cannot be put back is refused and keeps one whole head", async () => {
+// The commit is the last step of the admission: the host-storage records are
+// written first, and a commit that throws (here, a write inside it fails) undoes
+// them. The hook then refuses the compaction, and the next request is the one
+// served before it.
+test("a manual compact whose commit fails is refused, undoes its admission records and leaves the next request unchanged", async () => {
     const f = await oc2ContextFixture(64886, options);
-    let failRestore = false;
+    let failCommit = false;
     const real = appliedProjection.replaceStoredAppliedProjection;
     const replace = spyOn(appliedProjection, "replaceStoredAppliedProjection");
     replace.mockImplementation((...args) => {
-        if (failRestore) throw new Error("database is locked");
+        if (failCommit) throw new Error("database is locked");
         return real(...args);
+    });
+    const realSet = f.hostStorage.set.bind(f.hostStorage);
+    const written = new Set<string>();
+    const write = spyOn(f.hostStorage, "set").mockImplementation(async (key, value) => {
+        if (
+            failCommit &&
+            (key.startsWith("native-fold/v3/") || key.startsWith("native-fold-state/v3/"))
+        )
+            written.add(key);
+        return realSet(key, value);
     });
     try {
         f.compartment(4);
-        await f.pass();
-        const endOfNewer = f.rows[10]!.id;
+        const served = await f.pass();
+        const before = storedHead(f);
+        const records = new Map<string, unknown>();
+        for (const key of [
+            `native-fold-state/v3/${encodeURIComponent(f.session)}`,
+            `native-fold/v3/${encodeURIComponent(f.session)}`,
+        ])
+            records.set(key, (await f.hostStorage.get(key)) ?? null);
         f.compartment(10);
-        failRestore = true;
+        failCommit = true;
         await expect(f.nativeFold(3, 0, "", "manual")).rejects.toThrow(
             "could not preserve the host checkpoint",
         );
-        failRestore = false;
-        // The projection is the last part written, so the failure comes after
-        // the markers and payloads were already put back inside the transaction.
+        failCommit = false;
         expect(replace).toHaveBeenCalled();
-        const stored = storedHead(f);
-        const m0 = String(
-            stored.renderCache.find((row) => row.cache_key === "cached_m0_bytes")?.value,
-        );
-        expect(m0).toContain("Review history 1");
-        expect(stored.markers.cached_m0_max_compartment_seq).toBe(1);
-        expect(stored.markers.cached_m0_last_baseline_end_message_id).toBe(endOfNewer);
-        expect(stored.projection.map((row) => row.m0_sha256)).toEqual([
-            createHash("sha256").update(m0).digest("hex"),
-        ]);
+        // Both admission records were written, and both are back as they were.
+        expect([...written].sort()).toEqual([...records.keys()].sort());
+        for (const [key, value] of records)
+            expect((await f.hostStorage.get(key)) ?? null).toEqual(value);
+        expect(storedHead(f)).toEqual(before);
+        failRunningCompaction(f);
+        const after = await f.pass();
+        expect(head(after)).not.toContain("Review history 1");
+        expect(after.bytes).toBe(served.bytes);
     } finally {
+        write.mockRestore();
         replace.mockRestore();
+        await f.cleanup();
+    }
+}, 60000);
+
+// The admission writes two host-storage records and then commits the head. A
+// process that stops after a record landed but before the commit leaves the old
+// head stored; the next process must keep serving it.
+for (const landed of [1, 2]) {
+    test(`a process that stops after ${landed} admission record(s) landed serves the previous head`, async () => {
+        const f = await oc2ContextFixture(66886 + landed * 1000, options);
+        const realSet = f.hostStorage.set.bind(f.hostStorage);
+        let hang = false;
+        let writes = 0;
+        let stopped = false;
+        const write = spyOn(f.hostStorage, "set").mockImplementation(async (key, value) => {
+            if (
+                hang &&
+                (key.startsWith("native-fold/v3/") || key.startsWith("native-fold-state/v3/"))
+            ) {
+                writes++;
+                if (writes <= landed) await realSet(key, value);
+                if (writes >= landed) {
+                    stopped = true;
+                    return new Promise<void>(() => {});
+                }
+                return;
+            }
+            return realSet(key, value);
+        });
+        try {
+            f.compartment(4);
+            const served = await f.pass();
+            f.compartment(10);
+            hang = true;
+            void f.nativeFold(3, 0, "", "manual");
+            for (let tick = 0; tick < 200 && !stopped; tick++)
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            expect(stopped).toBe(true);
+            hang = false;
+            await f.restart();
+            resetServedHeadsForTest();
+            failRunningCompaction(f);
+            const after = await f.pass();
+            expect(head(after)).not.toContain("Review history 1");
+            expect(head(after)).toBe(head(served));
+        } finally {
+            write.mockRestore();
+            await f.cleanup();
+        }
+    }, 60000);
+}
+
+// A pass of the same session while the host admits the compaction reads the
+// store as staging left it: it serves the previous head byte for byte. The
+// commit then proceeds, and the next pass serves the admitted head.
+test("a pass during admission serves the previous head, and the admitted head follows", async () => {
+    const f = await oc2ContextFixture(69886, options);
+    const realSet = f.hostStorage.set.bind(f.hostStorage);
+    let during: Pass | undefined;
+    let intercept = false;
+    const write = spyOn(f.hostStorage, "set").mockImplementation(async (key, value) => {
+        if (intercept && key.startsWith("native-fold/v3/")) {
+            intercept = false;
+            during = await f.pass();
+        }
+        return realSet(key, value);
+    });
+    try {
+        f.compartment(4);
+        const served = await f.pass();
+        f.compartment(10);
+        intercept = true;
+        let error: unknown;
+        try {
+            await f.nativeFold(3, 0, "", "manual");
+        } catch (caught) {
+            error = caught;
+        }
+        expect(during).toBeDefined();
+        expect(head(during!)).toBe(head(served));
+        expect(String(error ?? "admitted")).toBe("admitted");
+        const after = await f.pass();
+        expect(head(after)).toContain("Review history 1");
+    } finally {
+        write.mockRestore();
         await f.cleanup();
     }
 }, 60000);
