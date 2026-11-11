@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
+import * as appliedProjection from "../../features/magic-context/memory/applied-projection";
 import { resetServedHeadsForTest } from "../../hooks/magic-context/host-checkpoint-ride";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
@@ -179,6 +181,48 @@ test("the head an admitted manual compact commits is the head the next request s
         const replay = await f.pass();
         expect(replay.bytes).toBe(afterFold.bytes);
     } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// The old head is put back in one write transaction right after the render. If
+// that transaction fails (a busy database, say), the compaction is refused and
+// the store keeps one consistent head: the new one with its own markers. It
+// must never keep the new payloads under the old markers.
+test("a manual compact whose old head cannot be put back is refused and keeps one whole head", async () => {
+    const f = await oc2ContextFixture(64886, options);
+    let failRestore = false;
+    const real = appliedProjection.replaceStoredAppliedProjection;
+    const replace = spyOn(appliedProjection, "replaceStoredAppliedProjection");
+    replace.mockImplementation((...args) => {
+        if (failRestore) throw new Error("database is locked");
+        return real(...args);
+    });
+    try {
+        f.compartment(4);
+        await f.pass();
+        const endOfNewer = f.rows[10]!.id;
+        f.compartment(10);
+        failRestore = true;
+        await expect(f.nativeFold(3, 0, "", "manual")).rejects.toThrow(
+            "could not preserve the host checkpoint",
+        );
+        failRestore = false;
+        // The projection is the last part written, so the failure comes after
+        // the markers and payloads were already put back inside the transaction.
+        expect(replace).toHaveBeenCalled();
+        const stored = storedHead(f);
+        const m0 = String(
+            stored.renderCache.find((row) => row.cache_key === "cached_m0_bytes")?.value,
+        );
+        expect(m0).toContain("Review history 1");
+        expect(stored.markers.cached_m0_max_compartment_seq).toBe(1);
+        expect(stored.markers.cached_m0_last_baseline_end_message_id).toBe(endOfNewer);
+        expect(stored.projection.map((row) => row.m0_sha256)).toEqual([
+            createHash("sha256").update(m0).digest("hex"),
+        ]);
+    } finally {
+        replace.mockRestore();
         await f.cleanup();
     }
 }, 60000);

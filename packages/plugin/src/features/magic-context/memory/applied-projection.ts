@@ -270,6 +270,106 @@ export function writeSoftProjection(
     );
 }
 
+/** Every applied-projection row one session holds under the current harness, as stored. */
+export interface StoredAppliedProjection {
+    snapshots: Array<{
+        project_path: string;
+        generation: number;
+        m0_sha256: string;
+        hard_memory_block: string;
+        fragment_watermark: number;
+        committed_fragments_json: string;
+        legacy: number;
+    }>;
+    rows: Array<{
+        project_path: string;
+        memory_id: number;
+        applied_revision: number;
+        projected_text: string;
+        projected_metadata_json: string;
+    }>;
+}
+
+/**
+ * Read this session's applied tuples (every project path) exactly as stored, so
+ * a caller that must undo a HARD fold's projection can put them back verbatim.
+ * Null when the store has no projection tables.
+ */
+export function readStoredAppliedProjection(
+    db: Database,
+    sessionId: string,
+): StoredAppliedProjection | null {
+    if (!tablesPresent(db)) return null;
+    const harness = getHarness();
+    return {
+        snapshots: db
+            .prepare(
+                `SELECT project_path, generation, m0_sha256, hard_memory_block, fragment_watermark, committed_fragments_json, legacy
+                 FROM memory_applied_snapshots WHERE session_id=? AND harness=? ORDER BY project_path`,
+            )
+            .all(sessionId, harness) as StoredAppliedProjection["snapshots"],
+        rows: db
+            .prepare(
+                `SELECT project_path, memory_id, applied_revision, projected_text, projected_metadata_json
+                 FROM memory_applied_rows WHERE session_id=? AND harness=? ORDER BY project_path, memory_id`,
+            )
+            .all(sessionId, harness) as StoredAppliedProjection["rows"],
+    };
+}
+
+/**
+ * Replace this session's applied tuples with `stored`, verbatim: the same rows,
+ * generations and m[0] digests, not a new generation. Call inside the write
+ * transaction that also puts back the m[0]/m[1] bytes those tuples describe.
+ */
+export function replaceStoredAppliedProjection(
+    db: Database,
+    sessionId: string,
+    stored: StoredAppliedProjection,
+): void {
+    unknownOwnerEvidence.get(db)?.delete(`${getHarness()}\0${sessionId}`);
+    if (!tablesPresent(db)) return;
+    const harness = getHarness();
+    db.prepare("DELETE FROM memory_applied_snapshots WHERE session_id=? AND harness=?").run(
+        sessionId,
+        harness,
+    );
+    db.prepare("DELETE FROM memory_applied_rows WHERE session_id=? AND harness=?").run(
+        sessionId,
+        harness,
+    );
+    const snapshot = db.prepare(
+        `INSERT INTO memory_applied_snapshots
+            (session_id, harness, project_path, generation, m0_sha256, hard_memory_block, fragment_watermark, committed_fragments_json, legacy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const row of stored.snapshots)
+        snapshot.run(
+            sessionId,
+            harness,
+            row.project_path,
+            row.generation,
+            row.m0_sha256,
+            row.hard_memory_block,
+            row.fragment_watermark,
+            row.committed_fragments_json,
+            row.legacy,
+        );
+    const applied = db.prepare(
+        "INSERT INTO memory_applied_rows(session_id,harness,project_path,memory_id,applied_revision,projected_text,projected_metadata_json) VALUES (?,?,?,?,?,?,?)",
+    );
+    for (const row of stored.rows)
+        applied.run(
+            sessionId,
+            harness,
+            row.project_path,
+            row.memory_id,
+            row.applied_revision,
+            row.projected_text,
+            row.projected_metadata_json,
+        );
+}
+
 /** Whether this session has any applied tuple row, whatever baseline it describes. */
 export function hasAppliedSnapshot(
     db: Database,
