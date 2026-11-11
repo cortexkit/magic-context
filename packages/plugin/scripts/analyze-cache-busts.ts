@@ -100,7 +100,7 @@ import { DumpScanIndex, type DumpScanMetrics, listDumpFiles } from "./cache-bust
 import { type CacheBustScanProgress, selectScanBatch } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR, loadRunnerSession, runnerDumpDirectory, runnerMeter, type RunnerRequest, type RunnerSession } from "./cache-bust-runner-sources";
 import { joinRequestsToViews, loadRunnerEvidence, runnerDecisionsBetween, type RunnerDecision, type RunnerEvidence } from "./cache-bust-runner-log";
-import { classifyRunnerStep, formatRunnerStepTiming, type RunnerClassification } from "./cache-bust-runner-classification";
+import { classifyRunnerStep, formatRunnerStepTiming, type RunnerStepClassification } from "./cache-bust-runner-classification";
 import { analyzeRunnerFeed, printRunnerFeedAnalysis } from "./cache-bust-runner-analyzer";
 import { AstrocyteRunnerMeterSource } from "./cache-bust-runner-feed";
 import { loadRunnerHeads } from "./cache-bust-runner-monitor";
@@ -244,7 +244,7 @@ export interface AnalysisRow {
     divergenceClass?: CacheBustDivergenceClass;
     decision?: CacheBustDecisionAttribution;
     runnerDecisions?: RunnerDecision[];
-    runnerClassification?: RunnerClassification;
+    runnerClassification?: RunnerStepClassification;
     renderedView?: number | null;
     viewJoin?: "time" | "unmatched";
     comparisonNote?: string;
@@ -1442,7 +1442,7 @@ export function analyzeSnapshots(
             ? runnerDecisionsBetween(options.runnerEvidence, previousAt, joinedAt, render?.view)
             : undefined;
         const requestFields = {
-            runnerClassification: undefined as RunnerClassification | undefined,
+            runnerClassification: undefined as RunnerStepClassification | undefined,
             ...(current.runnerRequest ? {
                 runnerDecisions: runnerDecisions?.all, renderedView: render?.view,
                 viewJoin: render ? "time" as const : "unmatched" as const,

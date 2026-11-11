@@ -4,6 +4,7 @@ import type { RunnerDecision } from "./cache-bust-runner-log";
 export type RunnerBustClass =
     | "scope_changed"
     | "view"
+    | "double_rebuild"
     | "plan_changed"
     | "provider_forgot"
     | "expired"
@@ -25,6 +26,47 @@ export interface RunnerClassification {
     afterRestart: boolean;
     previousStepAt?: number;
     idleGapMs?: number;
+    viewVersion?: number;
+    viewAcceptedAt?: number;
+}
+
+export type RunnerStepClassification = Omit<RunnerClassification, "class"> & {
+    class?: Exclude<RunnerBustClass, "double_rebuild">;
+};
+
+// A runner applies a new view at its next request, so a second view for the
+// same context-window pressure shows up within the next request or two.
+export const DOUBLE_REBUILD_WINDOW_MS = 120_000;
+
+export interface RunnerViewRewrite {
+    at: number;
+    viewVersion: number;
+    viewAcceptedAt: number;
+    written: number;
+    idleGapMs?: number;
+}
+
+/** Group only rewrites already attributed to distinct accepted views. */
+export function extendRunnerRebuildChain(
+    chain: readonly RunnerViewRewrite[],
+    step: RunnerMeterStep,
+    classification: RunnerClassification,
+): RunnerViewRewrite[] {
+    if (classification.class !== "view" || classification.viewVersion === undefined ||
+        classification.viewAcceptedAt === undefined) return [...chain];
+    const rewrite: RunnerViewRewrite = {
+        at: step.at,
+        viewVersion: classification.viewVersion,
+        viewAcceptedAt: classification.viewAcceptedAt,
+        written: step.write,
+        idleGapMs: classification.idleGapMs,
+    };
+    const last = chain.at(-1);
+    if (!last || step.at - last.at > DOUBLE_REBUILD_WINDOW_MS || step.at < last.at)
+        return [rewrite];
+    if (chain.some((prior) => prior.viewVersion === rewrite.viewVersion ||
+        prior.viewAcceptedAt === rewrite.viewAcceptedAt)) return [...chain];
+    return [...chain, rewrite];
 }
 
 export interface RunnerCacheFacts {
@@ -40,7 +82,7 @@ export function classifyRunnerStep(
     current: RunnerMeterStep,
     decisions: readonly RunnerDecision[],
     facts: RunnerCacheFacts = {},
-): RunnerClassification {
+): RunnerStepClassification {
     const cacheTtlMs = facts.cacheTtlMs ?? 3_600_000;
     const previousTotal = previous.read + previous.write;
     const window = decisions.filter(
@@ -64,7 +106,7 @@ export function classifyRunnerStep(
             evidence: "cache read covers the previous read + write minus 64",
         };
     }
-    const result = (kind: RunnerBustClass, evidence: string): RunnerClassification => ({
+    const result = (kind: NonNullable<RunnerStepClassification["class"]>, evidence: string): RunnerStepClassification => ({
         ...base,
         healthy: false,
         class: kind,
@@ -94,7 +136,11 @@ export function classifyRunnerStep(
             previousVersion !== undefined &&
             event.version > previousVersion,
     );
-    if (view) return result("view", view.line ?? view.detail);
+    if (view) return {
+        ...result("view", view.line ?? view.detail),
+        viewVersion: view.version,
+        viewAcceptedAt: view.at,
+    };
     const causes = (event: RunnerDecision): string[] =>
         event.kind === "ride"
             ? (event.detail.match(/^ride \[([^\]]*)\]/)?.[1] ?? "")

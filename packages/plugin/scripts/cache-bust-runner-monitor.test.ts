@@ -93,6 +93,133 @@ function scan(rows: RunnerFeedRow[], heads = facts(), now = NOW) {
     return { state, alerts, args, run: () => scanRunnerFeed(args) };
 }
 
+function doubleRebuildFixture(gap = 3379) {
+    const first = Date.parse("2026-11-11T17:29:24.444Z");
+    const second = first + gap;
+    const heads = facts();
+    heads.get("head")!.harness = "broca";
+    heads.get("head")!.decisions = [
+        event(first - MINUTE - 1, "view 4 accepted (400 edits, no cut)"),
+        event(first - 1, "view 5 accepted (579 edits, cut through msg_500)"),
+        event(second - 1, "view 6 accepted (675 edits, cut through msg_600)"),
+    ];
+    const rows = [
+        row("head", first - MINUTE, 654_946, 0),
+        { ...row("head", first, 63_631, 293_685), prompt: 654_946 },
+        { ...row("head", second, 63_631, 198_750), prompt: 357_316 },
+    ].map((item) => ({ ...item, harness: "broca", model: "claude-opus-5-5" }));
+    return { first, second, heads, rows, now: second + 1000 };
+}
+
+test("double rebuild pair wakes once for the two reported view rewrites", async () => {
+    const fixture = doubleRebuildFixture();
+    const s = scan(fixture.rows, fixture.heads, fixture.now);
+    await s.run();
+    await s.run();
+    expect(s.alerts).toHaveLength(1);
+    expect(s.alerts[0]).toMatchObject({ class: "double_rebuild", urgency: "high", rewrittenTokens: 492_435 });
+    expect(s.alerts[0]!.detail).toBe(
+        "session=head; harness=broca; runner=broca; model=claude-opus-5-5; class=double_rebuild; session took 2 view rewrites in a row: 2026-11-11T17:29:24.444Z view 5 wrote 293685 tokens; 2026-11-11T17:29:27.823Z view 6 wrote 198750 tokens; idle before first rewrite=60 seconds",
+    );
+    await s.run();
+    expect(s.alerts).toHaveLength(1);
+    expect(Object.values(s.state.rebuilds)[0]!.rewrites.map((rewrite) => rewrite.viewVersion)).toEqual([5, 6]);
+});
+
+test("double rebuild window is inclusive at 120 seconds, not ten minutes", async () => {
+    for (const [gap, expected] of [[120_000, 1], [120_001, 0], [10 * MINUTE, 0]]) {
+        const fixture = doubleRebuildFixture(gap);
+        const s = scan(fixture.rows, fixture.heads, fixture.now);
+        await s.run();
+        await s.run();
+        expect(s.alerts).toHaveLength(expected!);
+    }
+});
+
+test("two rows attributed to the same accepted view are not a double rebuild and unexplained stays unexplained", async () => {
+    const fixture = doubleRebuildFixture();
+    fixture.heads.get("head")!.decisions.pop();
+    const s = scan(fixture.rows, fixture.heads, fixture.now);
+    await s.run();
+    await s.run();
+    expect(s.alerts.map((alert) => alert.class)).toEqual(["unexplained"]);
+    expect(s.state.rebuilds).toEqual({});
+    const analyzed = await analyzeRunnerFeed(source(fixture.rows), fixture.heads, "head");
+    expect(analyzed.map((item) => item.classification?.class)).toEqual([undefined, "view", "unexplained"]);
+});
+
+test("double rebuild wakes without a token threshold and never joins different sessions or harnesses", async () => {
+    const fixture = doubleRebuildFixture();
+    const small = fixture.rows.map((item, index) => ({
+        ...item, cache_read: [1000, 500, 0][index], cache_write: 0, prompt: 1000,
+    }));
+    const s = scan(small, fixture.heads, fixture.now);
+    await s.run();
+    await s.run();
+    expect(s.alerts.map((alert) => [alert.class, alert.rewrittenTokens])).toEqual([["double_rebuild", 0]]);
+    for (const other of [{ session: "other" }, { harness: "thalamus" }]) {
+        const rows = fixture.rows.map((item) => ({ ...item }));
+        rows[2] = { ...rows[2]!, ...other };
+        fixture.heads.set("other", fixture.heads.get("head")!);
+        const isolated = scan(rows, fixture.heads, fixture.now);
+        await isolated.run();
+        await isolated.run();
+        expect(isolated.alerts).toHaveLength(0);
+    }
+});
+
+test("three accepted views in one scan make one finding listing every rewrite", async () => {
+    const fixture = doubleRebuildFixture();
+    const third = fixture.second + 1000;
+    fixture.heads.get("head")!.decisions.push(event(third - 1, "view 7 accepted (700 edits, no cut)"));
+    const rows = [...fixture.rows, { ...fixture.rows[2]!, ...row("head", third, 0, 50_000), harness: "broca", model: "claude-opus-5-5" }];
+    const s = scan(rows, fixture.heads, third + 1000);
+    await s.run();
+    await s.run();
+    expect(s.alerts).toHaveLength(1);
+    expect(s.alerts[0]!.detail).toContain("session took 3 view rewrites in a row");
+    expect(s.alerts[0]!.detail).toContain("view 7 wrote 50000 tokens");
+    expect(Object.values(s.state.rebuilds)[0]!.rewrites).toHaveLength(3);
+    const analyzed = await analyzeRunnerFeed(source(rows), fixture.heads, "head");
+    expect(analyzed.slice(1).map((item) => item.classification?.class)).toEqual([
+        "double_rebuild", "double_rebuild", "double_rebuild",
+    ]);
+    const output: string[] = [];
+    printRunnerFeedAnalysis(analyzed, (line) => output.push(line));
+    expect(output.filter((line) => line.includes(" | double_rebuild | "))).toHaveLength(3);
+});
+
+test("a later scan extends the saved finding without another wake, including after restart", async () => {
+    const fixture = doubleRebuildFixture();
+    const s = scan(fixture.rows, fixture.heads, fixture.now);
+    await s.run();
+    await s.run();
+    const third = fixture.second + MINUTE;
+    fixture.heads.get("head")!.decisions.push(event(third - 1, "view 7 accepted (700 edits, no cut)"));
+    const logs: string[] = [];
+    const state = parseRunnerMonitorState(JSON.parse(JSON.stringify(s.state)));
+    const args = { ...s.args, state, now: third + 1000, deadline: third + 31_000, clock: () => third + 1000,
+        source: source([{ ...row("head", third, 0, 50_000), harness: "broca", model: "claude-opus-5-5" }]),
+        log: (line: string) => logs.push(line) };
+    await scanRunnerFeed(args);
+    await scanRunnerFeed(args);
+    expect(s.alerts).toHaveLength(1);
+    expect(Object.values(state.rebuilds)[0]!.rewrites.map((rewrite) => rewrite.viewVersion)).toEqual([5, 6, 7]);
+    expect(logs.map((line) => JSON.parse(line).kind)).toEqual(["runner_double_rebuild_extended"]);
+    await scanRunnerFeed(args);
+    expect(logs).toHaveLength(1);
+    pruneRunnerState(state, third + 31 * HOUR);
+    expect(state.rebuilds).toEqual({});
+    expect(state.sent).toEqual({});
+});
+
+test("analyzer feed sees the pair even when the first rewrite is outside --since", async () => {
+    const fixture = doubleRebuildFixture();
+    const analyzed = await analyzeRunnerFeed(source(fixture.rows), fixture.heads, "head", { since: fixture.first });
+    expect(analyzed).toHaveLength(1);
+    expect(analyzed[0]!.classification).toMatchObject({ class: "double_rebuild", viewVersion: 6 });
+});
+
 test("each runner class uses exact causes and start-to-start windows", () => {
     const at = Date.parse("2026-11-11T04:02:16Z");
     const previous = { at: at - 20_000, model: "claude", read: 250_000, write: 100_000 };
@@ -523,7 +650,7 @@ test("identical feed and store facts produce identical attribution with extra fa
         [],
         { runnerEvidence: { decisions: heads.get("head")!.decisions, renders: [], files: [] } },
     );
-    expect(store[1]!.runnerClassification).toEqual(feed[1]!.classification);
+    expect(feed[1]!.classification).toEqual(store[1]!.runnerClassification);
     const sentinel = scan(feedRows, heads);
     await sentinel.run();
     await sentinel.run();

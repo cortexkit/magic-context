@@ -1630,6 +1630,7 @@ export async function runSentinelOnce(
                 counters.runner = await scanRunnerFeed({ state: runner, source: deps.runnerSource ?? feedTransport.runnerSource(),
                     heads: runnerHeads,
                     root, now: nowMs, clock, deadline: deadlineMs, wakeAge: maxWakeAgeMs,
+                    log: stderr,
                     emit: async (alert) => {
                         const event: CacheBustEvent = { source_module: "magic-context", kind: "cache_bust", vendor_event_id: alert.id,
                             session_id: alert.session, directory: root, occurred_at_ms: alert.at, urgency: alert.urgency,

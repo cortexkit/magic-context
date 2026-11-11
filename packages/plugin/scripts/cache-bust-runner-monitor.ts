@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
     classifyRunnerStep,
+    extendRunnerRebuildChain,
     formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
+    type RunnerViewRewrite,
 } from "./cache-bust-runner-classification";
 import {
     runnerFeedRow,
@@ -99,6 +101,7 @@ export interface RunnerObservation extends RunnerClassification {
 }
 interface HeadState {
     last?: RunnerMeterStep;
+    rebuildChain?: RunnerViewRewrite[];
     seen: Record<string, { at: number; read: number; write: number; cursor: string }>;
     pending: Record<string, PendingRow>;
     summary: RunnerObservation[];
@@ -128,6 +131,7 @@ export interface RunnerMonitorState {
     unexplained: { session: string; at: number; harness: string }[];
     planEpisode?: number;
     sent: Record<string, number>;
+    rebuilds: Record<string, { session: string; harness: string; rewrites: RunnerViewRewrite[] }>;
 }
 export const emptyRunnerState = (): RunnerMonitorState => ({
     run: 0,
@@ -138,6 +142,7 @@ export const emptyRunnerState = (): RunnerMonitorState => ({
     plans: [],
     unexplained: [],
     sent: {},
+    rebuilds: {},
 });
 const nonnegative = z.number().finite().nonnegative();
 const meterStepSchema = z.object({
@@ -152,6 +157,7 @@ const observationSchema = z.object({
         .enum([
             "scope_changed",
             "view",
+            "double_rebuild",
             "plan_changed",
             "provider_forgot",
             "expired",
@@ -164,12 +170,21 @@ const observationSchema = z.object({
     afterRestart: z.boolean(),
     previousStepAt: nonnegative.optional(),
     idleGapMs: nonnegative.optional(),
+    viewVersion: nonnegative.optional(),
+    viewAcceptedAt: nonnegative.optional(),
     step: z.string(),
     at: nonnegative,
     read: nonnegative,
     written: nonnegative,
     model: z.string(),
     feedVerdict: z.string(),
+});
+const viewRewriteSchema = z.object({
+    at: nonnegative,
+    viewVersion: nonnegative,
+    viewAcceptedAt: nonnegative,
+    written: nonnegative,
+    idleGapMs: nonnegative.optional(),
 });
 const monitorSchema = z.object({
     run: nonnegative,
@@ -183,6 +198,7 @@ const monitorSchema = z.object({
         z.string(),
         z.object({
             last: meterStepSchema.optional(),
+            rebuildChain: z.array(viewRewriteSchema).optional(),
             seen: z
                 .record(
                     z.string(),
@@ -224,6 +240,11 @@ const monitorSchema = z.object({
         .array(z.object({ session: z.string(), at: nonnegative, harness: z.string() }))
         .default([]),
     sent: z.record(z.string(), nonnegative),
+    rebuilds: z.record(z.string(), z.object({
+        session: z.string(),
+        harness: z.string(),
+        rewrites: z.array(viewRewriteSchema),
+    })).default({}),
 });
 export function parseRunnerMonitorState(value: unknown): RunnerMonitorState {
     return monitorSchema.parse(value);
@@ -298,6 +319,7 @@ export async function scanRunnerFeed(args: {
     deadline: number;
     wakeAge: number;
     emit: (alert: RunnerAlert) => Promise<void>;
+    log?: (line: string) => void;
 }): Promise<RunnerRunSummary> {
     const { state, source, heads, now, clock, deadline } = args;
     const summary: RunnerRunSummary = {
@@ -328,6 +350,7 @@ export async function scanRunnerFeed(args: {
                 // The missing interval cannot supply a trustworthy predecessor.
                 for (const head of Object.values(state.heads)) {
                     delete head.last;
+                    delete head.rebuildChain;
                     head.pending = {};
                 }
                 continue;
@@ -384,6 +407,7 @@ export async function scanRunnerFeed(args: {
                 .map(([id, pending]) => ({ key, id, head, row: pending.row }));
         })
         .sort((a, b) => a.row.occurred_at_ms - b.row.occurred_at_ms);
+    const rebuildAlerts = new Map<string, RunnerAlert>();
     for (const { id, head, row } of ready) {
         if (clock() >= deadline) {
             summary.bounded = true;
@@ -429,6 +453,30 @@ export async function scanRunnerFeed(args: {
         const fresh = now - step.at <= args.wakeAge;
         if (fresh) head.summary.push(observation);
         const alert = alertFor(row, observation, facts.harness, args.root);
+        if (classified.class === "view") {
+            const chain = extendRunnerRebuildChain(head.rebuildChain ?? [], step, classified);
+            head.rebuildChain = chain;
+            if (chain.length >= 2) {
+                observation.class = "double_rebuild";
+                const first = chain[0]!;
+                const findingId = `runner-double-rebuild:${row.harness}:${row.session}:${first.at}:${first.viewVersion}`;
+                const prior = state.rebuilds[findingId];
+                state.rebuilds[findingId] = { session: row.session, harness: row.harness, rewrites: chain };
+                if (state.sent[findingId] !== undefined) {
+                    state.sent[findingId] = step.at;
+                    if (chain.length > (prior?.rewrites.length ?? 0)) args.log?.(JSON.stringify({
+                        kind: "runner_double_rebuild_extended", id: findingId,
+                        session: row.session, rewrite: chain.at(-1),
+                    }));
+                } else if (fresh) {
+                    rebuildAlerts.set(findingId, {
+                        ...alert, id: findingId, class: "double_rebuild",
+                        rewrittenTokens: chain.reduce((sum, rewrite) => sum + rewrite.written, 0),
+                        detail: `session=${row.session}; harness=${row.harness}; runner=${facts.harness}; model=${row.model}; class=double_rebuild; session took ${chain.length} view rewrites in a row: ${chain.map((rewrite) => `${new Date(rewrite.at).toISOString()} view ${rewrite.viewVersion} wrote ${rewrite.written} tokens`).join("; ")}; idle before first rewrite=${first.idleGapMs === undefined ? "unknown" : `${first.idleGapMs / 1000} seconds`}`,
+                    });
+                }
+            }
+        }
         if (classified.class === "unexplained" && fresh) {
             state.unexplained = state.unexplained.filter(
                 (recent) => recent.at >= step.at - 600_000 && recent.session !== row.session,
@@ -505,6 +553,13 @@ export async function scanRunnerFeed(args: {
             }
         }
     }
+    // Coalesce a chain seen in this scan before sending. Later extensions keep
+    // the saved finding up to date, but must not send another wake.
+    for (const alert of rebuildAlerts.values()) {
+        if (state.sent[alert.id] !== undefined) continue;
+        state.sent[alert.id] = alert.at;
+        await args.emit(alert);
+    }
     pruneRunnerState(state, now);
     return summary;
 }
@@ -516,6 +571,8 @@ export function pruneRunnerState(state: RunnerMonitorState, now: number): void {
             continue;
         }
         head.summary = head.summary.filter((row) => row.at >= now - RETENTION);
+        if ((head.rebuildChain?.at(-1)?.at ?? Infinity) < now - RETENTION)
+            delete head.rebuildChain;
         for (const [id, seen] of Object.entries(head.seen))
             if (seen.at < now - RETENTION) delete head.seen[id];
         for (const [id, pending] of Object.entries(head.pending))
@@ -534,4 +591,6 @@ export function pruneRunnerState(state: RunnerMonitorState, now: number): void {
     if (!state.plans.length) delete state.planEpisode;
     for (const [id, at] of Object.entries(state.sent))
         if (at < now - RETENTION) delete state.sent[id];
+    for (const [id, finding] of Object.entries(state.rebuilds))
+        if ((finding.rewrites.at(-1)?.at ?? 0) < now - RETENTION) delete state.rebuilds[id];
 }

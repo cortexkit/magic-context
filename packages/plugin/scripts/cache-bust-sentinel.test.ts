@@ -39,6 +39,8 @@ import {
     SubcWakeEventTransport,
 } from "./cache-bust-sentinel";
 import { disruptionLogMarkers } from "./cache-bust-scheduler-log";
+import type { RunnerFeedRow } from "./cache-bust-runner-feed";
+import { parseRunnerDecision } from "./cache-bust-runner-log";
 
 const temporaryDirectories: string[] = [];
 
@@ -1560,4 +1562,54 @@ describe("cache-bust sentinel runs", () => {
         expect(retry).toMatchObject({ sendRefused: 0, skippedSeen: 2 });
         expect(calls).toHaveLength(2);
     });
+});
+
+
+test("runner double rebuild uses the existing high-urgency wake and saved state survives restart", async () => {
+    const root = temporaryDirectory("sentinel-double-rebuild-");
+    const first = Date.parse("2026-11-11T17:29:24.444Z");
+    const second = Date.parse("2026-11-11T17:29:27.823Z");
+    const rows: RunnerFeedRow[] = [
+        [first - 60_000, 654_946, 0, 654_946],
+        [first, 63_631, 293_685, 654_946],
+        [second, 63_631, 198_750, 357_316],
+    ].map(([at, read, written, prompt]) => ({
+        cursor: `c${at}`, harness: "broca", source: "runner", step_ref: `head/${at}`,
+        session: "head", occurred_at_ms: at!, provider: "anthropic", model: "claude-opus-5-5",
+        cache_read: read, cache_write: written, input: 1, output: 1, prompt: prompt!, verdict: "bust",
+    }));
+    const decisions = [
+        [first - 60_001, "view 4 accepted (400 edits, no cut)"],
+        [first - 1, "view 5 accepted (579 edits, cut through msg_500)"],
+        [second - 1, "view 6 accepted (675 edits, cut through msg_600)"],
+    ].map(([at, body]) => parseRunnerDecision(`${new Date(at!).toISOString()} INFO ck-mc: session head: ${body}`, "head")!);
+    const settings = { ...options(join(root, "state.json")), send: true, runnerDataDir: root };
+    const delivered: CacheBustEvent[] = [];
+    const deps = {
+        now: () => second + 1000,
+        stdout: () => {}, stderr: () => {}, listActiveSessions: () => [],
+        runnerHeads: new Map([["head", { harness: "broca", decisions }]]),
+        runnerSource: { id: "astrocyte", read: async () => ({ rows, next: null, through: "end" }) },
+        transport: { record: async (event: CacheBustEvent) => {
+            const saved = loadSentinelState(settings.stateFile).runner!;
+            expect(saved.sent[event.vendor_event_id]).toBe(second);
+            expect(saved.rebuilds[event.vendor_event_id]!.rewrites).toHaveLength(2);
+            delivered.push(event);
+            return { disposition: "delivered", committed_order: 1 };
+        } },
+    };
+    await runSentinelOnce(settings, deps);
+    const counters = await runSentinelOnce(settings, deps);
+    expect(counters.accepted).toBe(1);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ urgency: "high", payload: { divergence_class: "double_rebuild", rewritten_tokens: 492_435 } });
+    const wake = agentDeliverRequest(delivered[0]!, settings.wakeAgentId, settings.wakeFromAgent);
+    expect(wake.urgency).toBe("high");
+    expect(wake.body.content).toContain("2026-11-11T17:29:24.444Z view 5 wrote 293685 tokens; 2026-11-11T17:29:27.823Z view 6 wrote 198750 tokens; idle before first rewrite=60 seconds");
+    // Every invocation reloads the state file, just as a fresh sentinel process does.
+    await runSentinelOnce(settings, { ...deps });
+    await runSentinelOnce(settings, { ...deps });
+    expect(delivered).toHaveLength(1);
+    const saved = loadSentinelState(settings.stateFile).runner!;
+    expect(saved.rebuilds[delivered[0]!.vendor_event_id]!.rewrites.map((rewrite) => rewrite.viewVersion)).toEqual([5, 6]);
 });

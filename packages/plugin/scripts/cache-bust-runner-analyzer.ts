@@ -1,8 +1,10 @@
 import {
     classifyRunnerStep,
+    extendRunnerRebuildChain,
     formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
+    type RunnerViewRewrite,
 } from "./cache-bust-runner-classification";
 import type { RunnerFeedRow, RunnerMeterSource } from "./cache-bust-runner-feed";
 import type { RunnerHeads } from "./cache-bust-runner-monitor";
@@ -37,6 +39,7 @@ export async function analyzeRunnerFeed(
         after = page.next;
     } while (true);
     const previous = new Map<string, RunnerMeterStep>();
+    const chains = new Map<string, { rewrites: RunnerViewRewrite[]; classes: RunnerClassification[] }>();
     const rows: RunnerFeedAnalysisRow[] = [];
     for (const row of [...latest.values()].sort((a, b) => a.occurred_at_ms - b.occurred_at_ms)) {
         if (row.occurred_at_ms > (options.until ?? Infinity)) continue;
@@ -60,9 +63,17 @@ export async function analyzeRunnerFeed(
         };
         const prior = previous.get(row.harness);
         previous.set(row.harness, step);
-        const classification = prior
+        const classification: RunnerClassification | undefined = prior
             ? classifyRunnerStep(prior, step, heads.get(session)?.decisions ?? [])
             : undefined;
+        if (classification?.class === "view") {
+            const priorChain = chains.get(row.harness);
+            const rewrites = extendRunnerRebuildChain(priorChain?.rewrites ?? [], step, classification);
+            const classes = rewrites.length > 1 ? [...(priorChain?.classes ?? []), classification] : [classification];
+            chains.set(row.harness, { rewrites, classes });
+            if (rewrites.length >= 2)
+                for (const member of classes) member.class = "double_rebuild";
+        }
         if (selected)
             rows.push({
                 row,
