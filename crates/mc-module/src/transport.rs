@@ -623,7 +623,8 @@ impl RunnerClient for SubcRunnerClient {
         engram_result(value)
     }
 
-    /// The catalog lookup routing already uses.
+    /// The module ids that claim `capability` in the daemon's catalog, by
+    /// the same lookup routing uses to find its provider.
     async fn resolve_providers(&self, capability: &str) -> Result<Vec<String>, String> {
         let consumer = self.consumer().await?;
         consumer

@@ -430,10 +430,10 @@ pub(crate) fn canonical<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
     serde_jcs::to_vec(value).expect("replies serialize")
 }
 
-/// One async lock per cut. Ops on one cut run one at a time, across door,
-/// catalog and Entorhinal calls too; ops on different cuts never wait for
-/// each other. A lock nobody holds or waits for is dropped the next time a
-/// lock is taken.
+/// One async lock per cut. Ops on one cut run one at a time, also across
+/// their calls to Engram's session door, the daemon's catalog and
+/// Entorhinal; ops on different cuts never wait for each other. A lock
+/// nobody holds or waits for is dropped the next time a lock is taken.
 #[derive(Default)]
 struct CutLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
 

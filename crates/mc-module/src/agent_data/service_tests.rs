@@ -514,8 +514,8 @@ async fn a_repeat_replays_its_bytes_and_another_request_is_id_reused_after_an_ab
         .unwrap_err();
         assert_eq!(refused.code, RefusalCode::InvalidState);
         assert_eq!(refused.detail, Some(json!({"step": "aborted"})));
-        // A prepare a later slice answered, then an abort: seeded as the
-        // journal records them.
+        // The journal as a prepare that was answered and then aborted
+        // leaves it: the prepare's receipt stays with the aborted cut.
         let prepare = cut_request(Op::Prepare, OTHER_CUT, &["r1"]);
         let reply = br#"{"external":[],"items":[]}"#;
         host.journal
