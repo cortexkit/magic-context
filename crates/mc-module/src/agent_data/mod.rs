@@ -25,12 +25,19 @@
 
 pub mod busy;
 pub mod gate;
+pub mod install;
 pub mod journal;
+pub mod moved;
 pub mod resolve;
 pub mod service;
+pub mod snapshot;
 
 #[cfg(test)]
+mod moved_tests;
+#[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod tests;
 
