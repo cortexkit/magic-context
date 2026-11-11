@@ -85,7 +85,9 @@ test("OpenCode 2 TUI shows feedback for server-registered /ctx-* commands", asyn
 		expect(names).toEqual(EXPECTED_COMMANDS);
 		expect(new Set(names).size).toBe(EXPECTED_COMMANDS.length);
 
-		// Seed one throwaway queue row so /ctx-flush has a visible sidebar change.
+		// Seed one throwaway queue row so /ctx-flush has one queued drop to apply
+		// ("Flushed: 1 dropped."). The sidebar no longer lists the queue; the
+		// /ctx-status dialog does.
 		const storageDir = host.env.MAGIC_CONTEXT_STORAGE_DIR;
 		if (!storageDir)
 			throw new Error("throwaway Magic Context storage path is missing");
@@ -116,7 +118,6 @@ test("OpenCode 2 TUI shows feedback for server-registered /ctx-* commands", asyn
 			...commandKeys("/ctx-wrapup invalid"),
 		];
 		const markers = [
-			"1 pending",
 			"Magic Context Status",
 			"Flushed: 1 dropped.",
 			"Recomp confirmation",
@@ -151,8 +152,6 @@ test("OpenCode 2 TUI shows feedback for server-registered /ctx-* commands", asyn
 		expect(
 			capture.openDatabases.filter((path) => !path.startsWith(`${host.root}/`)),
 		).toEqual([]);
-		// The seeded queue row must have disappeared from the final TUI screen.
-		expect(capture.raw.slice(-12_000)).not.toContain("1 pending");
 
 		const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
 		expect(log).toContain(

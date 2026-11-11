@@ -64,15 +64,15 @@ test("OpenCode 2 has one server registration for each /ctx-* command", async () 
 		// serve host has to let go of the store first.
 		await host.stopHost();
 
-		// "Magic Context" is the sidebar the same setup() call mounts, so its
-		// paint is the signal that the TUI plugin ran to completion.
+		// "MAGIC CONTEXT" is the header of the sidebar the same setup() call
+		// mounts, so its paint is the signal that the TUI plugin ran to completion.
 		const capture = await captureTui({
 			env: host.env,
 			root: host.root,
 			cwd: host.cwd,
 			sessionID: session.id,
 			keys: ["/ctx-status", "\r", "\r"],
-			markers: ["Magic Context", "⚡ Magic Context Status"],
+			markers: ["MAGIC CONTEXT", "⚡ Magic Context Status"],
 			timeoutMs: 120_000,
 		});
 		expect({ missing: capture.missing }).toEqual({ missing: [] });

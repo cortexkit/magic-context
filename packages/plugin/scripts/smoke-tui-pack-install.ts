@@ -178,11 +178,13 @@ assert(
   "stubbed solid-js virtual module exposes reactive primitives",
 );
 
+// The sidebar's drawing lives in the panel component; sidebar-content only
+// fetches data and hands it over.
 const compiledSidebar = await readFile(
-  join(packageRoot, "src/tui-compiled/slots/sidebar-content.tsx"),
+  join(packageRoot, "src/tui-compiled/slots/sidebar-panel.tsx"),
   "utf8",
 );
-const rawSidebar = await readFile(join(packageRoot, "src/tui/slots/sidebar-content.tsx"), "utf8");
+const rawSidebar = await readFile(join(packageRoot, "src/tui/slots/sidebar-panel.tsx"), "utf8");
 assert(
   compiledSidebar.includes("_$effect(") || compiledSidebar.includes("_$insert("),
   "compiled sidebar lacks OpenTUI reactive wrapper calls",

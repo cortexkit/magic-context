@@ -19,22 +19,22 @@ const pluginVersion = (
 ).version;
 
 /**
- * Rows only the real sidebar component draws. The plain-text projection the v2
- * TUI falls back to writes a four-line block ("Magic Context", "Context …",
- * "Historian idle · C:n", "Memories n/n · Q:n") and none of these:
- *   - the collapse triangle and version in the header badge,
- *   - a "Compartments" row (the text projection folds that count into "C:n"),
- *   - the token-breakdown legend, whose "Conversation" row is drawn only from a
- *     snapshot with a non-zero input-token count, so it is also the proof that
- *     live RPC data reached the component rather than a placeholder.
+ * Two proofs, kept apart. The plain-text projection the v2 TUI falls back to
+ * writes a four-line block ("Magic Context", "Context …", "Historian idle ·
+ * C:n", "Memories n/n · Q:n") and none of the first group:
+ *   - the real component painted: the header badge with its collapse triangle
+ *     and version, and the panel's section titles;
+ *   - live RPC data reached it: the context gauge prints "% left" only from a
+ *     snapshot with a token reading, and "no reading" otherwise. The capture
+ *     holds everything the TUI wrote, including the first paint before the
+ *     snapshot arrives, so the absence of "no reading" cannot be asserted here.
  */
 const COMPONENT_MARKERS = [
-	"▼ Magic Context",
+	"▼ MAGIC CONTEXT",
 	`v${pluginVersion}`,
-	"Compartments",
-	"Conversation",
-	"Historian",
-	"Memories",
+	"History",
+	"Knowledge",
+	"% left",
 ];
 
 /** Substrings only the text projection produces. */
