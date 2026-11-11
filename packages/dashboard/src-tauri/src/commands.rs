@@ -1918,10 +1918,10 @@ mod tests {
         let empty = crate::test_bin::write_test_executable("opencode", "#!/bin/sh\nexit 0\n", "");
         let bin = slow.to_str().expect("UTF-8 path");
         let timeout = std::time::Duration::from_millis(30);
-        assert!(probe_opencode_models(bin, timeout)
-            .await
-            .unwrap_err()
-            .contains("timed out after 0s"));
+        // The failure text is printed: a stub that could not be started fails
+        // this probe too, with a different error than the timeout.
+        let slow_error = probe_opencode_models(bin, timeout).await.unwrap_err();
+        assert!(slow_error.contains("timed out after 0s"), "{slow_error}");
         assert_eq!(
             probe_opencode_models(bin, std::time::Duration::from_secs(2))
                 .await
