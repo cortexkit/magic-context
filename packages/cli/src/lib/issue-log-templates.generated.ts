@@ -179,6 +179,7 @@ const TEMPLATE_DATA = [
 "transform: recovery request still over the window: about \x01 tokens against the 95% line \x01 of \x01; not sending it, recovery stays armed for the next turn",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: worker exited before replying (\x01); marker unchanged, advancement deferred\x020p",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: worker exited before replying (\x01); marker unchanged, advancement deferred",
+"ck-mc: session \x01: ignoring a prompt of \x01 tokens: it repeats, without its view, a reading ignored as measured before view \x01; waiting for a new reading",
 "[magic-context] compaction-marker slow writer site=\x01 acquire_ms=\x01 statements_ms=\x01 rollback_ms=\x01 wal_autocheckpoint=\x01 wal_pages_before=\x01 wal_pages_after=\x01",
 "OMP structural comparison skipped: prepared history representation is not modeled; stale prepared requests are not detected on this pass; session=\x01",
 "[magic-context] native embedding worker teardown is unsafe on this Bun version; using WASM. Upgrade the host to Bun >=1.4.0 for native inference.",

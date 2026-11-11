@@ -158,6 +158,7 @@ async fn built_on_the_reading(session: &mut Session, client: &Client, settings: 
         Some(SpentReading {
             tokens: READING,
             view: views[0].version,
+            older: None,
             ignored: false,
         })
     );
@@ -498,6 +499,13 @@ async fn spent_saved_state_without_the_field_loads() {
     assert_eq!(session.unconfirmed.len(), 2);
     let mut saved = serde_json::to_value(session.durable()).unwrap();
     let fields = saved.as_object_mut().unwrap();
+    assert!(
+        !fields["spent_reading"]
+            .as_object()
+            .unwrap()
+            .contains_key("older"),
+        "a spent reading without an older size saved one"
+    );
     assert!(fields.remove("spent_reading").is_some());
     for pending in fields["unconfirmed"].as_array_mut().unwrap() {
         pending["before"]
@@ -631,6 +639,11 @@ async fn spent_an_ignored_older_reading_repeated_without_its_view_after_a_runner
             session.reading_stale,
             "applied: {applied}: the in-flight reading counted"
         );
+        assert_eq!(
+            session.spent_reading.and_then(|spent| spent.older),
+            Some(IN_FLIGHT),
+            "applied: {applied}"
+        );
 
         // The runner restarts and sets the session up again. One that holds
         // the accepted view refuses it as not newer when Setup offers it.
@@ -677,7 +690,10 @@ async fn spent_a_failed_read_back_at_setup_keeps_the_spent_reading() {
     let first = built_on_the_reading(&mut session, &client, &settings).await;
     let request = reading(&session, &client, 2, READING, Some(&first));
     session.notice(&client, &settings, request).await;
-    assert!(session.unconfirmed.is_empty(), "the runner applies the view");
+    assert!(
+        session.unconfirmed.is_empty(),
+        "the runner applies the view"
+    );
 
     let (mut restored, _, _, _, _) = fixture();
     restored.restore(session.durable());
