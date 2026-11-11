@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as filesystem from "node:fs";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { listOpenFiles } from "../../plugin/src/shared/test-open-files";
 
 const root = process.env.FENCE_REVIEW_OUTPUT;
 const source = resolve(
@@ -12,14 +13,10 @@ const host = process.env.FENCE_REVIEW_HOST;
 const seed = Number(process.env.FENCE_REVIEW_SEED ?? 81273);
 const load = (path: string) => import(join(source, "packages", path));
 function proveIsolation() {
-	const result = spawnSync("lsof", ["-p", String(process.pid), "-Fn"], {
-		encoding: "utf8",
-		windowsHide: true,
-	});
-	expect(result.status).toBe(0);
-	const paths = result.stdout
-		.split("\n")
-		.filter((line) => line.startsWith("n"));
+	const result = listOpenFiles();
+	// Missing evidence must not be interpreted as an isolated independent host.
+	if (!result.available) throw new Error(result.reason);
+	const paths = result.paths;
 	expect(
 		paths.some((line) =>
 			/\/(?:\.local\/share\/opencode|\.local\/share\/cortexkit\/magic-context|\.config\/(?:opencode|cortexkit))\//.test(

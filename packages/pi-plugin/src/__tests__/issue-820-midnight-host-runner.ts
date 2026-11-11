@@ -1,9 +1,9 @@
 import { afterAll, expect, setSystemTime, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listOpenFiles } from "@magic-context/core/shared/test-open-files";
 import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
@@ -186,13 +186,12 @@ async function run(extraRow: boolean) {
 		return Object.assign(events(), { result: async () => output });
 	};
 	try {
-		const descriptors = execFileSync(
-			"lsof",
-			["-nP", "-p", String(process.pid)],
-			{ encoding: "utf8", windowsHide: true },
-		)
-			.split("\n")
-			.filter((line) => /\.db(?:-wal|-shm)?(?:\s|$)/u.test(line));
+		const inventory = listOpenFiles();
+		// A real-host run needs positive evidence that all databases are disposable.
+		if (!inventory.available) throw new Error(inventory.reason);
+		const descriptors = inventory.paths.filter((path) =>
+			/\.db(?:-wal|-shm)?(?:\s|$)/u.test(path),
+		);
 		expect(descriptors.length).toBeGreaterThan(0);
 		for (const line of descriptors) expect(line).toContain(root);
 		console.log("issue 820 host database descriptors:", descriptors.join("\n"));

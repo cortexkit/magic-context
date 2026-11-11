@@ -13,7 +13,7 @@ for (const host of ["oc1", "oc2"]) {
                 const path = (relative: string) => JSON.stringify(join(import.meta.dir, relative));
                 const common = `
 import { writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { listOpenFiles } from ${path("../../shared/test-open-files.ts")};
 import { openDatabase } from ${path("../../features/magic-context/storage-db.ts")};
 import { createTagger } from ${path("../../features/magic-context/tagger.ts")};
 import { createTransform } from ${path("transform.ts")};
@@ -46,8 +46,10 @@ const pass = async (messages) => {
  const output = {messages:structuredClone(messages)}; await handler({},output); return output;
 };
 const isolate = () => {
-  const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8',windowsHide:true});
- if(files.status !== 0 || /\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.stdout)) throw new Error('Live-store isolation not proved');
+  const files = listOpenFiles();
+  // A missing inventory cannot establish live-store isolation before killing the host.
+  if(!files.available) throw new Error(files.reason);
+  if(/\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.paths.join('\\n'))) throw new Error('Live-store isolation not proved');
  console.log('OC_LSOF pid=' + process.pid + ' forbidden=0');
 };
 const kill = () => process.kill(process.pid,'SIGKILL');

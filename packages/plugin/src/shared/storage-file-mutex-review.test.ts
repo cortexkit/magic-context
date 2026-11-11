@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "./rpc-utils";
 import { withStorageFileMutex } from "./storage-file-mutex";
 import * as permissions from "./storage-permissions";
+import { listOpenFiles } from "./test-open-files";
 import { createTestTempDir } from "./test-temp-dir";
 
 const mutex = join(import.meta.dir, "storage-file-mutex.ts");
@@ -54,12 +54,10 @@ withStorageFileMutex(${JSON.stringify(join(root, "locks"))}, () => {
     expect(new TextDecoder().decode(first.value)).toContain("HELD");
     reader.releaseLock();
     if (process.platform === "darwin") {
-        const files = spawnSync("/usr/sbin/lsof", ["-p", String(child.pid), "-Fn"], {
-            encoding: "utf8",
-            windowsHide: true,
-        });
-        expect(files.status).toBe(0);
-        const names = files.stdout.split("\n").filter((line) => line.startsWith("n"));
+        const files = listOpenFiles(child.pid);
+        // A paused child's isolation cannot be established from a missing inventory.
+        if (!files.available) throw new Error(files.reason);
+        const names = files.paths;
         expect(
             names.some((line) =>
                 /\/(?:\.local\/share\/opencode|\.local\/share\/cortexkit\/magic-context|\.config\/(?:opencode|cortexkit))\//.test(
