@@ -91,7 +91,11 @@ import {
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
-import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import {
+    type Database,
+    isSqliteTransactionOpen,
+    type Statement as PreparedStatement,
+} from "../../shared/sqlite";
 import {
     logSlowWriteTransaction,
     WriteTransactionSteps,
@@ -2656,6 +2660,39 @@ function cueMemoriesFor(
     });
 }
 
+let foldSavepoints = 0;
+
+/**
+ * One of the fold's own transactions. On a connection with no transaction open
+ * it runs the statements the caller passes (BEGIN or BEGIN IMMEDIATE, then
+ * COMMIT or ROLLBACK), exactly as a fold always has. On a connection that
+ * already has one open it uses a savepoint instead: SQLite refuses a nested
+ * BEGIN, and a COMMIT would end the caller's transaction. The OpenCode 2
+ * manual-compaction staging renders a fold inside its own write transaction and
+ * rolls it back; no other caller nests. The savepoint name is unique, so a
+ * second rollback after the first (both catch blocks below can run) fails on a
+ * missing savepoint instead of rolling back an enclosing one.
+ */
+function beginFoldTransaction(db: Database, begin: () => void) {
+    const savepoint = isSqliteTransactionOpen(db) ? `mc_fold_${++foldSavepoints}` : null;
+    if (savepoint) db.exec(`SAVEPOINT ${savepoint}`);
+    else begin();
+    return {
+        commit(commit: () => void): void {
+            if (savepoint) db.exec(`RELEASE ${savepoint}`);
+            else commit();
+        },
+        rollback(rollback: () => void): void {
+            if (!savepoint) {
+                rollback();
+                return;
+            }
+            db.exec(`ROLLBACK TO ${savepoint}`);
+            db.exec(`RELEASE ${savepoint}`);
+        },
+    };
+}
+
 export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const projectPath = options.projectPath;
     const projectDirectory = options.projectDirectory ?? projectPath ?? "";
@@ -2682,7 +2719,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     // read vs a later Date.now() at persist created a determinism gap inside the fold.
     const foldMaterializedAt = Date.now();
 
-    options.db.exec("BEGIN");
+    const inputs = beginFoldTransaction(options.db, () => options.db.exec("BEGIN"));
     try {
         workspace = resolveWorkspaceRenderContext({
             db: options.db,
@@ -2758,10 +2795,10 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         ]);
         // Every agent fragment up to here is already in the rows this snapshot read.
         foldFragmentWatermark = maxAgentFragmentId(options.db, options.sessionId);
-        options.db.exec("COMMIT");
+        inputs.commit(() => options.db.exec("COMMIT"));
     } catch (error) {
         try {
-            options.db.exec("ROLLBACK");
+            inputs.rollback(() => options.db.exec("ROLLBACK"));
         } catch {
             // ignore rollback failures from an already-closed transaction
         }
@@ -2879,7 +2916,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     let m1Text = M1_EMPTY_PLACEHOLDER;
     let m1Bytes = Buffer.from(m1Text, "utf8");
     options.beforeCacheCommitForTest?.();
-    options.db.exec("BEGIN IMMEDIATE");
+    const writer = beginFoldTransaction(options.db, () => options.db.exec("BEGIN IMMEDIATE"));
     const transactionStartedAt = performance.now();
     steps.reset();
     try {
@@ -2950,7 +2987,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             current.upgradeState !== snapshotMarkers.upgradeState ||
             (current.projectIdentity ?? null) !== (snapshotMarkers.projectIdentity ?? null);
         if (stale) {
-            options.db.exec("ROLLBACK");
+            writer.rollback(() => options.db.exec("ROLLBACK"));
             throw new MaterializeContentionError({ reason: "snapshot changed before Phase 3" });
         }
 
@@ -3054,7 +3091,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         commitFold?.(options.db, { m0Bytes, m1Bytes, muralDataUrl: frozenMuralDataUrl });
 
         steps.mark("onFoldCommit");
-        options.db.exec("COMMIT");
+        writer.commit(() => options.db.exec("COMMIT"));
         options.state.memoryBlockCount = visibleMemoryIds.length;
         steps.mark("commit");
         logSlowWriteTransaction(
@@ -3068,7 +3105,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         options.state.cachedM0MuralHash = frozenMuralHash;
     } catch (error) {
         try {
-            options.db.exec("ROLLBACK");
+            writer.rollback(() => options.db.exec("ROLLBACK"));
         } catch {
             // already rolled back
         }
