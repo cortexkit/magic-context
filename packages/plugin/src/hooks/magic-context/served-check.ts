@@ -305,8 +305,11 @@ function mixId(hash: number, value: unknown): number {
     if (typeof value !== "string") return mix(hash, value === undefined ? -1 : -2);
     const length = value.length;
     let h = mix(hash, length);
-    for (let index = length - 1; index >= 1 && index >= length - 8; index -= 2)
+    const stop = length > 8 ? length - 8 : 0;
+    let index = length - 1;
+    for (; index > stop; index -= 2)
         h = mix(h, (value.charCodeAt(index) << 16) | value.charCodeAt(index - 1));
+    if (index === stop && length > 0) h = mix(h, value.charCodeAt(index));
     return h;
 }
 
