@@ -1,17 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 
 import type { TuiPluginApi, TuiSlotPlugin, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
-import {
-    createContext,
-    createEffect,
-    createMemo,
-    createSignal,
-    For,
-    on,
-    onCleanup,
-    Show,
-    useContext,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import packageJson from "../../../package.json";
 import { formatThresholdPercent } from "../../shared/format-threshold";
 import {
@@ -32,7 +22,13 @@ import { compactionOffSidebarRows } from "../compaction-off";
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db";
 import { createRefreshScheduler } from "../data/refresh-scheduler";
 import { directoryForSession } from "../data/session-directory";
-import { SidebarFrame, SidebarSection, SidebarStatRow, SidebarTextRow } from "../quota-sidebar.js";
+import {
+    SidebarFrame,
+    SidebarGaugeRow,
+    SidebarSection,
+    SidebarStatRow,
+    SidebarTextRow,
+} from "../quota-sidebar.js";
 
 // Recomp commands do not send parent-session message events.
 let activeRecompPollKick: (() => void) | null = null;
@@ -133,48 +129,6 @@ function shortText(text: string): string {
 
 function present(value: number | null | undefined): value is number {
     return typeof value === "number" && Number.isFinite(value);
-}
-
-// The frame does not export SidebarGaugeRow (common-auth#12).
-const GaugeTheme =
-    createContext<
-        () => Pick<TuiThemeCurrent, "text" | "textMuted" | "success" | "warning" | "error">
-    >();
-
-function SidebarGaugeRow(props: {
-    label: string;
-    used: number | undefined;
-    value?: string;
-    warnAt?: number;
-    errorAt?: number;
-}) {
-    const theme = useContext(GaugeTheme);
-    const known = () => present(props.used);
-    const used = () => Math.max(0, Math.min(100, props.used ?? 0));
-    const filled = () => Math.round(used() / 10);
-    const tone = () =>
-        !known()
-            ? theme?.().textMuted
-            : used() >= (props.errorAt ?? 80)
-              ? theme?.().error
-              : used() >= (props.warnAt ?? 50)
-                ? theme?.().warning
-                : theme?.().success;
-    return (
-        <box width="100%" flexDirection="row" justifyContent="space-between" columnGap={1}>
-            <box flexDirection="row" flexShrink={0}>
-                <text fg={theme?.().textMuted}>{props.label} </text>
-                <text fg={tone()} wrapMode="none">
-                    {known()
-                        ? `${"█".repeat(filled())}${"░".repeat(10 - filled())} ${Math.round(100 - used())}% left`
-                        : "no reading"}
-                </text>
-            </box>
-            <text fg={theme?.().text} wrapMode="none" flexShrink={1}>
-                <b>{props.value ?? "—"}</b>
-            </text>
-        </box>
-    );
 }
 
 const SidebarContent = (props: {
@@ -388,139 +342,180 @@ const SidebarContent = (props: {
         return rows;
     });
 
+    const collapsedContext = () => {
+        const used = contextUsage();
+        return present(used)
+            ? `${Math.round(100 - Math.max(0, Math.min(100, used)))}% left ●`
+            : "no reading ●";
+    };
+    const collapsedHistorian = () => {
+        const data = s();
+        if (!data) return "no reading ●";
+        const run = data.historianRun;
+        const state =
+            run?.outcome === "failed" || run?.outcome === "fallback"
+                ? run.outcome
+                : data.historianRunning || data.compartmentInProgress
+                  ? "summarizing"
+                  : "idle";
+        return `${state}${run ? ` · ${relativeTime(run.finishedAt).replace(/ ago$/, "")}` : ""} ●`;
+    };
+
     return (
-        <GaugeTheme.Provider value={() => props.theme}>
-            <SidebarFrame
-                header={{ badge: headerLabel(), version: `v${packageJson.version}` }}
-                accounts={[]}
-                showQuota={false}
-                theme={{
-                    text: props.theme.text,
-                    textMuted: props.theme.textMuted,
-                    accent: props.theme.accent,
-                    success: props.theme.success,
-                    warning: props.theme.warning,
-                    error: props.theme.error,
-                    background: badgeTextColor(props.theme.accent, props.theme.background),
-                    borderActive: props.theme.borderActive,
-                }}
-                appearance={{
-                    barWidth: 10,
-                    barFilledChar: "█",
-                    barEmptyChar: "░",
-                    warnThreshold: 65,
-                    errorThreshold: 85,
-                }}
-                now={Date.now()}
-                collapsed={false}
-                onToggle={() => {}}
-                sections={() => (
-                    <>
-                        <SidebarSection title="Context">
-                            <SidebarGaugeRow
-                                label="ctx"
-                                used={contextUsage()}
-                                value={tokenValue()}
-                                warnAt={compactionOff() ? 100 : s()?.executeThreshold}
-                                errorAt={compactionOff() ? 100 : 85}
+        <SidebarFrame
+            header={{ badge: headerLabel(), version: `v${packageJson.version}` }}
+            accounts={[]}
+            showQuota={false}
+            theme={{
+                text: props.theme.text,
+                textMuted: props.theme.textMuted,
+                accent: props.theme.accent,
+                success: props.theme.success,
+                warning: props.theme.warning,
+                error: props.theme.error,
+                background: badgeTextColor(props.theme.accent, props.theme.background),
+                borderActive: props.theme.borderActive,
+            }}
+            appearance={{
+                barWidth: 10,
+                barFilledChar: "█",
+                barEmptyChar: "░",
+                warnThreshold: 65,
+                errorThreshold: 85,
+            }}
+            now={Date.now()}
+            collapsible={true}
+            collapsed={props.controller.collapsed()}
+            onToggle={props.controller.toggleCollapsed}
+            collapsedSections={() => (
+                <>
+                    <SidebarStatRow label="Context" value={collapsedContext()} />
+                    <Show when={!compactionOff() && sections().historian}>
+                        <SidebarStatRow label="Historian" value={collapsedHistorian()} />
+                    </Show>
+                    <Show when={!compactionOff() && sections().status}>
+                        <SidebarStatRow
+                            label="Cache"
+                            value={
+                                present(s()?.pendingOpsCount)
+                                    ? `${s()?.pendingOpsCount} drops queued ●`
+                                    : "no reading ●"
+                            }
+                        />
+                    </Show>
+                    <Show when={healthRows().length > 0}>
+                        <SidebarStatRow
+                            label="Health"
+                            value={`${healthRows().length} ${healthRows().length === 1 ? "issue" : "issues"} ●`}
+                            tone={
+                                healthRows().some((row) => row.tone === "error")
+                                    ? "error"
+                                    : "warning"
+                            }
+                        />
+                    </Show>
+                </>
+            )}
+            sections={() => (
+                <>
+                    <SidebarSection title="Context">
+                        <SidebarGaugeRow
+                            label="ctx"
+                            used={contextUsage()}
+                            value={tokenValue()}
+                            warnAt={compactionOff() ? 100 : s()?.executeThreshold}
+                            errorAt={compactionOff() ? 100 : 85}
+                        />
+                        <Show
+                            when={!compactionOff()}
+                            fallback={<SidebarTextRow text="native compaction" />}
+                        >
+                            <SidebarStatRow label="Next summary" value={nextSummary()} />
+                        </Show>
+                    </SidebarSection>
+                    <Show when={!compactionOff() && sections().historian}>
+                        <SidebarSection title="History">
+                            <SidebarStatRow
+                                label="Historian"
+                                value={
+                                    s()
+                                        ? s()?.historianRunning || s()?.compartmentInProgress
+                                            ? "summarizing"
+                                            : "idle"
+                                        : "—"
+                                }
                             />
-                            <Show
-                                when={!compactionOff()}
-                                fallback={<SidebarTextRow text="native compaction" />}
-                            >
-                                <SidebarStatRow label="Next summary" value={nextSummary()} />
+                            <SidebarStatRow label="Last run" value={values().lastRun} />
+                            <SidebarStatRow label="Model" value={values().model} />
+                            <SidebarStatRow label="Waiting" value={values().waiting} />
+                            <Show when={progress()}>
+                                <SidebarStatRow label={progressLabel()} value={progressValue()} />
                             </Show>
                         </SidebarSection>
-                        <Show when={!compactionOff() && sections().historian}>
-                            <SidebarSection title="History">
-                                <SidebarStatRow
-                                    label="Historian"
-                                    value={
-                                        s()
-                                            ? s()?.historianRunning || s()?.compartmentInProgress
-                                                ? "summarizing"
-                                                : "idle"
-                                            : "—"
-                                    }
-                                />
-                                <SidebarStatRow label="Last run" value={values().lastRun} />
-                                <SidebarStatRow label="Model" value={values().model} />
-                                <SidebarStatRow label="Waiting" value={values().waiting} />
-                                <Show when={progress()}>
-                                    <SidebarStatRow
-                                        label={progressLabel()}
-                                        value={progressValue()}
-                                    />
-                                </Show>
-                            </SidebarSection>
-                        </Show>
-                        <Show when={!compactionOff() && sections().status}>
-                            <SidebarSection title="Prompt cache">
-                                <SidebarStatRow label="Cache built" value={values().cacheBuilt} />
-                                <SidebarStatRow label="Since then" value={values().sinceThen} />
-                                <SidebarStatRow label="Queued drops" value={values().drops} />
-                            </SidebarSection>
-                        </Show>
-                        <Show when={sections().memory || sections().status}>
-                            <SidebarSection title="Knowledge">
-                                <Show
-                                    when={compactionOff()}
-                                    fallback={
-                                        <>
-                                            <Show when={sections().memory}>
-                                                <SidebarStatRow
-                                                    label="Memories"
-                                                    value={values().memories}
-                                                />
-                                            </Show>
-                                            <Show when={sections().status}>
-                                                <SidebarStatRow
-                                                    label="Notes"
-                                                    value={values().notes}
-                                                />
-                                            </Show>
-                                        </>
-                                    }
-                                >
-                                    <For each={values().nativeRows}>
-                                        {(row) => (
-                                            <SidebarStatRow label={row.label} value={row.value} />
-                                        )}
-                                    </For>
-                                </Show>
-                            </SidebarSection>
-                        </Show>
-                        <Show when={sections().dreamer}>
-                            <SidebarSection title="Dreamer">
-                                <SidebarStatRow label="Last run" value={values().dreamerLastRun} />
-                                <Show when={s()?.dreamerProgress}>
-                                    {(p: () => NonNullable<SidebarSnapshot["dreamerProgress"]>) => (
-                                        <SidebarStatRow
-                                            label="Current"
-                                            value={`${p().task} ${p().processed}/${p().total}`}
-                                        />
-                                    )}
-                                </Show>
-                            </SidebarSection>
-                        </Show>
-                        <Show when={healthRows().length > 0}>
-                            <SidebarSection title="Health">
-                                <For each={healthRows()}>
+                    </Show>
+                    <Show when={!compactionOff() && sections().status}>
+                        <SidebarSection title="Prompt cache">
+                            <SidebarStatRow label="Cache built" value={values().cacheBuilt} />
+                            <SidebarStatRow label="Since then" value={values().sinceThen} />
+                            <SidebarStatRow label="Queued drops" value={values().drops} />
+                        </SidebarSection>
+                    </Show>
+                    <Show when={sections().memory || sections().status}>
+                        <SidebarSection title="Knowledge">
+                            <Show
+                                when={compactionOff()}
+                                fallback={
+                                    <>
+                                        <Show when={sections().memory}>
+                                            <SidebarStatRow
+                                                label="Memories"
+                                                value={values().memories}
+                                            />
+                                        </Show>
+                                        <Show when={sections().status}>
+                                            <SidebarStatRow label="Notes" value={values().notes} />
+                                        </Show>
+                                    </>
+                                }
+                            >
+                                <For each={values().nativeRows}>
                                     {(row) => (
-                                        <SidebarStatRow
-                                            label={row.label}
-                                            value={row.value}
-                                            tone={row.tone}
-                                        />
+                                        <SidebarStatRow label={row.label} value={row.value} />
                                     )}
                                 </For>
-                                <SidebarTextRow text="/ctx-status shows details" />
-                            </SidebarSection>
-                        </Show>
-                    </>
-                )}
-            />
-        </GaugeTheme.Provider>
+                            </Show>
+                        </SidebarSection>
+                    </Show>
+                    <Show when={sections().dreamer}>
+                        <SidebarSection title="Dreamer">
+                            <SidebarStatRow label="Last run" value={values().dreamerLastRun} />
+                            <Show when={s()?.dreamerProgress}>
+                                {(p: () => NonNullable<SidebarSnapshot["dreamerProgress"]>) => (
+                                    <SidebarStatRow
+                                        label="Current"
+                                        value={`${p().task} ${p().processed}/${p().total}`}
+                                    />
+                                )}
+                            </Show>
+                        </SidebarSection>
+                    </Show>
+                    <Show when={healthRows().length > 0}>
+                        <SidebarSection title="Health">
+                            <For each={healthRows()}>
+                                {(row) => (
+                                    <SidebarStatRow
+                                        label={row.label}
+                                        value={row.value}
+                                        tone={row.tone}
+                                    />
+                                )}
+                            </For>
+                            <SidebarTextRow text="/ctx-status shows details" />
+                        </SidebarSection>
+                    </Show>
+                </>
+            )}
+        />
     );
 };
 

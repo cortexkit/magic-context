@@ -1,6 +1,7 @@
 export {
     SidebarFrame,
+    SidebarGaugeRow,
     SidebarSection,
     SidebarStatRow,
     SidebarTextRow,
-} from "@cortexkit/common-auth/quota-sidebar";
+} from "@cortexkit/opencode-sidebar";

@@ -1,14 +1,8 @@
-import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { effect as _$effect } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { insertNode as _$insertNode } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { insert as _$insert } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { setProp as _$setProp } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { createElement as _$createElement } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
 /** @jsxImportSource @opentui/solid */
 
-import { createContext, createEffect, createMemo, createSignal, For, on, onCleanup, Show, useContext } from "opentui:runtime-module:solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
 import { formatThresholdPercent } from "../../shared/format-threshold";
 import { computeEffectiveOrder, DEFAULT_PREFS, DEFAULT_SLOT_ORDER, PLUGIN_KEY, queueTuiPreferenceUpdate, readTuiPreferencesFile, readTuiPreferencesFileSync, resolveMagicContextPrefs, watchTuiPreferences } from "../../shared/tui-preferences";
@@ -18,7 +12,7 @@ import { compactionOffSidebarRows } from "../compaction-off";
 import { loadSidebarSnapshot } from "../data/context-db";
 import { createRefreshScheduler } from "../data/refresh-scheduler";
 import { directoryForSession } from "../data/session-directory";
-import { SidebarFrame, SidebarSection, SidebarStatRow, SidebarTextRow } from "../quota-sidebar.js";
+import { SidebarFrame, SidebarGaugeRow, SidebarSection, SidebarStatRow, SidebarTextRow } from "../quota-sidebar.js";
 
 // Recomp commands do not send parent-session message events.
 let activeRecompPollKick = null;
@@ -97,60 +91,6 @@ function shortText(text) {
 }
 function present(value) {
   return typeof value === "number" && Number.isFinite(value);
-}
-
-// The frame does not export SidebarGaugeRow (common-auth#12).
-const GaugeTheme = createContext();
-function SidebarGaugeRow(props) {
-  const theme = useContext(GaugeTheme);
-  const known = () => present(props.used);
-  const used = () => Math.max(0, Math.min(100, props.used ?? 0));
-  const filled = () => Math.round(used() / 10);
-  const tone = () => !known() ? theme?.().textMuted : used() >= (props.errorAt ?? 80) ? theme?.().error : used() >= (props.warnAt ?? 50) ? theme?.().warning : theme?.().success;
-  return (() => {
-    var _el$ = _$createElement("box"),
-      _el$2 = _$createElement("box"),
-      _el$3 = _$createElement("text"),
-      _el$4 = _$createTextNode(` `),
-      _el$5 = _$createElement("text"),
-      _el$6 = _$createElement("text"),
-      _el$7 = _$createElement("b");
-    _$insertNode(_el$, _el$2);
-    _$insertNode(_el$, _el$6);
-    _$setProp(_el$, "width", "100%");
-    _$setProp(_el$, "flexDirection", "row");
-    _$setProp(_el$, "justifyContent", "space-between");
-    _$setProp(_el$, "columnGap", 1);
-    _$insertNode(_el$2, _el$3);
-    _$insertNode(_el$2, _el$5);
-    _$setProp(_el$2, "flexDirection", "row");
-    _$setProp(_el$2, "flexShrink", 0);
-    _$insertNode(_el$3, _el$4);
-    _$insert(_el$3, () => props.label, _el$4);
-    _$setProp(_el$5, "wrapMode", "none");
-    _$insert(_el$5, (() => {
-      var _c$ = _$memo(() => !!known());
-      return () => _c$() ? `${"█".repeat(filled())}${"░".repeat(10 - filled())} ${Math.round(100 - used())}% left` : "no reading";
-    })());
-    _$insertNode(_el$6, _el$7);
-    _$setProp(_el$6, "wrapMode", "none");
-    _$setProp(_el$6, "flexShrink", 1);
-    _$insert(_el$7, () => props.value ?? "—");
-    _$effect(_p$ => {
-      var _v$ = theme?.().textMuted,
-        _v$2 = tone(),
-        _v$3 = theme?.().text;
-      _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "fg", _v$, _p$.e));
-      _v$2 !== _p$.t && (_p$.t = _$setProp(_el$5, "fg", _v$2, _p$.t));
-      _v$3 !== _p$.a && (_p$.a = _$setProp(_el$6, "fg", _v$3, _p$.a));
-      return _p$;
-    }, {
-      e: undefined,
-      t: undefined,
-      a: undefined
-    });
-    return _el$;
-  })();
 }
 const SidebarContent = props => {
   const [snapshot, setSnapshot] = createSignal(null);
@@ -301,247 +241,252 @@ const SidebarContent = props => {
     });
     return rows;
   });
-  return _$createComponent(GaugeTheme.Provider, {
-    value: () => props.theme,
-    get children() {
-      return _$createComponent(SidebarFrame, {
-        get header() {
-          return {
-            badge: headerLabel(),
-            version: `v${packageJson.version}`
-          };
-        },
-        accounts: [],
-        showQuota: false,
-        get theme() {
-          return {
-            text: props.theme.text,
-            textMuted: props.theme.textMuted,
-            accent: props.theme.accent,
-            success: props.theme.success,
-            warning: props.theme.warning,
-            error: props.theme.error,
-            background: badgeTextColor(props.theme.accent, props.theme.background),
-            borderActive: props.theme.borderActive
-          };
-        },
-        appearance: {
-          barWidth: 10,
-          barFilledChar: "█",
-          barEmptyChar: "░",
-          warnThreshold: 65,
-          errorThreshold: 85
-        },
-        get now() {
-          return Date.now();
-        },
-        collapsed: false,
-        onToggle: () => {},
-        sections: () => [_$createComponent(SidebarSection, {
-          title: "Context",
+  const collapsedContext = () => {
+    const used = contextUsage();
+    return present(used) ? `${Math.round(100 - Math.max(0, Math.min(100, used)))}% left ●` : "no reading ●";
+  };
+  const collapsedHistorian = () => {
+    const data = s();
+    if (!data) return "no reading ●";
+    const run = data.historianRun;
+    const state = run?.outcome === "failed" || run?.outcome === "fallback" ? run.outcome : data.historianRunning || data.compartmentInProgress ? "summarizing" : "idle";
+    return `${state}${run ? ` · ${relativeTime(run.finishedAt).replace(/ ago$/, "")}` : ""} ●`;
+  };
+  return _$createComponent(SidebarFrame, {
+    get header() {
+      return {
+        badge: headerLabel(),
+        version: `v${packageJson.version}`
+      };
+    },
+    accounts: [],
+    showQuota: false,
+    get theme() {
+      return {
+        text: props.theme.text,
+        textMuted: props.theme.textMuted,
+        accent: props.theme.accent,
+        success: props.theme.success,
+        warning: props.theme.warning,
+        error: props.theme.error,
+        background: badgeTextColor(props.theme.accent, props.theme.background),
+        borderActive: props.theme.borderActive
+      };
+    },
+    appearance: {
+      barWidth: 10,
+      barFilledChar: "█",
+      barEmptyChar: "░",
+      warnThreshold: 65,
+      errorThreshold: 85
+    },
+    get now() {
+      return Date.now();
+    },
+    collapsible: true,
+    get collapsed() {
+      return props.controller.collapsed();
+    },
+    get onToggle() {
+      return props.controller.toggleCollapsed;
+    },
+    collapsedSections: () => [_$createComponent(SidebarStatRow, {
+      label: "Context",
+      get value() {
+        return collapsedContext();
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!!compactionOff())() && sections().historian;
+      },
+      get children() {
+        return _$createComponent(SidebarStatRow, {
+          label: "Historian",
+          get value() {
+            return collapsedHistorian();
+          }
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!!compactionOff())() && sections().status;
+      },
+      get children() {
+        return _$createComponent(SidebarStatRow, {
+          label: "Cache",
+          get value() {
+            return _$memo(() => !!present(s()?.pendingOpsCount))() ? `${s()?.pendingOpsCount} drops queued ●` : "no reading ●";
+          }
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return healthRows().length > 0;
+      },
+      get children() {
+        return _$createComponent(SidebarStatRow, {
+          label: "Health",
+          get value() {
+            return `${healthRows().length} ${healthRows().length === 1 ? "issue" : "issues"} ●`;
+          },
+          get tone() {
+            return healthRows().some(row => row.tone === "error") ? "error" : "warning";
+          }
+        });
+      }
+    })],
+    sections: () => [_$createComponent(SidebarSection, {
+      title: "Context",
+      get children() {
+        return [_$createComponent(SidebarGaugeRow, {
+          label: "ctx",
+          get used() {
+            return contextUsage();
+          },
+          get value() {
+            return tokenValue();
+          },
+          get warnAt() {
+            return _$memo(() => !!compactionOff())() ? 100 : s()?.executeThreshold;
+          },
+          get errorAt() {
+            return compactionOff() ? 100 : 85;
+          }
+        }), _$createComponent(Show, {
+          get when() {
+            return !compactionOff();
+          },
+          get fallback() {
+            return _$createComponent(SidebarTextRow, {
+              text: "native compaction"
+            });
+          },
           get children() {
-            return [_$createComponent(SidebarGaugeRow, {
-              label: "ctx",
-              get used() {
-                return contextUsage();
-              },
+            return _$createComponent(SidebarStatRow, {
+              label: "Next summary",
               get value() {
-                return tokenValue();
-              },
-              get warnAt() {
-                return _$memo(() => !!compactionOff())() ? 100 : s()?.executeThreshold;
-              },
-              get errorAt() {
-                return compactionOff() ? 100 : 85;
+                return nextSummary();
+              }
+            });
+          }
+        })];
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!!compactionOff())() && sections().historian;
+      },
+      get children() {
+        return _$createComponent(SidebarSection, {
+          title: "History",
+          get children() {
+            return [_$createComponent(SidebarStatRow, {
+              label: "Historian",
+              get value() {
+                return _$memo(() => !!s())() ? s()?.historianRunning || s()?.compartmentInProgress ? "summarizing" : "idle" : "—";
+              }
+            }), _$createComponent(SidebarStatRow, {
+              label: "Last run",
+              get value() {
+                return values().lastRun;
+              }
+            }), _$createComponent(SidebarStatRow, {
+              label: "Model",
+              get value() {
+                return values().model;
+              }
+            }), _$createComponent(SidebarStatRow, {
+              label: "Waiting",
+              get value() {
+                return values().waiting;
               }
             }), _$createComponent(Show, {
               get when() {
-                return !compactionOff();
-              },
-              get fallback() {
-                return _$createComponent(SidebarTextRow, {
-                  text: "native compaction"
-                });
+                return progress();
               },
               get children() {
                 return _$createComponent(SidebarStatRow, {
-                  label: "Next summary",
+                  get label() {
+                    return progressLabel();
+                  },
                   get value() {
-                    return nextSummary();
+                    return progressValue();
                   }
                 });
               }
             })];
           }
-        }), _$createComponent(Show, {
-          get when() {
-            return _$memo(() => !!!compactionOff())() && sections().historian;
-          },
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!!compactionOff())() && sections().status;
+      },
+      get children() {
+        return _$createComponent(SidebarSection, {
+          title: "Prompt cache",
           get children() {
-            return _$createComponent(SidebarSection, {
-              title: "History",
-              get children() {
-                return [_$createComponent(SidebarStatRow, {
-                  label: "Historian",
-                  get value() {
-                    return _$memo(() => !!s())() ? s()?.historianRunning || s()?.compartmentInProgress ? "summarizing" : "idle" : "—";
-                  }
-                }), _$createComponent(SidebarStatRow, {
-                  label: "Last run",
-                  get value() {
-                    return values().lastRun;
-                  }
-                }), _$createComponent(SidebarStatRow, {
-                  label: "Model",
-                  get value() {
-                    return values().model;
-                  }
-                }), _$createComponent(SidebarStatRow, {
-                  label: "Waiting",
-                  get value() {
-                    return values().waiting;
-                  }
-                }), _$createComponent(Show, {
+            return [_$createComponent(SidebarStatRow, {
+              label: "Cache built",
+              get value() {
+                return values().cacheBuilt;
+              }
+            }), _$createComponent(SidebarStatRow, {
+              label: "Since then",
+              get value() {
+                return values().sinceThen;
+              }
+            }), _$createComponent(SidebarStatRow, {
+              label: "Queued drops",
+              get value() {
+                return values().drops;
+              }
+            })];
+          }
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return sections().memory || sections().status;
+      },
+      get children() {
+        return _$createComponent(SidebarSection, {
+          title: "Knowledge",
+          get children() {
+            return _$createComponent(Show, {
+              get when() {
+                return compactionOff();
+              },
+              get fallback() {
+                return [_$createComponent(Show, {
                   get when() {
-                    return progress();
+                    return sections().memory;
                   },
                   get children() {
                     return _$createComponent(SidebarStatRow, {
-                      get label() {
-                        return progressLabel();
-                      },
+                      label: "Memories",
                       get value() {
-                        return progressValue();
+                        return values().memories;
                       }
                     });
-                  }
-                })];
-              }
-            });
-          }
-        }), _$createComponent(Show, {
-          get when() {
-            return _$memo(() => !!!compactionOff())() && sections().status;
-          },
-          get children() {
-            return _$createComponent(SidebarSection, {
-              title: "Prompt cache",
-              get children() {
-                return [_$createComponent(SidebarStatRow, {
-                  label: "Cache built",
-                  get value() {
-                    return values().cacheBuilt;
-                  }
-                }), _$createComponent(SidebarStatRow, {
-                  label: "Since then",
-                  get value() {
-                    return values().sinceThen;
-                  }
-                }), _$createComponent(SidebarStatRow, {
-                  label: "Queued drops",
-                  get value() {
-                    return values().drops;
-                  }
-                })];
-              }
-            });
-          }
-        }), _$createComponent(Show, {
-          get when() {
-            return sections().memory || sections().status;
-          },
-          get children() {
-            return _$createComponent(SidebarSection, {
-              title: "Knowledge",
-              get children() {
-                return _$createComponent(Show, {
-                  get when() {
-                    return compactionOff();
-                  },
-                  get fallback() {
-                    return [_$createComponent(Show, {
-                      get when() {
-                        return sections().memory;
-                      },
-                      get children() {
-                        return _$createComponent(SidebarStatRow, {
-                          label: "Memories",
-                          get value() {
-                            return values().memories;
-                          }
-                        });
-                      }
-                    }), _$createComponent(Show, {
-                      get when() {
-                        return sections().status;
-                      },
-                      get children() {
-                        return _$createComponent(SidebarStatRow, {
-                          label: "Notes",
-                          get value() {
-                            return values().notes;
-                          }
-                        });
-                      }
-                    })];
-                  },
-                  get children() {
-                    return _$createComponent(For, {
-                      get each() {
-                        return values().nativeRows;
-                      },
-                      children: row => _$createComponent(SidebarStatRow, {
-                        get label() {
-                          return row.label;
-                        },
-                        get value() {
-                          return row.value;
-                        }
-                      })
-                    });
-                  }
-                });
-              }
-            });
-          }
-        }), _$createComponent(Show, {
-          get when() {
-            return sections().dreamer;
-          },
-          get children() {
-            return _$createComponent(SidebarSection, {
-              title: "Dreamer",
-              get children() {
-                return [_$createComponent(SidebarStatRow, {
-                  label: "Last run",
-                  get value() {
-                    return values().dreamerLastRun;
                   }
                 }), _$createComponent(Show, {
                   get when() {
-                    return s()?.dreamerProgress;
+                    return sections().status;
                   },
-                  children: p => _$createComponent(SidebarStatRow, {
-                    label: "Current",
-                    get value() {
-                      return `${p().task} ${p().processed}/${p().total}`;
-                    }
-                  })
+                  get children() {
+                    return _$createComponent(SidebarStatRow, {
+                      label: "Notes",
+                      get value() {
+                        return values().notes;
+                      }
+                    });
+                  }
                 })];
-              }
-            });
-          }
-        }), _$createComponent(Show, {
-          get when() {
-            return healthRows().length > 0;
-          },
-          get children() {
-            return _$createComponent(SidebarSection, {
-              title: "Health",
+              },
               get children() {
-                return [_$createComponent(For, {
+                return _$createComponent(For, {
                   get each() {
-                    return healthRows();
+                    return values().nativeRows;
                   },
                   children: row => _$createComponent(SidebarStatRow, {
                     get label() {
@@ -549,20 +494,71 @@ const SidebarContent = props => {
                     },
                     get value() {
                       return row.value;
-                    },
-                    get tone() {
-                      return row.tone;
                     }
                   })
-                }), _$createComponent(SidebarTextRow, {
-                  text: "/ctx-status shows details"
-                })];
+                });
               }
             });
           }
-        })]
-      });
-    }
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return sections().dreamer;
+      },
+      get children() {
+        return _$createComponent(SidebarSection, {
+          title: "Dreamer",
+          get children() {
+            return [_$createComponent(SidebarStatRow, {
+              label: "Last run",
+              get value() {
+                return values().dreamerLastRun;
+              }
+            }), _$createComponent(Show, {
+              get when() {
+                return s()?.dreamerProgress;
+              },
+              children: p => _$createComponent(SidebarStatRow, {
+                label: "Current",
+                get value() {
+                  return `${p().task} ${p().processed}/${p().total}`;
+                }
+              })
+            })];
+          }
+        });
+      }
+    }), _$createComponent(Show, {
+      get when() {
+        return healthRows().length > 0;
+      },
+      get children() {
+        return _$createComponent(SidebarSection, {
+          title: "Health",
+          get children() {
+            return [_$createComponent(For, {
+              get each() {
+                return healthRows();
+              },
+              children: row => _$createComponent(SidebarStatRow, {
+                get label() {
+                  return row.label;
+                },
+                get value() {
+                  return row.value;
+                },
+                get tone() {
+                  return row.tone;
+                }
+              })
+            }), _$createComponent(SidebarTextRow, {
+              text: "/ctx-status shows details"
+            })];
+          }
+        });
+      }
+    })]
   });
 };
 export function createSidebarContentSlot(api) {
