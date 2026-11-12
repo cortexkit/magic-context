@@ -178,10 +178,15 @@ function seed(cursorEndedAt = NOW - SETTLE) {
     kvStore.set("state", state);
 }
 
-// The part of the flow's kv state the script also keeps: its cursor and dedupe keys.
+// The part of the flow's kv state the script also keeps: its cursor, dedupe keys
+// and the budget stops it holds (the flow never holds one, see flow.js).
 function sharedState() {
-    const { cursor, sent } = kvStore.get("state") as { cursor: unknown; sent: unknown };
-    return { version: 1, cursor, sent };
+    const { cursor, sent, pending } = kvStore.get("state") as {
+        cursor: unknown;
+        sent: unknown;
+        pending?: unknown;
+    };
+    return { version: 1, cursor, sent, ...(pending === undefined ? {} : { pending }) };
 }
 
 // Runs both at `now`, requires identical outcomes, and returns the flow's alerts.
@@ -216,6 +221,25 @@ const at = (now = NOW) => now + SETTLE;
 const QUOTA = "Historian host recorded an assistant error: APIError: Antigravity account pool has no account available within the configured wait limit.";
 
 // ---- The script's cases, replayed through both ----
+
+// The one known difference (see flow.js's header): the script leaves out a
+// dreamer budget stop whose dream task completed, reading the outcome from
+// dream_runs; the flow cannot read run outcomes and counts it. Flip this test
+// when `subagent_invocations.read` returns the run's outcome for such rows.
+test("known difference: a dreamer budget stop whose task completed is left out by the script and counted by the flow", async () => {
+    seed();
+    const child = "ses_e3247cff8ffex5Zghx4fDip24A";
+    const error = `DreamTokenBudgetExceeded message="Dreamer child ${child} spent 18891 prompt tokens (token_budget)"`;
+    attempt({ session: "parent-1", status: "failed", time: NOW - 1_000, error, task: "verify", subagent: "dreamer" });
+    db.prepare("INSERT OR REPLACE INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, 'opencode', ?, ?)")
+        .run("parent-1", "/fixture/project", NOW);
+    db.prepare("INSERT INTO dream_runs (project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id) VALUES (?, ?, ?, 'fixture-holder', ?, 1, 0, 0, 0, NULL, ?)")
+        .run("/fixture/project", NOW - 10_000, NOW - 500, JSON.stringify([{ name: "verify", status: "completed", children: [{ sessionId: child, promptTokens: 18_891 }] }]), "parent-1");
+    const old = await runOld(at());
+    const flowed = await runFlow(at());
+    expect(old.alerts).toEqual([]);
+    expect(flowed.alerts).toBeGreaterThan(0);
+});
 
 test("a quota failure recovered by a completed fallback raises no alert", async () => {
     seed();
@@ -586,7 +610,7 @@ function generatedCases(trials: number): GeneratedCase[] {
             const ended = NOW - pick(3 * DAY);
             const linked = rows.length && pick(4) === 0 ? rows[pick(rows.length)]!.id : null;
             const row: Row = {
-                id, session_id: `s-${pick(4)}`, subagent: pick(5) ? "historian" : "dreamer",
+                id, session_id: `s-${pick(4)}`, harness: "opencode", subagent: pick(5) ? "historian" : "dreamer",
                 task: [null, "fallback", "historian", "classify"][pick(4)]!,
                 started_at: ended - pick(200_000), ended_at: ended,
                 status: statuses[pick(statuses.length)]!, error: GENERATED_ERRORS[pick(GENERATED_ERRORS.length)]!,
@@ -599,7 +623,7 @@ function generatedCases(trials: number): GeneratedCase[] {
                 id++;
                 const started = row.ended_at - 6_000 + pick(130_000);
                 rows.push({
-                    id, session_id: pick(5) ? row.session_id : "s-other", subagent: row.subagent, task: "fallback",
+                    id, session_id: pick(5) ? row.session_id : "s-other", harness: "opencode", subagent: row.subagent, task: "fallback",
                     started_at: started, ended_at: started + pick(60_000),
                     status: pick(3) ? "completed" : "failed", error: null,
                     parent_invocation_id: pick(2) ? row.id : null,

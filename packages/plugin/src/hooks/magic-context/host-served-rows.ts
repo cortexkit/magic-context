@@ -19,12 +19,22 @@
  * unchanged.
  */
 
+import type { ReplayDocument } from "../../features/magic-context/storage-replay-document";
 import type { MessageLike } from "./tag-messages";
 
-/** A staged row edit becomes durable only after dependent reasoning decisions commit. */
+/**
+ * A staged row edit. Its decisions are saved only after the pass's dependent
+ * reasoning decisions, in the same replay-document update as the rest of the
+ * pass's instruction-row decisions, and only once nothing can refuse the pass.
+ */
 export interface HostRowReclaim {
     edits: readonly MessageLike[];
-    commit(): void;
+    /** Whether `record` has anything to add: this pass retires rows or turns covered rows on. */
+    hasDecisions: boolean;
+    /** Add this pass's retirement decisions to `doc`; false when it needs no change. */
+    record(doc: ReplayDocument): boolean;
+    /** Mark the served rows as retired, once `record`'s update is saved. */
+    markRetired(): void;
 }
 
 const HOST_UNSERVED_ROW = "hostUnservedRow";

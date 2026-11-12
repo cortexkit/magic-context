@@ -22,8 +22,8 @@ test("identity inspections reuse path and count probes only within one request",
         );
         host.exec("CREATE TABLE session(id TEXT, directory TEXT)");
         for (let i = 0; i < 3; i++) {
-            host.prepare("INSERT INTO session VALUES (?1, ?2)").run(`s${i}`, directory);
-            db.prepare("INSERT INTO session_projects VALUES (?1, 'opencode', ?2)").run(
+            host.prepare("INSERT INTO session VALUES (?, ?)").run(`s${i}`, directory);
+            db.prepare("INSERT INTO session_projects VALUES (?, 'opencode', ?)").run(
                 `s${i}`,
                 i % 2 ? "git:aaa" : "dir:bbb",
             );

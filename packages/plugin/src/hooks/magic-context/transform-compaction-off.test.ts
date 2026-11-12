@@ -53,10 +53,12 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
+import * as loggerModule from "../../shared/logger";
 import { clearModelsDevCache } from "../../shared/models-dev-cache";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { __ignoredNotificationTest } from "./send-session-notification";
+import * as systemDateRefresh from "./system-date-refresh";
 import { createTransform } from "./transform";
 
 type TestMessage = {
@@ -653,19 +655,30 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         const guarded = source.map((message, index) =>
             guardDeepMutations(message, mutations, `messages[${index}]`),
         );
-        const { transform } = makeOffTransform({
-            sessionId: "ses-1",
-            maybeAutoEmbedSession: () => {
-                throw new Error("injected failure after the production pass");
-            },
-        });
+        const { transform } = makeOffTransform({ sessionId: "ses-1" });
         const handler = createMessagesTransformHandler({
             magicContext: { "experimental.chat.messages.transform": transform },
             compactionOff: true,
         });
         const output = { messages: guarded };
 
-        await expect(handler({}, output)).resolves.toBeDefined();
+        // The pass's last call before it captures its request, unguarded: a
+        // failure there still ends the transform with an exception. (A failure
+        // after the capture, such as auto-embed scheduling, is logged and the
+        // pass is served; see the next test.)
+        let injected = 0;
+        const failure = spyOn(systemDateRefresh, "finishSystemDateRefresh").mockImplementation(
+            () => {
+                injected++;
+                throw new Error("injected failure after the production pass");
+            },
+        );
+        try {
+            await expect(handler({}, output)).resolves.toBeDefined();
+        } finally {
+            failure.mockRestore();
+        }
+        expect(injected).toBe(1);
 
         // The production transform prepended two synthetic messages before
         // the injected failure. Array restoration removes those additions,
@@ -675,6 +688,61 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         expect(output.messages).toHaveLength(identities.length);
         expect(output.messages.map((message) => message)).toEqual(guarded);
         expect(JSON.stringify(output.messages)).toBe(before);
+    });
+
+    it("serves the pass when auto-embed scheduling fails after the capture, and leaves retained inputs read-only", async () => {
+        useTempDataHome("co-proxy-after-capture-");
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, "ses-1");
+        setCompactionModeRecord(db, "ses-1", "off");
+        closeDatabase();
+
+        const source = makeMessages("ses-1");
+        const before = JSON.stringify(source);
+        const identities = [...source];
+        const mutations: string[] = [];
+        const guarded = source.map((message, index) =>
+            guardDeepMutations(message, mutations, `messages[${index}]`),
+        );
+        const { transform } = makeOffTransform({
+            sessionId: "ses-1",
+            maybeAutoEmbedSession: () => {
+                throw new Error("injected failure after the capture");
+            },
+        });
+        const handler = createMessagesTransformHandler({
+            magicContext: { "experimental.chat.messages.transform": transform },
+            compactionOff: true,
+        });
+        const output = { messages: guarded };
+        const logged: string[] = [];
+        const logs = spyOn(loggerModule, "sessionLog").mockImplementation((_session, line) => {
+            logged.push(String(line));
+        });
+        try {
+            await expect(handler({}, output)).resolves.toBeDefined();
+        } finally {
+            logs.mockRestore();
+        }
+
+        // Once the pass has captured its request it is decided: the failure is
+        // logged and the transformed request, with its two synthetic head
+        // messages, is served. No retained message was written to.
+        expect(
+            logged.some((line) =>
+                line.startsWith(
+                    "auto-embed scheduling failed after the request was decided; serving the pass",
+                ),
+            ),
+        ).toBe(true);
+        expect(mutations).toEqual([]);
+        expect(output.messages).toHaveLength(identities.length + 2);
+        expect(
+            output.messages
+                .slice(0, 2)
+                .map((message) => (message.info as { syntheticHead?: boolean }).syntheticHead),
+        ).toEqual([true, true]);
+        expect(JSON.stringify(output.messages.slice(2))).toBe(before);
     });
 
     it("transition pass: flip notice goes OUT OF BAND and the message array is indistinguishable from a steady-state off pass", async () => {

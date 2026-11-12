@@ -1,5 +1,5 @@
 import type { Database } from "../../shared/sqlite";
-import { readReplayEnvelope, updateReplayDocument } from "./storage-replay-document";
+import { type ReplayDocument, readReplayEnvelope } from "./storage-replay-document";
 
 /**
  * Whether this session serves OpenCode 2 instruction rows that its history
@@ -33,16 +33,25 @@ export function isHostInstructionRetentionOn(db: Database, sessionId: string): b
 }
 
 /**
- * Persist the switch. True when it is persisted, whether this call wrote it or
- * it was already set; false when the document could not be written.
+ * Add a pass's instruction-row decisions to `doc`, the session's replay
+ * document: the switch when `retention` is set, and whatever `record` adds (the
+ * instruction rows the pass retires). The caller saves them in the same update
+ * as the pass's other replay records, so a pass never saves one without the
+ * other. False when the document already holds them.
  */
-export function markHostInstructionRetention(db: Database, sessionId: string): boolean {
-    return updateReplayDocument(db, sessionId, (doc) => {
-        const lane = doc[NAMESPACE];
-        if (typeof lane === "object" && lane !== null && (lane as { on?: unknown }).on === true)
-            return false;
+export function recordHostInstructionDecisions(
+    doc: ReplayDocument,
+    decisions: { retention: boolean; record?: (doc: ReplayDocument) => boolean },
+): boolean {
+    let changed = decisions.record?.(doc) ?? false;
+    const lane = doc[NAMESPACE];
+    if (
+        decisions.retention &&
+        !(typeof lane === "object" && lane !== null && (lane as { on?: unknown }).on === true)
+    ) {
         doc.version = 2;
         doc[NAMESPACE] = { on: true };
-        return true;
-    });
+        changed = true;
+    }
+    return changed;
 }

@@ -145,8 +145,8 @@ describe("Pi m[0] mural image fold (on-demand render → wire)", () => {
 					.replace(`${MEMORY_MURAL_GUIDANCE}\n`, ""),
 			);
 			db.prepare(
-				"INSERT INTO session_render_cache (session_id,cache_key,value) VALUES (?2, 'cached_m0_bytes', ?1) ON CONFLICT(session_id,cache_key) DO UPDATE SET value=excluded.value",
-			).run(legacy, SESSION_ID);
+				"INSERT INTO session_render_cache (session_id,cache_key,value) VALUES (?, 'cached_m0_bytes', ?) ON CONFLICT(session_id,cache_key) DO UPDATE SET value=excluded.value",
+			).run(SESSION_ID, legacy);
 			__test.clearPiMuralProcessCache(SESSION_ID);
 			const deferredMessages = [userMessage("defer")];
 			const deferred = injectM0M1Pi(

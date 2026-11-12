@@ -8,6 +8,15 @@
 // both produce the same alerts on the same rows. A change to the rules belongs
 // in both places until that script is retired.
 //
+// One known difference: the script leaves out a dreamer run that stopped at
+// its token budget (DreamTokenBudgetExceeded) when its dream task still
+// completed, and holds such a row for up to 60 minutes while the run has not
+// been recorded yet; it reads the outcome from dream_runs and session_projects.
+// This flow can read only `subagent_invocations.read`, which does not return
+// run outcomes, so it still counts those rows as failures. Closing the gap
+// needs that read to return the owning dream run's outcome for such rows; the
+// parity test pins the difference so it is flipped when the read grows it.
+//
 // basal wraps this text in an async function, so top-level `await` and
 // `return` work. The runtime has no console, timers or TextEncoder.
 
@@ -43,7 +52,7 @@ function normalizeError(error) {
     // Recorded errors are cut at a fixed length, which can split a UUID;
     // the surviving prefix (8 hex digits plus partial groups) is still an id.
     .replace(/\b[a-f0-9]{8}(?:-[a-f0-9]{1,12})+/gi, '<id>')
-    .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, '<id>')
+    .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:ses|session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, '<id>')
     .replace(/\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b/gi, '<duration>')
     // Compact countdowns such as "34h 33m 37s" change on every report of the
     // same failure, so they must collapse into one class.
@@ -493,6 +502,22 @@ async function readRows(args, cursorField, limit) {
 const now = Date.now();
 const loaded = loadState(await kv.get(STATE_KEY), now);
 const state = loaded.state;
+// Dedupe keys saved before a change to normalizeError keep their old class
+// text. Normalize them again, as the script does when it loads its state;
+// several old classes can collapse into one, so their counts are combined
+// rather than read as new growth.
+{
+  const sent = {};
+  for (const [oldKey, value] of Object.entries(state.sent)) {
+    const parts = JSON.parse(oldKey);
+    const normalizedKey = Array.isArray(parts) && parts.length === 4 && typeof parts[3] === 'string'
+      ? JSON.stringify([...parts.slice(0, 3), normalizeError(parts[3])]) : oldKey;
+    const previous = sent[normalizedKey];
+    sent[normalizedKey] = previous
+      ? { at: Math.max(previous.at, value.at), count: previous.count + value.count } : value;
+  }
+  state.sent = sent;
+}
 for (const key of Object.keys(state.sent)) {
   if (now - state.sent[key].at >= 6 * HOUR) delete state.sent[key];
 }
@@ -716,6 +741,9 @@ if (alerts.length) {
   // Reserve the dedupe keys before delivery so an ambiguous delivery cannot cause a repeated wake.
   for (const alert of alerts) state.sent[alertKey(alert)] = { at: now, count: alert.count };
 }
+// The script holds a dreamer budget stop here until its run is recorded; this
+// flow never does (see the header), so its list of held rows is always empty.
+state.pending = [];
 await kv.set(STATE_KEY, state);
 if (alerts.length) {
   const deliveryId = `mc-subagent-failure-${now}-${state.cursor.id}`;

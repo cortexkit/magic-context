@@ -1,5 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
+import * as replayDocument from "../../features/magic-context/storage-replay-document";
+import { readReplayEnvelope } from "../../features/magic-context/storage-replay-document";
 import { readSessionMetaCollection } from "../../features/magic-context/storage-session-collections";
+import * as lkgRecoveryPrefix from "../../hooks/magic-context/lkg-recovery-prefix";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import * as instructionSupersession from "../fold/instruction-supersession";
 import { retiredLiveInstructionIDs } from "../fold/instruction-supersession";
@@ -333,6 +336,131 @@ test("folds preserve live retirements and prune covered ids only with the next n
         const restarted = await f.pass();
         expect(instructionTexts(restarted)).not.toContain(combined("LIVE_OLD"));
         expect(instructionTexts(restarted)).not.toContain(combined("POST_FOLD_OLD"));
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// A pass that retires instruction rows saves that decision, together with the
+// switch that serves covered rows, in its publication at the end of the pass,
+// in one transaction with the served records. A pass refused before that
+// transaction commits must leave neither saved:
+// a later pass would otherwise replay the retirement as a decision already
+// served, on rows the provider was last sent with the old request.
+const decisionNamespaces = (f: Awaited<ReturnType<typeof oc2ContextFixture>>) => {
+    const envelope = readReplayEnvelope(f.db, f.session);
+    return JSON.stringify([
+        envelope.instructionSupersession,
+        envelope.coveredInstructionSupersession,
+        envelope.hostInstructionRetention,
+    ]);
+};
+/**
+ * Fail every replay-document update that would change the stored instruction
+ * decisions, and let every other update through, as a write that fails only
+ * on the update carrying them would.
+ */
+const failDecisionWrites = () => {
+    const original = replayDocument.updateReplayDocument;
+    return spyOn(replayDocument, "updateReplayDocument").mockImplementation(
+        (db, sessionId, mutate) => {
+            const probe = structuredClone(
+                readReplayEnvelope(db, sessionId),
+            ) as replayDocument.ReplayDocument;
+            const namespaces = (doc: replayDocument.ReplayDocument) =>
+                JSON.stringify([
+                    doc.instructionSupersession,
+                    doc.coveredInstructionSupersession,
+                    doc.hostInstructionRetention,
+                ]);
+            const stored = namespaces(probe);
+            mutate(probe);
+            if (namespaces(probe) !== stored) return false;
+            return original(db, sessionId, mutate);
+        },
+    );
+};
+const refusalSites = {
+    // The last-good untagged-message record cannot be written (transform.ts).
+    "untagged-record": () => [
+        spyOn(lkgRecoveryPrefix, "readPersistedLkgUntaggedInputIds").mockReturnValue([
+            "untagged-row-no-longer-served",
+        ]),
+        spyOn(lkgRecoveryPrefix, "persistLkgUntaggedInputIds").mockReturnValue(false),
+    ],
+    // The replay-document update that would save the decisions fails.
+    "decision-write": () => [failDecisionWrites()],
+};
+for (const [index, [site, fail]] of Object.entries(refusalSites).entries())
+    test(`a pass refused at the ${site} site saves no instruction retirement and no covered-row switch`, async () => {
+        const f = await oc2ContextFixture(30879 + index, options);
+        try {
+            f.compartment(4);
+            await f.pass();
+            f.instruction(combined("RETIRED_WIRE_CATALOG"), both);
+            f.instruction(combined("CURRENT_WIRE_CATALOG"), both);
+            f.respond(1, 900000);
+            const before = decisionNamespaces(f);
+            const spies = fail();
+            let refused: Awaited<ReturnType<typeof f.attempt>>;
+            try {
+                refused = await f.attempt();
+            } finally {
+                for (const spy of spies) spy.mockRestore();
+            }
+            expect(
+                refused.error !== undefined ||
+                    refused.logs.some((line) => line.endsWith("lkg_replay_served")),
+            ).toBe(true);
+            expect(retiredLiveInstructionIDs(f.db, f.session).size).toBe(0);
+            expect(decisionNamespaces(f)).toBe(before);
+            // The next pass decides the retirement again and saves it itself.
+            const next = await f.pass();
+            expect(instructionTexts(next)).toEqual([combined("CURRENT_WIRE_CATALOG")]);
+            expect(retiredLiveInstructionIDs(f.db, f.session).size).toBe(1);
+        } finally {
+            await f.cleanup();
+        }
+    }, 60000);
+
+// The untagged-message record and the instruction decisions go into the same
+// replay-document update, inside the pass's publication. A pass refused there
+// leaves both as they were. Saved separately, the record could
+// be rewritten before the decisions failed, and the wrapper's replay, which
+// adds its own untagged messages to the saved record, would then lose
+// messages the replayed request still serves untagged.
+test("a pass refused at its last-good record update leaves the untagged-message record as it was", async () => {
+    const f = await oc2ContextFixture(30889, options);
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.instruction(combined("RETIRED_WIRE_CATALOG"), both);
+        f.instruction(combined("CURRENT_WIRE_CATALOG"), both);
+        f.respond(1, 900000);
+        // A record this pass no longer serves untagged, so the pass rewrites it.
+        expect(
+            lkgRecoveryPrefix.persistLkgUntaggedInputIds(f.db, f.session, [
+                "untagged-row-no-longer-served",
+            ]),
+        ).toBe(true);
+        const before = decisionNamespaces(f);
+        const spy = failDecisionWrites();
+        let refused: Awaited<ReturnType<typeof f.attempt>>;
+        try {
+            refused = await f.attempt();
+        } finally {
+            spy.mockRestore();
+        }
+        expect(
+            refused.error !== undefined ||
+                refused.logs.some((line) => line.endsWith("lkg_replay_served")),
+        ).toBe(true);
+        expect(decisionNamespaces(f)).toBe(before);
+        // The wrapper's replay adds what it serves untagged to the saved record;
+        // the refused pass must not have removed what the record held.
+        expect(readReplayEnvelope(f.db, f.session).lkgUntaggedInputIds).toContain(
+            "untagged-row-no-longer-served",
+        );
     } finally {
         await f.cleanup();
     }

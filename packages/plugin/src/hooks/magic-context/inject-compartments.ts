@@ -2520,6 +2520,23 @@ export function stripMemoryMuralBlock(m0Text: string): string {
         .trim();
 }
 
+/**
+ * The m[0]/m[1] texts the injection serves from a saved pair, as they go out on
+ * the wire: a saved m[0] that names a mural it has no stored image for is served
+ * without that block (see the replay in injectM0M1). Null for a part that is
+ * not saved.
+ */
+export function servedHeadTexts(
+    state: Pick<M0M1State, "cachedM0Bytes" | "cachedM1Bytes" | "cachedM0MuralDataUrl">,
+): { m0Text: string | null; m1Text: string | null } {
+    const m0Text = decodeM0Bytes(state.cachedM0Bytes);
+    return {
+        m0Text:
+            m0Text !== null && !state.cachedM0MuralDataUrl ? stripMemoryMuralBlock(m0Text) : m0Text,
+        m1Text: decodeM0Bytes(state.cachedM1Bytes),
+    };
+}
+
 export function renderM0(args: {
     projectDocs: string;
     userProfileBaseline: UserMemory[];

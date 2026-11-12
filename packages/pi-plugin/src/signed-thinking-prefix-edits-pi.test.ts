@@ -14,6 +14,8 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { clearCachedM0M1 } from "@magic-context/core/features/magic-context/storage-meta-shared";
+import { sessionRenderCacheSelect } from "@magic-context/core/features/magic-context/storage-session-cache";
+import { sessionMetaCollectionSelect } from "@magic-context/core/features/magic-context/storage-session-collections";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { bumpEpochsForWorkspaceMembers } from "@magic-context/core/features/magic-context/workspaces";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -43,6 +45,8 @@ async function withSession(
 		restart: () => void;
 		user: (text: string) => void;
 		editMemory: (content: string) => void;
+		bumpMemoryEpoch: () => void;
+		shiftFirstTimestamp: (by: number) => void;
 	}) => Promise<void>,
 ) {
 	const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-pi-spe-"));
@@ -77,6 +81,14 @@ async function withSession(
 		let handler = register();
 		const source: PiMessage[] = [userMessage("task", 1)];
 		const ids = ["task"];
+		const projectIdentity = () =>
+			(
+				db
+					.prepare(
+						"SELECT cached_m0_project_identity AS id FROM session_meta WHERE session_id = ?",
+					)
+					.get(sessionId) as { id: string | null }
+			).id as string;
 		await body({
 			db,
 			step: (n) => {
@@ -134,13 +146,7 @@ async function withSession(
 				handler = register();
 			},
 			editMemory: (content) => {
-				const identity = (
-					db
-						.prepare(
-							"SELECT cached_m0_project_identity AS id FROM session_meta WHERE session_id = ?",
-						)
-						.get(sessionId) as { id: string | null }
-				).id as string;
+				const identity = projectIdentity();
 				insertMemory(db, {
 					projectPath: identity,
 					category: "PROJECT_RULES",
@@ -148,6 +154,12 @@ async function withSession(
 					importance: 90,
 				});
 				bumpEpochsForWorkspaceMembers(db, identity);
+			},
+			bumpMemoryEpoch: () =>
+				bumpEpochsForWorkspaceMembers(db, projectIdentity()),
+			shiftFirstTimestamp: (by) => {
+				const first = source[0] as { timestamp?: number };
+				first.timestamp = (first.timestamp ?? 0) + by;
 			},
 		});
 	} finally {
@@ -167,6 +179,113 @@ const signatures = (messages: unknown[]) =>
 /** Cases that witness a defect that is still open; see each case's comment. */
 const OPEN_DEFECTS = process.env.MC_SIGNED_THINKING_OPEN_DEFECTS === "1";
 const head = (messages: unknown[]) => JSON.stringify(messages.slice(0, 2));
+
+const cachedHead = (db: ReturnType<typeof createTestDb>, sessionId: string) => {
+	const row = db
+		.prepare(
+			`SELECT ${sessionRenderCacheSelect("cached_m0_bytes", "m0", db)}, cached_m0_materialized_at AS at, ${sessionMetaCollectionSelect("merged_reasoning_stripped_ids", "stripped", db)} FROM session_meta WHERE session_id = ?`,
+		)
+		.get(sessionId) as
+		| { m0: Uint8Array | null; at: number | null; stripped: string | null }
+		| undefined;
+	return {
+		m0: row?.m0 ? Buffer.from(row.m0).toString("utf8") : null,
+		materializedAt: row?.at ?? null,
+		stripped: row?.stripped ?? null,
+	};
+};
+
+/** Runs one pass while every write of the thinking-strip record fails. */
+async function passWithStripWritesFailing(s: {
+	db: ReturnType<typeof createTestDb>;
+	pass: () => Promise<unknown[]>;
+}): Promise<void> {
+	s.db.exec(
+		"CREATE TEMP TRIGGER fail_thinking_strip BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta BEGIN SELECT RAISE(ABORT, 'thinking strip write failed'); END",
+	);
+	// The record is a session-meta collection, which a chunked store keeps in
+	// session_meta_chunks rows: every write to those rows fails as well.
+	for (const event of ["INSERT", "UPDATE", "DELETE"])
+		s.db.exec(
+			`CREATE TEMP TRIGGER fail_thinking_strip_${event.toLowerCase()} BEFORE ${event} ON session_meta_chunks WHEN ${event === "DELETE" ? "OLD" : "NEW"}.column_name='merged_reasoning_stripped_ids' BEGIN SELECT RAISE(ABORT, 'thinking strip write failed'); END`,
+		);
+	try {
+		await s.pass().catch(() => undefined);
+	} finally {
+		s.db.exec("DROP TRIGGER IF EXISTS temp.fail_thinking_strip");
+		for (const event of ["insert", "update", "delete"])
+			s.db.exec(`DROP TRIGGER IF EXISTS temp.fail_thinking_strip_${event}`);
+	}
+}
+
+// A fold at a new turn after a memory edit, as in the case below, while the
+// write that saves the strip of the earlier turn's thinking fails. Saved after
+// the fold commits, the failure would leave the new head saved and the thinking
+// on the wire behind it: compaction-off strips only on the pass whose fold
+// re-renders the head, so no later pass would.
+test("Pi compaction-off: a fold whose thinking strip cannot be saved is not saved either, and the retry folds and strips", async () => {
+	const sessionId = "pi-spe-off-strip-fail";
+	await withSession(sessionId, async (s) => {
+		await s.pass();
+		s.step(1);
+		const first = await s.pass();
+		s.step(2);
+		await s.pass();
+		const before = cachedHead(s.db, sessionId);
+		s.user("next task");
+		s.editMemory("keep functions small");
+		await passWithStripWritesFailing(s);
+		expect(cachedHead(s.db, sessionId)).toEqual(before);
+		// The host sends the same request again: the fold and its strip land together.
+		const out = await s.pass();
+		expect(head(out) !== head(first)).toBe(true);
+		expect(signatures(out)).toEqual([]);
+	});
+});
+
+// A fold that re-renders the same head text while the head messages still
+// differ from the served ones: here the first message's timestamp moved, which
+// the head messages copy (a Pi compaction that replaces the leading messages
+// does the same). The fold's transaction compares only text and image, so it
+// saves no strip; the strip is decided after the commit, from the full head
+// messages, as before. Without a failure it still strips; with a failing strip
+// write the fold stays saved, which is the window this path keeps.
+for (const failStrip of [false, true])
+	test(`Pi compaction-off: a fold with the same head text but different head messages strips after the commit${failStrip ? ", strip write failing" : ""}`, async () => {
+		const sessionId = `pi-spe-off-same-text-${failStrip}`;
+		await withSession(sessionId, async (s) => {
+			await s.pass();
+			s.step(1);
+			await s.pass();
+			s.step(2);
+			const served = await s.pass();
+			const before = cachedHead(s.db, sessionId);
+			s.user("next task");
+			s.bumpMemoryEpoch();
+			s.shiftFirstTimestamp(1_000);
+			if (failStrip) {
+				await passWithStripWritesFailing(s);
+				const after = cachedHead(s.db, sessionId);
+				expect(after.m0).toBe(before.m0);
+				expect(after.materializedAt).not.toBe(before.materializedAt);
+				expect(after.stripped).toBe(before.stripped);
+				return;
+			}
+			const out = await s.pass();
+			expect(cachedHead(s.db, sessionId).materializedAt).not.toBe(
+				before.materializedAt,
+			);
+			const content = (messages: unknown[]) =>
+				JSON.stringify(
+					messages
+						.slice(0, 2)
+						.map((message) => (message as { content: unknown }).content),
+				);
+			expect(content(out)).toBe(content(served));
+			expect(head(out)).not.toBe(head(served));
+			expect(signatures(out)).toEqual([]);
+		});
+	});
 
 // A fold on a pass that holds nothing (the new turn has no signed thinking
 // yet) re-renders m[0] in front of the earlier turn's signed thinking, which

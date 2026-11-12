@@ -3,6 +3,7 @@ import * as retention from "../../features/magic-context/storage-host-instructio
 import { setHostInstructionRetentionEnabledForTests } from "../../features/magic-context/storage-host-instruction-retention";
 import { writeSessionRenderCache } from "../../features/magic-context/storage-session-cache";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
+import * as lkgRecoveryPrefix from "../../hooks/magic-context/lkg-recovery-prefix";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as models from "../../shared/models-dev-cache";
 import { scaleTest } from "../../shared/slow-test";
@@ -478,7 +479,7 @@ for (const failure of ["read", "write"] as const)
                 ? spyOn(retention, "isHostInstructionRetentionOn").mockImplementation(() => {
                       throw new Error("replay document unreadable");
                   })
-                : spyOn(retention, "markHostInstructionRetention").mockReturnValue(false);
+                : spyOn(lkgRecoveryPrefix, "persistLkgUntaggedInputIds").mockReturnValue(false);
         const f = await fixture(failure === "read" ? 755 : 756);
         try {
             f.compartment(4);

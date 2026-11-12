@@ -46,19 +46,22 @@ export function renderSearchArchive(
                 ? `SELECT f.message_ordinal AS ordinal, f.message_id AS id, f.role, f.content
                    FROM message_fts_rowid_map AS m
                    JOIN message_history_fts AS f ON f.rowid = m.fts_rowid
-                   WHERE m.session_id = ?1 AND m.message_ordinal BETWEEN ?2 AND ?3
-                     AND f.session_id = ?1 AND f.message_ordinal BETWEEN ?2 AND ?3
+                   WHERE m.session_id = ? AND m.message_ordinal BETWEEN ? AND ?
+                     AND f.session_id = ? AND f.message_ordinal BETWEEN ? AND ?
                    ORDER BY m.message_ordinal`
                 : `SELECT message_ordinal AS ordinal, message_id AS id, role, content
                    FROM message_history_fts
-                   WHERE session_id = ?1 AND message_ordinal BETWEEN ?2 AND ?3
+                   WHERE session_id = ? AND message_ordinal BETWEEN ? AND ?
                    ORDER BY CAST(message_ordinal AS INTEGER)`,
         );
         const blocks: string[] = [];
         let tokens = 0;
         let lastOrdinal = start - 1;
         let truncated = false;
-        for (const row of rows.iterate(sessionId, start, end) as Iterable<ArchiveRow>) {
+        const bindings = sessionFirst
+            ? [sessionId, start, end, sessionId, start, end]
+            : [sessionId, start, end];
+        for (const row of rows.iterate(...bindings) as Iterable<ArchiveRow>) {
             if (!row.content) continue;
             if (!archiveOnly) {
                 rawIds ??= readRawIds();

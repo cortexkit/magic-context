@@ -925,7 +925,7 @@ export function getUncoveredCompartmentEndsThrough(
             `SELECT k.end_message_id, k.end_message,
                 n.start_message_id AS successor_id, n.start_message AS successor_start FROM compartments k
          LEFT JOIN compartments n ON n.session_id = k.session_id AND n.sequence = k.sequence + 1
-         WHERE k.session_id = ?1 AND k.end_message <= ?2 AND k.end_message > ?3 AND k.end_block_index IS NOT NULL
+         WHERE k.session_id = ? AND k.end_message <= ? AND k.end_message > ? AND k.end_block_index IS NOT NULL
            AND NOT COALESCE(n.sequence IS NOT NULL AND (
                (n.start_message_id = k.end_message_id AND n.start_block_index > k.end_block_index)
                OR n.start_message = k.end_message + 1), 0)

@@ -77,7 +77,17 @@ function compareWithGlobalQueries(db: Database): { filtered: string[]; global: s
             statement.all = ((...bindings: unknown[]) => {
                 const actual = all(...bindings);
                 const baselineSql = sql.replaceAll(MESSAGE_FTS_SESSION_FILTER_SQL, "");
-                const baseline = prepare(baselineSql).all(...bindings);
+                // Removing a rowid predicate also removes its own session binding.
+                const fragmentBindings = new Set<number>();
+                let bindingIndex = 0;
+                const segments = sql.split(MESSAGE_FTS_SESSION_FILTER_SQL);
+                for (const segment of segments.slice(0, -1)) {
+                    bindingIndex += (segment.match(/\?/g) ?? []).length;
+                    fragmentBindings.add(bindingIndex++);
+                }
+                const baseline = prepare(baselineSql).all(
+                    ...bindings.filter((_, index) => !fragmentBindings.has(index)),
+                );
                 expect(JSON.stringify(actual)).toBe(JSON.stringify(baseline));
                 seen[sql.includes(MESSAGE_FTS_SESSION_FILTER_SQL) ? "filtered" : "global"].push(
                     sql,
@@ -166,8 +176,8 @@ describe("session-first message FTS", () => {
         expect(seen.filtered.length).toBeGreaterThanOrEqual(6);
         const plan = db
             .prepare(`EXPLAIN QUERY PLAN SELECT content FROM message_history_fts
-            WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}session_id = ?1 AND message_history_fts MATCH ?`)
-            .all("mapped", "queue") as Array<{ detail: string }>;
+            WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}session_id = ? AND message_history_fts MATCH ?`)
+            .all("mapped", "mapped", "queue") as Array<{ detail: string }>;
         // One postings cursor, not a MATCH restart for every sidecar rowid.
         expect(plan.some(({ detail }) => /VIRTUAL TABLE INDEX 0:M/.test(detail))).toBe(true);
         expect(
@@ -175,8 +185,8 @@ describe("session-first message FTS", () => {
         ).toBe(true);
         const bytecode = db
             .prepare(`EXPLAIN SELECT content FROM message_history_fts
-            WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}session_id = ?1 AND message_history_fts MATCH ?`)
-            .all("mapped", "queue") as Array<{ opcode: string }>;
+            WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}session_id = ? AND message_history_fts MATCH ?`)
+            .all("mapped", "mapped", "queue") as Array<{ opcode: string }>;
         const membership = bytecode.findIndex(({ opcode }) => opcode === "NotFound");
         const contentRead = bytecode.findIndex(({ opcode }) => opcode === "VColumn");
         expect(membership).toBeGreaterThan(0);

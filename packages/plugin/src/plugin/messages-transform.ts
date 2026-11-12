@@ -29,6 +29,7 @@ import {
     discardWithheldServedCapture,
     dropSlot,
     getSlot,
+    lkgContentDigest,
     noteEntry,
 } from "../hooks/magic-context/lkg-slot";
 import { replayCommittedDrops } from "../hooks/magic-context/replay-committed-drops";
@@ -270,6 +271,10 @@ export function tryMessagesTransformLkgReplay(args: {
             } else {
                 const inputMessages = output.messages as MessageLike[];
                 const keys = resolveLkgModelKeys(inputMessages);
+                // The replay shares the entry's tail objects and edits them in
+                // place (saved thinking strips, committed drops), so digest the
+                // host's messages before it runs; see noteLkgRecoveryPrefix.
+                const hostTailDigests = entry.pristineTail.map(lkgContentDigest);
                 const replay = replayLkg({
                     sessionId,
                     messages: inputMessages,
@@ -343,6 +348,7 @@ export function tryMessagesTransformLkgReplay(args: {
                             entry,
                             messages: replay.messages,
                             ...keys,
+                            hostTailDigests,
                             db,
                         })
                     )

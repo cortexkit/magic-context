@@ -324,6 +324,7 @@ import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provid
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { ModelInput } from "@magic-context/core/shared/model-resolution";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
+import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import { recoveryReasoningPrefixes } from "@magic-context/core/shared/recovery-reasoning-prefix";
 import {
 	guardSqliteTransformPass,
@@ -393,6 +394,7 @@ import {
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	mustMaterializePi,
+	type PiFoldHead,
 	type PiM0M1InjectionResult as PiInjectionResult,
 	type PiM0M1PassSnapshot,
 	type PiM0M1State,
@@ -583,6 +585,7 @@ import {
 	isPiSystemEntry,
 	isPiSystemMessageEntry,
 	type PiEffectiveSystemState,
+	placePiInitialSystemAtHead,
 	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
@@ -4571,6 +4574,35 @@ export function registerPiContextHandler(
 				return undefined;
 			}
 		};
+		// Runs one statement that follows the capture of this pass's request as the
+		// last good one. From that point the request is decided: a failure that
+		// reached the recovery path would leave the refused pass's output saved as
+		// the request to replay. So such a statement is best effort: its failure is
+		// logged under its name and the pass goes on with the next statement. The
+		// outcome clock's own checks still end the invocation, since a cancelled
+		// or expired invocation must not return a result at all.
+		const afterCapture = <T>(
+			sessionId: string,
+			statement: string,
+			run: () => T,
+		): T | undefined => {
+			try {
+				return run();
+			} catch (error) {
+				if (
+					budget.isCancelled(error) ||
+					error instanceof PiContextDeadlineError ||
+					error instanceof PiContextSupersededError
+				)
+					throw error;
+				sessionLog(
+					sessionId,
+					`${statement} failed after the request was decided; serving the pass:`,
+					error,
+				);
+				return undefined;
+			}
+		};
 		try {
 			const tFindSession = performance.now();
 			const sessionId = resolveSessionId(ctx);
@@ -7260,6 +7292,21 @@ export function registerPiContextHandler(
 				}
 			} else finishPrefix(false);
 			publishFinalRequestAccounting();
+			// The system prompt hook of this same request reads whether the history
+			// head (m[0]/m[1]) is held, to keep the date frozen in front of kept
+			// signed thinking. It is
+			// recorded before the capture below: skipping it would let that hook move
+			// the date in front of thinking bound to the old one, and a failure here
+			// still refuses the pass before anything is saved as the last good request.
+			if (
+				!budget.sideTurn &&
+				((result.strictThinkingKept && !result.signedPrefixRewritten) ||
+					result.heldHeadReleasedForSystemChange === true) &&
+				!result.materialized
+			)
+				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
+					deferPiDeliveredSystemRefresh(sessionId, ownsHistory),
+				);
 			let serializedOutput: PiLkgSerializedOutput | undefined;
 			let numbersCommitted = false;
 			budget.stage = "LKG/served publication";
@@ -7294,6 +7341,11 @@ export function registerPiContextHandler(
 					/* Missing optional attribution must not prevent capturing the good prefix. */
 				}
 				budget.assertOutcome();
+				// Once captureAppliedPass below has taken this pass's output, the request
+				// is decided: no failure after it may turn the pass into a refusal, or the
+				// refused output would stay saved as the last good request. Statements
+				// after it are guarded or run through afterCapture; only the outcome
+				// clock's own checks may still end the invocation.
 				try {
 					// Preserve unreadable or newer-version session replay JSON rather than
 					// overwrite state this build cannot interpret. The transformed request can still be served.
@@ -7408,15 +7460,17 @@ export function registerPiContextHandler(
 			)
 				acknowledgePiIdentityRebuilds(options.db, sessionId);
 			if (!budget.sideTurn)
-				captureOpencodeReasoningBudgetStatus(
-					sessionId,
-					piReasoningStatusMessages(outputMessages),
-					resolveKeepReasoningTokens(
-						options.heuristics?.keepReasoningTokens,
-						resolvePiContextModelKey(ctx),
+				afterCapture(sessionId, "reasoning budget status", () =>
+					captureOpencodeReasoningBudgetStatus(
+						sessionId,
+						piReasoningStatusMessages(outputMessages),
+						resolveKeepReasoningTokens(
+							options.heuristics?.keepReasoningTokens,
+							resolvePiContextModelKey(ctx),
+						),
+						isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id),
+						sessionDecisionCalibration(options.db, sessionId).proseRatio,
 					),
-					isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id),
-					sessionDecisionCalibration(options.db, sessionId).proseRatio,
 				);
 			if (thinkingBindingRecoveryApplied) {
 				try {
@@ -7433,7 +7487,11 @@ export function registerPiContextHandler(
 				}
 			}
 			budget.assertOutcome();
-			publishTransformDecision?.();
+			afterCapture(sessionId, "transform decision record", () =>
+				publishTransformDecision?.(),
+			);
+			// A test hook that may throw to inject a failure after the capture; it is
+			// not run through afterCapture so that failure still refuses the pass.
 			options.onPostprocess?.({ bustedThisPass: result.bustedThisPass });
 			// The pass succeeded, and the pipeline persisted the strip a tools
 			// release required (or refused the pass), so the new tool list becomes
@@ -7442,25 +7500,19 @@ export function registerPiContextHandler(
 			// leaves a start-order session unchanged; if that record cannot be
 			// written, the release is not recorded either and the next pass
 			// releases again.
-			if (
-				requestToolsChange === null ||
-				recordPiBindingStripEndOrder(options.db, sessionId)
-			)
-				requestToolsRelease?.commit();
-			else
-				sessionLog(
-					sessionId,
-					"request tools release not recorded: the end strip order could not be written",
-				);
-			if (
-				!budget.sideTurn &&
-				((result.strictThinkingKept && !result.signedPrefixRewritten) ||
-					result.heldHeadReleasedForSystemChange === true) &&
-				!result.materialized
-			)
-				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
-					deferPiDeliveredSystemRefresh(sessionId, ownsHistory),
-				);
+			afterCapture(sessionId, "request tools release record", () => {
+				if (
+					requestToolsChange === null ||
+					recordPiBindingStripEndOrder(options.db, sessionId)
+				)
+					requestToolsRelease?.commit();
+				else
+					sessionLog(
+						sessionId,
+						"request tools release not recorded: the end strip order could not be written",
+					);
+			});
+			// The held system head was recorded before the capture (see above).
 			// Every refusal point inside this handler is behind us. The dispatch
 			// wrapper certifies the saved copy of this request only once it actually
 			// hands the request on for sending, and records a refusal otherwise.
@@ -7472,29 +7524,36 @@ export function registerPiContextHandler(
 						ticket,
 					);
 			}
-			recordServedSystemHash();
+			afterCapture(
+				sessionId,
+				"served system hash record",
+				recordServedSystemHash,
+			);
 			finishPrefix();
-			if (!budget.sideTurn && result.hostTokenPass)
-				scheduleHostTokenBreakdown(options.db, sessionId, {
-					...result.hostTokenPass,
-					measuredAt: Date.now(),
-					projectIdentity: servedProjectIdentity || undefined,
-					injectionBudgetTokens: options.injection?.injectionBudgetTokens,
-					memoryBlockCount: sessionMeta.memoryBlockCount ?? 0,
-					readAttribution: (blocks) =>
-						readPiTokenAttribution(
-							pi,
-							ctx,
-							sessionMeta,
-							{
-								sessionId,
-								providerInputLimit,
-								usableContextLimit: usageContextLimit,
-							},
-							result.hostTokenPass!.toolCallTokens,
-							blocks,
-						),
-				});
+			const hostTokenPass = result.hostTokenPass;
+			if (!budget.sideTurn && hostTokenPass)
+				afterCapture(sessionId, "host token breakdown scheduling", () =>
+					scheduleHostTokenBreakdown(options.db, sessionId, {
+						...hostTokenPass,
+						measuredAt: Date.now(),
+						projectIdentity: servedProjectIdentity || undefined,
+						injectionBudgetTokens: options.injection?.injectionBudgetTokens,
+						memoryBlockCount: sessionMeta.memoryBlockCount ?? 0,
+						readAttribution: (blocks) =>
+							readPiTokenAttribution(
+								pi,
+								ctx,
+								sessionMeta,
+								{
+									sessionId,
+									providerInputLimit,
+									usableContextLimit: usageContextLimit,
+								},
+								hostTokenPass.toolCallTokens,
+								blocks,
+							),
+					}),
+				);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -9192,6 +9251,48 @@ function captureReasoningMutationRollback(
 	};
 }
 
+/**
+ * Whether `served` carries `head` (m[0]'s text and mural image, m[1]'s text) at
+ * `index`, where this pass inserts its head. A mismatch here is also a mismatch
+ * of the full head messages, which contain these values; the reverse need not
+ * hold. The mural image is compared as stored, without building its data URL.
+ */
+function piServedHeadMatches(
+	served: readonly unknown[] | null,
+	index: number,
+	head: PiFoldHead,
+): boolean {
+	const contentOf = (message: unknown): unknown[] | null =>
+		isRecord(message) &&
+		message.role === "user" &&
+		Array.isArray(message.content)
+			? message.content
+			: null;
+	const isText = (part: unknown, text: string) =>
+		isRecord(part) && part.type === "text" && part.text === text;
+	const m0 = contentOf(served?.[index]);
+	const m1 = contentOf(served?.[index + 1]);
+	if (!m0 || !m1 || m1.length !== 1 || !isText(m1[0], head.m1Text))
+		return false;
+	if (m0.length !== (head.muralDataUrl ? 2 : 1) || !isText(m0[0], head.m0Text))
+		return false;
+	if (!head.muralDataUrl) return true;
+	const image = m0[1];
+	if (
+		!isRecord(image) ||
+		image.type !== "image" ||
+		typeof image.mimeType !== "string" ||
+		typeof image.data !== "string"
+	)
+		return false;
+	const prefix = `data:${image.mimeType};base64,`;
+	return (
+		head.muralDataUrl.length === prefix.length + image.data.length &&
+		head.muralDataUrl.startsWith(prefix) &&
+		head.muralDataUrl.endsWith(image.data)
+	);
+}
+
 async function runCompactionOffPipeline(
 	args: RunPipelineArgs,
 ): Promise<RunPipelineResult> {
@@ -9245,6 +9346,20 @@ async function runCompactionOffPipeline(
 	// The transcript before any head is injected: the thinking strip below
 	// addresses its entries by their index in this array.
 	const transcript = [...(args.messages as unknown[])];
+	// The transcript entries' stable ids, which the thinking strip records;
+	// resolved only on a pass that strips.
+	let stripEntryIdsMemo: ReturnType<typeof resolvePiRealStableId>[] | undefined;
+	const stripEntryIds = () => {
+		stripEntryIdsMemo ??= transcript.map((message, index) =>
+			resolvePiRealStableId(
+				message,
+				index,
+				args.entryIds,
+				args.entryIdByRef ?? undefined,
+			),
+		);
+		return stripEntryIdsMemo;
+	};
 	let headChangedUnderSignedThinking = false;
 	if (args.injection) {
 		const state: PiM0M1State = {
@@ -9290,6 +9405,47 @@ async function runCompactionOffPipeline(
 			signedTurnHoldsHead && !recorded && !state.preparedPrefix
 				? (args.readLastServedMessages?.() ?? null)
 				: undefined;
+		// The request this session last served, read at most once per pass.
+		let lastServed: readonly unknown[] | null | undefined;
+		const readLastServed = () => {
+			if (lastServed === undefined)
+				lastServed = args.readLastServedMessages?.() ?? null;
+			return lastServed;
+		};
+		if (!signedTurnHoldsHead && args.reasoningClearing?.prefixBound === true) {
+			// A fold that changes the head in front of the earlier turns' signed
+			// thinking saves the strip of that thinking in the fold's own
+			// transaction. Saved after the commit, a failed write would leave the
+			// new head saved with the thinking on the wire behind it; compaction-off
+			// strips only on the pass whose fold changed the head and never refuses
+			// a pass, so every later request would carry it and be rejected. Inside
+			// the transaction only the head's text and mural image are compared with
+			// the served head. A head whose text and image match but whose full
+			// messages differ (an envelope field such as a timestamp) is still
+			// stripped below, after the commit, and keeps that window.
+			state.onFoldPrepare = () => {
+				const served = readLastServed();
+				const headIndex = placePiInitialSystemAtHead([
+					...(args.messages as unknown[]),
+				]);
+				return (db, head) => {
+					if (piServedHeadMatches(served, headIndex, head)) return;
+					applyPiProactiveThinkingStrip({
+						db,
+						sessionId: args.sessionId,
+						messages: transcript,
+						entryIds: stripEntryIds(),
+						provider: args.resolvedProviderID,
+						model: args.resolvedModelID,
+						cacheBustingPass: true,
+						stripActiveTurn: true,
+						persistOnly: true,
+						requirePersistence: true,
+						report: (line) => sessionLog(args.sessionId, line),
+					});
+				};
+			};
+		}
 		if (prefixPass)
 			prefixPass.compactionOffFallback = (messages, headCount) => {
 				const shadow = messages
@@ -9332,8 +9488,10 @@ async function runCompactionOffPipeline(
 			// could re-render it. The earlier turns' signed thinking is bound to
 			// the head it was served behind as well: when the new head differs from
 			// the one last served (or that one is unknown), those blocks are
-			// stripped below, on the same pass as the re-render.
-			const served = args.readLastServedMessages?.() ?? null;
+			// stripped below, on the same pass as the re-render. When the fold
+			// already saved that strip, the write below finds every entry saved and
+			// writes nothing.
+			const served = readLastServed();
 			const headCount = injectionResult?.syntheticLeadingCount ?? 0;
 			headChangedUnderSignedThinking =
 				served === null ||
@@ -9356,14 +9514,7 @@ async function runCompactionOffPipeline(
 			db: args.db,
 			sessionId: args.sessionId,
 			messages: transcript,
-			entryIds: transcript.map((message, index) =>
-				resolvePiRealStableId(
-					message,
-					index,
-					args.entryIds,
-					args.entryIdByRef ?? undefined,
-				),
-			),
+			entryIds: stripEntryIds(),
 			provider: args.resolvedProviderID,
 			model: args.resolvedModelID,
 			cacheBustingPass: true,

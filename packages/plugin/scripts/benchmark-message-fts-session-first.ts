@@ -33,13 +33,13 @@ function querySql(lane: Lane, filtered: boolean): string {
     const filter = filtered ? MESSAGE_FTS_SESSION_FILTER_SQL : "";
     if (lane === "auto") {
         return `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content
-            FROM message_history_fts WHERE ${filter}session_id = ?1 AND message_history_fts MATCH ?
+            FROM message_history_fts WHERE ${filter}session_id = ? AND message_history_fts MATCH ?
             ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`;
     }
     return `WITH matches AS MATERIALIZED (
         SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content,
             CAST(message_ordinal AS INTEGER) AS ordinalValue, bm25(message_history_fts) AS ftsRank
-        FROM message_history_fts WHERE ${filter}session_id = ?1 AND message_history_fts MATCH ?
+        FROM message_history_fts WHERE ${filter}session_id = ? AND message_history_fts MATCH ?
     ), eligible AS (
         SELECT * FROM matches WHERE ordinalValue <= ? ORDER BY ftsRank, ordinalValue ASC LIMIT ?
     ), summary AS (
@@ -69,8 +69,8 @@ function worker(): void {
             prepared.set(filtered, statement);
         }
         return lane === "auto"
-            ? statement.all(session, match, 30)
-            : statement.all(session, match, cutoff, 90, cutoff);
+            ? statement.all(...(filtered ? [session, session] : [session]), match, 30)
+            : statement.all(...(filtered ? [session, session] : [session]), match, cutoff, 90, cutoff);
     };
     const run = (): Sample => {
         let filtered = false;

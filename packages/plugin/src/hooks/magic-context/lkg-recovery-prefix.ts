@@ -1,4 +1,5 @@
 import {
+    type ReplayDocument,
     readReplayEnvelope,
     updateReplayDocument,
 } from "../../features/magic-context/storage-replay-document";
@@ -28,11 +29,16 @@ interface RecoveryPrefix {
 // may predate raw messages sent while SQLite's writer was unavailable. Refuse
 // recovery until a successful transform explicitly rebuilds the request;
 // those older stored bytes cannot prove what the provider has cached.
-const sessions = new BoundedSessionMap<{
+type LkgRecoverySession = {
     prefix?: RecoveryPrefix;
     fenceRevision?: string;
     uncertifiedNormal?: boolean;
-}>(1000);
+};
+type LkgRecoverySessionState = LkgRecoverySession | undefined;
+const sessions = new BoundedSessionMap<LkgRecoverySession>(1000);
+// Sessions whose saved last-good request this process has already handed to a
+// pass as the request served before it started (see readRecoveryIdentityPrefix).
+const restartHeadChecked = new BoundedSessionMap<true>(1000);
 export function noteUncertifiedNormalLkg(sessionId: string, revision: string | undefined): void {
     sessions.set(sessionId, {
         ...sessions.get(sessionId),
@@ -53,11 +59,13 @@ export function rememberLkgDirtyRevision(sessionId: string, revision: string): v
 
 export function clearLkgRecoveryPrefixes(): void {
     sessions.clear();
+    restartHeadChecked.clear();
     clearLkgFenceProcessState();
 }
 
 export function clearLkgRecoverySession(sessionId: string): void {
     sessions.delete(sessionId);
+    restartHeadChecked.delete(sessionId);
     clearLkgFenceProcessState(sessionId);
 }
 
@@ -85,17 +93,24 @@ export function readPersistedLkgUntaggedInputIds(db: Database, sessionId: string
     }
 }
 
-/** Replace the record (an empty set removes it). Returns false when it could not be written. */
+/**
+ * Replace the record (an empty set removes it; `undefined` leaves it as it is),
+ * in one replay-document update with whatever `alsoRecord` adds to the same
+ * document. Returns false when it could not be written; then neither is saved.
+ */
 export function persistLkgUntaggedInputIds(
     db: Database,
     sessionId: string,
-    ids: Iterable<string>,
+    ids: Iterable<string> | undefined,
+    alsoRecord?: (doc: ReplayDocument) => boolean,
 ): boolean {
-    const next = [...new Set(ids)].sort();
+    const next = ids === undefined ? undefined : [...new Set(ids)].sort();
     try {
         return updateReplayDocument(db, sessionId, (doc) => {
+            const recorded = alsoRecord?.(doc) ?? false;
             const saved = Array.isArray(doc.lkgUntaggedInputIds) ? doc.lkgUntaggedInputIds : [];
-            if (JSON.stringify(saved) === JSON.stringify(next)) return false;
+            if (next === undefined || JSON.stringify(saved) === JSON.stringify(next))
+                return recorded;
             doc.version = 2;
             if (next.length > 0) doc.lkgUntaggedInputIds = next;
             else delete doc.lkgUntaggedInputIds;
@@ -113,13 +128,20 @@ export function noteLkgRecoveryPrefix(args: {
     messages: MessageLike[];
     modelKey: string | null;
     providerKey: string | null;
+    /**
+     * Digests of `entry.pristineTail` taken before the replay edited it. The
+     * replay strips saved thinking and applies saved drops to those same objects
+     * in place, but the host sends them unedited on its next request, and the
+     * next pass compares that request with these digests. Digests of the edited
+     * copies would make any replay that stripped or dropped something in its
+     * tail look like a changed input, so the next pass would drop the replay and
+     * serve the saved rebuild: a second prompt rewrite.
+     */
+    hostTailDigests: readonly (string | null)[];
     /** Also record the untagged messages durably (best effort; the next pass retries). */
     db?: Database;
 }): boolean {
-    const digests = [
-        ...args.entry.entryContentDigests,
-        ...args.entry.pristineTail.map(lkgContentDigest),
-    ];
+    const digests = [...args.entry.entryContentDigests, ...args.hostTailDigests];
     if (digests.length !== args.entry.entryInputIds.length || digests.some((value) => !value))
         return false;
     const ids = args.entry.entryInputIds;
@@ -150,7 +172,7 @@ export function readLkgRecoveryPrefix(
     inputs: (Pick<LkgEntryProjection, "id" | "contentDigest"> & { role?: string })[],
     messages: MessageLike[],
     db?: Database,
-): { prefix?: RecoveryPrefix; rebuildReason?: string } {
+): { prefix?: RecoveryPrefix; rebuildReason?: string; restartedSlotJson?: string } {
     return readRecoveryIdentityPrefix(
         sessionId,
         inputs.map((input, index) => ({
@@ -167,7 +189,7 @@ function readRecoveryIdentityPrefix(
     inputs: Pick<LkgEntryProjection, "id" | "contentDigest">[],
     messages: MessageLike[],
     db?: Database,
-): { prefix?: RecoveryPrefix; rebuildReason?: string } {
+): { prefix?: RecoveryPrefix; rebuildReason?: string; restartedSlotJson?: string } {
     const state = sessions.get(sessionId);
     const slot =
         db && (!state || state.prefix || state.uncertifiedNormal)
@@ -176,11 +198,22 @@ function readRecoveryIdentityPrefix(
     const prefix = state?.prefix;
     if (!prefix && state?.uncertifiedNormal && ownsLkgDirtyFence(sessionId, state.fenceRevision))
         return {};
-    if (!prefix)
+    if (!prefix) {
+        // A frozen last-good replay lives only in memory. After a restart the
+        // saved request is the only record of what went out last, and a head
+        // saved by a refused pass may differ from it. The first pass of this
+        // process gets that request once, to compare the head it serves with it.
+        let restartedSlotJson: string | undefined;
+        if (!state && slot && !restartHeadChecked.has(sessionId)) {
+            restartHeadChecked.set(sessionId, true);
+            restartedSlotJson = slot.jsonPrefix;
+        }
+        const restarted = restartedSlotJson === undefined ? {} : { restartedSlotJson };
         return (!state && lkgRecoveryFenceUnclean(sessionId)) ||
             (slot && lkgFenceRequiresRebuild(sessionId, slot, !!state))
-            ? { rebuildReason: "lkg_restart_rebuild" }
-            : {};
+            ? { rebuildReason: "lkg_restart_rebuild", ...restarted }
+            : restarted;
+    }
     const keys = resolveLkgModelKeys(messages);
     if (
         (state?.fenceRevision !== undefined &&
@@ -198,6 +231,22 @@ function readRecoveryIdentityPrefix(
 }
 
 /** Extend the immutable provider-output record only after saving the successful transformed request. */
+/**
+ * The session's recovery state as it is now. A pass refused after its capture
+ * puts it back with restoreLkgRecoverySession, so the replay that stands in for
+ * the pass and the next pass see the state the last request sent left.
+ */
+export function snapshotLkgRecoverySession(sessionId: string): LkgRecoverySessionState {
+    const state = sessions.get(sessionId);
+    return state ? { ...state } : undefined;
+}
+
+/** Put back a state taken with snapshotLkgRecoverySession. */
+export function restoreLkgRecoverySession(sessionId: string, state: LkgRecoverySessionState): void {
+    if (state) sessions.set(sessionId, state);
+    else sessions.delete(sessionId);
+}
+
 export function noteLkgHealthyPrefix(
     sessionId: string,
     inputs: LkgEntryProjection[],
