@@ -37,6 +37,7 @@ const RECOVERABLE_ERROR =
 type Row = {
     id: number;
     session_id: string;
+    harness: string;
     subagent: string;
     task: string | null;
     started_at: number;
@@ -47,7 +48,7 @@ type Row = {
 };
 type Cursor = { ended_at: number; id: number };
 type Sent = { at: number; count: number };
-type State = { version: 1; cursor: Cursor; sent: Record<string, Sent> };
+type State = { version: 1; cursor: Cursor; sent: Record<string, Sent>; pending?: number[] };
 export type Alert = {
     rule: "new_class" | "failure_share" | "class_doubled";
     subagent: string;
@@ -80,7 +81,7 @@ export function normalizeError(error: string | null): string {
         // Recorded errors are cut at a fixed length, which can split a UUID;
         // the surviving prefix (8 hex digits plus partial groups) is still an id.
         .replace(/\b[a-f0-9]{8}(?:-[a-f0-9]{1,12})+/gi, "<id>")
-        .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, "<id>")
+        .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:ses|session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, "<id>")
         .replace(/\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b/gi, "<duration>")
         // Compact countdowns such as "34h 33m 37s" change on every report of the
         // same failure, so they must collapse into one class.
@@ -103,6 +104,22 @@ function loadState(path: string, now: number): State {
         !Number.isSafeInteger(state.cursor?.id) || !state.sent || typeof state.sent !== "object") {
         throw new Error("invalid failure sentinel state");
     }
+    if (state.pending !== undefined && (!Array.isArray(state.pending) || state.pending.length > MAX_NEW ||
+        state.pending.some((id) => !Number.isSafeInteger(id) || id <= 0))) {
+        throw new Error("invalid failure sentinel pending state");
+    }
+    const sent: Record<string, Sent> = {};
+    for (const [oldKey, value] of Object.entries(state.sent)) {
+        const parts: unknown = JSON.parse(oldKey);
+        const normalizedKey = Array.isArray(parts) && parts.length === 4 && typeof parts[3] === "string"
+            ? JSON.stringify([...parts.slice(0, 3), normalizeError(parts[3])]) : oldKey;
+        const previous = sent[normalizedKey];
+        // Several child-specific classes can collapse into one. Combine their
+        // counts so upgrading cannot mistake the combined total for new growth.
+        sent[normalizedKey] = previous
+            ? { at: Math.max(previous.at, value.at), count: previous.count + value.count } : value;
+    }
+    state.sent = sent;
     return state;
 }
 
@@ -115,6 +132,44 @@ function key(alert: Alert): string {
     // must dedupe to a single alert instead of re-firing for every class it contains.
     const klass = alert.rule === "failure_share" ? "*" : alert.class;
     return JSON.stringify([alert.rule, alert.subagent, alert.task, klass]);
+}
+
+export function dreamBudgetChildSessionId(error: string | null): string | null {
+    return error?.match(/\bDreamer child (ses_[a-zA-Z0-9]+) spent\b/)?.[1] ?? null;
+}
+
+type BudgetOutcome = "count" | "completed" | "pending";
+
+function budgetOutcome(db: Database, row: Row, now: number): BudgetOutcome {
+    if (row.subagent !== "dreamer" || !["failed", "timed_out"].includes(row.status) ||
+        !/\b(?:DreamTokenBudgetExceeded|token_budget)\b/.test(row.error ?? "")) return "count";
+    // Invocation session_id names the parent. The error's child id is also the
+    // identity recorded in the owning dream task's children array.
+    const child = dreamBudgetChildSessionId(row.error);
+    if (!child) return "count";
+    const project = db.query("SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?")
+        .get(row.session_id, row.harness) as { project_path: string } | null;
+    const finishedBefore = Math.min(now, row.started_at + HOUR);
+    const runs = (project
+        ? db.query("SELECT tasks_json FROM dream_runs WHERE project_path = ? AND finished_at >= ? AND finished_at <= ?")
+            .all(project.project_path, row.started_at, finishedBefore)
+        : db.query("SELECT tasks_json FROM dream_runs WHERE finished_at >= ? AND finished_at <= ?")
+            .all(row.started_at, finishedBefore)) as { tasks_json: string }[];
+    for (const run of runs) {
+        let tasks: unknown;
+        try { tasks = JSON.parse(run.tasks_json); } catch { continue; }
+        if (!Array.isArray(tasks)) continue;
+        for (const task of tasks) {
+            if (!task || typeof task !== "object" || !Array.isArray(task.children)) continue;
+            if (!task.children.some((entry: unknown) => entry && typeof entry === "object" &&
+                "sessionId" in entry && entry.sessionId === child)) continue;
+            if (task.status === "completed") return "completed";
+            if (task.status === "failed") return "count";
+        }
+    }
+    // The task writes its outcome only at the end. Hold the child until a
+    // dream_runs row records the task outcome; a missing outcome must eventually alert.
+    return now < row.started_at + HOUR ? "pending" : "count";
 }
 
 /**
@@ -237,31 +292,57 @@ export async function runFailureSentinel(options: FailureSentinelOptions): Promi
     }
     let db: Database | undefined;
     let examined = 0;
+    let budgetStopsNotCounted = 0;
     let bounded = false;
     let alerts: Alert[] = [];
     try {
         if (!existsSync(options.db)) throw new Error(`context database missing: ${options.db}`);
         db = new Database(options.db, { readonly: true });
         db.exec("PRAGMA busy_timeout = 3000");
-        const fields = "id, session_id, subagent, task, started_at, ended_at, status, error, parent_invocation_id";
+        const fields = "id, session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id";
         const settledBefore = now - (options.settleMs ?? DEFAULT_SETTLE_MS);
         const next = db.query(`SELECT ${fields} FROM subagent_invocations WHERE ended_at IS NOT NULL AND ended_at <= ? AND (ended_at > ? OR (ended_at = ? AND id > ?)) ORDER BY ended_at, id LIMIT ?`)
             .all(settledBefore, state.cursor.ended_at, state.cursor.ended_at, state.cursor.id, MAX_NEW + 1) as Row[];
         bounded = next.length > MAX_NEW;
-        const fresh = next.slice(0, MAX_NEW);
+        const fresh: Row[] = [];
+        const pendingRows = (state.pending ?? []).length
+            ? db.query(`SELECT ${fields} FROM subagent_invocations WHERE id IN (${state.pending!.map(() => "?").join(",")})`)
+                .all(...state.pending!) as Row[] : [];
+        const pending = new Set<number>();
+        const outcomes = new Map<number, BudgetOutcome>();
+        const outcome = (row: Row): BudgetOutcome => {
+            let value = outcomes.get(row.id);
+            if (!value) { value = budgetOutcome(db!, row, now); outcomes.set(row.id, value); }
+            return value;
+        };
+        for (const row of pendingRows) {
+            const result = outcome(row);
+            if (result === "pending") pending.add(row.id);
+            else fresh.push(row);
+        }
+        for (const row of next.slice(0, MAX_NEW)) {
+            const result = outcome(row);
+            if (result === "pending" && pending.size >= MAX_NEW) { bounded = true; break; }
+            if (result === "pending") pending.add(row.id);
+            fresh.push(row);
+            state.cursor = { ended_at: row.ended_at, id: row.id };
+        }
+        state.pending = [...pending];
+        budgetStopsNotCounted = fresh.filter((row) => outcome(row) === "completed").length;
         examined += next.length;
         if (fresh.length) {
             const history = db.query(`SELECT ${fields} FROM subagent_invocations WHERE ended_at > ? AND ended_at <= ? ORDER BY ended_at DESC, id DESC LIMIT ?`)
                 .all(now - 7 * DAY, now, MAX_HISTORY + 1) as Row[];
             examined += history.length;
             bounded ||= history.length > MAX_HISTORY;
-            const rows = history.slice(0, MAX_HISTORY);
-            const completeSince = history.length > MAX_HISTORY ? rows.at(-1)!.ended_at : now - 7 * DAY;
-            alerts = evaluateFailures(rows, fresh, now, completeSince).filter((alert) => {
+            const historyRows = history.slice(0, MAX_HISTORY);
+            const completeSince = history.length > MAX_HISTORY ? historyRows.at(-1)!.ended_at : now - 7 * DAY;
+            const rows = [...new Map([...historyRows, ...pendingRows].map((row) => [row.id, row])).values()]
+                .filter((row) => outcome(row) === "count");
+            alerts = evaluateFailures(rows, fresh.filter((row) => outcome(row) === "count"), now, completeSince).filter((alert) => {
                 const previous = state.sent[key(alert)];
                 return !previous || now - previous.at >= 6 * HOUR || alert.count >= Math.ceil(previous.count * 1.5);
             });
-            for (const row of fresh) state.cursor = { ended_at: row.ended_at, id: row.id };
         }
     } finally { db?.close(false); }
     if (alerts.length) {
@@ -273,7 +354,7 @@ export async function runFailureSentinel(options: FailureSentinelOptions): Promi
         if (options.send) await deliver(options, content, id);
         else output(JSON.stringify({ delivery_id: id, alerts }));
     } else saveState(options.stateFile, state);
-    log(JSON.stringify({ kind: "subagent_failure_sentinel_summary", at: new Date((options.now ?? Date.now)()).toISOString(), examined, alerts: alerts.length, bounded, watermark: state.cursor }));
+    log(JSON.stringify({ kind: "subagent_failure_sentinel_summary", at: new Date((options.now ?? Date.now)()).toISOString(), examined, alerts: alerts.length, bounded, budget_stops_not_counted: budgetStopsNotCounted, watermark: state.cursor }));
     return { examined, alerts, bounded };
 }
 
