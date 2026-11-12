@@ -25,7 +25,7 @@ Add `--force` to auto-fix what it can. Add `--issue` to generate a sanitized bug
    ```bash
    npx @cortexkit/magic-context@latest doctor --force
    ```
-   `--force` clears stale npm plugin caches that sometimes prevent the latest version from loading.
+   `--force` clears stale npm plugin caches that sometimes prevent the latest version from loading. On OpenCode 2, update the plugin as described in [Updating Magic Context on OpenCode 2](/getting-started/opencode-2/#updating-magic-context-on-opencode-2).
 
 3. **Check for version pin conflicts.** If your `opencode.json` or npm config pins the plugin to an older version, the new package may not load. Remove explicit version pins and let `@latest` resolve.
 
@@ -93,7 +93,7 @@ Both hosts open the same `context.db`, but each keeps its own cached copy of the
 
 `doctor` reads the version and schema fence of each cached copy, compares them with the newest migration in `context.db`, and names any cache directory that is behind. To bring that host up to date:
 
-- **OpenCode 2:** open `/plugins`, select Magic Context and press **ctrl+u** (ctrl+r only re-checks), or run `opencode plugin update`. Then restart OpenCode 2.
+- **OpenCode 2:** follow [Updating Magic Context on OpenCode 2](/getting-started/opencode-2/#updating-magic-context-on-opencode-2).
 - **OpenCode 1:** quit OpenCode 1 and delete the cache directory doctor names (for example `~/.cache/opencode/packages/@cortexkit/opencode-magic-context@latest`). OpenCode 1 installs the current release on its next start.
 
 After each Magic Context release, update both hosts before using either one, so neither is left behind the database.
