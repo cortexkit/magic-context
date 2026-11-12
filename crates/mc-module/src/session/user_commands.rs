@@ -1,7 +1,27 @@
 use super::*;
-use cortexkit_role_user_commands::{Fact, FactValue, Figure, ModuleRunRequest, Preview, RunReply};
+use cortexkit_role_user_commands::{
+    ErrorBody, Fact, FactValue, Figure, ModuleRunRequest, Preview, RunReply,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+const ANSWER_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+// A person would have to flush more than ten times an hour to fill this in a
+// day. The cap bounds each session document without retiring a live answer.
+const MAX_ANSWERS: usize = 256;
+
+fn wall_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis() as i64)
+}
+
+fn outcome_unknown() -> ErrorBody {
+    ErrorBody::new(
+        "unavailable",
+        "The command outcome could not be recorded; retry with the same request_id.",
+    )
+}
 
 fn number(label: &str, value: u64, unit: &str, noun: Option<&str>, approx: bool) -> Fact {
     let mut data = FactValue::number(value as f64);
@@ -67,6 +87,42 @@ build_state! {
 }
 
 impl Session {
+    /// Request ids are scoped to this session subject. The full body digest
+    /// still detects changed args, preview versions and forwarded caller facts.
+    fn command_replay(&mut self, request: &ModuleRunRequest, digest: &str) -> Option<RunReply> {
+        self.command_answers = self.command_answers_for_save();
+        self.command_answers
+            .iter()
+            .find(|answer| answer.request_id == request.request_id)
+            .map(|answer| {
+                if answer.request_digest == digest {
+                    answer.answer.clone()
+                } else {
+                    RunReply::new("request_conflict")
+                }
+            })
+    }
+
+    /// Every persistence path uses this projection, including ordinary worker
+    /// checkpoints. Empty lists stay absent so sessions without commands keep
+    /// their previous JSON shape and need no database migration.
+    pub(super) fn command_answers_for_save(&self) -> Arc<Vec<crate::store::CommandAnswer>> {
+        let cutoff = wall_now().saturating_sub(ANSWER_RETENTION_MS);
+        if self
+            .command_answers
+            .iter()
+            .all(|answer| answer.stored_at >= cutoff)
+        {
+            return Arc::clone(&self.command_answers);
+        }
+        Arc::new(
+            self.command_answers
+                .iter()
+                .filter(|answer| answer.stored_at >= cutoff)
+                .cloned()
+                .collect(),
+        )
+    }
     fn command_managed(&self) -> bool {
         self.compacting()
             && !self.suspended
@@ -209,36 +265,41 @@ impl Session {
         client: &C,
         settings: &Settings,
         request: &ModuleRunRequest,
-    ) -> RunReply {
+    ) -> Result<RunReply, ErrorBody> {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_jcs::to_vec(request).map_err(|_| crate::user_commands::invalid("request"))?
+            )
+        );
+        if let Some(answer) = self.command_replay(request, &digest) {
+            return Ok(answer);
+        }
         if !self.command_managed() {
-            return RunReply::new(if request.preview_version == "unmanaged" {
+            return Ok(RunReply::new(if request.preview_version == "unmanaged" {
                 "not_managed"
             } else {
                 "preview_stale"
-            });
+            }));
         }
         let mut plan = self.flush_plan(settings);
         if plan.preview.version != request.preview_version {
-            return RunReply::new("preview_stale");
+            return Ok(RunReply::new("preview_stale"));
         }
         if let Some(reason) = plan.preview.reason {
-            return RunReply::new(reason);
+            return Ok(RunReply::new(reason));
+        }
+        if self.command_answers.len() >= MAX_ANSWERS {
+            return Err(ErrorBody::new(
+                "command_capacity",
+                "Command answer storage is full for this session.",
+            ));
         }
         let Some((view, state)) = plan.built.take() else {
-            return RunReply::new("failed");
+            return Err(outcome_unknown());
         };
         state.install(self);
         let version = view.version;
-        self.app_cause = "explicit_flush".into();
-        if !self.publish(client, view).await {
-            self.next_flush = false;
-            // Try to persist the rollback before reporting failure, so a
-            // restart does not re-offer the failed command's saved view.
-            if let Err(error) = self.save() {
-                tracing::warn!("ck-mc: command rollback could not be saved: {error}");
-            }
-            return RunReply::new("failed");
-        }
         let mut reply = RunReply::new("scheduled");
         reply.facts = Some(vec![
             number("Parts dropped", plan.parts, "count", Some("parts"), false),
@@ -246,7 +307,40 @@ impl Session {
             number("Prompt after", plan.after, "tokens", None, true),
             number("View", version, "count", Some("views"), false),
         ]);
-        reply
+        Arc::make_mut(&mut self.command_answers).push(crate::store::CommandAnswer {
+            request_id: request.request_id.clone(),
+            request_digest: digest,
+            answer: reply.clone(),
+            stored_at: wall_now(),
+            principal: cortexkit_role_user_commands::ADMITTED_CALLER.into(),
+            caller: request.caller.clone(),
+        });
+        self.app_cause = "explicit_flush".into();
+        // Publication saves the scheduled answer and its possibly-delivered
+        // view in one document, before the runner can receive the view.
+        let (delivered, durable) = self.publish_recorded(client, view).await;
+        if delivered {
+            return Ok(reply);
+        }
+        self.next_flush = false;
+        let answer = Arc::make_mut(&mut self.command_answers)
+            .last_mut()
+            .expect("new command answer");
+        answer.answer = RunReply::new("failed");
+        answer.stored_at = wall_now();
+        let failed = answer.answer.clone();
+        if self.save().is_err() {
+            // Do not expose a failed answer that was never saved. Restore the
+            // last durable view and answer together; retries then see exactly
+            // the same recovery state as a restarted worker.
+            if let Some(durable) = durable {
+                self.restore(durable);
+            } else {
+                Arc::make_mut(&mut self.command_answers).pop();
+            }
+            return Err(outcome_unknown());
+        }
+        Ok(failed)
     }
 
     fn command_status(&self, settings: &Settings) -> Preview {

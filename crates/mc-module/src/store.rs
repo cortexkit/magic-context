@@ -18,9 +18,26 @@ use serde::{Deserialize, Serialize};
 use crate::memory_profile::MemoryContext;
 use crate::summary::head::Baseline;
 
+/// A person's run answer, saved with the view decision it reports.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommandAnswer {
+    pub(crate) request_id: String,
+    pub(crate) request_digest: String,
+    pub(crate) answer: cortexkit_role_user_commands::RunReply,
+    pub(crate) stored_at: i64,
+    pub(crate) principal: String,
+    pub(crate) caller: cortexkit_role_user_commands::Caller,
+}
+
+fn no_command_answers(answers: &Arc<Vec<CommandAnswer>>) -> bool {
+    answers.is_empty()
+}
+
 /// What a session keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Durable {
+    #[serde(default, skip_serializing_if = "no_command_answers")]
+    pub command_answers: Arc<Vec<CommandAnswer>>,
     #[serde(default)]
     pub app: crate::app_read::SessionState,
     /// Compaction features and conditions, for a tool arriving before Setup

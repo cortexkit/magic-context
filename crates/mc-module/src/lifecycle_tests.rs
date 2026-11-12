@@ -98,6 +98,7 @@ struct Client {
     /// `session.apply_view` fails as a call does when the connection to the
     /// runner drops.
     fail_apply: Mutex<bool>,
+    before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// `session.applied_view` fails as a call does when the connection to
     /// the runner drops.
     fail_applied_view: Mutex<bool>,
@@ -160,6 +161,10 @@ impl RunnerClient for Client {
         request: ApplyViewRequest,
     ) -> Result<ApplyViewAnswer, crate::client::ClientError> {
         self.offered.lock().unwrap().push(request.view);
+        let before_apply = self.before_apply.lock().unwrap().take();
+        if let Some(before_apply) = before_apply {
+            before_apply();
+        }
         if *self.fail_apply.lock().unwrap() {
             return Err(crate::client::ClientError::new("connection lost"));
         }

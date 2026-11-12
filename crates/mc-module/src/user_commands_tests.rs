@@ -3,6 +3,9 @@ use crate::user_commands::{self as commands, Request};
 use cortexkit_role_user_commands as wire;
 use serde_json::json;
 
+#[path = "user_commands_durable_tests.rs"]
+mod durable;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
@@ -54,15 +57,9 @@ async fn preview(
     let body = serde_json::to_vec(&json!({"method":"commands.preview", "params":request})).unwrap();
     let request = commands::decode(&body).unwrap().unwrap();
     serde_json::from_value(
-        commands::execute(
-            Some(session),
-            client,
-            settings,
-            &Default::default(),
-            request,
-        )
-        .await
-        .unwrap(),
+        commands::execute(Some(session), client, settings, request)
+            .await
+            .unwrap(),
     )
     .unwrap()
 }
@@ -165,12 +162,11 @@ async fn user_commands_flush_preview_does_not_drain_and_run_lands_exactly_counte
     assert!(client.offered.lock().unwrap().is_empty());
     let request =
         wire::ModuleRunRequest::new(preview_request(&session, "flush"), p.version, "flush-1");
-    let replays = Default::default();
+
     let answer = commands::execute(
         Some(&mut session),
         &client,
         &settings,
-        &replays,
         Request::Run(request.clone()),
     )
     .await
@@ -189,7 +185,6 @@ async fn user_commands_flush_preview_does_not_drain_and_run_lands_exactly_counte
         Some(&mut session),
         &client,
         &settings,
-        &replays,
         Request::Run(request.clone()),
     )
     .await
@@ -202,7 +197,6 @@ async fn user_commands_flush_preview_does_not_drain_and_run_lands_exactly_counte
         Some(&mut session),
         &client,
         &settings,
-        &replays,
         Request::Run(conflict),
     )
     .await
@@ -232,6 +226,7 @@ async fn user_commands_preview_stales_on_queue_summary_or_applied_view() {
             session
                 .command_run(&client, &settings, &request)
                 .await
+                .unwrap()
                 .outcome,
             "preview_stale"
         );
@@ -292,6 +287,7 @@ async fn user_commands_each_unavailable_reason_and_status_shapes() {
         session
             .command_run(&client, &settings, &request)
             .await
+            .unwrap()
             .outcome,
         "thinking_hold"
     );
@@ -329,12 +325,11 @@ async fn user_commands_push_failure_is_failed_and_replayed_without_retry() {
         let p = preview(&mut session, &client, &settings, "flush").await;
         let request =
             wire::ModuleRunRequest::new(preview_request(&session, "flush"), p.version, "failure");
-        let replays = Default::default();
+
         let a = commands::execute(
             Some(&mut session),
             &client,
             &settings,
-            &replays,
             Request::Run(request.clone()),
         )
         .await
@@ -345,7 +340,6 @@ async fn user_commands_push_failure_is_failed_and_replayed_without_retry() {
             Some(&mut session),
             &client,
             &settings,
-            &replays,
             Request::Run(request),
         )
         .await
@@ -388,6 +382,7 @@ async fn user_commands_flush_never_folds_even_with_fold_due() {
         session
             .command_run(&client, &settings, &request)
             .await
+            .unwrap()
             .outcome,
         "scheduled"
     );
@@ -435,7 +430,6 @@ async fn user_commands_record_real_handler_samples() {
         Some(&mut session),
         &client,
         &settings,
-        &Default::default(),
         Request::Run(request),
     )
     .await
@@ -467,6 +461,7 @@ async fn user_commands_record_real_handler_samples() {
             session
                 .command_run(&client, &settings, &request)
                 .await
+                .unwrap()
                 .outcome,
             reason
         );
@@ -669,6 +664,7 @@ async fn user_commands_new_memory_alone_lands_in_m1_without_folding_m0() {
         session
             .command_run(&client, &settings, &request)
             .await
+            .unwrap()
             .outcome,
         "scheduled"
     );
@@ -700,6 +696,7 @@ async fn user_commands_published_summary_lands_with_drops_without_pressure_refol
         session
             .command_run(&client, &settings, &request)
             .await
+            .unwrap()
             .outcome,
         "scheduled"
     );
@@ -747,6 +744,7 @@ async fn user_commands_flush_rides_cleanup_and_reasoning_below_execute_threshold
         session
             .command_run(&client, &settings, &request)
             .await
+            .unwrap()
             .outcome,
         "scheduled"
     );
@@ -779,13 +777,12 @@ async fn user_commands_failed_save_never_pushes_and_saved_push_failure_stays_rol
             p.version,
             "save-failure",
         );
-        assert_eq!(
-            session
-                .command_run(&client, &settings, &request)
-                .await
-                .outcome,
-            "failed"
-        );
+        let result = session.command_run(&client, &settings, &request).await;
+        if failed_save {
+            assert_eq!(result.unwrap_err().code, "unavailable");
+        } else {
+            assert_eq!(result.unwrap().outcome, "failed");
+        }
         assert!(session.latest.is_none());
         assert!(session.unconfirmed.is_empty());
         assert!(session.queued.contains(&("old".into(), "p".into())));
@@ -881,7 +878,10 @@ async fn user_commands_removal_facts_do_not_subtract_new_delta_tokens() {
     assert!(p.figure.as_ref().unwrap().value > p.figure.as_ref().unwrap().was.unwrap());
     let request =
         wire::ModuleRunRequest::new(preview_request(&session, "flush"), p.version, "net-growth");
-    let reply = session.command_run(&client, &settings, &request).await;
+    let reply = session
+        .command_run(&client, &settings, &request)
+        .await
+        .unwrap();
     assert_eq!(reply.outcome, "scheduled");
     assert_eq!(reply.facts.as_ref().unwrap()[1].data.value, Some(6.0));
     assert!(reply.facts.as_ref().unwrap()[2].data.value.unwrap() > 10_000.0);

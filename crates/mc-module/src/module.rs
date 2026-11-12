@@ -74,7 +74,6 @@ impl<C> Clone for Module<C> {
 }
 
 struct Inner<C> {
-    command_replays: tokio::sync::Mutex<crate::user_commands::Replays>,
     app_read: crate::app_read::AppRead,
     context_read: crate::context_read::ContextRead,
     client: Arc<C>,
@@ -227,7 +226,6 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
         Self {
             inner: Arc::new(Inner {
-                command_replays: Default::default(),
                 app_read,
                 context_read,
                 client,
@@ -834,12 +832,30 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .expect("worker map")
             .get(&key)
             .cloned();
+        let worker = worker.or_else(|| {
+            if !matches!(&request, commands::Request::Run(_))
+                || self
+                    .inner
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.load(&key))
+                    .is_none()
+            {
+                return None;
+            }
+            let mut workers = self.inner.workers.lock().expect("worker map");
+            Some(
+                workers
+                    .entry(key.clone())
+                    .or_insert_with(|| self.spawn_worker(key.clone()))
+                    .clone(),
+            )
+        });
         let Some(worker) = worker else {
             return commands::execute(
                 None,
                 self.inner.client.as_ref(),
                 &Settings::default(),
-                &self.inner.command_replays,
                 request,
             )
             .await;
@@ -943,13 +959,29 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 match job {
                     Job::Resume => continue,
                     Job::Command { request, reply } => {
+                        if session.is_none() {
+                            if let Some(durable) =
+                                inner.store.as_ref().and_then(|store| store.load(&held_key))
+                            {
+                                let route = Route {
+                                    session: held_key.clone(),
+                                    project: None,
+                                    workdir: None,
+                                    agent_id: None,
+                                };
+                                let mut restored = Session::tools_only(&route, inner.db.clone());
+                                restored.set_store(inner.store.clone());
+                                restored.load_summaries();
+                                restored.restore(durable);
+                                session = Some(restored);
+                            }
+                        }
                         let read_only =
                             matches!(&request, crate::user_commands::Request::Preview(_));
                         let result = crate::user_commands::execute(
                             session.as_mut(),
                             inner.client.as_ref(),
                             settings,
-                            &inner.command_replays,
                             request,
                         )
                         .await;

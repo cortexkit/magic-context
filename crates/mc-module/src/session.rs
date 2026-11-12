@@ -52,6 +52,7 @@ use crate::view_builder;
 const IMPLICIT_FORGET_LIMIT: usize = 3;
 
 pub struct Session {
+    command_answers: Arc<Vec<crate::store::CommandAnswer>>,
     app: crate::app_read::SessionState,
     app_projection: app_projection::Projection,
     app_decisions: Vec<Value>,
@@ -677,6 +678,7 @@ impl Session {
         db: Option<Arc<ContextDb>>,
     ) -> Self {
         Self {
+            command_answers: Default::default(),
             app: Default::default(),
             app_projection: Default::default(),
             app_decisions: Vec::new(),
@@ -880,6 +882,7 @@ impl Session {
     pub fn durable(&self) -> crate::store::Durable {
         let _timing = crate::notice_cost_timing::span("session.durable");
         crate::store::Durable {
+            command_answers: self.command_answers_for_save(),
             app: self.app.clone(),
             compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
             preset: (!self.tools_only).then(|| self.preset.as_str().to_owned()),
@@ -916,6 +919,7 @@ impl Session {
 
     /// Take back what a previous ck-mc process saved for the session.
     pub fn restore(&mut self, durable: crate::store::Durable) {
+        self.command_answers = durable.command_answers;
         self.app = durable.app.clone();
         self.tools_only = false;
         if let Some(preset) = durable
@@ -4458,14 +4462,23 @@ impl Session {
     /// restarted ck-mc knows the view may be in the runner's hands. A view
     /// the runner refuses, or a call that fails, puts the state back.
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) -> bool {
+        self.publish_recorded(client, view).await.0
+    }
+
+    async fn publish_recorded<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        view: View,
+    ) -> (bool, Option<crate::store::Durable>) {
         if self.suspended || self.transcript_behind.is_some() || self.refuse_oversized(&view) {
-            return false;
+            return (false, None);
         }
         self.accept(view.clone());
-        if let Err(error) = self.save() {
+        let durable = self.durable();
+        if let Err(error) = self.save_state(&durable) {
             tracing::warn!("ck-mc: {error}");
             self.roll_back(view.version, false, None);
-            return false;
+            return (false, None);
         }
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
@@ -4473,7 +4486,7 @@ impl Session {
                 self.runner_holds(view.version);
                 self.log_view_accepted(&view);
                 self.app_view_status(view.version, "accepted");
-                return true;
+                return (true, Some(durable));
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 tracing::warn!(
@@ -4518,18 +4531,19 @@ impl Session {
                 );
                 self.roll_back(view.version, false, None);
                 self.adopt_runner_view(client).await;
-                return self.newest_applied == view.version
+                let delivered = self.newest_applied == view.version
                     && self
                         .latest
                         .as_ref()
                         .is_some_and(|held| held.checksum == view.checksum);
+                return (delivered, Some(durable));
             }
             Err(error) => {
                 self.runner_call_failed("session.apply_view", &error);
                 self.roll_back(view.version, false, None);
             }
         }
-        false
+        (false, Some(durable))
     }
 
     /// A view handed over before ck-mc restarted that the runner does not
@@ -4629,8 +4643,12 @@ impl Session {
 
     /// Save the session's state now, where a store is set.
     fn save(&self) -> Result<(), String> {
+        self.save_state(&self.durable())
+    }
+
+    fn save_state(&self, durable: &crate::store::Durable) -> Result<(), String> {
         if let Some(store) = &self.store {
-            store.save(&self.key, &self.durable())?;
+            store.save(&self.key, durable)?;
             if self.app_decisions_dirty {
                 if let Err(error) = store.save_app_decisions(&self.key, &self.app_decisions) {
                     tracing::warn!("ck-mc: {error}");
