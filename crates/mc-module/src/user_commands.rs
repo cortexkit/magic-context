@@ -1,4 +1,6 @@
-//! Person-facing commands. Relay claims are audit data, never authority.
+//! Commands a person runs from the apps. What the relay says about the caller
+//! is kept for the audit record only; authorization uses the caller the daemon
+//! attested for the route.
 
 use cortexkit_role_compaction::read::SessionRef;
 use cortexkit_role_user_commands as wire;
