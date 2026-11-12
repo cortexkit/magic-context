@@ -89,6 +89,15 @@
         "input": {}
     },
     {
+        "class": "accounted_latest_turn_thinking_removed",
+        "decision": {
+            "decision": "defer",
+            "canonicalDecision": "defer",
+            "materializeReason": "latest_turn_thinking_removed"
+        },
+        "input": {}
+    },
+    {
         "class": "accounted_ctx_reduce",
         "decision": { "decision": "defer", "droppedCount": 2 },
         "input": { "contentEvidence": "assistant tool name=ctx_reduce" }

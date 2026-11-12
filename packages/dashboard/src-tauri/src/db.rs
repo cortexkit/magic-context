@@ -1736,6 +1736,7 @@ fn transform_decision_reason_label(reason: &str) -> Option<&'static str> {
         "coverage_fold" => Some("Coverage fold"),
         "profile_transition" => Some("Profile transition"),
         "tag_identity_repair" => Some("Tag identity repair"),
+        "latest_turn_thinking_removed" => Some("Rejected thinking removed"),
         _ => None,
     }
 }
@@ -1774,6 +1775,7 @@ const MAGIC_CONTEXT_REBUILD_REASONS: &[&str] = &[
     "profile_transition",
     "host_compaction",
     "tag_identity_repair",
+    "latest_turn_thinking_removed",
 ];
 
 /// Prefix the plugin writes when the host stops replaying its frozen
@@ -11634,6 +11636,7 @@ mod cache_turn_tests {
             ("coverage_fold", "Coverage fold"),
             ("profile_transition", "Profile transition"),
             ("tag_identity_repair", "Tag identity repair"),
+            ("latest_turn_thinking_removed", "Rejected thinking removed"),
         ] {
             let cause = TransformDecisionCause {
                 decision: "execute".to_string(),

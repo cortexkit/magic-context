@@ -19,6 +19,7 @@ import { Database } from "bun:sqlite";
  * | accounted_hard_pressure_refold | yes | matched HARD/m0 pass records materialize_reason=pressure_refold |
  * | accounted_hard_fold | yes | matched pass records another materialized HARD/m0 fold; tiny mid-history defer/first_render seams are excluded |
  * | accounted_tag_identity_repair | yes | matched pass records materialize_reason=tag_identity_repair (Pi kept the newest of two tag numbers for one call or message and rebuilt once) |
+ * | accounted_latest_turn_thinking_removed | yes | matched pass records materialize_reason=latest_turn_thinking_removed (the provider rejected the latest assistant turn's thinking, and the pass removed it from that turn) |
  * | accounted_ctx_reduce | yes | matched pass applies drops at an agent ctx_reduce landing |
  * | accounted_drop_applied | yes | matched pass records applied drops |
  * | accounted_soft_m1_execute | yes | matched canonical execute pass refreshes m1 |
