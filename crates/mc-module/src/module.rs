@@ -15,7 +15,7 @@
 //! [`crate::upkeep`]) runs on a timer of its own, for every project a
 //! session used in the last hour, one project at a time.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -91,7 +91,12 @@ struct Inner<C> {
     /// worker created, and again when a worker takes a job off its queue.
     journal: Arc<crate::agent_data::Journal>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
-    set_up: Mutex<HashSet<SessionRef>>,
+    /// The sessions set up in this process, each with the statement epoch
+    /// its newest Setup named (`None` when it named none). Every notice and
+    /// ride is checked against it as it arrives, before it is queued (see
+    /// the `statement_order` module). In memory only: after a restart every
+    /// session is set up again.
+    set_up: Mutex<HashMap<SessionRef, Option<String>>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
     /// The same work counted per session, for a move's `busy`.
@@ -226,7 +231,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 store: store.map(Arc::new),
                 journal,
                 workers: Mutex::new(HashMap::new()),
-                set_up: Mutex::new(HashSet::new()),
+                set_up: Mutex::new(HashMap::new()),
                 summaries_running: Mutex::new(0),
                 runs: Arc::default(),
                 agent_data: crate::agent_data::Service::new(agent_data),
@@ -460,6 +465,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .insert(route.session.clone(), project.clone());
             self.touch(&route.session);
         }
+        // The epoch is recorded and the Setup queued under one lock, the one
+        // a notice or ride is checked and queued under. So no statement
+        // checked against the epoch this Setup replaces is queued behind it,
+        // and of two Setups racing, the one queued last is the one recorded.
+        // The queue is unbounded, so sending never waits.
+        let mut set_up = self.inner.set_up.lock().expect("setup sessions");
         let worker = {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
@@ -468,15 +479,52 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .clone()
         };
         let key = route.session.clone();
+        let epoch = request.statement_epoch.clone();
         worker
             .send(Job::Setup(route, request, features))
             .map_err(|_| ModuleError::Stopped)?;
-        self.inner
-            .set_up
-            .lock()
-            .expect("setup sessions")
-            .insert(key);
+        set_up.insert(key, epoch);
         Ok(SetupAnswer::Ready)
+    }
+
+    /// Whether a notice or ride (`kind`) with `conditions` belongs to the
+    /// statement epoch of the session's newest Setup, as `set_up` records
+    /// it, checked as the statement arrives, before anything else (see the
+    /// `statement_order` module). `None` when the session was not set up in
+    /// this process. A statement that does not belong is logged here, once.
+    /// The caller holds the `set_up` lock and keeps holding it while it
+    /// queues an admitted statement.
+    fn epoch_verdict(
+        set_up: &HashMap<SessionRef, Option<String>>,
+        session: &SessionRef,
+        kind: &str,
+        conditions: &cortexkit_role_compaction::notice::Conditions,
+    ) -> Option<bool> {
+        let held = set_up.get(session)?;
+        let admitted = crate::session::epoch_admits(held.as_deref(), conditions);
+        if !admitted {
+            tracing::info!(
+                "ck-mc: session {}: dropped a {kind} from statement epoch {:?} (stamp {:?}): the session's Setup named epoch {:?}; asking the runner to set the session up again",
+                session.session,
+                conditions.statement_epoch,
+                conditions.statement_seq,
+                held
+            );
+        }
+        Some(admitted)
+    }
+
+    /// [`Self::epoch_verdict`] under its own lock, for tests that check a
+    /// statement and queue it in two steps.
+    #[cfg(test)]
+    fn statement_admitted(
+        &self,
+        session: &SessionRef,
+        kind: &str,
+        conditions: &cortexkit_role_compaction::notice::Conditions,
+    ) -> Option<bool> {
+        let set_up = self.inner.set_up.lock().expect("setup sessions");
+        Self::epoch_verdict(&set_up, session, kind, conditions)
     }
 
     /// `compaction.notice`. Answers at once; the work runs afterwards. A
@@ -488,16 +536,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         request: NoticeRequest,
     ) -> Result<NoticeAnswer, ModuleError> {
         self.admit(session)?;
-        if !self
-            .inner
-            .set_up
-            .lock()
-            .expect("setup sessions")
-            .contains(session)
-        {
-            return Ok(NoticeAnswer::SetupRequired);
+        // The epoch comes first: a notice from another Setup's epoch is
+        // dropped before it can advance anything, its notice number
+        // included. A session not set up in this process asks for Setup too.
+        // Checked and queued under the lock a Setup is recorded and queued
+        // under (see `setup`).
+        let set_up = self.inner.set_up.lock().expect("setup sessions");
+        match Self::epoch_verdict(&set_up, session, "notice", &request.conditions) {
+            Some(true) => {}
+            None | Some(false) => return Ok(NoticeAnswer::SetupRequired),
         }
-        match self.send(session, Job::Notice(request)) {
+        let sent = self.send(session, Job::Notice(request));
+        drop(set_up);
+        match sent {
             Ok(()) => {
                 self.touch(session);
                 Ok(NoticeAnswer::Received)
@@ -518,7 +569,25 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         self.admit(session)?;
         let deadline = Duration::from_millis(request.deadline_ms);
         let (reply, answer) = oneshot::channel();
-        self.send(session, Job::Ride(request, reply))?;
+        {
+            // A ride from another Setup's epoch is refused as for a session
+            // ck-mc does not hold, which makes a live runner set it up
+            // again. For a session not set up in this process, a ride
+            // naming an epoch or a stamp is refused the same way; one naming
+            // neither goes to the session's worker, if there is one, as it
+            // always did. Checked and queued under the lock a Setup is
+            // recorded and queued under (see `setup`), released before the
+            // answer is awaited.
+            let unordered = request.conditions.statement_epoch.is_none()
+                && request.conditions.statement_seq.is_none();
+            let set_up = self.inner.set_up.lock().expect("setup sessions");
+            match Self::epoch_verdict(&set_up, session, "ride", &request.conditions) {
+                Some(true) => {}
+                None if unordered => {}
+                None | Some(false) => return Err(ModuleError::UnknownSession),
+            }
+            self.send(session, Job::Ride(request, reply))?;
+        }
         match tokio::time::timeout(deadline, answer).await {
             Ok(Ok(Some(view))) => Ok(RideAnswer::View { view }),
             Ok(Ok(None)) | Err(_) => Ok(RideAnswer::Nothing),
@@ -1391,6 +1460,10 @@ mod agent_data_receiver_tests;
 #[cfg(test)]
 #[path = "agent_data/runner_tests.rs"]
 mod agent_data_runner_tests;
+
+#[cfg(test)]
+#[path = "statement_epoch_tests.rs"]
+mod statement_epoch_tests;
 
 #[cfg(test)]
 mod config_tests {

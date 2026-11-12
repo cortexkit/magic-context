@@ -1,0 +1,33 @@
+{
+  "method": "compaction.setup",
+  "params": {
+    "applied_view": {
+      "checksum": "73191a83b00c75f1f59e88e44b5b0d1e0465392dcd131354e0aed3e98660f577",
+      "version": 1
+    },
+    "context_window": 32768,
+    "detects": [
+      "cache_expired",
+      "over_limit"
+    ],
+    "model": {
+      "model": "example-model",
+      "provider": "example-provider",
+      "variant": "standard"
+    },
+    "newest": {
+      "digest": "1725aad389e945ae6af74e1eb18c666c7f99def8ca284d8e807a59f814743626",
+      "mid": "message-b",
+      "ordinal": 2
+    },
+    "now": 1700000000200,
+    "output_reserve": 4096,
+    "preset": "example",
+    "rules": {
+      "history_edit_cost": "suffix",
+      "signed_parts": "none"
+    },
+    "statement_epoch": "fedcba9876543210fedcba9876543210",
+    "statement_seq": 7
+  }
+}

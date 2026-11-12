@@ -1,0 +1,38 @@
+{
+  "method": "compaction.notice",
+  "params": {
+    "conditions": {
+      "context_window": 32768,
+      "last_prompt_tokens": 1024,
+      "last_prompt_view": 1,
+      "model": {
+        "model": "example-model",
+        "provider": "example-provider",
+        "variant": "standard"
+      },
+      "notes_tokens": {
+        "count": 25,
+        "exact": true
+      },
+      "output_reserve": 4096,
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      },
+      "signed_floor": {
+        "through": "message-a"
+      },
+      "statement_epoch": "89abcdef0123456789abcdef01234567",
+      "statement_seq": 42,
+      "system_tokens": {
+        "count": 100,
+        "exact": true
+      },
+      "tools_tokens": {
+        "count": 50,
+        "exact": true
+      }
+    },
+    "seq": 5
+  }
+}

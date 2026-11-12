@@ -45,6 +45,12 @@ mod move_floor_tests;
 #[path = "signed_floor_tests.rs"]
 mod signed_floor_tests;
 
+#[path = "statement_order_tests.rs"]
+mod statement_order_tests;
+
+#[path = "statement_order_review_tests.rs"]
+mod statement_order_review_tests;
+
 #[path = "restart_offer_tests.rs"]
 mod restart_offer_tests;
 
@@ -241,8 +247,11 @@ fn fixture() -> (Session, Client, Route, SetupRequest, Settings) {
     (session, client, route, request, settings)
 }
 
+/// A notice on the session's conditions, under the statement epoch its
+/// Setup named (none for a session set up without one).
 fn notice(session: &Session, seq: u64, newest: Option<Cursor>) -> NoticeRequest {
     let mut request = NoticeRequest::new(seq, session.conditions.clone());
+    request.conditions.statement_epoch = session.statement_epoch.clone();
     request.newest = newest;
     request
 }
@@ -1801,4 +1810,41 @@ async fn lifecycle_a_refused_keep_view_waits_again() {
         .publish(&client, view.expect("the keep drops both outputs"))
         .await;
     assert_eq!(session.pending_keep, Some(kept));
+}
+
+/// Setup's closing log line reports what Setup read from the runner: the
+/// transcript reads and the entries they returned, and whether it read the
+/// runner's applied view back (`failed` when that call failed). Checked on
+/// the counters the line is made from, not on the log: a log capture in a
+/// test can miss a line when another test thread hit the same call site
+/// first without a subscriber.
+#[tokio::test]
+async fn lifecycle_setup_counts_what_it_read() {
+    let (mut session, client, route, mut request, settings) = fixture();
+    *client.entries.lock().unwrap() = vec![text(1, "older"), text(2, "newest")];
+    request.newest = client.entries.lock().unwrap().last().map(cursor);
+    let before = session.runner_reads.counts();
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    let read = session.runner_reads.since(before);
+    assert_eq!((read.reads, read.entries), (1, 2));
+    assert_eq!(read.read_back(), "no");
+    // A runner applying a view ck-mc doesn't know is read back.
+    request.applied_view = Some(AppliedView::new(5, "unknown"));
+    let before = session.runner_reads.counts();
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    assert_eq!(session.runner_reads.since(before).read_back(), "yes");
+    // A read-back that fails is not reported as one that happened.
+    *client.fail_applied_view.lock().unwrap() = true;
+    request.applied_view = Some(AppliedView::new(6, "unknown"));
+    let before = session.runner_reads.counts();
+    session
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    let read = session.runner_reads.since(before);
+    assert_eq!((read.applied_view, read.applied_view_failed), (1, 1));
+    assert_eq!(read.read_back(), "failed");
 }

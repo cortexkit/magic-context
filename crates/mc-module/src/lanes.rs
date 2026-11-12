@@ -2423,3 +2423,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "reasoning_fallback_tests.rs"]
+mod reasoning_fallback_tests;

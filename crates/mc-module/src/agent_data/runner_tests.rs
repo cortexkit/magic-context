@@ -570,7 +570,7 @@ async fn the_first_setup_after_a_move_adopts_the_runners_view_and_offers_none() 
     );
     // The destination served the session from the moved summaries.
     assert_eq!(summaries(&b.conn()), summaries(&a.conn()));
-    assert!(b.module.inner.set_up.lock().unwrap().contains(&session));
+    assert!(b.module.inner.set_up.lock().unwrap().contains_key(&session));
 
     // The destination carries on from the adopted view: once the session
     // is over its threshold again, its next views follow the runner's

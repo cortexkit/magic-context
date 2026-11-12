@@ -1063,7 +1063,13 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
         .lock()
         .unwrap()
         .contains_key(&key("s1")));
-    assert!(!f.module.inner.set_up.lock().unwrap().contains(&key("s1")));
+    assert!(!f
+        .module
+        .inner
+        .set_up
+        .lock()
+        .unwrap()
+        .contains_key(&key("s1")));
     assert!(!f
         .module
         .inner

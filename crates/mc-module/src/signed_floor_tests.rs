@@ -251,7 +251,7 @@ fn tool_output(id: &str, tag: u64, output_bytes: u64) -> Part {
 /// calls that keep the old outputs out of the protected tail, and a prompt.
 /// Dropping either old output invalidates `thought/r` unless a floor covers
 /// it.
-fn bound_transcript() -> Vec<Entry> {
+pub(super) fn bound_transcript() -> Vec<Entry> {
     let reasoning = Part::new(
         "r",
         PartBody::Reasoning {
@@ -299,7 +299,9 @@ fn requested() -> BTreeSet<lanes::PartKey> {
 
 /// A session on [`bound_transcript`], set up with the floor Setup names, if
 /// any, and both old outputs queued for dropping.
-async fn bound_set_up(floor: Option<&str>) -> (Session, Client, Route, SetupRequest, Settings) {
+pub(super) async fn bound_set_up(
+    floor: Option<&str>,
+) -> (Session, Client, Route, SetupRequest, Settings) {
     let (mut session, client, route, mut request, settings) = fixture();
     request.rules = ProviderRules::new(SignedParts::Bound, EditCost::Suffix);
     *client.entries.lock().unwrap() = bound_transcript();
@@ -316,7 +318,7 @@ async fn bound_set_up(floor: Option<&str>) -> (Session, Client, Route, SetupRequ
 }
 
 /// A notice at 90% of the window on [`bound_transcript`], naming `floor`.
-fn bound_notice(session: &Session, seq: u64, floor: Option<&str>) -> NoticeRequest {
+pub(super) fn bound_notice(session: &Session, seq: u64, floor: Option<&str>) -> NoticeRequest {
     let mut request = notice(session, seq, bound_transcript().last().map(cursor));
     request.conditions.signed_floor = floor.map(SignedFloor::new);
     request.conditions.last_prompt_tokens = Some(90_000);
@@ -331,13 +333,13 @@ fn thought_refused() -> ViewRefusal {
     })
 }
 
-fn keeps_thought(view: &View) -> bool {
+pub(super) fn keeps_thought(view: &View) -> bool {
     !view.edits.iter().any(|edit| {
         matches!(&edit.op, EditOp::Drop { mid, part: Some(part) } if mid == "thought" && part == "r")
     })
 }
 
-fn carries_requested(view: &View) -> bool {
+pub(super) fn carries_requested(view: &View) -> bool {
     requested().iter().all(|(mid, part)| {
         view.edits.iter().any(|edit| {
             matches!(&edit.op, EditOp::Replace { mid: m, part: p, .. } if m == mid && p == part)
@@ -346,7 +348,7 @@ fn carries_requested(view: &View) -> bool {
 }
 
 /// The view library's check as a runner that applies no signed floor runs it.
-fn check_without_floor(session: &Session, view: &View) {
+pub(super) fn check_without_floor(session: &Session, view: &View) {
     if let Err(broken) = cortexkit_compaction_view::rules::check(
         session.index.entries(),
         &view.edits,

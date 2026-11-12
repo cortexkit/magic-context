@@ -3,6 +3,7 @@
 //! needs a lock.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cortexkit_role_compaction::notice::{Conditions, Event, NoticeRequest};
@@ -300,6 +301,25 @@ pub struct Session {
     /// A floor a refusal showed the runner does not apply, while the
     /// runner's conditions keep naming it. Not saved.
     disproved_floor: Option<signed_floor::Disproved>,
+    /// The highest `statement_seq` stamp ck-mc took from the runner's
+    /// statements for this session, or the latest Setup's (see the
+    /// `statement_order` module). Not saved.
+    statement_seq: Option<u64>,
+    /// The statement epoch the newest Setup this worker handled named
+    /// (`None` when it named none). Checked against every notice and ride
+    /// in queue order (see the `statement_order` module). Not saved.
+    statement_epoch: Option<String>,
+    /// The newest notice or ride was built before a statement ck-mc already
+    /// took (see the `statement_order` module): it brought no reading, so
+    /// its pass leaves the pressure state as the last reading left it. Not
+    /// saved.
+    statement_late: bool,
+    /// How many such late notices and rides arrived since the last Setup,
+    /// which reports the count in its closing log line. Not saved.
+    late_statements: u64,
+    /// The reads this session made to its runner, for Setup's log line.
+    /// Not saved.
+    runner_reads: RunnerReads,
 }
 
 /// A view the runner took (an `apply_view` it accepted, or a ride's answer)
@@ -404,6 +424,73 @@ struct NoticePass {
     summary: Option<run::Request>,
     rebuild: bool,
     head_stale: bool,
+}
+
+/// Running counts of the reads a session made to its runner, so Setup can
+/// log what it read ([`Session::setup`]) without any work of its own.
+/// Atomic only because some reads go through a shared borrow of the
+/// session; a session's jobs still run one at a time.
+#[derive(Default)]
+struct RunnerReads {
+    /// Transcript reads ck-mc started, failed ones included. A read of
+    /// messages by id that the `reads` helpers split into several requests
+    /// counts once.
+    reads: AtomicU64,
+    /// Entries those reads returned.
+    entries: AtomicU64,
+    /// `session.applied_view` calls.
+    applied_view: AtomicU64,
+    /// Those of them that failed.
+    applied_view_failed: AtomicU64,
+}
+
+/// What [`RunnerReads`] counted over some stretch, such as one Setup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReadCounts {
+    reads: u64,
+    entries: u64,
+    applied_view: u64,
+    applied_view_failed: u64,
+}
+
+impl ReadCounts {
+    /// Whether the runner's applied view was read back: `failed` when a
+    /// call was made and failed, so a failed read is never reported as one
+    /// that happened.
+    fn read_back(&self) -> &'static str {
+        if self.applied_view_failed > 0 {
+            "failed"
+        } else if self.applied_view > 0 {
+            "yes"
+        } else {
+            "no"
+        }
+    }
+}
+
+impl RunnerReads {
+    fn counts(&self) -> ReadCounts {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        ReadCounts {
+            reads: load(&self.reads),
+            entries: load(&self.entries),
+            applied_view: load(&self.applied_view),
+            applied_view_failed: load(&self.applied_view_failed),
+        }
+    }
+
+    /// What was counted since `before`, an earlier [`Self::counts`].
+    fn since(&self, before: ReadCounts) -> ReadCounts {
+        let now = self.counts();
+        ReadCounts {
+            reads: now.reads.saturating_sub(before.reads),
+            entries: now.entries.saturating_sub(before.entries),
+            applied_view: now.applied_view.saturating_sub(before.applied_view),
+            applied_view_failed: now
+                .applied_view_failed
+                .saturating_sub(before.applied_view_failed),
+        }
+    }
 }
 
 /// What walking the summaries from the newest found, reading from the runner
@@ -678,6 +765,11 @@ impl Session {
             move_floor_held: false,
             signed_floor: None,
             disproved_floor: None,
+            statement_seq: None,
+            statement_epoch: None,
+            statement_late: false,
+            late_statements: 0,
+            runner_reads: RunnerReads::default(),
         }
     }
 
@@ -957,7 +1049,36 @@ impl Session {
     /// A new session with a head gets its first view right away, before its
     /// first request: nothing is cached yet, so it costs nothing, and the
     /// model sees its memories and docs from the first step.
+    ///
+    /// Its end is logged with what it cost: a slow first step can wait on
+    /// Setup's reads from the runner, and the line that opens Setup says
+    /// nothing about them.
     pub async fn setup<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        route: &Route,
+        request: &SetupRequest,
+        features: Features,
+    ) {
+        let started = std::time::Instant::now();
+        let before = self.runner_reads.counts();
+        let late = std::mem::take(&mut self.late_statements);
+        self.set_up(client, settings, route, request, features)
+            .await;
+        let read = self.runner_reads.since(before);
+        tracing::info!(
+            "ck-mc: session {}: setup done in {} ms: {} transcript reads returned {} entries; applied view read back: {}; {late} notices or rides built before one already taken arrived since the previous Setup",
+            self.key.session,
+            started.elapsed().as_millis(),
+            read.reads,
+            read.entries,
+            read.read_back()
+        );
+    }
+
+    /// What [`Session::setup`] does, with every early return.
+    async fn set_up<C: RunnerClient>(
         &mut self,
         client: &C,
         settings: &Settings,
@@ -982,6 +1103,13 @@ impl Session {
         self.suspended = false;
         self.conditions = conditions_of(request);
         self.limits = crate::reads::Limits::from_setup(request.limits.as_ref());
+        // Setup states the session as it is now: its epoch and stamp replace
+        // the held ones, even when the stamp is lower than one taken before
+        // (a runner restored from a backup). Without them, statements are
+        // taken in arrival order again.
+        self.statement_seq = request.statement_seq;
+        self.statement_epoch = request.statement_epoch.clone();
+        self.statement_late = false;
         // Setup is the runner's statement afresh: a floor a refusal showed
         // it contradicting is taken again if this Setup names it.
         self.disproved_floor = None;
@@ -1071,6 +1199,12 @@ impl Session {
         settings: &Settings,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
+        // Whether the notice belongs to the session as ck-mc holds it comes
+        // first, before anything in it is taken, the notice number included.
+        let Some(standing) = self.standing(&notice.conditions) else {
+            self.log_foreign("notice", &notice.conditions);
+            return None;
+        };
         // Not newer than the last notice handled since Setup (compaction contract N5). Setup sets
         // the count to 0 and a runner's first notice after it is 1, so this
         // also ignores a notice numbered 0.
@@ -1079,20 +1213,17 @@ impl Session {
         }
         // A held session does nothing else until its summaries pass the
         // check again.
+        let stated = StatedView::of(standing, notice.applied_view.as_ref());
         if self.transcript_behind.is_some()
             && !self
-                .resume_if_transcript_whole(
-                    client,
-                    notice.applied_view.as_ref(),
-                    notice.newest.as_ref(),
-                )
+                .resume_if_transcript_whole(client, stated, notice.newest.as_ref())
                 .await
         {
             return None;
         }
         let version = self.latest.as_ref().map(|view| view.version);
         let cut = self.cut_ordinal();
-        let summary = self.handle_notice(client, settings, notice).await;
+        let summary = self.handle_notice(client, settings, notice, standing).await;
         if !self.index_ready {
             return summary;
         }
@@ -1107,22 +1238,27 @@ impl Session {
         client: &C,
         settings: &Settings,
         notice: NoticeRequest,
+        standing: Standing,
     ) -> Option<run::Request> {
         self.seq = notice.seq;
         let previous = reading_of(&self.conditions);
         let previous_notes = self.notes.measured;
-        self.notes.notice(
-            notice.conditions.notes_tokens,
-            notice.token_family.as_deref(),
-        );
-        self.conditions = notice.conditions.clone();
+        let was_stale = self.reading_stale;
+        self.take_conditions("notice", standing, &notice.conditions);
+        if standing == Standing::Current {
+            self.notes.notice(
+                notice.conditions.notes_tokens,
+                notice.token_family.as_deref(),
+            );
+            self.surface_tokens = (
+                notice.conditions.system_tokens,
+                notice.conditions.tools_tokens,
+            );
+        }
+        let stated = StatedView::of(standing, notice.applied_view.as_ref());
         self.threshold = (
             settings.execute_threshold_percentage,
             settings.execute_threshold_source,
-        );
-        self.surface_tokens = (
-            notice.conditions.system_tokens,
-            notice.conditions.tools_tokens,
         );
         self.warn_if_prompt_size_missing(&notice.entries);
         // What the runner says about the views it took comes first: a
@@ -1144,8 +1280,12 @@ impl Session {
                 _ => None,
             })
             .collect();
-        self.settle_unconfirmed(notice.applied_view.as_ref(), &refused);
-        self.judge_reading(previous, notice.applied_view.as_ref());
+        self.settle_stated(stated, &refused);
+        let judged = self.judged_view(stated);
+        match standing {
+            Standing::Current => self.judge_reading(previous, judged.as_ref()),
+            Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
+        }
         if self.reading_stale {
             // The apps keep the last current reading; its notes attribution
             // must stay with it while the newest notice's pending count advances.
@@ -1268,11 +1408,17 @@ impl Session {
         // A view the runner applies that ck-mc does not expect (it lost one,
         // or restored an older one) is taken as ck-mc's own. After the read,
         // so the view's cut message is in the index.
-        if self.runner_differs(notice.applied_view.as_ref()) {
+        if self.runner_differs(self.judged_view(stated).as_ref()) {
             self.adopt_runner_view(client).await;
             // The reading was judged before ck-mc knew its own newest view.
-            if self.judge_spent_reading_after_adoption(previous, notice.applied_view.as_ref()) {
-                self.notes.measured = previous_notes;
+            let judged = self.judged_view(stated);
+            match standing {
+                Standing::Current => {
+                    if self.judge_spent_reading_after_adoption(previous, judged.as_ref()) {
+                        self.notes.measured = previous_notes;
+                    }
+                }
+                Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
             }
         }
         self.forget_missing();
@@ -1280,8 +1426,9 @@ impl Session {
         // the `ctx_keep` request stay as the last current reading left them.
         // Released on a reading that says nothing about usage, the latch would
         // let the next reading in the force band take a second emergency
-        // batch right after the view that took the first.
-        if !self.reading_stale {
+        // batch right after the view that took the first. A late statement
+        // brought no reading, so it changes none either.
+        if !self.reading_stale && standing == Standing::Current {
             if !pass::in_force_band(&self.conditions, settings) {
                 self.emergency_latched = false;
             }
@@ -1551,8 +1698,10 @@ impl Session {
             .find(|entry| trigger::is_meaningful_user(entry))
             .map(|entry| (entry.ordinal, entry.mid.clone()));
         // A stale reading says nothing about usage, so it doesn't clear the
-        // mark: the mark waits for a reading under the current view.
-        if (usage < threshold && !self.reading_stale)
+        // mark: the mark waits for a reading under the current view. A late
+        // statement brought no reading, so its pass leaves the mark too.
+        let reading_new = !self.reading_stale && !self.statement_late;
+        if (usage < threshold && reading_new)
             || self
                 .floor_pending_for
                 .as_ref()
@@ -1652,10 +1801,10 @@ impl Session {
         // shrunk cannot re-arm the same mark on this evaluation. A pass after
         // a stale reading leaves the mark for the next current one, since
         // lifting the floor is for a pass at the threshold.
-        let taken_mark = if self.reading_stale {
-            None
-        } else {
+        let taken_mark = if reading_new {
             self.floor_pending_for.take()
+        } else {
+            None
         };
         let lift_floor = taken_mark.is_some();
         let mut until = bounded(tail, force || lift_floor);
@@ -2110,7 +2259,7 @@ impl Session {
                 walk.failed += 1;
                 continue;
             }
-            let entries = match crate::reads::named_detail(
+            let read = crate::reads::named_detail(
                 client,
                 &self.key,
                 vec![summary.end_message_id.clone()],
@@ -2118,8 +2267,9 @@ impl Session {
                 Detail::Compact,
                 |mids| Select::Mids { mids },
             )
-            .await
-            {
+            .await;
+            self.count_read(read.as_ref().ok().map(Vec::len));
+            let entries = match read {
                 Ok(entries) => entries,
                 Err(error) => {
                     if !error.message.starts_with("runner fault:") {
@@ -2188,7 +2338,7 @@ impl Session {
     async fn resume_if_transcript_whole<C: RunnerClient>(
         &mut self,
         client: &C,
-        applied: Option<&AppliedView>,
+        applied: StatedView<'_>,
         runner_newest: Option<&Cursor>,
     ) -> bool {
         let forget_from = match self.check_summaries(client).await {
@@ -2200,7 +2350,7 @@ impl Session {
             SummaryCheck::ReadFailed => return false,
         };
         self.release_transcript_hold();
-        self.settle_unconfirmed(applied, &[]);
+        self.settle_stated(applied, &[]);
         self.load_move_floor(client).await;
         self.offer_unconfirmed_again(client).await;
         if let Some(ordinal) = forget_from {
@@ -2218,18 +2368,22 @@ impl Session {
     /// pass, read the transcript now. A ride itself builds only from what
     /// the index holds, and the session resumes in this pass.
     pub async fn before_ride<C: RunnerClient>(&mut self, client: &C, ride: &RideRequest) {
+        // Whether the ride belongs to the session as ck-mc holds it comes
+        // first, before anything in it is taken. A ride from another epoch
+        // is logged by `ride`, which sees it next.
+        let Some(standing) = self.standing(&ride.conditions) else {
+            return;
+        };
         if self.transcript_behind.is_none() || self.suspended {
             return;
         }
-        if !self
-            .resume_if_transcript_whole(client, ride.applied_view.as_ref(), None)
-            .await
-        {
+        let stated = StatedView::of(standing, ride.applied_view.as_ref());
+        if !self.resume_if_transcript_whole(client, stated, None).await {
             return;
         }
         self.index = Index::starting_at(self.cut.unwrap_or(1));
         self.index_ready = self.read_until(client, None, true).await;
-        if self.index_ready && self.runner_differs(ride.applied_view.as_ref()) {
+        if self.index_ready && self.runner_differs(self.judged_view(stated).as_ref()) {
             self.adopt_runner_view(client).await;
         }
     }
@@ -2707,24 +2861,41 @@ impl Session {
     /// lands only what the pass would land on a notice, as does a soft window
     /// budget signal (see [`pass::RideCauseKind`]).
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
+        // Whether the ride belongs to the session as ck-mc holds it comes
+        // first, before anything in it is taken.
+        let Some(standing) = self.standing(&ride.conditions) else {
+            self.log_foreign("ride", &ride.conditions);
+            return None;
+        };
         if !self.index_ready || self.suspended {
             return None;
         }
         let previous = reading_of(&self.conditions);
-        self.conditions = ride.conditions.clone();
+        let was_stale = self.reading_stale;
+        self.take_conditions("ride", standing, &ride.conditions);
+        let stated = StatedView::of(standing, ride.applied_view.as_ref());
         self.take_signed_floor();
+        // A late ride's own reading was not taken, so it is not named as
+        // the last prompt.
+        let last_prompt = match standing {
+            Standing::Current => format!("{:?}", ride.conditions.last_prompt_tokens),
+            Standing::Older { .. } => "late, reading ignored".to_owned(),
+        };
         tracing::info!(
-            "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {:?}, applied view {:?}",
+            "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {last_prompt}, applied view {:?}",
             self.key.session,
             ride.causes,
             ride.request_tokens,
-            ride.conditions.last_prompt_tokens,
             ride.applied_view.as_ref().map(|view| view.version),
         );
-        self.settle_unconfirmed(ride.applied_view.as_ref(), &[]);
+        self.settle_stated(stated, &[]);
         // An over-limit ride still lands on a stale reading: it acts on the
         // runner's own estimate of the request it is about to send.
-        self.judge_reading(previous, ride.applied_view.as_ref());
+        let judged = self.judged_view(stated);
+        match standing {
+            Standing::Current => self.judge_reading(previous, judged.as_ref()),
+            Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
+        }
         let over_limit = ride
             .has(RideCause::OverLimit)
             .then_some(ride.request_tokens.unwrap_or(0));
@@ -4584,6 +4755,12 @@ impl Session {
                 }
             }
         }
+        self.settle_refused(refused);
+    }
+
+    /// Roll back the oldest unconfirmed view the runner refused at a step
+    /// boundary, with every view built on it.
+    fn settle_refused(&mut self, refused: &[(u64, ViewRefusal)]) {
         if let Some((version, refusal)) = refused
             .iter()
             .filter(|(version, _)| {
@@ -4781,6 +4958,9 @@ impl Session {
     /// Take the view the runner applies as ck-mc's own: after a refusal, or
     /// when ck-mc's copy is missing or older (for example after a restore).
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
+        self.runner_reads
+            .applied_view
+            .fetch_add(1, Ordering::Relaxed);
         match client.applied_view(&self.key).await {
             Ok(answer) => {
                 self.keep_spent_reading_for(&answer);
@@ -4813,7 +4993,12 @@ impl Session {
                 self.latest_unknown = false;
                 self.app_adopt_head();
             }
-            Err(error) => self.runner_call_failed("session.applied_view", &error),
+            Err(error) => {
+                self.runner_reads
+                    .applied_view_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                self.runner_call_failed("session.applied_view", &error);
+            }
         }
     }
 
@@ -4867,6 +5052,19 @@ impl Session {
             .await
     }
 
+    /// Count one transcript read ck-mc made to the runner and the entries it
+    /// returned (`None` when it failed), for Setup's closing log line. A
+    /// read of messages by id that the `reads` helpers split into several
+    /// requests counts once.
+    fn count_read(&self, entries: Option<usize>) {
+        self.runner_reads.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(entries) = entries {
+            self.runner_reads
+                .entries
+                .fetch_add(entries as u64, Ordering::Relaxed);
+        }
+    }
+
     async fn read_until_from<C: RunnerClient>(
         &mut self,
         client: &C,
@@ -4880,7 +5078,9 @@ impl Session {
                 return true;
             }
             let request = self.limits.after(after, None, Detail::Compact);
-            let page = match client.read(&self.key, request).await {
+            let page = client.read(&self.key, request).await;
+            self.count_read(page.as_ref().ok().map(|page| page.entries.len()));
+            let page = match page {
                 Ok(page) => page,
                 Err(error) => {
                     self.runner_call_failed("session.entries", &error);
@@ -5052,11 +5252,12 @@ impl Session {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            match crate::reads::named(client, &self.key, mids, self.limits, |mids| Select::Mids {
-                mids,
+            let read = crate::reads::named(client, &self.key, mids, self.limits, |mids| {
+                Select::Mids { mids }
             })
-            .await
-            {
+            .await;
+            self.count_read(read.as_ref().ok().map(Vec::len));
+            match read {
                 Ok(entries) => {
                     for entry in entries {
                         for part in entry.parts {
@@ -5448,6 +5649,11 @@ pub use move_floor::MoveFloor;
 
 #[path = "signed_floor.rs"]
 mod signed_floor;
+
+#[path = "statement_order.rs"]
+mod statement_order;
+pub(crate) use statement_order::epoch_admits;
+use statement_order::{Standing, StatedView};
 
 #[cfg(test)]
 mod config_tests {
