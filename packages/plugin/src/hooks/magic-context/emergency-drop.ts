@@ -238,15 +238,27 @@ export function planEmergencyDrop(input: {
     // the pass just dropped is counted as fixed overhead, and a pass that has
     // already shrunk the request far below the ceiling skips as if tool drops
     // could never reach it.
-    const removedThisPass = Math.max(input.removedThisPassTokens ?? 0, 0);
-    const servedInputTokens = Math.max(currentTotalInputTokens - removedThisPass, 0);
+    //
+    // The removed mass comes out of the floor only. The active tags are
+    // measured on the request this pass serves, so it holds at least them. A
+    // reading too small to hold the removed mass and the active tags together
+    // does not describe this request: a test that sets usage directly, or the
+    // newest results arriving after the reading. Such a reading keeps today's
+    // meaning, the size the planner works against, and is never reduced below
+    // the active mass it would have to contain.
+    const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
+    const removedThisPass = Math.min(
+        removedMeasured,
+        Math.max(currentTotalInputTokens - tailTokens, 0),
+    );
+    const servedInputTokens = currentTotalInputTokens - removedThisPass;
     const fixedFloor = Math.max(servedInputTokens - tailTokens, 0);
     const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
     const target = fixedFloor + TARGET_FRACTION * workingSpan;
     const reclaimTokens = Math.round(servedInputTokens - target);
     const servedNote =
-        removedThisPass > 0
-            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass`
+        removedMeasured > 0
+            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}`
             : "";
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass
