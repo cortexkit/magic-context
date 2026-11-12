@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "../../..");
 const action = Bun.YAML.parse(await Bun.file(resolve(root, ".github/actions/restore-ci-dists/action.yml")).text()) as {
-    runs: { steps: { run?: string }[] };
+    runs: { steps: { name?: string; run?: string }[] };
 };
 
 function run(command: string[], env = process.env): string {
@@ -28,7 +28,9 @@ test("verified dist restoration selects production entry despite newer checkout 
         writeFileSync(resolve(artifactDir, "ci-dists.sha256"), `${new Bun.CryptoHasher("sha256").update(readFileSync(archive)).digest("hex")}  ci-dists.tar.gz\n`);
         writeFileSync(resolve(artifactDir, "ci-dists.commit"), "same-checkout\n");
         expect(probe()).toMatch(/\/packages\/plugin\/src\/index\.ts$/);
-        const restore = action.runs.steps.find((step) => step.run)?.run;
+        // The step before this one downloads the artifact and needs GitHub; this
+        // test supplies the downloaded files itself and runs only the unpack step.
+        const restore = action.runs.steps.find((step) => step.name === "Verify and unpack")?.run;
         expect(restore).toBeDefined();
         run(["bash", "-e", "-o", "pipefail", "-c", restore!], {
             ...process.env, RUNNER_TEMP: scratch, GITHUB_WORKSPACE: root, GITHUB_SHA: "same-checkout",
