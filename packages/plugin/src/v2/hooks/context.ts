@@ -3518,7 +3518,6 @@ export async function registerContext(context: V2Context) {
             try {
                 await runManagedContext(draft);
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
-                returned = true;
                 if (
                     !deletedSessions.has(draft.sessionID) &&
                     admissionRebuildPasses.has(draft.sessionID)
@@ -3546,6 +3545,9 @@ export async function registerContext(context: V2Context) {
                             );
                     }
                 }
+                // Set last: the admission commits above can still throw, and a
+                // throw here refuses the turn, so no request reaches the provider.
+                returned = true;
             } finally {
                 admissionRebuildPasses.delete(draft.sessionID);
                 nativeFoldReplay?.cancelLegacyUpgrade(draft.sessionID);
