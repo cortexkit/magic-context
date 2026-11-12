@@ -51,6 +51,7 @@ pub const CHILD: &str = "mc-summary";
 /// What a run reads and writes.
 #[derive(Clone, Debug)]
 pub struct Request {
+    pub limits: crate::reads::Limits,
     pub session: SessionRef,
     /// Snapshot the child's route when the run starts. Later Setup updates
     /// affect the next run, never a child or continuation already in flight.
@@ -885,7 +886,15 @@ async fn read_range<C: RunnerClient>(
     client: &C,
     job: &Request,
 ) -> Result<Vec<cortexkit_role_compaction::read::Entry>, String> {
-    crate::reads::full_range(client, &job.session, job.from, job.until, |_| false).await
+    crate::reads::full_range(
+        client,
+        &job.session,
+        job.from,
+        job.until,
+        job.limits,
+        |_| false,
+    )
+    .await
 }
 
 /// Wait for a run's result until `deadline`, the run's overall limit. The

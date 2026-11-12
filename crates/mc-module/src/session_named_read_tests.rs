@@ -40,7 +40,7 @@ async fn ctx_reduce_batches_1000_tags_outside_the_index_and_queues_every_drop() 
     }
 }
 
-fn image_result(ordinal: u64) -> Entry {
+pub(super) fn image_result(ordinal: u64) -> Entry {
     let mut part = output_part("p", ordinal);
     let PartBody::Tool(tool) = &mut part.body else {
         unreachable!()
@@ -59,7 +59,7 @@ fn image_result(ordinal: u64) -> Entry {
     )
 }
 
-fn hold_compact_images(session: &mut Session, entries: &[Entry]) {
+pub(super) fn hold_compact_images(session: &mut Session, entries: &[Entry]) {
     let compact = entries.iter().cloned().map(|mut entry| {
         for part in &mut entry.parts {
             if let PartBody::Tool(tool) = &mut part.body {

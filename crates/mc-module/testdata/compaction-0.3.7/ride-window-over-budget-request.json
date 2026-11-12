@@ -1,0 +1,23 @@
+{
+  "method": "compaction.ride",
+  "params": {
+    "causes": [
+      "window_over_budget"
+    ],
+    "conditions": {
+      "context_window": 32768,
+      "last_prompt_tokens": 1024,
+      "model": {
+        "model": "example-model",
+        "provider": "example-provider",
+        "variant": "standard"
+      },
+      "output_reserve": 4096,
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      }
+    },
+    "deadline_ms": 1500
+  }
+}

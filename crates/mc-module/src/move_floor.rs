@@ -157,23 +157,27 @@ impl Session {
         if let Some(ordinal) = self.index.ordinal_of(mid) {
             return Some(ordinal);
         }
-        let request = ReadRequest::new(
-            Select::Mids {
-                mids: vec![mid.to_owned()],
-            },
+        match crate::reads::named_detail(
+            client,
+            &self.key,
+            vec![mid.to_owned()],
+            self.limits,
             Detail::Compact,
-        );
-        match client.read(&self.key, request).await {
-            Ok(page) => page
-                .entries
+            |mids| Select::Mids { mids },
+        )
+        .await
+        {
+            Ok(entries) => entries
                 .iter()
                 .find(|entry| entry.mid == mid)
                 .map(|entry| entry.ordinal),
             Err(error) => {
-                tracing::warn!(
-                    "ck-mc: session {}: reading entry {mid} to place it against the move floor failed: {error:?}",
-                    self.key.session
-                );
+                if !error.message.starts_with("runner fault:") {
+                    tracing::warn!(
+                        "ck-mc: session {}: reading entry {mid} to place it against the move floor failed: {error:?}",
+                        self.key.session
+                    );
+                }
                 None
             }
         }

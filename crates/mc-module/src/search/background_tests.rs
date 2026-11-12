@@ -2,6 +2,7 @@ use super::*;
 use crate::client::{Child, ClientError};
 use cortexkit_role_compaction::part::{Part, PartBody};
 use cortexkit_role_compaction::read::{Entry, Head, ReadPage, Role};
+use cortexkit_role_compaction::read::{ReadRequest, Select};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
@@ -51,6 +52,7 @@ impl Fake {
     }
     fn mark(&self, from: Option<u64>) -> Mark {
         Mark {
+            limits: crate::reads::Limits::default(),
             newest: self.cursor(),
             from,
             reconcile: None,

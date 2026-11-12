@@ -71,7 +71,9 @@ async fn assert_tag_batches(count: u64, sizes: &[usize]) {
     let client = Client::default();
     let session = SessionRef::new("test", "mock", "s1");
     let tags: Vec<_> = (1..=count).collect();
-    let entries = by_tags(&client, &session, tags.clone()).await.unwrap();
+    let entries = by_tags(&client, &session, tags.clone(), Limits::default())
+        .await
+        .unwrap();
     let reads = client.reads.lock().unwrap();
     assert_eq!(reads.len(), sizes.len(), "request count for {count} tags");
     let mut offset = 0;
@@ -139,6 +141,7 @@ async fn by_tags_error_on_second_of_three_requests_fails_the_read() {
         &client,
         &SessionRef::new("test", "mock", "s1"),
         (1..=513).collect(),
+        Limits::default(),
     )
     .await
     .expect_err("a successful first batch must not hide a failed second batch");

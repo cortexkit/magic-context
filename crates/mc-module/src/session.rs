@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use cortexkit_role_compaction::notice::{Conditions, Event, NoticeRequest};
 use cortexkit_role_compaction::part::PartBody;
-use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
+#[cfg(test)]
+use cortexkit_role_compaction::read::ReadRequest;
+use cortexkit_role_compaction::read::{Cursor, Detail, Select, SessionRef};
 use cortexkit_role_compaction::ride::{RideCause, RideRequest};
 use cortexkit_role_compaction::rules::RuleBreak;
 use cortexkit_role_compaction::setup::SetupRequest;
@@ -33,9 +35,6 @@ use crate::summary::trigger;
 use crate::summary::two_pass::turn_one;
 use crate::tokens;
 use crate::view_builder;
-
-/// How many bytes one catch-up read asks for at most.
-const READ_PAGE_BYTES: u64 = 1 << 20;
 
 /// How many of the newest summaries ck-mc may forget when the transcript no
 /// longer holds the messages they end on and the runner reported no revert.
@@ -63,6 +62,8 @@ pub struct Session {
     preset: crate::catalog::Preset,
     reminder_counter: u64,
     conditions: Conditions,
+    limits: crate::reads::Limits,
+    window_over_budget: bool,
     child_harness: Option<String>,
     /// Only runners that opt in can verify the policy members in a view's checksum.
     view_anchor: bool,
@@ -564,6 +565,8 @@ impl Session {
                 .unwrap_or(crate::catalog::Preset::Head),
             reminder_counter: 0,
             conditions: conditions_of(request),
+            limits: crate::reads::Limits::from_setup(request.limits.as_ref()),
+            window_over_budget: false,
             warned_no_prompt: false,
             notes: Default::default(),
             surface_tokens: (None, None),
@@ -938,6 +941,7 @@ impl Session {
         self.tools_only = false;
         self.suspended = false;
         self.conditions = conditions_of(request);
+        self.limits = crate::reads::Limits::from_setup(request.limits.as_ref());
         // Setup is the runner's statement afresh: a floor a refusal showed
         // it contradicting is taken again if this Setup names it.
         self.disproved_floor = None;
@@ -1219,6 +1223,7 @@ impl Session {
         if !self.index_ready {
             return None;
         }
+        self.log_window_budget();
         self.take_signed_floor();
         // A view the runner applies that ck-mc does not expect (it lost one,
         // or restored an older one) is taken as ck-mc's own. After the read,
@@ -1681,6 +1686,7 @@ impl Session {
             self.floor_lifted_for = prompt.map(|(_, mid)| mid);
         }
         Some(run::Request {
+            limits: self.limits,
             session: self.key.clone(),
             // Retries, repairs and turn two belong to one summary attempt;
             // keep them on one harness even if Setup changes during the run.
@@ -1940,23 +1946,28 @@ impl Session {
                 walk.failed += 1;
                 continue;
             }
-            let request = ReadRequest::new(
-                Select::Mids {
-                    mids: vec![summary.end_message_id.clone()],
-                },
+            let entries = match crate::reads::named_detail(
+                client,
+                &self.key,
+                vec![summary.end_message_id.clone()],
+                self.limits,
                 Detail::Compact,
-            );
-            let page = match client.read(&self.key, request).await {
-                Ok(page) => page,
+                |mids| Select::Mids { mids },
+            )
+            .await
+            {
+                Ok(entries) => entries,
                 Err(error) => {
-                    tracing::warn!(
-                        "ck-mc: session {}: reconciling summaries failed: {error:?}",
-                        self.key.session
-                    );
+                    if !error.message.starts_with("runner fault:") {
+                        tracing::warn!(
+                            "ck-mc: session {}: reconciling summaries failed: {error:?}",
+                            self.key.session
+                        );
+                    }
                     return None;
                 }
             };
-            if page.entries.iter().any(|entry| {
+            if entries.iter().any(|entry| {
                 entry.mid == summary.end_message_id && entry.ordinal == summary.end_message as u64
             }) {
                 break;
@@ -2474,11 +2485,29 @@ impl Session {
         )
     }
 
+    /// The runner's soft budget is diagnostic only. Count the compact index's
+    /// JSON bytes only at a crossing, never on an unchanged notice.
+    fn log_window_budget(&mut self) {
+        let flagged = self.conditions.window_over_budget == Some(true);
+        if flagged && !self.window_over_budget {
+            let bytes = serde_json::to_vec(self.index.entries()).map_or(0, |bytes| bytes.len());
+            tracing::info!(
+                "ck-mc: session {}: window_over_budget: {} entries, {} known compact JSON bytes; stated budget entries {:?}, bytes {:?} (None means no bound stated)",
+                self.key.session, self.index.entries().len(), bytes,
+                self.limits.window_entries, self.limits.window_bytes
+            );
+            if self.limits.window_entries.is_none() && self.limits.window_bytes.is_none() {
+                tracing::warn!("ck-mc: session {}: runner fault: window_over_budget without a stated window budget", self.key.session);
+            }
+        }
+        self.window_over_budget = flagged;
+    }
+
     /// A ride: the runner is about to send a request whose bytes before the
     /// conversation change anyway, or that would not fit, or whose cache the
     /// provider forgot. The first two land everything held now; the last
-    /// lands only what the pass would land on a notice (see
-    /// [`pass::RideCauseKind`]).
+    /// lands only what the pass would land on a notice, as does a soft window
+    /// budget signal (see [`pass::RideCauseKind`]).
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         if !self.index_ready || self.suspended {
             return None;
@@ -2520,13 +2549,13 @@ impl Session {
             }
             true
         } else {
-            // A forgotten cache alone: the pass rebuilds only if a notice
-            // with these conditions would.
+            // Cache-state and soft-budget signals add no permission: the pass
+            // rebuilds only if a notice with these conditions would.
             self.rebuild_permitted(settings)
         };
         if !permitted {
             tracing::info!(
-                "ck-mc: session {}: ride {:?} only says the provider forgot its cache; the current view stays",
+                "ck-mc: session {}: ride {:?} adds no rebuild permission; the current view stays",
                 self.key.session,
                 ride.causes,
             );
@@ -2647,7 +2676,15 @@ impl Session {
                     .summaries
                     .last()
                     .and_then(|summary| u64::try_from(summary.end_message).ok());
-                crate::expand::run(client, &self.key, input, last_summarized, self.counter()).await
+                crate::expand::run(
+                    client,
+                    &self.key,
+                    self.limits,
+                    input,
+                    last_summarized,
+                    self.counter(),
+                )
+                .await
             }
             other => Err(format!("unknown tool {other}")),
         }
@@ -2967,7 +3004,7 @@ impl Session {
         let archived = if missing.is_empty() {
             Vec::new()
         } else {
-            crate::reads::by_tags(client, &self.key, missing).await?
+            crate::reads::by_tags(client, &self.key, missing, self.limits).await?
         };
         let find = |tag: u64| {
             self.index.find_tag(tag).or_else(|| {
@@ -4640,14 +4677,7 @@ impl Session {
             if !std::mem::take(&mut force) && self.index.ends_at(newest) {
                 return true;
             }
-            let request = ReadRequest::new(
-                Select::After {
-                    after_ordinal: after,
-                    limit: None,
-                },
-                Detail::Compact,
-            )
-            .with_max_bytes(READ_PAGE_BYTES);
+            let request = self.limits.after(after, None, Detail::Compact);
             let page = match client.read(&self.key, request).await {
                 Ok(page) => page,
                 Err(error) => {
@@ -4656,6 +4686,9 @@ impl Session {
                 }
             };
             let runner_newest = page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal);
+            if crate::reads::check_page(&self.key, after, &page).is_err() {
+                return false;
+            }
             if self.cut.is_some_and(|cut| runner_newest < cut) {
                 if rebuilt {
                     tracing::info!(
@@ -4748,6 +4781,7 @@ impl Session {
     /// invalidates rows from an undone branch before the reader continues.
     pub(crate) fn search_mark(&mut self) -> crate::search::background::Mark {
         crate::search::background::Mark {
+            limits: self.limits,
             newest: self.index.cursor(),
             from: self.search_dirty_from.take(),
             reconcile: self.search_reconcile_from.take(),
@@ -4816,7 +4850,11 @@ impl Session {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            match crate::reads::named(client, &self.key, mids, |mids| Select::Mids { mids }).await {
+            match crate::reads::named(client, &self.key, mids, self.limits, |mids| Select::Mids {
+                mids,
+            })
+            .await
+            {
                 Ok(entries) => {
                     for entry in entries {
                         for part in entry.parts {
@@ -4836,6 +4874,8 @@ impl Session {
                         }
                     }
                 }
+                // The reader already logged a runner fault once for this read.
+                Err(error) if error.message.starts_with("runner fault:") => {}
                 Err(error) => tracing::warn!(
                     "ck-mc: session {}: reading tool results with images failed: {error:?}",
                     self.key.session

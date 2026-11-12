@@ -1,0 +1,9 @@
+{
+  "code": "invalid_params",
+  "detail": {
+    "field": "select",
+    "max": 256,
+    "problem": "too_many"
+  },
+  "message": "too many names in selection"
+}

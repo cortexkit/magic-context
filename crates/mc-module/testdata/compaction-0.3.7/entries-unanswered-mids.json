@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "digest": "e4565946a06648fa4ba6a87d56934d4506449a4e850ef6a5f588e3375f1e5ea7",
+      "mid": "message-a",
+      "notice": {
+        "sender": "example-notifier",
+        "template": "example"
+      },
+      "ordinal": 1,
+      "parts": [
+        {
+          "digest": "635c5b437d5d204fd794bbf6d6569f53f3df37c2802d3df80e8df1a2c8a0e7d3",
+          "id": "part-a",
+          "kind": "text",
+          "tag": 1,
+          "text": "An invented message."
+        }
+      ],
+      "role": "user",
+      "written_at": 1700000000000
+    }
+  ],
+  "head": {},
+  "unanswered": [
+    "message-b"
+  ]
+}

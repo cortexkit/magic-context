@@ -66,6 +66,9 @@ mod transcript_behind_tests;
 #[path = "session_named_read_tests.rs"]
 mod named_read_tests;
 
+#[path = "compaction_limits_tests.rs"]
+mod compaction_limits_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

@@ -296,13 +296,14 @@ pub enum RideCauseKind {
     /// thinking is invalid already. The head folds and every lane lands in
     /// that rewrite for free.
     PrefixChanges,
-    /// The provider forgot the cache, but the request's bytes stay the same
-    /// (`cache_expired`, `chain_reset`, `tier_change`, `account_change`, and
-    /// any cause ck-mc does not know). This is no rebuild permission, alone
+    /// No change to the request's prefix bytes is established (`cache_expired`,
+    /// `chain_reset`, `tier_change`, `account_change`, `window_over_budget`,
+    /// and any cause ck-mc does not know). The soft window-budget signal says
+    /// nothing about cache loss. This is no rebuild permission, alone
     /// or next to another cause. Sending the same bytes keeps signed
     /// thinking valid (Anthropic invalidates every later thinking block when
-    /// anything before it changes), and the provider reads the prefix again
-    /// at full price either way, so a rewrite here saves nothing. It would
+    /// anything before it changes), so a rewrite is not free even when the
+    /// provider must read the unchanged prefix again. It would
     /// cost that reasoning and land drops the agent was told wait for the
     /// execute threshold. Queued work waits for a pass that rebuilds anyway.
     Forgotten,
@@ -317,6 +318,7 @@ pub fn ride_cause_kind(cause: &RideCause) -> RideCauseKind {
         | RideCause::ChainReset
         | RideCause::TierChange
         | RideCause::AccountChange
+        | RideCause::WindowOverBudget
         | RideCause::Unknown(_) => RideCauseKind::Forgotten,
         // A cause a newer contract adds: until ck-mc knows it changes the
         // request's bytes, it is taken as only a forgotten cache.

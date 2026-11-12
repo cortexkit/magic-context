@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use cortexkit_role_compaction::read::{Cursor, Detail, Entry, ReadRequest, Select, SessionRef};
+use cortexkit_role_compaction::read::{Cursor, Detail, Entry, SessionRef};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Notify;
 
@@ -20,6 +20,7 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct Mark {
+    pub limits: crate::reads::Limits,
     pub newest: Option<Cursor>,
     pub from: Option<u64>,
     pub reconcile: Option<u64>,
@@ -465,17 +466,17 @@ async fn index_batch<C: RunnerClient>(
             if limit == 0 {
                 return Err("search snapshot contains an ordinal gap".into());
             }
-            let request = ReadRequest::new(
-                Select::After {
-                    after_ordinal: (watermark > 0).then_some(watermark),
-                    limit: Some(limit),
-                },
+            let mut request = mark.limits.after(
+                (watermark > 0).then_some(watermark),
+                Some(limit),
                 Detail::Compact,
-            )
-            .with_max_bytes(PAGE_BYTES);
+            );
+            request.max_bytes = Some(request.max_bytes.unwrap_or(PAGE_BYTES).min(PAGE_BYTES));
             let page = tokio::time::timeout(Duration::from_secs(10), client.read(key, request))
                 .await
                 .map_err(|_| "search gap read timed out".to_owned())?
+                .map_err(|e| e.to_string())?;
+            crate::reads::check_page(key, (watermark > 0).then_some(watermark), &page)
                 .map_err(|e| e.to_string())?;
             let actual_newest = page.head.newest.as_ref().map_or(0, |cursor| cursor.ordinal);
             if actual_newest < newest {

@@ -505,6 +505,7 @@ async fn surface_verbose_expand_does_not_call_the_end_of_history_truncation() {
     let answer = crate::expand::run(
         &client,
         &session("head").key,
+        crate::reads::Limits::default(),
         &json!({"start":1,"end":10,"verbose":true}),
         None,
         crate::count::Counter::for_model(None),

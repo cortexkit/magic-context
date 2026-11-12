@@ -264,13 +264,14 @@ fn verbose_label(entry: &Entry) -> String {
 pub async fn run<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
+    limits: reads::Limits,
     input: &Value,
     last_summarized: Option<u64>,
     counter: crate::count::Counter,
 ) -> Result<String, String> {
     match mode(input)? {
-        Mode::Tag(tag) => by_tag(client, session, tag).await,
-        Mode::Message(number) => by_message(client, session, number).await,
+        Mode::Tag(tag) => by_tag(client, session, limits, tag).await,
+        Mode::Message(number) => by_message(client, session, limits, number).await,
         Mode::Range {
             start,
             end,
@@ -285,9 +286,9 @@ pub async fn run<C: RunnerClient>(
             }
             let end_clamped = last_summarized.map_or(end, |last| end.min(last));
             if verbose {
-                verbose_range(client, session, start, end_clamped, counter).await
+                verbose_range(client, session, limits, start, end_clamped, counter).await
             } else {
-                range(client, session, start, end, end_clamped, counter).await
+                range(client, session, limits, start, end, end_clamped, counter).await
             }
         }
     }
@@ -296,9 +297,10 @@ pub async fn run<C: RunnerClient>(
 async fn by_tag<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
+    limits: reads::Limits,
     tag: u64,
 ) -> Result<String, String> {
-    let entries = reads::by_tags(client, session, vec![tag]).await?;
+    let entries = reads::by_tags(client, session, vec![tag], limits).await?;
     let part = entries
         .iter()
         .flat_map(|entry| &entry.parts)
@@ -314,10 +316,11 @@ async fn by_tag<C: RunnerClient>(
 async fn by_message<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
+    limits: reads::Limits,
     number: u64,
 ) -> Result<String, String> {
     // Ordinals count from 1, so a message's number is its ordinal.
-    let entries = reads::full_range(client, session, number, number + 1, |_| true).await?;
+    let entries = reads::full_range(client, session, number, number + 1, limits, |_| true).await?;
     let Some(entry) = entries.into_iter().find(|entry| entry.ordinal == number) else {
         return Ok(format!(
             "No message at ordinal {number} in this session's stored history — it was deleted (session prune/revert) or the ordinal is wrong, so it can't be recovered. Re-run the tool if you still need the data."
@@ -345,6 +348,7 @@ async fn by_message<C: RunnerClient>(
 async fn range<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
+    limits: reads::Limits,
     start: u64,
     asked_end: u64,
     end: u64,
@@ -353,7 +357,7 @@ async fn range<C: RunnerClient>(
     // The chunk stops at the budget; the read stops once it has read more
     // text than the budget could show.
     let byte_cap = TOKEN_BUDGET * 8;
-    let entries = reads::full_range(client, session, start, end + 1, |read| {
+    let entries = reads::full_range(client, session, start, end + 1, limits, |read| {
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
@@ -387,12 +391,13 @@ async fn range<C: RunnerClient>(
 async fn verbose_range<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
+    limits: reads::Limits,
     start: u64,
     end: u64,
     counter: crate::count::Counter,
 ) -> Result<String, String> {
     let byte_cap = TOKEN_BUDGET * 8;
-    let entries = reads::full_range(client, session, start, end + 1, |read| {
+    let entries = reads::full_range(client, session, start, end + 1, limits, |read| {
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;

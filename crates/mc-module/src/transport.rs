@@ -53,6 +53,11 @@ use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+// Enabling this makes runners cap and continue named reads and send the soft
+// window-budget flag and ride cause. Deploy ck-mc's readers before declaring
+// compaction-limits/v1 in its manifest.
+const DECLARE_COMPACTION_LIMITS: bool = false;
+
 /// The module's manifest with moves off ([`manifest_for`]).
 pub fn manifest(module_id: &str) -> ModuleManifest {
     manifest_for(module_id, false)
@@ -160,6 +165,9 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     ];
     if agent_data {
         claims.push(cortexkit_role_agent_data::PROVIDES.to_owned());
+    }
+    if DECLARE_COMPACTION_LIMITS {
+        claims.push(cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned());
     }
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
         .provides(provides)
@@ -1879,6 +1887,7 @@ mod manifest_tests {
         ] {
             assert!(provides.contains(&claim), "{claim} missing: {provides:?}");
         }
+        assert!(!provides.contains(&"compaction-limits/v1"));
         assert!(
             !provides
                 .iter()
