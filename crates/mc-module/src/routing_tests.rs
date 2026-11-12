@@ -69,29 +69,46 @@ async fn declarations_are_shared_by_provider_and_connection_epoch() {
 }
 
 #[tokio::test]
-async fn absent_or_failed_discovery_is_cached_until_reconnect() {
-    for result in [
-        Ok(json!({"capabilities": []})),
-        Err(RouteError {
-            code: "routing_unavailable".into(),
-            message: "role.describe failed".into(),
-            detail: None,
-        }),
-    ] {
-        let capabilities = Capabilities::default();
-        let first = capabilities
-            .select_request("routing", 1, request(), async { result })
-            .await;
-        assert!(first.harness.is_none());
-        let cached = capabilities
-            .select_request("routing", 1, request(), async { panic!("cached") })
-            .await;
-        assert!(cached.harness.is_none());
-        let reconnected = capabilities
-            .select_request("routing", 2, request(), async {
-                Ok(json!({"capabilities": ["select_harness"]}))
+async fn a_missing_capability_is_cached_until_reconnect() {
+    let capabilities = Capabilities::default();
+    let first = capabilities
+        .select_request("routing", 1, request(), async {
+            Ok(json!({"capabilities": []}))
+        })
+        .await;
+    assert!(first.harness.is_none());
+    let cached = capabilities
+        .select_request("routing", 1, request(), async { panic!("cached") })
+        .await;
+    assert!(cached.harness.is_none());
+    let reconnected = capabilities
+        .select_request("routing", 2, request(), async {
+            Ok(json!({"capabilities": ["select_harness"]}))
+        })
+        .await;
+    assert_eq!(reconnected.harness.as_deref(), Some("claude-code"));
+}
+
+/// A describe call that fails tells nothing about the provider, so it is not
+/// cached: a provider that was still starting gets asked again on the next
+/// select, without waiting for a reconnect.
+#[tokio::test]
+async fn a_failed_discovery_is_asked_again_on_the_next_select() {
+    let capabilities = Capabilities::default();
+    let failed = capabilities
+        .select_request("routing", 1, request(), async {
+            Err(RouteError {
+                code: "routing_unavailable".into(),
+                message: "role.describe failed".into(),
+                detail: None,
             })
-            .await;
-        assert_eq!(reconnected.harness.as_deref(), Some("claude-code"));
-    }
+        })
+        .await;
+    assert!(failed.harness.is_none());
+    let next = capabilities
+        .select_request("routing", 1, request(), async {
+            Ok(json!({"capabilities": ["select_harness"]}))
+        })
+        .await;
+    assert_eq!(next.harness.as_deref(), Some("claude-code"));
 }

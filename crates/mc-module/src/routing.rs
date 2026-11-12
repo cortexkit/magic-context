@@ -62,8 +62,11 @@ pub trait Router: Send + Sync + 'static {
 
 type Declaration = (u64, Arc<OnceCell<bool>>);
 
-/// Routing's optional select fields are opt-in. Cache negative discovery too:
-/// older providers must remain usable without a describe call on every select.
+/// Routing's optional select fields are opt-in. A provider's answer is cached
+/// per connection epoch, a missing capability included, so an older provider
+/// isn't asked again on every select. A describe call that fails is not an
+/// answer: that select omits the field and the next select asks again, so a
+/// provider that was still starting doesn't lose the field until it reconnects.
 #[derive(Default)]
 pub(crate) struct Capabilities {
     providers: Mutex<HashMap<String, Declaration>>,
@@ -88,20 +91,21 @@ impl Capabilities {
             Arc::clone(&declaration.1)
         };
         let select_harness = cell
-            .get_or_init(|| async {
-                match describe.await {
-                    Ok(value) => value["capabilities"]
+            .get_or_try_init(|| async {
+                describe.await.map(|value| {
+                    value["capabilities"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .any(|name| name.as_str() == Some(cortexkit_role_routing::capabilities::SELECT_HARNESS)),
-                    Err(error) => {
-                        tracing::warn!(provider, reason = %error, "routing harness omitted: provider discovery failed");
-                        false
-                    }
-                }
+                        .any(|name| name.as_str() == Some(cortexkit_role_routing::capabilities::SELECT_HARNESS))
+                })
             })
-            .await;
+            .await
+            .copied()
+            .unwrap_or_else(|error| {
+                tracing::warn!(provider, reason = %error, "routing harness omitted: provider discovery failed");
+                false
+            });
         if !select_harness {
             request.harness = None;
         }
