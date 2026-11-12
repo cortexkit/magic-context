@@ -2845,23 +2845,6 @@ export async function runPostTransformPhase(
         `foldExecuted=${foldExecutedThisPass} m1Refreshed=${publishedM1RefreshedThisPass}`,
     );
     const tPassDecisions = performance.now();
-    const frontToolCandidates = args.tags.filter(
-        (tag) =>
-            tag.type === "tool" &&
-            tag.status === "active" &&
-            args.targets.get(tag.tagNumber)?.canDrop?.(),
-    );
-    if (
-        activeThinkingPrefixHold &&
-        (args.forceSignedRebuildForFit ||
-            (args.contextUsage.percentage >= 95 &&
-                frontToolCandidates.length > 0 &&
-                frontToolCandidates.every(
-                    (tag) => newTargets.get(tag.tagNumber)?.thinkingRewriteProtected === true,
-                )))
-    ) {
-        releaseThinkingForRewrite(true);
-    }
     if (activeThinkingPrefixHold) {
         isExplicitFlush = false;
         deferredMaterialize = false;
