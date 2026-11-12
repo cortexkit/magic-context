@@ -751,6 +751,42 @@ describe("planEmergencyDrop — the request this pass serves", () => {
         expect(plan.reason).toContain("fixed floor ≈251191 already exceeds ceiling 250000");
     });
 
+    it("never takes the removed mass out of a reading too small to hold it and the active tags", () => {
+        // The reading (96,000) is below the active tags (100,000) the request
+        // still carries, so it does not describe this request. The planner
+        // works against it as before, and the measured removal changes nothing.
+        const tools = [
+            tag(1, "bash", 1, { servedTokens: 60_000, reclaimableTokens: 60_000 }),
+            tag(2, "read", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 }),
+        ];
+        const input = {
+            tags: tools,
+            floorTags: tools,
+            maxTag: 2,
+            protectedCutoff: null,
+            currentTotalInputTokens: 96_000,
+            ceilingTokens: 65_000,
+            usagePercentage: 96,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const plan = planEmergencyDrop({ ...input, removedThisPassTokens: 372_390 });
+        const today = planEmergencyDrop(input);
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toEqual(today.tagNumbers);
+        expect(plan.reclaimTokens).toBe(today.reclaimTokens);
+        expect(plan.reason).toContain("after ≈0 removed this pass (≈372390 measured)");
+        // Between the two: only what the reading holds beyond the active tags
+        // comes out of it.
+        const partial = planEmergencyDrop({
+            ...input,
+            currentTotalInputTokens: 130_000,
+            removedThisPassTokens: 50_000,
+        });
+        expect(partial.reason).toContain("served≈100000 after ≈30000 removed this pass");
+    });
+
     it("gauges the gap on the served request, so earlier drops count toward the target", () => {
         const tools = [tag(1, "bash", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 })];
         const input = {
