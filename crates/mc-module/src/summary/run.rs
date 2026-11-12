@@ -202,8 +202,13 @@ pub async fn run<C: RunnerClient + Router>(
         {
             Ok(answer) => answer,
             Err(error) => {
-                if let Some(wait) = AccountWait::of_routing(&error, SendKind::TurnOne, now_ms()) {
-                    return Err(SummaryError::AccountWait(wait));
+                // Waiting charges no failure, so a fallback refusal must not
+                // erase the route failure that made the fallback necessary.
+                if failure.is_none() {
+                    if let Some(wait) = AccountWait::of_routing(&error, SendKind::TurnOne, now_ms())
+                    {
+                        return Err(SummaryError::AccountWait(wait));
+                    }
                 }
                 // No route left after a failure: the failure is what to report.
                 return Err(failure.unwrap_or_else(|| error.to_string()).into());

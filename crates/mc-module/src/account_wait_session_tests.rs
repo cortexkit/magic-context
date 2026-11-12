@@ -116,23 +116,19 @@ async fn routing_account_wait_releases_quota_preserves_views_and_stops_repeat_no
     assert!(session.decide_notice(&settings).summary.is_some());
     assert!(session.drain.spent > 0);
     let now = now_ms();
-    let wait = AccountWait::of_routing(
-        &crate::routing::RouteError {
+    use crate::summary::run::account_wait_send_tests::{job, Answer, Client as SendClient};
+    let sender = SendClient::new(Answer::RunEndsFinal).with_route_refusal_after(
+        0,
+        crate::routing::RouteError {
             code: "no_route".into(),
             message: "blocked routes".into(),
             detail: Some(json!({"reason": "all_inadequate", "reset_at_ms": now + 20 * 60_000})),
         },
-        SendKind::TurnOne,
-        now,
-    )
-    .unwrap();
+    );
+    let result = run::run(&sender, None, &job()).await;
+    assert!(matches!(result, Err(run::SummaryError::AccountWait(_))));
     session
-        .summary_finished(
-            &client,
-            &settings,
-            Err(run::SummaryError::AccountWait(wait)),
-            now,
-        )
+        .summary_finished(&client, &settings, result, now)
         .await;
     assert_eq!(session.app.failures, 0);
     assert_eq!(session.app.last_error, None);
@@ -152,6 +148,38 @@ async fn routing_account_wait_releases_quota_preserves_views_and_stops_repeat_no
     at_usage(&mut session, 96.0);
     assert!(session.decide_notice(&settings).summary.is_some());
     assert!(session.decide_notice(&settings).summary.is_none());
+}
+
+#[tokio::test]
+async fn routing_account_wait_fallback_refusal_preserves_and_counts_the_first_failure() {
+    use crate::summary::run::account_wait_send_tests::{job, Answer, Client as SendClient};
+
+    let (mut session, client, settings) = ready();
+    assert!(session.decide_notice(&settings).summary.is_some());
+    let spent = session.drain.spent;
+    assert!(spent > 0);
+    let now = now_ms();
+    let sender = SendClient::new(Answer::RunEndsFinal).with_route_refusal_after(
+        1,
+        crate::routing::RouteError {
+            code: "no_route".into(),
+            message: "fallback routes are blocked".into(),
+            detail: Some(json!({"reason": "all_inadequate", "reset_at_ms": now + 20 * 60_000})),
+        },
+    );
+    let result = run::run(&sender, None, &job()).await;
+    session
+        .summary_finished(&client, &settings, result, now)
+        .await;
+    assert_eq!(session.app.failures, 1);
+    assert!(session
+        .app
+        .last_error
+        .as_deref()
+        .unwrap()
+        .starts_with("the run ended error: "));
+    assert_eq!(session.drain.spent, spent, "the failed attempt stays spent");
+    assert!(session.account_wait.is_none());
 }
 
 #[tokio::test]

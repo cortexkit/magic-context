@@ -41,6 +41,30 @@ async fn routing_account_wait_timed_all_inadequate_starts_no_run_or_attempt() {
 }
 
 #[tokio::test]
+async fn routing_account_wait_fallback_refusal_keeps_the_failed_route_outcome() {
+    let client = Client::new(Answer::RunEndsFinal).with_route_refusal_after(
+        1,
+        refusal(json!({"reason": "all_inadequate", "reset_at_ms": NOW})),
+    );
+    let error = run(&client, None, &job())
+        .await
+        .expect_err("the first route failed");
+    let SummaryError::Failed(message) = error else {
+        panic!("a fallback refusal hid the route failure: {error:?}");
+    };
+    assert_eq!(
+        message,
+        format!(
+            "the run ended error: {} (child head:mc-summary:1-4:decision-1:first)",
+            Answer::RunEndsFinal.run_end().error.unwrap().message
+        )
+    );
+    assert_eq!(*client.selects.lock().unwrap(), 2);
+    assert_eq!(*client.sends.lock().unwrap(), 1);
+    assert_eq!(*client.reports.lock().unwrap(), vec![Outcome::Failed]);
+}
+
+#[tokio::test]
 async fn routing_account_wait_untimed_all_inadequate_and_permanent_reasons_still_fail() {
     for reason in [
         "all_inadequate",

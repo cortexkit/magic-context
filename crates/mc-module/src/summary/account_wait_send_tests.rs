@@ -92,6 +92,7 @@ impl Answer {
 pub(crate) struct Client {
     answer: Answer,
     route_refusal: Option<RouteError>,
+    route_refusal_after: usize,
     pub(crate) sends: Mutex<usize>,
     selects: Mutex<usize>,
     reports: Mutex<Vec<Outcome>>,
@@ -102,10 +103,17 @@ impl Client {
         Self {
             answer,
             route_refusal: None,
+            route_refusal_after: 0,
             sends: Mutex::new(0),
             selects: Mutex::new(0),
             reports: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn with_route_refusal_after(mut self, selects: usize, error: RouteError) -> Self {
+        self.route_refusal = Some(error);
+        self.route_refusal_after = selects;
+        self
     }
 }
 
@@ -166,8 +174,10 @@ impl Router for Client {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
         let mut selects = self.selects.lock().unwrap();
         *selects += 1;
-        if let Some(error) = &self.route_refusal {
-            return Err(error.clone());
+        if *selects > self.route_refusal_after {
+            if let Some(error) = &self.route_refusal {
+                return Err(error.clone());
+            }
         }
         let route = RouteRef::new("test", format!("model-{selects}"));
         let runner = RunnerRef::new(
@@ -190,7 +200,7 @@ impl Router for Client {
     }
 }
 
-fn job() -> Request {
+pub(crate) fn job() -> Request {
     Request {
         limits: crate::reads::Limits::default(),
         session: SessionRef::new("runner", "pi", "head"),
