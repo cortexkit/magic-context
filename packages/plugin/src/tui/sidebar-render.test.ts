@@ -121,9 +121,17 @@ const cases = [
     { snapshot: { ...healthy, usagePercentage: 65 } },
     { snapshot: { ...healthy, usagePercentage: 85 } },
     { snapshot: { ...healthy, compartmentInProgress: true }, width: 40 },
-    { snapshot: healthy, changeTheme: true },
+    {
+        snapshot: healthy,
+        toggleHeader: true,
+        preferences: { "magic-context": { rememberCollapsed: false } },
+    },
     { snapshot: { ...healthy, historianRun: { ...healthy.historianRun!, outcome: "failed" } } },
     { snapshot: healthy, matchingBadgeColors: true },
+    { snapshot: healthy, preferences: { "magic-context": { startCollapsed: true } } },
+    { snapshot: incident, preferences: { "magic-context": { startCollapsed: true } } },
+    { snapshot: null, preferences: { "magic-context": { startCollapsed: true } } },
+    { snapshot: off, preferences: { "magic-context": { startCollapsed: true } } },
 ];
 type Result = {
     frame: string;
@@ -187,6 +195,30 @@ function tone(index: number, text: string, color: string) {
 }
 
 describe("option B sidebar", () => {
+    test("preserves the expanded and incident render output", () => {
+        expect(
+            results.slice(0, 2).map((result) => ({ ...result, frame: result.frame.split("\n") })),
+        ).toMatchSnapshot();
+    });
+    test("collapses an account-less panel to the Option B summary rows", () => {
+        row(16, "Context", "45% left ●");
+        row(16, "Historian", "idle · 1h55m ●");
+        row(16, "Cache", "151 drops queued ●");
+        expect(results[16]!.frame).toContain("▶ MAGIC CONTEXT");
+        expect(results[16]!.frame).not.toMatch(
+            /Health|Prompt cache|Knowledge|Dreamer|Next summary|█/,
+        );
+        expect(results[13]!.frame).toBe(results[16]!.frame);
+        row(17, "Historian", "fallback · 1m ●");
+        row(17, "Health", "2 issues ●");
+        tone(17, "2 issues ●", "#ff8800");
+        expect(results[17]!.frame).not.toMatch(/4\/4 rejected|shows details|Last run/);
+        row(18, "Context", "no reading ●");
+        row(18, "Historian", "no reading ●");
+        row(18, "Cache", "no reading ●");
+        row(19, "Context", "45% left ●");
+        expect(results[19]!.frame).not.toMatch(/Historian|Cache|Health/);
+    });
     test("draws the healthy expanded sections with actionable snapshot values", () => {
         for (const title of [
             "MAGIC CONTEXT",
@@ -250,7 +282,7 @@ describe("option B sidebar", () => {
             /History|Prompt cache|Next summary|4\/4 rejected|Fallback/,
         );
     });
-    test("maps existing visibility preferences without using the stored collapse value", () => {
+    test("maps visibility preferences and restores the stored collapse value", () => {
         expect(results[4]!.frame).toContain("CUSTOM");
         expect(results[4]!.frame).toContain("Context");
         expect(results[4]!.frame).not.toMatch(/History|Prompt cache|Knowledge|Dreamer/);
@@ -285,9 +317,6 @@ describe("option B sidebar", () => {
         tone(10, "35% left", "#ff8800");
         tone(11, "15% left", "#ff0000");
         expect(results[12]!.frame).toContain("summarizing");
-    });
-    test("updates the gauge tone when the host replaces its theme", () => {
-        tone(13, "45% left", "#00aaff");
     });
     test("the raw-source frame bundle draws the same expanded view", () => {
         expect(rawResult.frame).toBe(results[0]!.frame);

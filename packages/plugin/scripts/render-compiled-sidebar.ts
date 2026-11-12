@@ -11,7 +11,7 @@ type RenderCase = {
     snapshot: SidebarSnapshot | null;
     width?: number;
     preferences?: Record<string, unknown>;
-    changeTheme?: boolean;
+    toggleHeader?: boolean;
     matchingBadgeColors?: boolean;
 };
 
@@ -78,7 +78,7 @@ for (const entry of inputs) {
     preferences = entry.preferences ?? {};
     const prefs = resolveMagicContextPrefs(preferences);
     const published = Promise.withResolvers<void>();
-    const [currentTheme, setTheme] = createSignal(
+    const [currentTheme] = createSignal(
         entry.matchingBadgeColors ? { ...theme, background: theme.accent } : theme,
     );
     const slot = createSidebarContentSlot({
@@ -115,8 +115,8 @@ for (const entry of inputs) {
             ),
         ]);
         for (let pass = 0; pass < 4; pass++) await setup.renderOnce();
-        if (entry.changeTheme) {
-            setTheme({ ...theme, success: RGBA.fromHex("#00aaff") });
+        if (entry.toggleHeader) {
+            await setup.mockMouse.click(2, 0);
             for (let pass = 0; pass < 3; pass++) await setup.renderOnce();
         }
         const spans = setup.captureSpans();

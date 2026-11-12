@@ -205,7 +205,7 @@ const files = await listSourceFiles(sourceRoot);
 async function bundleSidebar(hostRuntime: boolean): Promise<boolean> {
     const outputFile = join(hostRuntime ? outputRoot : sourceRoot, sidebarBundleName);
     const result = await Bun.build({
-        entrypoints: [fileURLToPath(import.meta.resolve("@cortexkit/common-auth/quota-sidebar"))],
+        entrypoints: [fileURLToPath(import.meta.resolve("@cortexkit/opencode-sidebar"))],
         target: "bun",
         format: "esm",
         external: [...runtimeSpecifiers],

@@ -1,7 +1,7 @@
 // @bun
-// ../../node_modules/.bun/@cortexkit+common-auth@0.38.0+79ed038a4f852143/node_modules/@cortexkit/common-auth/src/quota-sidebar/index.tsx
-import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
+// ../../node_modules/.bun/@cortexkit+opencode-sidebar@0.2.0+4f25175b99662f85/node_modules/@cortexkit/opencode-sidebar/src/index.tsx
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { use as _$use } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { effect as _$effect } from "opentui:runtime-module:%40opentui%2Fsolid";
@@ -10,253 +10,6 @@ import { insert as _$insert } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { setProp as _$setProp } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createElement as _$createElement } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createContext, createMemo, createSignal, For, Index, mergeProps, Show, useContext } from "opentui:runtime-module:solid-js";
-
-// ../../node_modules/.bun/@cortexkit+common-auth@0.38.0+79ed038a4f852143/node_modules/@cortexkit/common-auth/src/quota/map.ts
-var ALL_SCOPE = "all";
-var DEFAULT_REQUIRED_LABELS = Object.freeze([
-  "primary"
-]);
-
-// ../../node_modules/.bun/@cortexkit+common-auth@0.38.0+79ed038a4f852143/node_modules/@cortexkit/common-auth/src/quota/format.ts
-var QUOTA_STALE_AFTER_MS = 15 * 60000;
-var NO_QUOTA_READING = "no quota reading yet";
-var NO_LIMITS_REPORTED = "no limits reported";
-function shortSpan(ms) {
-  const minutes = Math.max(1, Math.floor(ms / 60000));
-  if (minutes < 60)
-    return `${minutes}m`;
-  if (minutes < 1440) {
-    const hours = Math.floor(minutes / 60);
-    const rest = minutes % 60;
-    return rest === 0 ? `${hours}h` : `${hours}h${rest}m`;
-  }
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor(minutes % 1440 / 60);
-  return hours === 0 ? `${days}d` : `${days}d${hours}h`;
-}
-function lengthName(minutes) {
-  if (minutes % 1440 === 0)
-    return `${minutes / 1440}d`;
-  if (minutes % 60 === 0)
-    return `${minutes / 60}h`;
-  return `${minutes}m`;
-}
-function quotaWindowName(limit) {
-  if (limit.scope !== ALL_SCOPE || limit.windowMinutes === undefined)
-    return limit.label;
-  return lengthName(limit.windowMinutes);
-}
-function clampPercent(remaining) {
-  return Math.min(100, Math.max(0, remaining));
-}
-function wholePercent(remaining) {
-  return Math.round(clampPercent(remaining));
-}
-function percentLeft(remaining) {
-  return `${wholePercent(remaining)}% left`;
-}
-function resetDetails(resetsAt, checkedAt, now) {
-  const at = resetsAt === undefined ? Number.NaN : Date.parse(resetsAt);
-  return {
-    ...Number.isFinite(at) && at > now ? { resetIn: shortSpan(at - now) } : {},
-    resetSinceReading: Number.isFinite(at) && at > checkedAt && at <= now
-  };
-}
-function displayOrder(left, right) {
-  const l = left.windowMinutes;
-  const r = right.windowMinutes;
-  if (l !== undefined && r !== undefined && l !== r)
-    return l - r;
-  if (l === undefined !== (r === undefined))
-    return l === undefined ? 1 : -1;
-  if (left.scope !== right.scope) {
-    if (left.scope === ALL_SCOPE)
-      return -1;
-    if (right.scope === ALL_SCOPE)
-      return 1;
-    return left.scope < right.scope ? -1 : 1;
-  }
-  return left.label < right.label ? -1 : left.label > right.label ? 1 : 0;
-}
-function quotaWindowParts(quota, options) {
-  const { windows, age } = scopedWindowParts(quota, options, true);
-  const parts = windows.map(({ part }) => part);
-  return age === undefined ? { windows: parts } : { windows: parts, age };
-}
-function withShortNames(windows) {
-  const abbreviations = scopeAbbreviations(windows.filter(({ part, scope }) => part.kind === "window" && scope !== ALL_SCOPE).map(({ scope }) => scope));
-  for (const window of windows) {
-    window.part.short = window.part.kind === "budget" ? "cr" : window.scope === ALL_SCOPE ? window.part.name : abbreviations.get(window.scope) ?? window.scope;
-  }
-  return windows;
-}
-function hasWindowReading(limit) {
-  return Number.isFinite(limit.remainingPercent) && Number.isFinite(limit.checkedAt);
-}
-function scopedWindowParts(quota, options, includeUnknown = false) {
-  if (!quota)
-    return { windows: [] };
-  const { now } = options;
-  const readings = quota.limits.filter((limit) => limit.kind === "reading" && (includeUnknown || hasWindowReading(limit))).sort(displayOrder);
-  const windows = readings.map((limit) => {
-    const part = hasWindowReading(limit) ? {
-      kind: "window",
-      reading: "known",
-      name: quotaWindowName(limit),
-      short: "",
-      figure: percentLeft(limit.remainingPercent),
-      remainingPercent: clampPercent(limit.remainingPercent),
-      checkedAt: limit.checkedAt,
-      ...resetDetails(limit.resetsAt, limit.checkedAt, now)
-    } : {
-      kind: "window",
-      reading: "unknown",
-      name: quotaWindowName(limit),
-      short: "",
-      figure: "no reading",
-      resetSinceReading: false
-    };
-    return {
-      scope: limit.scope,
-      ...limit.windowMinutes === undefined ? {} : { windowMinutes: limit.windowMinutes },
-      part
-    };
-  });
-  const budget = quota.budget;
-  if (budget) {
-    const remainingPercent = budget.remainingPercent;
-    const figure = budget.reached ? "credits spent" : remainingPercent !== undefined ? `credits ${percentLeft(remainingPercent)}` : "credits available";
-    windows.push({
-      scope: ALL_SCOPE,
-      spent: budget.reached,
-      part: {
-        kind: "budget",
-        reading: "known",
-        name: "credits",
-        short: "",
-        figure,
-        ...remainingPercent === undefined ? {} : { remainingPercent: clampPercent(remainingPercent) },
-        checkedAt: budget.checkedAt,
-        ...resetDetails(budget.resetsAt, budget.checkedAt, now)
-      }
-    });
-  }
-  withShortNames(windows);
-  const readingTimes = windows.flatMap(({ part }) => part.reading === "known" && part.checkedAt !== undefined ? [part.checkedAt] : []);
-  if (readingTimes.length > 0) {
-    const age = now - Math.min(...readingTimes);
-    if (age > (options.staleAfterMs ?? QUOTA_STALE_AFTER_MS)) {
-      return { windows, age: `checked ${shortSpan(age)} ago` };
-    }
-  }
-  return { windows };
-}
-function scopeDisplayName(scope) {
-  const model = scope.slice(scope.indexOf(":") + 1);
-  return model.charAt(0).toUpperCase() + model.slice(1);
-}
-function scopeAbbreviations(scopes) {
-  const names = [...new Set(scopes.map(scopeDisplayName))];
-  const lengths = new Map(names.map((name) => [name, 2]));
-  const short = (name) => name.slice(0, lengths.get(name));
-  for (;; ) {
-    const byShort = new Map;
-    for (const name of names) {
-      byShort.set(short(name), [...byShort.get(short(name)) ?? [], name]);
-    }
-    let extended = false;
-    for (const group of byShort.values()) {
-      if (group.length < 2)
-        continue;
-      for (const name of group) {
-        const length = lengths.get(name) ?? 2;
-        if (length < name.length) {
-          lengths.set(name, length + 1);
-          extended = true;
-        }
-      }
-    }
-    if (!extended)
-      break;
-  }
-  return new Map(scopes.map((scope) => [scope, short(scopeDisplayName(scope))]));
-}
-var NARROW_GROUP_LIMIT = 2;
-function groupShortNames(groups) {
-  const labels = groups.map((group) => group.label.trim() || group.scope);
-  const short = scopeAbbreviations(labels);
-  return labels.map((label) => short.get(label) ?? label);
-}
-function groupedNarrowPieces(groups, windows) {
-  if (!groups || groups.length === 0)
-    return;
-  const reported = windows.filter(({ part }) => part.kind === "window");
-  if (reported.some(({ scope }) => scope === ALL_SCOPE))
-    return;
-  const candidates = groups.flatMap((group, listed) => {
-    const inGroup = reported.filter(({ scope }) => scope === group.scope);
-    const groupTightest = inGroup.reduce((least, window) => least === undefined || (window.part.remainingPercent ?? 0) < (least.part.remainingPercent ?? 0) ? window : least, undefined);
-    return groupTightest ? [{ group, listed, window: groupTightest }] : [];
-  });
-  if (candidates.length === 0)
-    return;
-  const names = groupShortNames(groups);
-  const left = (candidate) => candidate.window.part.remainingPercent ?? 0;
-  const shown = [...candidates].sort((a, b) => left(a) - left(b) || a.listed - b.listed).slice(0, NARROW_GROUP_LIMIT).sort((a, b) => a.listed - b.listed);
-  return shown.map((candidate, index) => {
-    const { windowMinutes } = candidate.window;
-    const piece = [
-      names[candidate.listed] ?? candidate.group.scope,
-      ...windowMinutes === undefined ? [] : [lengthName(windowMinutes)],
-      `${wholePercent(left(candidate))}%`
-    ].join(" ");
-    return index === shown.length - 1 ? `${piece} left` : piece;
-  });
-}
-function narrowTextParts(quota, options) {
-  const { windows } = scopedWindowParts(quota, options);
-  const grouped = groupedNarrowPieces(quota?.groups, windows);
-  if (grouped)
-    return grouped;
-  const general = windows.filter(({ part, scope }) => part.kind === "window" && scope === ALL_SCOPE);
-  const scoped = windows.filter(({ part, scope }) => part.kind === "window" && scope !== ALL_SCOPE);
-  const budget = windows.find(({ part }) => part.kind === "budget");
-  const budgetLeft = budget?.spent ? 0 : budget?.part.remainingPercent;
-  const extras = [
-    ...scoped.map(({ part }) => ({
-      label: part.short,
-      remaining: part.remainingPercent ?? 0
-    })),
-    ...budgetLeft === undefined || budget === undefined ? [] : [{ label: budget.part.short, remaining: budgetLeft }]
-  ];
-  const tightest = extras.reduce((best, item) => best === undefined || item.remaining < best.remaining ? item : best, undefined);
-  const pieces = general.map(({ part }) => `${part.name} ${wholePercent(part.remainingPercent ?? 0)}%`);
-  if (tightest) {
-    pieces.push(`${tightest.label} ${wholePercent(tightest.remaining)}%`);
-  }
-  if (pieces.length === 0)
-    return windows.map(({ part }) => part.figure);
-  return pieces.map((piece, index) => index === pieces.length - 1 ? `${piece} left` : piece);
-}
-function quotaTextParts(quota, options) {
-  if (options.form === "narrow")
-    return narrowTextParts(quota, options);
-  const { windows, age } = scopedWindowParts(quota, options);
-  const full = (options.form ?? "full") === "full";
-  const text = windows.map(({ part }) => {
-    const reset = full && part.resetIn ? `, resets ${part.resetIn}` : "";
-    return `${part.kind === "budget" ? "" : `${part.name} `}${part.figure}${reset}`;
-  });
-  return age === undefined ? text : [...text, age];
-}
-function formatQuota(quota, options) {
-  const parts = quotaTextParts(quota, options);
-  if (parts.length > 0)
-    return parts.join(" \xB7 ");
-  return quota && quota.limits.length > 0 ? NO_LIMITS_REPORTED : NO_QUOTA_READING;
-}
-
-// ../../node_modules/.bun/@cortexkit+common-auth@0.38.0+79ed038a4f852143/node_modules/@cortexkit/common-auth/src/quota-sidebar/index.tsx
 var FrameContext = createContext();
 function frameContext() {
   const context = useContext(FrameContext);
@@ -391,6 +144,119 @@ function barSegments(used, appearance, pace) {
     tone
   }];
 }
+function SidebarGaugeRow(props) {
+  const context = frameContext();
+  const [columns, setColumns] = createSignal(0);
+  let row;
+  const known = () => props.used !== undefined && Number.isFinite(props.used);
+  const used = () => Math.max(0, Math.min(100, props.used ?? 0));
+  const figure = () => known() ? `${Math.round(100 - used())}% left` : "no reading";
+  const appearance = () => ({
+    ...context.appearance,
+    warnThreshold: props.warnAt ?? context.appearance.warnThreshold,
+    errorThreshold: props.errorAt ?? context.appearance.errorThreshold
+  });
+  const label = () => columns() <= 0 ? props.label : fitText(props.label, columns() - displayWidth(figure()) - 1);
+  const barCells = () => {
+    if (!known())
+      return 0;
+    const desired = context.appearance.barWidth;
+    if (columns() <= 0)
+      return desired;
+    const room = columns() - displayWidth(label()) - 1 - displayWidth(figure()) - 1;
+    return room >= Math.min(4, desired) ? Math.min(desired, room) : 0;
+  };
+  const segments = createMemo(() => barSegments(used(), {
+    ...appearance(),
+    barWidth: barCells()
+  }), undefined, {
+    equals: (previous, next) => previous.every((segment, index) => segment.text === next[index]?.text && segment.tone === next[index]?.tone)
+  });
+  const value = () => {
+    if (!props.value)
+      return "";
+    if (columns() <= 0)
+      return props.value;
+    const room = columns() - displayWidth(label()) - 1 - displayWidth(figure()) - (barCells() > 0 ? barCells() + 1 : 0) - 1;
+    return room >= 2 ? fitText(props.value, room) : "";
+  };
+  const tone = () => known() ? usageTone(used(), appearance()) : "textMuted";
+  return (() => {
+    var _el$9 = _$createElement("box"), _el$0 = _$createElement("box"), _el$1 = _$createElement("text"), _el$10 = _$createTextNode(` `), _el$13 = _$createElement("text");
+    _$insertNode(_el$9, _el$0);
+    _$use((element) => {
+      row = element;
+    }, _el$9);
+    _$setProp(_el$9, "onSizeChange", () => setColumns(row?.width ?? 0));
+    _$setProp(_el$9, "width", "100%");
+    _$setProp(_el$9, "flexDirection", "row");
+    _$setProp(_el$9, "justifyContent", "space-between");
+    _$insertNode(_el$0, _el$1);
+    _$insertNode(_el$0, _el$13);
+    _$setProp(_el$0, "flexDirection", "row");
+    _$setProp(_el$0, "flexShrink", 0);
+    _$insertNode(_el$1, _el$10);
+    _$setProp(_el$1, "wrapMode", "none");
+    _$insert(_el$1, label, _el$10);
+    _$insert(_el$0, _$createComponent(Show, {
+      get when() {
+        return barCells() > 0;
+      },
+      get children() {
+        return [_$createComponent(Index, {
+          get each() {
+            return segments();
+          },
+          children: (segment) => (() => {
+            var _el$16 = _$createElement("text");
+            _$setProp(_el$16, "wrapMode", "none");
+            _$insert(_el$16, () => segment().text);
+            _$effect((_p$) => {
+              var _v$7 = context.theme[segment().tone], _v$8 = displayWidth(segment().text);
+              _v$7 !== _p$.e && (_p$.e = _$setProp(_el$16, "fg", _v$7, _p$.e));
+              _v$8 !== _p$.t && (_p$.t = _$setProp(_el$16, "width", _v$8, _p$.t));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined
+            });
+            return _el$16;
+          })()
+        }), (() => {
+          var _el$11 = _$createElement("text");
+          _$insertNode(_el$11, _$createTextNode(` `));
+          _$setProp(_el$11, "wrapMode", "none");
+          return _el$11;
+        })()];
+      }
+    }), _el$13);
+    _$setProp(_el$13, "wrapMode", "none");
+    _$insert(_el$13, figure);
+    _$insert(_el$9, _$createComponent(Show, {
+      get when() {
+        return value();
+      },
+      get children() {
+        var _el$14 = _$createElement("text"), _el$15 = _$createElement("b");
+        _$insertNode(_el$14, _el$15);
+        _$setProp(_el$14, "wrapMode", "none");
+        _$insert(_el$15, value);
+        _$effect((_$p) => _$setProp(_el$14, "fg", context.theme.text, _$p));
+        return _el$14;
+      }
+    }), null);
+    _$effect((_p$) => {
+      var _v$5 = context.theme.textMuted, _v$6 = context.theme[tone()];
+      _v$5 !== _p$.e && (_p$.e = _$setProp(_el$1, "fg", _v$5, _p$.e));
+      _v$6 !== _p$.t && (_p$.t = _$setProp(_el$13, "fg", _v$6, _p$.t));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined
+    });
+    return _el$9;
+  })();
+}
 function QuotaRow(props) {
   const context = frameContext();
   const [columns, setColumns] = createSignal(0);
@@ -412,40 +278,40 @@ function QuotaRow(props) {
     return fitText(text, columns() - props.labelWidth);
   };
   return [(() => {
-    var _el$9 = _$createElement("box"), _el$0 = _$createElement("box");
-    _$insertNode(_el$9, _el$0);
+    var _el$17 = _$createElement("box"), _el$18 = _$createElement("box");
+    _$insertNode(_el$17, _el$18);
     _$use((element) => {
       row = element;
-    }, _el$9);
-    _$setProp(_el$9, "onSizeChange", () => setColumns(row?.width ?? 0));
-    _$setProp(_el$9, "width", "100%");
-    _$setProp(_el$9, "flexDirection", "row");
-    _$setProp(_el$9, "justifyContent", "space-between");
-    _$setProp(_el$0, "flexDirection", "row");
-    _$insert(_el$0, _$createComponent(Show, {
+    }, _el$17);
+    _$setProp(_el$17, "onSizeChange", () => setColumns(row?.width ?? 0));
+    _$setProp(_el$17, "width", "100%");
+    _$setProp(_el$17, "flexDirection", "row");
+    _$setProp(_el$17, "justifyContent", "space-between");
+    _$setProp(_el$18, "flexDirection", "row");
+    _$insert(_el$18, _$createComponent(Show, {
       get when() {
         return props.labelWidth > 0;
       },
       get children() {
-        var _el$1 = _$createElement("text");
-        _$setProp(_el$1, "wrapMode", "none");
-        _$setProp(_el$1, "flexShrink", 0);
-        _$insert(_el$1, label);
-        _$effect((_$p) => _$setProp(_el$1, "fg", context.theme.textMuted, _$p));
-        return _el$1;
+        var _el$19 = _$createElement("text");
+        _$setProp(_el$19, "wrapMode", "none");
+        _$setProp(_el$19, "flexShrink", 0);
+        _$insert(_el$19, label);
+        _$effect((_$p) => _$setProp(_el$19, "fg", context.theme.textMuted, _$p));
+        return _el$19;
       }
     }), null);
-    _$insert(_el$0, _$createComponent(Show, {
+    _$insert(_el$18, _$createComponent(Show, {
       get when() {
         return hasReading();
       },
       get fallback() {
         return (() => {
-          var _el$13 = _$createElement("text");
-          _$insertNode(_el$13, _$createTextNode(`no reading`));
-          _$setProp(_el$13, "wrapMode", "none");
-          _$effect((_$p) => _$setProp(_el$13, "fg", context.theme.textMuted, _$p));
-          return _el$13;
+          var _el$23 = _$createElement("text");
+          _$insertNode(_el$23, _$createTextNode(`no reading`));
+          _$setProp(_el$23, "wrapMode", "none");
+          _$effect((_$p) => _$setProp(_el$23, "fg", context.theme.textMuted, _$p));
+          return _el$23;
         })();
       },
       get children() {
@@ -455,11 +321,11 @@ function QuotaRow(props) {
           },
           get fallback() {
             return (() => {
-              var _el$15 = _$createElement("text");
-              _$insertNode(_el$15, _$createTextNode(`reset since last check`));
-              _$setProp(_el$15, "wrapMode", "none");
-              _$effect((_$p) => _$setProp(_el$15, "fg", context.theme.textMuted, _$p));
-              return _el$15;
+              var _el$25 = _$createElement("text");
+              _$insertNode(_el$25, _$createTextNode(`reset since last check`));
+              _$setProp(_el$25, "wrapMode", "none");
+              _$effect((_$p) => _$setProp(_el$25, "fg", context.theme.textMuted, _$p));
+              return _el$25;
             })();
           },
           get children() {
@@ -473,85 +339,85 @@ function QuotaRow(props) {
                     return segments();
                   },
                   children: (segment) => (() => {
-                    var _el$17 = _$createElement("text");
-                    _$setProp(_el$17, "wrapMode", "none");
-                    _$insert(_el$17, () => segment().text);
+                    var _el$27 = _$createElement("text");
+                    _$setProp(_el$27, "wrapMode", "none");
+                    _$insert(_el$27, () => segment().text);
                     _$effect((_p$) => {
-                      var _v$5 = context.theme[segment().tone], _v$6 = segment().text ? undefined : 0;
-                      _v$5 !== _p$.e && (_p$.e = _$setProp(_el$17, "fg", _v$5, _p$.e));
-                      _v$6 !== _p$.t && (_p$.t = _$setProp(_el$17, "width", _v$6, _p$.t));
+                      var _v$9 = context.theme[segment().tone], _v$0 = segment().text ? undefined : 0;
+                      _v$9 !== _p$.e && (_p$.e = _$setProp(_el$27, "fg", _v$9, _p$.e));
+                      _v$0 !== _p$.t && (_p$.t = _$setProp(_el$27, "width", _v$0, _p$.t));
                       return _p$;
                     }, {
                       e: undefined,
                       t: undefined
                     });
-                    return _el$17;
+                    return _el$27;
                   })()
                 });
               }
             }), (() => {
-              var _el$10 = _$createElement("text");
-              _$setProp(_el$10, "wrapMode", "none");
-              _$insert(_el$10, figure);
-              _$effect((_$p) => _$setProp(_el$10, "fg", context.theme[usageTone(used(), context.appearance)], _$p));
-              return _el$10;
+              var _el$20 = _$createElement("text");
+              _$setProp(_el$20, "wrapMode", "none");
+              _$insert(_el$20, figure);
+              _$effect((_$p) => _$setProp(_el$20, "fg", context.theme[usageTone(used(), context.appearance)], _$p));
+              return _el$20;
             })()];
           }
         });
       }
     }), null);
-    _$insert(_el$9, _$createComponent(Show, {
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!(hasReading() && props.showReset))() && !props.part.resetSinceReading;
       },
       get children() {
-        var _el$11 = _$createElement("box");
-        _$setProp(_el$11, "flexShrink", 0);
-        _$setProp(_el$11, "flexDirection", "row");
-        _$setProp(_el$11, "justifyContent", "flex-end");
-        _$insert(_el$11, _$createComponent(Show, {
+        var _el$21 = _$createElement("box");
+        _$setProp(_el$21, "flexShrink", 0);
+        _$setProp(_el$21, "flexDirection", "row");
+        _$setProp(_el$21, "justifyContent", "flex-end");
+        _$insert(_el$21, _$createComponent(Show, {
           get when() {
             return props.part.resetIn;
           },
           get children() {
-            var _el$12 = _$createElement("text");
-            _$setProp(_el$12, "wrapMode", "none");
-            _$insert(_el$12, () => props.part.resetIn);
-            _$effect((_$p) => _$setProp(_el$12, "fg", context.theme.textMuted, _$p));
-            return _el$12;
+            var _el$22 = _$createElement("text");
+            _$setProp(_el$22, "wrapMode", "none");
+            _$insert(_el$22, () => props.part.resetIn);
+            _$effect((_$p) => _$setProp(_el$22, "fg", context.theme.textMuted, _$p));
+            return _el$22;
           }
         }));
-        _$effect((_$p) => _$setProp(_el$11, "width", props.resetWidth, _$p));
-        return _el$11;
+        _$effect((_$p) => _$setProp(_el$21, "width", props.resetWidth, _$p));
+        return _el$21;
       }
     }), null);
-    _$effect((_$p) => _$setProp(_el$0, "flexShrink", props.part.resetSinceReading ? 1 : 0, _$p));
-    return _el$9;
+    _$effect((_$p) => _$setProp(_el$18, "flexShrink", props.part.resetSinceReading ? 1 : 0, _$p));
+    return _el$17;
   })(), _$createComponent(Show, {
     get when() {
       return _$memo(() => !!(hasReading() && !props.part.resetSinceReading))() && paceLine();
     },
     keyed: true,
     children: (line) => (() => {
-      var _el$18 = _$createElement("box"), _el$20 = _$createElement("text");
-      _$insertNode(_el$18, _el$20);
-      _$setProp(_el$18, "width", "100%");
-      _$setProp(_el$18, "flexDirection", "row");
-      _$insert(_el$18, _$createComponent(Show, {
+      var _el$28 = _$createElement("box"), _el$30 = _$createElement("text");
+      _$insertNode(_el$28, _el$30);
+      _$setProp(_el$28, "width", "100%");
+      _$setProp(_el$28, "flexDirection", "row");
+      _$insert(_el$28, _$createComponent(Show, {
         get when() {
           return props.labelWidth > 0;
         },
         get children() {
-          var _el$19 = _$createElement("text");
-          _$insert(_el$19, () => "".padEnd(props.labelWidth));
-          _$effect((_$p) => _$setProp(_el$19, "fg", context.theme.textMuted, _$p));
-          return _el$19;
+          var _el$29 = _$createElement("text");
+          _$insert(_el$29, () => "".padEnd(props.labelWidth));
+          _$effect((_$p) => _$setProp(_el$29, "fg", context.theme.textMuted, _$p));
+          return _el$29;
         }
-      }), _el$20);
-      _$setProp(_el$20, "wrapMode", "none");
-      _$insert(_el$20, line);
-      _$effect((_$p) => _$setProp(_el$20, "fg", context.theme[props.pace?.tone ?? "textMuted"], _$p));
-      return _el$18;
+      }), _el$30);
+      _$setProp(_el$30, "wrapMode", "none");
+      _$insert(_el$30, line);
+      _$effect((_$p) => _$setProp(_el$30, "fg", context.theme[props.pace?.tone ?? "textMuted"], _$p));
+      return _el$28;
     })()
   })];
 }
@@ -559,13 +425,8 @@ function CollapsedAccountRow(props) {
   const context = frameContext();
   const [width, setWidth] = createSignal(0);
   let row;
-  const hasQuota = () => quotaWindowParts(props.account.quota, {
-    now: context.now
-  }).windows.some((part) => part.reading === "known");
-  const text = () => hasQuota() ? formatQuota(props.account.quota, {
-    now: context.now,
-    form: "narrow"
-  }) : props.account.emptyQuotaText?.collapsed ?? "\u2014";
+  const hasQuota = () => props.account.hasQuota;
+  const text = () => hasQuota() ? props.account.collapsedQuotaText ?? "" : props.account.emptyQuotaText?.collapsed ?? "\u2014";
   const showQuota = () => width() <= 0 || displayWidth(text()) + 4 <= width();
   const label = () => {
     if (width() <= 0)
@@ -575,32 +436,32 @@ function CollapsedAccountRow(props) {
   const muted = () => props.account.collapsed?.muted ?? false;
   const quotaTone = () => muted() ? "textMuted" : props.account.collapsed?.quotaTone ?? "success";
   return (() => {
-    var _el$21 = _$createElement("box"), _el$23 = _$createElement("box"), _el$26 = _$createElement("text");
-    _$insertNode(_el$21, _el$23);
+    var _el$31 = _$createElement("box"), _el$33 = _$createElement("box"), _el$36 = _$createElement("text");
+    _$insertNode(_el$31, _el$33);
     _$use((element) => {
       row = element;
-    }, _el$21);
-    _$setProp(_el$21, "onSizeChange", () => setWidth(row?.width ?? 0));
-    _$setProp(_el$21, "width", "100%");
-    _$setProp(_el$21, "flexDirection", "row");
-    _$setProp(_el$21, "justifyContent", "space-between");
-    _$insert(_el$21, _$createComponent(Show, {
+    }, _el$31);
+    _$setProp(_el$31, "onSizeChange", () => setWidth(row?.width ?? 0));
+    _$setProp(_el$31, "width", "100%");
+    _$setProp(_el$31, "flexDirection", "row");
+    _$setProp(_el$31, "justifyContent", "space-between");
+    _$insert(_el$31, _$createComponent(Show, {
       get when() {
         return label();
       },
       get children() {
-        var _el$22 = _$createElement("text");
-        _$setProp(_el$22, "wrapMode", "none");
-        _$setProp(_el$22, "flexShrink", 1);
-        _$insert(_el$22, label);
-        _$effect((_$p) => _$setProp(_el$22, "fg", context.theme[muted() ? "textMuted" : "text"], _$p));
-        return _el$22;
+        var _el$32 = _$createElement("text");
+        _$setProp(_el$32, "wrapMode", "none");
+        _$setProp(_el$32, "flexShrink", 1);
+        _$insert(_el$32, label);
+        _$effect((_$p) => _$setProp(_el$32, "fg", context.theme[muted() ? "textMuted" : "text"], _$p));
+        return _el$32;
       }
-    }), _el$23);
-    _$insertNode(_el$23, _el$26);
-    _$setProp(_el$23, "flexDirection", "row");
-    _$setProp(_el$23, "flexShrink", 0);
-    _$insert(_el$23, _$createComponent(Show, {
+    }), _el$33);
+    _$insertNode(_el$33, _el$36);
+    _$setProp(_el$33, "flexDirection", "row");
+    _$setProp(_el$33, "flexShrink", 0);
+    _$insert(_el$33, _$createComponent(Show, {
       get when() {
         return showQuota();
       },
@@ -611,34 +472,34 @@ function CollapsedAccountRow(props) {
           },
           get fallback() {
             return (() => {
-              var _el$27 = _$createElement("text");
-              _$insert(_el$27, text);
-              _$effect((_$p) => _$setProp(_el$27, "fg", context.theme.textMuted, _$p));
-              return _el$27;
+              var _el$37 = _$createElement("text");
+              _$insert(_el$37, text);
+              _$effect((_$p) => _$setProp(_el$37, "fg", context.theme.textMuted, _$p));
+              return _el$37;
             })();
           },
           get children() {
-            var _el$24 = _$createElement("text"), _el$25 = _$createElement("b");
-            _$insertNode(_el$24, _el$25);
-            _$insert(_el$25, text);
-            _$effect((_$p) => _$setProp(_el$24, "fg", context.theme[quotaTone()], _$p));
-            return _el$24;
+            var _el$34 = _$createElement("text"), _el$35 = _$createElement("b");
+            _$insertNode(_el$34, _el$35);
+            _$insert(_el$35, text);
+            _$effect((_$p) => _$setProp(_el$34, "fg", context.theme[quotaTone()], _$p));
+            return _el$34;
           }
         });
       }
-    }), _el$26);
-    _$insert(_el$26, () => showQuota() ? " " : "", null);
-    _$insert(_el$26, () => props.account.blocked ? "\u2298" : "\u25CF", null);
+    }), _el$36);
+    _$insert(_el$36, () => showQuota() ? " " : "", null);
+    _$insert(_el$36, () => props.account.blocked ? "\u2298" : "\u25CF", null);
     _$effect((_p$) => {
-      var _v$7 = label() ? 1 : 0, _v$8 = context.theme[props.account.indicatorTone];
-      _v$7 !== _p$.e && (_p$.e = _$setProp(_el$21, "columnGap", _v$7, _p$.e));
-      _v$8 !== _p$.t && (_p$.t = _$setProp(_el$26, "fg", _v$8, _p$.t));
+      var _v$1 = label() ? 1 : 0, _v$10 = context.theme[props.account.indicatorTone];
+      _v$1 !== _p$.e && (_p$.e = _$setProp(_el$31, "columnGap", _v$1, _p$.e));
+      _v$10 !== _p$.t && (_p$.t = _$setProp(_el$36, "fg", _v$10, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$21;
+    return _el$31;
   })();
 }
 function AccountBlock(props) {
@@ -678,35 +539,33 @@ function AccountBlock(props) {
     const full = `${props.account.label}${props.account.titleSuffix ? ` \xB7 ${props.account.titleSuffix}` : ""}`;
     return columns() <= 0 ? full : fitText(full, columns() - displayWidth(props.account.status.text) - 1);
   };
-  const age = () => quotaWindowParts(props.account.quota, {
-    now: context.now
-  }).age;
+  const age = () => props.account.quotaAge;
   const hasRows = () => props.account.groups.some((group) => group.rows.length > 0);
   return (() => {
-    var _el$28 = _$createElement("box"), _el$29 = _$createElement("box"), _el$30 = _$createElement("text"), _el$31 = _$createElement("b"), _el$32 = _$createElement("text"), _el$33 = _$createElement("b");
-    _$insertNode(_el$28, _el$29);
+    var _el$38 = _$createElement("box"), _el$39 = _$createElement("box"), _el$40 = _$createElement("text"), _el$41 = _$createElement("b"), _el$42 = _$createElement("text"), _el$43 = _$createElement("b");
+    _$insertNode(_el$38, _el$39);
     _$use((element) => {
       block = element;
-    }, _el$28);
-    _$setProp(_el$28, "onSizeChange", () => setColumns(block?.width ?? 0));
-    _$setProp(_el$28, "width", "100%");
-    _$setProp(_el$28, "flexDirection", "column");
-    _$insertNode(_el$29, _el$30);
-    _$insertNode(_el$29, _el$32);
-    _$setProp(_el$29, "width", "100%");
-    _$setProp(_el$29, "flexDirection", "row");
-    _$setProp(_el$29, "justifyContent", "space-between");
-    _$setProp(_el$29, "columnGap", 1);
-    _$insertNode(_el$30, _el$31);
-    _$setProp(_el$30, "wrapMode", "none");
-    _$setProp(_el$30, "flexShrink", 1);
-    _$insert(_el$31, label);
-    _$insertNode(_el$32, _el$33);
-    _$setProp(_el$32, "wrapMode", "none");
-    _$setProp(_el$32, "flexShrink", 0);
-    _$insert(_el$33, () => props.account.status.text);
-    _$insert(_el$28, () => context.beforeQuota?.(props.account), null);
-    _$insert(_el$28, _$createComponent(Show, {
+    }, _el$38);
+    _$setProp(_el$38, "onSizeChange", () => setColumns(block?.width ?? 0));
+    _$setProp(_el$38, "width", "100%");
+    _$setProp(_el$38, "flexDirection", "column");
+    _$insertNode(_el$39, _el$40);
+    _$insertNode(_el$39, _el$42);
+    _$setProp(_el$39, "width", "100%");
+    _$setProp(_el$39, "flexDirection", "row");
+    _$setProp(_el$39, "justifyContent", "space-between");
+    _$setProp(_el$39, "columnGap", 1);
+    _$insertNode(_el$40, _el$41);
+    _$setProp(_el$40, "wrapMode", "none");
+    _$setProp(_el$40, "flexShrink", 1);
+    _$insert(_el$41, label);
+    _$insertNode(_el$42, _el$43);
+    _$setProp(_el$42, "wrapMode", "none");
+    _$setProp(_el$42, "flexShrink", 0);
+    _$insert(_el$43, () => props.account.status.text);
+    _$insert(_el$38, () => context.beforeQuota?.(props.account), null);
+    _$insert(_el$38, _$createComponent(Show, {
       get when() {
         return hasRows();
       },
@@ -768,7 +627,7 @@ function AccountBlock(props) {
         });
       }
     }), null);
-    _$insert(_el$28, _$createComponent(Show, {
+    _$insert(_el$38, _$createComponent(Show, {
       get when() {
         return age();
       },
@@ -779,24 +638,25 @@ function AccountBlock(props) {
         wrapMode: "none"
       })
     }), null);
-    _$insert(_el$28, () => context.afterQuota?.(props.account), null);
+    _$insert(_el$38, () => context.afterQuota?.(props.account), null);
     _$effect((_p$) => {
-      var _v$9 = props.marginTop, _v$0 = context.theme.text, _v$1 = context.theme[props.account.status.tone];
-      _v$9 !== _p$.e && (_p$.e = _$setProp(_el$28, "marginTop", _v$9, _p$.e));
-      _v$0 !== _p$.t && (_p$.t = _$setProp(_el$30, "fg", _v$0, _p$.t));
-      _v$1 !== _p$.a && (_p$.a = _$setProp(_el$32, "fg", _v$1, _p$.a));
+      var _v$11 = props.marginTop, _v$12 = context.theme.text, _v$13 = context.theme[props.account.status.tone];
+      _v$11 !== _p$.e && (_p$.e = _$setProp(_el$38, "marginTop", _v$11, _p$.e));
+      _v$12 !== _p$.t && (_p$.t = _$setProp(_el$40, "fg", _v$12, _p$.t));
+      _v$13 !== _p$.a && (_p$.a = _$setProp(_el$42, "fg", _v$13, _p$.a));
       return _p$;
     }, {
       e: undefined,
       t: undefined,
       a: undefined
     });
-    return _el$28;
+    return _el$38;
   })();
 }
 function SidebarFrame(props) {
   const hasData = () => props.accounts.length > 0;
-  const headerLabel = () => !hasData() ? props.header.badge : `${props.collapsed ? "\u25B6" : "\u25BC"} ${props.header.badge}`;
+  const canCollapse = () => props.collapsible ?? hasData();
+  const headerLabel = () => !canCollapse() ? props.header.badge : `${props.collapsed ? "\u25B6" : "\u25BC"} ${props.header.badge}`;
   const context = mergeProps(props, {
     get theme() {
       const theme = props.theme;
@@ -814,38 +674,38 @@ function SidebarFrame(props) {
   return _$createComponent(FrameContext.Provider, {
     value: context,
     get children() {
-      var _el$34 = _$createElement("box"), _el$35 = _$createElement("box"), _el$36 = _$createElement("box"), _el$37 = _$createElement("text"), _el$38 = _$createElement("b");
-      _$insertNode(_el$34, _el$35);
-      _$setProp(_el$34, "width", "100%");
-      _$setProp(_el$34, "flexDirection", "column");
-      _$insertNode(_el$35, _el$36);
-      _$setProp(_el$35, "width", "100%");
-      _$setProp(_el$35, "flexDirection", "row");
-      _$setProp(_el$35, "justifyContent", "space-between");
-      _$setProp(_el$35, "alignItems", "center");
-      _$setProp(_el$35, "onMouseDown", () => {
-        if (hasData())
+      var _el$44 = _$createElement("box"), _el$45 = _$createElement("box"), _el$46 = _$createElement("box"), _el$47 = _$createElement("text"), _el$48 = _$createElement("b");
+      _$insertNode(_el$44, _el$45);
+      _$setProp(_el$44, "width", "100%");
+      _$setProp(_el$44, "flexDirection", "column");
+      _$insertNode(_el$45, _el$46);
+      _$setProp(_el$45, "width", "100%");
+      _$setProp(_el$45, "flexDirection", "row");
+      _$setProp(_el$45, "justifyContent", "space-between");
+      _$setProp(_el$45, "alignItems", "center");
+      _$setProp(_el$45, "onMouseDown", () => {
+        if (canCollapse())
           props.onToggle();
       });
-      _$insertNode(_el$36, _el$37);
-      _$setProp(_el$36, "paddingLeft", 1);
-      _$setProp(_el$36, "paddingRight", 1);
-      _$insertNode(_el$37, _el$38);
-      _$insert(_el$38, headerLabel);
-      _$insert(_el$35, _$createComponent(Show, {
+      _$insertNode(_el$46, _el$47);
+      _$setProp(_el$46, "paddingLeft", 1);
+      _$setProp(_el$46, "paddingRight", 1);
+      _$insertNode(_el$47, _el$48);
+      _$insert(_el$48, headerLabel);
+      _$insert(_el$45, _$createComponent(Show, {
         get when() {
           return props.header.version;
         },
         get children() {
-          var _el$39 = _$createElement("text");
-          _$insert(_el$39, () => props.header.version);
-          _$effect((_$p) => _$setProp(_el$39, "fg", context.theme.textMuted, _$p));
-          return _el$39;
+          var _el$49 = _$createElement("text");
+          _$insert(_el$49, () => props.header.version);
+          _$effect((_$p) => _$setProp(_el$49, "fg", context.theme.textMuted, _$p));
+          return _el$49;
         }
       }), null);
-      _$insert(_el$34, _$createComponent(Show, {
+      _$insert(_el$44, _$createComponent(Show, {
         get when() {
-          return _$memo(() => !!props.collapsed)() && hasData();
+          return _$memo(() => !!props.collapsed)() && canCollapse();
         },
         get children() {
           return [_$createComponent(For, {
@@ -858,9 +718,9 @@ function SidebarFrame(props) {
           }), _$memo(() => props.collapsedSections?.())];
         }
       }), null);
-      _$insert(_el$34, _$createComponent(Show, {
+      _$insert(_el$44, _$createComponent(Show, {
         get when() {
-          return !props.collapsed || !hasData();
+          return !props.collapsed || !canCollapse();
         },
         get children() {
           return [_$createComponent(Show, {
@@ -889,20 +749,21 @@ function SidebarFrame(props) {
         }
       }), null);
       _$effect((_p$) => {
-        var _v$10 = invertBadge() ? props.theme?.accent : undefined, _v$11 = invertBadge() ? props.theme?.background : context.theme.accent;
-        _v$10 !== _p$.e && (_p$.e = _$setProp(_el$36, "backgroundColor", _v$10, _p$.e));
-        _v$11 !== _p$.t && (_p$.t = _$setProp(_el$37, "fg", _v$11, _p$.t));
+        var _v$14 = invertBadge() ? props.theme?.accent : undefined, _v$15 = invertBadge() ? props.theme?.background : context.theme.accent;
+        _v$14 !== _p$.e && (_p$.e = _$setProp(_el$46, "backgroundColor", _v$14, _p$.e));
+        _v$15 !== _p$.t && (_p$.t = _$setProp(_el$47, "fg", _v$15, _p$.t));
         return _p$;
       }, {
         e: undefined,
         t: undefined
       });
-      return _el$34;
+      return _el$44;
     }
   });
 }
 export {
   SidebarFrame,
+  SidebarGaugeRow,
   SidebarSection,
   SidebarStatRow,
   SidebarTextRow
