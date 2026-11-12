@@ -20,12 +20,14 @@
  *
  * - Tier 1, every pass, every message: a shape fingerprint mixed from the
  *   message's id and role, its part count, and per part its id, its type and
- *   the lengths of its strings (text, reasoning, tool input and output as they
- *   are sent, attachments). It reads lengths and mixes integers; it hashes no
- *   content. It sees every edit that changes a length or a part (a drop
- *   placeholder, a stripped or cleared reasoning part, a removed image, a tag
- *   prefix, a re-rendered history head, a message added, removed or moved). It
- *   cannot see an edit that keeps every length.
+ *   the lengths of its strings (text, reasoning and its signature, tool output
+ *   as it is sent, attachments). A tool's input is read shallowly (its type,
+ *   or its length when it is a string or an array). It reads lengths and mixes
+ *   integers; it hashes no content. It sees every edit that changes a length
+ *   or a part (a drop placeholder, a stripped or cleared reasoning part, a
+ *   removed image, a tag prefix, a re-rendered history head, a message added,
+ *   removed or moved). It cannot see an edit that keeps every length, or one
+ *   inside a tool's input object.
  * - Content digests of a handful of messages on every pass: the head (the first
  *   two messages and any further leading synthetic or summary rows), the last
  *   recorded message, the first message with kept signed thinking, and every
@@ -476,6 +478,23 @@ function mixPart(hash: number, rawPart: unknown): number {
 }
 
 
+/**
+ * A message's tier-1 fingerprint.
+ *
+ * Measured on the Linux build server (packages/plugin/scripts/served-check-timing.ts)
+ * over a long coding session's shape, this loop over every message is almost
+ * all of an appending pass's cost: about 0.2 ms at 1,000 messages and 2.4 ms at
+ * 10,000, about 1.2% of the transform pass it follows. The time is memory
+ * access, reading each message's info, parts and tool state, not the integer
+ * mixing: the same loop over objects already in cache takes 0.7 ms at 10,000,
+ * and a walk that reads only message ids takes about 0.1 ms. It cannot be made
+ * cheaper without going blind to the edit passes make most often, a tool
+ * output replaced by a placeholder inside the same part, so it reads every
+ * part. Three things that were measured to cost more are deliberately absent:
+ * hashing ids character by character (only the last eight code units are
+ * mixed), enumerating object keys (a tool's input is read shallowly) and
+ * module-level `let` bindings (results go through `walkOut`).
+ */
 function messageShape(message: unknown): number {
     const record =
         message && typeof message === "object" ? (message as Record<string, unknown>) : {};
