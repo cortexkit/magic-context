@@ -1,7 +1,9 @@
 //! The head is captured only when a view changes. Splitting it into sections
 //! and counting tokens run on the app-read thread when an app asks, never in
 //! the work a session does for each step of its runner.
-use super::{error, Refusal, Snapshot};
+#[cfg(test)]
+use super::Snapshot;
+use super::{error, invalid, Refusal, REPLY_BUDGET};
 use crate::count::Counter;
 use crate::summary::head::{Baseline, Form, M0_ID, M1_EMPTY, M1_ID};
 use cortexkit_role_compaction::view::{EditOp, InsertedImage, View};
@@ -102,6 +104,7 @@ impl ReadState {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read(snapshot: &Snapshot, state: Option<&ReadState>) -> Result<Value, Refusal> {
     let breakdown = snapshot.breakdown.without_summaries();
     read_breakdown(breakdown, state)
@@ -152,7 +155,36 @@ pub(super) fn read_breakdown(
             }
         }
     }
-    Ok(json!({"as_of":as_of,"managed":managed,"messages":messages}))
+    let mut outline = json!({"as_of":as_of,"managed":managed,"messages":messages});
+    // Attribution can grow independently of the head's text. Keep the outline
+    // readable even when an unusually large item list exhausts the frame.
+    while super::result_bytes(outline.clone()).len() > REPLY_BUDGET {
+        let largest = outline["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(m, message)| {
+                message["sections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(s, section)| {
+                        section
+                            .get("items")
+                            .map(|items| (serde_json::to_vec(items).unwrap().len(), m, s))
+                    })
+            })
+            .max();
+        let Some((_, m, s)) = largest else { break };
+        let section = outline["messages"][m]["sections"][s]
+            .as_object_mut()
+            .unwrap();
+        section.remove("items");
+        section.insert("items_omitted".into(), json!("too_large"));
+    }
+    Ok(outline)
 }
 
 /// Fixed renderer wrappers delimit sections; content inside these wrappers is
@@ -216,26 +248,33 @@ fn unavailable() -> Refusal {
 
 fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal> {
     let delta = slot.id == M1_ID;
-    let mut message = json!({"slot":if delta {"delta"} else {"baseline"},"tokens":counter.count(&slot.text),"sections":[]});
+    let mut message = json!({"slot":if delta {"delta"} else {"baseline"},"tokens":counter.count(&slot.text),"bytes":slot.text.len(),"sections":[]});
     if delta && slot.text == M1_EMPTY {
         message["empty"] = json!(true);
         message["placeholder"] = json!(slot.text);
         return Ok(message);
     }
     let mut sections = Vec::new();
-    for (kind, text) in split(&slot.text, delta)? {
-        let mut section = json!({"kind":kind,"tokens":counter.count(text),"text":text});
+    for (index, (kind, text)) in split(&slot.text, delta)?.into_iter().enumerate() {
+        let mut section =
+            json!({"index":index,"kind":kind,"tokens":counter.count(text),"bytes":text.len()});
         match kind {
             "project_docs" => {
                 static FILES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
                     regex::Regex::new(r#"(?s)<file name="([^"]*)">.*?</file>"#)
                         .expect("file wrappers")
                 });
-                section["items"] = json!(FILES.captures_iter(text).map(|m|json!({"name":unescape(&m[1]),"tokens":counter.count(&m[0]),"text":&m[0]})).collect::<Vec<_>>());
+                let items = FILES.captures_iter(text).map(|m| {
+                    let range = m.get(0).unwrap();
+                    json!({"name":unescape(&m[1]),"tokens":counter.count(range.as_str()),"start":range.start(),"len":range.len()})
+                }).collect::<Vec<_>>();
+                if !items.is_empty() {
+                    section["items"] = json!(items);
+                }
             }
             "history" => {
                 if let Some(baseline) = &head.baseline {
-                    section["items"] = json!(baseline
+                    let items = baseline
                         .summary_items
                         .iter()
                         .filter(|item| {
@@ -245,7 +284,13 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
                                 .is_ok_and(|id| id <= baseline.through_sequence);
                             in_baseline != delta
                         })
-                        .collect::<Vec<_>>());
+                        .collect::<Vec<_>>();
+                    let empty = baseline.through_sequence == -1
+                        || baseline.through_sequence == 0
+                            && text == crate::summary::head::HISTORY_EMPTY;
+                    if !items.is_empty() || !delta && empty {
+                        section["items"] = json!(items);
+                    }
                 }
             }
             "memory" => {
@@ -255,7 +300,27 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
             }
             "memory_updates" => {
                 if let Some(baseline) = &head.baseline {
-                    section["items"] = json!(baseline.committed.iter().flat_map(|entry|entry.lines.iter().map(move |line|json!({"form":match entry.form { Form::Full=>"full",Form::Marker=>"marker",Form::Overflow=>"overflow" },"text":crate::neutral::without_tag_notation(line)}))).collect::<Vec<_>>());
+                    let mut cursor = 0;
+                    let mut items = Vec::new();
+                    let mut known = true;
+                    for entry in &baseline.committed {
+                        for line in &entry.lines {
+                            let line = crate::neutral::without_tag_notation(line);
+                            if line.is_empty() {
+                                known = false;
+                                break;
+                            }
+                            let Some(start) = text[cursor..].find(&line).map(|n| cursor + n) else {
+                                known = false;
+                                break;
+                            };
+                            items.push(json!({"form":match entry.form { Form::Full=>"full",Form::Marker=>"marker",Form::Overflow=>"overflow" },"start":start,"len":line.len()}));
+                            cursor = start + line.len();
+                        }
+                    }
+                    if known && !items.is_empty() {
+                        section["items"] = json!(items);
+                    }
                 }
             }
             "memory_mural" => {
@@ -264,11 +329,12 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(&image.data)
                         .map_err(|_| unavailable())?;
-                    section["image"] = json!({"media_type":image.media_type,"sha256":format!("{:x}",Sha256::digest(bytes)),"data":image.data,"tokens":null});
+                    section["image"] = json!({"media_type":image.media_type,"sha256":format!("{:x}",Sha256::digest(&bytes)),"bytes":bytes.len(),"tokens":null});
                 }
             }
             _ => {}
         }
+        validate_ranges(&mut section, text);
         sections.push(section);
     }
     message["sections"] = json!(sections);
@@ -285,6 +351,34 @@ fn unescape(text: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+
+fn validate_ranges(section: &mut Value, text: &str) {
+    let valid =
+        section
+            .get("items")
+            .and_then(Value::as_array)
+            .is_none_or(|items| {
+                items.iter().all(|item| {
+                    if item.get("start").is_none() && item.get("len").is_none() {
+                        return true;
+                    }
+                    let range = item["start"].as_u64().zip(item["len"].as_u64()).and_then(
+                        |(start, len)| {
+                            Some((
+                                usize::try_from(start).ok()?,
+                                usize::try_from(start.checked_add(len)?).ok()?,
+                            ))
+                        },
+                    );
+                    range.is_some_and(|(start, end)| {
+                        text.is_char_boundary(start) && text.is_char_boundary(end)
+                    })
+                })
+            });
+    if !valid {
+        section.as_object_mut().unwrap().remove("items");
+    }
 }
 
 fn memory_items(text: &str, counter: Counter) -> Option<Vec<Value>> {
@@ -322,12 +416,30 @@ fn memory_items(text: &str, counter: Counter) -> Option<Vec<Value>> {
             ));
         }
     }
+    // Items are in text order. Each is searched for after the previous one,
+    // so a memory whose content quotes a later memory's line cannot take that
+    // memory's range.
+    let mut cursor = 0;
     for item in &mut items {
-        item["tokens"] = json!(counter.count(item["text"].as_str().expect("memory text")));
+        let rendered = item.as_object_mut().unwrap().remove("text").unwrap();
+        let rendered = rendered.as_str().expect("memory text");
+        let start = cursor + text[cursor..].find(rendered)?;
+        item["tokens"] = json!(counter.count(rendered));
+        item["start"] = json!(start);
+        item["len"] = json!(rendered.len());
+        cursor = start + rendered.len();
     }
-    Some(items)
+    (!items.is_empty()).then_some(items)
 }
+
+#[path = "head_section.rs"]
+mod section;
+pub(super) use section::{read_section, SectionRequest};
 
 #[cfg(test)]
 #[path = "head_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "head_v12_tests.rs"]
+mod v12_tests;

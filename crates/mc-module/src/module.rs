@@ -268,15 +268,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         params: Value,
     ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
         self.app_gate(&params)?;
-        if method != "context.head" {
+        if !matches!(method, "context.head" | "context.head_section") {
             return self.inner.app_read.read(method, params).await;
         }
         let result = self.inner.app_read.read(method, params.clone()).await;
         match result {
-            Err(refusal) if method == "context.head" && refusal.code == "head_not_ready" => {
+            Err(refusal) if refusal.code == "head_not_ready" => {
                 crate::app_read::idle::fetch(
                     &self.inner.app_read,
                     self.inner.client.as_ref(),
+                    method,
                     params,
                 )
                 .await

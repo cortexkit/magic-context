@@ -4,7 +4,7 @@ use crate::summary::head::{delta, fold, head_ops, Inputs};
 use cortexkit_role_compaction::view::Edit;
 use std::collections::BTreeMap;
 
-fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, Vec<String>) {
+pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("ARCHITECTURE.md"),
@@ -97,7 +97,7 @@ fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, Vec<String>
     (state, texts)
 }
 
-fn snapshot() -> Snapshot {
+pub(super) fn snapshot() -> Snapshot {
     crate::session::Session::app_sample_snapshot()
 }
 
@@ -201,15 +201,19 @@ fn shared_memory_items_name_sources_but_omit_ambiguous_boundaries() {
             .iter()
             .find(|section| section["kind"] == "memory")
             .unwrap();
-        assert_eq!(section["text"], block);
+        assert_eq!(
+            section_text(
+                &state,
+                "baseline",
+                section["index"].as_u64().unwrap() as usize
+            ),
+            block
+        );
         if known {
             let items = section["items"].as_array().unwrap();
             assert_eq!(items.len(), 2);
             assert!(items[0].get("source").is_none());
-            assert!(items[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("\n  Check the original bytes."));
+            assert!(item_text(&block, &items[0]).contains("\n  Check the original bytes."));
             assert_eq!(items[1]["source"], "Related & project");
             assert_eq!(items[1]["id"], 2);
         } else {
@@ -218,7 +222,38 @@ fn shared_memory_items_name_sources_but_omit_ambiguous_boundaries() {
     }
 }
 
-fn reconstruct(message: &Value) -> String {
+pub(super) fn section_text(state: &ReadState, slot: &str, index: usize) -> String {
+    let view = state
+        .offered
+        .as_ref()
+        .or(state.confirmed.as_ref())
+        .unwrap()
+        .version;
+    let mut text = String::new();
+    let mut offset = 0;
+    loop {
+        let params =
+            json!({"view":view,"slot":slot,"section":index,"offset":offset,"max_bytes":1024});
+        let reply = read_section(Some(state), SectionRequest::parse(&params).unwrap()).unwrap();
+        assert!(super::super::result_bytes(reply.clone()).len() <= super::super::REPLY_BUDGET);
+        text.push_str(reply["text"].as_str().unwrap());
+        let Some(next) = reply["next_offset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    text
+}
+
+pub(super) fn item_text<'a>(text: &'a str, item: &Value) -> &'a str {
+    let start = item["start"].as_u64().unwrap() as usize;
+    let end = start + item["len"].as_u64().unwrap() as usize;
+    assert!(text.is_char_boundary(start));
+    assert!(text.is_char_boundary(end));
+    &text[start..end]
+}
+
+pub(super) fn reconstruct(state: &ReadState, message: &Value) -> String {
     if message["empty"] == true {
         return message["placeholder"].as_str().unwrap().into();
     }
@@ -226,7 +261,13 @@ fn reconstruct(message: &Value) -> String {
         .as_array()
         .unwrap()
         .iter()
-        .map(|section| section["text"].as_str().unwrap())
+        .map(|section| {
+            section_text(
+                state,
+                message["slot"].as_str().unwrap(),
+                section["index"].as_u64().unwrap() as usize,
+            )
+        })
         .collect::<Vec<_>>();
     if message["slot"] == "delta" {
         format!(
@@ -246,24 +287,20 @@ fn split_real_renders_reconstructs_both_messages_and_bare_tags() {
         let (state, texts) = rendered(true, empty, false);
         let result = read(&snapshot(), Some(&state)).unwrap();
         for (message, text) in result["messages"].as_array().unwrap().iter().zip(texts) {
-            assert_eq!(reconstruct(message), text);
+            assert_eq!(reconstruct(&state, message), text);
+            assert_eq!(message["bytes"], text.len());
             assert_eq!(
                 message["tokens"],
                 Counter::for_model(Some("provider/model")).count(&text)
             );
         }
         let memory = &result["messages"][0]["sections"][3];
-        assert!(memory["text"]
-            .as_str()
-            .unwrap()
-            .contains("Expand 42 for evidence."));
-        assert!(!memory["text"].as_str().unwrap().contains('§'));
+        let text = section_text(&state, "baseline", 3);
+        assert!(text.contains("Expand 42 for evidence."));
+        assert!(!text.contains('§'));
         assert_eq!(memory["items"][0]["id"], 1);
         assert_eq!(memory["items"][0]["category"], "PROJECT_RULES");
-        assert!(memory["items"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("\n  Keep the original bytes."));
+        assert!(item_text(&text, &memory["items"][0]).contains("\n  Keep the original bytes."));
         assert_eq!(
             result["messages"][0]["sections"].as_array().unwrap().len(),
             5
@@ -315,13 +352,13 @@ fn unrecognized_sections_preserve_bytes_warn_once_and_release_with_the_head() {
     let weak = Arc::downgrade(state.offered.as_ref().unwrap());
     let mut replica = super::super::tests::replica(None);
     let key = replica.snapshots.keys().next().unwrap().clone();
-    replica.heads.insert(key.clone(), state);
+    replica.heads.insert(key.clone(), state.clone());
     for _ in 0..2 {
         let result = replica
             .read("context.head", &json!({"session":key}))
             .unwrap();
         let message = &result["messages"][0];
-        assert_eq!(reconstruct(message), expected);
+        assert_eq!(reconstruct(&state, message), expected);
         let other = message["sections"].as_array().unwrap().last().unwrap();
         assert_eq!(other["kind"], "other");
         assert!(other.get("items").is_none());
@@ -330,6 +367,7 @@ fn unrecognized_sections_preserve_bytes_warn_once_and_release_with_the_head() {
     replica.forget_head(&key);
     assert!(replica.heads.is_empty());
     assert!(replica.head_warnings.borrow().is_empty());
+    drop(state);
     assert!(weak.upgrade().is_none());
     assert!(
         replica.snapshots.contains_key(&key),
@@ -383,7 +421,13 @@ fn mismatched_attribution_is_omitted_and_counts_follow_the_serving_model() {
     let image = &baseline["sections"][4]["image"];
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(image["data"].as_str().unwrap())
+        .decode(
+            &state.offered.as_ref().unwrap().slots[0]
+                .image
+                .as_ref()
+                .unwrap()
+                .data,
+        )
         .unwrap();
     assert_eq!(image["sha256"], format!("{:x}", Sha256::digest(bytes)));
     assert!(image["tokens"].is_null());
@@ -400,6 +444,15 @@ fn unchanged_slots_share_their_text_and_baseline() {
     );
     let view = View::seal(8, ops.into_iter().map(|op| Edit::new(7, op)).collect());
     state.record(&view, before.baseline.clone(), "provider/model");
+    for (version, changed) in [(7, true), (8, false)] {
+        let params = json!({"view":version,"slot":"baseline","section":0});
+        let result = read_section(Some(&state), SectionRequest::parse(&params).unwrap());
+        if changed {
+            assert_eq!(result.unwrap_err().code, "head_changed");
+        } else {
+            assert_eq!(result.unwrap()["view"], version);
+        }
+    }
     let after = state.offered.as_ref().unwrap();
     for (old, new) in before.slots.iter().zip(&after.slots) {
         assert!(Arc::ptr_eq(old, new));
@@ -417,16 +470,16 @@ fn unchanged_slots_share_their_text_and_baseline() {
 }
 
 #[test]
-fn samples_v11() {
+fn samples_v12() {
     let mut samples = BTreeMap::<String, Vec<u8>>::new();
-    let v10 =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v10");
-    for line in std::fs::read_to_string(v10.join("SHA256SUMS"))
+    let v11 =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v11");
+    for line in std::fs::read_to_string(v11.join("SHA256SUMS"))
         .unwrap()
         .lines()
     {
         let (_, name) = line.split_once("  ").unwrap();
-        samples.insert(name.into(), std::fs::read(v10.join(name)).unwrap());
+        samples.insert(name.into(), std::fs::read(v11.join(name)).unwrap());
     }
     for name in [
         "head",
@@ -470,14 +523,16 @@ fn samples_v11() {
             Ok(result) => json!({"result":result}),
             Err(refusal) => json!({"error":refusal}),
         };
+        super::v12_tests::check_v11_round_trip(name, &state, &response);
         let sample = json!({"name":name,"request":{"method":"context.head","params":{"session":snapshot.key}},"response":response});
         samples.insert(
             format!("{name}.json"),
             format!("{}\n", serde_json::to_string_pretty(&sample).unwrap()).into_bytes(),
         );
     }
+    super::v12_tests::samples(&mut samples);
     let mut root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v11");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v12");
     let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
     let regenerate = output.is_some();
     if let Some(output) = output.filter(|value| value != "1") {
@@ -510,8 +565,12 @@ fn samples_v11() {
     );
 }
 
-fn large_head(memory_count: i64, image: Option<InsertedImage>) -> (View, Arc<Baseline>) {
-    let summaries = (1..=1000)
+pub(super) fn large_head(
+    summary_count: i64,
+    memory_count: i64,
+    image: Option<InsertedImage>,
+) -> (View, Arc<Baseline>) {
+    let summaries = (1..=summary_count)
         .map(|sequence| StoredCompartment {
             sequence,
             start_message: sequence * 2,
@@ -547,7 +606,7 @@ fn large_head(memory_count: i64, image: Option<InsertedImage>) -> (View, Arc<Bas
         profile_budget_tokens: 1000,
     };
     let baseline = fold(&inputs, image.as_ref().map(|_| "tiny-mural"));
-    assert_eq!(baseline.summary_items.len(), 1000);
+    assert_eq!(baseline.summary_items.len(), summary_count as usize);
     assert_eq!(baseline.shown.len(), memory_count as usize);
     let (m1, baseline, _) = delta(&baseline, &inputs);
     let view = View::seal(
@@ -562,7 +621,7 @@ fn large_head(memory_count: i64, image: Option<InsertedImage>) -> (View, Arc<Bas
 
 #[test]
 fn head_read_cost_for_one_thousand_summaries() {
-    let (view, baseline) = large_head(0, None);
+    let (view, baseline) = large_head(1000, 0, None);
     let mut state = ReadState::default();
     state.record(&view, Some(baseline), "provider/model");
     let snapshot = snapshot();
@@ -586,7 +645,7 @@ fn head_resident_cost_shares_one_thousand_summary_and_two_thousand_memory_record
         .slots[0]
         .image
         .clone();
-    let (view, baseline) = large_head(2000, image);
+    let (view, baseline) = large_head(1000, 2000, image);
     let mut state = ReadState::default();
     let started = std::time::Instant::now();
     state.record(&view, Some(baseline.clone()), "provider/model");

@@ -102,6 +102,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
                 "context.watch",
                 "context.states",
                 "context.head",
+                "context.head_section",
                 "context.compartment",
                 "context.cache_why",
                 "context.search",
@@ -984,7 +985,7 @@ impl Handler {
                     _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
                     value = subscription.recv() => match value? { Some(value) => value, None => return Ok(HandlerOutcome::Streamed) },
                 };
-                let bytes = crate::app_read::result_bytes(notice);
+                let bytes = crate::app_read::reply_bytes(method, notice)?;
                 tokio::select! {
                     _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
                     result = ctx.emit(bytes) => if result.is_err() { return Ok(HandlerOutcome::Streamed); },
@@ -992,14 +993,7 @@ impl Handler {
             }
         }
         let value = self.module.app_request(method, params).await?;
-        let bytes = crate::app_read::result_bytes(value);
-        if bytes.len() > 512 * 1024 {
-            return Err(Refusal::new(
-                "app_op_unavailable",
-                "App reply exceeds the frame budget.",
-                None,
-            ));
-        }
+        let bytes = crate::app_read::reply_bytes(method, value)?;
         Ok(HandlerOutcome::Response(bytes))
     }
 
@@ -1671,7 +1665,7 @@ mod app_read_tests {
             .iter()
             .find(|role| role["service_id"] == "mc-app-read")
             .unwrap();
-        for method in ["context.head", "context.states"] {
+        for method in ["context.head", "context.head_section", "context.states"] {
             assert!(service["operations"]
                 .as_array()
                 .unwrap()
@@ -1682,6 +1676,22 @@ mod app_read_tests {
             bind.principal = Some(Principal::Unverified);
             assert_eq!(app_admission(&bind).unwrap_err().code, "not_permitted");
         }
+    }
+
+    #[test]
+    fn app_read_oversized_replies_name_the_method_and_use_the_size_refusal() {
+        for method in [
+            "context.head",
+            "context.head_section",
+            "session_data.read",
+            "context.watch",
+        ] {
+            let refusal =
+                crate::app_read::reply_bytes(method, json!("x".repeat(512 * 1024))).unwrap_err();
+            assert_eq!(refusal.code, "reply_too_large");
+            assert!(refusal.message.contains(method));
+        }
+        assert!(crate::app_read::reply_bytes("context.head", json!({})).is_ok());
     }
 
     fn request() -> RouteBindRequest {

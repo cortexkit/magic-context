@@ -1,0 +1,131 @@
+{
+  "name": "head-no-mural",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": true,
+      "messages": [
+        {
+          "bytes": 446,
+          "sections": [
+            {
+              "bytes": 177,
+              "index": 0,
+              "items": [
+                {
+                  "len": 76,
+                  "name": "ARCHITECTURE.md",
+                  "start": 15,
+                  "tokens": 24
+                },
+                {
+                  "len": 68,
+                  "name": "STRUCTURE.md",
+                  "start": 93,
+                  "tokens": 22
+                }
+              ],
+              "kind": "project_docs",
+              "tokens": 60
+            },
+            {
+              "bytes": 61,
+              "index": 1,
+              "kind": "user_profile",
+              "tokens": 19
+            },
+            {
+              "bytes": 80,
+              "index": 2,
+              "items": [
+                {
+                  "compartment_id": "1",
+                  "tier": 1,
+                  "tokens": 13
+                }
+              ],
+              "kind": "history",
+              "tokens": 25
+            },
+            {
+              "bytes": 122,
+              "index": 3,
+              "items": [
+                {
+                  "category": "PROJECT_RULES",
+                  "id": 1,
+                  "len": 54,
+                  "start": 33,
+                  "tokens": 14
+                }
+              ],
+              "kind": "memory",
+              "tokens": 40
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 150
+        },
+        {
+          "bytes": 402,
+          "empty": false,
+          "sections": [
+            {
+              "bytes": 184,
+              "index": 0,
+              "items": [
+                {
+                  "form": "full",
+                  "len": 84,
+                  "start": 82
+                }
+              ],
+              "kind": "memory_updates",
+              "tokens": 45
+            },
+            {
+              "bytes": 76,
+              "index": 1,
+              "items": [
+                {
+                  "compartment_id": "2",
+                  "tier": 1,
+                  "tokens": 13
+                }
+              ],
+              "kind": "history",
+              "tokens": 29
+            },
+            {
+              "bytes": 91,
+              "index": 2,
+              "kind": "user_profile",
+              "tokens": 26
+            }
+          ],
+          "slot": "delta",
+          "tokens": 118,
+          "wrapper": {
+            "close": "</session-history-since>",
+            "open": "<session-history-since>"
+          }
+        }
+      ]
+    }
+  }
+}

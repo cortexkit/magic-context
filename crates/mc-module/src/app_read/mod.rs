@@ -29,6 +29,18 @@ pub use watch::Subscription;
 /// agent or flow. Project or user configuration must not widen this authority.
 pub const DEVELOPMENT_ADMITS_DIRECT: bool = true;
 pub const ROLE: (&str, &str) = ("mc-app-read", "v1");
+pub(crate) const REPLY_BUDGET: usize = 512 * 1024;
+
+pub(crate) fn reply_bytes(method: &str, value: Value) -> Result<Vec<u8>, Refusal> {
+    let bytes = result_bytes(value);
+    if bytes.len() > REPLY_BUDGET {
+        return Err(error(
+            "reply_too_large",
+            &format!("App reply for {method} exceeds the frame budget."),
+        ));
+    }
+    Ok(bytes)
+}
 
 pub(crate) fn result_bytes(value: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({"result":value})).expect("app reply JSON")
@@ -320,6 +332,7 @@ enum Command {
     ForgetHead(SessionRef),
     Read(String, Value, oneshot::Sender<Result<Value, Refusal>>),
     RunnerHead(
+        String,
         Value,
         cortexkit_role_compaction::view::AppliedViewAnswer,
         oneshot::Sender<Result<Value, Refusal>>,
@@ -342,6 +355,7 @@ struct Replica {
     context: Option<Connection>,
     watches: watch::Hub,
     heads: HashMap<SessionRef, head::ReadState>,
+    idle_heads: std::cell::RefCell<HashMap<SessionRef, idle::KeptHead>>,
     head_warnings: std::cell::RefCell<HashSet<(SessionRef, u64)>>,
 }
 
@@ -373,6 +387,7 @@ impl AppRead {
                     context,
                     watches: watch::Hub::new(),
                     heads: HashMap::new(),
+                    idle_heads: Default::default(),
                     head_warnings: Default::default(),
                 };
                 replica.load();
@@ -385,8 +400,8 @@ impl AppRead {
                         Command::Read(method, params, reply) => {
                             let _ = reply.send(replica.read(&method, &params));
                         }
-                        Command::RunnerHead(params, answer, reply) => {
-                            let _ = reply.send(replica.runner_head(&params, answer));
+                        Command::RunnerHead(method, params, answer, reply) => {
+                            let _ = reply.send(replica.runner_head(&method, &params, answer));
                         }
                         Command::Watch(caller, params, reply) => {
                             let result = replica.subscribe(caller, &params);
@@ -422,12 +437,13 @@ impl AppRead {
 
     async fn runner_head(
         &self,
+        method: &str,
         params: Value,
         answer: cortexkit_role_compaction::view::AppliedViewAnswer,
     ) -> Result<Value, Refusal> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Command::RunnerHead(params, answer, tx))
+            .send(Command::RunnerHead(method.into(), params, answer, tx))
             .map_err(|_| unavailable())?;
         rx.await.map_err(|_| unavailable())?
     }
@@ -444,6 +460,7 @@ impl AppRead {
 impl Replica {
     fn forget_head(&mut self, key: &SessionRef) {
         self.heads.remove(key);
+        self.idle_heads.borrow_mut().remove(key);
         self.head_warnings
             .borrow_mut()
             .retain(|(session, _)| session != key);
@@ -599,6 +616,7 @@ impl Replica {
     fn update(&mut self, update: Update) {
         let _timing = crate::notice_cost_timing::span("app.replica");
         let key = update.key;
+        self.idle_heads.borrow_mut().remove(&key);
         self.heads.insert(key.clone(), update.head);
         let h = update.header;
         let mut snapshot = self.snapshots.remove(&key).unwrap_or_else(|| Snapshot {
@@ -717,6 +735,15 @@ impl Replica {
             "session_data.read" => &["session", "section", "if_version"],
             "context.states" => &["session", "message_ids", "if_version"],
             "context.head" => &["session"],
+            "context.head_section" => &[
+                "session",
+                "view",
+                "slot",
+                "section",
+                "part",
+                "offset",
+                "max_bytes",
+            ],
             "context.compartment" => &["session", "compartment_id"],
             "context.cache_why" => &["session", "producers"],
             "context.search" => &["query", "scope", "sources", "cursor"],
@@ -727,20 +754,42 @@ impl Replica {
             return self.search(p);
         }
         let key = session(p.get("session").unwrap_or(&Value::Null))?;
+        if method == "context.head_section" {
+            head::SectionRequest::parse(params)?;
+        }
         let snapshot = match self.locate(&key) {
             Err(refusal)
-                if method == "context.head"
+                if matches!(method, "context.head" | "context.head_section")
                     && refusal.code == "store_unavailable"
                     && self.known.contains(&key) =>
             {
-                return Err(head::not_ready())
+                return self
+                    .kept_head(&key, method, params)
+                    .unwrap_or_else(|| Err(head::not_ready()))
             }
             result => result?,
         };
-        if method == "context.head" {
-            let result = head::read(snapshot, self.heads.get(&key))?;
-            self.warn_head(&key, &result);
-            return Ok(result);
+        if matches!(method, "context.head" | "context.head_section") {
+            if let Some(state) = self.heads.get(&key).filter(|state| state.ready) {
+                self.idle_heads.borrow_mut().remove(&key);
+                return self.serve_head(
+                    &key,
+                    method,
+                    params,
+                    snapshot.breakdown.without_summaries(),
+                    state,
+                );
+            }
+            if let Some(result) = self.kept_head(&key, method, params) {
+                return result;
+            }
+            return self.serve_head(
+                &key,
+                method,
+                params,
+                snapshot.breakdown.without_summaries(),
+                self.heads.get(&key).unwrap_or(&head::ReadState::default()),
+            );
         }
         let mut fields = match method {
             "session_data.read" => {
