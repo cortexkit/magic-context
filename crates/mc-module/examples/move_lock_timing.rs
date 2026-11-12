@@ -14,7 +14,7 @@ use mc_module::move_renumber::{HostMessage, Numbering};
 use mc_module::store::Store;
 use std::time::{Duration, Instant};
 
-#[path = "../src/move_in/fixture.rs"]
+#[path = "../src/move_in/fixture_tests.rs"]
 mod fixture;
 #[path = "move_lock_timing/writer.rs"]
 mod writer;

@@ -3,7 +3,7 @@ use crate::move_renumber::{renumber, HostMessage, Numbering};
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-#[path = "fixture.rs"]
+#[path = "fixture_tests.rs"]
 mod fixture_data;
 use fixture_data::{fixture, messages, request};
 
