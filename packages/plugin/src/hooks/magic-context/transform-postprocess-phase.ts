@@ -130,6 +130,7 @@ import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
+import { snapshotEmergencyServedMass } from "./emergency-drop";
 import {
     contextRefusalError,
     EmergencyFailClosedError,
@@ -3457,6 +3458,25 @@ export async function runPostTransformPhase(
         }
     }
     let autoReclaimDidMutateThisPass = false;
+    // The emergency planner below reads the provider's measure of the previous
+    // request, while queued drops landing first take content (and the
+    // reasoning beside it) out of the request this pass serves. Measure the
+    // tagged content before anything lands, so the planner can take exactly
+    // that removed mass off the reading instead of treating it as a fixed part
+    // of the request. Only passes where the planner can run pay for this.
+    const emergencyPlannerMayRun =
+        shouldRunHeuristics &&
+        forceBandConfirmed &&
+        args.emergencyCeilingTokens !== undefined &&
+        args.emergencyCeilingTokens > 0;
+    const servedBeforeRemovals = emergencyPlannerMayRun
+        ? snapshotEmergencyServedMass(
+              args.tags,
+              newTargets,
+              sessionDecisionCalibration(args.db, args.sessionId),
+              args.messages,
+          )
+        : undefined;
     // Pending-op read, temporal decisions, the background permission observer
     // start and the reasoning-removal read.
     logTransformTiming(
@@ -3592,6 +3612,7 @@ export async function runPostTransformPhase(
                                   ceilingTokens: args.emergencyCeilingTokens,
                                   usagePercentage: args.contextUsage.percentage,
                                   passAlreadyPriced: emergencyRewriteAlreadyPriced,
+                                  servedBeforePass: servedBeforeRemovals,
                               }
                             : undefined,
                     routine: routineCleanupApplied,

@@ -627,13 +627,16 @@ export function createToolDropTarget(
             [],
         measureReclaim: (skeleton) => {
             const entry = index.get(compositeKey);
+            // Count what the request carries now: a call this pass already cut
+            // to a skeleton serves its clone, not the pristine part.
+            const served = entry?.occurrences.map(servedPart) ?? [];
             const parts = entry?.occurrences.map((occ) => occ.part) ?? [];
             const count = (parts: unknown[]) =>
                 estimateMessageTokens({
                     info: { id: "reclaim", role: "assistant" },
                     parts,
                 } as MessageLike);
-            const before = count(parts);
+            const before = count(served);
             const retained = skeleton ? parts.map((part) => skeletonRealToolPart(part, tagId)) : [];
             const after = count(retained);
             // Several calls can share one thinking block; credit only tool I/O here to avoid reclaiming it twice.

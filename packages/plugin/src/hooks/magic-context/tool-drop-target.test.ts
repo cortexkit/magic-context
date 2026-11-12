@@ -825,3 +825,33 @@ it("reclaim preview counts the retained skeleton without mutating the served par
     expect(skeleton.afterTools).toBeLessThan(skeleton.beforeTools);
     expect(JSON.stringify(messages)).toBe(bytes);
 });
+
+it("reclaim preview measures what a call already cut to a skeleton this pass still serves", () => {
+    const messages = [
+        message("m", "assistant", [
+            {
+                type: "tool",
+                callID: "c",
+                tool: "read",
+                state: {
+                    input: { path: "sample.txt" },
+                    output: "word ".repeat(999),
+                    status: "completed",
+                },
+            },
+        ]),
+    ];
+    const target = createToolDropTarget(
+        "c",
+        [],
+        buildIndex(messages),
+        new ToolMutationBatch(messages),
+        12,
+    );
+    const preview = target.measureReclaim(true);
+    expect(target.skeletonReal()).toBe("truncated");
+    // The request now carries the skeleton, so that is what the call serves.
+    const after = target.measureReclaim(false);
+    expect(after.beforeTools).toBe(preview.afterTools);
+    expect(after.beforeTools).toBeLessThan(preview.beforeTools);
+});
