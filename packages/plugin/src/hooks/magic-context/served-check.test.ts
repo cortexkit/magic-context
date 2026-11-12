@@ -60,7 +60,14 @@ function step(id: string, output: string, thinking = false): Message {
 function head(): Message {
     return {
         info: { id: "m0", role: "user" },
-        parts: [{ id: "m0-p", type: "text", text: "<session-history>old</session-history>", synthetic: true }],
+        parts: [
+            {
+                id: "m0-p",
+                type: "text",
+                text: "<session-history>old</session-history>",
+                synthetic: true,
+            },
+        ],
     };
 }
 
@@ -254,7 +261,9 @@ test("a same-length edit tier 1 cannot see is found by the sampled full check", 
         expect(sampled?.events).toContain("same_shape_change");
         expect(
             logs.lines.some((line) =>
-                line.startsWith("served check: content changed with the same shape first_index=3 seen_by=full"),
+                line.startsWith(
+                    "served check: content changed with the same shape first_index=3 seen_by=full",
+                ),
             ),
         ).toBe(true);
     } finally {

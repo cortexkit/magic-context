@@ -184,9 +184,11 @@ test("Pi: ordinary turns and a plain replay log nothing; a replay with a drop th
 		// The drop also replaced the call's arguments, which tier 1 reads only
 		// shallowly: the full check names that edit as a same-shape change.
 		expect(
-			mixed.events.filter((line) => line !== replayEvent).every((line) =>
-				line.startsWith("served check: content changed with the same shape "),
-			),
+			mixed.events
+				.filter((line) => line !== replayEvent)
+				.every((line) =>
+					line.startsWith("served check: content changed with the same shape "),
+				),
 		).toBe(true);
 	} finally {
 		restoreLogs();
@@ -269,9 +271,7 @@ test("Pi compaction-off: a memory edit's fold is a change without rebuild permis
 					contextWindow: 200_000,
 				}),
 			};
-			return withEvents(() =>
-				handler({ messages } as never, ctx as never),
-			);
+			return withEvents(() => handler({ messages } as never, ctx as never));
 		};
 		expect((await pass()).events).toEqual([]);
 		step(1);

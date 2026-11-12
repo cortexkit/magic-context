@@ -9,8 +9,8 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { getTagsBySession, openDatabase } from "../../features/magic-context/storage";
-import { markTagDropped } from "../../features/magic-context/storage-tags";
 import { closeDatabase } from "../../features/magic-context/storage-db";
+import { markTagDropped } from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
@@ -83,7 +83,12 @@ function session(sessionId: string) {
         },
         user(text: string) {
             source.push({
-                info: { id: `u${clock}`, role: "user", sessionID: sessionId, time: { created: clock++ } },
+                info: {
+                    id: `u${clock}`,
+                    role: "user",
+                    sessionID: sessionId,
+                    time: { created: clock++ },
+                },
                 parts: [{ type: "text", text }],
             });
         },
@@ -160,5 +165,7 @@ test("OpenCode 1: an ordinary turn and a replay of the request before it log not
     const events = await s.pass();
     expect(s.replays).toBe(2);
     expect(events).toHaveLength(1);
-    expect(events[0]).toStartWith("served check: a replay differed from the request served before it ");
+    expect(events[0]).toStartWith(
+        "served check: a replay differed from the request served before it ",
+    );
 });

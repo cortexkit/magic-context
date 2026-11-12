@@ -1,11 +1,3 @@
-import {
-    beginServedRequest,
-    commitServedRequest,
-    countServedRefusal,
-    dropServedRecord,
-    forgetServedRecord,
-    noteServedRefusal,
-} from "../../hooks/magic-context/served-check";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
@@ -110,6 +102,14 @@ import {
 } from "../../hooks/magic-context/read-session-formatting";
 import { createM0RenderOptions } from "../../hooks/magic-context/render-options";
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
+import {
+    beginServedRequest,
+    commitServedRequest,
+    countServedRefusal,
+    dropServedRecord,
+    forgetServedRecord,
+    noteServedRefusal,
+} from "../../hooks/magic-context/served-check";
 import {
     STORAGE_BUSY_MESSAGE,
     StorageBusyRefusalError,

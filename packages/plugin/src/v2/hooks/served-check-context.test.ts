@@ -60,7 +60,6 @@ test("OpenCode 2: ordinary turns and a plain replay log nothing; a replay with a
             "served check: a replay differed from the request served before it ",
         );
         expect(mixedEvents[0]).toContain("host=opencode2");
-
     } finally {
         failure.restore();
         await fixture.cleanup();

@@ -29,6 +29,11 @@ import { dropSlot, getSlot, lkgContentDigest, noteEntry } from "../hooks/magic-c
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { replayCommittedDrops } from "../hooks/magic-context/replay-committed-drops";
 import {
+    noteExternalLkgReplay,
+    type RustLkgReplayParticipant,
+    resolveRustLkgReplayParticipant,
+} from "../hooks/magic-context/rust-lkg-freeze-registry";
+import {
     beginServedRequest,
     commitServedRequest,
     countServedRefusal,
@@ -36,11 +41,6 @@ import {
     noteServedHostInput,
     noteServedReplay,
 } from "../hooks/magic-context/served-check";
-import {
-    noteExternalLkgReplay,
-    type RustLkgReplayParticipant,
-    resolveRustLkgReplayParticipant,
-} from "../hooks/magic-context/rust-lkg-freeze-registry";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import { retirePendingSystemPromptDelivery } from "../hooks/magic-context/system-prompt-delivery";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
@@ -823,11 +823,7 @@ export function createMessagesTransformHandler(args: {
             return await run(input, output);
         } finally {
             preserveUserTerminatedTail(output.messages, inputMessages);
-            reportAssistantTerminatedTail(
-                output.messages,
-                inputTailRole,
-                resolveSessionId(output),
-            );
+            reportAssistantTerminatedTail(output.messages, inputTailRole, resolveSessionId(output));
         }
     }
 }

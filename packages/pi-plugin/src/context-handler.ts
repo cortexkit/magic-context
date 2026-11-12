@@ -256,14 +256,14 @@ import {
 } from "@magic-context/core/hooks/magic-context/recovery-fit";
 import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
+	modelAcceptsEmptyContent,
+	variantChangeBustsProviderCache,
+} from "@magic-context/core/hooks/magic-context/sentinel";
+import {
 	dropServedRecord,
 	noteServedPassPermission,
 	noteServedReplay,
 } from "@magic-context/core/hooks/magic-context/served-check";
-import {
-	modelAcceptsEmptyContent,
-	variantChangeBustsProviderCache,
-} from "@magic-context/core/hooks/magic-context/sentinel";
 import { decideSignedThinkingHold } from "@magic-context/core/hooks/magic-context/signed-thinking-hold";
 import { servedPrefixMatches } from "@magic-context/core/hooks/magic-context/strict-thinking-prefix";
 import {

@@ -5804,10 +5804,10 @@ export function checkM0MutationDriftAndSignal(args: {
 }
 
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
-import { noteServedPassPermission } from "./served-check";
 import {
     clearPendingMaterialization,
     hasPendingMaterializationOrigin,
     pendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";
+import { noteServedPassPermission } from "./served-check";

@@ -477,7 +477,6 @@ function mixPart(hash: number, rawPart: unknown): number {
     return h;
 }
 
-
 /**
  * A message's tier-1 fingerprint.
  *
@@ -645,7 +644,8 @@ function commit(args: CommitServedRequestArgs): ServedComparison {
     let leading = true;
     for (let index = 0; index < m; index += 1) {
         shapes[index] = messageShape(messages[index]);
-        if (prefixBound && keptThinkingIndex < 0 && walkOut.messageThinking) keptThinkingIndex = index;
+        if (prefixBound && keptThinkingIndex < 0 && walkOut.messageThinking)
+            keptThinkingIndex = index;
         if (leading && index >= HEAD_MIN) {
             if (walkOut.messageHead && index < HEAD_MAX) headCount = index + 1;
             else leading = false;
@@ -821,9 +821,7 @@ function commit(args: CommitServedRequestArgs): ServedComparison {
         // the change, which is fine on a pass that may rebuild.
         const unstripped = keptThinkingIndex >= 0 && firstIndex <= keptThinkingIndex;
         const stripped =
-            !unstripped &&
-            prior.keptThinkingIndex >= 0 &&
-            firstIndex <= prior.keptThinkingIndex;
+            !unstripped && prior.keptThinkingIndex >= 0 && firstIndex <= prior.keptThinkingIndex;
         if (unstripped || (stripped && permitted !== true)) {
             events.push("thinking_prefix_change");
             count.thinkingPrefixChange += 1;
