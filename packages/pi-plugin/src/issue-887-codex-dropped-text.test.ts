@@ -300,9 +300,10 @@ describe("a dropped reply whose signature Oh My Pi removed", () => {
 	const guards: [string, (message: any) => void, string?][] = [
 		["an edit that is not a drop placeholder", () => {}, "Checking parser."],
 		[
-			"native text that the hook did not change",
+			"native text that differs from the block it is paired with",
 			(message) => {
-				message.providerPayload.items[1].content[0].text = ORIGINAL;
+				message.providerPayload.items[1].content[0].text =
+					"Checking the lexer now.";
 			},
 		],
 		[
@@ -400,6 +401,27 @@ describe("a dropped reply whose signature Oh My Pi removed", () => {
 			expect(next.providerPayload).toEqual(before);
 		});
 	}
+
+	// From Oh My Pi 18.19.0 the host copies the hook's cleaned text into the
+	// native item, so it holds the same bytes as the block. Warm replay still
+	// sends that item, so the drop has to reach it.
+	test("writes the placeholder into a native item that already holds the cleaned text", async () => {
+		__setPiHarnessKindForTesting("omp");
+		const saved = await hookRewritten("commentary");
+		const messages = history(structuredClone(saved), "commentary");
+		messages[1].providerPayload.items[1].content[0].text = ORIGINAL;
+		const next = dropText(messages);
+		expect(next.providerPayload.items[1].content[0].text).toBe(PLACEHOLDER);
+		expect(next.providerPayload.items[1].phase).toBe("commentary");
+		for (const encoder of encoders) {
+			const sent = dispatch(messages, encoder.convert);
+			expect([encoder.version, sent.mismatch]).toEqual([
+				encoder.version,
+				undefined,
+			]);
+			expect(sent.bytes).not.toContain(ORIGINAL);
+		}
+	});
 });
 
 describe("a placeholder that the native item already holds", () => {
@@ -436,25 +458,38 @@ describe("a placeholder that the native item already holds", () => {
 				);
 			});
 		}
-		test(`${encoder.version}: a placeholder does not admit a clean unsigned sibling`, () => {
-			const turn = codexTurn(
-				{ type: "text", text: PLACEHOLDER },
-				PLACEHOLDER,
-				"commentary",
-			);
-			turn.content.splice(2, 0, { type: "text", text: "Second" });
-			turn.providerPayload.items.splice(2, 0, {
-				type: "message",
-				id: "msg_second",
-				role: "assistant",
-				status: "completed",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Second", annotations: [] }],
+		for (const [label, siblingNative, admitted] of [
+			[
+				"a clean unsigned sibling that its native item replays exactly",
+				"Second",
+				true,
+			],
+			["an unsigned sibling whose native text differs", "Other", false],
+		] as const)
+			test(`${encoder.version}: a placeholder beside ${label} is ${admitted ? "admitted" : "refused"}`, () => {
+				const turn = codexTurn(
+					{ type: "text", text: PLACEHOLDER },
+					PLACEHOLDER,
+					"commentary",
+				);
+				turn.content.splice(2, 0, { type: "text", text: "Second" });
+				turn.providerPayload.items.splice(2, 0, {
+					type: "message",
+					id: "msg_second",
+					role: "assistant",
+					status: "completed",
+					phase: "commentary",
+					content: [
+						{ type: "output_text", text: siblingNative, annotations: [] },
+					],
+				});
+				const { mismatch } = dispatch(
+					history(turn, "commentary"),
+					encoder.convert,
+				);
+				if (admitted) expect(mismatch).toBeUndefined();
+				else expect(mismatch).toContain("comparison=content");
 			});
-			expect(
-				dispatch(history(turn, "commentary"), encoder.convert).mismatch,
-			).toContain("comparison=content");
-		});
 	}
 });
 

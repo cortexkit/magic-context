@@ -424,23 +424,22 @@ describe("reply shapes with more than one text block", () => {
 		expect(sent.bytes).not.toContain("First.");
 	});
 
-	test("a whitespace-only hook rewrite is still mirrored", async () => {
+	test("a whitespace-only difference keeps the signature, and the drop is still mirrored", async () => {
 		__setPiHarnessKindForTesting("omp");
-		const saved = await throughHook(
-			codexTurn(
-				[
-					{
-						text: `${ORIGINAL}\n`,
-						native: `${ORIGINAL}\n`,
-						id: "msg_c",
-						phase: "commentary",
-					},
-				],
-				true,
-			),
-			runner.Runner,
+		const raw = codexTurn(
+			[
+				{
+					text: `${ORIGINAL}\n`,
+					native: `${ORIGINAL}\n`,
+					id: "msg_c",
+					phase: "commentary",
+				},
+			],
+			true,
 		);
-		expect(saved.content[1]).toEqual({ type: "text", text: ORIGINAL });
+		const saved = await throughHook(raw, runner.Runner);
+		// The hook leaves tag-free text alone, so the block stays signed.
+		expect(saved.content[1]).toEqual(raw.content[1]);
 		const messages = history(structuredClone(saved), true);
 		const next = edit(messages, [[1, PLACEHOLDER]]);
 		expect(next.providerPayload.items[1].content[0].text).toBe(PLACEHOLDER);

@@ -464,20 +464,47 @@ describe("unsigned native projection guards", () => {
 			expected: [...visible, '["Second",null]'],
 		},
 		{
-			name: "genuinely rewritten native text",
+			name: "native text rewritten beyond the leading ordinal",
 			change: (m) => {
 				m.content[0].text = "§99§ Hello";
-				native(m).content[0].text = "Hello";
+				native(m).content[0].text = "Hello there";
 			},
 			expected: ['["§99§ Hello",null]'],
 		},
 		{
-			name: "native text untouched by cleanup",
+			name: "clean native text that differs from the block",
 			change: (m) => {
-				native(m).content[0].text = "Hello";
+				native(m).content[0].text = "Hello there";
 			},
 		},
 	];
+	// From Oh My Pi 18.19.0 the host copies the hook's cleaned text into the
+	// native item, so native and block hold the same bytes and the native text
+	// needs no cleanup. Warm replay still sends that item with its phase.
+	const admitted: Array<{ name: string; text: string }> = [
+		{
+			name: "block minus its leading ordinal equals the native text",
+			text: "§99§ Hello",
+		},
+		{ name: "block equals the already-cleaned native text", text: "Hello" },
+	];
+	for (const check of admitted) {
+		test(`admits ${check.name}`, () => {
+			const message = saved();
+			message.content[0].text = check.text;
+			native(message).content[0].text = "Hello";
+			const alternatives: {
+				fallback?: readonly string[];
+				cold?: readonly string[];
+			} = {};
+			expect(
+				piResponsesAssistantTexts(message, model(), "omp", alternatives),
+			).toEqual(['["Hello","final_answer"]']);
+			expect(alternatives.fallback).toEqual([
+				JSON.stringify([check.text, null]),
+			]);
+		});
+	}
 	for (const check of rejects) {
 		test(`rejects ${check.name}`, () => {
 			const message = saved();
@@ -837,7 +864,11 @@ describe("the exact persisted assistant cleanup relation", () => {
 		] as const) {
 			test(`${host.version}: hook cleanup ${label} and two calls`, async () => {
 				let message = saved();
-				if (host.Runner)
+				// The hook leaves tag-free text alone (the whitespace-only case keeps
+				// its signature through the real runner). History saved by an older
+				// build, whose hook trimmed it, still has to replay, so that case is
+				// built in its stored form below.
+				if (host.Runner && raw.includes("§"))
 					message = await rewritten(
 						host,
 						"openai-responses",

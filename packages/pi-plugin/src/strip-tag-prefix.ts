@@ -66,6 +66,13 @@ export function stripTagPrefixFromAssistantMessage(message: {
  * {@link stripTagPrefixFromAssistantMessage}, or undefined when nothing changes.
  * Parts stay in their positions and keep every other field, because Oh My Pi
  * rejects a replacement that changes anything except text.
+ *
+ * A text part with no `§` in it is left exactly as the model wrote it. The
+ * shared cleanup also trims surrounding whitespace, and Oh My Pi treats any
+ * byte change as a rewrite: it drops the part's `textSignature` (the binding
+ * of the text to its native OpenAI Responses item and phase) and, from 18.19.0,
+ * copies the trimmed text into the stored native item. A whitespace-only trim
+ * removes no tag notation, so it is not worth losing that binding.
  */
 export function strippedAssistantContent(
 	content: unknown,
@@ -78,7 +85,7 @@ export function strippedAssistantContent(
 		if (part === null || typeof part !== "object" || part.type !== "text") {
 			continue;
 		}
-		if (typeof part.text !== "string") continue;
+		if (typeof part.text !== "string" || !part.text.includes("§")) continue;
 		const stripped = stripPersistedAssistantText(
 			part.text,
 			provider === "anthropic",

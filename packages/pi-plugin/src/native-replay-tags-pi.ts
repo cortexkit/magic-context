@@ -5,10 +5,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-replay-document";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
-import {
-	nativeResponseTagStripKey,
-	PI_NATIVE_TAG_STRIP_PROVENANCE,
-} from "./native-replay-tag-provenance-pi";
+import { nativeResponseTagStripKey } from "./native-replay-tag-provenance-pi";
 
 const FIELD = "piResponsesTagStrips";
 const TAG = /^§\d+§ /u;
@@ -89,7 +86,6 @@ export function applyNativeResponseTagReplayPi(args: {
 		const frozen = saved;
 		const content = message.content;
 		const nativeItems = payload.items;
-		const decisions: Record<string, string> = {};
 		let changed = false;
 		const items = nativeItems.map((item) => {
 			if (
@@ -144,7 +140,6 @@ export function applyNativeResponseTagReplayPi(args: {
 					return item;
 				added.add(key);
 			}
-			decisions[key] = output.text;
 			changed = true;
 			return {
 				...item,
@@ -154,7 +149,6 @@ export function applyNativeResponseTagReplayPi(args: {
 		if (changed)
 			pending.set(index, {
 				...message,
-				[PI_NATIVE_TAG_STRIP_PROVENANCE]: decisions,
 				providerPayload: { ...payload, items },
 			});
 	}
