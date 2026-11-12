@@ -12,7 +12,14 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { injectM0M1, type M0M1State, renderM0, stripMemoryMuralBlock } from "./inject-compartments";
+import {
+    injectM0M1,
+    type M0M1State,
+    renderM0,
+    servedHeadTexts,
+    stripMemoryMuralBlock,
+} from "./inject-compartments";
+import { servedPrefixMatches } from "./strict-thinking-prefix";
 import type { MessageLike } from "./tag-messages";
 
 const SESSION_ID = "ses_mural_inject";
@@ -495,5 +502,35 @@ describe("m[0] mural image fold (on-demand render → wire)", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+});
+
+// A saved m[0] from before the mural image was stored can still name a mural it
+// has no image for. The injection serves it without that block, so a head
+// compared with a served request must be read the same way, or every
+// comparison reads as a change.
+describe("servedHeadTexts", () => {
+    it("reads a saved m[0] that names a mural with no stored image as the injection serves it", () => {
+        const m0 = "<project-docs>\nv1\n</project-docs>";
+        const legacy = `${m0}\n\n<memory-mural>\nThe project memory mural image follows.\n</memory-mural>`;
+        const m1 = "<session-history>\n## 1-1 \u00b7 Baseline\n</session-history>";
+        const state = {
+            cachedM0Bytes: Buffer.from(legacy),
+            cachedM1Bytes: Buffer.from(m1),
+            cachedM0MuralDataUrl: null,
+        };
+        const served = [
+            { info: { role: "user" }, parts: [{ type: "text", text: m0 }] },
+            { info: { role: "user" }, parts: [{ type: "text", text: m1 }] },
+        ];
+        expect(servedHeadTexts(state)).toEqual({ m0Text: m0, m1Text: m1 });
+        expect(servedPrefixMatches({ messages: served, ...servedHeadTexts(state) })).toBe(true);
+        // The saved bytes themselves never equal what was served.
+        expect(servedPrefixMatches({ messages: served, m0Text: legacy, m1Text: m1 })).toBe(false);
+        // With its image stored, the block is served and kept.
+        expect(
+            servedHeadTexts({ ...state, cachedM0MuralDataUrl: "data:image/png;base64,AAAA" })
+                .m0Text,
+        ).toBe(legacy);
     });
 });

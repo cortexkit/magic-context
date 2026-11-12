@@ -55,6 +55,11 @@ type Output = Parameters<ReturnType<typeof createMessagesTransformHandler>>[1];
 
 /** A model whose signed thinking is bound to every byte in front of it. */
 const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
+/**
+ * Witnesses for defects that are still open run only with
+ * MC_SIGNED_THINKING_OPEN_DEFECTS=1; each names its defect.
+ */
+const OPEN_DEFECTS = process.env.MC_SIGNED_THINKING_OPEN_DEFECTS === "1";
 const BULKY = "BULKY-TOOL-OUTPUT const value = compute(input, options); // line\n".repeat(200);
 
 const tempDirs: string[] = [];
@@ -542,6 +547,49 @@ async function sessionUnderPressure(name: string, executeThresholdPercentage?: n
 /** Ids of the summary rows a request serves. */
 const summaryRowIds = (messages: Message[]): string[] =>
     messages.filter((message) => message.info.summary === true).map((m) => String(m.info.id));
+
+describe("review witness (second look): a marker moved outside this process changes the served row on a pass without rewrite permission", () => {
+    // Open defect: every pass rebuilds the summary row from the marker state in
+    // the shared store, so a move another process records changes this
+    // process's next request even when that pass may not rewrite the prefix.
+    // The deferred-clear tombstone cannot carry it: that state is shared too,
+    // and the moving process retires it on the same pass. Closing this needs a
+    // record, per process, of the request it last served, and replaying that
+    // request's summary row (and anything else the move changes in the host's
+    // input) until a pass that may rewrite the prefix.
+    it.skipIf(!OPEN_DEFECTS)(
+        "a marker another process moved replaces the summary row on this process's next defer pass, in front of the turn's kept signed thinking",
+        async () => {
+            const session = await sessionUnderPressure("concurrent-move");
+            // The rebuild consumes the published history; its move is postponed.
+            session.setDecision("execute");
+            session.setMarkerOutcome(busyWriter);
+            await session.serve(4, Number.POSITIVE_INFINITY);
+            session.setDecision("defer");
+            const deferred = await session.serve(5, Number.POSITIVE_INFINITY);
+            expect(summaryRowIds(deferred.messages)).toEqual([]);
+            expect(JSON.stringify(deferred.messages)).toContain('"signature":"sig-5"');
+
+            // Another process serving this session moves the pending marker on one of
+            // its own passes and records it, as the drain does when it succeeds.
+            setPersistedCompactionMarkerState(session.db(), session.sessionId, MOVED_MARKER);
+            setPendingCompactionMarkerState(session.db(), session.sessionId, null);
+
+            const next = await session.serve(6, Number.POSITIVE_INFINITY);
+            // Precondition: this pass may not change the cached prefix.
+            expect(next.logs.find((line) => line.startsWith("rewrite permission:"))).toContain(
+                "allowed=false",
+            );
+            // It must replay the previous request and append the new step. It
+            // serves the moved marker's summary row after m[1] instead, while the
+            // turn's signed thinking after that row stays on the wire.
+            expect(summaryRowIds(next.messages)).toEqual([]);
+            expect(JSON.stringify(next.messages.slice(0, deferred.messages.length))).toBe(
+                JSON.stringify(deferred.messages),
+            );
+        },
+    );
+});
 
 describe("review guard (second look): the rewrite-permission gate of the marker drain", () => {
     it("a pass that consumes a queued history refresh without rewrite permission leaves a pending marker where it is", async () => {

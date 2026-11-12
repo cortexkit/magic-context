@@ -12,7 +12,7 @@ import {
     readLkgRecoveryPrefix,
 } from "./lkg-recovery-prefix";
 import { buildLkgPrefix, captureLkgSlot, projectLkgEntry, replayLkg } from "./lkg-replay";
-import { getSlot, noteEntry, resetLkgSlotsForTest } from "./lkg-slot";
+import { getSlot, lkgContentDigest, noteEntry, resetLkgSlotsForTest } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
 
 const user = (id: string): MessageLike => ({
@@ -185,6 +185,7 @@ test("LKG instruction rows: repeated notices across the anchor replay once in or
             messages: replay.ok ? replay.messages : [],
             modelKey: "test/model",
             providerKey: "test",
+            hostTailDigests: entry.pristineTail.map(lkgContentDigest),
         }),
     ).toBe(true);
     expect(lkgRecoveryEntryUnproven("instructions", entry, messages)).toBe(false);

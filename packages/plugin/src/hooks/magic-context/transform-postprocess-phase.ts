@@ -42,7 +42,6 @@ import {
 import {
     hostInstructionRetentionEnabled,
     isHostInstructionRetentionOn,
-    markHostInstructionRetention,
 } from "../../features/magic-context/storage-host-instruction-retention";
 import {
     addMergedReasoningStrippedIds,
@@ -169,6 +168,7 @@ import {
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
+    servedHeadTexts,
 } from "./inject-compartments";
 import {
     isAnthropicThinkingPart,
@@ -1684,6 +1684,18 @@ interface RunPostTransformPhaseArgs {
     opencode1?: boolean;
     opencode2?: boolean;
     releaseRecoveryPrefix?: () => void;
+    /**
+     * The request a frozen last-good replay serves, present only while this
+     * pass starts from one. Read only on a pass that releases it, to tell
+     * whether the history head this pass renders differs from the replay's.
+     */
+    frozenRecoveryRequest?: () => readonly unknown[] | null;
+    /**
+     * The saved last-good request, present only on this process's first pass
+     * of the session when no frozen replay is in memory: after a restart it is
+     * the only record of the request served before this pass.
+     */
+    restartedLastServedRequest?: () => readonly unknown[] | null;
     /** Add §N§ reduction handles to messages sent untagged during recovery, once a fold replaces the provider's cached prefix. */
     normalizeRecoveryTail?: () => void;
     compactionMarkerStrategy?: CompactionMarkerStrategy;
@@ -1872,6 +1884,13 @@ interface RunPostTransformPhaseArgs {
      * strip of thinking that a busting pass invalidates.
      */
     thinkingBindingRecoveryEnabledForModel?: boolean;
+    /**
+     * An armed binding-recovery target this process already applied on an
+     * earlier pass and could not clear. The pass does not apply it again: its
+     * strips are saved, and applying it again would strip thinking produced
+     * after it.
+     */
+    appliedBindingRecoveryTarget?: string;
     /** Raw harness observations captured before any Magic Context insertion or sentinelization. */
     trailingBlankSourceDecisions?: TrailingBlankSourceDecisions;
     temporalCandidates?: ReadonlyMap<string, string>;
@@ -1897,6 +1916,17 @@ interface RunPostTransformPhaseArgs {
 }
 
 export interface PostTransformPhaseResult {
+    /**
+     * This process's first pass serves a history head that differs from the
+     * saved last-good request's, and stripped the signed thinking bound to it.
+     */
+    restartHeadChanged?: boolean;
+    /**
+     * Instruction-row decisions transform.ts saves in one update right before
+     * it captures the request: the rows this pass retires, and whether it turns
+     * on the switch that serves covered rows.
+     */
+    pendingHostInstructionDecisions?: { reclaim?: HostRowReclaim; retention: boolean };
     thinkingReleasedForFit?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
@@ -2139,6 +2169,14 @@ function legacyPublishedHeadChanged(args: RunPostTransformPhaseArgs): boolean {
     // A known first request has no served prefix to preserve. An absent reader,
     // unlike an empty served snapshot, cannot establish that it is a first render.
     if (served === null) return true;
+    return legacyHeadDiffersFrom(args, served);
+}
+
+/** Whether the legacy history block this pass renders differs from the one `served` begins with. */
+function legacyHeadDiffersFrom(
+    args: RunPostTransformPhaseArgs,
+    served: readonly unknown[],
+): boolean {
     const previous = served[0] as MessageLike | undefined;
     if (!Array.isArray(previous?.parts) || !args.pendingCompartmentInjection) return false;
     const text = previous.parts.find(
@@ -2152,6 +2190,30 @@ function legacyPublishedHeadChanged(args: RunPostTransformPhaseArgs): boolean {
     if (typeof text !== "string") return false;
     const block = `<session-history>\n${args.pendingCompartmentInjection.block}\n</session-history>`;
     return text !== block && !text.startsWith(`${block}\n\n`);
+}
+
+/**
+ * Whether the history head this pass renders differs from the head of `frozen`,
+ * the request a frozen last-good replay served. The m[0]/m[1] pair is read from
+ * the session's cached bytes as the final injection serves them: prefix
+ * preparation has already brought them up to date. Both sides are compared as
+ * they go out on the wire. A missing or unreadable frozen request counts as
+ * different, so the caller strips rather than keeps.
+ */
+function frozenRecoveryHeadDiffers(
+    args: RunPostTransformPhaseArgs,
+    m0M1Enabled: boolean,
+    frozen: readonly unknown[] | null,
+): boolean {
+    if (m0M1Enabled)
+        return !servedPrefixMatches({
+            messages: frozen,
+            ...servedHeadTexts(args.sessionMeta as M0M1State),
+            muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
+        });
+    if ((args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0)
+        return frozen === null || legacyHeadDiffersFrom(args, frozen);
+    return false;
 }
 
 export async function runPostTransformPhase(
@@ -2367,16 +2429,24 @@ export async function runPostTransformPhase(
     let thinkingReleasedForFit = false;
     // `stripInCompactionOff` makes a compaction-off pass remove the frozen
     // blocks from its own wire too (it otherwise only records them), for a
-    // release whose head change compaction-off cannot avoid.
-    const releaseThinkingForRewrite = (forFit = false, stripInCompactionOff = false) => {
+    // release whose head change compaction-off cannot avoid. `saved` is a strip
+    // the caller already persisted (a compaction-off fold saves its strip in the
+    // fold's transaction); the release then only applies it.
+    const releaseThinkingForRewrite = (
+        forFit = false,
+        stripInCompactionOff = false,
+        saved?: ReturnType<typeof freezeReasoningOnBustingPass>,
+    ) => {
         const stripOffWire = compactionOff && stripInCompactionOff;
-        const stripped = freezeReasoningOnBustingPass({
-            db: args.db,
-            sessionId: args.sessionId,
-            messages: args.messages,
-            alreadyFrozen: bindingThinking,
-            compactionOff: stripOffWire,
-        });
+        const stripped =
+            saved ??
+            freezeReasoningOnBustingPass({
+                db: args.db,
+                sessionId: args.sessionId,
+                messages: args.messages,
+                alreadyFrozen: bindingThinking,
+                compactionOff: stripOffWire,
+            });
         if (stripped.persistenceFailed)
             throw new Error("Cannot persist signed thinking omission before prefix rewrite");
         if (stripOffWire)
@@ -2540,6 +2610,60 @@ export async function runPostTransformPhase(
         m1Bytes: args.sessionMeta.cachedM1Bytes ?? null,
         muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
     };
+    // How a head rendered on this pass compares with the head the session last
+    // served: whether it loses the provider's cached prefix (`bustsPrefix`), and
+    // whether it changes the served bytes signed thinking is bound to
+    // (`changesHead`).
+    const compareRenderedHead = (rendered: {
+        m0Bytes: Buffer;
+        m1Bytes: Buffer;
+        muralDataUrl: string | null;
+    }) => {
+        const servedMatches = () =>
+            servedPrefixMatches({
+                messages: servedBeforeFirstRender,
+                m0Text: rendered.m0Bytes.toString(),
+                m1Text: rendered.m1Bytes.toString(),
+                muralDataUrl: rendered.muralDataUrl,
+            });
+        return {
+            bustsPrefix: activeThinkingPrefixHold
+                ? !servedMatches()
+                : foldBustsServedPrefix(foldDueDecision.reason, servedPrefixBeforeFold, rendered),
+            changesHead: firstRenderBust
+                ? !servedMatches()
+                : foldChangesServedPrefix(servedPrefixBeforeFold, rendered),
+        };
+    };
+    // Compaction-off never refuses a pass, so a head it renders in front of
+    // kept signed thinking saves the strip of that thinking inside the render's
+    // own transaction: a failed strip write then rolls the head back with it,
+    // and a later pass renders and strips together. Saved after the commit, a
+    // failed write would leave the new head saved and nothing would strip again,
+    // since compaction-off strips only on the pass whose render changed the head.
+    // A first render under a hold strips the held turn's thinking; any other
+    // render strips when it changes the head.
+    const compactionOffRenderStrip = (
+        db: ContextDatabase,
+        head: { bustsPrefix: boolean; changesHead: boolean },
+    ): ReturnType<typeof freezeReasoningOnBustingPass> | undefined => {
+        const due =
+            compactionOff &&
+            (activeThinkingPrefixHold
+                ? firstRenderBust && head.bustsPrefix
+                : args.thinkingBindingRecoveryEnabledForModel === true && head.changesHead);
+        if (!due) return undefined;
+        const strip = freezeReasoningOnBustingPass({
+            db,
+            sessionId: args.sessionId,
+            messages: args.messages,
+            alreadyFrozen: bindingThinking,
+            compactionOff: true,
+        });
+        if (strip.persistenceFailed)
+            throw new Error("Cannot persist signed thinking omission with the compaction-off fold");
+        return strip;
+    };
     if (
         (foldDueDecision.value ||
             softRefreshOpportunity ||
@@ -2553,6 +2677,8 @@ export async function runPostTransformPhase(
         // ignores reasons that only lose the provider cache: signed thinking is
         // bound to bytes, so only a byte change invalidates it.
         let committedFoldChangesHead: boolean | undefined;
+        // The thinking strip a compaction-off fold saved in its own transaction.
+        let compactionOffFoldStrip: ReturnType<typeof freezeReasoningOnBustingPass> | undefined;
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
             // Omitting messages keeps prefix preparation off-wire. The final
@@ -2582,26 +2708,9 @@ export async function runPostTransformPhase(
                         args.targets,
                     );
                     return (db, rendered) => {
-                        const bustsPrefix = activeThinkingPrefixHold
-                            ? !servedPrefixMatches({
-                                  messages: servedBeforeFirstRender,
-                                  m0Text: rendered.m0Bytes.toString(),
-                                  m1Text: rendered.m1Bytes.toString(),
-                                  muralDataUrl: rendered.muralDataUrl,
-                              })
-                            : foldBustsServedPrefix(
-                                  foldDueDecision.reason,
-                                  servedPrefixBeforeFold,
-                                  rendered,
-                              );
-                        committedFoldChangesHead = firstRenderBust
-                            ? !servedPrefixMatches({
-                                  messages: servedBeforeFirstRender,
-                                  m0Text: rendered.m0Bytes.toString(),
-                                  m1Text: rendered.m1Bytes.toString(),
-                                  muralDataUrl: rendered.muralDataUrl,
-                              })
-                            : foldChangesServedPrefix(servedPrefixBeforeFold, rendered);
+                        const head = compareRenderedHead(rendered);
+                        const bustsPrefix = head.bustsPrefix;
+                        committedFoldChangesHead = head.changesHead;
                         if (bustsPrefix) {
                             if (!conversions.isCurrent(db)) {
                                 throw new MaterializeContentionError({
@@ -2614,6 +2723,7 @@ export async function runPostTransformPhase(
                             }
                         }
                         committedFoldBustsServedPrefix = bustsPrefix;
+                        compactionOffFoldStrip = compactionOffRenderStrip(db, head);
                     };
                 },
             });
@@ -2622,7 +2732,7 @@ export async function runPostTransformPhase(
                 // Compaction-off holds every open signed turn, but a first render
                 // has no cached head to replay: the new head goes out, so the
                 // turn's thinking must leave the wire with it.
-                releaseThinkingForRewrite(false, true);
+                releaseThinkingForRewrite(false, true, compactionOffFoldStrip);
             } else if (
                 compactionOff &&
                 !activeThinkingPrefixHold &&
@@ -2640,7 +2750,7 @@ export async function runPostTransformPhase(
                     args.sessionId,
                     "compaction-off fold changed the head: stripping signed thinking",
                 );
-                releaseThinkingForRewrite(false, true);
+                releaseThinkingForRewrite(false, true, compactionOffFoldStrip);
             }
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
             foldExecutedThisPass = foldExecutesThisPass(
@@ -2895,14 +3005,51 @@ export async function runPostTransformPhase(
     if (servedShapeRepair.needsRebuild && !isCacheBustingPass)
         throw new Error("Served-shape repair requires a rebuilding pass");
     servedShapeRepair.apply(isCacheBustingPass);
+    // A frozen last-good replay keeps the history head it went out with until a
+    // pass that may rewrite the whole prefix releases it (see the end of this
+    // phase), and that pass serves the head saved now. A pass refused after it
+    // saved a new head leaves exactly that difference behind, unserved, so this
+    // pass has changed nothing in the head itself. Every signed block served
+    // since the replay is still bound to the replay's head, so a release that
+    // changes the head is a head change like a fold, and both strips below
+    // count it.
+    const releasedFrozenHeadChanged =
+        isCacheBustingPass &&
+        !activeThinkingPrefixHold &&
+        args.frozenRecoveryRequest !== undefined &&
+        frozenRecoveryHeadDiffers(args, m0M1EnabledForFold, args.frozenRecoveryRequest());
+    if (releasedFrozenHeadChanged)
+        sessionLog(
+            args.sessionId,
+            "frozen replay release: the history head differs from the replay's; counting it as a head change",
+        );
+    // A frozen replay lives only in memory, so after a restart the first pass
+    // can serve a head that a refused pass saved but never served, on a pass
+    // without rewrite permission. Every signed block served since was produced
+    // behind the head of the saved last-good request. When the head this pass
+    // serves differs from that one, the change is already on this request, so
+    // the pass strips every kept signed block, as any head change does, and
+    // transform.ts records the rewrite with its reason.
+    const restartHeadChanged =
+        !compactionOff &&
+        args.thinkingBindingRecoveryEnabledForModel === true &&
+        args.restartedLastServedRequest !== undefined &&
+        frozenRecoveryHeadDiffers(args, m0M1EnabledForFold, args.restartedLastServedRequest());
+    if (restartHeadChanged) {
+        sessionLog(
+            args.sessionId,
+            "restart: the history head differs from the saved last-good request's; stripping signed thinking",
+        );
+        releaseThinkingForRewrite();
+    }
     // An unheld bust of a prefix-bound model whose turn still keeps signed
     // thinking lands like a bust on any other model: latest-turn protection is
     // lifted so queued drops and cleanup in the turn apply on it. A bust that
     // changes anything before the kept thinking must then strip every signed
     // block, because those blocks no longer match their prefix:
-    // - a pass whose head changed (fold, first render, m[1] refresh) strips
-    //   now, before any lane edits, through the same persisted freeze a held
-    //   pass's release uses;
+    // - a pass whose head changed (fold, first render, m[1] refresh, a frozen
+    //   replay released with a different head) strips now, before any lane
+    //   edits, through the same persisted freeze a held pass's release uses;
     // - any other bust (flush, pressure, subagent execute) strips
     //   at the end of the pass through the proactive strip, only if one of its
     //   edits lies before newer thinking, so a bust with nothing to apply keeps
@@ -2918,7 +3065,8 @@ export async function runPostTransformPhase(
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
             publishedM1RefreshedThisPass ||
-            hostCheckpointRide
+            hostCheckpointRide ||
+            releasedFrozenHeadChanged
         )
             releaseThinkingForRewrite();
         else {
@@ -4016,6 +4164,9 @@ export async function runPostTransformPhase(
             preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId);
         }
         const tInjectM0M1 = performance.now();
+        // The thinking strip a compaction-off render in this call saved in its
+        // own transaction.
+        let finalRenderStrip: ReturnType<typeof freezeReasoningOnBustingPass> | undefined;
         try {
             const messagesBeforeInjection = args.messages.slice();
             const result = injectM0M1({
@@ -4041,7 +4192,29 @@ export async function runPostTransformPhase(
                 // path: memory/docs/user-profile render, but historical
                 // compartment rows never reach <session-history>.
                 compactionOff,
+                // This call replays the saved pair when there is one. When it
+                // renders instead (no head is saved, for example after the
+                // preparation's render rolled back), compaction-off saves the
+                // thinking strip in the render's transaction, as the
+                // preparation does. The hook runs only when the call renders.
+                ...(compactionOff
+                    ? {
+                          onFoldPrepare: () => (db, rendered) => {
+                              finalRenderStrip = compactionOffRenderStrip(
+                                  db,
+                                  compareRenderedHead(rendered),
+                              );
+                          },
+                      }
+                    : {}),
             });
+            if (finalRenderStrip?.strip) {
+                sessionLog(
+                    args.sessionId,
+                    "compaction-off render changed the head: stripping signed thinking",
+                );
+                releaseThinkingForRewrite(false, true, finalRenderStrip);
+            }
             deliveredPrefix = result;
             if (result.prefixTrimStatus === "applied") {
                 // Preparation can summarize history without removing messages from
@@ -4869,7 +5042,11 @@ export async function runPostTransformPhase(
                     : null;
             // The latest-turn thinking recovery shares the column; its state
             // is not an armed binding flag and must not strip every block.
-            if (flagTarget && !isLatestThinkingRecoveryTarget(flagTarget)) {
+            if (
+                flagTarget &&
+                !isLatestThinkingRecoveryTarget(flagTarget) &&
+                flagTarget !== args.appliedBindingRecoveryTarget
+            ) {
                 thinkingBindingRecovery = freezeAllReasoningForBindingRecovery({
                     db: args.db,
                     sessionId: args.sessionId,
@@ -5207,6 +5384,7 @@ export async function runPostTransformPhase(
         dropModeSwitchesThisPass ||
         // Re-tagging a replayed tail is an edit in front of newer thinking.
         recoveryTailNormalizedThisPass ||
+        releasedFrozenHeadChanged ||
         firstApplicationEdits.beforeNewerThinking;
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
     if (
@@ -5241,18 +5419,19 @@ export async function runPostTransformPhase(
         }
     }
 
-    // Host retirements must not survive a failed required thinking-strip write.
-    // The omission above is durable before its dependent row edit is committed.
-    hostRowReclaim?.commit();
-    // Likewise the retention switch: a pass that fails before this point must
-    // not leave covered rows served on a following pass that may not rewrite
-    // the prefix.
-    if (
-        retainCoveredInstructions &&
-        !coveredRetentionOn &&
-        !markHostInstructionRetention(args.db, args.sessionId)
-    )
-        failPass("host-instruction-retention-persistence-failure");
+    // The pass's instruction-row decisions (the rows it retires and the switch
+    // that serves covered rows) are saved by transform.ts in one update right
+    // before it captures the request, after its last refusal site, so a pass
+    // refused anywhere before that leaves neither behind for a later pass to
+    // replay unserved. They stay after the thinking-strip writes above, which
+    // must be durable before any row edit they protect is saved.
+    const pendingHostInstructionDecisions =
+        hostRowReclaim || (retainCoveredInstructions && !coveredRetentionOn)
+            ? {
+                  reclaim: hostRowReclaim,
+                  retention: retainCoveredInstructions && !coveredRetentionOn,
+              }
+            : undefined;
 
     // Reasoning that a drop neutralized this pass. Canonical Anthropic keeps the
     // empty sentinel its adapter drops (its existing bytes). Elsewhere a drop
@@ -5582,6 +5761,8 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
+        pendingHostInstructionDecisions,
+        restartHeadChanged,
     };
 }
 

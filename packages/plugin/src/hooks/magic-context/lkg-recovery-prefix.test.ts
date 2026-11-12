@@ -47,6 +47,7 @@ function recovery() {
             messages: output,
             modelKey: null,
             providerKey: null,
+            hostTailDigests: entry.pristineTail.map(lkgContentDigest),
         }),
     ).toBe(true);
     return { raw, entry, output };

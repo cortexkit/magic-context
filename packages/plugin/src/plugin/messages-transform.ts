@@ -25,7 +25,7 @@ import {
 } from "../hooks/magic-context/lkg-recovery-prefix";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { lkgReplayFits, lkgReplayLimit } from "../hooks/magic-context/lkg-replay-fit";
-import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
+import { dropSlot, getSlot, lkgContentDigest, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { replayCommittedDrops } from "../hooks/magic-context/replay-committed-drops";
 import {
@@ -287,6 +287,10 @@ export function tryMessagesTransformLkgReplay(args: {
             } else {
                 const inputMessages = output.messages as MessageLike[];
                 const keys = resolveLkgModelKeys(inputMessages);
+                // The replay shares the entry's tail objects and edits them in
+                // place (saved thinking strips, committed drops), so digest the
+                // host's messages before it runs; see noteLkgRecoveryPrefix.
+                const hostTailDigests = rust ? [] : entry.pristineTail.map(lkgContentDigest);
                 const replay = replayLkg({
                     sessionId,
                     messages: inputMessages,
@@ -370,6 +374,7 @@ export function tryMessagesTransformLkgReplay(args: {
                             entry,
                             messages: replay.messages,
                             ...keys,
+                            hostTailDigests,
                             db,
                         })
                     )

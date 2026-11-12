@@ -29,8 +29,10 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { recordHostInstructionDecisions } from "../../features/magic-context/storage-host-instruction-retention";
 import {
     addMergedReasoningStrippedIds,
+    bindingRecoveryAwaitingClear,
     casChannel2NudgeState,
     clearDetectedContextLimit,
     clearEmergencyDropSample,
@@ -47,9 +49,11 @@ import {
     getOverflowState,
     getPersistedCompactionMarkerState,
     loadTransformPassStateSnapshot,
+    noteBindingRecoveryAwaitingClear,
     recordOverflowDetected,
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
+    retryBindingRecoveryClear,
 } from "../../features/magic-context/storage-meta-persisted";
 import { isTagOwnerSummaryReady } from "../../features/magic-context/storage-tags";
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
@@ -295,6 +299,26 @@ export { EmergencyFailClosedError } from "./emergency-fail-closed";
 // stable across transform passes. Cleared on session.deleted and entries are
 // invalidated on message.removed via clearMessageTokensCache().
 //
+/**
+ * Runs one statement that follows the capture of a pass's request as the last
+ * good one. From that point the request is decided: a refusal would leave the
+ * wrapper holding the refused pass's output as the request to replay, so every
+ * later statement is best effort. A failure is logged under the statement's
+ * name, and the pass goes on with the next statement.
+ */
+function afterCapture<T>(sessionId: string, statement: string, run: () => T): T | undefined {
+    try {
+        return run();
+    } catch (error) {
+        sessionLog(
+            sessionId,
+            `${statement} failed after the request was decided; serving the pass:`,
+            error,
+        );
+        return undefined;
+    }
+}
+
 // Bounded LRU on the outer key: sessions that are never explicitly deleted
 // (crashed OpenCode, archived but not deleted sessions, sessions outliving
 // the plugin process's interest) would otherwise leak their inner Maps
@@ -1393,6 +1417,17 @@ export function createTransform(deps: TransformDeps) {
             findLastAssistantModel(messages) ?? deps.liveModelBySession?.get(sessionId);
         const thinkingRecoveryModel =
             findNewestUserModel(messages) ?? deps.liveModelBySession?.get(sessionId);
+        // A binding recovery this process applied but could not clear is
+        // cleared here, before anything reads the column it shares with the
+        // latest-turn recovery. While the clear keeps failing, the recovery is
+        // not applied again: its strips are saved and replay on every pass, and
+        // applying it again would strip thinking produced after it.
+        try {
+            retryBindingRecoveryClear(db, sessionId);
+        } catch (error) {
+            sessionLog(sessionId, "thinking binding recovery: retried clear failed:", error);
+        }
+        const appliedBindingRecoveryTarget = bindingRecoveryAwaitingClear(sessionId);
         const thinkingRecovery = prepareLatestThinkingRecovery({
             db,
             sessionId,
@@ -3716,6 +3751,27 @@ export function createTransform(deps: TransformDeps) {
             opencode2: deps.storeGeneration === "v2",
             structuralSentinelUpgradeFailed,
             releaseRecoveryPrefix: releaseRecoveryReplay,
+            frozenRecoveryRequest: recovery.prefix
+                ? () => {
+                      try {
+                          const frozen: unknown = JSON.parse(recovery.prefix?.json ?? "null");
+                          return Array.isArray(frozen) ? frozen : null;
+                      } catch {
+                          return null;
+                      }
+                  }
+                : undefined,
+            restartedLastServedRequest:
+                recovery.restartedSlotJson !== undefined
+                    ? () => {
+                          try {
+                              const saved: unknown = JSON.parse(recovery.restartedSlotJson ?? "");
+                              return Array.isArray(saved) ? saved : null;
+                          } catch {
+                              return null;
+                          }
+                      }
+                    : undefined,
             normalizeRecoveryTail,
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
@@ -3839,6 +3895,7 @@ export function createTransform(deps: TransformDeps) {
                 : undefined,
             restoreLatestTurnOriginals,
             resolvedModelID: modelForBudget?.modelID,
+            appliedBindingRecoveryTarget,
             thinkingBindingRecoveryEnabledForModel: isPrefixBoundThinkingModel(
                 modelForBudget?.providerID,
                 modelForBudget?.modelID,
@@ -3887,7 +3944,9 @@ export function createTransform(deps: TransformDeps) {
                 ? "recovery_tail_normalized"
                 : recoveryReleased
                   ? "recovery_prefix_released"
-                  : undefined);
+                  : postTransformResult.restartHeadChanged
+                    ? "lkg_restart_head_changed"
+                    : undefined);
         if (recoveryReleaseReason) postTransformResult.bustedThisPass = true;
         passOutcome.markFinalized();
 
@@ -4456,17 +4515,53 @@ export function createTransform(deps: TransformDeps) {
         // Keep the durable untagged-message record equal to what this pass serves
         // untagged, before the pass is served: a restart then keeps serving them
         // untagged. It empties once a pass tagged them (or none is left to serve).
-        // A failed write fails the pass, so the last good request is replayed.
+        // The pass's instruction-row decisions (see
+        // pendingHostInstructionDecisions) go into the same replay-document
+        // update. This is the last refusal site before the capture: a failed
+        // update saves neither, refuses the pass, and the last good request is
+        // replayed. Rows are marked retired on the served messages only once the
+        // update is saved.
+        const instructionDecisions = postTransformResult.pendingHostInstructionDecisions;
+        const reclaim = instructionDecisions?.reclaim;
+        const decisionsDue =
+            instructionDecisions !== undefined &&
+            (instructionDecisions.retention || reclaim?.hasDecisions === true);
         if (!compactionOff) {
             const stillUntagged =
                 untaggedReplayTailServed && !recoveryNormalized ? [...untaggedReplayIds] : [];
-            if (
+            const untaggedChanged =
                 JSON.stringify([...new Set(stillUntagged)].sort()) !==
-                    JSON.stringify([...new Set(persistedUntaggedInputIds)].sort()) &&
-                !persistLkgUntaggedInputIds(db, sessionId, stillUntagged)
-            )
+                JSON.stringify([...new Set(persistedUntaggedInputIds)].sort());
+            if (
+                (untaggedChanged || decisionsDue) &&
+                !persistLkgUntaggedInputIds(
+                    db,
+                    sessionId,
+                    untaggedChanged ? stillUntagged : undefined,
+                    decisionsDue
+                        ? (doc) =>
+                              recordHostInstructionDecisions(doc, {
+                                  retention: instructionDecisions?.retention === true,
+                                  record: reclaim ? (target) => reclaim.record(target) : undefined,
+                              })
+                        : undefined,
+                )
+            ) {
+                if (decisionsDue) {
+                    const failure = new Error(
+                        "Cannot persist the last-good records with this pass's instruction-row decisions",
+                    );
+                    sessionLog(
+                        sessionId,
+                        "transform refused degraded pass site=host-instruction-retention-persistence-failure:",
+                        failure,
+                    );
+                    failPass("host-instruction-retention-persistence-failure", failure);
+                }
                 throw new Error("Cannot persist the last-good untagged-message record");
+            }
         }
+        reclaim?.markRetired();
         // The system date rides a bust, but on a prefix-bound model only one
         // that serves no signed thinking: every such block is bound to the
         // system prompt in front of it, whether the bust kept it (it edited
@@ -4503,6 +4598,12 @@ export function createTransform(deps: TransformDeps) {
         // returned message, including its already-served raw tail. Models whose
         // thinking signatures depend on earlier bytes also need complete arrays
         // to reproduce those bytes after restart.
+        //
+        // Once captureLkgSlot below has taken this pass's output, the request is
+        // decided: nothing after it may turn the pass into a refusal, or the
+        // wrapper would hold the refused output as the last good request. Every
+        // statement after the capture runs through afterCapture, except
+        // noteLkgHealthyPrefix, which the next pass needs to be correct.
         if (passOutcome.captureEligible || recovery.prefix || recoveryReleaseReason) {
             const keys = resolveLkgModelKeys(messages);
             const modelKey = modelForBudget
@@ -4525,8 +4626,9 @@ export function createTransform(deps: TransformDeps) {
             if (captured) {
                 // Preserve ordinary publication timing. Recovery already published
                 // dirty before returning, so its fence stays dirty until this save lands.
-                const capturedSlot = getInMemorySlot(sessionId);
-                if (capturedSlot) {
+                afterCapture(sessionId, "deferred last-good save", () => {
+                    const capturedSlot = getInMemorySlot(sessionId);
+                    if (!capturedSlot) return;
                     const revision =
                         lkgDirtyRevision(sessionId) ??
                         dirtyLkgRecoveryRevision(sessionId, capturedSlot);
@@ -4567,7 +4669,7 @@ export function createTransform(deps: TransformDeps) {
                             }
                         }),
                     );
-                }
+                });
                 noteLkgHealthyPrefix(sessionId, lkgInput, messages, !!recoveryReleaseReason);
             }
             if (!captured) {
@@ -4603,65 +4705,67 @@ export function createTransform(deps: TransformDeps) {
         // its own assistant for the cache diagnostics. A pass that removed the
         // provider's latest turn's thinking after a rejection changed bytes from
         // that turn on, without a rebuild of its own, so it records that reason.
-        if (
-            postTransformResult.bustedThisPass ||
-            hardCacheExpired ||
-            thinkingRecovery.removedThisPass
-        ) {
-            recordPendingTransformDecision(sessionId, {
-                tsMs: Date.now(),
-                decision: schedulerDecision,
-                materialized: postTransformResult.materialized,
-                materializeReason: normalizeMaterializeReason(
-                    "opencode",
-                    postTransformResult.materializeReason ??
-                        (thinkingRecovery.removedThisPass
-                            ? LATEST_TURN_THINKING_REMOVED_REASON
-                            : hardCacheExpired
-                              ? "ttl_idle"
-                              : null),
-                    postTransformResult.materialized,
-                ),
-                systemHashPrev: postTransformResult.systemHashPrev,
-                systemHashNew: postTransformResult.systemHashNew,
-                m0ToolSetHashPrev: postTransformResult.m0ToolSetHashPrev,
-                m0ToolSetHashNew: postTransformResult.m0ToolSetHashNew,
-                m0ModelKeyPrev: postTransformResult.m0ModelKeyPrev,
-                m0ModelKeyNew: postTransformResult.m0ModelKeyNew,
-                emergency: postTransformResult.emergency,
-                droppedTokens: postTransformResult.droppedTokens,
-                droppedCount: postTransformResult.droppedCount,
-                inputTokens: contextUsage.inputTokens,
-                bustedThisPass: true,
-                lkgFrozenReleaseReason: recoveryReleaseReason,
-            });
-        } else {
-            // A pass that changed no message bytes stages no decision row. Keep its
-            // decision in memory anyway: if the system prompt hook detects a changed
-            // prompt on the same request, that request still rewrites the provider's
-            // prompt cache and its row is built from this decision.
-            noteOpenCodeUnbustedPass(sessionId, {
-                tsMs: Date.now(),
-                decision: schedulerDecision,
-                materialized: postTransformResult.materialized,
-                materializeReason: normalizeMaterializeReason(
-                    "opencode",
-                    postTransformResult.materializeReason,
-                    postTransformResult.materialized,
-                ),
-                systemHashPrev: postTransformResult.systemHashPrev,
-                systemHashNew: postTransformResult.systemHashNew,
-                m0ToolSetHashPrev: postTransformResult.m0ToolSetHashPrev,
-                m0ToolSetHashNew: postTransformResult.m0ToolSetHashNew,
-                m0ModelKeyPrev: postTransformResult.m0ModelKeyPrev,
-                m0ModelKeyNew: postTransformResult.m0ModelKeyNew,
-                emergency: postTransformResult.emergency,
-                droppedTokens: postTransformResult.droppedTokens,
-                droppedCount: postTransformResult.droppedCount,
-                inputTokens: contextUsage.inputTokens,
-                bustedThisPass: false,
-            });
-        }
+        afterCapture(sessionId, "transform decision record", () => {
+            if (
+                postTransformResult.bustedThisPass ||
+                hardCacheExpired ||
+                thinkingRecovery.removedThisPass
+            ) {
+                recordPendingTransformDecision(sessionId, {
+                    tsMs: Date.now(),
+                    decision: schedulerDecision,
+                    materialized: postTransformResult.materialized,
+                    materializeReason: normalizeMaterializeReason(
+                        "opencode",
+                        postTransformResult.materializeReason ??
+                            (thinkingRecovery.removedThisPass
+                                ? LATEST_TURN_THINKING_REMOVED_REASON
+                                : hardCacheExpired
+                                  ? "ttl_idle"
+                                  : null),
+                        postTransformResult.materialized,
+                    ),
+                    systemHashPrev: postTransformResult.systemHashPrev,
+                    systemHashNew: postTransformResult.systemHashNew,
+                    m0ToolSetHashPrev: postTransformResult.m0ToolSetHashPrev,
+                    m0ToolSetHashNew: postTransformResult.m0ToolSetHashNew,
+                    m0ModelKeyPrev: postTransformResult.m0ModelKeyPrev,
+                    m0ModelKeyNew: postTransformResult.m0ModelKeyNew,
+                    emergency: postTransformResult.emergency,
+                    droppedTokens: postTransformResult.droppedTokens,
+                    droppedCount: postTransformResult.droppedCount,
+                    inputTokens: contextUsage.inputTokens,
+                    bustedThisPass: true,
+                    lkgFrozenReleaseReason: recoveryReleaseReason,
+                });
+            } else {
+                // A pass that changed no message bytes stages no decision row. Keep its
+                // decision in memory anyway: if the system prompt hook detects a changed
+                // prompt on the same request, that request still rewrites the provider's
+                // prompt cache and its row is built from this decision.
+                noteOpenCodeUnbustedPass(sessionId, {
+                    tsMs: Date.now(),
+                    decision: schedulerDecision,
+                    materialized: postTransformResult.materialized,
+                    materializeReason: normalizeMaterializeReason(
+                        "opencode",
+                        postTransformResult.materializeReason,
+                        postTransformResult.materialized,
+                    ),
+                    systemHashPrev: postTransformResult.systemHashPrev,
+                    systemHashNew: postTransformResult.systemHashNew,
+                    m0ToolSetHashPrev: postTransformResult.m0ToolSetHashPrev,
+                    m0ToolSetHashNew: postTransformResult.m0ToolSetHashNew,
+                    m0ModelKeyPrev: postTransformResult.m0ModelKeyPrev,
+                    m0ModelKeyNew: postTransformResult.m0ModelKeyNew,
+                    emergency: postTransformResult.emergency,
+                    droppedTokens: postTransformResult.droppedTokens,
+                    droppedCount: postTransformResult.droppedCount,
+                    inputTokens: contextUsage.inputTokens,
+                    bustedThisPass: false,
+                });
+            }
+        });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 
         // Estimate the total token size of the transformed messages array so
@@ -4697,76 +4801,78 @@ export function createTransform(deps: TransformDeps) {
         // historian-driven drop), the cache will be ~slightly stale until
         // the next cache-busting pass; acceptable drift for a display
         // estimate.
-        const msgTokens = getMessageTokensCache(sessionId);
-        // Durable second tier: the tag store holds per-message real-token counts
-        // computed ONCE at tag-insert time and persisted, so a cold pass (empty
-        // in-process cache after restart) reads them instead of re-tokenizing the
-        // tail. Injected m[0]/m[1] blocks and synthetic-todowrite are never
-        // tagged, so they fall through to the live walk below and stay counted in
-        // conversation_tokens — preserving the display-layer subtraction contract
-        // (the RPC handler subtracts compartments/memories/docs/profile from this
-        // total to isolate real conversation). A message with any NULL-count tag
-        // (legacy, mid-backfill) is absent here this pass and live-tokenizes,
-        // converging to the stored path once the tagger backfills it.
-        let storedByMessage = new Map<
-            string,
-            { conversation: number; toolCall: number; hasNull: boolean }
-        >();
-        const uncachedMessageIds = messages.flatMap((message) => {
-            const messageId = (message.info as { id?: string }).id;
-            return messageId !== undefined && !msgTokens.has(messageId) ? [messageId] : [];
-        });
-        if (uncachedMessageIds.length > 0) {
+        afterCapture(sessionId, "conversation token estimate", () => {
+            const msgTokens = getMessageTokensCache(sessionId);
+            // Durable second tier: the tag store holds per-message real-token counts
+            // computed ONCE at tag-insert time and persisted, so a cold pass (empty
+            // in-process cache after restart) reads them instead of re-tokenizing the
+            // tail. Injected m[0]/m[1] blocks and synthetic-todowrite are never
+            // tagged, so they fall through to the live walk below and stay counted in
+            // conversation_tokens — preserving the display-layer subtraction contract
+            // (the RPC handler subtracts compartments/memories/docs/profile from this
+            // total to isolate real conversation). A message with any NULL-count tag
+            // (legacy, mid-backfill) is absent here this pass and live-tokenizes,
+            // converging to the stored path once the tagger backfills it.
+            let storedByMessage = new Map<
+                string,
+                { conversation: number; toolCall: number; hasNull: boolean }
+            >();
+            const uncachedMessageIds = messages.flatMap((message) => {
+                const messageId = (message.info as { id?: string }).id;
+                return messageId !== undefined && !msgTokens.has(messageId) ? [messageId] : [];
+            });
+            if (uncachedMessageIds.length > 0) {
+                try {
+                    storedByMessage = omitIncompleteFileTokenTotals(
+                        db,
+                        sessionId,
+                        messages.flatMap((message) =>
+                            message.info.id ? [{ id: message.info.id, parts: message.parts }] : [],
+                        ),
+                        getActiveTagTokenTotalsByMessage(db, sessionId, uncachedMessageIds),
+                    );
+                } catch {
+                    storedByMessage = new Map();
+                }
+            }
+            let conversationTokens = 0;
+            let toolCallTokens = 0;
+            for (const message of messages) {
+                const mid = (message.info as { id?: string }).id;
+                if (mid) {
+                    const cached = msgTokens.get(mid);
+                    if (cached) {
+                        conversationTokens += cached.conversation;
+                        toolCallTokens += cached.toolCall;
+                        continue;
+                    }
+                    const stored = storedByMessage.get(mid);
+                    if (stored && !stored.hasNull) {
+                        conversationTokens += stored.conversation;
+                        toolCallTokens += stored.toolCall;
+                        msgTokens.set(mid, {
+                            conversation: stored.conversation,
+                            toolCall: stored.toolCall,
+                        });
+                        continue;
+                    }
+                }
+                const estimated = estimateMessageTokens(message);
+                if (mid) msgTokens.set(mid, estimated);
+                conversationTokens += estimated.conversation;
+                toolCallTokens += estimated.toolCall;
+            }
             try {
-                storedByMessage = omitIncompleteFileTokenTotals(
-                    db,
-                    sessionId,
-                    messages.flatMap((message) =>
-                        message.info.id ? [{ id: message.info.id, parts: message.parts }] : [],
-                    ),
-                    getActiveTagTokenTotalsByMessage(db, sessionId, uncachedMessageIds),
-                );
-            } catch {
-                storedByMessage = new Map();
-            }
-        }
-        let conversationTokens = 0;
-        let toolCallTokens = 0;
-        for (const message of messages) {
-            const mid = (message.info as { id?: string }).id;
-            if (mid) {
-                const cached = msgTokens.get(mid);
-                if (cached) {
-                    conversationTokens += cached.conversation;
-                    toolCallTokens += cached.toolCall;
-                    continue;
-                }
-                const stored = storedByMessage.get(mid);
-                if (stored && !stored.hasNull) {
-                    conversationTokens += stored.conversation;
-                    toolCallTokens += stored.toolCall;
-                    msgTokens.set(mid, {
-                        conversation: stored.conversation,
-                        toolCall: stored.toolCall,
-                    });
-                    continue;
+                updateSessionMeta(db, sessionId, { conversationTokens, toolCallTokens });
+            } catch (error) {
+                // Pure display/telemetry optimization — never fail transform on a
+                // BUSY/transient error here. Next pass will refresh the value.
+                const code = (error as { code?: string } | null)?.code;
+                if (code !== "SQLITE_BUSY") {
+                    sessionLog(sessionId, "conversation_tokens UPDATE failed:", error);
                 }
             }
-            const estimated = estimateMessageTokens(message);
-            if (mid) msgTokens.set(mid, estimated);
-            conversationTokens += estimated.conversation;
-            toolCallTokens += estimated.toolCall;
-        }
-        try {
-            updateSessionMeta(db, sessionId, { conversationTokens, toolCallTokens });
-        } catch (error) {
-            // Pure display/telemetry optimization — never fail transform on a
-            // BUSY/transient error here. Next pass will refresh the value.
-            const code = (error as { code?: string } | null)?.code;
-            if (code !== "SQLITE_BUSY") {
-                sessionLog(sessionId, "conversation_tokens UPDATE failed:", error);
-            }
-        }
+        });
 
         // The final-array walk runs inside runPostTransformPhase after its last
         // byte mutation. Report both channel verdicts from that same baseline;
@@ -4830,31 +4936,40 @@ export function createTransform(deps: TransformDeps) {
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
 
-        withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
+        afterCapture(sessionId, "auto-embed scheduling", () =>
+            withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId)),
+        );
 
         const bindingRecovery = postTransformResult.thinkingBindingRecovery;
         if (bindingRecovery) {
-            const cleared = clearThinkingBindingRecoveryIf(
-                db,
-                sessionId,
-                bindingRecovery.flagTarget,
+            // A target this pass cannot clear stays armed. Every later pass
+            // retries the clear before it reads the column, and does not apply
+            // the recovery again meanwhile; the strips are already saved.
+            const cleared = afterCapture(sessionId, "thinking binding recovery clear", () =>
+                clearThinkingBindingRecoveryIf(db, sessionId, bindingRecovery.flagTarget),
             );
+            if (cleared === undefined)
+                noteBindingRecoveryAwaitingClear(sessionId, bindingRecovery.flagTarget);
             sessionLog(
                 sessionId,
-                `thinking binding recovery: stripped bound reasoning from ${bindingRecovery.messageIds.length} assistant(s) [${bindingRecovery.messageIds.join(",")}]; flag=${cleared ? "cleared" : "rearmed"}`,
+                `thinking binding recovery: stripped bound reasoning from ${bindingRecovery.messageIds.length} assistant(s) [${bindingRecovery.messageIds.join(",")}]; flag=${cleared === undefined ? "kept" : cleared ? "cleared" : "rearmed"}`,
             );
         }
         if (passOutcome.captureEligible)
-            finalWireUsage.capture(sessionId, {
-                messages,
-                systemPromptTokens: sessionMeta.systemPromptTokens,
-                providerID: modelForBudget?.providerID,
-                modelID: modelForBudget?.modelID,
-                agentName: notificationParams.agent,
-                sessionId,
-                systemPromptHash: sessionMeta.systemPromptHash,
-            });
-        deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted);
+            afterCapture(sessionId, "final wire usage capture", () =>
+                finalWireUsage.capture(sessionId, {
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                    sessionId,
+                    systemPromptHash: sessionMeta.systemPromptHash,
+                }),
+            );
+        afterCapture(sessionId, "pass permission report", () =>
+            deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted),
+        );
     };
 
     const timedTransform: typeof transform = (input, output) =>

@@ -2803,6 +2803,44 @@ export function armThinkingBindingRecovery(db: Database, sessionId: string): voi
     db.prepare(
         "UPDATE session_meta SET thinking_binding_recovery_target = ? WHERE session_id = ?",
     ).run(THINKING_BINDING_RECOVERY_ALL_ASSISTANTS, sessionId);
+    // A new rejection: the next pass applies the recovery again.
+    bindingRecoveriesAwaitingClear.delete(sessionId);
+}
+
+/**
+ * Sessions whose armed binding recovery this process has applied but could not
+ * clear. The flag is one value for every rejection, so a pass that read it
+ * again would strip every block once more, including thinking produced after
+ * the recovery. Kept in memory only: it says what this process did.
+ */
+const bindingRecoveriesAwaitingClear = new Map<string, string>();
+
+/** The recovery armed as `target` was applied on a pass whose clear failed. */
+export function noteBindingRecoveryAwaitingClear(sessionId: string, target: string): void {
+    bindingRecoveriesAwaitingClear.set(sessionId, target);
+}
+
+/** The armed target this process applied and has not cleared yet, if any. */
+export function bindingRecoveryAwaitingClear(sessionId: string): string | undefined {
+    return bindingRecoveriesAwaitingClear.get(sessionId);
+}
+
+/**
+ * Retry the clear of a recovery this process applied. True once the flag is
+ * gone (this call cleared it, or something else did); false while it stays
+ * armed. A throw leaves it awaiting the next retry.
+ */
+export function retryBindingRecoveryClear(db: Database, sessionId: string): boolean {
+    const target = bindingRecoveriesAwaitingClear.get(sessionId);
+    if (target === undefined) return true;
+    if (
+        clearThinkingBindingRecoveryIf(db, sessionId, target) ||
+        getThinkingBindingRecoveryTarget(db, sessionId) !== target
+    ) {
+        bindingRecoveriesAwaitingClear.delete(sessionId);
+        return true;
+    }
+    return false;
 }
 
 /** Clear only the flag this live pass actually applied; a concurrent re-arm wins. */

@@ -30,6 +30,10 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { copySessionStateForClone } from "../../features/magic-context/storage-clone";
+import {
+    armThinkingBindingRecovery,
+    getThinkingBindingRecoveryTarget,
+} from "../../features/magic-context/storage-meta-persisted";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import * as replayDocumentModule from "../../features/magic-context/storage-replay-document";
@@ -38,7 +42,8 @@ import { createMessagesTransformHandler } from "../../plugin/messages-transform"
 import * as loggerModule from "../../shared/logger";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { forkCloneFilter } from "../../v2/fork-inheritance";
-import { resetLkgSlotsForTest } from "./lkg-slot";
+import { loadPersistedLkgSlot } from "./lkg-persist";
+import { dropSlot, getInMemorySlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { requestPendingMaterialization } from "./pending-materialization";
 import { providerVisiblePart } from "./provider-visible-parts";
 import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
@@ -139,6 +144,8 @@ interface SessionOptions {
     compactionOff?: boolean;
     memory?: boolean;
     executeThresholdPercentage?: number;
+    /** Further transform dependencies, such as host callbacks a case makes fail. */
+    transformDeps?: Record<string, unknown>;
 }
 
 /**
@@ -214,6 +221,7 @@ function session(
                       }),
                   }
                 : {}),
+            ...options.transformDeps,
         } as never);
         handler = createMessagesTransformHandler({
             magicContext: {
@@ -255,6 +263,10 @@ function session(
         logs,
         pending,
         problems,
+        /** How many passes have run so far; problems name their pass by this number. */
+        get passNumber() {
+            return passNumber;
+        },
         systemPromptRefreshSessions,
         projectIdentity,
         served: () => served,
@@ -562,6 +574,260 @@ for (const host of HOSTS) {
         expect(s.problems).toEqual([]);
     }, 60_000);
 }
+
+// ── Compaction-off: a fold that changes the head in front of kept signed
+// thinking saves the strip of that thinking in its own transaction. Saved
+// after the commit, a failed strip write would leave the new head saved and
+// the thinking it invalidates on the wire. Compaction-off strips only on the
+// pass whose fold changed the head, so no later pass would strip it.
+function failThinkingStripWrites(db: ReturnType<typeof openDatabase>): () => void {
+    db.exec(
+        "CREATE TEMP TRIGGER fail_thinking_strip BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta BEGIN SELECT RAISE(ABORT, 'thinking strip write failed'); END",
+    );
+    return () => db.exec("DROP TRIGGER IF EXISTS temp.fail_thinking_strip");
+}
+for (const host of HOSTS) {
+    it(`${host}: compaction-off, a fold at a new turn whose thinking strip cannot be saved is not saved either, and the retry folds and strips`, async () => {
+        const s = session(host, `spe-off-strip-fail-${host}`, {
+            compactionOff: true,
+            memory: true,
+        });
+        s.editMemory("Prefer small commits");
+        s.user("run some bash commands");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        s.editMemory("Always use Bun");
+        s.step(4, 200);
+        await s.pass();
+        const before = s.cachedM0();
+        s.user("next task");
+        const restore = failThinkingStripWrites(s.db);
+        try {
+            await s.pass();
+        } finally {
+            restore();
+        }
+        report(`${host} off fold strip fails`, s, { logs: s.relevantLogs() });
+        expect(s.cachedM0()).toBe(before);
+        // The host sends the same request again: the fold and its strip land together.
+        await s.pass();
+        report(`${host} off fold strip retry`, s, { logs: s.relevantLogs() });
+        expect(s.cachedM0()).not.toBe(before);
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+}
+
+// ── Compaction-off, first render under a hold (compaction-off holds every open
+// signed turn): the head is gone, the docs it renders changed, and the strip
+// of the open turn's thinking cannot be saved. A render saves that strip in its
+// own transaction, the preparation's and the final injection's alike, so the
+// failed write rolls the new head back, nothing is saved, and the next pass
+// renders and strips together. The failing pass itself cannot serve a valid
+// request: the old head is no longer saved, and the strip cannot be saved
+// either, so it is served without a head (compaction-off never refuses), with
+// its thinking. Only later passes are checked.
+for (const host of HOSTS)
+    it(`${host}: compaction-off, a first render under a hold whose thinking strip cannot be saved is not saved either, and the retry renders and strips`, async () => {
+        const s = session(host, `spe-off-first-render-strip-fail-${host}`, {
+            compactionOff: true,
+        });
+        s.user("long task");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        s.editDocs("v2");
+        s.clearHead();
+        s.step(4, 200);
+        const restore = failThinkingStripWrites(s.db);
+        try {
+            await s.pass();
+        } finally {
+            restore();
+        }
+        const failingPass = s.passNumber;
+        report(`${host} off first render strip fails`, s, { logs: s.relevantLogs() });
+        expect(s.cachedM0()).toBeNull();
+        await s.pass();
+        report(`${host} off first render strip retry`, s, { logs: s.relevantLogs() });
+        expect(s.cachedM0()).toContain("v2");
+        expect(s.problems.filter((problem) => !problem.startsWith(`pass ${failingPass}:`))).toEqual(
+            [],
+        );
+    }, 60_000);
+
+// ── The failing pass of the case above, on its own: the kept thinking must be
+// served behind the prefix it was produced behind. That pass serves no head
+// (the old one is no longer saved, and the new one cannot be saved without its
+// strip), so the thinking sits behind a different prefix on that one request.
+// Open defect: serving that request validly needs a per-process record of the
+// request this process last served, to replay its head.
+for (const host of HOSTS)
+    it.skipIf(!OPEN_DEFECTS)(
+        `${host}: compaction-off, the pass whose first-render strip cannot be saved serves its kept thinking behind the prefix it was produced behind`,
+        async () => {
+            const s = session(host, `spe-off-first-render-failing-pass-${host}`, {
+                compactionOff: true,
+            });
+            s.user("long task");
+            await s.pass();
+            for (let n = 1; n <= 3; n++) {
+                s.step(n, 200);
+                await s.pass();
+            }
+            s.editDocs("v2");
+            s.clearHead();
+            s.step(4, 200);
+            const restore = failThinkingStripWrites(s.db);
+            try {
+                await s.pass();
+            } finally {
+                restore();
+            }
+            report(`${host} off first render failing pass`, s, { logs: s.relevantLogs() });
+            expect(s.problems).toEqual([]);
+        },
+        60_000,
+    );
+
+// ── Managed mode: the provider rejected a request for its signed thinking,
+// which arms the binding recovery, and the next pass strips every bound block
+// and captures that request as the last good one. Only then does it clear the
+// recovery target. When that last write fails, the pass must still be served:
+// refusing it after the capture leaves the refused output saved as the last
+// good request while the turn is refused or replaced. The target stays armed;
+// while the clear keeps failing every pass replays the saved strips and is
+// served, and the first pass whose retried clear succeeds clears it.
+for (const host of HOSTS)
+    it(`${host}: a binding recovery whose target cannot be cleared still serves its pass, and the next pass clears it`, async () => {
+        const sessionId = `spe-recovery-clear-fails-${host}`;
+        const s = session(host, sessionId);
+        s.user("long task");
+        await s.pass();
+        for (let n = 1; n <= 2; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        s.user("next task");
+        await s.pass();
+        // What the event handler does when the provider rejects bound thinking.
+        armThinkingBindingRecovery(s.db, sessionId);
+        dropSlot(sessionId, "thinking_binding_recovery");
+        s.db.exec(
+            "CREATE TEMP TRIGGER fail_recovery_clear BEFORE UPDATE OF thinking_binding_recovery_target ON session_meta WHEN NEW.thinking_binding_recovery_target = '' BEGIN SELECT RAISE(ABORT, 'recovery clear failed'); END",
+        );
+        let recovered: Awaited<ReturnType<typeof s.pass>>;
+        let repeated: Awaited<ReturnType<typeof s.pass>>;
+        try {
+            recovered = await s.pass();
+            repeated = await s.pass();
+        } finally {
+            s.db.exec("DROP TRIGGER IF EXISTS temp.fail_recovery_clear");
+        }
+        report(`${host} recovery clear fails`, s, { logs: s.relevantLogs() });
+        expect(recovered.messages).not.toBeNull();
+        expect(signedSignatures(recovered.messages ?? [])).toEqual([]);
+        expect(JSON.stringify(repeated.messages)).toBe(JSON.stringify(recovered.messages));
+        expect(getThinkingBindingRecoveryTarget(s.db, sessionId)).not.toBe("");
+
+        const next = await s.pass();
+        expect(JSON.stringify(next.messages)).toBe(JSON.stringify(recovered.messages));
+        expect(getThinkingBindingRecoveryTarget(s.db, sessionId) ?? "").toBe("");
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+// ── Managed mode: a binding recovery whose clear fails leaves its target armed.
+// The flag is one value for every rejection, so a later pass that reads it would
+// strip every block again, including thinking produced after the recovery. A
+// failed clear is retried at the start of every later pass until it succeeds,
+// and while it keeps failing the recovery this process already applied is not
+// applied again (its strips are saved and replay on every pass).
+for (const host of HOSTS)
+    it(`${host}: an uncleared binding recovery target never strips thinking produced after the recovery`, async () => {
+        const sessionId = `spe-recovery-stale-target-${host}`;
+        const s = session(host, sessionId);
+        s.user("long task");
+        await s.pass();
+        for (let n = 1; n <= 2; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        s.user("next task");
+        await s.pass();
+        armThinkingBindingRecovery(s.db, sessionId);
+        dropSlot(sessionId, "thinking_binding_recovery");
+        s.db.exec(
+            "CREATE TEMP TRIGGER fail_recovery_clear BEFORE UPDATE OF thinking_binding_recovery_target ON session_meta WHEN NEW.thinking_binding_recovery_target = '' BEGIN SELECT RAISE(ABORT, 'recovery clear failed'); END",
+        );
+        let later: Awaited<ReturnType<typeof s.pass>>;
+        try {
+            const recovered = await s.pass();
+            expect(signedSignatures(recovered.messages ?? [])).toEqual([]);
+            // The next turn thinks after the recovery went out.
+            for (let n = 3; n <= 4; n++) {
+                s.step(n, 200);
+                await s.pass();
+            }
+            // That turn ends; no open turn protects its thinking any more.
+            s.user("one more thing");
+            later = await s.pass();
+        } finally {
+            s.db.exec("DROP TRIGGER IF EXISTS temp.fail_recovery_clear");
+        }
+        report(`${host} stale recovery target`, s, { logs: s.relevantLogs() });
+        expect(getThinkingBindingRecoveryTarget(s.db, sessionId)).not.toBeNull();
+        expect(signedSignatures(later.messages ?? [])).toEqual(["sig-3", "sig-4"]);
+        // The first pass whose retried clear succeeds clears it, and keeps the thinking.
+        const after = await s.pass();
+        expect(getThinkingBindingRecoveryTarget(s.db, sessionId)).toBeNull();
+        expect(signedSignatures(after.messages ?? [])).toEqual(["sig-3", "sig-4"]);
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+// ── Managed mode: host callbacks the transform calls after it captured its
+// request (auto-embed scheduling, the pass-permission report) can fail. The
+// request is decided by then: the pass is served, it is the request saved as
+// the last good one in memory and on disk, and the statements after the
+// failing one still run.
+for (const host of HOSTS)
+    for (const failing of ["maybeAutoEmbedSession", "onPassPermission"] as const)
+        it(`${host}: a failing ${failing} after the capture still serves the pass and saves it`, async () => {
+            const sessionId = `spe-after-capture-${failing}-${host}`;
+            const calls: string[] = [];
+            const callback = (name: typeof failing) => () => {
+                calls.push(name);
+                if (name === failing) throw new Error(`${name} failed`);
+            };
+            const s = session(host, sessionId, {
+                transformDeps: {
+                    maybeAutoEmbedSession: callback("maybeAutoEmbedSession"),
+                    onPassPermission: callback("onPassPermission"),
+                },
+            });
+            s.user("long task");
+            await s.pass();
+            s.step(1, 200);
+            calls.length = 0;
+            const out = await s.pass();
+            expect(out.messages).not.toBeNull();
+            expect(calls).toEqual(["maybeAutoEmbedSession", "onPassPermission"]);
+            expect(
+                s.logs.some((line) =>
+                    line.includes("failed after the request was decided; serving the pass"),
+                ),
+            ).toBe(true);
+            const served = JSON.parse(JSON.stringify(out.messages));
+            expect(JSON.parse(getInMemorySlot(sessionId)?.jsonPrefix ?? "null")).toEqual(served);
+            // The deferred save runs after the pass returns.
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(JSON.parse(loadPersistedLkgSlot(s.db, sessionId)?.jsonPrefix ?? "null")).toEqual(
+                served,
+            );
+        }, 60_000);
 
 // ── Managed mode: an idle-expired request at the start of a new turn may
 // advance the system date (the open turn has no signed thinking yet), but the

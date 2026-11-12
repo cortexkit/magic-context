@@ -446,6 +446,16 @@ function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
 export interface PiM0M1State {
 	/** Test hook before writer admission, before any m[1] render reads. */
 	beforeCacheCommitForTest?: () => void;
+	/**
+	 * Lets the caller save state that must commit or roll back with a fold.
+	 * Called once per fold attempt before the writer is taken, so it may read
+	 * outside the lock. The callback it returns runs inside the fold's
+	 * transaction just before COMMIT, with the head the fold will serve; a throw
+	 * from it rolls the fold back. It must not await.
+	 */
+	onFoldPrepare?: () =>
+		| ((db: ContextDatabase, head: PiFoldHead) => void)
+		| undefined;
 	/** These delivery fields are scoped to one context pass, never persisted. */
 	freezePrefixForPass?: boolean;
 	allowFreshContentionFallback?: boolean;
@@ -486,6 +496,15 @@ export interface PiM0M1State {
 	mural?: MuralWireOptions;
 	/** Keeps memory/docs injection while suppressing compartment history rendering and trimming. */
 	compactionOff?: boolean;
+}
+
+/** The head a committed fold serves, as `injectM0M1Pi` puts it on the wire. */
+export interface PiFoldHead {
+	/** m[0]'s text; its mural block is left out when the fold resolved no mural. */
+	m0Text: string;
+	m1Text: string;
+	/** The mural image sent after m[0]'s text, as a data URL, or null for none. */
+	muralDataUrl: string | null;
 }
 
 const EMPTY_PI_PROJECT_DOCS: PiProjectDocsRender = {
@@ -734,6 +753,9 @@ function piImageFromDataUrl(dataUrl: string): PiImageContent | null {
 	if (!match) return null;
 	return { type: "image", mimeType: match[1], data: match[2] };
 }
+
+/** Whether {@link piImageFromDataUrl} accepts a URL, without copying its payload. */
+const PI_IMAGE_DATA_URL_PREFIX = /^data:image\/[a-zA-Z0-9.+-]+;base64,[\s\S]/;
 
 /**
  * Resolve mural wire options for a HARD fold. Explicit test `state.mural` wins;
@@ -1798,6 +1820,7 @@ export function materializeM0Pi(
 	);
 	steps.mark("pre_metadata");
 	state.beforeCacheCommitForTest?.();
+	const commitFold = state.onFoldPrepare?.();
 	// Validate the m[0] snapshot, render m[1], and persist the pair atomically.
 	try {
 		db.exec("BEGIN IMMEDIATE");
@@ -1897,6 +1920,23 @@ export function materializeM0Pi(
 		// the next pass trims against the wrong point (under/over-trim). Atomic
 		// with the m[0] bytes + markers + m[1] bytes is the only correct placement.
 		steps.mark("sessionMeta");
+		if (commitFold) {
+			// As injectM0M1Pi serves it: m[0] keeps its mural block only when the fold
+			// resolved a mural, and the image goes with it when its URL parses.
+			const muralWire =
+				m0.includes("<memory-mural>") && frozenMuralDataUrl
+					? frozenMuralDataUrl
+					: null;
+			commitFold(db, {
+				m0Text: muralWire ? m0 : stripMemoryMuralBlock(m0),
+				m1Text: m1Render.text,
+				muralDataUrl:
+					muralWire && PI_IMAGE_DATA_URL_PREFIX.test(muralWire)
+						? muralWire
+						: null,
+			});
+			steps.mark("onFoldCommit");
+		}
 		db.exec("COMMIT");
 		steps.mark("commit");
 		logSlowWriteTransaction(

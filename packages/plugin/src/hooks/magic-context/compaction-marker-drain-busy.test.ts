@@ -23,6 +23,7 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import {
+    clearPendingOps,
     closeDatabase,
     getOrCreateSessionMeta,
     getPendingCompactionMarkerState,
@@ -47,6 +48,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { MARKER_SUMMARY_TEXT, type MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { readExecuteReclaimState } from "./execute-reclaim";
 import { clearInjectionCache, injectM0M1 } from "./inject-compartments";
+import * as lkgRecoveryPrefix from "./lkg-recovery-prefix";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { rearmPendingCompactionMarkerSignals } from "./pending-marker-rearm";
 import { requestPendingMaterialization } from "./pending-materialization";
@@ -428,6 +430,9 @@ async function sessionInToolLoop(name: string, shape = DEFAULT_SHAPE) {
         get deferredHistoryRefreshSessions() {
             return deferredHistoryRefreshSessions;
         },
+        get deferredMaterializationSessions() {
+            return deferredMaterializationSessions;
+        },
         get historyRefreshSessions() {
             return historyRefreshSessions;
         },
@@ -503,6 +508,25 @@ function served(pass: { messages: Message[] | Error }): Message[] {
 
 const permissionLine = (logs: string[]): string =>
     logs.find((line) => line.startsWith("rewrite permission:")) ?? "";
+
+/** The host array with a new user message right before step 5, which then opens a new turn. */
+const newTurnAtStep5 = (messages: Message[], sessionId: string): Message[] => {
+    const index = messages.findIndex((message) => message.info.id === "step-5");
+    if (index < 0) return messages;
+    return [
+        ...messages.slice(0, index),
+        {
+            info: {
+                id: "carry-on",
+                role: "user",
+                sessionID: sessionId,
+                time: { created: 8.5 },
+            },
+            parts: [{ type: "text", text: "carry on" }],
+        },
+        ...messages.slice(index),
+    ];
+};
 
 describe("compaction-marker drain with a busy host writer", () => {
     it("serves the rebuilt request when the marker definitely did not move, and the next step's defer pass replays it byte for byte", async () => {
@@ -795,23 +819,6 @@ describe("compaction-marker drain with a busy host writer", () => {
     // a user message and step 6 does not think; otherwise the strip that merges
     // adjacent assistants' reasoning would edit the prefix on the same pass and
     // the move would not be its only prefix change.
-    const newTurnAtStep5 = (messages: Message[], sessionId: string): Message[] => {
-        const index = messages.findIndex((message) => message.info.id === "step-5");
-        if (index < 0) return messages;
-        return [
-            ...messages.slice(0, index),
-            {
-                info: {
-                    id: "carry-on",
-                    role: "user",
-                    sessionID: sessionId,
-                    time: { created: 8.5 },
-                },
-                parts: [{ type: "text", text: "carry on" }],
-            },
-            ...messages.slice(index),
-        ];
-    };
     for (const ride of ["flush", "force"] as const) {
         for (const binds of [true, false]) {
             it(`a marker move on a ${ride} pass with nothing else to do ${binds ? "strips the signed thinking after it on a prefix-bound model" : "keeps the thinking of a model that does not bind it"}, counts as a rebuild, and the next step replays it byte for byte`, async () => {
@@ -894,5 +901,144 @@ describe("compaction-marker drain with a busy host writer", () => {
         ).toBe(true);
         expect(getPendingCompactionMarkerState(session.db, session.sessionId)).not.toBeNull();
         expect(session.deferredHistoryRefreshSessions.has(session.sessionId)).toBe(true);
+    });
+});
+
+/**
+ * A refused rebuild leaves part of its work saved (the new m[1], the stripped
+ * thinking, a landed drop) while the wrapper serves the previous request in its
+ * place. That replay applies the saved strips and drops to the newest messages
+ * and is then served as the frozen recovery request.
+ */
+describe("the last-good replay of a refused rebuild", () => {
+    it("stays frozen on the next step, because it records the host's messages as the host sends them, not as the replay edited them", async () => {
+        const session = await sessionInToolLoop("refused-replay");
+        // The rebuild saves its new m[1] and strips the turn's signed thinking,
+        // then fails at a marker move whose outcome is unknown, so the wrapper
+        // replays the previous request with the saved strips applied.
+        session.setDecision("execute");
+        session.setMarkerOutcome(() => busyWriter("uncertain"));
+        const replay = served(await session.serve(hostArray(session.sessionId, 4)));
+        expect(session.onLkgReplay).toHaveBeenCalledTimes(1);
+        // The replay edited the newest step: its thinking is gone, while the
+        // host still stores and resends it.
+        expect(JSON.stringify(replay)).not.toContain("sig-4");
+        expect(JSON.stringify(hostArray(session.sessionId, 4))).toContain("sig-4");
+
+        // The next step: the host resends the same messages plus one. The
+        // replay goes out again byte for byte and only the new step is added;
+        // the saved rebuild waits for a pass that may rewrite the prefix.
+        session.setDecision("defer");
+        const nextPass = await session.serve(hostArray(session.sessionId, 5));
+        const next = served(nextPass);
+        expect(JSON.stringify(next.slice(0, replay.length))).toBe(JSON.stringify(replay));
+        expect(next).toHaveLength(replay.length + 1);
+        expect(nextPass.busted).toBe(false);
+        expect(JSON.stringify(next)).not.toContain(
+            "Advanced history published while the marker was pending",
+        );
+    });
+
+    it("a pass that releases it with nothing else to rewrite strips the thinking produced since, because the history head it serves is the saved one", async () => {
+        // Only step 5 thinks. Earlier thinking would leave a strip of merged
+        // reasoning runs that the refused pass never reached, and the releasing
+        // pass would apply it as an edit of its own.
+        const shape: HostShape = { model: MODEL, thinks: (step) => step === 5 };
+        const session = await sessionInToolLoop("refused-replay-release", shape);
+        // From step 5 on, a new user message precedes step 5, so step 5's
+        // thinking opens a run of its own and no strip that merges adjacent
+        // assistants' reasoning reaches it.
+        const host = (steps: number) =>
+            newTurnAtStep5(hostArray(session.sessionId, steps, shape), session.sessionId);
+        session.setDecision("execute");
+        session.setMarkerOutcome(() => busyWriter("uncertain"));
+        const replay = served(await session.serve(host(4)));
+        expect(session.onLkgReplay).toHaveBeenCalledTimes(1);
+
+        // Step 5 thinks after the replay went out, so its signature is bound to
+        // the replay's history head.
+        session.setDecision("defer");
+        const frozen = served(await session.serve(host(5)));
+        expect(JSON.stringify(frozen.slice(0, replay.length))).toBe(JSON.stringify(replay));
+        expect(JSON.stringify(frozen)).toContain("sig-5");
+        const savedHistory = "Advanced history published while the marker was pending";
+        expect(JSON.stringify(frozen.slice(0, 2))).not.toContain(savedHistory);
+
+        // A pass in the force band may rewrite the prefix and has nothing to
+        // do: no history refresh or materialization is left, no drop is
+        // queued and the marker provably stays where it is. Releasing the
+        // replay is its only change in front of step 5's thinking.
+        session.deferredHistoryRefreshSessions.delete(session.sessionId);
+        session.deferredMaterializationSessions.delete(session.sessionId);
+        session.setMarkerOutcome(() => busyWriter("definitely-no-cut"));
+        session.setUsage(90);
+        const releasePass = await session.serve(host(6));
+        const released = served(releasePass);
+        expect(permissionLine(releasePass.logs)).toContain("allowed=true");
+        expect(releasePass.logs).toContain(
+            "frozen replay release: the history head differs from the replay's; counting it as a head change",
+        );
+        expect(JSON.stringify(released.slice(0, 2))).toContain(savedHistory);
+        expect(JSON.stringify(released)).not.toContain("sig-5");
+        expect(getMergedReasoningStrippedIds(session.db, session.sessionId)).toContain(
+            thinkingBindingRecoveryFrozenId("step-5"),
+        );
+
+        // The next step serves the released request byte for byte.
+        session.setUsage(30);
+        const after = served(await session.serve(host(7)));
+        expect(JSON.stringify(after.slice(0, released.length))).toBe(JSON.stringify(released));
+        expect(after).toHaveLength(released.length + 1);
+    });
+
+    // A release that serves the replay's own head changes nothing in front of
+    // the thinking produced since, so that thinking stays.
+    it("a pass that releases it with the history head unchanged keeps the thinking produced since", async () => {
+        const shape: HostShape = { model: MODEL, thinks: (step) => step === 5 };
+        const session = await sessionInToolLoop("refused-replay-same-head", shape);
+        const host = (steps: number) =>
+            newTurnAtStep5(hostArray(session.sessionId, steps, shape), session.sessionId);
+        // A rebuild consumes the published history and moves the marker, so
+        // no history is left for the releasing pass to add to the head.
+        session.setDecision("execute");
+        await session.serve(host(3));
+        session.setDecision("defer");
+        // No queued drop either: the releasing pass would apply it in front of
+        // the new thinking, which strips that thinking for a reason of its own.
+        clearPendingOps(session.db, session.sessionId);
+        // The next pass changes nothing in the head and is refused because the
+        // record of untagged messages cannot be saved, so the wrapper replays
+        // the previous request.
+        const spies = [
+            spyOn(lkgRecoveryPrefix, "readPersistedLkgUntaggedInputIds").mockReturnValue([
+                "untagged-row-no-longer-served",
+            ]),
+            spyOn(lkgRecoveryPrefix, "persistLkgUntaggedInputIds").mockReturnValue(false),
+        ];
+        let replay: Message[];
+        try {
+            replay = served(await session.serve(host(4)));
+        } finally {
+            for (const spy of spies) spy.mockRestore();
+        }
+        expect(session.onLkgReplay).toHaveBeenCalledTimes(1);
+        const frozen = served(await session.serve(host(5)));
+        expect(JSON.stringify(frozen.slice(0, replay.length))).toBe(JSON.stringify(replay));
+        expect(JSON.stringify(frozen)).toContain("sig-5");
+
+        // A pass at 90% usage (the force band, which may rewrite the prefix)
+        // releases the replay with nothing else to do; the head it serves is
+        // the replay's.
+        session.deferredMaterializationSessions.delete(session.sessionId);
+        session.setMarkerOutcome(() => busyWriter("definitely-no-cut"));
+        session.setUsage(90);
+        const releasePass = await session.serve(host(6));
+        const released = served(releasePass);
+        expect(permissionLine(releasePass.logs)).toContain("allowed=true");
+        expect(JSON.stringify(released.slice(0, 2))).toBe(JSON.stringify(frozen.slice(0, 2)));
+        expect(releasePass.logs).not.toContain(
+            "frozen replay release: the history head differs from the replay's; counting it as a head change",
+        );
+        expect(JSON.stringify(released)).toContain("sig-5");
     });
 });

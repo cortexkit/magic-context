@@ -1,7 +1,4 @@
-import {
-    readReplayEnvelope,
-    updateReplayDocument,
-} from "../../features/magic-context/storage-replay-document";
+import { readReplayEnvelope } from "../../features/magic-context/storage-replay-document";
 import {
     type HostRowReclaim,
     hostInstructionRow,
@@ -108,27 +105,23 @@ export function reclaimInstructionRows(
     }
     return {
         edits,
-        commit() {
-            // The transform calls this only after required thinking omissions are
-            // durable. A failed omission must leave these choices fresh for retry.
+        hasDecisions: newlyRetired.size > 0 || switchCovered,
+        record(doc) {
+            if (newlyRetired.size === 0 && !switchCovered) return false;
+            const current = decode(doc[namespace]);
             if (
-                (newlyRetired.size > 0 || switchCovered) &&
-                !updateReplayDocument(db, sessionID, (doc) => {
-                    const current = decode(doc[namespace]);
-                    if (
-                        [...newlyRetired].every((id) => current.has(id)) &&
-                        (!switchCovered || coveredOn(doc[coveredNamespace]))
-                    )
-                        return false;
-                    for (const id of folded) current.delete(id);
-                    for (const id of newlyRetired) current.add(id);
-                    doc.version = 2;
-                    doc[namespace] = [...current];
-                    if (switchCovered) doc[coveredNamespace] = { on: true };
-                    return true;
-                })
+                [...newlyRetired].every((id) => current.has(id)) &&
+                (!switchCovered || coveredOn(doc[coveredNamespace]))
             )
-                throw new Error("Cannot persist instruction supersession");
+                return false;
+            for (const id of folded) current.delete(id);
+            for (const id of newlyRetired) current.add(id);
+            doc.version = 2;
+            doc[namespace] = [...current];
+            if (switchCovered) doc[coveredNamespace] = { on: true };
+            return true;
+        },
+        markRetired() {
             for (const { message, row } of rows) {
                 if (omits(message, row.id)) markRetiredInstructionRow(message.info);
             }
