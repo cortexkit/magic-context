@@ -1525,6 +1525,10 @@ describe("buildSidebarSnapshot — Rust module status merge", () => {
             expect(snapshot.compartmentCount).toBe(4);
             expect(snapshot.compartmentTokens).toBe(23);
             expect(snapshot.pendingOpsCount).toBe(2);
+            expect(snapshot.queuedDropCount).toBe(2);
+            // The module reports no token total for its drop queue; a TypeScript-side estimate would describe
+            // a different queue, so the estimate is absent.
+            expect(snapshot.queuedDropTokens).toBeUndefined();
             expect(snapshot.boundaryPresent).toBe(true);
             expect(snapshot.coverageOrdinal).toBe(17);
             expect(buildCompartmentCount(db, sessionId, moduleStatus)).toBe(4);

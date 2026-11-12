@@ -452,7 +452,7 @@ export function buildSidebarSnapshot(
         }
 
         let pendingOpsCount = 0;
-        let queuedDropTokens = 0;
+        let queuedDropTokens: number | undefined = 0;
         let queuedDropCount = 0;
         try {
             const pendingRow = db
@@ -473,6 +473,9 @@ export function buildSidebarSnapshot(
         if (typeof moduleStatus?.pending_drop_count === "number") {
             pendingOpsCount = moduleStatus.pending_drop_count;
             queuedDropCount = moduleStatus.pending_drop_count;
+            // The module's drop queue is not the pending_ops table, and the module reports no token total for
+            // it, so an estimate from pending_ops would describe a different queue.
+            queuedDropTokens = undefined;
         }
 
         let sessionNoteCount = 0;
