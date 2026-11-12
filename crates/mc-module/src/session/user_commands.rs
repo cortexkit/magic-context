@@ -58,8 +58,10 @@ impl Session {
         *self = snapshot;
         self.view_validation = validation;
     }
-    /// Request ids are scoped to this session subject. The full body digest
-    /// still detects changed args, preview versions and forwarded caller facts.
+    /// A request id is unique within one session; the same id on another
+    /// session is a different run. Reusing an id here with a different request
+    /// (other args, preview version, or caller details the app relayed) is a
+    /// conflict, detected by the digest of the whole request.
     fn command_replay(&mut self, request: &ModuleRunRequest, digest: &str) -> Option<RunReply> {
         self.command_answers = self.command_answers_for_save();
         self.command_answers
@@ -130,9 +132,11 @@ impl Session {
     }
 
     /// Build only on a complete session copy. Deriving Clone on Session makes
-    /// new fields part of the transaction automatically; no mutation-field
-    /// inventory can silently omit a future builder decision or app stamp.
-    /// Only exact-payload validation certificates return to the live session.
+    /// new fields part of the copy automatically, so a hand-kept list of fields
+    /// can't miss a future builder decision or app-read state. The one thing
+    /// copied back is the view builder's validation cache: it only remembers
+    /// which inserted text and images already passed validation, which is true
+    /// whether or not the flush runs.
     fn planned_flush(&mut self, settings: &Settings) -> Option<(View, Box<Session>)> {
         let mut planned = self.command_snapshot();
         std::mem::swap(&mut self.view_validation, &mut planned.view_validation);
