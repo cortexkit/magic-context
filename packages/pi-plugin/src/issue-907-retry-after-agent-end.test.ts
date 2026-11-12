@@ -24,17 +24,22 @@ const failed = assistantMessage("", 20, {
 });
 const answered = assistantMessage("answer", 30);
 
-function harness() {
+function harness(input: readonly unknown[] = [prompt]) {
 	__setPiHarnessKindForTesting("omp");
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const refusals: string[] = [];
 	let managedMessages: unknown[] = [];
-	const branch = [
-		{ type: "message" as const, id: "native-0", message: prompt },
-	];
+	let idle = false;
+	const branch: { type: "message"; id: string; message: unknown }[] = input.map(
+		(message, index) => ({
+			type: "message" as const,
+			id: `native-${index}`,
+			message,
+		}),
+	);
 	const ctx = {
 		...fakeContext(SESSION),
-		isIdle: () => false,
+		isIdle: () => idle,
 		sessionManager: {
 			getSessionId: () => SESSION,
 			getBranch: () => branch,
@@ -61,10 +66,14 @@ function harness() {
 	return {
 		refusals,
 		emit,
+		branch,
+		setIdle: (value: boolean) => {
+			idle = value;
+		},
 		get blocked() {
 			return piBlockedDispatches(ctx);
 		},
-		context: () => emit("context", { messages: [structuredClone(prompt)] }),
+		context: () => emit("context", { messages: structuredClone(input) }),
 		// Re-sending the same prepared payload, as the host's provider layer does
 		// when it retries a failed stream without a new context pass.
 		dispatch: () =>
@@ -73,7 +82,7 @@ function harness() {
 			}),
 		failedRunEnd: () =>
 			emit("agent_end", {
-				messages: [structuredClone(prompt), structuredClone(failed)],
+				messages: structuredClone([...input, failed]),
 				willContinue: true,
 			}),
 	};
@@ -125,38 +134,164 @@ test("issue 907: a final end still refuses a later request without a fresh pass"
 // Measured on Oh My Pi 18.18.6 and 18.18.9 when a handler earlier in the same
 // extension holds the failed run's agent_end: the host orders agent_start and
 // agent_end per extension but delivers context and before_provider_request at
-// once, so the retry's pass is prepared and sent before the late end arrives.
-// The provider layer's own resend of that request is then refused.
-test("issue 907: a late willContinue end after the retry was sent leaves its provider resend without a receipt (current behaviour)", async () => {
-	const h = harness();
+// once, so the retry's pass is prepared and sent before the late end arrives,
+// and the retry's own agent_start is delivered after that end.
+async function retrySentBeforeLateEnd(h: ReturnType<typeof harness>) {
 	h.emit("agent_start");
 	await h.context();
 	h.dispatch();
+	// Provider error; the host drops the failed reply and runs the retry's
+	// pass and first send while the failed run's end is still queued.
 	await h.context();
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
+}
+
+function expectEndRefusal(h: ReturnType<typeof harness>) {
+	expect(h.blocked).toBe(1);
+	expect(h.refusals).toHaveLength(1);
+	expect(h.refusals[0]).toContain("origin=agent_end");
+	expect(h.refusals[0]).toContain(
+		"the run that owned the latest context pass has ended",
+	);
+}
+
+// The order measured in the host reproduction: late end, then the retry's
+// late start, then the provider layer's resend of the retry's request.
+test("issue 907: a provider resend after the late willContinue end and the retry's late start is admitted", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
 	h.failedRunEnd();
 	h.emit("agent_start");
 	h.dispatch();
-	expect(h.blocked).toBe(1);
-	expect(h.refusals[0]).toContain("no context pass ran for this operation");
+	expect(h.refusals).toEqual([]);
+	expect(h.blocked).toBe(0);
 });
 
 // The sequence in the issue: the retry's pass was prepared and sent, the
 // failed run's end (willContinue) is delivered afterwards, and the provider
 // layer resends the same prepared request with no new start or context pass.
-// The end belongs to the earlier failed attempt, so the resend should pass.
-test.failing("issue 907: a provider resend after the failed run's late willContinue end is admitted", async () => {
+// The end belongs to the earlier failed attempt, so the resend passes.
+test("issue 907: a provider resend after the failed run's late willContinue end is admitted", async () => {
 	const h = harness();
-	h.emit("agent_start");
-	await h.context();
-	h.dispatch();
-	await h.context();
-	h.dispatch();
+	await retrySentBeforeLateEnd(h);
 	h.failedRunEnd();
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
 	expect(h.blocked).toBe(0);
+});
+
+// Once the kept operation's run really ends, nothing keeps it: the terminal
+// end has no willContinue, and a later request needs a new pass.
+for (const lateStart of [false, true])
+	test(`issue 907: after a kept late end, the retry's terminal end still refuses later sends (late start ${lateStart ? "delivered" : "not delivered"})`, async () => {
+		const h = harness();
+		await retrySentBeforeLateEnd(h);
+		h.failedRunEnd();
+		h.dispatch();
+		if (lateStart) h.emit("agent_start");
+		h.dispatch();
+		expect(h.refusals).toEqual([]);
+		h.emit("agent_end", {
+			messages: structuredClone([prompt, answered]),
+		});
+		h.dispatch();
+		expectEndRefusal(h);
+		// The next run's start opens an operation with no pass of its own.
+		h.emit("agent_start");
+		h.dispatch();
+		expect(h.blocked).toBe(2);
+		expect(h.refusals[1]).toContain("no context pass ran for this operation");
+	});
+
+// Each late end below differs from the failed attempt's end in one respect,
+// so it cannot be attributed to that attempt and ends the retry's operation.
+test("issue 907: the same late end without willContinue ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	h.emit("agent_end", { messages: structuredClone([prompt, failed]) });
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: a late willContinue end whose trailing assistant did not fail ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	h.emit("agent_end", {
+		messages: structuredClone([
+			prompt,
+			assistantMessage("", 20, { stopReason: "stop" }),
+		]),
+		willContinue: true,
+	});
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: a late willContinue end with two trailing messages ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	h.emit("agent_end", {
+		messages: structuredClone([
+			prompt,
+			failed,
+			assistantMessage("", 21, {
+				stopReason: "error",
+				errorMessage: "429 Rate limit exceeded",
+			}),
+		]),
+		willContinue: true,
+	});
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: a late willContinue end whose failed assistant is already in the input ends the operation", async () => {
+	// The input holds an assistant with the failed message's role and timestamp,
+	// so the trailing message is not one the host dropped from this input.
+	const earlier = assistantMessage("earlier", 20);
+	const h = harness([prompt, earlier]);
+	await retrySentBeforeLateEnd(h);
+	h.emit("agent_end", {
+		messages: structuredClone([prompt, earlier, failed]),
+		willContinue: true,
+	});
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: a late willContinue end whose earlier messages differ from the input ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	// Same role and timestamp as the prompt, different content.
+	h.emit("agent_end", {
+		messages: structuredClone([userMessage("another prompt", 10), failed]),
+		willContinue: true,
+	});
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: the failed attempt's late end in an idle session ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	h.setIdle(true);
+	h.failedRunEnd();
+	h.dispatch();
+	expectEndRefusal(h);
+});
+
+test("issue 907: the failed attempt's late end after the host branch moved on ends the operation", async () => {
+	const h = harness();
+	await retrySentBeforeLateEnd(h);
+	h.branch.push({
+		type: "message",
+		id: "native-next",
+		message: userMessage("next", 40),
+	});
+	h.failedRunEnd();
+	h.dispatch();
+	expectEndRefusal(h);
 });
 
 // Host facts the analysis relies on, read from the Oh My Pi package pinned in
