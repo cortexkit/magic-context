@@ -946,8 +946,10 @@ fn seed_moved(conn: &Connection, session: &str) {
     fact(conn, "wire-pub-open", 0, Some(c1), "retryable");
 }
 
-/// Another session's publications on the destination, which take the
-/// commit order the moved publication had on the source.
+/// Another session's publications, committed on the destination before the
+/// move. They hold the same commit-order values the moved publication has on
+/// the source, so the import must queue the moved one after them and may not
+/// keep its old value.
 fn seed_destination(conn: &Connection) {
     for id in ["wire-b-1", "wire-b-2"] {
         publication(conn, id, "wire-b-own", true, "published");

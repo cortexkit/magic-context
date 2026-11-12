@@ -369,9 +369,11 @@ async fn every_published_step_is_the_participants_step_machine() {
 }
 
 /// Every published case of the one-ref-set rule, as this participant takes
-/// it: an op naming the set its cut started with runs, whatever the order;
-/// any other set is refused `invalid_state` naming the step and the
-/// expected refs. The first op a machine receives for a cut fixes the set:
+/// it. A cut is one move: the id under which the driver freezes a set of
+/// sessions on the source and installs them on the receiver. An op naming
+/// the set its cut started with runs, whatever the order; any other set is
+/// refused `invalid_state` naming the step and the expected refs. The first
+/// op a machine receives for a cut fixes the set:
 /// `prepare` on the source, `import` on the receiver. The reads are never
 /// checked.
 #[tokio::test]
