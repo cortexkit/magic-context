@@ -354,3 +354,22 @@ for (const count of [1_000, 10_000]) {
         });
     });
 }
+
+/** Serves two requests and returns weak references to them only. */
+function serveAndForget(): WeakRef<object>[] {
+    const base = session(50, 40);
+    serve("gc", base);
+    const next = fresh([...base, user("n", "new")]);
+    serve("gc", next);
+    return [new WeakRef(base), new WeakRef(next), new WeakRef(next[3] as object)];
+}
+
+test("the record keeps no message: a committed request is collectable", async () => {
+    const refs = serveAndForget();
+    for (let round = 0; round < 4; round += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        Bun.gc(true);
+    }
+    expect(getServedRecordForTest("gc")?.count).toBe(52);
+    expect(refs.map((ref) => ref.deref() === undefined)).toEqual([true, true, true]);
+});

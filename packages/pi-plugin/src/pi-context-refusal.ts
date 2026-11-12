@@ -200,7 +200,7 @@ function finishPiServedRequest(
 	sessionId: string,
 	ctx: ExtensionContext,
 	messages: readonly unknown[],
-	compactionOff: boolean,
+	compactionOff: () => boolean,
 ): void {
 	try {
 		commitServedRequest({
@@ -209,7 +209,8 @@ function finishPiServedRequest(
 			messages,
 			providerID: ctx.model?.provider,
 			modelID: ctx.model?.id,
-			compactionOff,
+			// Read inside this guard: resolving the project's settings can throw.
+			compactionOff: compactionOff(),
 		});
 	} catch {
 		// Measurement only; never let it affect the turn.
@@ -1079,7 +1080,7 @@ export function registerPiGuardedContext(
 					servedSessionId,
 					ctx,
 					result?.messages ?? event.messages,
-					options.compactionOff?.(ctx) === true,
+					() => options.compactionOff?.(ctx) === true,
 				);
 			return result;
 		} catch (error) {

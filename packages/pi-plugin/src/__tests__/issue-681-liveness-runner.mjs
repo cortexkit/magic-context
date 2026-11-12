@@ -53,6 +53,11 @@ const sandbox = {
 	Text: class {},
 	piManagedSignature: () => "synthetic-signature",
 	preparePiDispatch: (messages) => ({ messages, structure: {} }),
+	// The served check keeps only numbers per message; its own test proves a
+	// committed request stays collectable (served-check.test.ts).
+	beginServedRequest() {},
+	commitServedRequest: () => null,
+	countServedRefusal() {},
 	lkgContentFields(message) {
 		const fields = message.content.map((part) => part.text);
 		weakSnapshots.push(new WeakRef(fields));
