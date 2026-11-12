@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { listOpenFiles } from "../../../plugin/src/shared/test-open-files";
 
 interface OmpLogger {
 	setTransports(options: { file: string }): void;
@@ -67,11 +67,10 @@ export async function exerciseOmpLoggerFiles(
 
 export function reportOmpLogDescriptors(): void {
 	if (process.platform !== "linux") return;
-	const files = execFileSync("lsof", ["-nP", "-p", String(process.pid)], {
-		encoding: "utf8",
-		windowsHide: true,
-	});
-	for (const line of files.split("\n")) {
+	const inventory = listOpenFiles();
+	// A missing inventory must not silently omit the fixture's descriptor evidence.
+	if (!inventory.available) throw new Error(inventory.reason);
+	for (const line of inventory.paths) {
 		if (/\/omp\.[^/\s]*\.log(?:\s|\.|$)/.test(line))
 			console.log("OMP fixture log descriptor:", line);
 	}

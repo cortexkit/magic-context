@@ -1206,6 +1206,23 @@ export type PrefixTrimStatus =
     | "boundary-precedes-window"
     | "refused";
 
+/**
+ * Why a `refused` trim made no cut, in the terms a person can act on.
+ * - `boundary-not-in-request`: the boundary row is not in the request, and the
+ *   request starts at or before it in the host's order, so the rows it covers
+ *   cannot be told apart from the rows after it.
+ * - `boundary-unordered`: the boundary row is not in the request and the host
+ *   store could not order it against the messages that are, or the request
+ *   carries the boundary row more than once.
+ */
+export type PrefixTrimRefusal = "boundary-not-in-request" | "boundary-unordered";
+
+interface PrefixTrimOutcome {
+    status: PrefixTrimStatus;
+    /** Set only with status `refused`. */
+    refusal?: PrefixTrimRefusal;
+}
+
 export interface PrefixTrimSourceOrder {
     /** Stable IDs in the exact order supplied by the host before this transform mutates the array. */
     messageIds: readonly string[];
@@ -1228,6 +1245,7 @@ export interface InjectM0M1Result {
     preparedMessages?: MessageLike[];
     preparedTrimBoundaryId?: string | null;
     prefixTrimStatus?: PrefixTrimStatus;
+    prefixTrimRefusal?: PrefixTrimRefusal;
 }
 
 export class MaterializeContentionError extends Error {
@@ -4417,7 +4435,7 @@ const absentBoundaryEpisodeBySession = new BoundedSessionMap<AbsentBoundaryEpiso
 const precedesVerdictBySession = new BoundedSessionMap<{
     boundary: string;
     firstLiveId: string;
-    precedes: boolean;
+    verdict: BoundaryWindowOrder;
 }>(INJECTION_CACHE_MAX);
 /**
  * Boundary already logged as sitting before the live window, so the "nothing to
@@ -4516,10 +4534,21 @@ export function findHostCompactionWindow(
     };
 }
 
-function boundaryPrecedesWindow(sessionId: string, boundary: string, firstLiveId: string): boolean {
+/**
+ * Where the boundary sorts against the first persisted live row: before it
+ * (the window starts after the boundary), not before it, or unknown when the
+ * store cannot order the two.
+ */
+type BoundaryWindowOrder = "precedes" | "not-before" | "unknown";
+
+function boundaryOrderAgainstWindow(
+    sessionId: string,
+    boundary: string,
+    firstLiveId: string,
+): BoundaryWindowOrder {
     const cached = precedesVerdictBySession.get(sessionId);
     if (cached && cached.boundary === boundary && cached.firstLiveId === firstLiveId) {
-        return cached.precedes;
+        return cached.verdict;
     }
     let order: number | null = null;
     try {
@@ -4532,9 +4561,14 @@ function boundaryPrecedesWindow(sessionId: string, boundary: string, firstLiveId
         sessionLog(sessionId, `prefix trim: placing boundary ${boundary} failed:`, error);
         order = null;
     }
-    const precedes = order !== null && order < 0;
-    precedesVerdictBySession.set(sessionId, { boundary, firstLiveId, precedes });
-    return precedes;
+    const verdict: BoundaryWindowOrder =
+        order === null || !Number.isFinite(order)
+            ? "unknown"
+            : order < 0
+              ? "precedes"
+              : "not-before";
+    precedesVerdictBySession.set(sessionId, { boundary, firstLiveId, verdict });
+    return verdict;
 }
 
 function logBoundaryPrecedesWindow(
@@ -4560,13 +4594,17 @@ function classifyAbsentBoundary(
     options: M0M1RenderOptions,
     messages: readonly MessageLike[],
     boundary: string,
-): PrefixTrimStatus {
+): PrefixTrimOutcome {
     const { sessionId } = options;
     const pass = options.isCacheBustingPass ? "priced" : "defer";
     const firstLiveId = firstPersistedLiveId(messages);
-    if (firstLiveId !== null && boundaryPrecedesWindow(sessionId, boundary, firstLiveId)) {
+    const order =
+        firstLiveId === null
+            ? "unknown"
+            : boundaryOrderAgainstWindow(sessionId, boundary, firstLiveId);
+    if (firstLiveId !== null && order === "precedes") {
         logBoundaryPrecedesWindow(options, boundary, firstLiveId);
-        return "boundary-precedes-window";
+        return { status: "boundary-precedes-window" };
     }
     precedesWindowLoggedBySession.delete(sessionId);
 
@@ -4583,7 +4621,10 @@ function classifyAbsentBoundary(
             `prefix trim: boundary ${boundary} absent from current messages; pass=${pass}; no in-pass trim applied (degraded pass ${episode.passes}; ${firstLiveId === null ? "no persisted live message to compare with" : `boundary does not sort before the first live message ${firstLiveId}`}; whole window served until a cache-busting pass moves the boundary into the window)`,
         );
     }
-    return "refused";
+    return {
+        status: "refused",
+        refusal: order === "not-before" ? "boundary-not-in-request" : "boundary-unordered",
+    };
 }
 
 function isSyntheticPrefixHead(message: MessageLike): boolean {
@@ -4610,19 +4651,19 @@ export function capturePrefixTrimSourceOrder(
     let sawPersistedRow = false;
     let invalidReason: string | null = null;
 
-    for (const [index, message] of messages.entries()) {
+    for (const message of messages) {
         const id = message.info.id;
         // OpenCode 2 renders instruction-update rows as id-less system messages
         // anywhere in history. They carry no row identity to order, so both
         // visible-boundary and persisted-order trimming preserve them.
         if (isHostRenderedSystemMessage(message)) continue;
         if (typeof id !== "string" || id.length === 0) {
-            if (!sawPersistedRow && isSyntheticPrefixHead(message)) {
-                syntheticHeadCount += 1;
-                continue;
-            }
-            invalidReason = `source message at index ${index} has no stable id outside the synthetic head`;
-            break;
+            if (!sawPersistedRow && isSyntheticPrefixHead(message)) syntheticHeadCount += 1;
+            // Any other message without an id (one another plugin's hook adds,
+            // the host's step-limit notice, a provider-native checkpoint) has
+            // no row in the store to order either. It is left out of the order,
+            // and the trim places it by the identified rows after it.
+            continue;
         }
         sawPersistedRow = true;
         if (seen.has(id)) {
@@ -4688,10 +4729,11 @@ function trimToPreparedPrefix(
         | "m0RematerializedThisPass"
         | "materializationContentionRetryExhausted"
     >,
-): PrefixTrimStatus {
-    if (options.compactionOff || !options.messages) return "not-attempted";
+): PrefixTrimOutcome {
+    if (options.compactionOff || !options.messages) return { status: "not-attempted" };
+    const messages = options.messages;
     const boundary = prepared.preparedTrimBoundaryId;
-    let status: PrefixTrimStatus = "not-required";
+    let outcome: PrefixTrimOutcome = { status: "not-required" };
 
     if (boundary) {
         const retireDecisions = (messageIds: readonly string[]) => {
@@ -4709,17 +4751,79 @@ function trimToPreparedPrefix(
                 new Set(messageIds),
             );
         };
+        // Cut through the boundary where it sits in the live array. This is the
+        // trim every host used before the source order existed, and the one Pi
+        // uses on every pass. `reanchor` places a boundary missing from the
+        // array by the store's order; a caller that already found the source
+        // order unusable passes false, since re-anchoring needs that order.
+        const trimAtVisibleBoundary = (reanchor: boolean): PrefixTrimOutcome => {
+            const index = findBoundaryIndex(options.sessionId, messages, boundary);
+            if (index >= 0) {
+                const cut =
+                    index +
+                    (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1);
+                // Match source-order trimming: a summary is not proof that an
+                // ID-less host instruction is dispensable. Retaining it here too
+                // keeps request bytes unchanged if the host later hides only the
+                // boundary on a cache-preserving pass.
+                const unplaced = messages.slice(0, cut).filter(isHostRenderedSystemMessage);
+                const removed = messages.splice(0, cut, ...unplaced);
+                retireDecisions(
+                    removed
+                        .map((message) => message.info.id)
+                        .filter((id): id is string => typeof id === "string"),
+                );
+                resetPrefixTrimFallbackState(options.sessionId);
+                return { status: "applied" };
+            }
+            if (reanchor) {
+                const reanchored = reanchorStoredBoundary(options, boundary);
+                if (reanchored && reanchored.messageIds[0] !== boundary) {
+                    return trimToPreparedPrefix(
+                        { ...options, prefixTrimSourceOrder: reanchored },
+                        prepared,
+                    );
+                }
+            }
+            return classifyAbsentBoundary(options, messages, boundary);
+        };
         const sourceOrder = options.prefixTrimSourceOrder;
         if (sourceOrder) {
-            const refuse = (reason: string): PrefixTrimStatus => {
+            const pass = options.isCacheBustingPass ? "priced" : "defer";
+            const refuse = (reason: string, refusal: PrefixTrimRefusal): PrefixTrimOutcome => {
                 sessionLog(
                     options.sessionId,
-                    `prefix trim: boundary ${boundary}; pass=${options.isCacheBustingPass ? "priced" : "defer"}; no in-pass trim applied (${reason})`,
+                    `prefix trim: boundary ${boundary}; pass=${pass}; no in-pass trim applied (${reason})`,
                 );
-                return "refused";
+                return { status: "refused", refusal };
+            };
+            // The source order is only a better witness than the live array
+            // itself. When it cannot be used (a repeated id, or a live array
+            // that does not follow it), the boundary is placed the way it was
+            // before the source order existed: by its position in the live
+            // array, or, when it is not there, by whether the live window
+            // starts after it. A boundary id that appears more than once in
+            // the live array proves no cut: the copy after the first would
+            // still be served next to its summary. Only a boundary that still
+            // cannot be placed is refused.
+            const placeWithoutSourceOrder = (reason: string): PrefixTrimOutcome => {
+                sessionLog(
+                    options.sessionId,
+                    `prefix trim: boundary ${boundary}; pass=${pass}; source order not usable (${reason}); placing the boundary by the live messages`,
+                );
+                const served = resolveHostServedBoundaryId(options.sessionId, boundary);
+                const copies = messages.filter(
+                    (message) => message.info.id === boundary || message.info.id === served,
+                ).length;
+                if (copies > 1)
+                    return refuse(
+                        `boundary ${boundary} appears ${copies} times in the live messages`,
+                        "boundary-unordered",
+                    );
+                return trimAtVisibleBoundary(false);
             };
             if (sourceOrder.invalidReason) {
-                status = refuse(sourceOrder.invalidReason);
+                outcome = placeWithoutSourceOrder(sourceOrder.invalidReason);
             } else {
                 const sourcePosition = new Map<string, number>();
                 sourceOrder.messageIds.forEach((id, index) => {
@@ -4730,12 +4834,15 @@ function trimToPreparedPrefix(
                     sourcePosition.get(resolveHostServedBoundaryId(options.sessionId, boundary));
                 if (boundaryPosition === undefined) {
                     const reanchored = reanchorStoredBoundary(options, boundary);
-                    status = reanchored
+                    outcome = reanchored
                         ? trimToPreparedPrefix(
                               { ...options, prefixTrimSourceOrder: reanchored },
                               prepared,
                           )
-                        : refuse("boundary absent from immutable source order");
+                        : refuse(
+                              "boundary absent from immutable source order",
+                              "boundary-unordered",
+                          );
                 } else {
                     let lastSourcePosition = -1;
                     let sawPersistedRow = false;
@@ -4743,9 +4850,33 @@ function trimToPreparedPrefix(
                     let firstLiveId: string | undefined;
                     let liveOrderError: string | null = null;
                     const retained: MessageLike[] = [];
-                    for (const [index, message] of options.messages.entries()) {
+                    // A message without an id has no row in the store, so the
+                    // store cannot order it against the boundary. Its place is
+                    // taken from the identified rows after it: it is cut if and
+                    // only if a later identified live message sits at or before
+                    // the boundary (a partial compartment end counts as at the
+                    // boundary, although that row itself is kept). Otherwise,
+                    // including when nothing identified follows it, it is kept.
+                    // This matches the visible-boundary cut and the compartment
+                    // injection, which cut everything before a visible boundary,
+                    // and keeps a trailing notice on every pass. Host system
+                    // rows met while such a message waits are queued with it, so
+                    // the order of what is kept never changes.
+                    let unplaced: MessageLike[] = [];
+                    const placeUnplaced = (cut: boolean) => {
+                        for (const message of unplaced) {
+                            if (!cut || isHostRenderedSystemMessage(message))
+                                retained.push(message);
+                        }
+                        unplaced = [];
+                    };
+                    for (const message of options.messages) {
                         const id = message.info.id;
                         if (isHostRenderedSystemMessage(message)) {
+                            if (unplaced.length > 0) {
+                                unplaced.push(message);
+                                continue;
+                            }
                             // Unplaced means a host system/instruction row without
                             // its own stable ID, not the injected synthetic user head. A
                             // neighbour cannot prove its coverage; even a covered
@@ -4760,8 +4891,8 @@ function trimToPreparedPrefix(
                         }
                         if (typeof id !== "string" || id.length === 0) {
                             if (!sawPersistedRow && isSyntheticPrefixHead(message)) continue;
-                            liveOrderError = `live message at index ${index} has no stable id outside the synthetic head`;
-                            break;
+                            unplaced.push(message);
+                            continue;
                         }
                         sawPersistedRow = true;
                         const position = sourcePosition.get(id);
@@ -4778,6 +4909,7 @@ function trimToPreparedPrefix(
                             firstLiveId = id;
                         }
                         lastSourcePosition = position;
+                        placeUnplaced(position <= boundaryPosition);
                         if (
                             position > boundaryPosition ||
                             (position === boundaryPosition &&
@@ -4785,8 +4917,10 @@ function trimToPreparedPrefix(
                         )
                             retained.push(message);
                     }
-                    if (liveOrderError) status = refuse(liveOrderError);
-                    else {
+                    placeUnplaced(false);
+                    if (liveOrderError) {
+                        outcome = placeWithoutSourceOrder(liveOrderError);
+                    } else {
                         // The pre-edit message order shows the summarized-history boundary
                         // preceded the first live row, even if preparation or reduction
                         // removed the boundary. Log that here: the edited array alone
@@ -4810,40 +4944,12 @@ function trimToPreparedPrefix(
                                 boundaryPosition + (preserveBoundary ? 0 : 1),
                             ),
                         );
-                        status = "applied";
+                        outcome = { status: "applied" };
                     }
                 }
             }
         } else {
-            const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
-            if (index >= 0) {
-                const cut =
-                    index +
-                    (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1);
-                // Match source-order trimming: a summary is not proof that an
-                // ID-less host instruction is dispensable. Retaining it here too
-                // keeps request bytes unchanged if the host later hides only the
-                // boundary on a cache-preserving pass.
-                const unplaced = options.messages.slice(0, cut).filter(isHostRenderedSystemMessage);
-                const removed = options.messages.splice(0, cut, ...unplaced);
-                retireDecisions(
-                    removed
-                        .map((message) => message.info.id)
-                        .filter((id): id is string => typeof id === "string"),
-                );
-                resetPrefixTrimFallbackState(options.sessionId);
-                status = "applied";
-            } else {
-                const reanchored = reanchorStoredBoundary(options, boundary);
-                if (reanchored && reanchored.messageIds[0] !== boundary) {
-                    status = trimToPreparedPrefix(
-                        { ...options, prefixTrimSourceOrder: reanchored },
-                        prepared,
-                    );
-                } else {
-                    status = classifyAbsentBoundary(options, options.messages, boundary);
-                }
-            }
+            outcome = trimAtVisibleBoundary(true);
         }
     }
     if (
@@ -4851,7 +4957,7 @@ function trimToPreparedPrefix(
         (options.isCacheBustingPass && !prepared.materializationContentionRetryExhausted)
     )
         clearInjectionCache(options.sessionId);
-    return status;
+    return outcome;
 }
 
 /** Capture a complete persisted pair and its boundary before a fallible preflight. */
@@ -4966,15 +5072,16 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     }
     if (prepared?.preparedMessages) {
         const head = prepared.preparedMessages;
-        let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
+        let prefixTrim: PrefixTrimOutcome = { status: "not-attempted" };
         if (options.messages) {
-            prefixTrimStatus = trimToPreparedPrefix(options, prepared);
+            prefixTrim = trimToPreparedPrefix(options, prepared);
             options.messages.unshift(...structuredClone(head));
         }
         return {
             ...prepared,
             prependedMessageCount: options.messages ? head.length : 0,
-            prefixTrimStatus,
+            prefixTrimStatus: prefixTrim.status,
+            prefixTrimRefusal: prefixTrim.refusal,
         };
     }
     hydrateCachedM0Mural(options.db, options.sessionId, options.state);
@@ -5254,9 +5361,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text,
         muralForWire,
     );
-    let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
+    let prefixTrim: PrefixTrimOutcome = { status: "not-attempted" };
     if (options.messages) {
-        prefixTrimStatus = trimToPreparedPrefix(options, {
+        prefixTrim = trimToPreparedPrefix(options, {
             m0RematerializedThisPass: rematerialized,
             materializationContentionRetryExhausted: contentionExhausted,
             preparedTrimBoundaryId,
@@ -5275,6 +5382,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text,
         preparedMessages,
         preparedTrimBoundaryId,
-        prefixTrimStatus,
+        prefixTrimStatus: prefixTrim.status,
+        ...(prefixTrim.refusal ? { prefixTrimRefusal: prefixTrim.refusal } : {}),
     };
 }

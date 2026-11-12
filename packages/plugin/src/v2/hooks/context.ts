@@ -1728,6 +1728,28 @@ export async function registerContext(context: V2Context) {
             log("[magic-context] v2 thinking binding recovery arm failed", armError);
         }
     };
+    /**
+     * Arm the latest-turn thinking recovery when a host failure event carries
+     * the provider's refusal of the latest assistant turn's thinking. Returns
+     * whether the error was that refusal, so the caller does not also treat it
+     * as a binding 400.
+     */
+    const armLatestThinkingFromEvent = (sessionID: string, error: unknown): boolean => {
+        if (error === undefined || !db || compactionOff) return false;
+        const model = liveModels.get(sessionID);
+        try {
+            return armLatestThinkingRecoveryFromError({
+                db,
+                sessionId: sessionID,
+                error,
+                providerID: model?.providerID,
+                modelID: model?.modelID,
+            });
+        } catch (armError) {
+            log("[magic-context] v2 latest-thinking recovery arm failed", armError);
+            return false;
+        }
+    };
     const usageController = new AbortController();
     const usageDone = (async () => {
         let retry = 0;
@@ -1800,8 +1822,12 @@ export async function registerContext(context: V2Context) {
                                 messageTimesCache.deleteMessage(sessionID, messageID);
                         }
                         // A failed step carries the provider error itself; a
-                        // binding 400 may reach this loop only that way.
-                        if (event.type === "session.step.failed")
+                        // binding 400 or a refusal of the latest turn's thinking
+                        // may reach this loop only that way.
+                        if (
+                            event.type === "session.step.failed" &&
+                            !armLatestThinkingFromEvent(sessionID, event.data.error)
+                        )
                             armBindingRecoveryFromEvent(
                                 sessionID,
                                 event.data.error,
@@ -1815,23 +1841,7 @@ export async function registerContext(context: V2Context) {
                             const error = hiddenTerminalError(event);
                             if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                             if (error !== undefined && db && !compactionOff) {
-                                const model = liveModels.get(sessionID);
-                                let latestTurnRejection = false;
-                                try {
-                                    latestTurnRejection = armLatestThinkingRecoveryFromError({
-                                        db,
-                                        sessionId: sessionID,
-                                        error,
-                                        providerID: model?.providerID,
-                                        modelID: model?.modelID,
-                                    });
-                                } catch (armError) {
-                                    log(
-                                        "[magic-context] v2 latest-thinking recovery arm failed",
-                                        armError,
-                                    );
-                                }
-                                if (!latestTurnRejection)
+                                if (!armLatestThinkingFromEvent(sessionID, error))
                                     armBindingRecoveryFromEvent(sessionID, error, event.type);
                             }
                             continue;

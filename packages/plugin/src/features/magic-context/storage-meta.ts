@@ -11,6 +11,7 @@ export {
     applyStrippedPlaceholderDelta,
     armThinkingBindingRecovery,
     type Channel2NudgeState,
+    cachedHeadCoversPendingCompactionMarker,
     captureChannel1PostReduceGraceBaseline,
     casChannel2NudgeClaim,
     casChannel2NudgeState,

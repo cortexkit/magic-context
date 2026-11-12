@@ -20,7 +20,7 @@ import { __test, registerPiDreamerProject, runPiDreamForProject } from ".";
 
 const PROJECT = "git:pi-smart-note-github";
 const owner = {};
-let fixture: ReturnType<typeof timeoutTestDatabase>;
+let fixture: ReturnType<typeof timeoutTestDatabase> | undefined;
 let compilerCalls: number;
 let disposeTransport: (() => Promise<void>) | undefined;
 
@@ -48,7 +48,7 @@ beforeEach(() => {
 			}) as never,
 	);
 	registerPiDreamerProject({
-		db: fixture.db,
+		db: fixture!.db,
 		projectDir: tmpdir(),
 		projectIdentity: PROJECT,
 		registrationOwner: owner,
@@ -67,7 +67,9 @@ afterEach(async () => {
 	disposeTransport = undefined;
 	__test.reset();
 	__wakePlaneTest.reset();
-	fixture.dispose();
+	// Setup can fail before the database fixture is assigned; preserve that original error.
+	fixture?.dispose();
+	fixture = undefined;
 });
 
 async function setup(
@@ -82,21 +84,21 @@ async function setup(
 		},
 	);
 	disposeTransport = transport.dispose;
-	const note = addNote(fixture.db, "smart", {
+	const note = addNote(fixture!.db, "smart", {
 		projectPath: PROJECT,
 		sessionId: "pi-owner",
 		content: "wake on CI failure",
 		surfaceCondition: GITHUB_FAILURE_CONDITION,
 	});
 	if (phase === "due")
-		fixture.db
+		fixture!.db
 			.prepare(`UPDATE notes SET compiled_check=?,
         check_status='compiled', policy_version=1, check_next_due_at=0 WHERE id=?`)
 			.run(GITHUB_FAILURE_CHECK, note.id);
 	return transport.paths;
 }
 function state() {
-	return getNotes(fixture.db, { type: "smart", projectPath: PROJECT })[0];
+	return getNotes(fixture!.db, { type: "smart", projectPath: PROJECT })[0];
 }
 
 for (const response of githubRateLimitResponses(
@@ -122,7 +124,7 @@ for (const response of githubRateLimitResponses(
 				: startedAt + response.delayMs,
 		);
 		expect(
-			getNotes(fixture.db, { type: "session", sessionId: "pi-owner" }),
+			getNotes(fixture!.db, { type: "session", sessionId: "pi-owner" }),
 		).toEqual([]);
 		expect(paths).toHaveLength(1);
 		expect(compilerCalls).toBe(phase === "compile" ? 1 : 0);
@@ -143,7 +145,7 @@ for (const response of githubPrivateResponses) {
 			checkNextDueAt: null,
 		});
 		expect(
-			getNotes(fixture.db, { type: "session", sessionId: "pi-owner" }),
+			getNotes(fixture!.db, { type: "session", sessionId: "pi-owner" }),
 		).toHaveLength(1);
 	});
 }

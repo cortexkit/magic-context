@@ -2777,28 +2777,31 @@ export async function embedItemsForProject(
     return { vectors, modelId, generation };
 }
 
-/** Keep domain items bounded to the same per-call window cap used by positional providers. */
-async function embedItemsWindowBounded(
+/** Bound requests to avoid timeouts that could trip the circuit breaker also used by search. */
+export async function embedItemsWindowBounded(
     projectIdentity: string,
     items: readonly { id: string; text: string; contentSha256: string }[],
     signal?: AbortSignal,
     db?: Database,
+    sessionId = projectIdentity,
+    options: { stopOnIncompleteSlice?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof embedItemsForProject>>> {
     if (items.length <= MAX_WINDOWS_PER_EMBED_CALL) {
-        return embedItemsForProject(projectIdentity, items, signal, db, projectIdentity);
+        return embedItemsForProject(projectIdentity, items, signal, db, sessionId);
     }
     const vectors = new Map<string, Float32Array>();
     let modelId: string | null = null;
     let generation: number | null = null;
     for (let start = 0; start < items.length; start += MAX_WINDOWS_PER_EMBED_CALL) {
-        const result = await embedItemsForProject(
-            projectIdentity,
-            items.slice(start, start + MAX_WINDOWS_PER_EMBED_CALL),
-            signal,
-            db,
-            projectIdentity,
-        );
+        const slice = items.slice(start, start + MAX_WINDOWS_PER_EMBED_CALL);
+        const result = await embedItemsForProject(projectIdentity, slice, signal, db, sessionId);
         if (!result) return null;
+        // Publication is atomic per summary: after a missing vector, more requests
+        // cannot make it storable. The background drain can still persist complete
+        // summaries from a mixed batch, so it retains partial results by default.
+        if (options.stopOnIncompleteSlice && slice.some((item) => !result.vectors.has(item.id))) {
+            return null;
+        }
         if (modelId === null) {
             modelId = result.modelId;
             generation = result.generation;

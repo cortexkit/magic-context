@@ -1,5 +1,6 @@
 export type CacheBustDivergenceClass =
     | "cache_scope_changed"
+    | "host_messages_removed"
     | "no_mc_pass_row"
     | "system_row_shift"
     | "accounted_hard_model_change"
@@ -9,6 +10,7 @@ export type CacheBustDivergenceClass =
     | "accounted_hard_marker_drain"
     | "accounted_hard_fold"
     | "accounted_tag_identity_repair"
+    | "accounted_latest_turn_thinking_removed"
     | "accounted_execute_published_history"
     | "accounted_soft_m1_execute"
     | "accounted_ctx_reduce"
@@ -50,6 +52,8 @@ export interface AnalyzedCacheRequest {
     providerCacheMissReason?: ProviderCacheMissReason;
     firstDivergence: string;
     analyzerCmd: string;
+    passEvidence?: string;
+    threadBreak?: { requestKey: string; cacheRead?: number; previousTotal?: number; gapMs?: number; continuesSinceFull?: number };
     /** Render-identity components the matched pass reported as changed, when it logged them. */
     identityDelta?: string[];
     /**
@@ -106,6 +110,8 @@ export interface CacheBustDecisionAttribution {
 
 export interface CacheBustAttributionInput {
     cacheScopeChanged?: boolean;
+    /** The host logged a message removal after the previous request and before this one. */
+    hostMessagesRemoved?: boolean;
     providerCacheMissReason?: string;
     threadEvidence?: "continuation_short_read" | "thread_break_unchanged_client_bytes" | "full_body_no_baseline";
     divergenceIndex: number;
@@ -175,6 +181,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         rule: "the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache and never wakes, even right after a reclaim bust",
     },
     {
+        divergenceClass: "host_messages_removed",
+        accounted: true,
+        rule: "the host logged message.removed for this session between requests; a revert changes the prefix independently of MC",
+    },
+    {
         divergenceClass: "system_row_shift",
         accounted: true,
         rule: "message[0]/system divergence rewrites less than 5% of the prompt",
@@ -228,6 +239,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "accounted_tag_identity_repair",
         accounted: true,
         rule: "matched pass records materialize_reason=tag_identity_repair (Pi kept the newest of two tag numbers for one call or message and rebuilt once)",
+    },
+    {
+        divergenceClass: "accounted_latest_turn_thinking_removed",
+        accounted: true,
+        rule: "matched pass records materialize_reason=latest_turn_thinking_removed (the provider rejected the latest assistant turn's thinking, and the pass removed it from that turn)",
     },
     {
         divergenceClass: "accounted_ctx_reduce",
@@ -453,6 +469,7 @@ export function isThresholdedThreadClass(divergenceClass: string): boolean {
  */
 const NOT_A_SECOND_REWRITE = new Set<string>([
     "cache_scope_changed",
+    "host_messages_removed",
     "usage_missing",
     "tail_shrink_no_rewrite",
     "system_row_shift",
@@ -542,6 +559,9 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
     // The provider drops an idle prefix whatever the request looks like, so an
     // expiry outranks every request-shape class below.
     if (input.idleCacheExpiry) return "idle_cache_expiry";
+    // A host revert removes conversation bytes independently of MC, even when
+    // no transform pass was recorded or the preceding pass reclaimed content.
+    if (input.hostMessagesRemoved) return "host_messages_removed";
     if (input.threadEvidence) return input.threadEvidence;
     // A request that wrote nothing while most of its prompt went uncached had no
     // breakpoint to write at. That is the request's own shape, so it outranks the
@@ -612,12 +632,13 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
         return usageMissing ? "usage_missing" : "provider_full_miss";
     }
     if (isTinyFirstRenderDefer) return "unaccounted_defer_pass";
-    // A scheduler-only defer does not show that a compaction actually ran. Nearby
-    // old marker text or a changed billing header cannot prove that mutation.
+    // A scheduler defer says only that usage was below its execute threshold.
+    // It does not prove that the pass made no changes; other processing steps
+    // may still rebuild the request.
     if (decision.source === "transform scheduler log" && canonicalDecision === "defer") {
         if (usageMissing) return "usage_missing";
         if (providerFullMiss) return "provider_full_miss";
-        return "unaccounted_defer_pass";
+        return "no_mc_pass_row";
     }
     // A pass that logged its reclaim ride states outright why it was allowed to
     // mutate, so it outranks the compaction-marker seam below, which only infers
@@ -644,6 +665,12 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
     // was rematerialized; without this class an unmaterialized repair read as an
     // m1 refresh and a materialized one as an unnamed fold.
     if (materializeReason === "tag_identity_repair") return "accounted_tag_identity_repair";
+    // The pass removed the thinking of the latest assistant turn because the
+    // provider rejected it. Bytes change from that turn on, and the pass
+    // records no other reason.
+    if (materializeReason === "latest_turn_thinking_removed") {
+        return "accounted_latest_turn_thinking_removed";
+    }
     if (decision.materialized) {
         if (materializeReason === "model_change") return "accounted_hard_model_change";
         if (materializeReason === "system_hash") return "accounted_hard_system_hash";

@@ -39,6 +39,8 @@ export const PASS_DEGRADATION_EFFECTS = {
     "image-strip-exception": "changes-request",
     "m0-m1-injection-degradation": "changes-request",
     "m0-m1-fallback-failure": "changes-request",
+    // Recorded only when the host marker may have moved. A marker that provably
+    // stayed where it was is served and its move retried on a later rebuild.
     "compaction-marker-drain-failure": "changes-request",
     // An uncommitted reminder is not appended to the newest user turn.
     "note-nudge-cas-failure": "served",

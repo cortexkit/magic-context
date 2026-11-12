@@ -41,6 +41,18 @@ sha2 = "0.10"
 subc-client-rs = "=0.26.1"
 subc-protocol = "=0.29.1"
 
+# Owner-only check for the serve-mode stable token file (src/serve/token_file.rs).
+# Already in the lockfile through tauri's dependency tree.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 subc-control = "=0.28.0"

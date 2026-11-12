@@ -232,6 +232,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/latest-assistant-turn";
 import {
 	captureOriginalTurn,
+	LATEST_TURN_THINKING_REMOVED_REASON,
 	prepareLatestThinkingRecovery,
 } from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
 import { loadPersistedLkgSlot } from "@magic-context/core/hooks/magic-context/lkg-persist";
@@ -535,11 +536,14 @@ import {
 	assertPiThinkingEntryIds,
 	frozenBindingEntryIds,
 	hasUnfrozenPiThinking,
+	persistPiLatestTurnThinkingRemoval,
+	piBindingStripsAtStart,
 	piMessageHasThinking,
 	planPiProactiveThinkingStrip,
 	preparePiThinkingStripWrite,
 	recordPiBindingStripEndOrder,
 	resolvePiBindingStripOrder,
+	stripPiThinkingOfIds,
 } from "./provider-error-recovery-pi";
 import {
 	convertEntriesToRawMessagePage,
@@ -6168,7 +6172,9 @@ export function registerPiContextHandler(
 				);
 			}
 			const piDecisionSnapshotNewestAssistant =
-				result.bustedThisPass || hasPendingPiSystemPromptHashChange(sessionId)
+				result.bustedThisPass ||
+				result.latestTurnThinkingRemoved === true ||
+				hasPendingPiSystemPromptHashChange(sessionId)
 					? findNewestPiAssistantEntryId(branchEntries)
 					: undefined;
 			const publishTransformDecision =
@@ -6182,7 +6188,10 @@ export function registerPiContextHandler(
 									materialized: result.materialized,
 									materializeReason: normalizeMaterializeReason(
 										"pi",
-										result.materializeReason,
+										result.materializeReason ??
+											(result.latestTurnThinkingRemoved
+												? LATEST_TURN_THINKING_REMOVED_REASON
+												: null),
 										result.materialized,
 									),
 									systemHashPrev: result.materialized
@@ -9070,6 +9079,13 @@ interface RunPipelineResult {
 	injectionResult: PiInjectionResult | null;
 	materialized: boolean;
 	materializeReason: string | null;
+	/**
+	 * This pass removed the provider's latest turn's thinking after the provider
+	 * rejected it (the latest-turn thinking recovery's second remedy). Bytes
+	 * change from that turn on without a rebuild, so the pass records its own
+	 * decision reason.
+	 */
+	latestTurnThinkingRemoved?: boolean;
 	droppedTokens: number;
 	droppedCount: number;
 	emergency: boolean;
@@ -9962,22 +9978,48 @@ function runSynchronousPipeline(
 		dropBranchIds ? ([...dropBranchIds].at(-1) ?? null) : null,
 	);
 	cancelPiAbandonedPendingDrops(args.db, args.sessionId, dropBranchIds);
+	const piStableId = (message: unknown, index: number) =>
+		resolvePiStableId(
+			message,
+			index,
+			args.entryIds,
+			args.entryIdByRef ?? undefined,
+		);
+	let stripRemovedTurnNow = false as boolean;
 	const thinkingRecovery = prepareLatestThinkingRecovery({
 		db: args.db,
 		sessionId: args.sessionId,
 		messages: args.messages,
-		id: (message, index) =>
-			resolvePiStableId(
-				message,
-				index,
-				args.entryIds,
-				args.entryIdByRef ?? undefined,
-			),
+		id: piStableId,
 		parts: (message) =>
 			Array.isArray((message as { content?: unknown })?.content)
 				? (message as { content: unknown[] }).content
 				: [],
+		modelID: args.resolvedModelID,
+		providerID: args.resolvedProviderID,
+		persistRemoval: (ids) => {
+			const outcome = persistPiLatestTurnThinkingRemoval(
+				args.db,
+				args.sessionId,
+				ids,
+			);
+			stripRemovedTurnNow = outcome.stripNow;
+			return outcome.persisted;
+		},
 	});
+	// The recovery removed the provider's latest turn's thinking and saved the
+	// removal before this run's pipeline stages. A context event can run the
+	// pipeline more than once (an outgoing-fit rerun works on a copy taken
+	// before the first run saved the removal, and the session's own strip
+	// replays run once per event), so every run removes it again at the point
+	// where the session replays its strips: here for a start-order session,
+	// after the stages otherwise (just before this function returns).
+	const removedTurnIds = new Set(thinkingRecovery.removedIds ?? []);
+	const removedTurnAtStart =
+		removedTurnIds.size > 0 &&
+		(stripRemovedTurnNow || piBindingStripsAtStart(args.db, args.sessionId));
+	if (removedTurnAtStart)
+		stripPiThinkingOfIds(args.messages, removedTurnIds, piStableId);
 	if (thinkingRecovery.ended)
 		signalPiPendingMaterialization(args.sessionId, "thinking_hold");
 	let restoreOriginals:
@@ -13774,6 +13816,12 @@ function runSynchronousPipeline(
 		parkedBustTriggersBySession.delete(args.sessionId);
 	if (prefixPass) prefixPass.boundary = protectedSignedPrefix;
 	if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
+	if (removedTurnIds.size > 0 && !removedTurnAtStart)
+		stripPiThinkingOfIds(outputMessages, removedTurnIds, (message) =>
+			message && typeof message === "object"
+				? postCommitStableIdByRef.get(message)
+				: undefined,
+		);
 	return {
 		prefixPass,
 		hostTokenPass,
@@ -13802,6 +13850,7 @@ function runSynchronousPipeline(
 		injectionResult,
 		materialized,
 		materializeReason,
+		latestTurnThinkingRemoved: thinkingRecovery.removedThisPass === true,
 		droppedTokens,
 		droppedCount,
 		emergency,

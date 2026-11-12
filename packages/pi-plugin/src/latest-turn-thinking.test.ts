@@ -22,6 +22,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { buildSyntheticTodoPart } from "@magic-context/core/hooks/magic-context/todo-view";
+import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
@@ -34,6 +35,7 @@ import {
 	signalPiPendingMaterialization,
 } from "./context-handler";
 import { injectM0M1Pi } from "./inject-compartments-pi";
+import { resetPiUpperEstimateReclaim } from "./pi-fit-reclaim";
 import {
 	applyPiProactiveThinkingStrip,
 	handlePiProviderFailure,
@@ -206,7 +208,7 @@ test("Pi Anthropic task applies queued drops mid-turn above the hold cap and str
 });
 
 for (const order of ["start", "end"] as const) {
-	test(`Pi ${order}-order recovery keeps the restored original for the rejected turn and omits it again after a real user`, async () => {
+	test(`Pi ${order}-order recovery keeps the restored original while the rejected turn is the provider's latest and omits it again after a newer turn`, async () => {
 		const sessionId = `pi-recovery-durable-${order}`;
 		const db = createTestDb();
 		getOrCreateSessionMeta(db, sessionId);
@@ -299,16 +301,327 @@ for (const order of ["start", "end"] as const) {
 			// original block; no pass removes it again.
 			for (let n = 0; n < 2; n++)
 				expect(thinkingOf(await pass(), "signed-2")).toEqual(original);
-			expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBe(
-				"latest_thinking_original:u",
-			);
+			const bound = getThinkingBindingRecoveryTarget(db, sessionId) ?? "";
+			expect(bound).toStartWith("latest_thinking_original_turn:");
+			expect(
+				JSON.parse(bound.slice("latest_thinking_original_turn:".length)),
+			).toMatchObject({
+				stage: "restoring",
+				first: "a",
+				last: "b",
+				rejections: 1,
+			});
+			// The provider checks the last assistant turn even when a real user
+			// message follows it, so the restore stays.
 			source.push(userMessage("next real user", 4));
 			ids.push("next");
+			expect(thinkingOf(await pass(), "signed-2")).toEqual(original);
+			expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBe(bound);
+			// A newer assistant turn proves a later request was accepted: the
+			// rejected turn is an older turn, and its accepted omission applies again.
+			source.push(
+				assistantMessage("answer-5", 5, {
+					provider: "anthropic",
+					model: "claude-opus-5-5",
+					content: [{ type: "text", text: "answer-5" }],
+				}),
+			);
+			ids.push("c");
 			const next = await pass();
-			// The rejected turn ended: its accepted older-turn omission applies again.
 			expect(thinkingOf(next, "signed-2")).toBeUndefined();
 			expect(getThinkingBindingRecoveryTarget(db, sessionId) ?? "").toBe("");
 		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+}
+
+// A model whose signatures are not bound to the bytes before them, so the
+// open turn's first render keeps its signed thinking (a prefix-bound model's
+// unheld first render omits it). The recovery is the same on every
+// Anthropic-family model.
+const MODEL = "claude-sonnet-4-5";
+const LATEST_TURN_400 =
+	"400: messages.3.content.2: thinking or redacted_thinking blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.";
+
+// The provider checks the last assistant turn of a request even when a new
+// user message follows it. A completed turn that carries all its original
+// thinking (signed by two models, say) and is rejected cannot be fixed by a
+// restore; the recovery removes its thinking instead, keeps every byte before
+// the turn, replays the removal, and refuses locally on the third rejection.
+for (const order of ["start", "end"] as const) {
+	test(`Pi ${order}-order: a rejected completed turn loses its thinking on the retry and refuses on the third rejection`, async () => {
+		const sessionId = `pi-latest-turn-removal-${order}`;
+		const db = createTestDb();
+		getOrCreateSessionMeta(db, sessionId);
+		updateSessionMeta(db, sessionId, {
+			isSubagent: true,
+			lastResponseTime: Date.now(),
+			cacheTtl: "59m",
+		});
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTokens: 4000,
+			heuristics: { clearReasoningAge: 1000 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: unknown[] }>;
+		const signed = (text: string, timestamp: number, thinking: string) =>
+			assistantMessage(text, timestamp, {
+				provider: "anthropic",
+				model: MODEL,
+				content: [
+					{ type: "thinking", thinking, thinkingSignature: `sig-${thinking}` },
+					{ type: "text", text },
+				],
+			});
+		const source: unknown[] = [
+			userMessage("old task", 1),
+			signed("old answer", 2, "old-thinking"),
+			userMessage("task", 3),
+			signed("step one", 4, "fable-thinking"),
+			signed("step two", 5, "fallback-thinking"),
+		];
+		const ids = ["old-u", "old-a", "u", "a1", "a2"];
+		const pass = async () => {
+			const messages = structuredClone(source);
+			const ctx = {
+				...fakeContext(sessionId, process.cwd(), ids, messages),
+				model: {
+					provider: "anthropic",
+					id: MODEL,
+					api: "anthropic-messages",
+					contextWindow: 100_000,
+				},
+				getContextUsage: () => ({
+					tokens: 20_000,
+					percent: 20,
+					contextWindow: 100_000,
+				}),
+			};
+			return (await handler({ messages: messages as never[] }, ctx as never))
+				.messages;
+		};
+		const reject = (n: number) => {
+			handlePiProviderFailure({
+				db,
+				sessionId,
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					model: MODEL,
+					errorMessage: LATEST_TURN_400,
+				},
+			});
+			// Pi keeps the failed reply as an empty errored row and the user retries.
+			source.push(
+				assistantMessage("", 10 + n * 2, {
+					provider: "anthropic",
+					model: MODEL,
+					content: [],
+					stopReason: "error",
+					errorMessage: LATEST_TURN_400,
+				}),
+				userMessage(`retry ${n}`, 11 + n * 2),
+			);
+			ids.push(`failed-${n}`, `retry-${n}`);
+		};
+		const text = (messages: unknown[]) => JSON.stringify(messages);
+		/** Served messages up to (not including) the rejected turn's first assistant. */
+		const beforeTurn = (messages: unknown[]) =>
+			JSON.stringify(
+				messages.slice(
+					0,
+					messages.findIndex((message) =>
+						JSON.stringify(message).includes("step one"),
+					),
+				),
+			);
+		try {
+			// The turn is served while it is open; its signed thinking is kept.
+			await pass();
+			if (order === "start") {
+				// An older turn's accepted omission, saved by a build that replayed
+				// omissions before the pipeline stages.
+				addMergedReasoningStrippedIds(db, sessionId, [
+					"binding_mismatch:old-a",
+				]);
+			}
+			await pass();
+			// The turn ends and the user asks again: this request is refused.
+			source.push(userMessage("next question", 6));
+			ids.push("next");
+			const rejected = await pass();
+			expect(text(rejected)).toContain("fable-thinking");
+			expect(text(rejected)).toContain("fallback-thinking");
+			reject(1);
+			const retried = await pass();
+			expect(text(retried)).not.toContain("fable-thinking");
+			expect(text(retried)).not.toContain("fallback-thinking");
+			expect(beforeTurn(retried)).toBe(beforeTurn(rejected));
+			const ledger = getMergedReasoningStrippedIds(db, sessionId);
+			expect(ledger.has("binding_mismatch:a1")).toBe(true);
+			expect(ledger.has("binding_mismatch:a2")).toBe(true);
+			expect(ledger.has(THINKING_BINDING_STRIP_ORDER_END_MARKER)).toBe(
+				order === "end",
+			);
+			// The next pass replays the removal byte for byte.
+			expect(text(await pass())).toBe(text(retried));
+			reject(2);
+			const second = await pass();
+			expect(text(second)).not.toContain("fable-thinking");
+			expect(text(second)).not.toContain("fallback-thinking");
+			reject(3);
+			await expect(pass()).rejects.toThrow("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+}
+
+// A context event can run the pipeline twice: an outgoing-fit reclaim reruns it
+// on a copy of the input taken before the first run saved the removal. The
+// rerun must serve the rejected turn without its thinking too, in either strip
+// order. Here the reclaim is forced by extension metadata that counts toward
+// the upper size estimate but is never sent.
+for (const order of ["start", "end"] as const) {
+	test(`Pi ${order}-order: a fit-reclaim rerun on the removal pass also serves the rejected turn without its thinking`, async () => {
+		const sessionId = `pi-latest-turn-removal-fit-${order}`;
+		const db = createTestDb();
+		getOrCreateSessionMeta(db, sessionId);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			cacheTtl: "59m",
+		});
+		const fake = createFakePi();
+		Object.assign(fake.pi, { getAllTools: () => [] });
+		const lines: string[] = [];
+		const log = spyOn(logger, "sessionLog").mockImplementation(
+			(_id, ...parts) => {
+				lines.push(parts.join(" "));
+			},
+		);
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTokens: 4000,
+			heuristics: { clearReasoningAge: 1000 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: unknown[] }>;
+		const signed = (text: string, timestamp: number, thinking: string) =>
+			assistantMessage(text, timestamp, {
+				provider: "anthropic",
+				model: MODEL,
+				content: [
+					{ type: "thinking", thinking, thinkingSignature: `sig-${thinking}` },
+					{ type: "text", text },
+				],
+			});
+		const source: unknown[] = [
+			{
+				role: "custom",
+				customType: "notice",
+				timestamp: 1,
+				content: [
+					{ type: "text", text: "small visible notice" },
+					{ type: "extension-metadata", details: "x".repeat(1_000_000) },
+				],
+			},
+			userMessage("old task", 2),
+			signed("old answer", 3, "old-thinking"),
+			userMessage("task", 4),
+			signed("step one", 5, "fable-thinking"),
+			signed("step two", 6, "fallback-thinking"),
+		];
+		const ids = ["notice", "old-u", "old-a", "u", "a1", "a2"];
+		const pass = async () => {
+			const messages = structuredClone(source);
+			const ctx = {
+				...fakeContext(sessionId, process.cwd(), ids, messages),
+				hasUI: false,
+				getSystemPrompt: () => "You are helpful.",
+				model: {
+					provider: "anthropic",
+					id: MODEL,
+					api: "anthropic-messages",
+					contextWindow: 50_000,
+				},
+				// No measured usage: Pi then checks the outgoing request's fit.
+				getContextUsage: () => ({
+					tokens: 0,
+					percent: 0,
+					contextWindow: 50_000,
+				}),
+			};
+			const served = JSON.stringify(
+				(await handler({ messages: messages as never[] }, ctx as never))
+					.messages,
+			);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				lastInputTokens: 0,
+				lastContextPercentage: 0,
+			});
+			return served;
+		};
+		try {
+			await pass();
+			if (order === "start")
+				addMergedReasoningStrippedIds(db, sessionId, [
+					"binding_mismatch:old-a",
+				]);
+			await pass();
+			source.push(userMessage("next question", 7));
+			ids.push("next");
+			expect(await pass()).toContain("fable-thinking");
+			handlePiProviderFailure({
+				db,
+				sessionId,
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					model: MODEL,
+					errorMessage: LATEST_TURN_400,
+				},
+			});
+			source.push(
+				assistantMessage("", 8, {
+					provider: "anthropic",
+					model: MODEL,
+					content: [],
+					stopReason: "error",
+					errorMessage: LATEST_TURN_400,
+				}),
+				userMessage("retry", 9),
+			);
+			ids.push("failed", "retry");
+			// A rebuild the history refresh asks for, with the per-session reclaim
+			// latch reset (as a provider overflow resets it), so the reclaim that
+			// the metadata over-count asks for runs on this pass.
+			signalPiHistoryRefresh(sessionId);
+			resetPiUpperEstimateReclaim(db, sessionId);
+			const before = lines.length;
+			const retried = await pass();
+			const passLines = lines.slice(before);
+			expect(
+				passLines.some((line) =>
+					line.includes("removed thinking from the bound turn"),
+				),
+			).toBe(true);
+			expect(
+				passLines.some((line) => line.includes("attempting emergency reclaim")),
+			).toBe(true);
+			expect(retried).not.toContain("fable-thinking");
+			expect(retried).not.toContain("fallback-thinking");
+		} finally {
+			log.mockRestore();
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}

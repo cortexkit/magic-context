@@ -11,6 +11,7 @@ import {
     estimateTokens,
     preloadTokenizer,
 } from "../../hooks/magic-context/read-session-formatting";
+import { listOpenFiles } from "../../shared/test-open-files";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { V2StoreReader } from "../store-reader";
 import { rawMessages } from "./store";
@@ -187,15 +188,11 @@ export default {...builtin,async setup(ctx){
                 "../../../../e2e-tests/src/opencode2-runner/plugin-activation"
             );
             await awaitPluginActivation(client, cwd, "@cortexkit/opencode-magic-context");
-            const lsof = spawnSync("lsof", ["-p", String(child.pid)], {
-                encoding: "utf8",
-                windowsHide: true,
-            });
-            expect(lsof.status).toBe(0);
-            writeFileSync(join(root, `lsof-${Date.now()}.txt`), lsof.stdout);
-            const databases = lsof.stdout
-                .split("\n")
-                .filter((line) => /\.db(?:\b|[- ])/.test(line));
+            const inventory = listOpenFiles(child.pid);
+            // A host that exits before inventory cannot provide the database isolation proof.
+            if (!inventory.available) throw new Error(inventory.reason);
+            writeFileSync(join(root, `lsof-${Date.now()}.txt`), inventory.paths.join("\n"));
+            const databases = inventory.paths.filter((line) => /\.db(?:\b|[- ])/.test(line));
             expect(databases.length).toBeGreaterThan(0);
             expect(databases.every((line) => line.includes(root))).toBe(true);
         };

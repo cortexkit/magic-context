@@ -1069,6 +1069,90 @@ describe("prepared prefix source-order trimming", () => {
         expect(live.map((entry) => entry.info.id)).toEqual([undefined, "before", "after"]);
     });
 
+    it("places each message without an id by the identified rows after it, keeping host rows in order", () => {
+        db = makeDb();
+        const idless = (text: string, role: "user" | "assistant"): MessageLike => ({
+            info: { role, sessionID: SESSION_ID },
+            parts: [{ type: "text", text }],
+        });
+        const hostRow = (text: string): MessageLike => ({
+            info: { role: "system", sessionID: SESSION_ID },
+            parts: [{ type: "text", text }],
+        });
+        const source = [
+            message("before", "user"),
+            idless("A", "user"),
+            message("covered", "assistant"),
+            idless("B", "user"),
+            hostRow("sys1"),
+            message("boundary", "assistant"),
+            idless("C", "user"),
+            hostRow("sys2"),
+            message("after", "user"),
+            idless("D", "assistant"),
+        ];
+        const evidence = capturePrefixTrimSourceOrder(source);
+        // A message without an id leaves the recorded order usable.
+        expect(evidence.invalidReason).toBeNull();
+        expect(evidence.messageIds).toEqual(["before", "covered", "boundary", "after"]);
+        const live = structuredClone(source);
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("boundary"),
+            prefixTrimSourceOrder: evidence,
+        });
+
+        expect(result.prefixTrimStatus).toBe("applied");
+        // A and B are followed by rows the summary covers, so they are cut with
+        // them; C is followed by a row after the boundary and D by nothing, so
+        // both are kept. Host system rows are kept wherever they sit, in order.
+        expect(live.map((entry) => (entry.parts[0] as { text: string }).text)).toEqual([
+            "new prefix",
+            "sys1",
+            "C",
+            "sys2",
+            "after",
+            "D",
+        ]);
+    });
+
+    it("refuses a cut when the live array carries the boundary more than once", () => {
+        db = makeDb();
+        // A repeated id makes the recorded order unusable, so the boundary is
+        // placed by the live array; cutting at the first copy would still serve
+        // the second one next to its summary.
+        const source = [
+            message("before", "user"),
+            message("boundary", "assistant"),
+            message("boundary", "assistant"),
+            message("after", "user"),
+        ];
+        const live = structuredClone(source);
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("boundary"),
+            prefixTrimSourceOrder: capturePrefixTrimSourceOrder(source),
+        });
+
+        expect(result.prefixTrimStatus).toBe("refused");
+        expect(result.prefixTrimRefusal).toBe("boundary-unordered");
+        expect(live.map((entry) => entry.info.id)).toEqual([
+            undefined,
+            "before",
+            "boundary",
+            "boundary",
+            "after",
+        ]);
+    });
+
     // OpenCode 2 renders an instruction-update row as an id-less system message.
     // A boundary stored on such a row stands for the served row before it.
     const hostSystem = (text: string): MessageLike => ({

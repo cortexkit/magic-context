@@ -50,7 +50,10 @@ export type CanonicalMaterializeReason =
     | "coverage_fold"
     | "profile_transition"
     | "host_compaction"
-    | "tag_identity_repair";
+    | "tag_identity_repair"
+    // The provider rejected the latest assistant turn's thinking and the pass
+    // removed that thinking: bytes change from that turn on, nothing before it.
+    | "latest_turn_thinking_removed";
 
 export interface PendingTransformDecision {
     tsMs: number;
@@ -145,6 +148,7 @@ const canonicalReasons = new Set<string>([
     "profile_transition",
     "host_compaction",
     "tag_identity_repair",
+    "latest_turn_thinking_removed",
 ]);
 
 const piReasonAliases: Record<string, CanonicalMaterializeReason> = {
@@ -248,7 +252,7 @@ export function writeRustTransformDecision(args: {
 }): void {
     const rawDecision = args.decision.trim();
     const decisionUpper = rawDecision.toUpperCase();
-    const mapped =
+    const scheduled =
         decisionUpper === "HARD" || decisionUpper === "MIGRATE_HARD"
             ? { decision: "execute" as const, materialized: true, bustedThisPass: true }
             : decisionUpper === "SOFT" ||
@@ -263,6 +267,12 @@ export function writeRustTransformDecision(args: {
                       materialized: false,
                       bustedThisPass: false,
                   };
+    // Removing the latest turn's thinking after a provider rejection changes
+    // bytes on whatever the module decided; the scheduler decision stays as is.
+    const mapped =
+        args.materializeReason === "latest_turn_thinking_removed"
+            ? { ...scheduled, bustedThisPass: true }
+            : scheduled;
     pendingDecisionBySession.set(args.sessionId, {
         tsMs: args.tsMs ?? Date.now(),
         decision: mapped.decision,

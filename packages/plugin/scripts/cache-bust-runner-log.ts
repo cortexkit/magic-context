@@ -5,9 +5,10 @@ import { parseStepRender, type StepRender } from "./step-render-log";
 
 export interface RunnerDecision {
     at: number;
-    kind: "setup" | "view" | "ride" | "summary_start" | "summary_publish" | "no_summary";
+    kind: "setup" | "view" | "view_refused" | "view_unknown" | "view_reoffer_failed" | "stale_reading" | "ride" | "signed_floor" | "summary_start" | "summary_publish" | "no_summary";
     detail: string;
     version?: number;
+    line?: string;
 }
 export interface RunnerEvidence {
     decisions: RunnerDecision[];
@@ -16,24 +17,36 @@ export interface RunnerEvidence {
 }
 
 export function parseRunnerDecision(line: string, session: string): RunnerDecision | null {
-    const at = Date.parse(line.match(/(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z)/)?.[1] ?? "");
-    const match = line.match(/ck-mc: session ([^\s:]+): (.*)$/);
+    const at = Date.parse(line.match(/(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/)?.[1] ?? "");
+    const match = line.match(/ck-mc: session (\S+): (.*)$/);
     if (!Number.isFinite(at) || match?.[1] !== session) return null;
     const body = match[2]!;
-    // Setup records a new runner/module handshake; it can reset the served view.
-    // Producer: b99525c82a, crates/mc-module/src/session.rs:603.
-    if (body.startsWith("setup (")) return { at, kind: "setup", detail: body };
+    // Setup is a handshake, not proof that the provider's cached prefix changed.
+    if (body.startsWith("setup (")) return { at, kind: "setup", detail: body, line };
     // Old shape: b99525c82a, crates/mc-module/src/session.rs:3040.
     // Cut-through/no-cut shape: 8c75aafa8d, the same file at :3051.
-    const view = /^view (\d+) accepted \((\d+) edits(?:, (?:cut through (.+)|no cut))?\)$/.exec(body);
+    const view = /^view (\d+) accepted\b/.exec(body);
+    const edits = /^view \d+ accepted \((\d+) edits/.exec(body)?.[1];
+    const cut = /, cut through (.+)\)$/.exec(body)?.[1];
     if (view) return {
-        at, kind: "view", version: Number(view[1]),
-        detail: `view=${view[1]} edits=${view[2]} cut=${view[3] ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
+        at, kind: "view", version: Number(view[1]), line,
+        detail: `view=${view[1]} edits=${edits ?? "unlogged"} cut=${cut ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
     };
+    const reoffer = /^(?:runner refused view|unknown answer to view) (\d+) offered again:/.exec(body) ??
+        /^view (\d+) .+; rebuilding instead of offering it again$/.exec(body) ??
+        /^offering view (\d+) again failed:/.exec(body);
+    if (reoffer) return { at, kind: "view_reoffer_failed", version: Number(reoffer[1]), detail: body, line };
+    const refused = /^runner refused view (\d+)(?: at a step boundary)?:/.exec(body);
+    if (refused) return { at, kind: "view_refused", version: Number(refused[1]), detail: body, line };
+    const unknown = /^unknown answer to view (\d+):/.exec(body);
+    if (unknown) return { at, kind: "view_unknown", version: Number(unknown[1]), detail: body, line };
+    if (/^ignoring a prompt of \d+ tokens: reading from view \d+, newest applied \d+.*; waiting for a reading under the current view$/.test(body))
+        return { at, kind: "stale_reading", detail: body, line };
     // b99525c82a, session.rs:1681; Rust Debug preserves causes and optional sizes.
-    if (/^ride \[.*\], request (?:Some\(\d+\)|None) tokens, last prompt (?:Some\(\d+\)|None), applied view (?:Some\(\d+\)|None)$/.test(body)) {
-        return { at, kind: "ride", detail: body };
+    if (/^ride \[.*\], request (?:Some\(\d+\)|None)/.test(body)) {
+        return { at, kind: "ride", detail: body, line };
     }
+    if (/^signed floor moved to \S+/.test(body)) return { at, kind: "signed_floor", detail: body, line };
     // b99525c82a, session.rs:1056, :1460 and :929 respectively. Publishing a
     // summary is not evidence that a request used a new view or a new cut.
     if (/^summary started over messages \d+\.\.\d+ \(~\d+ tokens\)$/.test(body)) return { at, kind: "summary_start", detail: body };
@@ -101,7 +114,8 @@ export function joinRequestsToViews(timestamps: readonly number[], renders: read
 export function runnerDecisionsBetween(evidence: RunnerEvidence, after: number, through: number, view?: number | null): { all: RunnerDecision[]; changes: RunnerDecision[] } {
     const all = evidence.decisions.filter((event) => event.at > after && event.at <= through);
     const previousVersion = evidence.decisions.filter((event) => event.kind === "view" && event.at <= after).at(-1)?.version;
-    const changes = all.filter((event) => event.kind === "ride" || event.kind === "setup" ||
-        (event.kind === "view" && event.version !== previousVersion && (view === undefined || event.version === view)));
+    const changes = all.filter((event) =>
+        event.kind === "view" && previousVersion !== undefined && event.version !== undefined && event.version > previousVersion &&
+        (view === undefined || event.version === view));
     return { all, changes };
 }

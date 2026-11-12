@@ -17,7 +17,7 @@ mkdirSync(root, { recursive: true });
 // entry and its split chunks with the native worker_threads implementation.
 const driver = `
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { listOpenFiles } from ${JSON.stringify(fileURLToPath(new URL("../../shared/test-open-files.ts", import.meta.url)))};
 import { Worker } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 import { writeFileSync } from 'node:fs';
@@ -33,11 +33,14 @@ async function run(extra, expectError = false) {
     const timer = setTimeout(() => { worker.terminate(); reject(new Error('worker did not exit')); }, 5000);
     worker.on('message', (message) => {
       if (message.kind === 'query') {
-        const open = execFileSync('lsof', ['-nP', '-p', String(process.pid), '-Fn'], { encoding: 'utf8' });
-        observed = open.split('\\n').filter(line => line.startsWith('n') && /\\.db(?:-wal|-shm)?$/.test(line));
-        assert(observed.some(line => line.slice(1) === path), 'lsof must observe the worker-owned database');
-        assert(observed.every(line => line.slice(1).startsWith(root + '/')), 'database escaped throwaway root');
-        assert(!open.includes('/.config/opencode/') && !open.includes('/.config/cortexkit/'), 'live config opened');
+        const inventory = listOpenFiles();
+        // The worker must expose its database while paused, not silently skip isolation.
+        assert(inventory.available, inventory.reason);
+        const open = inventory.paths;
+        observed = open.filter(path => /\\.db(?:-wal|-shm)?$/.test(path));
+        assert(observed.includes(path), 'inventory must observe the worker-owned database');
+        assert(observed.every(path => path.startsWith(root + '/')), 'database escaped throwaway root');
+        assert(open.every(path => !path.includes('/.config/opencode/') && !path.includes('/.config/cortexkit/')), 'live config opened');
         worker.postMessage({ id: message.id, result: null });
       } else reply = message;
     });

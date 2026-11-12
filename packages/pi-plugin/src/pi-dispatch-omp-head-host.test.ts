@@ -1,10 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lkgContentFields } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { listOpenFiles } from "../../plugin/src/shared/test-open-files";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import { assertPiRefusedDispatch } from "./__tests__/dispatch-probe";
 import {
@@ -55,25 +55,18 @@ const definitions = [
 	},
 ];
 const aliases = definitions.flatMap(({ agent, ai }) => [agent, ai]);
-// Open OMP log files of this process as `<fd> <path>`. lsof's field output is
-// used because its table pads columns to the widest row, so the same
-// descriptor prints differently once other files are open.
+// Include descriptor identity so a new handle at an inherited path is still checked.
 const ompLogDescriptors = (): string[] => {
 	if (process.platform !== "linux") return [];
-	const fields = execFileSync(
-		"lsof",
-		["-nP", "-p", String(process.pid), "-F", "fn"],
-		{ encoding: "utf8", windowsHide: true },
-	).split("\n");
-	const open: string[] = [];
-	let fd = "";
-	for (const field of fields) {
-		if (field.startsWith("f")) fd = field.slice(1);
-		else if (field.startsWith("n") && /omp\..*\.log/.test(field)) {
-			open.push(`${fd} ${field.slice(1).replace(/ \(deleted\)$/, "")}`);
-		}
-	}
-	return open;
+	const inventory = listOpenFiles();
+	// Missing evidence cannot establish that every newly pinned logger is isolated.
+	if (!inventory.available) throw new Error(inventory.reason);
+	return inventory.entries
+		.filter((entry) => /omp\..*\.log/.test(entry.path))
+		.map(
+			(entry) =>
+				`${entry.descriptor} ${entry.path.replace(/ \(deleted\)$/, "")}`,
+		);
 };
 // Another OMP fixture that ran earlier in this Bun process can leave its own
 // log descriptor open after its temporary root is deleted. Only descriptors
@@ -110,13 +103,10 @@ const hosts = await Promise.all(
 	}),
 );
 await exerciseOmpLoggerFiles(aliases);
-const descriptors =
-	process.platform === "linux"
-		? execFileSync("lsof", ["-nP", "-p", String(process.pid)], {
-				encoding: "utf8",
-				windowsHide: true,
-			})
-		: "";
+const inventory = process.platform === "linux" ? listOpenFiles() : undefined;
+// The database exclusion check requires a complete inventory, not an empty fallback.
+if (inventory && !inventory.available) throw new Error(inventory.reason);
+const descriptors = inventory?.available ? inventory.paths : [];
 const pinnedOmpLogs = ompLogDescriptors().filter(
 	(line) => !inheritedOmpLogs.has(line),
 );
@@ -127,7 +117,7 @@ for (const line of pinnedOmpLogs) {
 	expect(line).toContain(root);
 	console.log("isolated OMP host descriptor:", line);
 }
-for (const line of descriptors.split("\n")) {
+for (const line of descriptors) {
 	expect(line).not.toMatch(/\/(?:context|store)\.db\b/);
 }
 afterAll(() => {

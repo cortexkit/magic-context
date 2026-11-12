@@ -19,7 +19,7 @@ const thinking = (n: number) => ({
 	signature: `signed-${n}`,
 });
 
-test("mock rejects edited, missing and reordered latest-turn thinking across tool results, and accepts removing all of it", async () => {
+test("mock rejects edited, missing and reordered latest-turn thinking across tool results and later user messages, and accepts removing all of it", async () => {
 	const mock = new MockProvider();
 	const { baseURL } = await mock.start({
 		thinkingScope: () => "negative-control",
@@ -94,6 +94,29 @@ test("mock rejects edited, missing and reordered latest-turn thinking across too
 					user,
 					{ role: "assistant", content: [] },
 					{ role: "user", content: "next real user" },
+				])
+			).status,
+		).toBe(200);
+		// A real user message after a turn does not end the provider's check:
+		// the last assistant turn is still checked against what it returned.
+		const answered = [
+			user,
+			{ role: "assistant", content: [] },
+			{ role: "user", content: "next real user" },
+		];
+		const edited = await send([
+			...answered,
+			{ role: "assistant", content: [returned[0], returned[2]] },
+			{ role: "user", content: "a new question" },
+		]);
+		expect(edited.status).toBe(400);
+		expect(await edited.text()).toContain("latest assistant message cannot be modified");
+		expect(
+			(
+				await send([
+					...answered,
+					{ role: "assistant", content: returned },
+					{ role: "user", content: "a new question" },
 				])
 			).status,
 		).toBe(200);
@@ -329,8 +352,11 @@ for (const { band, mode } of [{ band: 76, mode: "drops" }, { band: 85, mode: "dr
                 if (mode === "legacy-rejected") {
                     expect(pass).toBe(4);
                     expect(h.mock.requests().filter(r => r.thinkingViolation)).toHaveLength(1);
-                    // The arm binds to the real user message that started the rejected turn.
-                    expect((h.contextDb().query("SELECT thinking_binding_recovery_target AS target FROM session_meta WHERE session_id = ?").get(childId) as { target: string }).target).toMatch(/^latest_thinking_original_armed:\S+$/);
+                    // The arm binds to the provider's latest turn of the rejected request:
+                    // the task's tool loop, named by its first and last assistant message.
+                    const armed = (h.contextDb().query("SELECT thinking_binding_recovery_target AS target FROM session_meta WHERE session_id = ?").get(childId) as { target: string }).target;
+                    expect(armed).toStartWith("latest_thinking_original_turn:");
+                    expect(JSON.parse(armed.slice("latest_thinking_original_turn:".length))).toMatchObject({ stage: "armed", rejections: 1 });
                 }
                 if (mode === "legacy-accepted") {
                     expect(pass).toBe(7);

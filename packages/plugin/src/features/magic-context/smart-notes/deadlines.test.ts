@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { listOpenFiles } from "../../../shared/test-open-files";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { addNote, getPendingSmartNotes } from "../storage-notes";
@@ -30,19 +30,15 @@ beforeEach(async () => {
     db = new Database(":memory:");
     initializeDatabase(db);
     runMigrations(db);
-    if (!isolationProven) {
-        const output = execFileSync("lsof", ["-p", String(process.pid)], {
-            encoding: "utf8",
-            timeout: 10_000,
-            windowsHide: true,
-        });
-        const dbLines = output.split("\n").filter((line) => /\.db(?:[-\s]|$)/.test(line));
+    if (!isolationProven && process.platform !== "win32") {
+        const inventory = listOpenFiles();
+        // Without an inventory the live-store isolation proof would be meaningless.
+        if (!inventory.available) throw new Error(inventory.reason);
+        const dbLines = inventory.paths.filter((path) => /\.db(?:[-\s]|$)/.test(path));
         // Other files in a full-suite worker may hold their own fixtures open.
         // They need not share this file's preload root, but none may be live.
         for (const line of dbLines) expect(line).toContain(realpathSync(tmpdir()));
-        console.log(
-            `lsof -p ${process.pid}: throwaway database descriptors\n${dbLines.join("\n")}`,
-        );
+        console.log(`pid ${process.pid}: throwaway database descriptors\n${dbLines.join("\n")}`);
         isolationProven = true;
     }
     // Instantiate the real VM before installing the virtual clock. The seam

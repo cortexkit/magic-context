@@ -4,6 +4,7 @@ import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listOpenFiles } from "@magic-context/core/shared/test-open-files";
 import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
@@ -546,13 +547,12 @@ describe("unsigned native projection guards", () => {
 afterAll(() => {
 	try {
 		if (process.platform === "linux") {
-			const files = execFileSync("lsof", ["-nP", "-p", String(process.pid)], {
-				encoding: "utf8",
-				windowsHide: true,
-			});
+			const inventory = listOpenFiles();
+			// Missing evidence must fail the isolation check rather than look like no live files.
+			if (!inventory.available) throw new Error(inventory.reason);
+			const files = inventory.paths;
 			expect(files).toContain(join(root, "lsof-marker"));
 			const outside = files
-				.split("\n")
 				.filter(
 					(line) =>
 						!line.includes(parent) &&
@@ -566,8 +566,8 @@ afterAll(() => {
 				/\/(?:\.pi|\.omp)(?:\/|\s)|\.local\/share\/opencode\/[^\s]*\.db|\.local\/share\/cortexkit\/magic-context\/(?:context|store)\.db|\.config\/(?:opencode|cortexkit)\//,
 			);
 			console.log(
-				"native replay lsof: isolated host descriptors checked",
-				files.split("\n").length - 1,
+				"native replay: isolated host descriptors checked",
+				files.length,
 			);
 		}
 	} finally {

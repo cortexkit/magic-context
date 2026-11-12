@@ -11,25 +11,26 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { parseAgentDeliverReply } from "./cache-bust-sentinel";
-import { parseStepRender } from "./step-render-log";
+import { parseStepAnswer, parseStepRender, type StepAnswer } from "./step-render-log";
 
 const HOUR = 3_600_000;
 const WINDOW = 10 * 60_000;
+const ANSWER_WINDOW = 60_000;
 const MAX_BYTES = 4 * 1024 * 1024; // per file, per invocation
 const AGENT_ID = "agent_b613e5cf2ee55b8c";
 type Kind = "p90" | "single" | "timeout" | "park" | "refusal" | "module_climb" | "busy_refusal" | "busy_replay" | "long_lock";
 const BUSY_REPLAY_THRESHOLD = 2;
 const LONG_LOCK_MS = 5_000;
 const UNKNOWN_SESSION = "unknown-session";
-type Pass = { at: number; elapsed: number; module: number | null };
-type Session = { passes: Pass[]; trend: Pass[]; lastAt: number; declines?: Record<string, Record<string, number>> };
+type Pass = { at: number; elapsed: number; module: number | null; runner?: number; wait?: number };
+type Session = { passes: Pass[]; trend: Pass[]; lastAt: number; answers?: StepAnswer[]; declines?: Record<string, Record<string, number>> };
 export type LkgDeclineSummary = { sessionId: string; hour: string; reasons: Record<string, number> };
 type Cursor = { dev: number; ino: number; offset: number };
 type Sent = { at: number; severity: number };
 type BusyCounts = { refusals: number; replays: number };
 type Hold = { at: number; site: string; ms: number };
 type State = { version: 1; files: Record<string, Cursor>; sessions: Record<string, Session>; sent: Record<string, Sent>; busy?: Record<string, Record<string, BusyCounts>>; holds?: Hold[]; pendingBusy?: Record<string, number>; lastSummaryDay?: string };
-export type LatencyAlert = { kind: Kind; sessionId: string; name: string; at: string; detail: string; lkgDeclines: Record<string, number>; count: number; p50: number; p90: number; max: number; moduleP50: number | null; moduleP90: number | null; moduleMax: number | null; pluginP50: number | null; pluginP90: number | null; pluginMax: number | null; busy?: BusyCounts; lock?: { site: string; count: number; p90: number; max: number }; load: number[]; loadSampledAt: string };
+export type LatencyAlert = { kind: Kind; sessionId: string; name: string; at: string; detail: string; lkgDeclines: Record<string, number>; count: number; p50: number; p90: number; max: number; moduleP50: number | null; moduleP90: number | null; moduleMax: number | null; runnerP50?: number | null; runnerP90?: number | null; runnerMax?: number | null; worstPass?: Pass; pluginP50: number | null; pluginP90: number | null; pluginMax: number | null; busy?: BusyCounts; lock?: { site: string; count: number; p90: number; max: number }; load: number[]; loadSampledAt: string };
 export type LatencyOptions = { files: string[]; stateFile: string; db: string; peerDb?: string; connectionFile: string; send: boolean; now?: () => number; load?: () => number[]; wake?: (content: string, id: string) => Promise<void>; stdout?: (line: string) => void; stderr?: (line: string) => void; since?: number; until?: number; replay?: boolean; summary?: boolean };
 const empty = (): State => ({ version: 1, files: {}, sessions: {}, sent: {}, busy: {}, holds: [], pendingBusy: {} });
 const quantile = (values: number[], fraction: number) => values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * fraction) - 1] : 0;
@@ -64,19 +65,16 @@ export function readNewLines(path: string, cursor: Cursor | undefined, maxBytes 
 const LKG_DECLINE = /^lkg_(?:model_mismatch|invalidated_reshape|content_mismatch|unsafe_seam|seam_invalid|anthropic_reasoning_run_invalid)$/;
 const hourKey = (at: number) => new Date(Math.floor(at / HOUR) * HOUR).toISOString();
 
-function parse(line: string): { sessionId: string; at: number; pass?: Pass; kind?: Kind; detail?: string; decline?: string; busy?: keyof BusyCounts; hold?: { site: string; ms: number } } | null {
+function parse(line: string): { sessionId: string; at: number; pass?: Pass; answer?: StepAnswer; kind?: Kind; detail?: string; decline?: string; busy?: keyof BusyCounts; hold?: { site: string; ms: number } } | null {
     const at = Date.parse(line.match(/(?:\[)?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z)/)?.[1] ?? "");
     if (!Number.isFinite(at)) return null;
-    // Sessions hosted by Thalamus's runners (thalamus-harness, thalamus-pi) run
-    // Magic Context in the ck-mc subc module instead of this plugin. The runner
-    // logs one `step render` line per model request: elapsed_ms is the whole
-    // request hook, and wait_ms is the part spent waiting for the runner's step
-    // answer, including any wait on the ck-mc module. That wait plays the part of
-    // a Rust pass's module time, so the same thresholds apply, including the
-    // alert when module time keeps rising across 20 passes. Pi session ids are
-    // UUIDs, so this match takes any session token.
+    // Runner elapsed_ms covers the host plugin's whole request hook; wait_ms
+    // covers its wait for the runner, including module calls. Only the paired
+    // answer's setup_ms and ride_ms can identify the module's share of that wait.
+    const answer = parseStepAnswer(line);
+    if (answer) return { sessionId: answer.sessionId, at, answer };
     const step = parseStepRender(line);
-    if (step) return { sessionId: step.sessionId, at, pass: { at, elapsed: step.elapsed, module: step.wait } };
+    if (step) return { sessionId: step.sessionId, at, pass: { at, elapsed: step.elapsed, module: null, runner: step.wait, wait: step.wait } };
     const sessionId = line.match(/\[magic-context\]\[([^\]]+)\]/)?.[1] ?? line.match(/\bsession=(ses_[\w-]+)/)?.[1];
     const hold = line.match(/\[magic-context\] slow write transaction: site=(\S+) held=([\d.]+)ms(?:\s|$)/);
     if (hold && Number.isFinite(Number(hold[2]))) return { sessionId: UNKNOWN_SESSION, at, hold: { site: hold[1]!, ms: Number(hold[2]) } };
@@ -109,6 +107,22 @@ function addLine(state: State, line: string, load: () => number[], file: string)
     // instead of guessing which concurrent turn was refused.
     const session = state.sessions[sessionId] ??= { passes: [], trend: [], lastAt: at };
     session.lastAt = at;
+    if (event.answer || event.pass?.runner !== undefined) {
+        // Version-one runner passes used to store the whole wait as module time.
+        // Reinterpret them only after a runner log identifies the session, leaving
+        // plugin-hosted sessions untouched and legacy waits out of module trends.
+        session.passes = session.passes.map((p) => p.runner === undefined && p.module !== null
+            ? { ...p, module: null, runner: p.module, wait: p.module } : p);
+        session.trend = session.trend.filter((p) => p.runner !== undefined && p.module !== null);
+        const answers = session.answers = (session.answers ?? []).filter((a) => a.at >= at - ANSWER_WINDOW);
+        if (event.answer) { answers.push(event.answer); return []; }
+        const newest = answers.filter((a) => a.at <= at).sort((a, b) => b.at - a.at)[0];
+        if (newest) {
+            answers.splice(answers.indexOf(newest), 1);
+            event.pass!.module = newest.module;
+            event.pass!.runner = Math.max(0, event.pass!.runner! - (newest.module ?? 0));
+        }
+    }
     if (event.decline) {
         const reasons = (session.declines ??= {})[hourKey(at)] ??= {};
         reasons[event.decline] = (reasons[event.decline] ?? 0) + 1;
@@ -122,7 +136,9 @@ function addLine(state: State, line: string, load: () => number[], file: string)
     const passes = session.passes;
     const elapsed = passes.map((p) => p.elapsed);
     const modules = passes.flatMap((p) => p.module === null ? [] : [p.module]);
-    const plugins = passes.flatMap((p) => p.module === null ? [] : [Math.max(0, p.elapsed - p.module)]);
+    const runners = passes.flatMap((p) => p.runner === undefined ? [] : [p.runner]);
+    const plugins = passes.flatMap((p) => p.module === null && p.runner === undefined ? [] : [pluginTime(p)]);
+    const worstPass = passes.reduce<Pass | undefined>((worst, pass) => !worst || pass.elapsed > worst.elapsed ? pass : worst, undefined);
     const report = (kind: Kind, detail: string, severity: number): LatencyAlert | null => {
         const key = JSON.stringify([kind === "long_lock" ? detail.split(" ")[0] : sessionId, kind]);
         const previous = state.sent[key];
@@ -134,6 +150,8 @@ function addLine(state: State, line: string, load: () => number[], file: string)
             moduleP50: modules.length ? quantile(modules, .5) : null,
             moduleP90: modules.length ? quantile(modules, .9) : null,
             moduleMax: modules.length ? Math.max(...modules) : null,
+            ...(runners.length ? { runnerP50: quantile(runners, .5), runnerP90: quantile(runners, .9), runnerMax: Math.max(...runners) } : {}),
+            ...(worstPass?.runner !== undefined ? { worstPass } : {}),
             pluginP50: plugins.length ? quantile(plugins, .5) : null,
             pluginP90: plugins.length ? quantile(plugins, .9) : null,
             pluginMax: plugins.length ? Math.max(...plugins) : null,
@@ -142,7 +160,7 @@ function addLine(state: State, line: string, load: () => number[], file: string)
     const alerts: LatencyAlert[] = [];
     const emit = (kind: Kind, detail: string, severity: number) => { const alert = report(kind, detail, severity); if (alert) alerts.push(alert); };
     if (event.pass) {
-        if (event.pass.elapsed > 12_000) emit("single", `pass ${event.pass.elapsed} ms (module ${event.pass.module ?? "n/a"} ms)`, event.pass.elapsed);
+        if (event.pass.elapsed > 12_000) emit("single", `pass ${event.pass.elapsed} ms (${event.pass.runner === undefined ? `module ${event.pass.module ?? "n/a"} ms` : runnerBreakdown(event.pass, (ms) => `${ms} ms`)})`, event.pass.elapsed);
         if (passes.length === 10 && quantile(elapsed, .9) > 5_000) emit("p90", "last 10 passes within 10 minutes", quantile(elapsed, .9));
         const trend = session.trend;
         if (trend.length >= 20) {
@@ -219,6 +237,10 @@ function names(dbPath: string, peerDbPath: string | undefined, alerts: LatencyAl
 // produces one line per project instead of one alert per child.
 const isUnnamedSession = (alert: LatencyAlert) => alert.name === alert.sessionId || /^(git|dir):/.test(alert.name);
 const seconds = (ms: number | null) => `${((ms ?? 0) / 1000).toFixed(1)} s`;
+// Keep the measured whole wait even when the runner's share was clamped to zero.
+const pluginTime = (pass: Pass) => Math.max(0, pass.elapsed - (pass.wait ?? ((pass.module ?? 0) + (pass.runner ?? 0))));
+const runnerBreakdown = (pass: Pass, duration: (ms: number) => string = seconds) =>
+    `${pass.module === null ? `runner wait ${duration(pass.runner!)} (not split)` : `runner ${duration(pass.runner!)}, module ${duration(pass.module)}`}, plugin ${duration(pluginTime(pass))}`;
 const KIND_LABEL: Record<Kind, string> = { p90: "slow p90", single: "slow pass", timeout: "timeout", park: "park", refusal: "refused turn", module_climb: "module time climbing", busy_refusal: "storage-busy refusal", busy_replay: "busy-storage replay", long_lock: "long lock holder" };
 
 /** Only a park or a refused turn needs to interrupt; latency alone is reported at medium urgency. */
@@ -247,7 +269,8 @@ export function formatAlerts(alerts: LatencyAlert[]): string {
             .flatMap((alert) => Object.entries(alert.lkgDeclines).map(([reason, count]) => `${count} ${reason}`));
         const locks = group.alerts.flatMap((alert) => alert.lock ? [alert.lock] : []).map((lock) => `${lock.site} max ${seconds(lock.max)}, p90 ${seconds(lock.p90)} (${lock.count} holds)`);
         const busy = group.alerts.flatMap((alert) => alert.busy ? [alert.busy] : []).at(-1);
-        return `- ${who}: ${kinds}; worst pass ${seconds(worst.max)} (module ${seconds(worst.moduleMax)}); p90 up to ${seconds(p90)}${busy ? `; busy storage ${busy.refusals} refusals, ${busy.replays} replays/hour` : ""}${locks.length ? `; lock ${locks.join(", ")}` : ""}${declines.length ? `; LKG declines ${declines.join(", ")}` : ""}`;
+        const breakdown = worst.worstPass ? `: ${runnerBreakdown(worst.worstPass)}` : ` (module ${seconds(worst.moduleMax)})`;
+        return `- ${who}: ${kinds}; worst pass ${seconds(worst.max)}${breakdown}; p90 up to ${seconds(p90)}${busy ? `; busy storage ${busy.refusals} refusals, ${busy.replays} replays/hour` : ""}${locks.length ? `; lock ${locks.join(", ")}` : ""}${declines.length ? `; LKG declines ${declines.join(", ")}` : ""}`;
     });
     const load = alerts[0]?.load.map((value) => value.toFixed(0)).join("/") ?? "?";
     const from = alerts.map((alert) => alert.at).sort()[0];

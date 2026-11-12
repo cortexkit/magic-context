@@ -1,10 +1,10 @@
 import { Database as BunDatabase } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { listOpenFiles } from "../../shared/test-open-files";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { closeDatabase, openDatabase } from "./storage-db";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
@@ -17,12 +17,10 @@ function fixturePath(): string {
 }
 
 function openFiles(path: string): string[] {
-    const inventory = spawnSync("lsof", ["-p", String(process.pid), "-Fn"], {
-        encoding: "utf8",
-        windowsHide: true,
-    });
-    expect(inventory.status).toBe(0);
-    return inventory.stdout.split("\n").filter((line) => line.startsWith(`n${path}`));
+    const inventory = listOpenFiles();
+    // An unavailable inventory cannot prove that closing SQLite released its handles.
+    if (!inventory.available) throw new Error(inventory.reason);
+    return inventory.paths.filter((name) => name.startsWith(path));
 }
 
 afterEach(() => {

@@ -20,7 +20,7 @@ for (const point of [
 			const { dir: root, cleanup } = createTestTempDir("mc-sigkill-review-");
 			const common = `
 import { writeFileSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { listOpenFiles } from ${modulePath("../../plugin/src/shared/test-open-files.ts")};
 import { createFakePi, createTestDb, fakeContext, userMessage, assistantMessage } from ${modulePath("test-utils.test.ts")};
 import { registerPiContextHandler } from ${modulePath("context-handler.ts")};
 import { __test as fence, hasCleanLkgRecoveryFence, lkgRecoveryFencePath } from ${modulePath("../../plugin/src/hooks/magic-context/lkg-recovery-fence.ts")};
@@ -43,8 +43,10 @@ const pass = (messages) => fake.handlers.get('context')({messages: structuredClo
 });
 const kill = () => process.kill(process.pid, 'SIGKILL');
 const isolate = () => {
-  const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8',windowsHide:true});
- if(files.status !== 0 || /\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.stdout)) throw new Error('Live-store isolation not proved');
+  const files = listOpenFiles();
+  // A missing inventory cannot establish live-store isolation before killing the host.
+  if(!files.available) throw new Error(files.reason);
+  if(/\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.paths.join('\\n'))) throw new Error('Live-store isolation not proved');
  console.log('SIGKILL_LSOF pid=' + process.pid + ' forbidden=0');
 };
 `;

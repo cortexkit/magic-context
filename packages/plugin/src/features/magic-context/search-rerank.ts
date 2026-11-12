@@ -10,6 +10,8 @@ import type { UnifiedSearchResult } from "./search";
 export const RERANK_MODEL = "gte-reranker-modernbert-base-f32";
 export const RERANK_LANE_LIMIT = 25;
 const DEADLINE_MS = 1500;
+const SYNAPSE_RESTART_BACKOFF_MS = 30_000;
+const SYNAPSE_ABSENT_BACKOFF_MS = 10 * 60_000;
 // Keep the existing location/title/body recipe's 1 KiB budget: twenty documents
 // send at most 20 KiB of source text rather than unbounded stored conversations.
 const DOCUMENT_BYTES = 1024;
@@ -194,10 +196,20 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
     }
 }
 const connections = new Map<string, Promise<SynapseClientLike>>();
+// A restarting module briefly looks absent too. Probe again after thirty seconds,
+// then back off for ten minutes only if the previous retry time is less than ten
+// minutes old. A longer gap may mean a separate restart, so start short again;
+// a successful catalog clears the state.
+const synapseRetryAt = new Map<string, number>();
 async function connect(connectionFile: string): Promise<SynapseClientLike> {
     let connection = connections.get(connectionFile);
     if (!connection) {
-        connection = inRootAsyncContext(() => SubcClient.connect({ connectionFile }));
+        // This connection serves only reranking. The client's thirty-second route
+        // retries outlive our catalog deadline and hide unknown_module, so let the
+        // per-daemon backoff handle module restarts and absence instead.
+        connection = inRootAsyncContext(() =>
+            SubcClient.connect({ connectionFile, routeOpenRetryDeadlineMs: 0 }),
+        );
         connections.set(connectionFile, connection);
         void connection.catch(() => connections.delete(connectionFile));
     }
@@ -307,6 +319,7 @@ export function prepareReranker(
     connectionFile?: string,
     injectedClient?: SynapseClientLike | null,
     config?: undefined,
+    now?: () => number,
 ): Promise<RerankSession | null>;
 export function prepareReranker(
     projectRoot: string,
@@ -314,6 +327,7 @@ export function prepareReranker(
     connectionFile?: string,
     injectedClient?: SynapseClientLike | null,
     config?: RerankConfig,
+    now?: () => number,
 ): Promise<PreparedReranker | null>;
 export async function prepareReranker(
     projectRoot: string,
@@ -321,18 +335,23 @@ export async function prepareReranker(
     connectionFile?: string,
     injectedClient?: SynapseClientLike | null,
     config?: RerankConfig,
+    now: () => number = Date.now,
 ): Promise<PreparedReranker | null> {
     if (config?.provider === "off") return null;
     if (config?.provider === "remote") return { remote: config };
+    const daemonFile = connectionFile ?? getDefaultSubcConnectionFile();
+    const rememberAbsence = injectedClient === undefined;
+    if (rememberAbsence && (synapseRetryAt.get(daemonFile) ?? 0) > now()) return null;
+    let catalogRequested = false;
     try {
         if (injectedClient === null) throw new RerankFailure("missing_synapse");
-        const client =
-            injectedClient ?? (await connect(connectionFile ?? getDefaultSubcConnectionFile()));
+        const client = injectedClient ?? (await connect(daemonFile));
         const identity = {
             project_root: projectRoot,
             harness: "magic-context",
             session: sessionId,
         };
+        catalogRequested = true;
         const lane = pinReranker(
             await bounded(
                 client.call(
@@ -343,9 +362,21 @@ export async function prepareReranker(
                 ),
             ),
         );
+        if (rememberAbsence) synapseRetryAt.delete(daemonFile);
         return { client, lane, identity };
     } catch (error) {
-        logRerankFallback(reasonOf(error));
+        const reason = reasonOf(error);
+        if (rememberAbsence && catalogRequested && reason === "unknown_module") {
+            const failedAt = now();
+            const previousRetryAt = synapseRetryAt.get(daemonFile);
+            const backoff =
+                previousRetryAt !== undefined &&
+                failedAt - previousRetryAt < SYNAPSE_ABSENT_BACKOFF_MS
+                    ? SYNAPSE_ABSENT_BACKOFF_MS
+                    : SYNAPSE_RESTART_BACKOFF_MS;
+            synapseRetryAt.set(daemonFile, failedAt + backoff);
+        }
+        logRerankFallback(reason);
         return null;
     }
 }

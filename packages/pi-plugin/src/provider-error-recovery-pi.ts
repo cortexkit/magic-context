@@ -22,7 +22,7 @@ import {
 	armBindingRecoverySafely,
 	armLatestThinkingRecovery,
 	LATEST_THINKING_RESTORE,
-	latestThinkingRecoveryCoversActiveTurn,
+	latestThinkingRestoringTurnMessages,
 } from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
 import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { isAnthropicFamilyRoute } from "@magic-context/core/hooks/magic-context/sentinel";
@@ -89,7 +89,7 @@ export function handlePiProviderFailure(args: {
 		!args.compactionOff &&
 		isAnthropicFamilyRoute(provider, model)
 	) {
-		armLatestThinkingRecovery(args.db, args.sessionId);
+		armLatestThinkingRecovery(args.db, args.sessionId, model);
 		clearPiLkgSessionState(args.sessionId);
 		dropSlot(args.sessionId, "latest-thinking-recovery-arm");
 		return { kind: "thinking_binding", armed: true };
@@ -294,7 +294,6 @@ export function applyPiThinkingBindingRecovery(args: {
 	// leaves the array as it is; skip its walks over the session.
 	if (!flagTarget && args.replayOrder && !before.phases[args.replayOrder])
 		return null;
-	const protectedMessages = latestAssistantTurnMessages(args.messages);
 	const resolvedEntryIds = completedThinkingEntryIds(
 		args.messages,
 		args.entryIds,
@@ -329,11 +328,12 @@ export function applyPiThinkingBindingRecovery(args: {
 		} else throw new PiThinkingBindingRecoveryRefusal();
 	}
 
-	// A provider rejection of this turn asks for its original thinking back.
-	// Replaying the turn's frozen omissions here would delete that original
-	// before recovery checks it (start of pass) or after it restored it (end
-	// of pass), resending the rejected bytes. Older turns stay omitted.
-	const restoringActiveTurn = latestThinkingRecoveryCoversActiveTurn({
+	// A provider rejection whose recovery restores a turn's original thinking
+	// asks for that thinking back. Replaying the turn's frozen omissions here
+	// would delete the original before recovery checks it (start of pass) or
+	// after it restored it (end of pass), resending the rejected bytes. Older
+	// turns stay omitted, and so does a turn whose thinking recovery removed.
+	const restoringTurn = latestThinkingRestoringTurnMessages({
 		db: args.db,
 		sessionId: args.sessionId,
 		messages: args.messages,
@@ -342,8 +342,7 @@ export function applyPiThinkingBindingRecovery(args: {
 	// Re-read after the recovery above may have recorded omissions.
 	const ledger = readPiOmissionLedger(args.db, args.sessionId);
 	for (let index = 0; index < args.messages.length; index += 1) {
-		if (restoringActiveTurn && protectedMessages.has(args.messages[index]))
-			continue;
+		if (restoringTurn?.has(args.messages[index])) continue;
 		const entryId = resolvedEntryIds[index];
 		if (
 			entryId &&
@@ -689,6 +688,82 @@ export function frozenBindingEntryIds(
 		if (entryId.length > 0) ids.add(entryId);
 	}
 	return ids;
+}
+
+/**
+ * Frozen entries that follow the session-wide strip order: those saved without
+ * an order record of their own (see piThinkingOmissionOrder). Entries with
+ * their own order replay in that phase whatever the session-wide marker says.
+ */
+function sessionOrderedFrozenEntryIds(
+	db: ContextDatabase,
+	sessionId: string,
+): string[] {
+	const view = readPiOmissionLedger(db, sessionId);
+	return [...view.frozen].filter(
+		(id) =>
+			!view.ids.has(piThinkingOmissionOrderId(id, "start")) &&
+			!view.ids.has(piThinkingOmissionOrderId(id, "end")),
+	);
+}
+
+/**
+ * Persist the latest-turn thinking removal (the second remedy of
+ * `prepareLatestThinkingRecovery`) into the binding-mismatch set, keeping the
+ * point in the pass where this session replays that set (see
+ * resolvePiBindingStripOrder). A session with no strips that follow the
+ * session-wide order yet, or one already in the end order, replays at the end
+ * of this pass; the end-order marker is written with the ids, so later passes
+ * keep that order (entries with an order of their own are not moved by it). A
+ * session still in the start order already ran this pass's start-of-pass
+ * replay, so the caller removes the turn's thinking itself (`stripNow`) before
+ * any stage runs, where every later pass of that session replays it.
+ */
+export function persistPiLatestTurnThinkingRemoval(
+	db: ContextDatabase,
+	sessionId: string,
+	entryIds: readonly string[],
+): { persisted: boolean; stripNow: boolean } {
+	const endOrder =
+		getMergedReasoningStrippedIds(db, sessionId).has(
+			THINKING_BINDING_STRIP_ORDER_END_MARKER,
+		) || sessionOrderedFrozenEntryIds(db, sessionId).length === 0;
+	const persisted = addMergedReasoningStrippedIds(db, sessionId, [
+		...entryIds.map(thinkingBindingRecoveryFrozenId),
+		...(endOrder ? [THINKING_BINDING_STRIP_ORDER_END_MARKER] : []),
+	]);
+	return { persisted, stripNow: persisted && !endOrder };
+}
+
+/**
+ * Whether this session replays the binding-mismatch strips that follow the
+ * session-wide order at the start of the context pass, before any stage
+ * (strips saved by earlier builds without the end-order marker; see
+ * resolvePiBindingStripOrder).
+ */
+export function piBindingStripsAtStart(
+	db: ContextDatabase,
+	sessionId: string,
+): boolean {
+	return (
+		!getMergedReasoningStrippedIds(db, sessionId).has(
+			THINKING_BINDING_STRIP_ORDER_END_MARKER,
+		) && sessionOrderedFrozenEntryIds(db, sessionId).length > 0
+	);
+}
+
+/** Remove the thinking of the messages whose stable id is in `ids`. */
+export function stripPiThinkingOfIds(
+	messages: readonly unknown[],
+	ids: ReadonlySet<string>,
+	resolveId: (message: unknown, index: number) => string | undefined,
+): number {
+	let stripped = 0;
+	for (let index = 0; index < messages.length; index += 1) {
+		const id = resolveId(messages[index], index);
+		if (id && ids.has(id)) stripped += stripThinkingParts(messages[index]);
+	}
+	return stripped;
 }
 
 /**

@@ -10,6 +10,7 @@ import { TestHarness } from "../src/harness";
 import { markerWorkerBundleFixture } from "../src/marker-worker-bundle-fixture";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 import { assertOpenPaths } from "../src/opencode2-runner/spawn";
+import { requestCtxFlush } from "../src/scenario-hosts";
 import { sessionMetaFieldValueSql } from "../src/session-meta-fields";
 
 /**
@@ -161,10 +162,42 @@ function pluginLog(): string {
 }
 
 function mainRequestBodies(): string[] {
+    return mainRequests().map((body) => JSON.stringify(body));
+}
+
+function mainRequests(): Record<string, unknown>[] {
     return h
         .requests()
         .filter((request) => !isHistorianRequest(request.body))
-        .map((request) => JSON.stringify(request.body));
+        .map((request) => request.body);
+}
+
+/** A request body without its cache breakpoints, which move to the newest message on every request. */
+function withoutCacheBreakpoints(body: Record<string, unknown> | undefined): Record<string, unknown> {
+    return JSON.parse(
+        JSON.stringify(body ?? {}, (key, value) => (key === "cache_control" ? undefined : value)),
+    );
+}
+
+/**
+ * The next request keeps everything the previous one sent: the same system
+ * prompt and tools, and the previous messages byte for byte, followed only by
+ * the new turn.
+ */
+function expectAppendOnly(
+    previous: Record<string, unknown> | undefined,
+    next: Record<string, unknown> | undefined,
+): void {
+    const before = withoutCacheBreakpoints(previous);
+    const after = withoutCacheBreakpoints(next);
+    expect(JSON.stringify(after.system)).toBe(JSON.stringify(before.system));
+    expect(JSON.stringify(after.tools)).toBe(JSON.stringify(before.tools));
+    const beforeMessages = before.messages as unknown[];
+    const afterMessages = after.messages as unknown[];
+    expect(afterMessages.length).toBeGreaterThan(beforeMessages.length);
+    expect(JSON.stringify(afterMessages.slice(0, beforeMessages.length))).toBe(
+        JSON.stringify(beforeMessages),
+    );
 }
 
 function assertThrowawayDatabasePaths(databases: string[], dataDir: string): void {
@@ -295,18 +328,61 @@ it(
         expect(markerState().marker).toBeNull();
         expect(markerState().pending).not.toBeNull();
 
-        // Put the candidate worker back and require the pending compaction marker to advance
-        // while ordinary new prompts continue to write messages to the host store.
+        // Put the candidate worker back. A pending marker moves only on a pass that
+        // may rewrite the cached prefix anyway, because the moved marker's summary
+        // row is served right after the history head. The mock keeps reporting 93.8%
+        // usage, which is high enough to force a rebuild once. That rebuild already
+        // ran, before the worker came back, and nothing new is queued since, so
+        // ordinary prompts have no rewrite permission: the marker stays pending and
+        // each request only appends to the last one.
         bundle.restoreWorker();
-        let rebuildingPasses = 0;
-        for (; rebuildingPasses < 4 && markerState().marker === null; rebuildingPasses++) {
-            const prompt = `marker recovery rebuilding pass ${rebuildingPasses + 1}`;
+        let previousRequest = mainRequests().at(-1);
+        expect(previousRequest).toBeDefined();
+        for (let pass = 1; pass <= 3; pass++) {
+            const prompt = `marker recovery ordinary pass ${pass}`;
             await h.sendPrompt(sessionId, prompt);
-            expect(mainRequestBodies().at(-1)).toContain(prompt);
-            expect(mainRequestBodies().at(-1)).toContain(HISTORY_SENTINEL);
+            const request = mainRequests().at(-1);
+            expect(JSON.stringify(request)).toContain(prompt);
+            expect(JSON.stringify(request)).toContain(HISTORY_SENTINEL);
+            expectAppendOnly(previousRequest, request);
+            expect(markerState().marker).toBeNull();
+            expect(markerState().pending).not.toBeNull();
+            previousRequest = request;
+        }
+
+        // `/ctx-flush` makes the next pass a rebuild the user asked for, and the
+        // pending marker moves on it. Discovery of the summary rows the move
+        // replaces runs in the background; it restarted when the worker came
+        // back and finishes in milliseconds on a session this size. A flush pass
+        // is repeated only when its own log says discovery was not ready yet.
+        let flushPasses = 0;
+        while (markerState().marker === null && flushPasses < 3) {
+            flushPasses++;
+            const logOffset = pluginLog().length;
+            await requestCtxFlush(h, sessionId);
+            const prompt = `marker recovery after /ctx-flush ${flushPasses}`;
+            await h.sendPrompt(sessionId, prompt);
+            const passLog = () => pluginLog().slice(logOffset);
+            const permitted = `[magic-context][${sessionId}] rewrite permission: allowed=true`;
+            // A pass's log lines are written together once buffered, so when its
+            // permission line is on disk its drain line is too.
+            await h
+                .waitFor(() => passLog().includes(permitted), {
+                    timeoutMs: 5_000,
+                    label: "flush pass permission log line",
+                })
+                .catch(() => undefined);
+            expect(passLog()).toContain(permitted);
+            expect(JSON.stringify(mainRequests().at(-1))).toContain(prompt);
+            expect(JSON.stringify(mainRequests().at(-1))).toContain(HISTORY_SENTINEL);
+            if (markerState().marker === null)
+                expect(passLog(), passLog()).toContain(
+                    "compaction-marker drain: candidate preparation deferred",
+                );
         }
         expect(markerState().marker, pluginLog().slice(-40000)).not.toBeNull();
-        console.log(`marker worker recovery: advanced after ${rebuildingPasses} rebuilding passes with new messages`);
+        expect(markerState().pending).toBeNull();
+        console.log(`marker worker recovery: moved on /ctx-flush pass ${flushPasses}`);
 
         // Native compaction. The mock answers the summary request.
         h.mock.setDefault(smallUsage(HOST_SUMMARY_SENTINEL));

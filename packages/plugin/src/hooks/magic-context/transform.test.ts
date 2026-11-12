@@ -771,6 +771,8 @@ describe("createTransform", () => {
         sourceAlreadyHostTrimmed?: boolean;
         sourceBoundaryMissing?: boolean;
         applyOutcome?: "applied" | "retryable-failure" | "concurrent-winner";
+        /** Request /ctx-flush before the draining pass, for a pass whose m[1] does not change. */
+        flush?: boolean;
     }) {
         useTempDataHome(`context-transform-marker-boundary-${options.name}-`);
         const sessionId = `ses-marker-boundary-${options.name}`;
@@ -812,6 +814,8 @@ describe("createTransform", () => {
 
         let decision: "execute" | "defer" = "defer";
         const deferredHistoryRefreshSessions = new Set<string>();
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const reconciledStates: Array<ReturnType<typeof getPersistedCompactionMarkerState>> = [];
         const applyDeferred = mock(
             (
@@ -849,9 +853,9 @@ describe("createTransform", () => {
             directory,
             injectDocs: false,
             memoryConfig: { enabled: false, injectionBudgetTokens: 0, autoPromote: false },
-            historyRefreshSessions: new Set(),
+            historyRefreshSessions,
             deferredHistoryRefreshSessions,
-            pendingMaterializationSessions: new Set(),
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map(),
             clearReasoningAge: 1000,
             protectedTokens: 0,
@@ -921,6 +925,10 @@ describe("createTransform", () => {
         });
         deferredHistoryRefreshSessions.add(sessionId);
         decision = "execute";
+        if (options.flush) {
+            historyRefreshSessions.add(sessionId);
+            requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
+        }
         const messages = options.sourceAlreadyHostTrimmed
             ? [
                   {
@@ -964,9 +972,12 @@ describe("createTransform", () => {
     });
 
     it("accepts an already host-trimmed boundary only when the source carries its marker", async () => {
+        // Its history is already in m[0], so the execute pass alone changes no
+        // bytes and may not move the marker; /ctx-flush gives it permission.
         const result = await runMarkerBoundaryFixture({
             name: "already-host-trimmed",
             sourceAlreadyHostTrimmed: true,
+            flush: true,
         });
         expect(result.applyDeferred).toHaveBeenCalledTimes(1);
         expect(getPendingCompactionMarkerState(result.db, result.sessionId)).toBeNull();

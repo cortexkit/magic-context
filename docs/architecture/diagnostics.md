@@ -59,6 +59,21 @@ Flags and subcommands:
 A cache bust shows up only as a provider bill. Two scripts attribute them from outside the plugin, both read-only:
 
 - **`scripts/analyze-cache-busts.ts <sessionIdPrefix>`** walks request dumps written by the authentication plugins (Anthropic and OpenAI request bodies), normalises both shapes to role and part summaries, and uses each response's reported cache usage to find where the cached prefix diverged. It lines those points up with the plugin log (scheduler decisions and `HARD` reasons) to name the pass responsible. Per-request rotating header values are masked so they are not reported as divergences.
-- **`scripts/cache-bust-sentinel.ts`** watches OpenCode and Pi/OMP sessions continuously (or once with `--once`) and classifies each divergence against a fixed rule table: accounted busts such as `/ctx-flush`, a force-band batch, a HARD fold with a model or system-prompt change, versus unaccounted ones that point at a bug.
+- **`scripts/cache-bust-sentinel.ts`** runs in the background and wakes the maintainer. It keeps its two older lanes (OpenCode 1 request dumps, and Pi and Oh My Pi session files) and adds a lane for runner heads: primary sessions hosted by a runner (OpenCode 2, Pi, Claude Code, Broca) on Anthropic models. That lane has no request bytes. It reads each step's cache usage from Astrocyte's read-only usage feed and the causes from the Rust module's (`ck-mc`) log.
+
+  A step that reads less from cache than the previous step left there gets the first class that applies:
+
+  | Class | Evidence |
+  |---|---|
+  | `scope_changed` | the model changed, so the step used another cache |
+  | `view` | `ck-mc` accepted a newer view (its own rebuild) before the step |
+  | `plan_changed` | the log shows the runner reported a changed tool list, system prompt or model, or `ck-mc` moved the session's signed floor (the message up to which the runner removes Anthropic's signed thinking blocks after a tool-list change) |
+  | `provider_forgot` | the log shows the runner reported a cache expiry, a connection reset, or a tier or account change |
+  | `expired` | more than the cache lifetime (one hour unless known) passed since the previous step started |
+  | `unexplained` | none of the above; a runner restart alone explains nothing |
+
+  It wakes for an unexplained rewrite of at least 20,000 tokens, for plan changes on three different sessions within ten minutes, and when warm reads after an idle hour drop below 50% over three hours while the preceding day was at least 80% (eight samples in each window). A wake older than 30 minutes is recorded, not sent. An unreachable feed gets one quiet notice after five runs. Active heads the feed has no steps for are listed in each run's summary without a wake.
+
+  `analyze-cache-busts.ts --source astrocyte --session <id>` prints the same classes for one session over the feed's last 24 hours; its store modes read deeper OpenCode 2 and Pi history.
 
 For looking at a session directly: `scripts/tail-view.ts <session_id>` prints messages since the last compartment and marks dropped ones, and the root `scripts/context-dump.ts <session_id>` dumps what Magic Context holds for a session.

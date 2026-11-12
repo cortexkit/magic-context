@@ -1765,6 +1765,7 @@ fn transform_decision_reason_label(reason: &str) -> Option<&'static str> {
         "coverage_fold" => Some("Coverage fold"),
         "profile_transition" => Some("Profile transition"),
         "tag_identity_repair" => Some("Tag identity repair"),
+        "latest_turn_thinking_removed" => Some("Rejected thinking removed"),
         _ => None,
     }
 }
@@ -1803,6 +1804,7 @@ const MAGIC_CONTEXT_REBUILD_REASONS: &[&str] = &[
     "profile_transition",
     "host_compaction",
     "tag_identity_repair",
+    "latest_turn_thinking_removed",
 ];
 
 /// Prefix the plugin writes when the host stops replaying its frozen
@@ -8986,8 +8988,9 @@ pub fn get_user_memory_candidates(
 
 pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
+    // A repeat dismiss must not rewrite the timestamp or tell sessions the profile changed.
     let affected = tx.execute(
-        "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
+        "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2 AND status = 'active'",
         params![now_millis(), id],
     )?;
     if affected > 0 {
@@ -11528,6 +11531,7 @@ mod cache_turn_tests {
             ("coverage_fold", "Coverage fold"),
             ("profile_transition", "Profile transition"),
             ("tag_identity_repair", "Tag identity repair"),
+            ("latest_turn_thinking_removed", "Rejected thinking removed"),
         ] {
             let cause = TransformDecisionCause {
                 decision: "execute".to_string(),

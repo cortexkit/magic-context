@@ -26,6 +26,8 @@ import {
     CacheBustSentinelInputError,
     type CacheBustSentinelOptions,
     cacheBustWindowId,
+    DEFAULT_MAX_WAKE_AGE_MS,
+    enumerateActiveSessions,
     eventForWindow,
     groupBustWindows,
     loadSentinelState,
@@ -37,6 +39,8 @@ import {
     SubcWakeEventTransport,
 } from "./cache-bust-sentinel";
 import { disruptionLogMarkers } from "./cache-bust-scheduler-log";
+import type { RunnerFeedRow } from "./cache-bust-runner-feed";
+import { parseRunnerDecision } from "./cache-bust-runner-log";
 
 const temporaryDirectories: string[] = [];
 
@@ -383,10 +387,10 @@ describe("cache-bust attribution contract", () => {
         const cls = classifyCacheBust({ ...bust, decision: joined });
         expect(cls).toBe("accounted_execute_published_history");
         expect(isUnaccountedCacheBustClass(cls)).toBe(false);
-        // The defer really is the class this request used to get, so the two
-        // candidates are not interchangeable.
+        // A scheduler line does not establish a no-change pass. Only the
+        // execute line with appliedRide="publishedHistory" explains this rewrite.
         expect(classifyCacheBust({ ...bust, decision: nextTurnDefer })).toBe(
-            "unaccounted_defer_pass",
+            "no_mc_pass_row",
         );
     });
 
@@ -1019,6 +1023,115 @@ describe("agent.deliver contract", () => {
 });
 
 describe("cache-bust sentinel runs", () => {
+    test.each([undefined, 10 * 60_000])("enumeration applies the wake horizon %p and clears an expired session's cursor once", async (maxWakeAgeMs) => {
+        const directory = temporaryDirectory("cache-bust-sentinel-enumeration-");
+        const runOptions = { ...options(join(directory, "state.json")),
+            databasePath: join(directory, "context.db"), maxWakeAgeMs };
+        const now = 10 * 24 * 60 * 60_000;
+        const horizon = maxWakeAgeMs ?? DEFAULT_MAX_WAKE_AGE_MS;
+        const rows = [
+            { sessionId: "ses_old", harness: "opencode", activityMs: now - horizon - 1 },
+            { sessionId: "ses_recent", harness: "pi", activityMs: now - horizon + 1 },
+            { sessionId: "ses_boundary", harness: "opencode", activityMs: now - horizon },
+            { sessionId: "ses_cursor", harness: "pi", activityMs: now - horizon - 1 },
+            { sessionId: "ses_analyzed", harness: "opencode", activityMs: now - 1 },
+            { sessionId: "ses_new", harness: "opencode", activityMs: now - 1 },
+        ];
+        const db = new Database(runOptions.databasePath);
+        try {
+            db.run("CREATE TABLE session_projects (session_id TEXT, harness TEXT, project_path TEXT, updated_at INTEGER)");
+            db.run("CREATE TABLE session_meta (session_id TEXT, harness TEXT, last_response_time INTEGER)");
+            for (const row of rows) {
+                db.run("INSERT INTO session_projects VALUES (?, ?, ?, ?)",
+                    [row.sessionId, row.harness, "dir:fixture", row.harness === "pi" ? 0 : row.activityMs]);
+                db.run("INSERT INTO session_meta VALUES (?, ?, ?)",
+                    [row.sessionId, row.harness, row.harness === "pi" ? row.activityMs : 0]);
+            }
+        } finally { db.close(false); }
+        const state = __test.defaultState();
+        for (const row of rows.filter((row) => row.sessionId !== "ses_new")) {
+            state.sessions[row.sessionId] = { lastAnalyzedRequestTimestampMs: row.activityMs - 1 };
+        }
+        state.sessions.ses_analyzed.lastAnalyzedRequestTimestampMs = now - 1;
+        state.sessions.ses_analyzed.lastScannedAtMs = now - 1;
+        state.sessions.ses_cursor.scanCursor = "expired-backlog";
+        saveSentinelState(runOptions.stateFile, state);
+        expect(enumerateActiveSessions(state, now, runOptions).map((row) => row.sessionId).sort())
+            .toEqual(["ses_cursor", "ses_new", "ses_recent"]);
+
+        const scanned: string[] = [];
+        const deps = {
+            now: () => now, loadDecisions: () => [],
+            analyzeSession: async (session: ActiveCacheBustSession) => {
+                scanned.push(session.sessionId);
+                return { requests: [], highWaterMarkMs: null };
+            }, stdout: () => {}, stderr: () => {},
+        };
+        await runSentinelOnce(runOptions, deps);
+        expect(scanned.sort()).toEqual(["ses_cursor", "ses_new", "ses_recent"]);
+        const saved = loadSentinelState(runOptions.stateFile);
+        expect(saved.sessions.ses_cursor.scanCursor).toBeUndefined();
+        expect(enumerateActiveSessions(saved, now, runOptions).map((row) => row.sessionId).sort())
+            .toEqual(["ses_new", "ses_recent"]);
+        await runSentinelOnce(runOptions, deps);
+        expect(scanned.filter((sessionId) => sessionId === "ses_cursor")).toHaveLength(1);
+    });
+
+    test("prunes only old idle session entries while retaining wake and lag deduplication state", async () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-prune-");
+        const runOptions = options(join(directory, "state.json"));
+        const day = 24 * 60 * 60_000;
+        const now = 3 * day;
+        const old = { lastAnalyzedRequestTimestampMs: 1, lastScannedAtMs: now - day - 1 };
+        const window = { startMs: 1, lastBustMs: 2 };
+        const state = __test.defaultState();
+        state.sessions = {
+            ses_idle: { ...old },
+            ses_legacy: { lastAnalyzedRequestTimestampMs: 1 },
+            ses_zero_pending: { ...old, pendingFiles: 0 },
+            ses_cursor: { ...old, scanCursor: "unfinished" },
+            ses_pending: { ...old, pendingFiles: 3, oldestPendingTimestampMs: now - 20 * 60_000 },
+            ses_open: { ...old, openWindow: window },
+            ses_backfill: { ...old, backfillWindow: window },
+            ses_recent: { ...old, lastScannedAtMs: now - 1 },
+            ses_boundary: { ...old, lastScannedAtMs: now - day },
+        };
+        const eventId = cacheBustWindowId("ses_idle", 1);
+        state.windows["ses_idle:1"] = { divergenceClass: "unaccounted_rewrite", lastEventId: eventId, eventIds: [eventId] };
+        state.deliveries[eventId] = { disposition: "delivered", committedOrder: 42 };
+        state.suppressedWindows["ses_idle:2"] = { divergenceClass: "no_mc_pass_row", rewrittenTokens: 80_000,
+            windowStartMs: 2, reason: "stale" };
+        state.lag = { startedAtMs: now - day, consecutiveRuns: 3, notified: true, lagMs: 20 * 60_000, pendingFiles: 3 };
+        saveSentinelState(runOptions.stateFile, state);
+        const output: string[] = [];
+        let clock = now;
+        await runSentinelOnce(runOptions, {
+            now: () => clock, listActiveSessions: () => { clock += 1; return []; },
+            stdout: (line) => output.push(line), stderr: () => {},
+        });
+        const saved = loadSentinelState(runOptions.stateFile);
+        expect(Object.keys(saved.sessions).sort()).toEqual([
+            "ses_backfill", "ses_boundary", "ses_cursor", "ses_open", "ses_pending", "ses_recent",
+        ]);
+        expect(saved.sessions.ses_boundary.lastScannedAtMs).toBe(now - day);
+        expect(saved.windows).toEqual(state.windows);
+        expect(saved.deliveries).toEqual(state.deliveries);
+        expect(saved.suppressedWindows).toEqual(state.suppressedWindows);
+        expect(saved.lag).toEqual({ ...state.lag, consecutiveRuns: 4, lagMs: 20 * 60_000 + 1 });
+        expect(output).toEqual([]);
+
+        let resumedSince: number | undefined;
+        await runSentinelOnce(runOptions, {
+            now: () => clock, listActiveSessions: () => [{ ...activeSession, sessionId: "ses_idle", activityMs: clock }],
+            loadDecisions: () => [], analyzeSession: async (_, since) => {
+                resumedSince = since;
+                return { requests: [], highWaterMarkMs: null };
+            }, stdout: () => {}, stderr: () => {},
+        });
+        expect(resumedSince).toBe(clock - runOptions.lookbackMs);
+        expect(loadSentinelState(runOptions.stateFile).windows).toEqual(state.windows);
+    });
+
     test("saves its state once per run, and keeps a failed run's progress", async () => {
         // The state file covers every session ever seen and a run walks thousands
         // of them, so saving after each session rewrote gigabytes an hour.
@@ -1074,7 +1187,7 @@ describe("cache-bust sentinel runs", () => {
         const runOptions = { ...options(stateFile), maxRunMs: 10 };
         expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
         expect(sent).toEqual(["ses_one"]);
-        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(true);
+        expect((await runSentinelOnce(runOptions, deps)).bounded).toBe(false);
         expect(sent).toEqual(["ses_one", "ses_two"]);
     });
     test("alerts on a second bust that a later run sees after the reclaim it follows", async () => {
@@ -1398,4 +1511,54 @@ describe("cache-bust sentinel runs", () => {
         expect(retry).toMatchObject({ sendRefused: 0, skippedSeen: 2 });
         expect(calls).toHaveLength(2);
     });
+});
+
+
+test("runner double rebuild uses the existing high-urgency wake and saved state survives restart", async () => {
+    const root = temporaryDirectory("sentinel-double-rebuild-");
+    const first = Date.parse("2026-11-11T17:29:24.444Z");
+    const second = Date.parse("2026-11-11T17:29:27.823Z");
+    const rows: RunnerFeedRow[] = [
+        [first - 60_000, 654_946, 0, 654_946],
+        [first, 63_631, 293_685, 654_946],
+        [second, 63_631, 198_750, 357_316],
+    ].map(([at, read, written, prompt]) => ({
+        cursor: `c${at}`, harness: "broca", source: "runner", step_ref: `head/${at}`,
+        session: "head", occurred_at_ms: at!, provider: "anthropic", model: "claude-opus-5-5",
+        cache_read: read, cache_write: written, input: 1, output: 1, prompt: prompt!, verdict: "bust",
+    }));
+    const decisions = [
+        [first - 60_001, "view 4 accepted (400 edits, no cut)"],
+        [first - 1, "view 5 accepted (579 edits, cut through msg_500)"],
+        [second - 1, "view 6 accepted (675 edits, cut through msg_600)"],
+    ].map(([at, body]) => parseRunnerDecision(`${new Date(at!).toISOString()} INFO ck-mc: session head: ${body}`, "head")!);
+    const settings = { ...options(join(root, "state.json")), send: true, runnerDataDir: root };
+    const delivered: CacheBustEvent[] = [];
+    const deps = {
+        now: () => second + 1000,
+        stdout: () => {}, stderr: () => {}, listActiveSessions: () => [],
+        runnerHeads: new Map([["head", { harness: "broca", decisions }]]),
+        runnerSource: { id: "astrocyte", read: async () => ({ rows, next: null, through: "end" }) },
+        transport: { record: async (event: CacheBustEvent) => {
+            const saved = loadSentinelState(settings.stateFile).runner!;
+            expect(saved.sent[event.vendor_event_id]).toBe(second);
+            expect(saved.rebuilds[event.vendor_event_id]!.rewrites).toHaveLength(2);
+            delivered.push(event);
+            return { disposition: "delivered", committed_order: 1 };
+        } },
+    };
+    await runSentinelOnce(settings, deps);
+    const counters = await runSentinelOnce(settings, deps);
+    expect(counters.accepted).toBe(1);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ urgency: "high", payload: { divergence_class: "double_rebuild", rewritten_tokens: 492_435 } });
+    const wake = agentDeliverRequest(delivered[0]!, settings.wakeAgentId, settings.wakeFromAgent);
+    expect(wake.urgency).toBe("high");
+    expect(wake.body.content).toContain("2026-11-11T17:29:24.444Z view 5 wrote 293685 tokens; 2026-11-11T17:29:27.823Z view 6 wrote 198750 tokens; idle before first rewrite=60 seconds");
+    // Every invocation reloads the state file, just as a fresh sentinel process does.
+    await runSentinelOnce(settings, { ...deps });
+    await runSentinelOnce(settings, { ...deps });
+    expect(delivered).toHaveLength(1);
+    const saved = loadSentinelState(settings.stateFile).runner!;
+    expect(saved.rebuilds[delivered[0]!.vendor_event_id]!.rewrites.map((rewrite) => rewrite.viewVersion)).toEqual([5, 6]);
 });

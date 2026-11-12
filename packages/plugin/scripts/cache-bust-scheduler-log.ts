@@ -77,6 +77,19 @@ function rustPassLogDecisions(
 
 const LOG_PREFIX = /^\[([^\]]+)\] \[magic-context\]\[([^\]]+)\] (.*)$/;
 
+/** Removal logs are host evidence, not transform passes, so they never claim a pass join. */
+export function messageRemovalLogMarkers(text: string, sessionId: string): CacheBustDecisionAttribution[] {
+    return text.split("\n").flatMap((line) => {
+        const match = LOG_PREFIX.exec(line);
+        if (!match || match[2] !== sessionId || !match[3].startsWith("event message.removed:")) return [];
+        const timestampMs = Date.parse(match[1]);
+        if (!Number.isFinite(timestampMs)) return [];
+        return [{ timestampMs, decision: "host_event", materialized: false, materializeReason: null,
+            emergency: false, droppedTokens: 0, droppedCount: 0, inputTokens: 0, flush: false,
+            source: "host message removal log", disruption: "host_messages_removed" }];
+    });
+}
+
 /**
  * Name the disruption a Rust adapter log line records, if any. These explain an
  * epoch HARD that follows within a minute: the module failed or asked for full
@@ -135,5 +148,5 @@ export function withSchedulerLogFallback(
         const next = logged[index + 1]?.timestampMs ?? Number.POSITIVE_INFINITY;
         return !decisions.some(row => row.timestampMs >= pass.timestampMs && row.timestampMs < next && row.timestampMs - pass.timestampMs <= 30_000);
     });
-    return [...decisions, ...fallback, ...rustPasses, ...disruptionLogMarkers(text, sessionId)];
+    return [...decisions, ...fallback, ...rustPasses, ...disruptionLogMarkers(text, sessionId), ...messageRemovalLogMarkers(text, sessionId)];
 }

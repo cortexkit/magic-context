@@ -20,6 +20,20 @@ beforeAll(async () => {
 			"pi-context-refusal.ts",
 		].map((file) => readFile(new URL(file, import.meta.url), "utf8")),
 	);
+	// Exercise the real reference-only evidence and session-cache factories in
+	// a private scope, without colliding with the other concatenated modules.
+	const foreignSource = (
+		await readFile(
+			new URL("pi-foreign-session-index.ts", import.meta.url),
+			"utf8",
+		)
+	)
+		.replace(/^import\b[\s\S]*?;\n/gm, "")
+		.replace(/^export /gm, "");
+	sources.unshift(`const { createPiForeignSessionIndex, piForeignEvidence, piProtectPreparedRows } = (() => {
+${foreignSource}
+return { createPiForeignSessionIndex, piForeignEvidence, piProtectPreparedRows };
+})();`);
 	const handlerSource = await readFile(
 		new URL("context-handler.ts", import.meta.url),
 		"utf8",

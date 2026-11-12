@@ -32,6 +32,7 @@ import {
 	PiContextDeadlineError,
 	PiContextSupersededError,
 } from "./pi-context-budget";
+import { piCheckPreparedDispatch } from "./pi-dispatch-acceptance";
 import {
 	type PiChainState,
 	type PiPreparedHistory,
@@ -45,6 +46,14 @@ import {
 	piCursorConversation,
 	piCursorManagedRoots,
 } from "./pi-dispatch-cursor";
+import { logPiDispatchMismatch } from "./pi-dispatch-diagnostic";
+import {
+	createPiForeignSessionIndex,
+	type PiForeignEvidence,
+	type PiForeignSessionIndex,
+	piForeignEvidence,
+	piProtectPreparedRows,
+} from "./pi-dispatch-foreign";
 import {
 	piConversationFields as conversationFields,
 	piDispatchShape,
@@ -54,7 +63,6 @@ import {
 import { piRefusedPayload } from "./pi-dispatch-refused";
 import {
 	type PiPreparedStructure,
-	piPreparedStructureMismatch,
 	preparePiDispatch,
 } from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
@@ -94,6 +102,7 @@ interface Operation {
 	cursorRoots?: readonly string[];
 	refusalMessage?: string;
 	preparedStructure?: PiPreparedStructure;
+	foreignEvidence?: PiForeignEvidence;
 	// Dropped parts of the latest pass whose native items Oh My Pi may replay;
 	// the request must carry each one's placeholder (piNativeDropWireMismatch).
 	nativeDrops?: readonly PiNativeDropExpectation[];
@@ -156,6 +165,7 @@ function releasePiOperationPayloads(operation: Operation): void {
 	operation.managedSignature = undefined;
 	operation.cursorRoots = undefined;
 	operation.preparedStructure = undefined;
+	operation.foreignEvidence = undefined;
 	operation.nativeDrops = undefined;
 	operation.preparedHistory = undefined;
 }
@@ -418,6 +428,10 @@ export function registerPiGuardedContext(
 	receiptMaps.add(structureWarnings);
 	const imageTrimNotices = new Map<string | object, boolean>();
 	receiptMaps.add(imageTrimNotices);
+	const foreignNotices = new Map<string | object, boolean>();
+	receiptMaps.add(foreignNotices);
+	const foreignIndexes = new Map<string | object, PiForeignSessionIndex>();
+	receiptMaps.add(foreignIndexes);
 	// What the latest admitted managed request carried and the response the
 	// provider returned to it. It outlives operations: Oh My Pi's automatic
 	// continuations (todo reminders, follow-up prompts) start new runs that
@@ -553,7 +567,11 @@ export function registerPiGuardedContext(
 		});
 		// OMP supplies session identity, but no provider-attempt ID. The latest
 		// context pass is the receipt for this operation, including payload retries.
-		// No awaits, DB access or payload hashing are allowed in this backstop.
+		// No awaits or database access are allowed in this synchronous backstop.
+		// Only a structural mismatch with candidate foreign text rows may lazily
+		// compare host entry fields by value, hashing only new/changed renderings
+		// and bounded candidate text against old fingerprints. There is no hashing
+		// to detect changes; matching requests never read/hash session history.
 		pi.on("before_provider_request", (event, ctx) => {
 			const cancelledOperation = operations.get(operationKey(ctx));
 			const signal = (ctx as { signal?: AbortSignal }).signal;
@@ -755,11 +773,12 @@ export function registerPiGuardedContext(
 						`[magic-context][pi] OMP structural comparison skipped: ${skipReason}; stale prepared requests are not detected on this pass; session=${String(key)}`,
 					);
 				}
-				const structureMismatch = skipReason
-					? undefined
-					: piPreparedStructureMismatch(
+				const structure = skipReason
+					? {}
+					: piCheckPreparedDispatch(
 							checked,
 							active.preparedStructure,
+							active.foreignEvidence,
 							(counts) => {
 								if (imageTrimNotices.has(key)) return;
 								imageTrimNotices.set(key, true);
@@ -768,10 +787,23 @@ export function registerPiGuardedContext(
 								);
 							},
 						);
-				if (structureMismatch)
-					throw new Error(
-						`provider request does not match this pass's managed dispatch (prepared turn structure); ${structureMismatch}`,
+				if (structure.mismatch) {
+					logPiDispatchMismatch(
+						checked,
+						active.preparedStructure,
+						structure.mismatch,
 					);
+					throw new Error(
+						`provider request does not match this pass's managed dispatch (prepared turn structure); ${structure.mismatch}`,
+					);
+				}
+				if (structure.foreign && !foreignNotices.has(key)) {
+					foreignNotices.set(key, true);
+					const { count, chars, before } = structure.foreign;
+					log(
+						`[magic-context][pi] foreign context rows accepted: count=${count} chars=${chars} beforePreparedRow0=${before[0] ?? -1} beforePreparedRow1=${before[1] ?? -1} beforePreparedRow2=${before[2] ?? -1} beforePreparedRow3=${before[3] ?? -1}; inserted by another extension after Magic Context's pass, outside managed history`,
+					);
+				}
 				const admittedFields = chained
 					? active.chainDispatchFields
 					: active.dispatchFields;
@@ -927,6 +959,16 @@ export function registerPiGuardedContext(
 				active.inputKeys = inputMessageKeys(event);
 				inputs = messageSnapshots(event.messages);
 				active.inputMessages = inputs;
+				let index = foreignIndexes.get(key);
+				if (!index) {
+					index = createPiForeignSessionIndex();
+					foreignIndexes.set(key, index);
+				}
+				active.foreignEvidence = piForeignEvidence(
+					ctx.sessionManager,
+					event.messages,
+					index,
+				);
 			}
 			// Share at most 2,000 ms of synchronous waiting for later turn writes,
 			// including autocommit statements. Initial session-meta admission uses
@@ -969,6 +1011,12 @@ export function registerPiGuardedContext(
 						ctx.cwd,
 					);
 				active.preparedStructure = prepared.structure;
+				if (active.foreignEvidence)
+					piProtectPreparedRows(
+						active.foreignEvidence,
+						result.messages,
+						prepared.structure,
+					);
 				active.nativeDrops = prepared.nativeDrops;
 				if (
 					fenceEnabled &&

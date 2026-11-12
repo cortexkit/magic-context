@@ -264,6 +264,8 @@ export async function oc2ContextFixture(
                         },
               ];
     let checkpoint: V2Message | undefined;
+    /** The messages a provider-native checkpoint serves in place of `checkpoint`. */
+    let providerWindow: V2Message[] | undefined;
     let hostWindowStart = 0;
     let lastDraft: SessionContext | undefined;
     let systemText = "Review the isolated project.";
@@ -276,7 +278,7 @@ export async function oc2ContextFixture(
         tools: { read: { description: "Read a file", input: { type: "object" } } },
         options: {},
         messages: structuredClone([
-            ...(checkpoint ? [checkpoint] : []),
+            ...(providerWindow ?? (checkpoint ? [checkpoint] : [])),
             ...rows.slice(hostWindowStart).flatMap(render),
         ]),
     });
@@ -393,6 +395,7 @@ export async function oc2ContextFixture(
             if (!draft.result) throw new Error("compaction hook supplied no summary");
             const id = `fold-${seed}-${rows.length}`;
             hostWindowStart = rows.length - windowRows;
+            providerWindow = undefined;
             // 2.1.0 names the first row it kept after the checkpoint.
             const metadata =
                 host === "2.1.0" ? { metadata: { keepID: rows[hostWindowStart]!.id } } : {};
@@ -469,6 +472,7 @@ export async function oc2ContextFixture(
             } else await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("native compaction hook supplied no summary");
             hostWindowStart = Math.max(0, rows.length - windowRows);
+            providerWindow = undefined;
             const recent =
                 recentOverride ??
                 rows
@@ -512,6 +516,48 @@ export async function oc2ContextFixture(
                 ],
                 ...(data.metadata === undefined ? {} : { metadata: data.metadata }),
             };
+            return id;
+        },
+        /**
+         * The host compacts with the model's own (provider-native) compaction,
+         * which it does when its compaction hook gets no answer, for example
+         * while Magic Context's compaction is off. OpenCode 2.0.22's
+         * `SessionCompaction` stores the newest user messages that fit its keep
+         * budget followed by the provider's checkpoint as an assistant message
+         * without an id (`cn.assistant(checkpoint)`), in the compaction row's
+         * `providerContext`, and every later request for the same model starts
+         * with those messages instead of the rows before the checkpoint.
+         */
+        providerFold(keptUsers = 2, text = "Provider checkpoint of the earlier conversation.") {
+            const kept = rows.filter((row) => row.type === "user").slice(-keptUsers);
+            const window: V2Message[] = [
+                ...kept.flatMap(render),
+                { role: "assistant", content: [{ type: "text", text }] },
+            ];
+            const id = `provider-${seed}-${nextSeq}`;
+            raw.prepare(
+                "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
+            ).run(
+                id,
+                session,
+                "compaction",
+                nextSeq++,
+                nowClock,
+                JSON.stringify({
+                    status: "completed",
+                    reason: "auto",
+                    summary: "",
+                    recent: "",
+                    providerContext: {
+                        version: 1,
+                        provenance: { providerID: provider, modelID: model },
+                        messages: window,
+                    },
+                }),
+            );
+            checkpoint = undefined;
+            providerWindow = window;
+            hostWindowStart = rows.length;
             return id;
         },
         /** Let the provider cache expire, so the next pass may rebuild the prefix. */

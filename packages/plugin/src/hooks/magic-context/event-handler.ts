@@ -389,7 +389,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         !deps.compactionOff &&
                         isAnthropicFamilyRoute(model?.providerID, model?.modelID)
                     ) {
-                        armLatestThinkingRecovery(deps.db, errInfo.sessionID);
+                        armLatestThinkingRecovery(deps.db, errInfo.sessionID, model?.modelID);
                         dropSlot(errInfo.sessionID, "latest-thinking-recovery-arm");
                         deps.onSessionCacheInvalidated?.(errInfo.sessionID);
                     }
@@ -611,7 +611,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     !deps.compactionOff &&
                     isAnthropicFamilyRoute(info.providerID, info.modelID)
                 ) {
-                    armLatestThinkingRecovery(deps.db, info.sessionID);
+                    armLatestThinkingRecovery(deps.db, info.sessionID, info.modelID);
                     dropSlot(info.sessionID, "latest-thinking-recovery-arm");
                     deps.onSessionCacheInvalidated?.(info.sessionID);
                     return;

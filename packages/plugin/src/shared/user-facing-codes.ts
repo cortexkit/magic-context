@@ -17,8 +17,14 @@ export const USER_FACING_FAILURES = {
     history_boundary_unresolved: {
         code: "MC-H04",
         sentence:
-            "This request was not sent: Magic Context could not safely place the history summary boundary in the loaded conversation, and the untrimmed request is larger than the model's context window.",
-        action: "Reopen this session in its current project directory, then run /ctx-recomp to rebuild the history summary. A model with a larger context window can also help.",
+            "This request was not sent: it is larger than the model's context window, and Magic Context could not cut the already-summarized history out of it.",
+        action: "Run /ctx-flush to compress the history now, then send your message again.",
+    },
+    history_boundary_recovering: {
+        code: "MC-H08",
+        sentence:
+            "This request was not sent: it is larger than the model's context window, and Magic Context could not cut the already-summarized history out of it.",
+        action: "Send your message again: Magic Context will first summarize more of the history and drop old tool output to make it fit.",
     },
     history_over_window_unmanaged: {
         code: "MC-H06",

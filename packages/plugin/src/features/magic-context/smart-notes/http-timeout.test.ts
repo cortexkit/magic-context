@@ -20,21 +20,23 @@ import { __wakePlaneTest } from "./wake-plane";
 const PROJECT = "git:http-timeout";
 const OWNER = "http-timeout-owner";
 const LEASE = "http-timeout-lease";
-let fixture: ReturnType<typeof timeoutTestDatabase>;
+let fixture: ReturnType<typeof timeoutTestDatabase> | undefined;
 
 beforeEach(() => {
     __wakePlaneTest.reset();
     __wakePlaneTest.setCatalogProbe(async () => []);
     fixture = timeoutTestDatabase();
-    expect(acquireLease(fixture.db, "holder", LEASE)).toBe(true);
+    expect(acquireLease(fixture!.db, "holder", LEASE)).toBe(true);
 });
 afterEach(() => {
-    fixture.dispose();
+    // Setup can fail before the database fixture is assigned; preserve that original error.
+    fixture?.dispose();
+    fixture = undefined;
     __wakePlaneTest.reset();
 });
 
 function source() {
-    return addNote(fixture.db, "smart", {
+    return addNote(fixture!.db, "smart", {
         projectPath: PROJECT,
         sessionId: OWNER,
         content: "watch remote state",
@@ -42,10 +44,10 @@ function source() {
     });
 }
 function state() {
-    return getNotes(fixture.db, { type: "smart", projectPath: PROJECT })[0];
+    return getNotes(fixture!.db, { type: "smart", projectPath: PROJECT })[0];
 }
 function notices() {
-    return getNotes(fixture.db, { type: "session", sessionId: OWNER });
+    return getNotes(fixture!.db, { type: "session", sessionId: OWNER });
 }
 function carrier(): HiddenCompletionExecutor {
     return {
@@ -63,7 +65,7 @@ function carrier(): HiddenCompletionExecutor {
 }
 function evaluate() {
     return evaluateSmartNotes({
-        db: fixture.db,
+        db: fixture!.db,
         hiddenCompletionExecutor: carrier(),
         projectIdentity: PROJECT,
         parentSessionId: OWNER,
@@ -77,7 +79,7 @@ function capabilities(signal: AbortSignal) {
     return createSmartNoteCapabilities({ projectRoot: process.cwd(), signal });
 }
 function seedCompiled(id: number) {
-    fixture.db
+    fixture!.db
         .prepare(`UPDATE notes SET compiled_check=?, check_status='compiled', policy_version=1,
         check_next_due_at=0, check_quarantined_until=NULL WHERE id=?`)
         .run(HTTP_CHECK, id);
@@ -112,9 +114,9 @@ test("HTTP deadline retries compilation without spending fallback strikes", asyn
     await withLocalHttpServer(null, async (requests) => {
         const note = source();
         // Existing logic strikes must not grow or trigger fallback on transport failure.
-        fixture.db.prepare("UPDATE notes SET check_failure_count=2 WHERE id=?").run(note.id);
+        fixture!.db.prepare("UPDATE notes SET check_failure_count=2 WHERE id=?").run(note.id);
         for (let i = 0; i < 2; i++) {
-            fixture.db.prepare("UPDATE notes SET check_next_due_at=0 WHERE id=?").run(note.id);
+            fixture!.db.prepare("UPDATE notes SET check_next_due_at=0 WHERE id=?").run(note.id);
             const startedAt = Date.now();
             expect(await evaluate()).toEqual({ surfaced: 0, pending: 1, ran: true });
             expect(state()).toMatchObject({
@@ -139,7 +141,7 @@ test("HTTP deadline retries scheduled checks without reauthoring or fallback", a
             const startedAt = Date.now();
             expect(
                 await runDueCompiledSmartNoteChecks({
-                    db: fixture.db,
+                    db: fixture!.db,
                     projectIdentity: PROJECT,
                     projectRoot: process.cwd(),
                     leaseHeld: () => true,
@@ -186,7 +188,7 @@ test("liveness HTTP deadline retries without spending logic strikes", async () =
         const note = source();
         seedCompiled(note.id);
         const startedAt = Date.now();
-        fixture.db
+        fixture!.db
             .prepare(`UPDATE notes SET check_next_due_at=?, check_false_since_at=? WHERE id=?`)
             .run(startedAt + 60_000, startedAt - 8 * 24 * 60 * 60_000, note.id);
         expect(await evaluate()).toEqual({ surfaced: 0, pending: 1, ran: true });
@@ -235,7 +237,7 @@ scaleTest(
             for (let i = 0; i < 3; i++) seedCompiled(source().id);
             const startedAt = Date.now();
             const result = await runDueCompiledSmartNoteChecks({
-                db: fixture.db,
+                db: fixture!.db,
                 projectIdentity: PROJECT,
                 projectRoot: process.cwd(),
                 leaseHeld: () => true,
@@ -247,7 +249,7 @@ scaleTest(
             expect(result).toMatchObject({ surfaced: 0, failed: 0, networkFailed: 0 });
             if (slow) expect(Date.now() - startedAt).toBeLessThan(10_000);
             expect(requests()).toBe(result.ran);
-            const notes = getNotes(fixture.db, { type: "smart", projectPath: PROJECT });
+            const notes = getNotes(fixture!.db, { type: "smart", projectPath: PROJECT });
             expect(notes.filter((n) => n.checkNextDueAt === 0)).toHaveLength(3 - result.ran);
         });
     },

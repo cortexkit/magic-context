@@ -1,5 +1,4 @@
 import { expect, spyOn } from "bun:test";
-import { execFileSync } from "node:child_process";
 import * as dns from "node:dns/promises";
 import { realpathSync, rmSync } from "node:fs";
 import * as http from "node:http";
@@ -7,6 +6,7 @@ import * as https from "node:https";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { Database } from "../../../../shared/sqlite";
+import { listOpenFiles } from "../../../../shared/test-open-files";
 import { createTestTempDirFromPath } from "../../../../shared/test-temp-dir";
 import { runMigrations } from "../../migrations";
 import { initializeDatabase } from "../../storage-db";
@@ -110,20 +110,18 @@ export function timeoutTestDatabase(): { db: Database; dispose: () => void } {
     const db = new Database(path);
     initializeDatabase(db);
     runMigrations(db);
-    if (!isolationProven) {
-        const output = execFileSync("lsof", ["-p", String(process.pid)], {
-            encoding: "utf8",
-            timeout: 10_000,
-            windowsHide: true,
-        });
-        const dbLines = output.split("\n").filter((line) => /\.db(?:[-\s]|$)/.test(line));
+    if (!isolationProven && process.platform !== "win32") {
+        const inventory = listOpenFiles();
+        // Without an inventory the live-store isolation proof would be meaningless.
+        if (!inventory.available) throw new Error(inventory.reason);
+        const dbLines = inventory.paths.filter((path) => /\.db(?:[-\s]|$)/.test(path));
         expect(dbLines.some((line) => line.includes(path))).toBe(true);
         // The test runner shares one process across test files, so other files' throwaway
         // databases may still be open here. The invariant is that every database this
         // process holds lives under the temp directory, never in a live store.
         const tempRoot = realpathSync(tmpdir());
         for (const line of dbLines) expect(line).toContain(tempRoot);
-        console.log(`lsof -p ${process.pid}: isolated database descriptors\n${dbLines.join("\n")}`);
+        console.log(`pid ${process.pid}: isolated database descriptors\n${dbLines.join("\n")}`);
         isolationProven = true;
     }
     return {

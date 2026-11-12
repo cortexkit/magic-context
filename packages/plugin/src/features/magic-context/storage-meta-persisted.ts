@@ -26,6 +26,7 @@ import {
     readReplayTrailingBlankSubset,
     updateTrailingBlankDecisions,
 } from "./storage-replay-document";
+import { sessionRenderCacheValueSql } from "./storage-session-cache";
 import {
     readSessionMetaCollection,
     updateSessionMetaCollection,
@@ -2130,13 +2131,19 @@ export function clearHistorianFailureState(db: Database, sessionId: string): voi
 
 // ── Overflow detection state ──
 //
-// Recovery can be armed by either a provider rejection or a proactive model
-// shrink check. Persisting the origin keeps restarts from conflating the two:
+// Recovery can be armed by a provider rejection, a proactive model shrink
+// check, or a pass that measured its own request over the window after it
+// could not cut the summarized history out of it
+// (`history_boundary_over_window`). Persisting the origin keeps restarts from
+// conflating them:
 // only the provider's own overflow rejection is trustworthy enough for the
 // transform to abort before another request. Numeric gating is deferred to the
 // module-side provider-accurate estimator.
 
-export type EmergencyRecoveryOrigin = "provider_overflow" | "proactive_model_shrink";
+export type EmergencyRecoveryOrigin =
+    | "provider_overflow"
+    | "proactive_model_shrink"
+    | "history_boundary_over_window";
 
 export interface PersistedOverflowState {
     /** Provider-reported context limit from the overflow error; 0 means none detected. */
@@ -2158,7 +2165,11 @@ function normalizeDetectedLimitModelKey(modelKey: string | null | undefined): st
 }
 
 function normalizeEmergencyRecoveryOrigin(value: unknown): EmergencyRecoveryOrigin | null {
-    return value === "provider_overflow" || value === "proactive_model_shrink" ? value : null;
+    return value === "provider_overflow" ||
+        value === "proactive_model_shrink" ||
+        value === "history_boundary_over_window"
+        ? value
+        : null;
 }
 
 type PersistedOverflowRow = {
@@ -3668,6 +3679,37 @@ export function getSessionsWithPendingMarker(db: Database): string[] {
         )
         .all() as Array<{ session_id: string }>;
     return rows.map((r) => r.session_id);
+}
+
+/**
+ * Whether the cached m[0]/m[1] pair already renders the history that a
+ * session's pending compaction marker summarizes. The pair records the last
+ * compartment end it rendered (`cached_m0_last_baseline_end_message_id`); the
+ * history is covered when that compartment ends at or after the pending
+ * marker's boundary. The next pass serves this cached pair, so a covered
+ * history needs no further refresh: only the marker move is outstanding.
+ */
+export function cachedHeadCoversPendingCompactionMarker(db: Database, sessionId: string): boolean {
+    const pending = getPendingCompactionMarkerState(db, sessionId);
+    if (!pending) return false;
+    // The m[0]/m[1] payloads live in session_render_cache; the value SQL also
+    // reads a store whose payloads are still session_meta columns.
+    const head = db
+        .prepare(
+            `SELECT length(${sessionRenderCacheValueSql("cached_m0_bytes", db)}) > 0
+                    AND length(${sessionRenderCacheValueSql("cached_m1_bytes", db)}) > 0 AS complete,
+                    cached_m0_last_baseline_end_message_id AS baseline
+               FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as { complete: number | null; baseline: string | null } | null;
+    if (head?.complete !== 1 || !head.baseline) return false;
+    if (head.baseline === pending.endMessageId) return true;
+    const rendered = db
+        .prepare(
+            "SELECT MAX(end_message) AS endMessage FROM compartments WHERE session_id = ? AND end_message_id = ?",
+        )
+        .get(sessionId, head.baseline) as { endMessage: number | null } | null;
+    return typeof rendered?.endMessage === "number" && rendered.endMessage >= pending.ordinal;
 }
 
 export function setSessionWorkMetrics(

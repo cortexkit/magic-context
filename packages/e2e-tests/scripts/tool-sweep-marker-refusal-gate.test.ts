@@ -31,7 +31,7 @@ test("marker refusal preserves persisted row until next provable pass advances o
     expect(refused.pending_compaction_marker_state).not.toBeNull();
     expect(log).toContain("compaction-marker drain: refusing ordinal 6 because prefix trim");
     expect(log).toContain("was not proven; preserving deferred history refresh signal");
-    expect(log).toContain("no stable id outside the synthetic head");
+    expect(log).toContain("appears more than once");
     expect(retry.pending_compaction_marker_state).toBeNull();
     expect(JSON.parse(retry.compaction_marker_state).boundaryOrdinal).toBe(6);
     expect(retry.compaction_marker_state).not.toBe(before.compaction_marker_state);

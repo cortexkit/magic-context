@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import type { HarnessAdapter } from "../adapters/types";
-import type { DiagnosticReport } from "../lib/diagnostics-opencode";
+import {
+    collectOpenCodePluginCacheReport,
+    type DiagnosticReport,
+} from "../lib/diagnostics-opencode";
+import * as githubIssue from "../lib/github-issue";
 import { MAX_GITHUB_BODY_BYTES } from "../lib/issue-body";
+import { getOpenCodeV2PluginCacheSlot, OPENCODE_PLUGIN_NAME } from "../lib/opencode-plugin-cache";
 import type { PromptIO, PromptSpinner } from "../lib/prompts";
 import * as prompts from "../lib/prompts";
 import { dispatchDoctor } from "./doctor";
@@ -67,48 +72,51 @@ describe("doctor --issue --report dispatch", () => {
     });
 });
 
-describe("OpenCode doctor --issue --report", () => {
-    function fakeReport(root: string, opencodeVersion = "1.0.0"): DiagnosticReport {
-        const logPath = join(root, "opencode.log");
-        writeFileSync(logPath, "INFO started\n");
-        return {
-            timestamp: "2026-05-11T12:00:00.000Z",
-            platform: "darwin",
-            arch: "arm64",
-            nodeVersion: "v24.0.0",
-            pluginVersion: "0.39.0",
-            opencodeInstalled: true,
-            opencodeVersion,
-            opencodeInstallKind: "cli",
-            opencodeInstallations: [],
-            configPaths: {
-                configDir: join(root, "config"),
-                opencodeConfig: join(root, "config", "opencode.jsonc"),
-                opencodeConfigFormat: "jsonc",
-                magicContextConfig: join(root, "config", "magic-context.jsonc"),
-                tuiConfig: join(root, "config", "tui.jsonc"),
-                tuiConfigFormat: "jsonc",
-                omoConfig: null,
-            },
-            opencodeConfigHasPlugin: true,
-            tuiConfigHasPlugin: true,
-            magicContextConfig: { exists: true, flags: {} },
-            pluginCache: { path: join(root, "cache") },
-            storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
-            conflicts: {
-                hasConflict: false,
-                reasons: [],
-                compactionEnabled: true,
-                nativeCompaction: { auto: false, prune: false },
-            },
-            logFile: { path: logPath, exists: true, sizeKb: 1 },
-            recentSessions: { available: true, rows: [] },
-            historianDumps: { byProject: [], legacyDumps: { dir: root, count: 0, recent: [] } },
-            historianFailures: { available: true, rows: [] },
-            historianRuns: { available: true, rows: [] },
-        };
-    }
+function fakeReport(root: string, opencodeVersion = "1.0.0"): DiagnosticReport {
+    const logPath = join(root, "opencode.log");
+    writeFileSync(logPath, "INFO started\n");
+    return {
+        timestamp: "2026-05-11T12:00:00.000Z",
+        platform: "darwin",
+        arch: "arm64",
+        nodeVersion: "v24.0.0",
+        pluginVersion: "0.39.0",
+        opencodeInstalled: true,
+        opencodeVersion,
+        opencodeInstallKind: "cli",
+        opencodeInstallations: [],
+        configPaths: {
+            configDir: join(root, "config"),
+            opencodeConfig: join(root, "config", "opencode.jsonc"),
+            opencodeConfigFormat: "jsonc",
+            magicContextConfig: join(root, "config", "magic-context.jsonc"),
+            tuiConfig: join(root, "config", "tui.jsonc"),
+            tuiConfigFormat: "jsonc",
+            omoConfig: null,
+        },
+        opencodeConfigHasPlugin: true,
+        tuiConfigHasPlugin: true,
+        magicContextConfig: { exists: true, flags: {} },
+        pluginCache: { path: join(root, "cache") },
+        storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
+        conflicts: {
+            hasConflict: false,
+            reasons: [],
+            compactionEnabled: true,
+            nativeCompaction: { auto: false, prune: false },
+        },
+        logFile: { path: logPath, exists: true, sizeKb: 1 },
+        recentSessions: { available: true, rows: [] },
+        historianDumps: { byProject: [], legacyDumps: { dir: root, count: 0, recent: [] } },
+        historianFailures: { available: true, rows: [] },
+        historianRuns: { available: true, rows: [] },
+    };
+}
 
+/** No npm lookup and no config read: the report as filed when the version check is unavailable. */
+const noFreshness = async () => ({ npmVersions: {} });
+
+describe("OpenCode doctor --issue --report", () => {
     it("writes the report to the given path without prompting", async () => {
         const root = tempRoot();
         for (const name of ["text", "confirm", "selectOne"] as const) {
@@ -121,7 +129,7 @@ describe("OpenCode doctor --issue --report", () => {
 
         const code = await openCodeDoctor.runIssueFlow(
             { reportPath: join("out", "diagnostics.md") },
-            { collectDiagnostics: async () => fakeReport(root) },
+            { collectDiagnostics: async () => fakeReport(root), checkPluginFreshness: noFreshness },
         );
 
         expect(code).toBe(0);
@@ -146,7 +154,10 @@ describe("OpenCode doctor --issue --report", () => {
             const reportPath = join(root, `opencode-${version}-diagnostics.md`);
             const code = await openCodeDoctor.runIssueFlow(
                 { reportPath },
-                { collectDiagnostics: async () => fakeReport(root, version) },
+                {
+                    collectDiagnostics: async () => fakeReport(root, version),
+                    checkPluginFreshness: noFreshness,
+                },
             );
 
             expect(code).toBe(0);
@@ -156,6 +167,244 @@ describe("OpenCode doctor --issue --report", () => {
             );
             expect(body).not.toContain(root);
         }
+    });
+});
+
+describe("OpenCode doctor --issue on an outdated plugin", () => {
+    const INSTALLED = "0.49.34";
+    const NEWEST = "0.49.52";
+    const STALE_WARNING = `warn OpenCode 2 is running an outdated Magic Context (cached: ${INSTALLED}, latest: ${NEWEST}); OpenCode does not install new releases on its own`;
+    const UPDATE_ADVICE =
+        "info   To upgrade, update it from OpenCode: open /plugins, select Magic Context and press ctrl+u (ctrl+r only re-checks), or run `opencode plugin update`,";
+    const FIX_ADVICE =
+        "info   or quit OpenCode (including `opencode service stop`) and run `magic-context doctor --fix`.";
+    const QUESTION = "Continue filing the issue? No stops here so you can update first.";
+
+    function useEnv(values: Record<string, string>): void {
+        const saved = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+        Object.assign(process.env, values);
+        restores.push(() => {
+            for (const [key, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+        });
+    }
+
+    /** An OpenCode 2 cache holding `installed`, loaded through an `@latest` config entry. */
+    function installedPlugin(installed = INSTALLED) {
+        const root = tempRoot();
+        const configDir = join(root, "config", "opencode");
+        useEnv({ HOME: root, XDG_CACHE_HOME: join(root, "cache"), OPENCODE_CONFIG_DIR: configDir });
+        const config = { plugin: [`${OPENCODE_PLUGIN_NAME}@latest`] };
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(join(configDir, "opencode.jsonc"), JSON.stringify(config));
+        const slot = getOpenCodeV2PluginCacheSlot(undefined, "latest");
+        const generation = join(slot, "1790000000000");
+        const packageDir = join(generation, "node_modules", ...OPENCODE_PLUGIN_NAME.split("/"));
+        mkdirSync(packageDir, { recursive: true });
+        writeFileSync(
+            join(packageDir, "package.json"),
+            JSON.stringify({ name: OPENCODE_PLUGIN_NAME, version: installed }),
+        );
+        writeFileSync(join(generation, "package.json"), JSON.stringify({ dependencies: {} }));
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        restores.push(() => process.chdir(originalCwd));
+        return { root, config, slot };
+    }
+
+    /** Real check and report wiring, with the npm lookup faked to return `newest`. */
+    function issueDeps(
+        fixture: ReturnType<typeof installedPlugin>,
+        options: { newest: string | null; platform?: NodeJS.Platform; interactive?: boolean },
+    ) {
+        const lookups: string[] = [];
+        const deps: openCodeDoctor.IssueFlowDeps = {
+            collectDiagnostics: async (collect) => ({
+                ...fakeReport(fixture.root, "2.0.0"),
+                pluginCache: collectOpenCodePluginCacheReport(
+                    "v2",
+                    fixture.config,
+                    collect?.npmVersions,
+                ),
+            }),
+            checkPluginFreshness: () =>
+                openCodeDoctor.checkPluginFreshnessForIssue({
+                    fetchNpmLatest: async (_pkg, distTag = "latest") => {
+                        lookups.push(distTag);
+                        return options.newest;
+                    },
+                }),
+            platform: options.platform ?? "linux",
+            isInteractive: () => options.interactive ?? true,
+        };
+        return { deps, lookups };
+    }
+
+    /** Records what the flow prints and asks; `fileAnyway` answers the outdated-plugin question. */
+    function capturePrompts(fileAnyway: boolean) {
+        const output: string[] = [];
+        const questions: string[] = [];
+        const filed: string[] = [];
+        const spies = [
+            spyOn(prompts.log, "warn").mockImplementation((m) => void output.push(`warn ${m}`)),
+            spyOn(prompts.log, "info").mockImplementation((m) => void output.push(`info ${m}`)),
+            spyOn(prompts.log, "success").mockImplementation((m) => void output.push(`pass ${m}`)),
+            spyOn(prompts.log, "error").mockImplementation((m) => void output.push(`error ${m}`)),
+            spyOn(prompts, "intro").mockImplementation(() => {}),
+            spyOn(prompts, "outro").mockImplementation((m) => void output.push(`outro ${m}`)),
+            spyOn(prompts, "spinner").mockImplementation(() => ({
+                start: () => {},
+                stop: () => {},
+                message: () => {},
+            })),
+            spyOn(prompts, "confirm").mockImplementation(async (message) => {
+                questions.push(message);
+                return message === QUESTION ? fileAnyway : true;
+            }),
+            spyOn(prompts, "text").mockImplementation(async (message) =>
+                message === "Issue title" ? "Old bug" : "It broke",
+            ),
+            spyOn(prompts, "selectOne").mockImplementation(failOnPrompt("selectOne")),
+            spyOn(githubIssue, "submitGithubIssue").mockImplementation((_title, path) => {
+                filed.push(path);
+                return { ok: true, output: "https://github.com/cortexkit/magic-context/issues/1" };
+            }),
+        ];
+        for (const spy of spies) restores.push(() => spy.mockRestore());
+        return { output, questions, filed };
+    }
+
+    function issueFilesIn(root: string): string[] {
+        return readdirSync(root).filter((name) => name.startsWith("magic-context-issue-"));
+    }
+
+    it("warns, prints the update advice and asks before filing; stop files nothing", async () => {
+        const fixture = installedPlugin();
+        const { deps, lookups } = issueDeps(fixture, { newest: NEWEST });
+        const { output, questions, filed } = capturePrompts(false);
+
+        expect(await openCodeDoctor.runIssueFlow({}, deps)).toBe(0);
+
+        expect(output.slice(0, 3)).toEqual([STALE_WARNING, UPDATE_ADVICE, FIX_ADVICE]);
+        expect(questions).toEqual([QUESTION]);
+        expect(output.at(-1)).toBe(
+            "outro Issue not filed. Update the plugin, then run `magic-context doctor --issue` again if the problem remains.",
+        );
+        expect(filed).toEqual([]);
+        expect(issueFilesIn(fixture.root)).toEqual([]);
+        expect(lookups).toEqual(["latest"]);
+    });
+
+    it("files the issue with the outdated line and npm's newest version when the user continues", async () => {
+        const fixture = installedPlugin();
+        const { deps, lookups } = issueDeps(fixture, { newest: NEWEST });
+        const { output, questions, filed } = capturePrompts(true);
+
+        expect(await openCodeDoctor.runIssueFlow({}, deps)).toBe(0);
+
+        expect(output.slice(0, 3)).toEqual([STALE_WARNING, UPDATE_ADVICE, FIX_ADVICE]);
+        expect(questions).toEqual([QUESTION, "Submit this issue on GitHub now?"]);
+        expect(filed).toHaveLength(1);
+        const body = readFileSync(filed[0]!, "utf-8");
+        expect(body).toContain(
+            [
+                "## Environment",
+                `- Plugin is outdated: installed ${INSTALLED}, newest ${NEWEST}.`,
+                `- magic-context CLI: v0.39.0 (installed plugin: v${INSTALLED})`,
+            ].join("\n"),
+        );
+        expect(body).toContain(`"latest": "${NEWEST}",\n  "latest_source": "npm"`);
+        // The version fetched for the warning is reused for the body: one lookup in all.
+        expect(lookups).toEqual(["latest"]);
+    });
+
+    it("files an up-to-date install as before, apart from the relabelled CLI line", async () => {
+        const fixture = installedPlugin(NEWEST);
+        const { deps } = issueDeps(fixture, { newest: NEWEST });
+        const { output, questions } = capturePrompts(false);
+        const reportPath = join(fixture.root, "report.md");
+
+        expect(await openCodeDoctor.runIssueFlow({ reportPath }, deps)).toBe(0);
+
+        expect(output).toEqual([`info Report written to ${reportPath}`]);
+        expect(questions).toEqual([]);
+        const body = readFileSync(reportPath, "utf-8");
+        expect(body).toContain(
+            `## Environment\n- magic-context CLI: v0.39.0 (installed plugin: v${NEWEST})\n- OS: `,
+        );
+        expect(body).not.toContain("Plugin is outdated");
+        expect(body).not.toContain("- Plugin: v");
+        expect(body).toContain(`"latest": "${NEWEST}",\n  "latest_source": "npm"`);
+    });
+
+    it("warns and continues without asking when no one can answer", async () => {
+        const fixture = installedPlugin();
+        const { deps } = issueDeps(fixture, { newest: NEWEST, interactive: false });
+        const { output, questions, filed } = capturePrompts(false);
+
+        expect(await openCodeDoctor.runIssueFlow({}, deps)).toBe(0);
+
+        expect(output.slice(0, 3)).toEqual([STALE_WARNING, UPDATE_ADVICE, FIX_ADVICE]);
+        expect(questions).toEqual(["Submit this issue on GitHub now?"]);
+        expect(filed).toHaveLength(1);
+        expect(readFileSync(filed[0]!, "utf-8")).toContain(
+            `- Plugin is outdated: installed ${INSTALLED}, newest ${NEWEST}.`,
+        );
+    });
+
+    it("warns and writes the report under --report without asking", async () => {
+        const fixture = installedPlugin();
+        const { deps } = issueDeps(fixture, { newest: NEWEST });
+        const { output, questions } = capturePrompts(false);
+        const reportPath = join(fixture.root, "report.md");
+
+        expect(await openCodeDoctor.runIssueFlow({ reportPath }, deps)).toBe(0);
+
+        expect(output).toEqual([
+            STALE_WARNING,
+            UPDATE_ADVICE,
+            FIX_ADVICE,
+            `info Report written to ${reportPath}`,
+        ]);
+        expect(questions).toEqual([]);
+        expect(readFileSync(reportPath, "utf-8")).toContain(
+            `- Plugin is outdated: installed ${INSTALLED}, newest ${NEWEST}.`,
+        );
+    });
+
+    it("files as before when the newest version cannot be fetched", async () => {
+        const fixture = installedPlugin();
+        const { deps, lookups } = issueDeps(fixture, { newest: null });
+        const { output, questions } = capturePrompts(false);
+        const reportPath = join(fixture.root, "report.md");
+
+        expect(await openCodeDoctor.runIssueFlow({ reportPath }, deps)).toBe(0);
+
+        expect(lookups).toEqual(["latest"]);
+        expect(output).toEqual([`info Report written to ${reportPath}`]);
+        expect(questions).toEqual([]);
+        const body = readFileSync(reportPath, "utf-8");
+        expect(body).not.toContain("Plugin is outdated");
+        expect(body).toContain(`- magic-context CLI: v0.39.0 (installed plugin: v${INSTALLED})`);
+        // `latest` falls back to the CLI's own version and says so.
+        expect(body).toContain('"latest_source": "cli"');
+    });
+
+    it("gives Windows the Windows advice instead of doctor --fix", async () => {
+        const fixture = installedPlugin();
+        const { deps } = issueDeps(fixture, { newest: NEWEST, platform: "win32" });
+        const { output } = capturePrompts(false);
+
+        expect(await openCodeDoctor.runIssueFlow({}, deps)).toBe(0);
+
+        expect(output.slice(0, 3)).toEqual([
+            STALE_WARNING,
+            UPDATE_ADVICE,
+            `info   or quit OpenCode and delete ${fixture.slot}; the next start installs the current release.`,
+        ]);
+        expect(output.join("\n")).not.toContain("doctor --fix");
     });
 });
 

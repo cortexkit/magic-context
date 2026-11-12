@@ -15,6 +15,7 @@ import { configSaveBlocker } from "./config-save-guard";
 import { configDefault, configSchemaNode, defaultLabel, defaultPlaceholder } from "./config-schema";
 import type { DreamTaskConfig, DreamTaskModelConfig } from "./DreamerTasksField";
 import DreamerTasksField from "./DreamerTasksField";
+import { resolveProbeDimensions } from "./embedding-probe-dimensions";
 import HarnessModelFields, { type Harness, modelCatalogForHarness } from "./HarnessModelFields";
 import HelpPopover from "./HelpPopover";
 import { LANGUAGE_OPTIONS } from "./languages";
@@ -884,19 +885,12 @@ function ConfigForm(props: {
                                             ).trim();
                                             // Raw-JSONC-only field, but the probe must
                                             // request the same width the runtime will.
-                                            const rawDimensions = getNestedValue(
-                                              formData(),
-                                              "embedding.dimensions",
+                                            // An invalid value pauses registration at
+                                            // runtime, so it is an error here rather
+                                            // than a silent fallback to the default.
+                                            const probeDimensions = resolveProbeDimensions(
+                                              getNestedValue(formData(), "embedding.dimensions"),
                                             );
-                                            // Same bounds as the runtime schema (positive
-                                            // integer ≤ 8192), no string coercion.
-                                            const dimensions =
-                                              typeof rawDimensions === "number" &&
-                                              Number.isInteger(rawDimensions) &&
-                                              rawDimensions > 0 &&
-                                              rawDimensions <= 8192
-                                                ? rawDimensions
-                                                : null;
                                             if (!endpoint || !model) {
                                               setEmbeddingTestResult({
                                                 ok: false,
@@ -904,6 +898,14 @@ function ConfigForm(props: {
                                               });
                                               return;
                                             }
+                                            if (!probeDimensions.ok) {
+                                              setEmbeddingTestResult({
+                                                ok: false,
+                                                message: probeDimensions.message,
+                                              });
+                                              return;
+                                            }
+                                            const dimensions = probeDimensions.dimensions;
                                             setEmbeddingTestResult({
                                               ok: false,
                                               message: "Testing...",

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listOpenFiles } from "../../plugin/src/shared/test-open-files";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	__test,
@@ -18,7 +18,7 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-// This real-time control needs lsof and a native SQLite locker, and intentionally fails
+// This real-time control needs a native SQLite locker, and intentionally fails
 // when a healthy pass plus writer admission exceeds OMP's 30-second context deadline.
 test.skipIf(
 	process.env.MC640_R2_DEADLINE !== "1" || process.platform !== "darwin",
@@ -79,10 +79,10 @@ test.skipIf(
 					).toContain("locked");
 					reader.releaseLock();
 				}
-				const descriptors = execFileSync("lsof", ["-p", String(process.pid)], {
-					encoding: "utf8",
-					windowsHide: true,
-				});
+				const inventory = listOpenFiles();
+				// The timing control is valid only when database isolation is proved.
+				if (!inventory.available) throw new Error(inventory.reason);
+				const descriptors = inventory.paths.join("\n");
 				writeFileSync(join(root, "lsof-host.txt"), descriptors);
 				const databaseRows = descriptors
 					.split("\n")

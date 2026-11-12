@@ -10,6 +10,12 @@
         }
     },
     {
+        "class": "host_messages_removed",
+        "decisionTimestampOffsetMs": -300001,
+        "decision": {},
+        "input": { "hostMessagesRemoved": true }
+    },
+    {
         "class": "system_row_shift",
         "decision": { "decision": "defer" },
         "input": {
@@ -79,6 +85,15 @@
             "decision": "execute",
             "canonicalDecision": "execute",
             "materializeReason": "tag_identity_repair"
+        },
+        "input": {}
+    },
+    {
+        "class": "accounted_latest_turn_thinking_removed",
+        "decision": {
+            "decision": "defer",
+            "canonicalDecision": "defer",
+            "materializeReason": "latest_turn_thinking_removed"
         },
         "input": {}
     },

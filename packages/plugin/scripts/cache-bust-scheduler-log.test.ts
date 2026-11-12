@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
 import { analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import { nearestCacheBustDecision, type CacheBustDecisionAttribution } from "./cache-bust-attribution";
 import { runSentinelOnce } from "./cache-bust-sentinel";
@@ -18,7 +19,7 @@ const log = `[2026-09-20T12:47:52.749Z] [magic-context][${session}] transform sc
 `;
 const execute: CacheBustDecisionAttribution = { timestampMs: Date.parse("2026-09-20T12:47:54.609Z"), decision: "execute", materialized: true, materializeReason: "pressure_refold", emergency: false, droppedTokens: 100, droppedCount: 366, inputTokens: 655813, flush: false, source: "transform_decisions" };
 function fixture(marker = true) {
-    const dir = mkdtempSync(join(tmpdir(), "scheduler-attribution-")); dirs.push(dir);
+    const dir = createTestTempDirFromPath(join(tmpdir(), "scheduler-attribution-")); dirs.push(dir);
     const logPath = join(dir, "mc.log"); writeFileSync(logPath, log);
     for (const [index, timestamp] of [aTime, bTime].entries()) {
         const stem = `${new Date(timestamp).toISOString().replaceAll(":", "-").replace(".", "-")}-00000${index}-${session}`;
@@ -42,7 +43,7 @@ test("scheduler fallback keeps the priced row and joins the later defer six seco
 });
 
 test("Rust pass logs carry raw input counts for self-inflicted epoch attribution", () => {
-    const dir = mkdtempSync(join(tmpdir(), "rust-pass-attribution-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "rust-pass-attribution-"));
     dirs.push(dir);
     const logPath = join(dir, "mc.log");
     writeFileSync(
@@ -61,21 +62,24 @@ test("Rust pass logs carry raw input counts for self-inflicted epoch attribution
     ]);
 });
 
-test("analyzer and sentinel discriminate unaccounted_defer_pass from no_mc_pass_row", async () => {
+test("analyzer and sentinel report a rewrite with only a scheduler line as no_mc_pass_row", async () => {
     const { dir, logPath } = fixture();
     const options = { sessionId: session, anthropicDir: dir, openaiDir: join(dir, "missing"), decisions: [execute] };
     const without = analyzeOpenCodeCacheBustSession({ ...options, mcLogPath: null });
     expect(without.requests[1]?.divergenceClass).toBe("no_mc_pass_row");
     const withLog = analyzeOpenCodeCacheBustSession({ ...options, mcLogPath: logPath });
-    expect(withLog.requests[1]?.divergenceClass).toBe("unaccounted_defer_pass");
+    // A scheduler defer records usage below the execute threshold, not proof
+    // that the completed pass made no changes. The byte rewrite still wakes.
+    expect(withLog.requests[1]?.divergenceClass).toBe("no_mc_pass_row");
+    expect(withLog.requests[1]?.passEvidence).toBe("no pass record for this request; a scheduler line was found");
     const events: string[] = [];
     await runSentinelOnce({ once: true, send: false, intervalMs: 60000, lookbackMs: 120000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal-core", wakeAgentId: "agent_b613e5cf2ee55b8c", wakeFromAgent: "mc-cache-bust-sentinel", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
         now: () => bTime + 1000,
         listActiveSessions: () => [{ sessionId: session, harness: "opencode", projectPath: "fixture", directory: dir, activityMs: bTime }],
         loadDecisions: () => [execute], stdout: line => events.push(line),
     });
-    expect(events.some(line => line.includes('"divergence_class":"unaccounted_defer_pass"'))).toBe(true);
-    expect(events.some(line => line.includes('"divergence_class":"no_mc_pass_row"'))).toBe(false);
+    expect(events.some(line => line.includes('"divergence_class":"unaccounted_defer_pass"'))).toBe(false);
+    expect(events.some(line => line.includes('"divergence_class":"no_mc_pass_row"'))).toBe(true);
 });
 
 // 2026-09-21 12:26Z. The execute pass at 12:26:08.421Z drained 160 queued drops
@@ -92,7 +96,7 @@ const drainLog = (applyReason: string): string =>
 `;
 
 function drainFixture(applyReason: string): { dir: string; logPath: string } {
-    const dir = mkdtempSync(join(tmpdir(), "published-history-drain-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "published-history-drain-"));
     dirs.push(dir);
     const logPath = join(dir, "mc.log");
     writeFileSync(logPath, drainLog(applyReason));

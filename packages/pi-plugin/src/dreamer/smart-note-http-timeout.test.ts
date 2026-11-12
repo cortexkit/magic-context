@@ -15,7 +15,7 @@ import { __test, registerPiDreamerProject, runPiDreamForProject } from ".";
 
 const PROJECT = "git:pi-smart-note-timeout";
 const owner = {};
-let fixture: ReturnType<typeof timeoutTestDatabase>;
+let fixture: ReturnType<typeof timeoutTestDatabase> | undefined;
 let compilerCalls: number;
 
 beforeEach(() => {
@@ -35,7 +35,7 @@ beforeEach(() => {
 			}) as never,
 	);
 	registerPiDreamerProject({
-		db: fixture.db,
+		db: fixture!.db,
 		projectDir: tmpdir(),
 		projectIdentity: PROJECT,
 		registrationOwner: owner,
@@ -52,11 +52,13 @@ beforeEach(() => {
 afterEach(() => {
 	__test.reset();
 	__wakePlaneTest.reset();
-	fixture.dispose();
+	// Setup can fail before the database fixture is assigned; preserve that original error.
+	fixture?.dispose();
+	fixture = undefined;
 });
 
 function source() {
-	return addNote(fixture.db, "smart", {
+	return addNote(fixture!.db, "smart", {
 		projectPath: PROJECT,
 		sessionId: "pi-owner",
 		content: "watch remote",
@@ -64,7 +66,7 @@ function source() {
 	});
 }
 function state() {
-	return getNotes(fixture.db, { type: "smart", projectPath: PROJECT })[0];
+	return getNotes(fixture!.db, { type: "smart", projectPath: PROJECT })[0];
 }
 function run() {
 	return runPiDreamForProject(PROJECT, "evaluate-smart-notes", owner);
@@ -79,7 +81,7 @@ test("Pi dreamer uses the shared sandbox for 3-second HTTP compile and evaluatio
 			status: "pending",
 			checkFailureCount: 0,
 		});
-		fixture.db
+		fixture!.db
 			.prepare("UPDATE notes SET check_next_due_at=0 WHERE id=?")
 			.run(note.id);
 		await run();
@@ -98,7 +100,7 @@ test("Pi HTTP deadlines retry compilation without fallback or owner notices", as
 	await withLocalHttpServer(null, async (requests) => {
 		const note = source();
 		for (let i = 0; i < 4; i++) {
-			fixture.db
+			fixture!.db
 				.prepare("UPDATE notes SET check_next_due_at=0 WHERE id=?")
 				.run(note.id);
 			const startedAt = Date.now();
@@ -114,7 +116,7 @@ test("Pi HTTP deadlines retry compilation without fallback or owner notices", as
 				startedAt + 5 * 60_000,
 			);
 			expect(
-				getNotes(fixture.db, { type: "session", sessionId: "pi-owner" }),
+				getNotes(fixture!.db, { type: "session", sessionId: "pi-owner" }),
 			).toEqual([]);
 		}
 		expect(requests()).toBe(4);

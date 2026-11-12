@@ -11,6 +11,7 @@ import {
 } from "../../features/magic-context/storage-tags";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import { listOpenFiles } from "../../shared/test-open-files";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import { createCtxExpandTools } from "../../tools/ctx-expand/tools";
 import {
@@ -211,14 +212,12 @@ test(
                 );
                 if (stressRoot) {
                     expect(statSync(join(root, "opencode.db")).size).toBeGreaterThan(2_000_000_000);
-                    const handles = Bun.spawnSync(["lsof", "-p", String(process.pid)], {
-                        windowsHide: true,
-                    });
-                    expect(handles.exitCode).toBe(0);
-                    const dbLines = handles.stdout
-                        .toString()
-                        .split("\n")
-                        .filter((line) => /\.db(?:-wal|-shm)?\s*$/.test(line));
+                    const inventory = listOpenFiles();
+                    // The stress fixture needs positive evidence that no live database is open.
+                    if (!inventory.available) throw new Error(inventory.reason);
+                    const dbLines = inventory.paths.filter((path) =>
+                        /\.db(?:-wal|-shm)?\s*$/.test(path),
+                    );
                     expect(dbLines.length).toBeGreaterThan(0);
                     for (const line of dbLines) expect(line).toContain(root);
                     console.info(`HOST PID ${process.pid}\n${dbLines.join("\n")}`);

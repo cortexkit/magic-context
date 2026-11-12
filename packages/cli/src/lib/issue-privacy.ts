@@ -43,6 +43,7 @@ const ENUMS = new Set([
     "validation",
     "exception",
     "cli",
+    "npm",
     "desktop",
     "darwin",
     "linux",
