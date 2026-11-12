@@ -146,3 +146,85 @@ for (const count of [1_000, 10_000]) {
         `${count} messages: appending pass median ${median(append).toFixed(3)} ms, of which tier 1 ${median(appendShape).toFixed(3)} ms (fingerprinted=${appendWork.fingerprinted} digested=${appendWork.digested} full=${appendWork.full}); early-change pass median ${median(early).toFixed(3)} ms (fingerprinted=${earlyWork.fingerprinted} digested=${earlyWork.digested} full=${earlyWork.full})`,
     );
 }
+
+// ── The check's share of a whole OpenCode 1 pass ──────────────────────────
+// The same messages (without the synthetic head, which the transform renders
+// itself) served through the production wrapper and transform, with every
+// store in a throwaway directory. Each appending pass adds one user message
+// and one assistant step to the host's array.
+{
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = mkdtempSync(join(tmpdir(), "served-check-timing-"));
+    process.env.XDG_DATA_HOME = join(root, "data");
+    process.env.XDG_CACHE_HOME = join(root, "cache");
+    process.env.XDG_CONFIG_HOME = join(root, "config");
+    const { openDatabase, closeDatabase } = await import(
+        "../src/features/magic-context/storage"
+    );
+    const { createTagger } = await import("../src/features/magic-context/tagger");
+    const { createTransform } = await import("../src/hooks/magic-context/transform");
+    const { createMessagesTransformHandler } = await import("../src/plugin/messages-transform");
+    const { setLogLineForwarder } = await import("../src/shared/logger");
+    setLogLineForwarder(() => undefined);
+    const passes = 8;
+    try {
+        for (const count of [1_000, 10_000]) {
+            const sessionId = `timing-pass-${count}`;
+            const host = (length: number) =>
+                Array.from({ length }, (_, index) => {
+                    const value = message(index) as { info: Record<string, unknown> };
+                    value.info.sessionID = sessionId;
+                    return value;
+                });
+            const db = openDatabase();
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler: { shouldExecute: () => "defer" },
+                contextUsageMap: new Map([
+                    [
+                        sessionId,
+                        { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
+                    ],
+                ]),
+                liveModelBySession: new Map([[sessionId, MODEL]]),
+                db,
+                directory: root,
+                injectDocs: false,
+                memoryConfig: { enabled: false, injectionBudgetTokens: 0, autoPromote: false },
+                historyRefreshSessions: new Set(),
+                pendingMaterializationSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+                historianRunnable: false,
+            } as never);
+            const handler = createMessagesTransformHandler({
+                magicContext: { "experimental.chat.messages.transform": transform as never },
+            });
+            const wall: number[] = [];
+            const check: number[] = [];
+            for (let pass = 0; pass < passes; pass += 1) {
+                const output = { messages: fresh(host(count + 2 * pass)) };
+                collect();
+                const start = performance.now();
+                await handler({}, output as never);
+                const elapsed = performance.now() - start;
+                const work = getServedCheckWorkForTest();
+                // The first two passes render the head and start the record.
+                if (pass >= 2 && !work.full) {
+                    wall.push(elapsed);
+                    check.push(work.ms);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            const passMs = median(wall);
+            const checkMs = median(check);
+            console.log(
+                `${count} messages through the OpenCode 1 wrapper: appending pass median ${passMs.toFixed(1)} ms, served check median ${checkMs.toFixed(3)} ms (${((100 * checkMs) / passMs).toFixed(2)}% of the pass; ${wall.length} appending passes measured)`,
+            );
+            closeDatabase();
+        }
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+}

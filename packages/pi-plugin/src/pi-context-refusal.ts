@@ -11,6 +11,11 @@ import {
 	type LkgInputSnapshot,
 	lkgContentFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import {
+	beginServedRequest,
+	commitServedRequest,
+	countServedRefusal,
+} from "@magic-context/core/hooks/magic-context/served-check";
 import { log } from "@magic-context/core/shared/logger";
 import {
 	withSqliteTransformPass,
@@ -174,6 +179,41 @@ function operationKey(ctx: ExtensionContext): string | object {
 	return (
 		ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager ?? "no-session"
 	);
+}
+
+function servedSessionOf(ctx: ExtensionContext): string | undefined {
+	try {
+		const id = ctx.sessionManager?.getSessionId?.();
+		return typeof id === "string" && id.length > 0 ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Hand the messages this hook returns to Pi to the served check. The OMP
+ * dispatch fence can still refuse the request after this; that refusal is not
+ * seen here, so the record then holds a request that was prepared but not sent.
+ * Never throws.
+ */
+function finishPiServedRequest(
+	sessionId: string,
+	ctx: ExtensionContext,
+	messages: readonly unknown[],
+	compactionOff: boolean,
+): void {
+	try {
+		commitServedRequest({
+			sessionId,
+			host: "pi",
+			messages,
+			providerID: ctx.model?.provider,
+			modelID: ctx.model?.id,
+			compactionOff,
+		});
+	} catch {
+		// Measurement only; never let it affect the turn.
+	}
 }
 
 function messageKey(message: unknown): string | undefined {
@@ -935,6 +975,10 @@ export function registerPiGuardedContext(
 		// new work and earns its own receipt; the refused pass stays abandoned.
 		active.refused = false;
 		active.refusalMessage = undefined;
+		// The served check (served-check.ts) records the main conversation's
+		// requests only; a side turn is a separate request beside it.
+		const servedSessionId = budget.sideTurn ? undefined : servedSessionOf(ctx);
+		if (servedSessionId) beginServedRequest(servedSessionId);
 		const { isOwned, isCurrent, assertOwner } = createPiContextOwnershipGuards(
 			operations,
 			key,
@@ -1029,8 +1073,18 @@ export function registerPiGuardedContext(
 				// message entry may not exist when the context hook first enters.
 				if (inputs) active.inputBranch = inputBranch(ctx, inputs);
 			}
+			// Without a result Pi sends its own messages.
+			if (servedSessionId)
+				finishPiServedRequest(
+					servedSessionId,
+					ctx,
+					result?.messages ?? event.messages,
+					options.compactionOff?.(ctx) === true,
+				);
 			return result;
 		} catch (error) {
+			// Nothing this pass prepared reaches the provider.
+			if (servedSessionId) countServedRefusal(servedSessionId);
 			if (budget.isCancelled(error)) {
 				budget.cancel();
 				if (isOwned()) active.ready = false;

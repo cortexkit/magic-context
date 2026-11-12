@@ -242,13 +242,22 @@ export function countServedRefusal(sessionId: string): void {
 
 /**
  * Forget the session's record, logging its counts first. Called where the
- * session's other per-process state is dropped (deleted, natively compacted,
- * its caches invalidated by a host edit).
+ * session's served history ends in this process: it was deleted, natively
+ * compacted, or the host removed messages from it (a revert or an edit). The
+ * next pass of the session is then not compared, and the line logged here
+ * tells a reader of the log "not compared" apart from "no difference seen".
+ * The last-good slot's invalidations do not drop the record: the record says
+ * what the provider last received, not what may be replayed.
  */
 export function dropServedRecord(sessionId: string, reason: string): void {
     try {
         const value = counters.peek(sessionId);
         if (value && value.commits + value.refused > 0) logCounts(sessionId, value, reason);
+        if (records.has(sessionId))
+            sessionLog(
+                sessionId,
+                `served check: record dropped reason=${reason}; the next request is not compared`,
+            );
     } catch {
         // Measurement only.
     }

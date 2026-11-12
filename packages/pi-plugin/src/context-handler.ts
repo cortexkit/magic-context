@@ -256,6 +256,11 @@ import {
 } from "@magic-context/core/hooks/magic-context/recovery-fit";
 import { evaluateRequestToolsRelease } from "@magic-context/core/hooks/magic-context/request-tools-release";
 import {
+	dropServedRecord,
+	noteServedPassPermission,
+	noteServedReplay,
+} from "@magic-context/core/hooks/magic-context/served-check";
+import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
 } from "@magic-context/core/hooks/magic-context/sentinel";
@@ -7396,6 +7401,7 @@ export function registerPiContextHandler(
 				budget.assertOutcome();
 				budget.recovery = err.recovery;
 				recordServedSystemHash();
+				noteServedReplay(sessionIdForError);
 				return { messages: err.messages } as {
 					messages: typeof event.messages;
 				};
@@ -7556,6 +7562,7 @@ export function registerPiContextHandler(
 						budget.assertOutcome();
 						budget.recovery = "fitting LKG replay";
 						recordServedSystemHash();
+						noteServedReplay(sessionIdForError);
 						return { messages: replay.messages } as unknown as {
 							messages: typeof event.messages;
 						};
@@ -10078,6 +10085,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let prefixMutationAllowed = prefixMutationPermitted(ridePermissionGate);
 	isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
 	let publishedWorkDrainAllowed = isCacheBustingPass;
+	// The served check (served-check.ts) compares the request this pass returns
+	// with the one served before it and needs the pass's permission to say
+	// whether a change was allowed. A memory note only; every later write of
+	// the permission below notes it again, so the last value wins.
+	const noteServedPermission = () =>
+		noteServedPassPermission(args.sessionId, {
+			permitted: isCacheBustingPass,
+			rides: reclaimRideLabel(rideSignals),
+			signedThinkingHold: protectedSignedPrefix,
+			firstRender: firstRenderBust,
+			hostCheckpointHead: false,
+			emergency: emergencyDropEligible,
+			schedulerDecision: args.schedulerDecision,
+		});
+	noteServedPermission();
 	stripUnheldSignedTurnOnBust();
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
@@ -10225,6 +10247,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			deferredMaterializationSessions.has(args.sessionId);
 		isCacheBustingPass = prefixMutationAllowed;
 		publishedWorkDrainAllowed = isCacheBustingPass;
+		noteServedPermission();
 		stripUnheldSignedTurnOnBust();
 		shouldRunHeuristics = args.heuristics !== undefined;
 		if (piM0State && prefixMutationAllowed) {
@@ -10460,6 +10483,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			prefixMutationAllowed = true;
 			isCacheBustingPass = true;
 			publishedWorkDrainAllowed = true;
+			noteServedPermission();
 			shouldRunHeuristics = args.heuristics !== undefined;
 			hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 		}
@@ -10785,6 +10809,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (rideSignals.executeReclaim) {
 		isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
 		publishedWorkDrainAllowed = isCacheBustingPass;
+		noteServedPermission();
 		shouldRunHeuristics ||= isCacheBustingPass && args.heuristics !== undefined;
 		stripUnheldSignedTurnOnBust();
 		applyTemporalOnRide();
@@ -13021,6 +13046,8 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	// Pi left the session (shutdown, switch, or the tracked-session cap).
+	dropServedRecord(sessionId, "session_cleared");
 	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);

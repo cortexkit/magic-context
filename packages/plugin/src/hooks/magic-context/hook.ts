@@ -88,6 +88,7 @@ import { formatEmbedStatusText } from "./format-embed-status";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
+import { dropServedRecord } from "./served-check";
 import { createSubcModuleClient } from "./module-client";
 import { createModuleToolBackends } from "./module-tool-backends";
 import { rearmPendingCompactionMarkerSignals } from "./pending-marker-rearm";
@@ -831,6 +832,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         onSessionDeleted: async (sessionId: string) => {
             rustRefusalRecovery?.forget(sessionId);
             dropSlot(sessionId, "session-deleted");
+            dropServedRecord(sessionId, "session_deleted");
             try {
                 await transform.clearRustSession(sessionId);
             } finally {
