@@ -213,6 +213,7 @@ pub struct SubcRunnerClient {
     /// The scopes ck-mc's summarizer children run under.
     child_scopes: Arc<ChildScopes>,
     runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
+    routing_capabilities: crate::routing::Capabilities,
 }
 
 impl SubcRunnerClient {
@@ -222,6 +223,7 @@ impl SubcRunnerClient {
             consumer: OnceCell::new(),
             child_scopes,
             runner_capabilities: Default::default(),
+            routing_capabilities: Default::default(),
         }
     }
 
@@ -341,13 +343,7 @@ impl SubcRunnerClient {
             .map_err(|error| format!("connect: {error:?}"))
     }
 
-    /// One call to the routing provider the catalog lists. Its answer is
-    /// `{"result": <answer>}`; a refusal is `{code, message, detail}`.
-    async fn route_call<P: Serialize>(
-        &self,
-        method: &str,
-        params: &P,
-    ) -> Result<Value, RouteError> {
+    async fn routing_provider(&self) -> Result<(&SubcConsumer, String), RouteError> {
         let unavailable = |message: String| RouteError {
             code: "routing_unavailable".into(),
             message,
@@ -373,9 +369,36 @@ impl SubcRunnerClient {
                 })
             }
         };
+        Ok((consumer, module_id))
+    }
+
+    /// One call to the routing provider the catalog lists. Its answer is
+    /// `{"result": <answer>}`; a refusal is `{code, message, detail}`.
+    async fn route_call<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<Value, RouteError> {
+        let (consumer, module_id) = self.routing_provider().await?;
+        Self::route_call_on(consumer, &module_id, method, params).await
+    }
+
+    async fn route_call_on<P: Serialize>(
+        consumer: &SubcConsumer,
+        module_id: &str,
+        method: &str,
+        params: &P,
+    ) -> Result<Value, RouteError> {
+        let unavailable = |message: String| RouteError {
+            code: "routing_unavailable".into(),
+            message,
+            detail: None,
+        };
         let reply = consumer
             .call(
-                RouteTarget::ManagementSurface { module_id },
+                RouteTarget::ManagementSurface {
+                    module_id: module_id.to_owned(),
+                },
                 // An unscoped select is attributed to ck-mc itself.
                 BindIdentity::new("magic-context", "routing"),
                 wire::encode(method, params),
@@ -405,7 +428,19 @@ impl SubcRunnerClient {
 
 impl crate::routing::Router for SubcRunnerClient {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
-        let result = self.route_call("route.select", &request).await?;
+        let (consumer, module_id) = self.routing_provider().await?;
+        // Discovery and selection must use the same provider: runner features
+        // cannot authorize optional fields on routing's separate role.
+        let request = self
+            .routing_capabilities
+            .select_request(
+                &module_id,
+                consumer.current_epoch(),
+                request,
+                Self::route_call_on(consumer, &module_id, "role.describe", &json!({})),
+            )
+            .await;
+        let result = Self::route_call_on(consumer, &module_id, "route.select", &request).await?;
         serde_json::from_value(result).map_err(|error| RouteError {
             code: "routing_unavailable".into(),
             message: format!("route.select answer: {error}"),

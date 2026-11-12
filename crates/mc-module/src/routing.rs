@@ -4,7 +4,12 @@
 //! reports how the run went. ck-mc never picks a model itself: with no
 //! routing provider, its runs are refused by name (`routing_unavailable`).
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tokio::sync::OnceCell;
 
 use cortexkit_role_routing::report::{Outcome, ReportRequest, Usage};
 use cortexkit_role_routing::select::{Requirements, SelectAnswer, SelectRequest};
@@ -55,11 +60,62 @@ pub trait Router: Send + Sync + 'static {
     fn report(&self, request: ReportRequest) -> impl Future<Output = ()> + Send;
 }
 
+type Declaration = (u64, Arc<OnceCell<bool>>);
+
+/// Routing's optional select fields are opt-in. Cache negative discovery too:
+/// older providers must remain usable without a describe call on every select.
+#[derive(Default)]
+pub(crate) struct Capabilities {
+    providers: Mutex<HashMap<String, Declaration>>,
+}
+
+impl Capabilities {
+    pub(crate) async fn select_request(
+        &self,
+        provider: &str,
+        connection_epoch: u64,
+        mut request: SelectRequest,
+        describe: impl Future<Output = Result<Value, RouteError>>,
+    ) -> SelectRequest {
+        let cell = {
+            let mut providers = self.providers.lock().expect("routing capabilities");
+            let declaration = providers
+                .entry(provider.to_owned())
+                .or_insert_with(|| (connection_epoch, Arc::new(OnceCell::new())));
+            if declaration.0 != connection_epoch {
+                *declaration = (connection_epoch, Arc::new(OnceCell::new()));
+            }
+            Arc::clone(&declaration.1)
+        };
+        let select_harness = cell
+            .get_or_init(|| async {
+                match describe.await {
+                    Ok(value) => value["capabilities"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|name| name.as_str() == Some(cortexkit_role_routing::capabilities::SELECT_HARNESS)),
+                    Err(error) => {
+                        tracing::warn!(provider, reason = %error, "routing harness omitted: provider discovery failed");
+                        false
+                    }
+                }
+            })
+            .await;
+        if !select_harness {
+            request.harness = None;
+        }
+        request
+    }
+}
+
 /// A summary run's select: the summarizer's demand, on the session's own
-/// runner, leaving out the routes already tried for this work.
-pub fn summary_select(runner: &str, tried: &[String]) -> SelectRequest {
+/// runner and child's harness, leaving out the routes already tried for this
+/// work. The transport omits the harness for providers that cannot read it.
+pub fn summary_select(runner: &str, harness: &str, tried: &[String]) -> SelectRequest {
     let mut request = SelectRequest::new(SUMMARY_CONSUMER, Requirements::iq(SUMMARY_IQ));
     request.runners = Some(vec![runner.to_owned()]);
+    request.harness = Some(harness.to_owned());
     if !tried.is_empty() {
         request.exclude = Some(tried.to_vec());
     }
@@ -94,3 +150,7 @@ pub fn report(decision_id: &str, outcome: Outcome, usage: Option<&StepUsage>) ->
     });
     request
 }
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod tests;

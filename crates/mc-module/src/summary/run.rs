@@ -190,6 +190,9 @@ pub async fn run<C: RunnerClient + Router>(
     let one_pass = language(super::prompt::historian_system_prompt());
     let two_pass = two_pass_system(job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
+    // A runner may host several harnesses with different model support. Route
+    // against the same harness that will receive every attempt's child send.
+    let child_harness = job.child_harness.as_deref().unwrap_or(&job.session.harness);
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
     // One deadline for the whole run, retries, repair and fallbacks
@@ -197,7 +200,11 @@ pub async fn run<C: RunnerClient + Router>(
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     for fallback in 0..=MAX_FALLBACKS {
         let answer = match client
-            .select(routing::summary_select(&job.session.runner, &tried))
+            .select(routing::summary_select(
+                &job.session.runner,
+                child_harness,
+                &tried,
+            ))
             .await
         {
             Ok(answer) => answer,
@@ -250,6 +257,7 @@ pub async fn run<C: RunnerClient + Router>(
         // fallback's invalid reply moves on to the next model.
         let call = Call {
             target: &target,
+            child_harness,
             window,
             repair: fallback == 0 && lane == Lane::Dormant,
             deadline,
@@ -353,6 +361,7 @@ impl From<SummaryError> for Failure {
 /// How one model is asked.
 struct Call<'a> {
     target: &'a Target,
+    child_harness: &'a str,
     window: fit::Window,
     /// An invalid reply gets one repair run.
     repair: bool,
@@ -670,10 +679,7 @@ async fn attempt<C: RunnerClient>(
         let child = Child {
             session: SessionRef::new(
                 job.session.runner.clone(),
-                job.child_harness
-                    .as_ref()
-                    .unwrap_or(&job.session.harness)
-                    .clone(),
+                call_on.child_harness,
                 child_name(job, label, retry),
             ),
             project_root: job.project_root.clone(),
@@ -835,6 +841,10 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
 #[cfg(test)]
 #[path = "session_class_tests.rs"]
 pub(crate) mod session_class_tests;
+
+#[cfg(test)]
+#[path = "harness_tests.rs"]
+mod harness_tests;
 
 #[cfg(test)]
 #[path = "account_wait_send_tests.rs"]

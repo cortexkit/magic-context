@@ -156,6 +156,7 @@ async fn turn_one_call_sets_creating_send_label() {
     };
     let call_on = Call {
         target: &target,
+        child_harness: "pi",
         window,
         system: "system",
         repair: false,
