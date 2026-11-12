@@ -2998,6 +2998,19 @@ impl Session {
         name: &str,
         input: &Value,
     ) -> Result<String, String> {
+        self.tool_unbounded(client, settings, name, input)
+            .await
+            .map(crate::tool_output::bounded)
+            .map_err(crate::tool_output::bounded)
+    }
+
+    async fn tool_unbounded<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        name: &str,
+        input: &Value,
+    ) -> Result<String, String> {
         if !self.tools_only && !self.index_ready && matches!(name, "ctx_reduce" | "ctx_keep") {
             return Err("transcript catch-up is incomplete; retry after the next notice".into());
         }

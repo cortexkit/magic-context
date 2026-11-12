@@ -358,11 +358,35 @@ async fn range<C: RunnerClient>(
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
-    let Some(chunk) = chunk::build(&entries, TOKEN_BUDGET, counter) else {
+    let Some(mut chunk) = chunk::build(&entries, TOKEN_BUDGET, counter) else {
         return Ok(format!(
             "No messages found in range {start}-{asked_end}. The range may be outside this session's history."
         ));
     };
+    // Token counts do not bound UTF-8 bytes. Keep whole messages under the
+    // wire budget, reserving space for the heading and continuation notice.
+    let body_budget = cortexkit_role_tool_provider::result::MAX_MODEL_VISIBLE_BYTES - 512;
+    if crate::tool_output::bytes(&chunk.input) > body_budget {
+        let mut low = entries
+            .iter()
+            .position(|entry| {
+                chunk::build(std::slice::from_ref(entry), TOKEN_BUDGET, counter).is_some()
+            })
+            .unwrap_or(0)
+            + 1;
+        let mut high = entries.len();
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if chunk::build(&entries[..mid], TOKEN_BUDGET, counter)
+                .is_some_and(|candidate| crate::tool_output::bytes(&candidate.input) <= body_budget)
+            {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        chunk = chunk::build(&entries[..low], TOKEN_BUDGET, counter).expect("recoverable prefix");
+    }
     let shown_end = chunk.validation.end_index;
     let lines = chunk.input.split_once('\n').map_or("", |(_, rest)| rest);
     let mut out = vec![
@@ -373,12 +397,12 @@ async fn range<C: RunnerClient>(
             chunk.token_estimate
         ),
         String::new(),
-        lines.to_owned(),
+        crate::tool_output::within(lines.to_owned(), body_budget),
     ];
     if shown_end < end {
         out.push(String::new());
         out.push(format!(
-            "Truncated at message {shown_end} (budget: ~{TOKEN_BUDGET} tokens). Call again with start={} end={end} for more.",
+            "Truncated at message {shown_end} (budget: ~{TOKEN_BUDGET} tokens or 65,536 bytes). Call again with start={} end={end} for more.",
             shown_end + 1
         ));
     }
@@ -402,6 +426,8 @@ async fn verbose_range<C: RunnerClient>(
     let mut used = 0;
     let mut last = start - 1;
     let mut truncated = false;
+    let body_budget = cortexkit_role_tool_provider::result::MAX_MODEL_VISIBLE_BYTES - 512;
+    let mut bytes = 0;
     for entry in &entries {
         let number = entry.ordinal;
         let header = format!("[{number}] {}", verbose_label(entry));
@@ -416,12 +442,17 @@ async fn verbose_range<C: RunnerClient>(
             format!("{header}\n{}", parts.join("\n"))
         };
         let cost = counter.count(&block);
-        if used + cost > TOKEN_BUDGET && !blocks.is_empty() {
+        if (used + cost > TOKEN_BUDGET
+            || bytes + crate::tool_output::bytes(&block) + 2 > body_budget)
+            && !blocks.is_empty()
+        {
             truncated = true;
             break;
         }
         used += cost;
         last = number;
+        let block = crate::tool_output::within(block, body_budget);
+        bytes += crate::tool_output::bytes(&block) + 2;
         blocks.push(block);
     }
     if blocks.is_empty() {
@@ -437,7 +468,7 @@ async fn verbose_range<C: RunnerClient>(
     if truncated {
         out.push(String::new());
         out.push(format!(
-            "Truncated at message {last} (budget: ~{TOKEN_BUDGET} tokens). Call again with start={} end={end} verbose=true for more.",
+            "Truncated at message {last} (budget: ~{TOKEN_BUDGET} tokens or 65,536 bytes). Call again with start={} end={end} verbose=true for more.",
             last + 1
         ));
     }

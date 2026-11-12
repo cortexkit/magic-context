@@ -97,6 +97,7 @@ pub mod store;
 mod store_text;
 pub mod summary;
 pub mod tokens;
+mod tool_output;
 pub mod transport;
 pub mod upkeep;
 mod user_commands;

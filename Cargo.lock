@@ -256,13 +256,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-role-harness"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54901f6290132d5f70ffbf6bd3e06d31c128cb70566a73fb201866b8394bb8aa"
+dependencies = [
+ "async-trait",
+]
+
+[[package]]
 name = "cortexkit-role-llm-runner"
 version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "189e7ab588bd31e2b7fb00d98a08e53ee7147e43d5802ec0c26e571041a9c76f"
 dependencies = [
  "cortexkit-rich-ui-syntax",
- "cortexkit-role-tool-provider 0.15.0",
+ "cortexkit-role-tool-provider 0.15.6",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -305,9 +314,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-display"
-version = "0.1.3"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1a8078663a8b485ccbd067c2b4dde6b17833a421dcc52db5ed3d1a47b665806"
+checksum = "4984bdea7810ecef09c980ed4adca5eaae2cb3fe9f99b8c5d0dffdc1fb5109c2"
 dependencies = [
  "serde",
  "serde_jcs",
@@ -332,9 +341,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-provider"
-version = "0.15.0"
+version = "0.15.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a4f8d0c4c27735951c321f21de4bf95eb172df1910af8043255c0eb5a0f4ceb"
+checksum = "f12d2f206d501266d4b1fe35f8fb0eafbc137fe5430c1abca708eb19087f7fc1"
 dependencies = [
  "cortexkit-role-tool-display",
  "serde",
@@ -342,6 +351,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "subc-protocol",
+]
+
+[[package]]
+name = "cortexkit-role-tool-provider-conformance"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92a45495b6ec0dd1b8f4cc906dd90985082dd2657f9a7fc58ffce2c8f4b4867a"
+dependencies = [
+ "async-trait",
+ "cortexkit-role-harness",
+ "cortexkit-role-tool-provider 0.15.6",
+ "futures-util",
+ "serde_json",
+ "subc-protocol",
+ "tokio",
 ]
 
 [[package]]
@@ -931,7 +955,8 @@ dependencies = [
  "cortexkit-role-llm-runner",
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
- "cortexkit-role-tool-provider 0.14.6",
+ "cortexkit-role-tool-provider 0.15.6",
+ "cortexkit-role-tool-provider-conformance",
  "cortexkit-role-user-commands",
  "cortexkit-tokens",
  "filetime",

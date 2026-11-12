@@ -41,7 +41,7 @@ miniz_oxide = "0.8"
 serde_jcs = "0.2"
 # Model tool calls and the edit to a person's message come through these
 # published contracts, each on a route of its own.
-cortexkit-role-tool-provider = "=0.14.6"
+cortexkit-role-tool-provider = "=0.15.6"
 cortexkit-role-step-transform-provider = "=0.5.0"
 # Routing picks a summarizer model the session's own runner can run; ck-mc
 # has no model chain of its own and never falls back to the session's model.
@@ -65,6 +65,7 @@ nix = { version = "0.31.3", features = ["fs"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+cortexkit-role-tool-provider-conformance = "=0.15.7"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.

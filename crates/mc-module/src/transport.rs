@@ -1133,7 +1133,12 @@ impl Handler {
             RouteRole::Compaction => self.compaction(&bound.route, body).await?,
             // Catalog answers are served as the exact canonical bytes the
             // catalog produced, never re-serialized.
-            RouteRole::Tools => return self.tool(&bound.route, body).await,
+            RouteRole::Tools => {
+                return self.tool(&bound.route, body).await.map_err(|mut refusal| {
+                    refusal.message = crate::tool_output::bounded(refusal.message);
+                    refusal
+                });
+            }
             RouteRole::Discovery => return self.discovery(&bound.route, body),
             RouteRole::Hooks => self.hook(&bound.route, body).await?,
         };
@@ -1229,7 +1234,8 @@ impl Handler {
             Err(ModuleError::Tool(output)) => (output, true),
             Err(other) => return Err(refusal(other)),
         };
-        let mut result = ToolResult::new(vec![ContentPart::text(text)]);
+        let mut result =
+            ToolResult::new(vec![ContentPart::text(crate::tool_output::bounded(text))]);
         if is_error {
             result.is_error = Some(true);
         }
@@ -1747,6 +1753,10 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
 #[cfg(test)]
 #[path = "transport_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "tool_conformance_tests.rs"]
+mod tool_conformance_tests;
 
 #[cfg(test)]
 #[path = "agent_data/transport_tests.rs"]
