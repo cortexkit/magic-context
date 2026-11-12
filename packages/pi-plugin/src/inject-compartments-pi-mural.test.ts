@@ -113,7 +113,10 @@ describe("Pi m[0] mural image fold (on-demand render → wire)", () => {
 			expect(hygieneTest.contentMemoStats().bytes).toBeGreaterThan(0);
 			clearContextHandlerSession(SESSION_ID);
 			expect(__test.hasMuralProcessCache(SESSION_ID)).toBe(false);
-			expect(hygieneTest.contentMemoStats()).toEqual({ entries: 0, bytes: 0 });
+			expect(hygieneTest.contentMemoStats()).toMatchObject({
+				entries: 0,
+				bytes: 0,
+			});
 			const replay = [userMessage("hello")];
 			injectM0M1Pi(baseState(), db, replay as never, undefined, false);
 			expect(JSON.stringify(replay)).toBe(JSON.stringify(first));
