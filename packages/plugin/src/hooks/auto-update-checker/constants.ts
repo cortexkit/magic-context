@@ -2,7 +2,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 
 export const PACKAGE_NAME = "@cortexkit/opencode-magic-context";
-export const NPM_REGISTRY_URL = "https://registry.npmjs.org";
+export { NPM_REGISTRY_URL, resolveNpmRegistryUrl } from "../../shared/npm-registry";
 export const NPM_FETCH_TIMEOUT = 10_000;
 
 function getOpenCodeCacheRoot(): string {
