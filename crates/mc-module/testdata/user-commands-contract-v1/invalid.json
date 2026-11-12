@@ -1,0 +1,21 @@
+[
+  {
+    "name": "read_with_run", "kind": "command", "field": "run",
+    "body": {"id":"status", "title":"Status", "summary":"Shows local status.", "subject":"computer", "args":[], "effects":["read"], "run":{}}
+  },
+  {
+    "name": "too_many_facts", "kind": "preview", "field": "facts",
+    "body": {"version":"example-version", "available":true, "facts":[
+      {"label":"1", "value":1.0}, {"label":"2", "value":2.0}, {"label":"3", "value":3.0},
+      {"label":"4", "value":4.0}, {"label":"5", "value":5.0}, {"label":"6", "value":6.0},
+      {"label":"7", "value":7.0}, {"label":"8", "value":8.0}, {"label":"9", "value":9.0},
+      {"label":"10", "value":10.0}, {"label":"11", "value":11.0}, {"label":"12", "value":12.0},
+      {"label":"13", "value":13.0}, {"label":"14", "value":14.0}, {"label":"15", "value":15.0},
+      {"label":"16", "value":16.0}, {"label":"17", "value":17.0}
+    ]}
+  },
+  {
+    "name":"bad_request_id", "kind":"run", "field":"request_id",
+    "body": {"id":"flush", "subject":{"kind":"session", "session":{"runner":"example-runner", "harness":"example-host", "session":"example-session"}}, "args":{}, "preview_version":"example-version", "request_id":"bad request!", "caller":{"app":"desktop", "admission":"operator_app"}}
+  }
+]

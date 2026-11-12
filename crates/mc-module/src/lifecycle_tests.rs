@@ -81,6 +81,9 @@ mod account_wait_session_tests;
 #[path = "account_wait_review_tests.rs"]
 mod account_wait_review_tests;
 
+#[path = "user_commands_tests.rs"]
+mod user_commands_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

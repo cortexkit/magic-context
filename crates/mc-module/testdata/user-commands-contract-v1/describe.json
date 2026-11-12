@@ -1,0 +1,14 @@
+{
+  "commands": [
+    {
+      "id":"flush", "title":"Flush context",
+      "summary":"Lands the drops the agent queued and the routine cleanup in one rebuild, now instead of at the next threshold.",
+      "subject":"session", "args":[], "effects":["reversible", "context_change"], "run":{}
+    },
+    {
+      "id":"status", "title":"Context status", "summary":"Shows local context status.",
+      "subject":"session", "args":[], "effects":["read"]
+    }
+  ],
+  "digest":"624e0f9a94469b9e398a26d8ee43f9bcc540cee3de0d33ae42a1da48640b1a53"
+}

@@ -48,6 +48,7 @@ cortexkit-role-step-transform-provider = "=0.5.0"
 cortexkit-role-routing = "=0.7.16"
 # A session moves between machines through the agent-data/v1 contract.
 cortexkit-role-agent-data = "=0.3.0"
+cortexkit-role-user-commands = "=0.1.0"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
 # published request and reply types.

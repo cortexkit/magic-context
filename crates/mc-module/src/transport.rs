@@ -134,9 +134,14 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     provides.push(ProviderRole::ManagementSurface {
         operations: MANAGEMENT_APP_METHODS
             .iter()
+            .chain(cortexkit_role_user_commands::MODULE_OPS.iter())
             .map(|method| subc_protocol::manifest::ManagementOperation {
                 name: (*method).into(),
-                kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                kind: if *method == "commands.run" {
+                    subc_protocol::manifest::ManagementOperationKind::Mutate
+                } else {
+                    subc_protocol::manifest::ManagementOperationKind::Query
+                },
                 description: None,
             })
             .collect(),
@@ -160,6 +165,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         cortexkit_role_compaction::COMPACTION_STATEMENT_SEQ_PROVIDES.to_owned(),
         "mc-app-read/v1".to_owned(),
         "mc-context-read/v1".to_owned(),
+        cortexkit_role_user_commands::PROVIDES.to_owned(),
         // Core finds tool providers and step-transform providers in
         // the daemon's module catalog by these claims, before it calls
         // `role.describe`. Without them core composes Magic Context
@@ -839,6 +845,7 @@ pub struct Handler {
     /// Every bound route, by channel: what the daemon said about it at bind.
     bound: Mutex<HashMap<u16, Bound>>,
     app_bound: Mutex<HashMap<u16, AppCaller>>,
+    command_bound: Mutex<HashMap<u16, Principal>>,
     context_bound: Mutex<std::collections::HashSet<u16>>,
     /// Every bound `agent-data` route, by channel, with the caller the
     /// daemon stamped on it.
@@ -1037,6 +1044,7 @@ impl Handler {
             module,
             bound: Mutex::default(),
             app_bound: Mutex::default(),
+            command_bound: Mutex::default(),
             context_bound: Mutex::default(),
             agent_data_bound: Mutex::default(),
         }
@@ -1428,6 +1436,37 @@ impl ModuleHandler for Handler {
             .lock()
             .expect("agent-data routes")
             .remove(&request.handle.channel);
+        self.command_bound
+            .lock()
+            .expect("command routes")
+            .remove(&request.handle.channel);
+        if matches!(&request.target, RouteTarget::ManagementSurface { module_id } if module_id == crate::MODULE_ID)
+        {
+            let principal = request.principal.clone().unwrap_or(Principal::Unverified);
+            self.command_bound
+                .lock()
+                .expect("command routes")
+                .insert(request.handle.channel, principal.clone());
+            if cortexkit_role_user_commands::check_admission(&principal, false, false).is_ok() {
+                self.bound.lock().expect("bound routes").insert(
+                    request.handle.channel,
+                    Bound {
+                        route: Route {
+                            session: SessionRef::new(
+                                "",
+                                MODULE_LEVEL_HARNESS,
+                                request.identity.session.clone(),
+                            ),
+                            project: None,
+                            workdir: None,
+                            agent_id: None,
+                        },
+                        role: RouteRole::Hooks,
+                    },
+                );
+                return BindDecision::accept();
+            }
+        }
         // First: app admission below takes every other internal-service
         // route and would judge Entorhinal as an app caller. With moves off
         // an agent-data route goes on like a route to any service ck-mc
@@ -1582,6 +1621,50 @@ impl ModuleHandler for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        if let Some(answer) = self.command(ctx.route_handle().channel, &body).await {
+            return match answer {
+                Ok(value) => {
+                    HandlerOutcome::Response(serde_json::to_vec(&value).expect("command reply"))
+                }
+                Err(error) => HandlerOutcome::ErrorWithDetail {
+                    code: error.code,
+                    message: error.message,
+                    detail: error.detail.unwrap_or(Value::Null),
+                },
+            };
+        }
+        self.handle_non_command(ctx, body).await
+    }
+}
+
+impl Handler {
+    async fn command(
+        &self,
+        channel: u16,
+        body: &[u8],
+    ) -> Option<Result<Value, subc_protocol::ErrorBody>> {
+        let principal = self
+            .command_bound
+            .lock()
+            .expect("command routes")
+            .get(&channel)
+            .cloned();
+        if let Some(principal) = principal {
+            // Other management consumers retain their existing operations.
+            // Command params are decoded only after admitting the daemon's
+            // recorded caller for this route.
+            let admitted =
+                cortexkit_role_user_commands::check_admission(&principal, false, false).is_ok();
+            let command = crate::user_commands::method(body)
+                .map_or(admitted, |method| method.starts_with("commands."));
+            if command {
+                return Some(self.module.command_request(&principal, body).await);
+            }
+        }
+        None
+    }
+
+    async fn handle_non_command(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
         // Before any other route: a move's request never reaches a session,
         // app or context handler.
         if let Some(answer) = self.agent_data(ctx.route_handle().channel, &body).await {
@@ -1910,6 +1993,9 @@ mod app_read_tests {
         assert_eq!(
             operations,
             [
+                ("commands.describe".into(), "query".into()),
+                ("commands.preview".into(), "query".into()),
+                ("commands.run".into(), "mutate".into()),
                 ("context.cache_why".into(), "query".into()),
                 ("context.search".into(), "query".into()),
                 ("context.watch".into(), "query".into()),
@@ -1972,6 +2058,89 @@ mod app_read_tests {
             ("tool-provider".into(), "v1".into()),
         ]));
         assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+    }
+}
+
+#[cfg(test)]
+mod user_commands_tests {
+    use super::*;
+
+    fn handler() -> Handler {
+        Handler::new(Module::new(
+            SubcRunnerClient::new(
+                PathBuf::from("unused-user-command-connection"),
+                Arc::new(ChildScopes::new("user-commands")),
+            ),
+            crate::pass::Settings::default(),
+            None,
+            None,
+        ))
+    }
+
+    fn route(principal: Principal) -> RouteBindRequest {
+        let mut request = RouteBindRequest::new(
+            subc_client_rs::RouteHandle::detached(10, 1),
+            RouteTarget::ManagementSurface {
+                module_id: crate::MODULE_ID.into(),
+            },
+            BindIdentity::new("", "command-test"),
+        );
+        request.principal = Some(principal);
+        request
+    }
+
+    #[tokio::test]
+    async fn user_commands_management_dispatch_admits_occipital_and_keeps_discovery() {
+        let handler = handler();
+        let request = route(Principal::Reserved {
+            module_id: "occipital".into(),
+        });
+        handler.on_bind(&request).await;
+        let result = handler
+            .command(10, br#"{"method":"commands.describe","params":{}}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result,
+            serde_json::to_value(crate::user_commands::describe()).unwrap()
+        );
+        assert!(handler
+            .command(10, br#"{"method":"transform.declare","params":{}}"#)
+            .await
+            .is_none());
+        assert!(handler
+            .dispatch(10, br#"{"method":"role.describe","params":{}}"#)
+            .await
+            .is_ok());
+        assert!(handler.command(10, b"invalid json").await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn user_commands_management_dispatch_refuses_other_callers_before_params() {
+        let handler = handler();
+        for caller in [
+            Principal::Direct,
+            Principal::Unverified,
+            Principal::Reserved {
+                module_id: "callosum".into(),
+            },
+            Principal::Reserved {
+                module_id: "other".into(),
+            },
+        ] {
+            handler.on_bind(&route(caller)).await;
+            for method in cortexkit_role_user_commands::MODULE_OPS {
+                let body = serde_json::to_vec(&json!({"method":method,"params":42})).unwrap();
+                let result = handler.command(10, &body).await.unwrap().unwrap_err();
+                assert_eq!(result.code, "caller_not_admitted");
+            }
+        }
+        handler.on_bind(&route(Principal::Direct)).await;
+        assert!(handler
+            .command(10, br#"{"method":"session_data.read","params":{}}"#)
+            .await
+            .is_none());
     }
 }
 

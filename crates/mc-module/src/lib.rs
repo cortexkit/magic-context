@@ -99,6 +99,7 @@ pub mod summary;
 pub mod tokens;
 pub mod transport;
 pub mod upkeep;
+mod user_commands;
 pub mod view_builder;
 pub mod workspace;
 

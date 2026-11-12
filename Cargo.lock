@@ -345,6 +345,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-role-user-commands"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10208a08b7ad82e82e182e68e33336e8915104647847eb345a3192393dffedc1"
+dependencies = [
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "subc-protocol",
+]
+
+[[package]]
 name = "cortexkit-store-types"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,6 +932,7 @@ dependencies = [
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider 0.14.6",
+ "cortexkit-role-user-commands",
  "cortexkit-tokens",
  "filetime",
  "mc-mock-runner",

@@ -1,0 +1,27 @@
+{
+  "commands": [
+    {
+      "args": [],
+      "effects": [
+        "reversible",
+        "context_change"
+      ],
+      "id": "flush",
+      "run": {},
+      "subject": "session",
+      "summary": "Lands queued drops, routine cleanup and new context in one rebuild at the next request.",
+      "title": "Flush context"
+    },
+    {
+      "args": [],
+      "effects": [
+        "read"
+      ],
+      "id": "status",
+      "subject": "session",
+      "summary": "Shows context usage, queued drops and summary progress.",
+      "title": "Context status"
+    }
+  ],
+  "digest": "00601bb4922a458a6fa313d9a08ddf03c9f2e9998d507cb0fd68971f53f4b102"
+}

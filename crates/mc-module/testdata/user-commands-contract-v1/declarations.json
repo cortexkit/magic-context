@@ -1,0 +1,31 @@
+{
+  "example-context": [
+    {
+      "id": "flush",
+      "title": "Flush context",
+      "summary": "Lands the drops the agent queued and the routine cleanup in one rebuild, now instead of at the next threshold.",
+      "subject": "session",
+      "args": [],
+      "effects": ["reversible", "context_change"],
+      "run": {}
+    },
+    {
+      "id": "status",
+      "title": "Context status",
+      "summary": "Shows local context status.",
+      "subject": "session",
+      "args": [],
+      "effects": ["read"]
+    }
+  ],
+  "example-code-tools": [
+    {
+      "id": "status",
+      "title": "Code status",
+      "summary": "Shows local index status for the bound session.",
+      "subject": "session",
+      "args": [],
+      "effects": ["read"]
+    }
+  ]
+}

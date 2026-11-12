@@ -1,0 +1,21 @@
+[
+  {
+    "name": "flush_scheduled",
+    "body": {
+      "outcome": "scheduled",
+      "facts": [
+        {"label": "Dropped", "value": 41.0, "unit": "count", "noun": "parts"},
+        {"label": "Removed", "value": 24300.0, "unit": "tokens", "approx": true},
+        {"label": "Prompt on next request", "value": 431000.0, "unit": "tokens", "approx": true},
+        {"label": "View", "value": 42.0, "unit": "count"}
+      ]
+    }
+  },
+  {"name": "flush_preview_stale", "body": {"outcome": "preview_stale"}},
+  {"name": "change_already_applied", "body": {"outcome": "applied"}},
+  {"name": "device_proof", "body": {"outcome": "device_proof_required"}},
+  {"name": "declined", "body": {"outcome": "approval_declined"}},
+  {"name": "expired", "body": {"outcome": "approval_expired"}},
+  {"name": "conflicting_request", "body": {"outcome": "request_conflict"}},
+  {"name": "module_outcome", "body": {"outcome": "example_completed", "open": {"kind": "artifact", "id": "example-artifact"}}}
+]

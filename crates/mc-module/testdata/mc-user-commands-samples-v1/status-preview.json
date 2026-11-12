@@ -1,0 +1,92 @@
+{
+  "available": true,
+  "effect": "Summaries are idle",
+  "facts": [
+    {
+      "label": "Context share",
+      "unit": "ratio",
+      "value": 0.10101010101010101
+    },
+    {
+      "label": "Rebuild threshold",
+      "unit": "ratio",
+      "value": 0.65
+    },
+    {
+      "label": "Queued drops",
+      "noun": "parts",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Unsummarized",
+      "noun": "messages",
+      "unit": "count",
+      "value": 2.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Value"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "approx": true,
+            "unit": "tokens",
+            "value": 10000.0
+          }
+        ],
+        "label": "Context now"
+      },
+      {
+        "cells": [
+          {
+            "approx": true,
+            "unit": "tokens",
+            "value": 1200.0
+          }
+        ],
+        "label": "Queued tokens"
+      },
+      {
+        "cells": [
+          {
+            "noun": "summaries",
+            "unit": "count",
+            "value": 0.0
+          }
+        ],
+        "label": "History"
+      },
+      {
+        "cells": [
+          {
+            "state": "ready"
+          }
+        ],
+        "label": "Summaries"
+      },
+      {
+        "cells": [
+          {
+            "noun": "views",
+            "unit": "count",
+            "value": 0.0
+          }
+        ],
+        "label": "Applied view"
+      },
+      {
+        "cells": [
+          {
+            "state": "unavailable"
+          }
+        ],
+        "label": "Project memories"
+      }
+    ]
+  },
+  "version": "b5f66e97d33dad3a8b1b75bcdffebd79d194ea740be42ac970af904c3d617c60"
+}

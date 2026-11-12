@@ -221,6 +221,8 @@ pub struct Session {
     /// The baseline a view being published was built on; it replaces
     /// `baseline` once the runner takes the view.
     next_baseline: Option<Arc<Baseline>>,
+    /// A delta-only flush cannot discharge a pending baseline fold.
+    next_flush: bool,
     /// How far each compressed text part is compressed, as the applied view
     /// shows it.
     caveman: lanes::CavemanState,
@@ -596,6 +598,7 @@ impl std::ops::Deref for Summaries {
 
 /// [`head::newer_summaries`] as the last view build computed it, and what it
 /// was computed from.
+#[derive(Clone)]
 struct HeadSummaries {
     /// The baseline items it was computed from. A baseline holding these, or
     /// the items it returned, gives the same result again.
@@ -735,6 +738,7 @@ impl Session {
             head_summaries: None,
             baseline: None,
             next_baseline: None,
+            next_flush: false,
             caveman: lanes::CavemanState::default(),
             next_caveman: None,
             next_covered: Vec::new(),
@@ -3479,12 +3483,12 @@ impl Session {
     /// The history head, and the cut when the newest summary's last message
     /// is still in the transcript. Only presets with a summarizer have a
     /// head. A due fold renders `m[0]` again from everything current.
-    fn history_ops(&mut self, settings: &Settings) -> (Vec<EditOp>, Option<u64>) {
+    fn history_ops(&mut self, settings: &Settings, flush: bool) -> (Vec<EditOp>, Option<u64>) {
         let _timing = crate::notice_cost_timing::span("build.history_ops");
         if !self.features.summarizer {
             return (Vec::new(), None);
         }
-        let mut ops = self.render_head(settings);
+        let mut ops = self.render_head_for(settings, flush);
         // A head kept as the latest view shows it (a read it needs failed,
         // see `head_as_shown`, which leaves no next baseline) carries no
         // newer summary. The cut then stays where that view has it: moving
@@ -3560,7 +3564,16 @@ impl Session {
     /// it: an empty read would otherwise state every shown memory as removed,
     /// and the next good read as updated again.
     fn render_head(&mut self, settings: &Settings) -> Vec<EditOp> {
+        self.render_head_for(settings, false)
+    }
+
+    fn render_head_for(&mut self, settings: &Settings, flush: bool) -> Vec<EditOp> {
         let _timing = crate::notice_cost_timing::span("head.render");
+        // A manual flush refreshes only the delta. A missing baseline waits
+        // for the normal first render, which is the path allowed to create it.
+        if flush && self.baseline.is_none() {
+            return self.head_as_shown("a flush cannot create a baseline");
+        }
         let docs = self
             .project
             .as_ref()
@@ -3651,7 +3664,7 @@ impl Session {
             base
         };
         let mut fresh_fold = true;
-        let mut base = match (&self.baseline, self.fold_due) {
+        let mut base = match (&self.baseline, self.fold_due && !flush) {
             (Some(baseline), false) => {
                 fresh_fold = false;
                 baseline.as_ref().clone()
@@ -3677,7 +3690,8 @@ impl Session {
             },
             &newer,
         );
-        if self.baseline.is_some()
+        if !flush
+            && self.baseline.is_some()
             && !self.fold_due
             && head::needs_refold(&base, pressure, history_budget_tokens, fold_inputs.counter)
         {
@@ -4015,6 +4029,18 @@ impl Session {
         prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
+        self.build_for(settings, over_limit, prefix_changes, keep, false)
+    }
+
+    fn build_for(
+        &mut self,
+        settings: &Settings,
+        over_limit: Option<u64>,
+        prefix_changes: bool,
+        keep: Option<&BTreeSet<lanes::PartKey>>,
+        flush: bool,
+    ) -> (Option<View>, u64) {
+        self.next_flush = flush;
         let _timing = crate::notice_cost_timing::span("build.total");
         if !self.index_ready {
             return (None, 0);
@@ -4056,7 +4082,7 @@ impl Session {
             "execute"
         }
         .into();
-        let (history, cut) = self.history_ops(settings);
+        let (history, cut) = self.history_ops(settings, flush);
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
@@ -4259,7 +4285,8 @@ impl Session {
         // memory another writer saved changes only `m[1]`: it waits for a
         // pass that rewrites anyway, as the plugin's history refresh rides a
         // rewrite and never starts one.
-        let history = if ops.is_empty()
+        let history = if !flush
+            && ops.is_empty()
             && !prefix_changes
             && over_limit.is_none()
             && keep.is_none()
@@ -4328,10 +4355,13 @@ impl Session {
             // cache is still warm.
             Ok(None) => {
                 self.commit_bookmark();
+                let flush = std::mem::take(&mut self.next_flush);
                 self.forget_queued(covered);
                 if let Some(next) = self.next_baseline.take() {
                     self.baseline = Some(next);
-                    self.fold_due = false;
+                    if !flush {
+                        self.fold_due = false;
+                    }
                 }
                 if let Some(next) = self.next_caveman.take() {
                     self.caveman = next;
@@ -4427,15 +4457,15 @@ impl Session {
     /// the session's state saved, so that whatever happens to the call, a
     /// restarted ck-mc knows the view may be in the runner's hands. A view
     /// the runner refuses, or a call that fails, puts the state back.
-    async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
+    async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) -> bool {
         if self.suspended || self.transcript_behind.is_some() || self.refuse_oversized(&view) {
-            return;
+            return false;
         }
         self.accept(view.clone());
         if let Err(error) = self.save() {
             tracing::warn!("ck-mc: {error}");
             self.roll_back(view.version, false, None);
-            return;
+            return false;
         }
         let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
@@ -4443,6 +4473,7 @@ impl Session {
                 self.runner_holds(view.version);
                 self.log_view_accepted(&view);
                 self.app_view_status(view.version, "accepted");
+                return true;
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 tracing::warn!(
@@ -4487,12 +4518,18 @@ impl Session {
                 );
                 self.roll_back(view.version, false, None);
                 self.adopt_runner_view(client).await;
+                return self.newest_applied == view.version
+                    && self
+                        .latest
+                        .as_ref()
+                        .is_some_and(|held| held.checksum == view.checksum);
             }
             Err(error) => {
                 self.runner_call_failed("session.apply_view", &error);
                 self.roll_back(view.version, false, None);
             }
         }
+        false
     }
 
     /// A view handed over before ck-mc restarted that the runner does not
@@ -4653,6 +4690,7 @@ impl Session {
     }
 
     fn accept(&mut self, view: View) {
+        let flush = std::mem::take(&mut self.next_flush);
         let _timing = crate::notice_cost_timing::span("publish.accept");
         self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
@@ -4692,7 +4730,9 @@ impl Session {
         if let Some(next) = self.next_baseline.take() {
             self.head_stale = false;
             self.baseline = Some(next);
-            self.fold_due = false;
+            if !flush {
+                self.fold_due = false;
+            }
             self.summary_unshown = false;
         }
         if let Some(next) = self.next_caveman.take() {
@@ -5663,6 +5703,8 @@ mod signed_floor;
 
 #[path = "statement_order.rs"]
 mod statement_order;
+
+mod user_commands;
 pub(crate) use statement_order::epoch_admits;
 use statement_order::{Standing, StatedView};
 

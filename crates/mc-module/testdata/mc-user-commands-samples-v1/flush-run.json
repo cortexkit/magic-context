@@ -1,0 +1,29 @@
+{
+  "facts": [
+    {
+      "label": "Parts dropped",
+      "noun": "parts",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "approx": true,
+      "label": "Tokens removed",
+      "unit": "tokens",
+      "value": 1194.0
+    },
+    {
+      "approx": true,
+      "label": "Prompt after",
+      "unit": "tokens",
+      "value": 8806.0
+    },
+    {
+      "label": "View",
+      "noun": "views",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "outcome": "scheduled"
+}

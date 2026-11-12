@@ -1,0 +1,25 @@
+{
+  "describe": {},
+  "list": {"subject": {"kind": "session", "session": {"runner": "example-runner", "harness": "example-host", "session": "example-session"}}},
+  "app_preview": {
+    "module": "example-context", "id": "flush",
+    "subject": {"kind": "session", "session": {"runner": "example-runner", "harness": "example-host", "session": "example-session"}},
+    "args": {}
+  },
+  "module_preview": {
+    "id": "flush",
+    "subject": {"kind": "session", "session": {"runner": "example-runner", "harness": "example-host", "session": "example-session"}},
+    "args": {}, "caller": {"app": "desktop", "admission": "operator_app"}
+  },
+  "app_run": {
+    "module": "example-context", "id": "flush",
+    "subject": {"kind": "session", "session": {"runner": "example-runner", "harness": "example-host", "session": "example-session"}},
+    "args": {}, "preview_version": "view42-queue7-summary3", "request_id": "Example_1-retry"
+  },
+  "module_run": {
+    "id": "flush",
+    "subject": {"kind": "session", "session": {"runner": "example-runner", "harness": "example-host", "session": "example-session"}},
+    "args": {}, "preview_version": "view42-queue7-summary3", "request_id": "Example_1-retry",
+    "caller": {"app": "phone", "admission": "phone", "device": "0123456789abcdef"}
+  }
+}

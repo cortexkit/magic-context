@@ -1,0 +1,37 @@
+{
+  "available": true,
+  "effect": "Lands queued drops and cleanup in one rebuild",
+  "facts": [
+    {
+      "label": "Queued drops",
+      "noun": "parts",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "approx": true,
+      "label": "Drops remove",
+      "unit": "tokens",
+      "value": 1194.0
+    },
+    {
+      "approx": true,
+      "label": "Cleanup removes",
+      "unit": "tokens",
+      "value": 0.0
+    },
+    {
+      "approx": true,
+      "label": "Rewrites once",
+      "unit": "tokens",
+      "value": 1203.0
+    }
+  ],
+  "figure": {
+    "label": "Context after",
+    "unit": "ratio",
+    "value": 0.08894949494949494,
+    "was": 0.10101010101010101
+  },
+  "version": "57a2660fd236630647f34f994835517edd518b09cfdaff6e47654947b98f613a"
+}

@@ -74,6 +74,7 @@ impl<C> Clone for Module<C> {
 }
 
 struct Inner<C> {
+    command_replays: tokio::sync::Mutex<crate::user_commands::Replays>,
     app_read: crate::app_read::AppRead,
     context_read: crate::context_read::ContextRead,
     client: Arc<C>,
@@ -111,6 +112,10 @@ struct Inner<C> {
 }
 
 enum Job {
+    Command {
+        request: crate::user_commands::Request,
+        reply: oneshot::Sender<Result<Value, subc_protocol::ErrorBody>>,
+    },
     Setup(Route, SetupRequest, preset::Features),
     Notice(NoticeRequest),
     Ride(RideRequest, oneshot::Sender<Option<View>>),
@@ -222,6 +227,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
         Self {
             inner: Arc::new(Inner {
+                command_replays: Default::default(),
                 app_read,
                 context_read,
                 client,
@@ -809,6 +815,42 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         worker.send(job).map_err(|_| ModuleError::Stopped)
     }
 
+    pub(crate) async fn command_request(
+        &self,
+        principal: &subc_protocol::Principal,
+        body: &[u8],
+    ) -> Result<Value, subc_protocol::ErrorBody> {
+        use crate::user_commands as commands;
+        cortexkit_role_user_commands::check_admission(principal, false, false)?;
+        let Some(request) = commands::decode(body)? else {
+            return serde_json::to_value(commands::describe())
+                .map_err(|_| commands::invalid("reply"));
+        };
+        let key = request.key();
+        let worker = self
+            .inner
+            .workers
+            .lock()
+            .expect("worker map")
+            .get(&key)
+            .cloned();
+        let Some(worker) = worker else {
+            return commands::execute(
+                None,
+                self.inner.client.as_ref(),
+                &Settings::default(),
+                &self.inner.command_replays,
+                request,
+            )
+            .await;
+        };
+        let (reply, answer) = oneshot::channel();
+        worker
+            .send(Job::Command { request, reply })
+            .map_err(|_| commands::invalid("subject"))?;
+        answer.await.map_err(|_| commands::invalid("subject"))?
+    }
+
     fn spawn_worker(&self, key: SessionRef) -> mpsc::UnboundedSender<Job> {
         let (jobs, mut receiver) = mpsc::unbounded_channel::<Job>();
         let inner = Arc::clone(&self.inner);
@@ -900,6 +942,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
                 match job {
                     Job::Resume => continue,
+                    Job::Command { request, reply } => {
+                        let read_only =
+                            matches!(&request, crate::user_commands::Request::Preview(_));
+                        let result = crate::user_commands::execute(
+                            session.as_mut(),
+                            inner.client.as_ref(),
+                            settings,
+                            &inner.command_replays,
+                            request,
+                        )
+                        .await;
+                        let _ = reply.send(result);
+                        if read_only {
+                            continue;
+                        }
+                    }
                     Job::Busy(reply) => {
                         let _ = reply.send(view_unconfirmed(session.as_ref()));
                         // A question changes nothing, so nothing is saved
@@ -1306,6 +1364,13 @@ fn hold(
         }
         Job::Ride(_, reply) => {
             let _ = reply.send(None);
+            None
+        }
+        Job::Command { reply, .. } => {
+            let _ = reply.send(Err(subc_protocol::ErrorBody::new(
+                "unknown_subject",
+                "Session is moving or unavailable.",
+            )));
             None
         }
         Job::Tool { reply, .. } => {

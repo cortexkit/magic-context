@@ -1,0 +1,47 @@
+[
+  {
+    "name": "flush_available",
+    "body": {
+      "version": "view42-queue7-summary3",
+      "available": true,
+      "effect": "Lands queued drops and cleanup in one rebuild",
+      "facts": [
+        {"label": "Queued drops", "value": 41.0, "unit": "count", "noun": "parts"},
+        {"label": "Removes", "value": 18200.0, "unit": "tokens", "approx": true},
+        {"label": "Cleanup", "value": 6100.0, "unit": "tokens", "approx": true},
+        {"label": "Rewrites once", "value": 240000.0, "unit": "tokens", "approx": true}
+      ],
+      "figure": {"label": "Context after", "value": 0.61, "unit": "ratio", "was": 0.78}
+    }
+  },
+  {"name": "flush_nothing_to_land", "body": {"version": "view42-queue8", "available": false, "reason": "nothing_to_land"}},
+  {"name": "flush_thinking_hold", "body": {"version": "view42-hold", "available": false, "reason": "thinking_hold"}},
+  {"name": "flush_not_managed", "body": {"version": "unmanaged", "available": false, "reason": "not_managed"}},
+  {"name": "flush_summary_running", "body": {"version": "view42-summary4", "available": false, "reason": "summary_running"}},
+  {
+    "name": "context_status",
+    "body": {"version": "view42", "available": true, "facts": [{"label": "Context", "state": "ready"}]}
+  },
+  {
+    "name": "code_status",
+    "body": {
+      "version": "index7",
+      "available": true,
+      "facts": [
+        {"label": "Search", "state": "ready"},
+        {"label": "Index", "state": "building", "progress": 0.4},
+        {"label": "Files", "value": 1200.0, "noun": "files"},
+        {"label": "Symbols", "value": 8400.0, "unit": "count"}
+      ],
+      "table": {
+        "columns": ["State", "Files"],
+        "rows": [
+          {"label": "Source", "cells": [{"state": "ready"}, {"value": 1000.0}]},
+          {"label": "Tests", "cells": [{"state": "building", "progress": 0.4}, {"value": 200.0}]}
+        ]
+      }
+    }
+  },
+  {"name": "code_not_bound", "body": {"version": "not-bound", "available": false, "reason": "not_bound"}},
+  {"name": "code_paused_low_disk", "body": {"version": "index7-low-disk", "available": false, "reason": "paused_low_disk"}}
+]
