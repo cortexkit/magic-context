@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { escalationBands } from "../../shared/escalation-bands";
+import { forceBandConfirmed } from "./routine-cleanup-decision";
 import {
     decideSignedThinkingHold,
     recordedReasoningTokens,
@@ -42,11 +44,21 @@ function turn(count: number, heavy: Array<{ back: number; tokens: number }>): Me
     return messages;
 }
 
+/** The force-band predicate the OpenCode transform passes for a reading. */
+const forceBand = (threshold: number, usage: number, fromEstimate = false) =>
+    forceBandConfirmed({
+        percentage: usage,
+        fromEstimate,
+        forceMaterializationPercentage: escalationBands(threshold).forceMaterializationPercentage,
+        compactionOff: false,
+    });
+
 const decide = (messages: Message[], usagePercentage: number) =>
     decideSignedThinkingHold({
         messages,
         usagePercentage,
         executeThresholdPercentage: 65,
+        forceBandPressure: forceBand(65, usagePercentage),
         estimateTextTokens: charTokens,
     });
 
@@ -76,16 +88,56 @@ describe("decideSignedThinkingHold", () => {
 
     it("the cap follows the session's execute threshold", () => {
         const messages = turn(10, [{ back: 3, tokens: 1_600 }]);
-        const at = (threshold: number, usage: number) =>
+        const at = (threshold: number, usage: number, fromEstimate = false) =>
             decideSignedThinkingHold({
                 messages,
                 usagePercentage: usage,
                 executeThresholdPercentage: threshold,
+                forceBandPressure: forceBand(threshold, usage, fromEstimate),
                 estimateTextTokens: charTokens,
             });
         expect(at(50, 55).held).toBe(true);
         expect(at(50, 61).held).toBe(false);
-        expect(at(80, 85).held).toBe(true);
+        expect(at(80, 84.9).held).toBe(true);
+    });
+
+    it("never holds in the force band, which ends the hold before the cap when the threshold is above 75%", () => {
+        const messages = turn(10, [{ back: 3, tokens: 1_600 }]);
+        const at = (threshold: number, usage: number, fromEstimate = false) =>
+            decideSignedThinkingHold({
+                messages,
+                usagePercentage: usage,
+                executeThresholdPercentage: threshold,
+                forceBandPressure: forceBand(threshold, usage, fromEstimate),
+                estimateTextTokens: charTokens,
+            });
+        // Threshold 80%: cap 90%, force band from 85%.
+        expect(at(80, 85)).toMatchObject({ held: false, reason: "force_band", capPercentage: 90 });
+        // A reading only a local count raised is force-band pressure only at
+        // 95%, so the hold runs until then and the cap ends it first.
+        expect(at(80, 89.9, true).held).toBe(true);
+        expect(at(80, 90, true).reason).toBe("above_cap");
+        // Threshold 88%: cap 98%, force band from 90%; a local count from 95%.
+        expect(at(88, 89.9).held).toBe(true);
+        expect(at(88, 90).reason).toBe("force_band");
+        expect(at(88, 94.9, true).held).toBe(true);
+        expect(at(88, 95, true).reason).toBe("force_band");
+    });
+
+    it("at the default threshold the force band never ends a hold the cap has not already ended", () => {
+        const messages = turn(10, [{ back: 3, tokens: 1_600 }]);
+        for (const fromEstimate of [false, true])
+            for (let tenths = 0; tenths <= 1_200; tenths++) {
+                const usage = tenths / 10;
+                const decision = decideSignedThinkingHold({
+                    messages,
+                    usagePercentage: usage,
+                    executeThresholdPercentage: 65,
+                    forceBandPressure: forceBand(65, usage, fromEstimate),
+                    estimateTextTokens: charTokens,
+                });
+                expect(decision.reason).toBe(usage < 75 ? "heavy_reasoning" : "above_cap");
+            }
     });
 
     it("does not hold when the heavy step is 16 steps back", () => {

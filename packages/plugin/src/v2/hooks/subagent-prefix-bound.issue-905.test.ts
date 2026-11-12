@@ -5,14 +5,19 @@
 // (`limit.context` 302,222, `execute_threshold_tokens` 250,000,
 // `protected_tokens` 16,000). The session runs through the real OpenCode 2
 // context hook (see __tests__/issue-905-subagent.fixture.ts); usage readings are
-// the size of what each request served. These tests pin today's behaviour, so
-// a change to any of it shows up here.
+// the size of what each request served. These tests pin the session's
+// behaviour, so a change to any of it shows up here. The signed-thinking hold
+// ends where force-band pressure begins (85% here), so a held stretch never
+// keeps the force band from landing the queued drops.
+
 import { beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
     hasMeasuredDecisionCalibration,
     resolveDecisionCalibration,
 } from "../../hooks/magic-context/decision-calibration";
 import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
+import { forceBandConfirmed } from "../../hooks/magic-context/routine-cleanup-decision";
 import { decideSignedThinkingHold } from "../../hooks/magic-context/signed-thinking-hold";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { servesThinkingBlock } from "../../hooks/magic-context/transform-postprocess-phase";
@@ -27,11 +32,15 @@ import {
 // 250,000 / 302,222 and ten points above it, as the transform logs them.
 const THRESHOLD = 82.72064905930078;
 const CAP = 92.72064905930078;
+// max(85%, threshold + 2): where force-band pressure begins.
+const FORCE_BAND = 85;
 
 let visible: Issue905Run;
 let omitted: Issue905Run;
 let largeConversation: Issue905Run;
 let withOutputLimit: Issue905Run;
+let defaultThreshold: Issue905Run;
+let localCount: Issue905Run;
 
 beforeAll(async () => {
     // Visible thinking: a third of the steps think heavily (above the hold's
@@ -58,6 +67,16 @@ beforeAll(async () => {
         heavyShare: 1,
         limit: { context: ISSUE_905_CONTEXT, output: 32_000 },
     });
+    // The same agent at the default 65% execute threshold: hold cap 75%, force
+    // band from 85%.
+    defaultThreshold = await runIssue905Session({
+        seed: 9054,
+        steps: 80,
+        configOverrides: { execute_threshold_tokens: undefined },
+    });
+    // A provider that reports no input usage: every pass reads a local count of
+    // the request it serves.
+    localCount = await runIssue905Session({ seed: 9055, steps: 80, reportUsage: false });
 }, 600_000);
 
 const strips = (run: Issue905Run) =>
@@ -87,24 +106,47 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         );
     });
 
-    test("a held pass in the force band rebuilds nothing: no queued drop lands, the emergency drop finds no candidate, no thinking is stripped", () => {
-        const heldInForceBand = visible.passes.filter(
-            (pass) =>
-                pass.thinkingHold === true &&
-                (pass.mcPercentage ?? 0) >= 85 &&
-                (pass.mcPercentage ?? 0) < CAP,
-        );
-        expect(heldInForceBand.length).toBeGreaterThanOrEqual(5);
-        for (const pass of heldInForceBand) {
-            // The force band lifts the hold's gate for the rewrite permission...
+    test("a pass in the force band is never held: it lands the queued drops and strips the turn's kept thinking once", () => {
+        const inForceBand = visible.passes.filter((pass) => (pass.mcPercentage ?? 0) >= FORCE_BAND);
+        // Below the cap, with heavy reasoning in the turn's recent steps: passes
+        // the hold's other conditions would have held.
+        expect(
+            inForceBand.filter((pass) => (pass.mcPercentage ?? 0) < CAP).length,
+        ).toBeGreaterThanOrEqual(5);
+        for (const pass of inForceBand) {
+            expect(pass.thinkingHold).toBe(false);
             expect(pass.rewriteAllowed).toBe(true);
             expect(pass.ride).toBe("force+subagentExecute");
-            // ...but every edit before the turn's kept thinking stays protected.
             expect(pass.pendingQueuedBefore).toBeGreaterThan(0);
+            expect(pass.pendingQueuedAfter).toBeLessThan(pass.pendingQueuedBefore);
+            // Every block the previous request served, plus the newest step's,
+            // stripped by this one pass.
+            expect(pass.proactiveStripFroze).toBe(
+                previous(visible, pass).served.thinkingBlocks + 1,
+            );
+            expect(pass.served.thinkingBlocks).toBe(0);
+        }
+        // The hold names the force band as the reason it ended.
+        expect(
+            visible.logs.filter((line) =>
+                line.includes("signed thinking hold: held=false reason=force_band"),
+            ).length,
+        ).toBeGreaterThanOrEqual(5);
+    });
+
+    test("between the threshold and the force band the hold still holds and nothing lands", () => {
+        const heldBelowForceBand = visible.passes.filter(
+            (pass) =>
+                pass.thinkingHold === true &&
+                (pass.mcPercentage ?? 0) >= THRESHOLD &&
+                (pass.mcPercentage ?? 0) < FORCE_BAND,
+        );
+        expect(heldBelowForceBand.length).toBeGreaterThanOrEqual(3);
+        for (const pass of heldBelowForceBand) {
+            expect(pass.rewriteAllowed).toBe(false);
             expect(pass.pendingQueuedAfter).toBe(pass.pendingQueuedBefore);
-            expect(pass.emergency).toContain("emergency tiered drop skipped: no-candidates");
             expect(pass.proactiveStripFroze).toBeNull();
-            expect(pass.served.thinkingBlocks).toBeGreaterThanOrEqual(15);
+            expect(pass.served.thinkingBlocks).toBeGreaterThan(0);
         }
     });
 
@@ -113,8 +155,8 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         expect(stripped.length).toBeGreaterThanOrEqual(3);
         for (const pass of stripped) {
             expect(pass.thinkingHold).toBe(false);
-            // Unheld in this run means above the cap.
-            expect(pass.mcPercentage ?? 0).toBeGreaterThanOrEqual(CAP);
+            // Unheld in this run means in the force band.
+            expect(pass.mcPercentage ?? 0).toBeGreaterThanOrEqual(FORCE_BAND);
             // Every block the previous request served, plus the newest step's.
             expect(pass.proactiveStripFroze).toBe(
                 previous(visible, pass).served.thinkingBlocks + 1,
@@ -269,8 +311,15 @@ test("issue 905: an omitted-text step is heavy for the hold on OpenCode 1, which
     const decide = (assistant: unknown) =>
         decideSignedThinkingHold({
             messages: [user, assistant],
-            usagePercentage: 88,
+            // Above the threshold and below the force band, where the hold applies.
+            usagePercentage: 84,
             executeThresholdPercentage: THRESHOLD,
+            forceBandPressure: forceBandConfirmed({
+                percentage: 84,
+                fromEstimate: false,
+                forceMaterializationPercentage: FORCE_BAND,
+                compactionOff: false,
+            }),
             estimateTextTokens: (text) => text.length / 4,
         });
     // OpenCode 1: the host's message keeps `info.tokens.reasoning`.
@@ -287,4 +336,98 @@ test("issue 905: an omitted-text step is heavy for the hold on OpenCode 1, which
     });
     expect(opencode1).toMatchObject({ held: true, heavyStepTokens: 5_000, capPercentage: CAP });
     expect(opencode2).toMatchObject({ held: false, reason: "no_recent_heavy_reasoning" });
+});
+
+/**
+ * The decisions and served bytes of every pass of the default-threshold run,
+ * recorded with the code from before the force band ended the hold. At 65% the
+ * hold's cap (75%) lies below the force band (85%), so ending the hold there
+ * must change nothing: the same digest proves it.
+ */
+const DEFAULT_THRESHOLD_DIGEST = "a40ff2cf6771e026884a8fcdd85a3d52c27928eb29352ed5e47ef24f9e1d5efb";
+
+describe("issue 905, the default 65% threshold", () => {
+    test("nothing changes: every pass decides and serves exactly what it did before", () => {
+        const passes = defaultThreshold.passes;
+        expect(new Set(passes.map((pass) => pass.threshold))).toEqual(new Set([65]));
+        const usage = (pass: Issue905Pass) => pass.mcPercentage ?? 0;
+        // The run covers the hold's whole range and the passes above its cap.
+        expect(
+            passes.filter(
+                (pass) => pass.thinkingHold === true && usage(pass) >= 65 && usage(pass) < 75,
+            ).length,
+        ).toBeGreaterThanOrEqual(3);
+        expect(
+            passes.filter(
+                (pass) =>
+                    pass.thinkingHold === false &&
+                    usage(pass) >= 75 &&
+                    (pass.proactiveStripFroze ?? 0) > 0,
+            ).length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(defaultThreshold.logs.some((line) => line.includes("reason=force_band"))).toBe(
+            false,
+        );
+        const digest = createHash("sha256")
+            .update(
+                passes
+                    .map((pass) =>
+                        [
+                            pass.decision,
+                            pass.thinkingHold,
+                            pass.rewriteAllowed,
+                            pass.ride,
+                            pass.pendingQueuedAfter,
+                            pass.proactiveStripFroze,
+                            pass.servedDigest,
+                        ].join("|"),
+                    )
+                    .join("\n"),
+            )
+            .digest("hex");
+        expect(digest).toBe(DEFAULT_THRESHOLD_DIGEST);
+    });
+});
+
+describe("issue 905, a provider that reports no usage", () => {
+    // The reading a priced pass took from its own local count, when it took one.
+    const localReading = (pass: Issue905Pass): number | null => {
+        const line = pass.logs.find((entry) =>
+            entry.includes("unknown provider usage; using wire estimate for priced pass"),
+        );
+        const match = line ? / percentage=([\d.]+) /.exec(line) : null;
+        return match ? Number(match[1]) : null;
+    };
+
+    test("between 85% and 95% of a local count the hold stays on and nothing lands", () => {
+        const between = localCount.passes.filter((pass) => {
+            const reading = localReading(pass);
+            return reading !== null && reading >= FORCE_BAND && reading < 95;
+        });
+        expect(between.length).toBeGreaterThanOrEqual(3);
+        for (const pass of between) {
+            expect(pass.thinkingHold).toBe(true);
+            expect(pass.rewriteAllowed).toBe(false);
+            expect(pass.pendingQueuedBefore).toBeGreaterThan(0);
+            expect(pass.pendingQueuedAfter).toBe(pass.pendingQueuedBefore);
+            expect(pass.proactiveStripFroze).toBeNull();
+            expect(pass.served.thinkingBlocks).toBeGreaterThan(0);
+        }
+    });
+
+    test("from 95% of a local count the hold ends: the pass lands the queued drops and strips the kept thinking once", () => {
+        const atEmergency = localCount.passes.filter((pass) => (localReading(pass) ?? 0) >= 95);
+        expect(atEmergency.length).toBeGreaterThanOrEqual(2);
+        for (const pass of atEmergency) {
+            expect(pass.thinkingHold).toBe(false);
+            expect(pass.logs.some((line) => line.includes("held=false reason=force_band"))).toBe(
+                true,
+            );
+            expect(pass.pendingQueuedAfter).toBeLessThan(pass.pendingQueuedBefore);
+            expect(pass.proactiveStripFroze).toBe(
+                previous(localCount, pass).served.thinkingBlocks + 1,
+            );
+            expect(pass.served.thinkingBlocks).toBe(0);
+        }
+    });
 });

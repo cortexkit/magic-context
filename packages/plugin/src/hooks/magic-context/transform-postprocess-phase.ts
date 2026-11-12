@@ -2420,7 +2420,8 @@ export async function runPostTransformPhase(
         protectedThinkingMessages,
     );
     // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
-    // model it holds only right after heavy reasoning and below the cap. Any
+    // model it holds only right after heavy reasoning, below the cap and outside
+    // the force band (`forceBandConfirmed` below, read from the same reading). Any
     // other pass of a signed turn busts like a pass of any other model, and
     // strips the turn's signed thinking when it does (see below).
     let activeThinkingPrefixHold = args.activeThinkingPrefixHold === true;

@@ -5861,6 +5861,16 @@ export function registerPiContextHandler(
 						),
 						usagePercentage,
 						executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+						// The same inputs the pipeline's emergency gate reads below
+						// (`forceMaterialization` and `contextUsage`). Compaction-off
+						// runs its own pipeline with no force band.
+						forceBandPressure:
+							!options.compactionOff &&
+							piForceBandPressure({
+								forceMaterialization: forceMaterialization || isEmergency,
+								percentage: usagePercentage,
+								forceMaterializationPercentage,
+							}),
 					}),
 				requestToolsChange,
 				contextUsage: {
@@ -9269,6 +9279,24 @@ async function runCompactionOffPipeline(
 const signedThinkingHoldLogKeys = new Map<string, string>();
 
 /**
+ * Pi's force-band pressure: the emergency gate that lets a pass held for signed
+ * thinking rewrite its prefix (runPipeline's ride permission). The bounded hold
+ * ends wherever this holds, so the hold and that permission agree on every
+ * pass. `forceMaterialization` is the caller's flag, which also covers the 95%
+ * emergency line read against the hard window.
+ */
+function piForceBandPressure(args: {
+	forceMaterialization?: boolean;
+	percentage: number;
+	forceMaterializationPercentage: number;
+}): boolean {
+	return (
+		args.forceMaterialization === true ||
+		args.percentage >= args.forceMaterializationPercentage
+	);
+}
+
+/**
  * Pi's bounded signed-thinking hold (decideSignedThinkingHold). Pi records the
  * provider's thinking-token count on `usage.reasoning` when the provider
  * reports one; Oh My Pi declares `usage.reasoningTokens`. Without either the
@@ -9282,6 +9310,8 @@ function resolvePiSignedThinkingHold(args: {
 	prefixBound: boolean;
 	usagePercentage: number;
 	executeThresholdPercentage: number;
+	/** `piForceBandPressure` for the reading the pipeline will read. */
+	forceBandPressure: boolean;
 }): boolean {
 	if (!args.prefixBound) return false;
 	let proseRatio: number | undefined;
@@ -9289,6 +9319,7 @@ function resolvePiSignedThinkingHold(args: {
 		messages: args.messages,
 		usagePercentage: args.usagePercentage,
 		executeThresholdPercentage: args.executeThresholdPercentage,
+		forceBandPressure: args.forceBandPressure,
 		estimateTextTokens: (text) => {
 			proseRatio ??= sessionDecisionCalibration(
 				args.db,
@@ -9655,9 +9686,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				};
 			})()
 		: undefined;
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
+	const emergencyDropEligible = piForceBandPressure({
+		forceMaterialization: args.forceMaterialization,
+		percentage: args.contextUsage.percentage,
+		forceMaterializationPercentage,
+	});
 	// Build the fold state once and reuse it for both the preflight and the wire
 	// injection. Omitting a render-affecting field from only one of those calls can
 	// manufacture a HARD signal that the real injection immediately disproves.

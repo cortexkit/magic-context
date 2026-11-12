@@ -32,24 +32,49 @@ export interface PressureBands {
     executePressureEligible: boolean;
 }
 
-export function pressureBands(args: {
+/** The inputs that place a pass's usage reading in the force band. */
+export interface ForceBandReading {
     percentage: number;
     /** The reading was raised only by a local count. */
     fromEstimate: boolean;
     forceMaterializationPercentage: number;
     compactionOff: boolean;
-    fullFeatureMode: boolean;
-    schedulerDecision: "execute" | "defer";
-}): PressureBands {
+}
+
+function forceBandOf(args: ForceBandReading) {
     const emergencyDropEligible =
         !args.compactionOff && args.percentage >= args.forceMaterializationPercentage;
     const forceRideWaitsOnLocalCount = args.fromEstimate && args.percentage < 95;
     return {
-        forceMaterialization: args.fullFeatureMode && emergencyDropEligible,
         emergencyDropEligible,
         forceRideWaitsOnLocalCount,
         forceBandConfirmed: emergencyDropEligible && !forceRideWaitsOnLocalCount,
-        executePressureEligible: args.schedulerDecision === "execute" || emergencyDropEligible,
+    };
+}
+
+/**
+ * Whether the reading is force-band pressure: the predicate that lets a pass
+ * held for signed thinking rewrite its prefix (`PressureBands.forceBandConfirmed`).
+ * The signed-thinking hold reads the same predicate and ends where it holds, so
+ * the hold and the rewrite permission cannot disagree about a pass.
+ */
+export function forceBandConfirmed(args: ForceBandReading): boolean {
+    return forceBandOf(args).forceBandConfirmed;
+}
+
+export function pressureBands(
+    args: ForceBandReading & {
+        fullFeatureMode: boolean;
+        schedulerDecision: "execute" | "defer";
+    },
+): PressureBands {
+    const band = forceBandOf(args);
+    return {
+        forceMaterialization: args.fullFeatureMode && band.emergencyDropEligible,
+        emergencyDropEligible: band.emergencyDropEligible,
+        forceRideWaitsOnLocalCount: band.forceRideWaitsOnLocalCount,
+        forceBandConfirmed: band.forceBandConfirmed,
+        executePressureEligible: args.schedulerDecision === "execute" || band.emergencyDropEligible,
     };
 }
 

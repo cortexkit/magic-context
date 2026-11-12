@@ -97,6 +97,7 @@ export interface PricedPassPlanInput {
     fullFeatureMode: boolean;
     schedulerDecision: "execute" | "defer";
     forceMaterializationPercentage: number;
+    /** The pass's signed-thinking hold as decided before the pass was sized. */
     signedThinkingHold: boolean;
     /** The pass renders the session's first history head. */
     firstRender: boolean;
@@ -141,6 +142,10 @@ export function planPricedPass(
         schedulerDecision: input.schedulerDecision,
     });
     const emergencySample = () => getEmergencyInputSample(input.db, input.sessionId);
+    // The signed-thinking hold never applies in the force band (see
+    // decideSignedThinkingHold); the caller ends it after sizing when the sized
+    // reading is there, so the plan counts the request that pass then serves.
+    const signedThinkingHold = input.signedThinkingHold && !bands.forceBandConfirmed;
     const rides: ReclaimRideSignals = {
         hardFold: input.folds || input.firstRender,
         force: forceRide({
@@ -158,12 +163,12 @@ export function planPricedPass(
     const drainAllowed =
         !input.compactionOff &&
         reclaimRidePermitted(rides, {
-            signedThinkingHold: input.signedThinkingHold,
+            signedThinkingHold,
             firstRender: input.firstRender,
             emergency: bands.forceBandConfirmed,
         });
     // A held pass drops its flush and published-history requests.
-    const materializationRequested = !input.signedThinkingHold && input.materializationRequested;
+    const materializationRequested = !signedThinkingHold && input.materializationRequested;
     const heuristics = heuristicsRunOnPass({
         compactionOff: input.compactionOff,
         drainAllowed,
@@ -192,8 +197,8 @@ export function planPricedPass(
             rewriteAlreadyPriced: input.folds || input.firstRender || input.historyRebuilt,
         });
     return {
-        editsWholePrefix: drainAllowed && !input.signedThinkingHold,
-        clearsReasoning: routine && !input.signedThinkingHold,
+        editsWholePrefix: drainAllowed && !signedThinkingHold,
+        clearsReasoning: routine && !signedThinkingHold,
     };
 }
 
