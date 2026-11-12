@@ -3,6 +3,8 @@ import { appendCompartments } from "../features/magic-context/compartment-storag
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
+import { queuePendingDropForUnchangedTag } from "../features/magic-context/storage-ops";
+import { getTagsBySession } from "../features/magic-context/storage-tags";
 import { Database } from "../shared/sqlite";
 import { buildSidebarSnapshot } from "./rpc-handlers";
 
@@ -35,24 +37,26 @@ test("N3 exposes the proactive floor beside the resolved execute threshold", () 
 test("N4 sums only this session's queued drop tokens with indexed lookups", () => {
     const { db, directory, session } = fixture();
     const insert = db.prepare(
-        "INSERT INTO tags(session_id, message_id, tag_number, type, token_count) VALUES (?, ?, ?, 'text', ?)",
+        "INSERT INTO tags(session_id, message_id, tag_number, type, byte_size, token_count) VALUES (?, ?, ?, 'message', 10, ?)",
     );
-    const first = Number(insert.run(session, "m1", 1, 123).lastInsertRowid);
-    const second = Number(insert.run(session, "m2", 2, 456).lastInsertRowid);
-    db.prepare("INSERT INTO pending_ops(session_id, tag_id, operation) VALUES (?, ?, 'drop')").run(
-        session,
-        first,
-    );
+    insert.run("other", "decoy", 101, 999);
+    insert.run(session, "m1", 101, 123);
+    insert.run(session, "m2", 102, 456);
+    const first = getTagsBySession(db, session).find((tag) => tag.tagNumber === 101)!;
+    expect(first.id).not.toBe(first.tagNumber);
+    expect(queuePendingDropForUnchangedTag(db, session, first)).toBe(true);
     db.prepare("INSERT INTO pending_ops(session_id, tag_id, operation) VALUES (?, ?, 'keep')").run(
         session,
-        second,
+        102,
     );
     db.prepare(
         "INSERT INTO pending_ops(session_id, tag_id, operation) VALUES ('other', ?, 'drop')",
-    ).run(second);
+    ).run(101);
     const prepared = spyOn(db, "prepare");
     const snapshot = buildSidebarSnapshot(db, session, directory);
     expect(snapshot.queuedDropTokens).toBe(123);
+    expect(snapshot.queuedDropCount).toBe(1);
+    expect(snapshot.pendingOpsCount).toBe(2);
     const sql = prepared.mock.calls
         .map(([sql]) => sql)
         .find((sql) => /SUM\(.*token_count/.test(sql));
@@ -102,7 +106,7 @@ test("N5 counts post-cache compartments and visible unexpired active or permanen
     prepared.mockRestore();
     for (const [label, pattern, params] of [
         ["N5 summaries", /COUNT\(\*\).*compartments.*sequence\s*>/s, [session, 0]],
-        ["N5 memories", /COUNT\(\*\).*memories.*id\s*>/s, [project, 1, Date.now()]],
+        ["N5 memories", /SELECT.*FROM memories.*id\s*>/s, [project, 1, Date.now()]],
     ] as const) {
         const sql = queries.find((sql) => pattern.test(sql));
         expect(sql).toBeDefined();
@@ -138,11 +142,11 @@ test("N5 uses workspace sharing and classification from the render policy", () =
         db.prepare(`INSERT INTO memories(project_path, category, content, normalized_hash,
         status, shareable, scope, first_seen_at, last_seen_at, created_at, updated_at)
         VALUES (?, ?, 'memory', ?, ?, ?, ?, 1, 1, 1, 1)`);
-    insert.run(project, "CODE", "own", "active", 0, "project");
+    insert.run(project, "ARCHITECTURE", "own", "active", 0, "project");
     insert.run("git:foreign", "CONSTRAINTS", "shared", "active", 1, "ecosystem");
     insert.run("git:foreign", "CONSTRAINTS", "permanent", "permanent", 1, "universe");
     insert.run("git:foreign", "CONSTRAINTS", "private", "active", 0, "project");
-    insert.run("git:foreign", "CODE", "not-shared", "active", 1, "ecosystem");
+    insert.run("git:foreign", "ARCHITECTURE", "not-shared", "active", 1, "ecosystem");
     insert.run("git:foreign", "CONSTRAINTS", "session-only", "active", 1, "session");
     expect(buildSidebarSnapshot(db, session, directory).memoriesSinceCache).toBe(3);
 });

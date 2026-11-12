@@ -16,6 +16,10 @@ export function rememberWaitingMessages(sessionId: string, count: number): void 
     waitingMessages.set(sessionId, Math.max(0, count));
 }
 
+export function invalidateWaitingMessages(sessionId: string): void {
+    waitingMessages.delete(sessionId);
+}
+
 export function beginSidebarHistorianRun(sessionId: string) {
     const generation = generations.get(sessionId) ?? {};
     generations.set(sessionId, generation);

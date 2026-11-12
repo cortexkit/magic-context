@@ -91,7 +91,7 @@ async function startServer(
 }
 
 describe("TUI context RPC data", () => {
-    test("scheduled reads expose RPC failures instead of hiding them behind a cached snapshot", async () => {
+    test("loadSidebarSnapshot throwOnFailure exposes RPC failures instead of a cached snapshot", async () => {
         const dataHome = makeDataHome();
         const directory = "/repo-scheduled";
         const sessionId = "ses_scheduled";

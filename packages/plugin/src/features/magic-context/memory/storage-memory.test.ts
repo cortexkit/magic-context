@@ -30,8 +30,21 @@ import {
     updateMemoryVerification,
 } from "./index";
 import { computeNormalizedHash } from "./normalize-hash";
+import { countNewMemoriesForM1Union } from "./storage-memory";
 
 let db: Database;
+
+it("counts only post-cache memory rows accepted by the visible-memory reader", () => {
+    db = makeMemoryDatabase();
+    const insert = db.prepare(`INSERT INTO memories
+        (project_path, category, content, normalized_hash, source_type,
+         first_seen_at, created_at, updated_at, last_seen_at)
+        VALUES ('project', 'CONSTRAINTS', 'memory', ?, ?, 1, 1, 1, 1)`);
+    insert.run("valid", "historian");
+    insert.run("invalid", "external-unknown-source");
+    expect(readNewMemoriesForM1Union(db, ["project"], 0, 100)).toHaveLength(1);
+    expect(countNewMemoriesForM1Union(db, ["project"], 0, 100)).toBe(1);
+});
 
 function makeMemoryDatabase(): Database {
     const database = new Database(":memory:");

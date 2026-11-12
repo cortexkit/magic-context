@@ -38,6 +38,7 @@ import {
 import { resolveOpenCodeProtectedTailBoundary } from "./protected-tail-boundary";
 import { withRawMessageProvider } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
+import { rememberWaitingMessages, sidebarObservations } from "./sidebar-observations";
 import type { TagTarget } from "./tag-messages";
 import { prewarmTagOwners } from "./tag-owner-warmup";
 
@@ -383,6 +384,25 @@ function insertCoveredMessageTag(
 }
 
 describe("checkCompartmentTrigger", () => {
+    it("invalidates a stale waiting count when a below-floor small tail cheap-skips", () => {
+        useTempDataHome("compartment-trigger-waiting-");
+        const db = openDatabase();
+        const sessionId = "ses-waiting-cheap-skip";
+        seedTriggerPolicy(db, sessionId);
+        insertCoveredMessageTag(db, sessionId, "small", 1, 10);
+        rememberWaitingMessages(sessionId, 140);
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 100 },
+            25,
+            65,
+            1000,
+        );
+        expect(result.shouldFire).toBe(false);
+        expect(sidebarObservations(sessionId).waitingMessages).toBeUndefined();
+    });
     it("cheap-skips the in-memory tail below the proactive floor when persisted plus untagged tokens are under budget", () => {
         useTempDataHome("compartment-trigger-memory-skip-");
         const db = openDatabase();

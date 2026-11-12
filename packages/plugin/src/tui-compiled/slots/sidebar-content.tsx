@@ -153,6 +153,7 @@ const SidebarContent = props => {
   };
   const contextUsage = () => {
     const data = s();
+    if (compactionOff() && present(data?.native_context_usage_percentage)) return data.native_context_usage_percentage;
     if (!data || data.contextLimit <= 0) return undefined;
     return compactionOff() ? data.inputTokens / data.contextLimit * 100 : present(data.usagePercentage) ? data.usagePercentage : undefined;
   };
@@ -172,10 +173,10 @@ const SidebarContent = props => {
     return {
       lastRun: run ? `${relativeTime(run.finishedAt)} · ${run.outcome}` : "—",
       model: modelName(run?.model),
-      waiting: present(data?.waitingMessages) ? `${data?.waitingMessages} msgs` : "—",
+      waiting: present(data?.waitingMessages) ? `${data?.waitingMessages} msgs` : "no reading",
       cacheBuilt: present(cacheAt) ? relativeTime(cacheAt) : "—",
       sinceThen: present(data?.summariesSinceCache) && present(data?.memoriesSinceCache) ? `${data?.summariesSinceCache} summaries · ${data?.memoriesSinceCache} memories` : "—",
-      drops: present(data?.pendingOpsCount) && present(drops) ? `${data?.pendingOpsCount} · ≈${compactTokens(drops)} at rebuild` : "—",
+      drops: present(data?.queuedDropCount) && present(drops) ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild` : "—",
       memories: present(data?.memoryCount) ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new` : "—",
       notes: present(data?.sessionNoteCount) && present(data?.readySmartNoteCount) ? `${data?.sessionNoteCount} · ${data?.readySmartNoteCount} smart waiting` : "—",
       dreamerLastRun: present(lastDream) ? `${relativeTime(lastDream)} · ${data?.dreamerFailures?.length ? "failed" : "ok"}` : "—",
@@ -210,7 +211,7 @@ const SidebarContent = props => {
       });
       if (counts && counts.fallbackRuns > 0) rows.push({
         label: "Fallback",
-        value: `${modelName(historian?.model).split(" ")[0]} finished ${counts.fallbackRuns} runs`,
+        value: `finished ${counts.fallbackRuns} runs`,
         tone: "warning"
       });
       if (historian?.outcome === "failed" || (data.historianFailureCount ?? 0) > 0) rows.push({
@@ -224,6 +225,20 @@ const SidebarContent = props => {
       value: `${data.dreamerFailures.length} tasks failed`,
       tone: "warning"
     });
+    const rebuild = data.recompProgress;
+    if (rebuild?.phase === "failed" || rebuild?.phase === "skipped") {
+      const verb = {
+        recomp: "Recomp",
+        upgrade: "Upgrade",
+        embed: "Embed",
+        wrapup: "Wrap-up"
+      }[rebuild.kind ?? "recomp"];
+      rows.push({
+        label: verb,
+        value: rebuild.phase === "failed" ? `✗ ${verb} failed` : "stopped",
+        tone: rebuild.phase === "failed" ? "error" : "warning"
+      });
+    }
     if (data.lastTransformError) rows.push({
       label: "Transform",
       value: shortText(data.lastTransformError),
@@ -315,7 +330,7 @@ const SidebarContent = props => {
         return _$createComponent(SidebarStatRow, {
           label: "Cache",
           get value() {
-            return _$memo(() => !!present(s()?.pendingOpsCount))() ? `${s()?.pendingOpsCount} drops queued ●` : "no reading ●";
+            return _$memo(() => !!present(s()?.queuedDropCount))() ? `${s()?.queuedDropCount} drops queued ●` : "no reading ●";
           }
         });
       }
@@ -552,6 +567,24 @@ const SidebarContent = props => {
                   return row.tone;
                 }
               })
+            }), _$createComponent(Show, {
+              get when() {
+                return s()?.recompProgress?.phase === "failed" || s()?.recompProgress?.phase === "skipped";
+              },
+              get children() {
+                return _$createComponent(Show, {
+                  get when() {
+                    return s()?.recompProgress?.message;
+                  },
+                  get children() {
+                    return _$createComponent(SidebarTextRow, {
+                      get text() {
+                        return s()?.recompProgress?.message ?? "";
+                      }
+                    });
+                  }
+                });
+              }
             }), _$createComponent(SidebarTextRow, {
               text: "/ctx-status shows details"
             })];

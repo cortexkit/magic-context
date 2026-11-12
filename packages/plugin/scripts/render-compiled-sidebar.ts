@@ -12,6 +12,7 @@ type RenderCase = {
     width?: number;
     preferences?: Record<string, unknown>;
     toggleHeader?: boolean;
+    now?: number;
     matchingBadgeColors?: boolean;
 };
 
@@ -59,6 +60,7 @@ const actualPrefs = await import(prefsUrl);
 mock.module(prefsUrl, () => ({
     ...actualPrefs,
     readTuiPreferencesFileSync: () => preferences,
+    queueTuiPreferenceUpdate: async () => {},
     watchTuiPreferences: () => () => {},
 }));
 if (process.argv.includes("--raw-frame")) {
@@ -74,6 +76,9 @@ const { testRender } = await import("@opentui/solid");
 const inputs = JSON.parse(await Bun.stdin.text()) as RenderCase[];
 const results = [];
 for (const entry of inputs) {
+    const realNow = Date.now;
+    const fixtureNow = entry.now;
+    if (fixtureNow !== undefined) Date.now = () => fixtureNow;
     snapshot = entry.snapshot;
     preferences = entry.preferences ?? {};
     const prefs = resolveMagicContextPrefs(preferences);
@@ -135,22 +140,24 @@ for (const entry of inputs) {
     } catch (error) {
         results.push({ error: error instanceof Error ? error.stack : String(error) });
     } finally {
+        Date.now = realNow;
         slot.dispose();
     }
 }
-process.stdout.write(
-    process.argv.includes("--frames")
-        ? results
-              .map((result) =>
-                  result.frame !== undefined
-                      ? result.frame
-                            .split("\n")
-                            .map((line) => line.trimEnd())
-                            .join("\n")
-                            .trimEnd()
-                      : result.error,
-              )
-              .join("\n\n")
-        : JSON.stringify(results),
-);
+const output = process.argv.includes("--frames")
+    ? results
+          .map((result) =>
+              result.frame !== undefined
+                  ? result.frame
+                        .split("\n")
+                        .map((line) => line.trimEnd())
+                        .join("\n")
+                        .trimEnd()
+                  : result.error,
+          )
+          .join("\n\n")
+    : JSON.stringify(results);
+await new Promise<void>((resolve, reject) => {
+    process.stdout.write(output, (error) => (error ? reject(error) : resolve()));
+});
 process.exit(0);

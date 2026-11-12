@@ -48,7 +48,7 @@ import {
 import { estimateTrueRawMessageTokens } from "./read-session-true-raw-tokens";
 import { reasoningBudgetCutoff } from "./reasoning-budget";
 import { modelAcceptsEmptyContent } from "./sentinel";
-import { rememberWaitingMessages } from "./sidebar-observations";
+import { invalidateWaitingMessages, rememberWaitingMessages } from "./sidebar-observations";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -467,6 +467,7 @@ function getUnsummarizedTailInfo(
                 boundarySnapshot: boundary,
             };
         } catch (error) {
+            invalidateWaitingMessages(sessionId);
             sessionLog(sessionId, "compartment trigger: raw tail inspection failed:", error);
             return TAIL_INFO_DEFAULTS;
         }
@@ -515,8 +516,10 @@ export function checkCompartmentTrigger(
             contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
             executeThresholdPercentage,
         })
-    )
+    ) {
+        invalidateWaitingMessages(sessionId);
         return { shouldFire: false };
+    }
 
     const lazyInMemoryTail = typeof inMemoryTail === "function" ? inMemoryTail : undefined;
     let resolvedInMemoryTail = typeof inMemoryTail === "function" ? undefined : inMemoryTail;
@@ -621,6 +624,7 @@ export function checkCompartmentTrigger(
                 // (commit_clusters). tail_size needs even more. Equality falls
                 // through to preserve the existing conservative < semantics.
                 if (eligibleUpperBound < triggerBudget) {
+                    invalidateWaitingMessages(sessionId);
                     const memorySuffix = resolvedInMemoryTail
                         ? ` (persisted=${persistedBound}, untagged-memory≤${untaggedUpperBound})`
                         : "";

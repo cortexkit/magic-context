@@ -219,6 +219,8 @@ const SidebarContent = (props: {
     };
     const contextUsage = () => {
         const data = s();
+        if (compactionOff() && present(data?.native_context_usage_percentage))
+            return data.native_context_usage_percentage;
         if (!data || data.contextLimit <= 0) return undefined;
         return compactionOff()
             ? (data.inputTokens / data.contextLimit) * 100
@@ -252,15 +254,17 @@ const SidebarContent = (props: {
         return {
             lastRun: run ? `${relativeTime(run.finishedAt)} · ${run.outcome}` : "—",
             model: modelName(run?.model),
-            waiting: present(data?.waitingMessages) ? `${data?.waitingMessages} msgs` : "—",
+            waiting: present(data?.waitingMessages)
+                ? `${data?.waitingMessages} msgs`
+                : "no reading",
             cacheBuilt: present(cacheAt) ? relativeTime(cacheAt) : "—",
             sinceThen:
                 present(data?.summariesSinceCache) && present(data?.memoriesSinceCache)
                     ? `${data?.summariesSinceCache} summaries · ${data?.memoriesSinceCache} memories`
                     : "—",
             drops:
-                present(data?.pendingOpsCount) && present(drops)
-                    ? `${data?.pendingOpsCount} · ≈${compactTokens(drops)} at rebuild`
+                present(data?.queuedDropCount) && present(drops)
+                    ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild`
                     : "—",
             memories: present(data?.memoryCount)
                 ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new`
@@ -309,7 +313,7 @@ const SidebarContent = (props: {
             if (counts && counts.fallbackRuns > 0)
                 rows.push({
                     label: "Fallback",
-                    value: `${modelName(historian?.model).split(" ")[0]} finished ${counts.fallbackRuns} runs`,
+                    value: `finished ${counts.fallbackRuns} runs`,
                     tone: "warning",
                 });
             if (historian?.outcome === "failed" || (data.historianFailureCount ?? 0) > 0)
@@ -325,6 +329,20 @@ const SidebarContent = (props: {
                 value: `${data.dreamerFailures.length} tasks failed`,
                 tone: "warning",
             });
+        const rebuild = data.recompProgress;
+        if (rebuild?.phase === "failed" || rebuild?.phase === "skipped") {
+            const verb = {
+                recomp: "Recomp",
+                upgrade: "Upgrade",
+                embed: "Embed",
+                wrapup: "Wrap-up",
+            }[rebuild.kind ?? "recomp"];
+            rows.push({
+                label: verb,
+                value: rebuild.phase === "failed" ? `✗ ${verb} failed` : "stopped",
+                tone: rebuild.phase === "failed" ? "error" : "warning",
+            });
+        }
         if (data.lastTransformError)
             rows.push({
                 label: "Transform",
@@ -397,8 +415,8 @@ const SidebarContent = (props: {
                         <SidebarStatRow
                             label="Cache"
                             value={
-                                present(s()?.pendingOpsCount)
-                                    ? `${s()?.pendingOpsCount} drops queued ●`
+                                present(s()?.queuedDropCount)
+                                    ? `${s()?.queuedDropCount} drops queued ●`
                                     : "no reading ●"
                             }
                         />
@@ -510,6 +528,16 @@ const SidebarContent = (props: {
                                     />
                                 )}
                             </For>
+                            <Show
+                                when={
+                                    s()?.recompProgress?.phase === "failed" ||
+                                    s()?.recompProgress?.phase === "skipped"
+                                }
+                            >
+                                <Show when={s()?.recompProgress?.message}>
+                                    <SidebarTextRow text={s()?.recompProgress?.message ?? ""} />
+                                </Show>
+                            </Show>
                             <SidebarTextRow text="/ctx-status shows details" />
                         </SidebarSection>
                     </Show>

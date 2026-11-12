@@ -159,7 +159,7 @@ function isShippedSourceFile(filePath: string): boolean {
     return filePath.endsWith(".tsx") || filePath.endsWith(".ts");
 }
 
-async function listSourceFiles(dir: string): Promise<string[]> {
+async function listSourceFiles(dir: string, includeJavaScript = false): Promise<string[]> {
     const entries = await readdir(dir, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -167,8 +167,11 @@ async function listSourceFiles(dir: string): Promise<string[]> {
     for (const entry of entries) {
         const entryPath = join(dir, entry.name);
         if (entry.isDirectory()) {
-            files.push(...(await listSourceFiles(entryPath)));
-        } else if (entry.isFile() && isShippedSourceFile(entryPath)) {
+            files.push(...(await listSourceFiles(entryPath, includeJavaScript)));
+        } else if (
+            entry.isFile() &&
+            (isShippedSourceFile(entryPath) || (includeJavaScript && entryPath.endsWith(".js")))
+        ) {
             files.push(entryPath);
         }
     }
@@ -288,7 +291,7 @@ for (const sourceFile of files) {
 }
 
 let stale = 0;
-for (const existing of await listSourceFiles(outputRoot)) {
+for (const existing of await listSourceFiles(outputRoot, true)) {
     if (expectedOutputs.has(existing)) continue;
     await rm(existing, { force: true });
     stale += 1;
