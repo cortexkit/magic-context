@@ -6975,6 +6975,17 @@ export function registerPiContextHandler(
 								}
 								budget.stage = "outgoing fit reclaim";
 								const freshMeta = getOrCreateSessionMeta(options.db, sessionId);
+								// This rerun forces emergency pressure (forceMaterialization),
+								// which lifts the hold's gate, while it keeps the main pass's
+								// signedThinkingHold. The hold cannot stay on here with the gate
+								// lifted: an unknown-usage recovery needs overflow recovery armed,
+								// so the main pass was at the 95% emergency line and unheld; an
+								// over-window proof sets forceSignedRebuildForFit, which strips the
+								// turn first; and an upper estimate whose main pass kept held
+								// thinking (strictThinkingKept) never gets here (reclaimHeld). What
+								// remains is an upper estimate whose main pass started held but
+								// released the turn; this rerun starts from the same pristine
+								// input and so re-derives that release.
 								result = await budget.waitMandatory(
 									runPipeline({
 										...pipelineArgs,
@@ -10486,7 +10497,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	let newTargets = new Map(
+	const newTargets = new Map(
 		protectNewTagMutations(
 			mutationView.map((message) => ({
 				info: message.info,
@@ -10497,31 +10508,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.reasoningClearing?.prefixBound === true,
 		),
 	);
-	if (
-		protectedSignedPrefix &&
-		args.contextUsage.percentage >= 95 &&
-		!args.upperEstimateOnly
-	) {
-		const candidates = getActiveTagsBySession(args.db, args.sessionId).filter(
-			(tag) => tag.type === "tool" && targets.get(tag.tagNumber)?.canDrop?.(),
-		);
-		if (
-			candidates.length > 0 &&
-			candidates.every(
-				(tag) =>
-					newTargets.get(tag.tagNumber)?.thinkingRewriteProtected === true,
-			)
-		) {
-			stripForPrefixRewrite();
-			newTargets = targets;
-			prefixMutationAllowed = true;
-			isCacheBustingPass = true;
-			publishedWorkDrainAllowed = true;
-			noteServedPermission();
-			shouldRunHeuristics = args.heuristics !== undefined;
-			hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
-		}
-	}
+	// No usage-based release of a held turn here: a pass held for signed
+	// thinking never reaches 95%. The main pass ends the hold in force-band
+	// pressure (piForceBandPressure), and no threshold puts the force band at
+	// or above 95% (see escalation-bands.test.ts). The fit reruns either strip
+	// (forceSignedRebuildForFit) or keep the main pass's reading and hold; the
+	// unknown-usage recovery rerun, the one with a new reading, follows only an
+	// unheld main pass (see the outgoing fit reclaim).
 	for (const number of identityAdoption.protectedTagNumbers) {
 		if (rewritingSignedPrefix) break;
 		const target = newTargets.get(number);

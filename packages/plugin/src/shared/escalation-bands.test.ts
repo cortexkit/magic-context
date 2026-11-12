@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { escalationBands } from "./escalation-bands";
+import { escalationBands, MAX_EXECUTE_THRESHOLD } from "./escalation-bands";
 
 describe("escalationBands", () => {
     test.each([
@@ -19,5 +19,20 @@ describe("escalationBands", () => {
     test("preserves the exact pre-raise behavior through threshold 80", () => {
         expect(escalationBands(65).forceMaterializationPercentage).toBe(85);
         expect(escalationBands(80).forceMaterializationPercentage).toBe(85);
+    });
+
+    // No threshold puts the force band at or above 95%. A pass held for signed
+    // thinking therefore never reaches 95% with compaction on (the hold ends in
+    // force-band pressure), and neither the OpenCode postprocess phase nor
+    // Pi's pipeline has a 95% release for a held turn any more: that removal
+    // rests on this bound. Raising the
+    // threshold clamp past 92% would let a reading in [95%, threshold + 2%) be
+    // held again.
+    test("the force band starts below 95% for every threshold", () => {
+        expect(escalationBands(Infinity).forceMaterializationPercentage).toBeLessThan(95);
+        expect(escalationBands(Number.MAX_VALUE).forceMaterializationPercentage).toBeLessThan(95);
+        expect(escalationBands(MAX_EXECUTE_THRESHOLD).forceMaterializationPercentage).toBeLessThan(
+            95,
+        );
     });
 });

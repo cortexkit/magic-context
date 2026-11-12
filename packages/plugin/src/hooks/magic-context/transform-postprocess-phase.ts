@@ -2845,6 +2845,14 @@ export async function runPostTransformPhase(
         `foldExecuted=${foldExecutedThisPass} m1Refreshed=${publishedM1RefreshedThisPass}`,
     );
     const tPassDecisions = performance.now();
+    // A fit proof releases a held turn here too. No usage-based release sits
+    // beside it: with compaction on a held pass never reaches 95% (the hold
+    // ends in force-band pressure, which a 95% reading always is; see
+    // escalation-bands.test.ts), and with compaction off the pass has no tool
+    // tags whose reclaim the held thinking could block.
+    if (activeThinkingPrefixHold && args.forceSignedRebuildForFit) {
+        releaseThinkingForRewrite(true);
+    }
     if (activeThinkingPrefixHold) {
         isExplicitFlush = false;
         deferredMaterialize = false;

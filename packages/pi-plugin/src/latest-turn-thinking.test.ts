@@ -1325,9 +1325,14 @@ test("Pi already-cold held pass keeps every signed block when no binding bytes c
 	}
 });
 
-for (const trigger of ["wall", "final fit"] as const)
+// "emergency" reads 96%: above the hold's cap (75%) and in the force band, so
+// the pass is unheld and strips the turn's signed thinking before the lanes,
+// as any unheld bust does. It once stood for a held pass reaching a 95% wall
+// release; no held pass reaches 95% now (see escalation-bands.test.ts), and
+// that release is gone. "final fit" reads 75%.
+for (const trigger of ["emergency", "final fit"] as const)
 	for (const outcome of ["fits", "still too large"] as const) {
-		test(`Pi ${trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
+		test(`Pi ${trigger === "emergency" ? "unheld 96% pass" : trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
 			const db = createTestDb();
 			const sessionId = `pi-signed-fit-${trigger}-${outcome}`;
 			getOrCreateSessionMeta(db, sessionId);
@@ -1488,7 +1493,7 @@ for (const trigger of ["wall", "final fit"] as const)
 				);
 				ids.push("latest-fit-call", "latest-fit-result");
 				queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-				percent = trigger === "wall" ? 96 : 75;
+				percent = trigger === "emergency" ? 96 : 75;
 				if (outcome === "fits") {
 					const output = JSON.stringify(await serve());
 					expect(output).not.toContain("fit-signature");
