@@ -61,14 +61,14 @@ script -qefc "stty rows 40 cols 160; opencode2 --standalone --print-logs --sessi
 TUI_PID=$!
 TUI_MARKER_SEEN=0
 for ((elapsed = 0; elapsed < TUI_MARKER_CEILING_SECONDS; elapsed++)); do
-    # "Compartments" is a row only the real sidebar component draws. The plugin
-    # also has a four-line plain-text projection for hosts that register no
-    # OpenTUI runtime modules, and that projection folds the compartment count
-    # into a "C:n" fragment. Matching the component row is what makes this lane
-    # fail if the Linux GA host silently lands on the fallback.
-    if grep -aFq "Compartments" /tmp/opencode2-tui.log 2>/dev/null \
-        && { grep -aFq "Magic Context" /tmp/opencode2-tui.log 2>/dev/null \
-            || grep -aFq "MagicContext" /tmp/opencode2-tui.log 2>/dev/null; }; then
+    # "Knowledge" is a section title only the real sidebar component draws,
+    # under its "MAGIC CONTEXT" header. The plugin also has a four-line
+    # plain-text projection for hosts that register no OpenTUI runtime
+    # modules; it has no section titles and writes the header in mixed case.
+    # Matching both is what makes this lane fail if the Linux GA host silently
+    # lands on the fallback.
+    if grep -aFq "Knowledge" /tmp/opencode2-tui.log 2>/dev/null \
+        && grep -aFq "MAGIC CONTEXT" /tmp/opencode2-tui.log 2>/dev/null; then
         TUI_MARKER_SEEN=1
         echo "TUI sidebar marker painted after ${elapsed}s"
         break
