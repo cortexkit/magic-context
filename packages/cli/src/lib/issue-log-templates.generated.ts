@@ -3206,6 +3206,7 @@ const SOURCE_FILE_DATA = [
 "u:rocessed-images-pi.ts",
 "o:ubagent-entry.ts",
 "w:runner.ts",
+"w:startup.ts",
 "w:telemetry.ts",
 "x:ool-boundary.ts",
 "o:ystem-prompt-delivery-pi.ts",

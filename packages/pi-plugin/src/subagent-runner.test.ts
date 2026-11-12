@@ -2935,6 +2935,42 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		await resultPromise;
 	});
 
+	for (const pipe of ["stdout", "stderr"] as const) {
+		it(`startup failure on ${pipe} overrides a successful terminal turn and exit zero`, async () => {
+			const child = createMockChild();
+			const { runner, spawnImpl } = runnerWith(child);
+			const resultPromise = runner.run(baseOptions);
+			const event = {
+				type: "magic_context_startup_error",
+				error: "storage open failed: fixture",
+			};
+			if (pipe === "stdout") child.writeStdoutLine(event);
+			else {
+				const line = `${JSON.stringify(event)}\n`;
+				child.writeStderr(line.slice(0, 13));
+				child.writeStderr(line.slice(13));
+			}
+			child.writeStdoutLine(
+				agentEnd([
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "not a valid success" }],
+						stopReason: "stop",
+					},
+				]),
+			);
+			child.emitClose(0);
+			const result = await resultPromise;
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.reason).toBe("spawn_failed");
+				expect(result.error).toBe("storage open failed: fixture");
+			}
+			expect(spawnImpl).toHaveBeenCalledTimes(1);
+			expect(child.killSignals).toContain("SIGTERM");
+		});
+	}
+
 	it("returns spawn_failed when the child emits an error", async () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);

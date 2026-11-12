@@ -29,10 +29,9 @@
  * Session-scoped `ctx_note`/`ctx_expand` stay omitted because hidden child
  * sessions have no useful transcript or parent note id to target.
  *
- * Recursion guard: this entry never wires `pi.on("context", ...)`,
- * `pi.on("before_agent_start", ...)`, or any other event that could
- * trigger historian/dreamer/transform pipelines. Subagents only get the
- * tool surface — that's it.
+ * Recursion guard: this entry never starts historian/dreamer/transform
+ * pipelines. Its context hook only refuses provider calls after failed startup;
+ * healthy children get the tool surface without context rewriting.
  *
  * How parent passes this entry to the child:
  *   MAGIC_CONTEXT_PI_SUBAGENT=1 pi --print \
@@ -63,6 +62,7 @@ import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shar
 import { loadPiConfig } from "./config";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
+import { reportSubagentStartupError } from "./subagent-startup";
 import { registerMagicContextTools } from "./tools";
 
 const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
@@ -70,6 +70,27 @@ const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
 let openedDb: ContextDatabase | undefined;
 
 export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
+	let startupComplete = false;
+	let startupError: string | undefined;
+	let failureReported = false;
+	const reportStartupFailure = async () => {
+		if (failureReported) return;
+		failureReported = true;
+		await reportSubagentStartupError(
+			startupError ?? "Magic Context child startup did not complete",
+		);
+	};
+	// Hosts can swallow session_start exceptions and overwrite process.exitCode.
+	// Context is awaited before provider calls on both Pi and OMP; exit here so a
+	// failed child cannot spend a model turn without its required tools.
+	pi.on("context", async () => {
+		if (startupComplete) return;
+		try {
+			await reportStartupFailure();
+		} finally {
+			process.exit(1);
+		}
+	});
 	// Keep any unexpected session-scoped child write attributed to its actual
 	// Pi-compatible host, even though hidden children normally avoid those writes.
 	setHarness(resolvePiHarnessKind());
@@ -141,10 +162,13 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 					` memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
 					` git_commits=${cfg.memory.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
 			);
+			startupComplete = true;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			startupError = `Magic Context child startup failed: ${message}`;
 			log(`[pi-subagent] startup failed: ${message}`);
 			process.exitCode = 1;
+			await reportStartupFailure();
 			throw err;
 		}
 	});
