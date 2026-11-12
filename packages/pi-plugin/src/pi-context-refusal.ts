@@ -109,6 +109,9 @@ interface Operation {
 	// Recorded only for serializers that can chain through previous_response_id.
 	preparedHistory?: PiPreparedHistory;
 	retainedAfterEnd: boolean;
+	// A retryable provider end can be followed by an automatic retry in the
+	// same run; finalize only when OMP reports that the run settled.
+	awaitingSettle?: boolean;
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
 	started: boolean;
@@ -170,6 +173,15 @@ function releasePiOperationPayloads(operation: Operation): void {
 	operation.preparedHistory = undefined;
 }
 
+function finishPiOperation(operation: Operation): void {
+	operation.awaitingSettle = false;
+	operation.ended = true;
+	operation.ready = false;
+	// A completed run is no longer dispatchable. Keep its small lifecycle
+	// and budget state for diagnostics, not its conversation snapshots.
+	releasePiOperationPayloads(operation);
+}
+
 function operationKey(ctx: ExtensionContext): string | object {
 	return (
 		ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager ?? "no-session"
@@ -185,6 +197,27 @@ function messageKey(message: unknown): string | undefined {
 	return typeof role === "string" && typeof timestamp === "number"
 		? `${role}:${timestamp}`
 		: undefined;
+}
+
+/**
+ * OMP emits agent_end for every low-level run, including a run it will retry
+ * automatically. The extension event does not carry OMP's public `willRetry`
+ * field, so a terminal assistant error is the available retry signal. The
+ * final agent_settled event then closes the operation if no retry happened.
+ */
+function retryableAgentEnd(event: unknown): boolean {
+	if (!event || typeof event !== "object") return false;
+	if ((event as { willRetry?: unknown }).willRetry === true) return true;
+	const messages = (event as { messages?: unknown }).messages;
+	if (!Array.isArray(messages)) return false;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!message || typeof message !== "object") continue;
+		const row = message as { role?: unknown; stopReason?: unknown };
+		if (row.role !== "assistant") continue;
+		return row.stopReason === "error";
+	}
+	return false;
 }
 
 /**
@@ -533,12 +566,30 @@ export function registerPiGuardedContext(
 					);
 					return;
 				}
-				operation.ended = true;
-				operation.ready = false;
-				// A completed run is no longer dispatchable. Keep its small lifecycle
-				// and budget state for diagnostics, not its conversation snapshots.
-				releasePiOperationPayloads(operation);
+				if (
+					operation.dispatched &&
+					operation.pass?.completed &&
+					retryableAgentEnd(event)
+				) {
+					operation.awaitingSettle = true;
+					log(
+						`[magic-context][pi] retryable agent_end; keeping the latest context pass until agent_settled session=${String(key)} ${operation.pass?.diagnostic() ?? ""}`,
+					);
+					return;
+				}
+				finishPiOperation(operation);
 			}
+		});
+		pi.on("agent_settled", (_event, ctx) => {
+			const key = operationKey(ctx);
+			if (sideSessions.get(key)?.sides) return;
+			const operation = operations.get(key);
+			if (!operation?.awaitingSettle) return;
+			if (ctx.isIdle() === false) return;
+			finishPiOperation(operation);
+			log(
+				`[magic-context][pi] agent_settled after retryable agent_end; finalized the context pass session=${String(key)}`,
+			);
 		});
 		// Oh My Pi awaits this event for each finalized main-agent assistant message,
 		// before the message joins context and before the next provider request. It
