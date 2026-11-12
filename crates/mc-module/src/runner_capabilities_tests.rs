@@ -3,6 +3,45 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
+async fn temperature_uses_only_the_declared_group_and_shares_discovery() {
+    let cache = RunnerCapabilities::default();
+    assert!(
+        cache
+            .temperature("runner", 1, async {
+                Ok(json!({"capabilities": ["temperature", "cache_policy", "future_group"]}))
+            })
+            .await
+    );
+    assert!(
+        cache
+            .cache_policy("runner", 1, async {
+                panic!("temperature discovery must be shared")
+            })
+            .await
+    );
+    for (index, value) in [
+        json!({}),
+        json!({"temperature": true}),
+        json!({"capabilities": "temperature"}),
+        json!({"capabilities": [17, {"temperature": true}, "cache_policy"]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !cache
+                .temperature("runner", index as u64 + 2, async { Ok(value) })
+                .await
+        );
+    }
+    assert!(
+        !cache
+            .temperature("offline", 1, async { Err(ClientError::new("offline")) })
+            .await
+    );
+}
+
+#[tokio::test]
 async fn notice_keep_and_cache_policy_share_the_declared_set() {
     let cache = RunnerCapabilities::default();
     assert!(

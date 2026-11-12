@@ -777,8 +777,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Reply, SummaryError> {
-    let runner = &child.session.runner;
-    let with_temperature = !refuses_temperature(runner);
+    let with_temperature = client.child_temperature(child).await;
     let session_class = if how.creates_child && client.child_session_class(child).await {
         Some("summary".to_owned())
     } else {
@@ -792,27 +791,17 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     } else {
         None
     };
-    let send = |temperature: bool| {
-        let mut request = SendRequest::new(prompt, send_id.to_owned());
-        request.session_class = session_class.clone();
-        request.cache = cache.clone();
-        request.runner_params = run_params(how, temperature);
-        // The routing decision is a typed send field: the runner fixes it
-        // for the run and forwards it when it gets an account from routing.
-        request.route_decision_id = Some(how.decision_id.to_owned());
-        request
-    };
-    let reply = match client.send_child(child, send(with_temperature)).await {
-        // No contract declares `generation.temperature`, so a runner may
-        // refuse it by name (llm-runner §9). A refused send starts nothing:
-        // send again without it, and leave it out for that runner from now on.
-        Err(error) if with_temperature && error.message.contains("generation.temperature") => {
-            remember_temperature_refused(runner);
-            client.send_child(child, send(false)).await
-        }
-        other => other,
-    }
-    .map_err(|error| send_refused(&error, how.send))?;
+    let mut request = SendRequest::new(prompt, send_id.to_owned());
+    request.session_class = session_class;
+    request.cache = cache;
+    request.runner_params = run_params(how, with_temperature);
+    // The routing decision is a typed send field: the runner fixes it
+    // for the run and forwards it when it gets an account from routing.
+    request.route_decision_id = Some(how.decision_id.to_owned());
+    let reply = client
+        .send_child(child, request)
+        .await
+        .map_err(|error| send_refused(&error, how.send))?;
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
@@ -851,6 +840,10 @@ pub(crate) mod session_class_tests;
 #[path = "account_wait_send_tests.rs"]
 pub(crate) mod account_wait_send_tests;
 
+#[cfg(test)]
+#[path = "temperature_tests.rs"]
+mod temperature_tests;
+
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system
 /// prompt, one model step and, on the send that creates the child, no tools.
@@ -878,27 +871,6 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
         params.insert("tools".into(), json!([]));
     }
     params
-}
-
-/// The runners that refused `generation.temperature`, for this process.
-fn temperature_refusals() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static REFUSED: OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
-        OnceLock::new();
-    REFUSED.get_or_init(Default::default)
-}
-
-fn refuses_temperature(runner: &str) -> bool {
-    temperature_refusals()
-        .lock()
-        .expect("temperature refusals")
-        .contains(runner)
-}
-
-fn remember_temperature_refused(runner: &str) {
-    temperature_refusals()
-        .lock()
-        .expect("temperature refusals")
-        .insert(runner.to_owned());
 }
 
 /// A run's usage as one step's: the summarizer runs one step.

@@ -330,6 +330,7 @@ impl Report {
 
 struct State {
     notice_keep: bool,
+    temperature: bool,
     provider_entry_speaks_for: bool,
     /// The provider declared `compaction-signed-floor/v1`, so Setup and
     /// conditions name the signed floor.
@@ -616,12 +617,21 @@ impl Host {
         self.lock().notice_keep = declared;
     }
 
+    /// Opt in to sampling temperature, so tests can emulate older runners too.
+    pub fn declare_temperature(&self, declared: bool) {
+        self.lock().temperature = declared;
+    }
+
     pub fn describe(&self) -> Value {
-        let capabilities = if self.lock().notice_keep {
+        let state = self.lock();
+        let mut capabilities = if state.notice_keep {
             vec!["cache_policy", "message_marks", "notice_keep"]
         } else {
             vec!["cache_policy"]
         };
+        if state.temperature {
+            capabilities.push(cortexkit_role_llm_runner::capabilities::TEMPERATURE);
+        }
         serde_json::json!({"capabilities": capabilities})
     }
 
@@ -697,6 +707,17 @@ impl Host {
     /// is stored as a person's message, whoever sent it.
     pub fn send(&self, bound_session: &str, request: SendRequest) -> Result<SendReply, Refusal> {
         let mut state = self.lock();
+        if request
+            .temperature()
+            .map_err(|field| Refusal::invalid_params(&field, "malformed temperature"))?
+            .is_some()
+            && !state.temperature
+        {
+            return Err(Refusal::invalid_params(
+                "generation.temperature",
+                "temperature is not declared",
+            ));
+        }
         if bound_session != state.config.session.session {
             let started = Instant::now();
             let responder = state.responder.clone();
@@ -889,6 +910,7 @@ impl<P: Provider> Runner<P> {
         }
         let state = State {
             notice_keep: false,
+            temperature: false,
             provider_entry_speaks_for: false,
             provider_signed_floor: false,
             signed_floor: None,

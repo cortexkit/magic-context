@@ -8,6 +8,8 @@ use std::sync::Mutex;
 
 pub(crate) struct Client {
     pub declares: bool,
+    pub temperature: bool,
+    pub refuse_temperature: bool,
     pub sends: Mutex<Vec<(Child, SendRequest)>>,
     discoveries: AtomicUsize,
 }
@@ -16,6 +18,8 @@ impl Client {
     pub fn new(declares: bool) -> Self {
         Self {
             declares,
+            temperature: true,
+            refuse_temperature: false,
             sends: Mutex::new(vec![]),
             discoveries: AtomicUsize::new(0),
         }
@@ -23,6 +27,9 @@ impl Client {
 }
 
 impl RunnerClient for Client {
+    async fn child_temperature(&self, _: &Child) -> bool {
+        self.temperature
+    }
     async fn child_session_class(&self, _: &Child) -> bool {
         self.discoveries.fetch_add(1, Ordering::SeqCst);
         self.declares
@@ -49,6 +56,12 @@ impl RunnerClient for Client {
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
         self.sends.lock().unwrap().push((child.clone(), request));
+        if self.refuse_temperature && self.sends.lock().unwrap().len() == 1 {
+            return Err(ClientError::refused(
+                "invalid_params",
+                "generation.temperature refused",
+            ));
+        }
         let mut reply = SendReply::new(states::ACTIVE);
         reply.run_id = Some("run".into());
         Ok(reply)

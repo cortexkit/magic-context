@@ -105,6 +105,11 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn child_session_class(&self, _child: &Child) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// Whether this child runner declares sampling temperature support.
+    /// Older or undiscoverable runners keep their own sampling defaults.
+    fn child_temperature(&self, _child: &Child) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
     /// `session.read`.
     fn read(
         &self,

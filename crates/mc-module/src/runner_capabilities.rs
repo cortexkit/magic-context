@@ -75,6 +75,18 @@ impl RunnerCapabilities {
             .contains(cortexkit_role_llm_runner::capabilities::SESSION_CLASS)
     }
 
+    pub async fn temperature(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::TEMPERATURE)
+    }
+
     /// `run.cancel` is served only by a runner declaring the `run_cancel`
     /// group.
     pub async fn run_cancel(

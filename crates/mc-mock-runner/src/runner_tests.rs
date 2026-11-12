@@ -185,6 +185,61 @@ async fn start(config: SessionConfig) -> Runner<TestProvider> {
 }
 
 #[tokio::test]
+async fn temperature_declaration_controls_child_send_admission() {
+    use cortexkit_role_llm_runner::send::SendRequest;
+
+    let runner = start(config(Kind::OpenAi, free(), 40_000)).await;
+    let host = runner.host();
+    let request = SendRequest::new("summarize", "first").with_runner_params(
+        json!({
+            "model": {"provider": "test", "model": "test-model"},
+            "system": "system",
+            "generation": {"max_output_tokens": 1000, "temperature": 0.1},
+            "stop_when": {"max_steps": 1},
+            "tools": []
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    assert_eq!(host.describe()["capabilities"], json!(["cache_policy"]));
+    let refusal = host.send("summary-child", request.clone()).unwrap_err();
+    assert_eq!(refusal.code, "invalid_params");
+    assert_eq!(
+        refusal.detail.unwrap()["field"],
+        json!("generation.temperature")
+    );
+    assert!(host.child_runs().is_empty());
+
+    host.declare_temperature(true);
+    assert_eq!(
+        host.describe()["capabilities"],
+        json!(["cache_policy", "temperature"])
+    );
+    host.send("summary-child", request).unwrap();
+    assert_eq!(
+        host.child_runs()[0].settings.generation.temperature,
+        Some(0.1)
+    );
+
+    host.declare_temperature(false);
+    let request = SendRequest::new("summarize", "without-temperature").with_runner_params(
+        json!({
+            "model": {"provider": "test", "model": "test-model"},
+            "system": "system",
+            "generation": {"max_output_tokens": 1000},
+            "stop_when": {"max_steps": 1},
+            "tools": []
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    host.send("other-child", request).unwrap();
+    assert_eq!(host.child_runs()[1].settings.generation.temperature, None);
+}
+
+#[tokio::test]
 async fn speaks_for_projection_is_gated_until_the_next_setup_for_reads_and_notices() {
     use cortexkit_role_compaction::read::{Detail, ReadRequest, Select};
     let mut runner = start(config(Kind::OpenAi, free(), 40_000)).await;

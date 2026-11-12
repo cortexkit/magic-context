@@ -481,6 +481,20 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
+    async fn child_temperature(&self, child: &Child) -> bool {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .temperature(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
+            .await
+    }
+
     async fn read(
         &self,
         session: &SessionRef,
