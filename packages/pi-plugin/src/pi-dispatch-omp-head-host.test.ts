@@ -72,6 +72,19 @@ const ompLogDescriptors = (): string[] => {
 // log descriptor open after its temporary root is deleted. Only descriptors
 // this file's pin opens are checked against this root.
 const inheritedOmpLogs = new Set(ompLogDescriptors());
+// Database descriptors open before the hosts load: an earlier test file in
+// this Bun process (the CI shards reuse one process for several files) can
+// leave its own temporary context.db open after deleting its folder. The check
+// below concerns only what loading the Oh My Pi hosts opens.
+const databaseDescriptors = (): string[] => {
+	if (process.platform !== "linux") return [];
+	const inventory = listOpenFiles();
+	if (!inventory.available) throw new Error(inventory.reason);
+	return inventory.entries
+		.filter((entry) => /\/(?:context|store)\.db\b/.test(entry.path))
+		.map((entry) => `${entry.descriptor} ${entry.path}`);
+};
+const inheritedDatabases = new Set(databaseDescriptors());
 await pinOmpLoggerFiles(root, aliases);
 const hosts = await Promise.all(
 	definitions.map(async (definition) => {
@@ -103,10 +116,11 @@ const hosts = await Promise.all(
 	}),
 );
 await exerciseOmpLoggerFiles(aliases);
-const inventory = process.platform === "linux" ? listOpenFiles() : undefined;
-// The database exclusion check requires a complete inventory, not an empty fallback.
-if (inventory && !inventory.available) throw new Error(inventory.reason);
-const descriptors = inventory?.available ? inventory.paths : [];
+// The database exclusion check requires a complete inventory, not an empty
+// fallback; databaseDescriptors throws when the inventory is unavailable.
+const openedDatabases = databaseDescriptors().filter(
+	(line) => !inheritedDatabases.has(line),
+);
 const pinnedOmpLogs = ompLogDescriptors().filter(
 	(line) => !inheritedOmpLogs.has(line),
 );
@@ -117,9 +131,7 @@ for (const line of pinnedOmpLogs) {
 	expect(line).toContain(root);
 	console.log("isolated OMP host descriptor:", line);
 }
-for (const line of descriptors) {
-	expect(line).not.toMatch(/\/(?:context|store)\.db\b/);
-}
+expect(openedDatabases).toEqual([]);
 afterAll(() => {
 	__setPiHarnessKindForTesting(undefined);
 	for (const [key, value] of Object.entries(previous)) {
