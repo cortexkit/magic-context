@@ -6717,11 +6717,25 @@ export function registerPiContextHandler(
 					getHarness() === "pi" && baseWindowGeometry
 						? baseWindowGeometry.derivation.absoluteWall
 						: rawFallbackLimit;
+				// Reuse the counts this pass's token accounting just took for the
+				// same served messages; a message whose token-relevant fields differ
+				// from its cached fingerprint is counted again.
+				const fitTokenCounts = () => {
+					const cache = piMessageTokenCacheBySession.get(sessionId);
+					return cache
+						? {
+								cache,
+								stableId: (message: object) =>
+									result.postCommitEntryIdByRef.get(message),
+							}
+						: undefined;
+				};
 				let estimate = estimatePiOutgoingInputTokens(
 					outputMessages,
 					envelope,
 					measuredPrefix,
 					outgoingFitLimit,
+					fitTokenCounts(),
 				);
 				let fitReclaimedThisPass = false;
 				if (
@@ -6782,6 +6796,7 @@ export function registerPiContextHandler(
 						envelope,
 						undefined,
 						rawFallbackLimit,
+						fitTokenCounts(),
 					);
 				}
 				const opaqueFallbackSteps =
@@ -7055,6 +7070,7 @@ export function registerPiContextHandler(
 									envelope,
 									undefined,
 									outgoingFitLimit,
+									fitTokenCounts(),
 								);
 							} finally {
 								if (!reclaimCompleted && upperCursor && reservation)

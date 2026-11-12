@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -35,7 +36,12 @@ type RecordRow = {
 	inputBytes: number;
 	servedMessages: number;
 	requestBytes: number;
+	requestHash?: string;
 	dispatchRefusal?: string;
+	refusal?: string;
+	tagRows?: number;
+	shape: string;
+	counters: Record<string, number>;
 };
 const median = (values: number[]) =>
 	[...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
@@ -87,6 +93,40 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 		const { resetLkgSlotsForTest } = await import(
 			"@magic-context/core/hooks/magic-context/lkg-slot"
 		);
+		const { appendCompartments } = await import(
+			"@magic-context/core/features/magic-context/compartment-storage"
+		);
+		const { __test: tailHygiene } = await import("../tail-hygiene-walk-pi");
+		// The test preload already loaded the shared estimator, so count its calls
+		// through a call-through spy rather than the loader instrumentation.
+		const formatting = await import(
+			"@magic-context/core/hooks/magic-context/read-session-formatting"
+		);
+		const estimateTokens = formatting.estimateTokens;
+		const tokenizerCalls = { calls: 0, chars: 0 };
+		// Optional: attribute tokenizer calls to their nearest product caller.
+		const tokenizerSites = new Map<string, number>();
+		const recordSites = process.env.MC_PI_PROFILE_TOKENIZER_SITES === "1";
+		const tokenizerSpy = spyOn(formatting, "estimateTokens").mockImplementation(
+			(text: string) => {
+				tokenizerCalls.calls += 1;
+				tokenizerCalls.chars += text.length;
+				if (recordSites) {
+					const site = (new Error().stack ?? "")
+						.split("\n")
+						.slice(2, 6)
+						.map((line) =>
+							line
+								.trim()
+								.replace(/^at /, "")
+								.replace(/\(.*\/src\//, "("),
+						)
+						.join(" < ");
+					tokenizerSites.set(site, (tokenizerSites.get(site) ?? 0) + 1);
+				}
+				return estimateTokens(text);
+			},
+		);
 		const require = createRequire(import.meta.url);
 		const output = resolve(
 			process.env.MC_PI_PROFILE_OUTPUT ?? join(scratch, "pi-preparation.json"),
@@ -96,6 +136,22 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 			.map(Number);
 		const runs = Number(process.env.MC_PI_PROFILE_RUNS ?? 5);
 		const diagnostic = process.env.MC_PI_PROFILE_DIAGNOSTIC === "1";
+		// "raw" sends the whole branch. "compacted" models a real long session:
+		// summaries cover everything except the newest `keep` messages, so the
+		// cut removes the covered history from the request.
+		const shape = process.env.MC_PI_PROFILE_SHAPE ?? "raw";
+		const keep = Number(process.env.MC_PI_PROFILE_KEEP ?? 500);
+		// Resend the first turn this many times before the append, as a user does
+		// after a refusal. With retries, a refused attempt is recorded, not failed.
+		const retries = Number(process.env.MC_PI_PROFILE_RETRIES ?? 0);
+		expect(Number.isSafeInteger(retries) && retries >= 0).toBe(true);
+		const passes = [
+			"fresh",
+			...Array.from({ length: retries }, (_, i) => `retry-${i + 1}`),
+			"append",
+		];
+		expect(["raw", "compacted"]).toContain(shape);
+		expect(Number.isSafeInteger(keep) && keep > 0 && keep % 5 === 0).toBe(true);
 		const { PiContextBudget } = await import("../pi-context-budget");
 		// A diagnostic clock lets a refused large pass finish so its later stages
 		// can be measured. It does not change the shipped guard or the stage clocks.
@@ -270,8 +326,28 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 							},
 						});
 						const sessionId = `profile-${kind}-${count}-${run}`;
+						if (shape === "compacted") {
+							// 500-message summaries end on a user message (index % 5 === 4),
+							// so no summary splits a tool call from its result.
+							const covered = count - keep;
+							expect(covered).toBeGreaterThan(0);
+							const compartments = [];
+							for (let start = 0; start < covered; start += 500) {
+								const end = Math.min(start + 500, covered) - 1;
+								compartments.push({
+									sequence: compartments.length,
+									startMessage: start + 1,
+									endMessage: end + 1,
+									startMessageId: `entry-${start}`,
+									endMessageId: `entry-${end}`,
+									title: `Synthetic files ${start} to ${end}`,
+									content: `U: inspect synthetic files ${start} to ${end}\nA: inspected them; the exported API stayed compatible.`,
+								});
+							}
+							appendCompartments(db, sessionId, compartments);
+						}
 						try {
-							for (const pass of ["fresh", "append"]) {
+							for (const pass of passes) {
 								// A host rebuilds from raw persisted history, not the array the
 								// preceding hook rewrote. Reuse the same handler/DB on append.
 								const source = structuredClone(messages);
@@ -336,13 +412,76 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 									inputBytes,
 									servedMessages: 0,
 									requestBytes: 0,
+									shape,
+									counters: {},
 								};
 								sampleHeap();
+								tokenizerCalls.calls = 0;
+								tokenizerCalls.chars = 0;
+								tokenizerSpy.mockClear();
+								tokenizerSites.clear();
+								tailHygiene.resetContentMemoCounters?.();
 								const result = (await timeAsync("contextHook", () =>
 									context({ messages: projected } as never, ctx as never),
 								)) as { messages?: unknown[] } | undefined;
 								const served = result?.messages ?? projected;
 								row.servedMessages = served.length;
+								const memo = tailHygiene.contentMemoStats();
+								row.counters = {
+									tokenizerCalls: tokenizerCalls.calls,
+									tokenizerChars: tokenizerCalls.chars,
+									tailMemoHits: memo.hits,
+									tailMemoMisses: memo.misses,
+									tailMemoEvictions: memo.evictions,
+									tailMemoTokenizations: memo.tokenizations,
+									tailMemoEntries: memo.entries,
+									tailMemoBytes: memo.bytes,
+								};
+								tokenizerSpy.mockClear();
+								if (recordSites) {
+									console.log(
+										"TOKENIZER_SITES",
+										pass,
+										JSON.stringify(
+											[...tokenizerSites]
+												.sort((a, b) => b[1] - a[1])
+												.slice(0, 12),
+											null,
+											1,
+										),
+									);
+									tokenizerSites.clear();
+								}
+								row.tagRows = (
+									db
+										.prepare(
+											"SELECT COUNT(*) AS n FROM tags WHERE session_id = ?",
+										)
+										.get(sessionId) as { n: number }
+								).n;
+								if (blocked) {
+									row.refusal = diagnostics.at(-1) ?? "refused";
+									expect(retries, row.refusal).toBeGreaterThan(0);
+									records.push(row);
+									console.log(
+										"PROFILE",
+										JSON.stringify({
+											host: kind,
+											count,
+											run,
+											pass,
+											shape,
+											refused: row.refusal,
+											tagRows: row.tagRows,
+											contextHookMs: row.stages.contextHook,
+										}),
+									);
+									row = undefined;
+									await new Promise<void>((done) => setImmediate(done));
+									continue;
+								}
+								if (shape === "compacted")
+									expect(served.length).toBeLessThan(source.length);
 								// Finish the asynchronous LKG write before starting the next
 								// turn, and report it separately from foreground latency.
 								await timeAsync(
@@ -385,6 +524,10 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 													activeRow.requestBytes = Buffer.byteLength(
 														String(init.body),
 													);
+													// Lets two code versions prove they sent identical bytes.
+													activeRow.requestHash = createHash("sha256")
+														.update(String(init.body))
+														.digest("hex");
 													return new Response(
 														"synthetic provider error after capture",
 														{ status: 400 },
@@ -419,8 +562,13 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 										count,
 										run,
 										pass,
+										shape,
+										servedMessages: row.servedMessages,
+										tagRows: row.tagRows,
+										requestHash: row.requestHash,
 										contextHookMs: row.stages.contextHook,
 										heapPeakBytes: row.heapPeakBytes,
+										counters: row.counters,
 									}),
 								);
 								writeFileSync(
@@ -456,7 +604,7 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 			}
 			for (const host of new Set(records.map((record) => record.host))) {
 				for (const count of counts)
-					for (const pass of ["fresh", "append"]) {
+					for (const pass of passes) {
 						const selected = records.filter(
 							(record) =>
 								record.host === host &&
@@ -480,6 +628,30 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 										median(selected.map((record) => record.stages[stage] ?? 0)),
 									]),
 								),
+								internal: Object.fromEntries(
+									[
+										...new Set(
+											selected.flatMap((record) =>
+												record.internal.map((sample) => sample.stage),
+											),
+										),
+									].map((stage) => [
+										stage,
+										median(
+											selected.map((record) =>
+												record.internal
+													.filter((sample) => sample.stage === stage)
+													.reduce((sum, sample) => sum + sample.elapsedMs, 0),
+											),
+										),
+									]),
+								),
+								counters: Object.fromEntries(
+									Object.keys(selected[0]?.counters ?? {}).map((key) => [
+										key,
+										median(selected.map((record) => record.counters[key] ?? 0)),
+									]),
+								),
 								heapPeakBytes: Math.max(
 									...selected.map((record) => record.heapPeakBytes),
 								),
@@ -490,6 +662,7 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 		} finally {
 			clock?.mockRestore();
 			hydration?.mockRestore();
+			tokenizerSpy.mockRestore();
 			restoreTiming();
 			setStageObserver(undefined);
 			__setPiHarnessKindForTesting(undefined);

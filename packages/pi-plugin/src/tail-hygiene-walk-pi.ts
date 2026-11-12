@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { protectedToolTagNumbers } from "@magic-context/core/features/magic-context/reclaim-protection";
 import { estimateImageTokensFromDataUrl } from "@magic-context/core/hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
@@ -22,13 +23,28 @@ import type { PiTagMetadata } from "./tag-snapshot-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
 const SYNTHETIC_TODO_PREFIX = "mc_synthetic_todo_";
-const MAX_CONTENT_MEMO_ENTRIES = 100_000;
+// The memo holds one small entry per distinct measured part. The entry bound is
+// sized so a 100,000-message session's parts all fit; every pass re-walks the
+// whole rendered request, so a memo smaller than that history evicts in the
+// same order the next pass reads, and then every lookup misses.
+const MAX_CONTENT_MEMO_ENTRIES = 250_000;
 const MAX_CONTENT_MEMO_BYTES = 64 * 1024 * 1024;
+// Content up to this length is its own memo key. Longer content is keyed by a
+// digest, so the memo's byte bound counts a fixed-size key per part instead of
+// the part itself. Keying by full content made a long session's tool outputs
+// fill the 64 MiB bound and evict each other on every pass.
+const INLINE_CONTENT_KEY_CHARS = 64;
 const contentMemo = new Map<
 	string,
 	{ hash: string; tokens: number | undefined; keyBytes: number }
 >();
 let contentMemoBytes = 0;
+// Lookup outcomes, read only by tests and profiling. They show whether a pass
+// reused earlier measurements or re-measured history the memo had to evict.
+let contentMemoHits = 0;
+let contentMemoMisses = 0;
+let contentMemoEvictions = 0;
+let contentMemoTokenizations = 0;
 
 /**
  * Forget every memoized token count. The memo is process-global, so a test that
@@ -44,7 +60,17 @@ export const __test = {
 	contentMemoStats: () => ({
 		entries: contentMemo.size,
 		bytes: contentMemoBytes,
+		hits: contentMemoHits,
+		misses: contentMemoMisses,
+		evictions: contentMemoEvictions,
+		tokenizations: contentMemoTokenizations,
 	}),
+	resetContentMemoCounters: () => {
+		contentMemoHits = 0;
+		contentMemoMisses = 0;
+		contentMemoEvictions = 0;
+		contentMemoTokenizations = 0;
+	},
 };
 
 const FNV1A_32_OFFSET = 0x811c9dc5;
@@ -127,11 +153,17 @@ function memoizedContent(
 	kind: TailHygienePartKind,
 	content: string,
 ): { hash: string; tokens: number | undefined } {
-	const key = `${kind}\0${content}`;
+	const key = contentMemoKey(kind, content);
 	const cached = contentMemo.get(key);
-	if (cached) return cached;
+	if (cached) {
+		contentMemoHits += 1;
+		return cached;
+	}
+	contentMemoMisses += 1;
 	const measured = {
-		hash: fnv1a32(key),
+		// The part hash feeds persisted content signatures, so it stays the
+		// FNV-1a of kind and full content whatever the memo key is.
+		hash: fnv1a32(`${kind}\0${content}`),
 		tokens: kind === "excluded" ? 0 : undefined,
 		keyBytes: key.length * 2 + 32,
 	};
@@ -146,16 +178,44 @@ function memoizedContent(
 		const removed = contentMemo.get(oldest);
 		if (removed) contentMemoBytes -= removed.keyBytes;
 		contentMemo.delete(oldest);
+		contentMemoEvictions += 1;
 	}
 	return measured;
 }
 
-function memoizedTokens(kind: TailHygienePartKind, content: string): number {
+/**
+ * Memo key for one part's content. Short content is used as is. Longer content
+ * uses its length and SHA-256: two different texts would need a SHA-256
+ * collision to share an entry. The digest reads UTF-16 code units, because
+ * UTF-8 encoding would turn different unpaired surrogates into the same bytes.
+ */
+function contentMemoKey(kind: TailHygienePartKind, content: string): string {
+	if (content.length <= INLINE_CONTENT_KEY_CHARS) return `${kind}\0=${content}`;
+	const digest = createHash("sha256")
+		.update(content, "utf16le")
+		.digest("base64");
+	return `${kind}\0#${content.length}\0${digest}`;
+}
+
+/**
+ * Token count and part hash from one memo lookup. Returning the hash with the
+ * count spares the walk a second lookup, and with it a second digest of the
+ * same content, when the part is finalized.
+ */
+function measuredContent(
+	kind: TailHygienePartKind,
+	content: string,
+): { contentHash: string; tokens: number } {
 	const measured = memoizedContent(kind, content);
 	if (measured.tokens === undefined) {
+		contentMemoTokenizations += 1;
 		measured.tokens = estimateTokens(content);
 	}
-	return measured.tokens;
+	return { contentHash: measured.hash, tokens: measured.tokens };
+}
+
+function memoizedTokens(kind: TailHygienePartKind, content: string): number {
+	return measuredContent(kind, content).tokens;
 }
 
 function partHash(kind: TailHygienePartKind, content: string): string {
@@ -844,7 +904,7 @@ export function measurePiTailHygiene(
 					key: `${messageKey}\0text:0`,
 					kind: "text",
 					content,
-					tokens: memoizedTokens("text", content),
+					...measuredContent("text", content),
 					tag,
 				});
 			}
@@ -888,7 +948,7 @@ export function measurePiTailHygiene(
 							key: `${key}\0toolOutput`,
 							kind: "toolOutput",
 							content,
-							tokens: memoizedTokens("toolOutput", content),
+							...measuredContent("toolOutput", content),
 							tag: arc?.sentinel ? undefined : tag,
 						});
 					}
@@ -906,7 +966,7 @@ export function measurePiTailHygiene(
 						key: `${key}\0text`,
 						kind: "text",
 						content,
-						tokens: memoizedTokens("text", content),
+						...measuredContent("text", content),
 						tag,
 					});
 				}
@@ -950,7 +1010,7 @@ export function measurePiTailHygiene(
 						key: `${key}\0toolInput`,
 						kind: "toolInput",
 						content,
-						tokens: memoizedTokens("toolInput", content),
+						...measuredContent("toolInput", content),
 						tag: arc?.sentinel ? undefined : arc?.tag,
 					});
 				}

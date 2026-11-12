@@ -57,6 +57,13 @@ export interface PiMessageTokenCacheEntry {
 export interface TokenizePiMessagesOptions {
 	cache: Map<string, PiMessageTokenCacheEntry>;
 	stableId: (message: object) => string | undefined;
+	/**
+	 * Drop cached ids absent from this call (default true). A caller that
+	 * counts a different selection of the same request, such as the outgoing
+	 * fit estimate, passes false so it cannot evict entries the pass's own
+	 * accounting still needs.
+	 */
+	prune?: boolean;
 	onTiming?: (
 		phase: "cacheValidation" | "bpe" | "cachePrune",
 		elapsedMs: number,
@@ -237,7 +244,7 @@ export function tokenizePiMessages(
 		}
 	}
 
-	if (options && liveIds) {
+	if (options && liveIds && options.prune !== false) {
 		const cachePruneStart = options.onTiming ? performance.now() : 0;
 		for (const id of options.cache.keys()) {
 			if (!liveIds.has(id)) options.cache.delete(id);
