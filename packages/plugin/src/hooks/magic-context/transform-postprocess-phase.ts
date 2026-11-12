@@ -3107,6 +3107,18 @@ export async function runPostTransformPhase(
         args.sessionId,
         `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} cache_expired=${args.m0M1?.hardSignals?.cacheExpired === true} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
     );
+    // The served check compares the request this pass returns with the one
+    // served before it; it needs this permission and its inputs to say whether
+    // a change it finds was allowed. A memory note only, read after the pass.
+    noteServedPassPermission(args.sessionId, {
+        permitted: isCacheBustingPass,
+        rides: reclaimRideLabel(rideSignals),
+        signedThinkingHold: activeThinkingPrefixHold,
+        firstRender: firstRenderBust,
+        hostCheckpointHead: hostCheckpointRide,
+        emergency: forceBandConfirmed,
+        schedulerDecision: args.schedulerDecision,
+    });
     let recoveryTailNormalizedThisPass = false;
     if (args.normalizeRecoveryTail && canNormalizeRecoveredShape) {
         args.normalizeRecoveryTail();
@@ -5792,6 +5804,7 @@ export function checkM0MutationDriftAndSignal(args: {
 }
 
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
+import { noteServedPassPermission } from "./served-check";
 import {
     clearPendingMaterialization,
     hasPendingMaterializationOrigin,

@@ -1862,6 +1862,8 @@ export function createTransform(deps: TransformDeps) {
                 deps.liveModelBySession?.set(sessionId, recovered);
             }
         }
+        // The served check reads the model this pass serves to after the pass.
+        noteServedModel(sessionId, modelForBudget);
         // Single pass-local provider resolution for every empty-sentinel producer.
         // A cold pass may recover the model from OpenCode's DB above; hot passes hit
         // the live map. Reusing this value keeps cold/hot output identical and keeps
@@ -5023,6 +5025,7 @@ export function createTransform(deps: TransformDeps) {
 export { resolveHistoryBudgetTokens } from "./render-options";
 
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
+import { noteServedModel } from "./served-check";
 import { resolveDecisionCalibration } from "./decision-calibration";
 import {
     beginSystemDateRequest,

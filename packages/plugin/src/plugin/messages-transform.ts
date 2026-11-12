@@ -29,6 +29,14 @@ import { dropSlot, getSlot, lkgContentDigest, noteEntry } from "../hooks/magic-c
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { replayCommittedDrops } from "../hooks/magic-context/replay-committed-drops";
 import {
+    beginServedRequest,
+    commitServedRequest,
+    countServedRefusal,
+    forgetServedRecord,
+    noteServedHostInput,
+    noteServedReplay,
+} from "../hooks/magic-context/served-check";
+import {
     noteExternalLkgReplay,
     type RustLkgReplayParticipant,
     resolveRustLkgReplayParticipant,
@@ -388,6 +396,7 @@ export function tryMessagesTransformLkgReplay(args: {
                         output,
                         replay.messages as unknown as MessageWithParts[],
                     );
+                    noteServedReplay(sessionId);
                     sessionLog(sessionId, "lkg_replay_served");
                     return true;
                 } else {
@@ -472,6 +481,12 @@ export function createMessagesTransformHandler(args: {
      * registry picks the adapter (the one that most recently ran the session).
      */
     rustReplayParticipant?: () => RustLkgReplayParticipant | null | undefined;
+    /**
+     * Record the returned request in the served check (served-check.ts). On by
+     * default; OpenCode 2 turns it off because its context hook changes the
+     * request after this wrapper returns and records it there.
+     */
+    recordServed?: boolean;
 }): (input: Record<string, never>, output: MessagesTransformOutput) => Promise<MessageWithParts[]> {
     const resolveRust = (sessionId: string): RustLkgReplayParticipant | undefined =>
         args.rustReplayParticipant
@@ -492,6 +507,7 @@ export function createMessagesTransformHandler(args: {
         // stay read-only.
         const compactionOffInputSnapshot = args.compactionOff ? [...output.messages] : null;
         const restoreCompactionOffInput = (): void => {
+            if (compactionOffInputSnapshot && sessionId) noteServedHostInput(sessionId);
             if (compactionOffInputSnapshot && output.messages !== compactionOffInputSnapshot) {
                 output.messages.splice(0, output.messages.length, ...compactionOffInputSnapshot);
             }
@@ -589,6 +605,8 @@ export function createMessagesTransformHandler(args: {
                                 tryReopen: args.tryReopenStorage,
                             });
                         }
+                        // The pass did not run: the host's own messages go out.
+                        if (sessionId) noteServedHostInput(sessionId);
                         return output.messages;
                     }
                 }
@@ -734,35 +752,84 @@ export function createMessagesTransformHandler(args: {
         return output.messages;
     };
 
+    /**
+     * Hand the returned request to the served check, or count the refusal when
+     * nothing was returned. Runs after every statement that can still refuse
+     * the turn, and never throws. Rust mode is outside the check: its record
+     * is forgotten so a later TypeScript pass starts from unknown.
+     */
+    const finishServedRequest = (
+        sessionId: string,
+        output: MessagesTransformOutput,
+        returned: boolean,
+    ): void => {
+        try {
+            if (!returned) countServedRefusal(sessionId);
+            else if (resolveRust(sessionId)) forgetServedRecord(sessionId);
+            else {
+                const keys = resolveLkgModelKeys(output.messages as MessageLike[]);
+                commitServedRequest({
+                    sessionId,
+                    host: "opencode",
+                    messages: output.messages,
+                    providerID: keys.providerKey,
+                    modelID:
+                        keys.modelKey && keys.providerKey
+                            ? keys.modelKey.slice(keys.providerKey.length + 1)
+                            : keys.modelKey,
+                    compactionOff: args.compactionOff === true,
+                });
+            }
+        } catch (error) {
+            sessionLog(sessionId, "served check skipped:", error);
+        }
+    };
+
     return (input, output): Promise<MessageWithParts[]> =>
         withSqliteTransformPass(async () => {
-            const tail = output.messages.at(-1);
-            // OpenCode persists the user row before its parts. Refuse before any
-            // transform or replay can turn that incomplete row into the old request.
-            // ID-less injected heads and host summary rows are not arriving prompts.
-            if (
-                tail?.info.role === "user" &&
-                tail.info.id &&
-                !(tail.info as { summary?: boolean }).summary &&
-                tail.parts.length === 0
-            ) {
-                throw new IncompleteUserMessageError();
-            }
-            const inputMessages = [...output.messages];
-            // Read before the transform runs: it mutates the shared message objects.
-            const inputTailRole = wireTailRole(output.messages);
-            enforcePersistedUserTerminatedTail(output.messages);
+            const servedSessionId = args.recordServed === false ? null : resolveSessionId(output);
+            if (servedSessionId) beginServedRequest(servedSessionId);
+            let returned = false;
             try {
-                return await run(input, output);
+                const served = await servePass(input, output);
+                returned = true;
+                return served;
             } finally {
-                preserveUserTerminatedTail(output.messages, inputMessages);
-                reportAssistantTerminatedTail(
-                    output.messages,
-                    inputTailRole,
-                    resolveSessionId(output),
-                );
+                if (servedSessionId) finishServedRequest(servedSessionId, output, returned);
             }
         });
+
+    async function servePass(
+        input: Record<string, never>,
+        output: MessagesTransformOutput,
+    ): Promise<MessageWithParts[]> {
+        const tail = output.messages.at(-1);
+        // OpenCode persists the user row before its parts. Refuse before any
+        // transform or replay can turn that incomplete row into the old request.
+        // ID-less injected heads and host summary rows are not arriving prompts.
+        if (
+            tail?.info.role === "user" &&
+            tail.info.id &&
+            !(tail.info as { summary?: boolean }).summary &&
+            tail.parts.length === 0
+        ) {
+            throw new IncompleteUserMessageError();
+        }
+        const inputMessages = [...output.messages];
+        // Read before the transform runs: it mutates the shared message objects.
+        const inputTailRole = wireTailRole(output.messages);
+        enforcePersistedUserTerminatedTail(output.messages);
+        try {
+            return await run(input, output);
+        } finally {
+            preserveUserTerminatedTail(output.messages, inputMessages);
+            reportAssistantTerminatedTail(
+                output.messages,
+                inputTailRole,
+                resolveSessionId(output),
+            );
+        }
+    }
 }
 
 function resolveSessionId(output: MessagesTransformOutput): string | null {
