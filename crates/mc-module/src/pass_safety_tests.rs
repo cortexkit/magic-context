@@ -8,7 +8,7 @@ fn an_accepted_lane_or_history_rewrite_rearms_an_emergency_episode_without_a_bat
         // The large task keeps the fixed prompt cost below the reclaim target.
         let mut task = text(1, "task");
         task.parts[0].body = PartBody::Text {
-            text: "task ".repeat(20_000),
+            text: "task ".repeat(20_000).into(),
         };
         session.index.extend([
             task,

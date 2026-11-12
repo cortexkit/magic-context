@@ -37,6 +37,9 @@ const HELD: usize = 210;
 const TRIALS: usize = 200;
 const WARM_STEPS: u64 = 3;
 
+#[path = "../benches/fixtures/compaction-port-cost.inc.rs"]
+mod compaction_port_cost;
+
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     Pi,
@@ -83,7 +86,8 @@ fn text(n: u64, slot: &str) -> cortexkit_role_compaction::part::Part {
             text: format!(
                 "Review component {n}: preserve the public API and existing cache boundaries. {}",
                 "Check the focused tests before publishing the change. ".repeat(3)
-            ),
+            )
+            .into(),
         },
     )
 }
@@ -123,7 +127,7 @@ fn broca_assistant(n: u64, output_bytes: u64) -> Entry {
             Seal::Signed,
             PartBody::Reasoning {
                 text_bytes: Some(reasoning.len() as u64),
-                text: Some(reasoning),
+                text: Some(reasoning.into()),
             },
         ),
     );

@@ -1422,7 +1422,7 @@ async fn lifecycle_a_refused_view_puts_the_age_sweep_bookmark_back() {
 fn old_notice_entries() -> Vec<Entry> {
     let mut old = text(1, "old-notice");
     old.parts[0].body = PartBody::Text {
-        text: "worker result ".repeat(1_000),
+        text: "worker result ".repeat(1_000).into(),
     };
     old.notice = Some(
         serde_json::from_value(serde_json::json!({
@@ -1436,7 +1436,7 @@ fn old_notice_entries() -> Vec<Entry> {
 fn notice_and_tool_entries() -> Vec<Entry> {
     let mut old_tool = output_part("p", 2);
     if let PartBody::Tool(tool) = &mut old_tool.body {
-        tool.output = Some("old file contents ".repeat(5_000));
+        tool.output = Some("old file contents ".repeat(5_000).into());
     }
     let mut entries = vec![
         old_notice_entries().remove(0),
@@ -1610,7 +1610,7 @@ fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
         let mut entries = old_notice_entries();
         entries[0].notice = None;
         entries[0].parts[0].body = PartBody::Text {
-            text: "word ".repeat(size),
+            text: "word ".repeat(size).into(),
         };
         session.index.extend(entries);
         session.reclaim_bookmark = u64::MAX;
@@ -1636,7 +1636,7 @@ fn lifecycle_notice_age_sweep_counts_notice_wakes_without_aging_tools() {
     };
     let mut old = notice_entry(2);
     old.parts[0].body = PartBody::Text {
-        text: "worker result ".repeat(1_000),
+        text: "worker result ".repeat(1_000).into(),
     };
     let tiny_output = |id, tag| {
         let mut part = output_part(id, tag);

@@ -114,7 +114,12 @@ impl Fixture {
             &mid,
             Role::Assistant,
             ordinal,
-            vec![Part::new("p", PartBody::Text { text: mid.clone() })],
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: mid.clone().into(),
+                },
+            )],
         );
         let mut notice = NoticeRequest::new(ordinal, self.conditions.clone())
             .with_newest(Cursor::new(ordinal, mid, entry.digest.clone()));

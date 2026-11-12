@@ -240,7 +240,7 @@ fn search_db() -> (tempfile::TempDir, Connection) {
                 vec![Part::new(
                     "p",
                     PartBody::Text {
-                        text: format!("été 🦀 needle {i}"),
+                        text: format!("été 🦀 needle {i}").into(),
                     },
                 )],
             )

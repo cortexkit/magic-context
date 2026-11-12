@@ -49,11 +49,11 @@ fn transcript(input: &Input) -> Vec<Entry> {
         let ordinal = entries.len() as u64 + 1;
         let body = if reasoning > 0 {
             PartBody::Reasoning {
-                text: Some(text),
+                text: Some(text.into()),
                 text_bytes: Some(4),
             }
         } else {
-            PartBody::Text { text }
+            PartBody::Text { text: text.into() }
         };
         let mut part = Part::new("p", body);
         part.tag = Some(ordinal);

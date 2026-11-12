@@ -328,7 +328,12 @@ fn notice(ordinal: u64) -> NoticeRequest {
         &mid,
         Role::Assistant,
         ordinal,
-        vec![Part::new("p", PartBody::Text { text: mid.clone() })],
+        vec![Part::new(
+            "p",
+            PartBody::Text {
+                text: mid.clone().into(),
+            },
+        )],
     );
     let mut notice = NoticeRequest::new(ordinal, conditions()).with_newest(Cursor::new(
         ordinal,

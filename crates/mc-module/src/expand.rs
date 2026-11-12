@@ -178,17 +178,14 @@ fn render_part_full(body: &PartBody) -> Option<String> {
                     lines.push(format!("  description: {}", title.trim()));
                 }
             }
-            lines.push(format!(
-                "  input: {}",
-                serde_json::to_string(&tool.input).unwrap_or_default()
-            ));
+            lines.push(format!("  input: {}", tool.input.as_str()));
             match (&tool.output, crate::neutral::is_finished(&tool.status)) {
                 (Some(output), _) => lines.push(format!("  output:\n{output}")),
                 (None, false) => lines.push("  output: (still running)".into()),
                 (None, true) => {}
             }
             lines.extend(attachments_line(
-                tool.attachments
+                tool.attachments()
                     .iter()
                     .map(|attachment| match &attachment.item {
                         AttachmentItem::File(file) => {
@@ -222,7 +219,7 @@ fn render_part_preview(body: &PartBody, counter: crate::count::Counter) -> Optio
             (!text.is_empty()).then(|| format!("    • {text}"))
         }
         PartBody::Tool(tool) => {
-            let arg = key_arg(&tool.input);
+            let arg = key_arg(&tool.input.parse());
             let head = if arg.is_empty() {
                 tool.name.clone()
             } else {

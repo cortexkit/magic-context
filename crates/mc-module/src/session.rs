@@ -272,7 +272,7 @@ pub struct Session {
     /// The output text of tool results with answered images, read in full
     /// once, so the answered-images lane can keep the text and mark each
     /// removed image ([`lanes::image_results`]).
-    image_outputs: std::collections::BTreeMap<lanes::PartKey, String>,
+    image_outputs: std::collections::BTreeMap<lanes::PartKey, cortexkit_role_compaction::Text>,
     /// The session's memory context, fixed at its first Setup, or at its
     /// first `ctx_memory` call if that comes first, and what its writes
     /// record from it.

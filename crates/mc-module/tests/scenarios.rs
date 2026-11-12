@@ -258,7 +258,7 @@ impl RunnerClient for HostClient {
             .unwrap()
             .entry(request.view.version)
             .or_default()
-            .push(request.view.checksum.clone());
+            .push(request.view.checksum.to_string());
         if let Some(dir) = self.snapshot_store.lock().unwrap().clone() {
             let snapshot = dir.join(format!("store-at-{}.db", request.view.version));
             let _ = std::fs::remove_file(&snapshot);
@@ -1429,7 +1429,7 @@ fn seen_input(host: &Host, tag: u64) -> Option<Value> {
             .iter()
             .find(|part| part.tag == Some(tag))
             .and_then(|part| match &part.body {
-                PartBody::Tool(tool) => Some(tool.input.clone()),
+                PartBody::Tool(tool) => Some(tool.input.parse()),
                 _ => None,
             })
     })
@@ -1604,7 +1604,7 @@ async fn answered_images_go_once_newer_content_is_dropped() {
     let PartBody::Tool(tool) = part_with(3).body else {
         panic!("tag 3 is a tool part");
     };
-    assert!(tool.attachments.is_empty(), "{:?}", tool.attachments);
+    assert!(tool.attachments().is_empty(), "{:?}", tool.attachments());
     // The pasted image becomes a line of text after the person's words.
     let pasted = rendered
         .iter()
@@ -3258,7 +3258,9 @@ fn expand_outputs(host: &Host) -> Vec<String> {
         .iter()
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
-            PartBody::Tool(tool) if tool.name == "ctx_expand" => tool.output.clone(),
+            PartBody::Tool(tool) if tool.name == "ctx_expand" => {
+                tool.output.as_ref().map(ToString::to_string)
+            }
             _ => None,
         })
         .collect()
@@ -3336,7 +3338,9 @@ fn tool_outputs(host: &Host, name: &str) -> Vec<String> {
         .iter()
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
-            PartBody::Tool(tool) if tool.name == name => tool.output.clone(),
+            PartBody::Tool(tool) if tool.name == name => {
+                tool.output.as_ref().map(ToString::to_string)
+            }
             _ => None,
         })
         .collect()
@@ -3879,7 +3883,7 @@ fn user_texts(host: &Host) -> Vec<String> {
         })
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
-            PartBody::Text { text } => Some(text.clone()),
+            PartBody::Text { text } => Some(text.to_string()),
             _ => None,
         })
         .collect()
@@ -3968,9 +3972,10 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
             PartBody::Tool(tool) if tool.name == "read" => Some(
-                tool.delivered
+                tool.delivered()
+                    .unwrap_or_default()
                     .iter()
-                    .map(|delivered| delivered.text.clone().unwrap_or_default())
+                    .map(|delivered| delivered.text.as_deref().unwrap_or_default().to_owned())
                     .collect(),
             ),
             _ => None,
@@ -4006,7 +4011,11 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
         .iter()
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
-            PartBody::Tool(tool) => tool.delivered.first().map(|item| item.template.clone()),
+            PartBody::Tool(tool) => tool
+                .delivered()
+                .unwrap_or_default()
+                .first()
+                .map(|item| item.template.clone()),
             _ => None,
         })
         .collect();

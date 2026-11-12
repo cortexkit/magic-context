@@ -178,9 +178,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-compaction-view"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01738ae0c6a26f4d52031b12835b87ebb9a593dc94f81083e203108ebbe7a3ff"
+checksum = "7c51d84404a6b0b89c0114f1c2d7023d8d738d3b79178ea36341faee5ed2bd2f"
 dependencies = [
  "cortexkit-role-compaction",
  "serde",
@@ -243,14 +243,16 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-compaction"
-version = "0.3.8"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8d4a5cea713d677a8a371336db954a96f761ce22300937f0c1a8822663aabf2"
+checksum = "a2f60bb6fb3ac51c4898b5188c7fa17a466287100788cca80d3aaca809613141"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
+ "serde_jcs",
  "serde_json",
  "serde_path_to_error",
+ "sha2",
 ]
 
 [[package]]

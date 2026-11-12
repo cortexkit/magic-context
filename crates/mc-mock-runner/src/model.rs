@@ -236,12 +236,14 @@ impl MockModel {
             for part in &message.parts {
                 total += part_tokens(message, part, request.reasoning_tokens);
                 let wire = message.wire_text(part).unwrap_or_default();
-                blocks.push(hash(&[
-                    role_name(&message.role).as_bytes(),
-                    part.id.as_bytes(),
-                    part.digest.as_bytes(),
-                    wire.as_bytes(),
-                ]));
+                blocks.push(part.digest.with_str(|digest| {
+                    hash(&[
+                        role_name(&message.role).as_bytes(),
+                        part.id.as_bytes(),
+                        digest.as_bytes(),
+                        wire.as_bytes(),
+                    ])
+                }));
                 tokens.push(total);
             }
         }
@@ -276,7 +278,8 @@ fn content_before(messages: &[RenderedMessage], limit: usize, system_digest: &st
                 opened = true;
             }
             hasher.update(b"\x00part\x00");
-            hasher.update(part.digest.as_bytes());
+            part.digest
+                .with_str(|digest| hasher.update(digest.as_bytes()));
         }
     }
     hex(&hasher.finalize())

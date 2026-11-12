@@ -364,7 +364,7 @@ struct State {
     responder: crate::child::Responder,
     seq: u64,
     /// The newest entry the provider was sent, and its checksum then.
-    notified: Option<(u64, String)>,
+    notified: Option<(u64, cortexkit_role_compaction::Digest)>,
     now: u64,
     last_send: Option<u64>,
     last_prompt_tokens: Option<u64>,
@@ -861,7 +861,7 @@ impl<P: Provider> Runner<P> {
             let mut past_cut = cut.is_none();
             for (role, text) in &moved.messages {
                 if past_cut {
-                    let body = PartBody::Text { text: text.clone() };
+                    let body = PartBody::Text { text: text.into() };
                     transcript.append(
                         role.clone(),
                         None,
@@ -1142,7 +1142,7 @@ impl<P: Provider> Runner<P> {
         {
             let mut state = self.host.lock();
             let now = state.now;
-            let mut parts = vec![(Seal::None, PartBody::Text { text: full })];
+            let mut parts = vec![(Seal::None, PartBody::Text { text: full.into() })];
             parts.extend((0..images).map(|_| (Seal::None, PartBody::File(pasted_image()))));
             state
                 .transcript
@@ -1278,7 +1278,7 @@ impl<P: Provider> Runner<P> {
                 seal,
                 PartBody::Reasoning {
                     text_bytes: text.as_ref().map(|text| text.len() as u64),
-                    text,
+                    text: text.map(Into::into),
                 },
             ));
         }
@@ -1294,7 +1294,7 @@ impl<P: Provider> Runner<P> {
             bodies.push((
                 Seal::None,
                 PartBody::Text {
-                    text: clean_reply(written).text,
+                    text: clean_reply(written).text.into(),
                 },
             ));
         }
@@ -1438,7 +1438,7 @@ impl<P: Provider> Runner<P> {
                 state.transcript.append(
                     Role::User,
                     notice,
-                    vec![(Seal::None, PartBody::Text { text })],
+                    vec![(Seal::None, PartBody::Text { text: text.into() })],
                     None,
                     None,
                     now,

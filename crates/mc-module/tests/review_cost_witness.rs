@@ -43,9 +43,7 @@ fn text_entry(ordinal: u64, mid: &str, text: &str) -> Entry {
         ordinal,
         vec![Part::new(
             format!("{mid}-part"),
-            PartBody::Text {
-                text: text.to_owned(),
-            },
+            PartBody::Text { text: text.into() },
         )],
     )
 }

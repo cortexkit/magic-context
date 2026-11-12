@@ -109,7 +109,7 @@ pub(crate) struct Projection {
     compartments: Arc<Vec<Value>>,
     decisions: Arc<Vec<Value>>,
     decisions_revision: u64,
-    view: Option<(u64, String)>,
+    view: Option<(u64, cortexkit_role_compaction::Digest)>,
     cut: Option<u64>,
     dropped: BTreeSet<lanes::PartKey>,
     dropped_messages: BTreeSet<String>,
@@ -430,7 +430,7 @@ impl Session {
                         }
                     })
                     .collect();
-                row.digest = entry.digest.clone();
+                row.digest = entry.digest.to_string();
                 row.reasoning_measure = measure;
                 row.user_origin = user_origin;
                 p.dirty.insert(entry.mid.clone());
@@ -483,8 +483,7 @@ impl Session {
             || reset
             || !p.initialized
             || p.cut != cut
-            || p.view.as_ref().map(|(v, h)| (*v, h.as_str()))
-                != view.map(|v| (v.version, v.checksum.as_str()));
+            || p.view.as_ref().map(|(v, h)| (*v, h)) != view.map(|v| (v.version, &v.checksum));
         if view_changed {
             let mut dropped = BTreeSet::new();
             let mut messages = BTreeSet::new();

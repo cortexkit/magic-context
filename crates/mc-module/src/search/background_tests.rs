@@ -34,7 +34,7 @@ fn entries(count: u64, prefix: &str) -> Vec<Entry> {
                 vec![Part::new(
                     format!("p{n}"),
                     PartBody::Text {
-                        text: format!("{prefix} searchable message {n}"),
+                        text: format!("{prefix} searchable message {n}").into(),
                     },
                 )],
             )

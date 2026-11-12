@@ -42,7 +42,13 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
         .find_map(|entry| {
             entry.parts.iter().find_map(|part| match &part.body {
                 PartBody::Tool(tool)
-                    if tool.name == "read" && tool.input["path"] == "app-drop-target" =>
+                    if tool.name == "read"
+                        && tool
+                            .input
+                            .get("path")
+                            .as_ref()
+                            .and_then(serde_json::Value::as_str)
+                            == Some("app-drop-target") =>
                 {
                     part.tag
                         .filter(|tag| {

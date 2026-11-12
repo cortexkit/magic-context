@@ -45,11 +45,11 @@ pub(super) fn image_result(ordinal: u64) -> Entry {
     let PartBody::Tool(tool) = &mut part.body else {
         unreachable!()
     };
-    tool.output = Some(format!("image result {ordinal}"));
-    tool.attachments = vec![Attachment::new(
+    tool.output = Some(format!("image result {ordinal}").into());
+    tool.set_attachments(vec![Attachment::new(
         "image",
         AttachmentItem::File(FileMedia::inline("image/png", Some(200_000))),
-    )];
+    )]);
     Entry::new(
         ordinal,
         format!("m{ordinal:04}"),
@@ -111,7 +111,7 @@ async fn build_now_batches_image_result_mids_at_the_named_read_ceiling() {
         for entry in entries {
             assert_eq!(
                 session.image_outputs.get(&(entry.mid, "p".into())),
-                Some(&format!("image result {}", entry.ordinal))
+                Some(&format!("image result {}", entry.ordinal).into())
             );
         }
     }

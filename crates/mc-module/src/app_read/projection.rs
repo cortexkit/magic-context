@@ -892,7 +892,12 @@ mod tests {
             "text-message",
             Role::User,
             201,
-            vec![Part::new("text", PartBody::Text { text: text.clone() })],
+            vec![Part::new(
+                "text",
+                PartBody::Text {
+                    text: text.clone().into(),
+                },
+            )],
         )]);
         let tokens = cortexkit_tokens::count(cortexkit_tokens::Family::ClaudeV5, &text).unwrap();
         assert_ne!(tokens, crate::tokens::bytes(text.len() as u64));
@@ -1132,7 +1137,7 @@ mod tests {
         let mut part = Part::new(
             "p",
             PartBody::Text {
-                text: "original output ".repeat(100),
+                text: "original output ".repeat(100).into(),
             },
         );
         part.tag = Some(201);

@@ -67,7 +67,7 @@ struct Kept {
     cut: Option<u64>,
     base: u64,
     baseline: Option<Arc<crate::summary::head::Baseline>>,
-    latest: Option<(u64, String)>,
+    latest: Option<(u64, cortexkit_role_compaction::Digest)>,
     unconfirmed: usize,
 }
 

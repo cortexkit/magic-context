@@ -40,7 +40,7 @@ fn estimate(part: &Part) -> u64 {
         PartBody::Text { text } => bytes(text.len() as u64),
         PartBody::Reasoning { text_bytes, .. } => bytes(text_bytes.unwrap_or(0)),
         PartBody::Tool(tool) => {
-            let input = serde_json::to_string(&tool.input).map_or(0, |input| input.len() as u64);
+            let input = tool.input.as_str().len() as u64;
             bytes(tool.name.len() as u64 + input + tool.output_bytes.unwrap_or(0))
                 + attachments(tool)
                 + rides(tool)
@@ -87,7 +87,8 @@ pub fn tool_output(part: &Part, tool: &ToolPart) -> u64 {
 fn rides(tool: &ToolPart) -> u64 {
     // Count clearing system-note rides like tool-result rides until measured
     // provider usage is available; then follow that measured usage.
-    tool.delivered
+    tool.delivered()
+        .unwrap_or_default()
         .iter()
         .map(|ride| {
             ride.tokens
@@ -97,7 +98,7 @@ fn rides(tool: &ToolPart) -> u64 {
 }
 
 fn attachments(tool: &ToolPart) -> u64 {
-    tool.attachments
+    tool.attachments()
         .iter()
         .map(|attachment| match &attachment.item {
             AttachmentItem::File(file) => media(file),
@@ -178,7 +179,7 @@ mod tests {
         let PartBody::Tool(body) = &mut part.body else {
             unreachable!()
         };
-        body.delivered = rides;
+        body.set_delivered(rides);
         part
     }
 

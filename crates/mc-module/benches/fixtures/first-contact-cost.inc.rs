@@ -423,7 +423,7 @@ fn contact(size: usize) -> Value {
             transcript.append(
                 role,
                 None,
-                vec![(Seal::None, PartBody::Text { text: body(n) })],
+                vec![(Seal::None, PartBody::Text { text: body(n).into() })],
                 None,
                 None,
                 n as u64 * 2000,
@@ -476,7 +476,7 @@ fn contact(size: usize) -> Value {
         let entries = {
             let mut state = client.0.lock().unwrap();
             vec![state.transcript.append(Role::Assistant,None,
-                vec![(Seal::None,PartBody::Text{text:body(size+1)})],None,None,(size+1) as u64*2000).clone()]
+                vec![(Seal::None,PartBody::Text{text:body(size+1).into()})],None,None,(size+1) as u64*2000).clone()]
         };
         let conditions: Conditions = serde_json::from_value(json!({"model":model(),"context_window":WINDOW,
             "output_reserve":RESERVE,"rules":rules(),"now":(size+1)*2000,"last_prompt_tokens":20_000})).unwrap();

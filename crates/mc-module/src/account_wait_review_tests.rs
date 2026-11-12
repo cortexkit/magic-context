@@ -34,7 +34,7 @@ fn head(entries: Vec<Entry>) -> (Session, Client, Settings) {
 }
 
 fn entry(ordinal: u64, role: Role, text: String) -> Entry {
-    let mut part = Part::new("p", PartBody::Text { text });
+    let mut part = Part::new("p", PartBody::Text { text: text.into() });
     part.tag = Some(ordinal);
     let mut entry = Entry::new(ordinal, format!("m{ordinal}"), role, ordinal, vec![part]);
     let mut usage = StepUsage::new();

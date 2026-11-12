@@ -212,7 +212,7 @@ fn insert(
             message_ordinal = excluded.message_ordinal, source_version = excluded.source_version,
             normalized_content_hash = excluded.normalized_content_hash, role = excluded.role,
             updated_at = excluded.updated_at",
-        params![session, entry.mid, number, entry.digest, content_hash(content), role, harness, now_ms()],
+        params![session, entry.mid, number, entry.digest.to_string(), content_hash(content), role, harness, now_ms()],
     )?;
     drop(source_timing);
     if content.is_empty() {

@@ -204,9 +204,9 @@ impl Transcript {
         }
         tool.status = status;
         tool.output_bytes = Some(output.len() as u64);
-        tool.output = Some(output);
-        tool.attachments = attachments;
-        tool.delivered = delivered;
+        tool.output = Some(output.into());
+        tool.set_attachments(attachments);
+        tool.set_delivered(delivered);
         *part = self::part(
             part.id.clone(),
             part.tag,

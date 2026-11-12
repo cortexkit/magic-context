@@ -628,7 +628,7 @@ impl Handler {
                     .flat_map(|entry| &entry.parts)
                     .filter_map(|part| match &part.body {
                         cortexkit_role_compaction::part::PartBody::Text { text } => {
-                            Some(text.clone())
+                            Some(text.to_string())
                         }
                         _ => None,
                     })
@@ -638,7 +638,8 @@ impl Handler {
                     .flat_map(|entry| &entry.parts)
                     .filter_map(|part| match &part.body {
                         cortexkit_role_compaction::part::PartBody::Tool(tool) => Some(
-                            tool.delivered
+                            tool.delivered()
+                                .unwrap_or_default()
                                 .iter()
                                 .filter_map(|item| item.template.clone())
                                 .collect::<Vec<_>>(),

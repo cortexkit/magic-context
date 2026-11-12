@@ -405,7 +405,7 @@ async fn audit_ctx_keep_drops_known_opaque_content_outside_the_kept_set() {
     let mut keep = tool_entry(3, 2);
     if let PartBody::Tool(tool) = &mut keep.parts[0].body {
         tool.name = "ctx_keep".into();
-        tool.input = json!({"tags": "1", "note": "Only the instructions are needed."});
+        tool.input = json!({"tags": "1", "note": "Only the instructions are needed."}).into();
     }
     keep.parts[0] = Part::new("tool", keep.parts[0].body.clone()).with_tag(2);
     keep = Entry::new(3, "m3", Role::Assistant, 2, keep.parts);

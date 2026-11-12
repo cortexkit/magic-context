@@ -69,7 +69,7 @@ fn clear_counts(entry: &mut Entry) {
     for part in &mut entry.parts {
         part.tokens = None;
         if let PartBody::Tool(tool) = &mut part.body {
-            for ride in &mut tool.delivered {
+            for ride in tool.delivered_mut() {
                 ride.tokens = None;
             }
         }
@@ -95,7 +95,11 @@ fn refresh_counts(held: &mut Entry, new: &Entry) -> bool {
             changed = true;
         }
         if let (PartBody::Tool(held), PartBody::Tool(new)) = (&mut held.body, &new.body) {
-            for (held, new) in held.delivered.iter_mut().zip(&new.delivered) {
+            for (held, new) in held
+                .delivered_mut()
+                .iter_mut()
+                .zip(new.delivered().unwrap_or_default())
+            {
                 if new.tokens.is_some() && held.tokens != new.tokens {
                     held.tokens = new.tokens;
                     changed = true;
@@ -506,7 +510,7 @@ mod tests {
         let PartBody::Tool(tool) = &mut message.parts[0].body else {
             unreachable!()
         };
-        tool.delivered = vec![Delivered::new("sender", "ride")];
+        tool.set_delivered(vec![Delivered::new("sender", "ride")]);
         let uncounted = message.clone();
         let mut index = Index::default();
         index.extend_counted([message.clone()], Some("family-a"));
@@ -515,7 +519,7 @@ mod tests {
         let PartBody::Tool(tool) = &mut message.parts[0].body else {
             unreachable!()
         };
-        tool.delivered[0].tokens = Some(TokenCount::new(9));
+        tool.delivered_mut()[0].tokens = Some(TokenCount::new(9));
         assert_eq!(
             index.extend_counted([message], Some("family-a")),
             Extend::Continued

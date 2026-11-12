@@ -231,7 +231,7 @@ impl CountCache {
 /// Attribution changes summary labels but is deliberately outside the wire
 /// digest. Include it only in the local token-count cache's identity.
 fn count_identity(entry: &Entry) -> String {
-    let mut identity = entry.digest.clone();
+    let mut identity = entry.digest.to_string();
     if let Some(agent) = &entry.speaks_for {
         identity.push_str(&serde_json::to_string(agent).expect("agent attribution serializes"));
     }
@@ -536,7 +536,7 @@ fn render_entry(entry: &Entry, verbatim: bool) -> Option<(char, Vec<String>, Vec
                     .parts
                     .iter()
                     .filter_map(|part| match &part.body {
-                        PartBody::Tool(tool) => Some(tool_summary(&tool.name, &tool.input)),
+                        PartBody::Tool(tool) => Some(tool_summary(&tool.name, &tool.input.parse())),
                         _ => None,
                     })
                     .collect();

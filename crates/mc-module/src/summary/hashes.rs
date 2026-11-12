@@ -52,7 +52,7 @@ pub fn by_ordinal(entries: &[Entry]) -> BTreeMap<u64, BTreeSet<String>> {
                 match &part.body {
                     PartBody::Text { text } => hashes_in(text, &mut hashes),
                     PartBody::Tool(tool) => {
-                        hashes_in_value(&tool.input, &mut hashes);
+                        hashes_in_value(&tool.input.parse(), &mut hashes);
                         if let Some(output) = &tool.output {
                             hashes_in(output, &mut hashes);
                         }

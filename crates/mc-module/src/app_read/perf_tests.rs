@@ -21,13 +21,13 @@ fn entry(ordinal: u64) -> Entry {
             Part::new(
                 "a",
                 PartBody::Text {
-                    text: "recorded session text ".repeat(50),
+                    text: "recorded session text ".repeat(50).into(),
                 },
             ),
             Part::new(
                 "b",
                 PartBody::Text {
-                    text: "another message part ".repeat(50),
+                    text: "another message part ".repeat(50).into(),
                 },
             ),
         ],

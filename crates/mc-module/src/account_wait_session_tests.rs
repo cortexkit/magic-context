@@ -46,7 +46,7 @@ fn ready() -> (Session, Client, Settings) {
 }
 
 fn push(session: &mut Session, ordinal: u64, role: Role, text: String) {
-    let mut part = Part::new("p", PartBody::Text { text });
+    let mut part = Part::new("p", PartBody::Text { text: text.into() });
     part.tag = Some(ordinal);
     let mut entry = Entry::new(ordinal, format!("m{ordinal}"), role, ordinal, vec![part]);
     let mut usage = StepUsage::new();

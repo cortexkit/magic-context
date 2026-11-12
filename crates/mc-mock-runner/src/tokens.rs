@@ -31,9 +31,9 @@ pub fn part_tokens(
         PartBody::Text { .. } => wire(),
         PartBody::Reasoning { .. } => reasoning_tokens(&part.id),
         PartBody::Tool(tool) => {
-            let input = serde_json::to_string(&tool.input).expect("tool input serializes");
+            let input = tool.input.as_str();
             let attachments: u64 = tool
-                .attachments
+                .attachments()
                 .iter()
                 .map(|attachment| match &attachment.item {
                     AttachmentItem::File(file) => media_tokens(&file.mime, file.size),
@@ -44,11 +44,12 @@ pub fn part_tokens(
                 .sum();
             // Text delivered with the result renders after it.
             let delivered: u64 = tool
-                .delivered
+                .delivered()
+                .unwrap_or_default()
                 .iter()
                 .map(|delivered| bytes_tokens(delivered.text_bytes))
                 .sum();
-            text_tokens(&tool.name) + text_tokens(&input) + wire() + attachments + delivered
+            text_tokens(&tool.name) + text_tokens(input) + wire() + attachments + delivered
         }
         PartBody::File(file) => media_tokens(&file.mime, file.size),
         PartBody::Opaque(opaque) => bytes_tokens(opaque.size.unwrap_or(0)),

@@ -105,7 +105,7 @@ impl ValidationCache {
         hash.update(serde_jcs::to_vec(&serde_json::json!(version)).expect("canonical version"));
         hash.update(b"}");
         let mut view = View::seal(version, vec![]);
-        view.checksum = format!("{:x}", hash.finalize());
+        view.checksum = cortexkit_role_compaction::Digest::from_bytes(hash.finalize().into());
         view.edits = edits;
         view.built_through = built_through;
         view.new_signed = new_signed;
@@ -637,7 +637,7 @@ mod tests {
             vec![Part::new(
                 "t",
                 PartBody::Text {
-                    text: format!("message {ordinal}"),
+                    text: format!("message {ordinal}").into(),
                 },
             )],
         )
@@ -726,7 +726,7 @@ mod tests {
         Part::new(
             id,
             PartBody::Text {
-                text: format!("text {id}"),
+                text: format!("text {id}").into(),
             },
         )
     }

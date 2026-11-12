@@ -33,7 +33,7 @@ fn said(tag: u64) -> Part {
         Some(tag),
         Seal::None,
         PartBody::Text {
-            text: format!("said {tag}"),
+            text: format!("said {tag}").into(),
         },
     )
 }

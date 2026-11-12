@@ -124,7 +124,7 @@ impl RunnerClient for Client {
                 let mut part = Part::new(
                     "p",
                     PartBody::Text {
-                        text: format!("message {ordinal} about the build"),
+                        text: format!("message {ordinal} about the build").into(),
                     },
                 );
                 part.tag = Some(ordinal);

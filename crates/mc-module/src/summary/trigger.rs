@@ -83,7 +83,8 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
         )
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !crate::injection::strip(text)
-                .unwrap_or_else(|| text.clone())
+                .as_deref()
+                .unwrap_or(text)
                 .trim()
                 .is_empty(),
             _ => false,

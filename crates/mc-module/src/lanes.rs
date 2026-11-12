@@ -346,7 +346,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     continue;
                 };
                 let small_recent = recent.contains(&tag)
-                    && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES;
+                    && input_string_bytes(&tool.input.parse()) <= SMALL_INPUT_MAX_BYTES;
                 let ends = ends_transcript(entry, part, newest_mid);
                 if sealed {
                     // Its output can't be replaced; removing the call that
@@ -371,13 +371,15 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     continue;
                 }
                 ops.push(replace("output", json!(placeholder(tag))));
-                if !tool.attachments.is_empty() {
+                if !tool.attachments().is_empty() {
                     ops.push(replace("attachments", json!([])));
                 }
-                if let (Shape::EditMarker, Some(arguments)) = (shape, tool.input.as_object()) {
-                    for (name, value) in arguments {
-                        if let Some(marked) = edit_marker(name, value) {
-                            ops.push(replace(&format!("input.{name}"), json!(marked)));
+                if shape == Shape::EditMarker {
+                    if let Value::Object(arguments) = tool.input.parse() {
+                        for (name, value) in arguments {
+                            if let Some(marked) = edit_marker(&name, &value) {
+                                ops.push(replace(&format!("input.{name}"), json!(marked)));
+                            }
                         }
                     }
                 }
@@ -445,7 +447,7 @@ pub fn reclaimable_tokens(context: &Context, entry: &Entry, part: &Part) -> u64 
             .index
             .newest_tool_tags(RECENT_TOOL_WINDOW)
             .contains(&tag)
-            && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES
+            && input_string_bytes(&tool.input.parse()) <= SMALL_INPUT_MAX_BYTES
     });
     if small_recent || ends_transcript(entry, part, newest_mid) {
         tokens::tool_result(part, tool)
@@ -910,15 +912,19 @@ const DEDUP_TOOLS: [&str; 9] = [
 /// within one assistant message. The newest stays; older ones go whole,
 /// outside the protected tail.
 pub fn duplicate_lookups(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
-    let mut newest: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+    let mut newest: BTreeMap<(&str, &str, cortexkit_role_compaction::Digest), u64> =
+        BTreeMap::new();
     let mut calls = Vec::new();
     for (entry, part, tool) in tool_parts(context) {
         let name = tool.name.strip_prefix("mcp_").unwrap_or(&tool.name);
         let (true, Some(tag)) = (DEDUP_TOOLS.contains(&name), part.tag) else {
             continue;
         };
-        let input = serde_json::to_string(&tool.input).unwrap_or_default();
-        let key = (entry.mid.clone(), tool.name.clone(), input);
+        let key = (
+            entry.mid.as_str(),
+            tool.name.as_str(),
+            tool.input.canonical_digest(),
+        );
         let held = newest.entry(key.clone()).or_insert(tag);
         *held = (*held).max(tag);
         calls.push((key, tag, entry, part));
@@ -1019,7 +1025,7 @@ pub fn caveman(
     let rewrite_all = state
         .english_word_rules
         .is_some_and(|english| english != settings.english_word_rules);
-    let mut eligible: Vec<(u64, PartKey, &str, String)> = context
+    let mut eligible: Vec<(u64, PartKey, &str, std::borrow::Cow<'_, str>)> = context
         .index
         .entries()
         .iter()
@@ -1039,7 +1045,9 @@ pub fn caveman(
             {
                 return None;
             }
-            let source = injection::stripped_source(tag, text).unwrap_or_else(|| text.clone());
+            let source = injection::stripped_source(tag, text)
+                .map(std::borrow::Cow::Owned)
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed(text.as_str()));
             (source.len() as u64 >= settings.min_chars).then_some((tag, key, text.as_str(), source))
         })
         .collect();
@@ -1100,7 +1108,7 @@ pub fn is_inline_image(media: &FileMedia) -> bool {
 }
 
 fn image_attachments(tool: &ToolPart) -> usize {
-    tool.attachments
+    tool.attachments()
         .iter()
         .filter(|attachment| matches!(&attachment.item, AttachmentItem::File(media) if is_inline_image(media)))
         .count()
@@ -1132,7 +1140,7 @@ pub fn image_results(index: &Index, edited: &Edited) -> Vec<PartKey> {
 pub struct Images<'a> {
     /// The output text of the tool results [`image_results`] names, as far
     /// as ck-mc has read it. A result whose text is missing waits.
-    pub outputs: &'a BTreeMap<PartKey, String>,
+    pub outputs: &'a BTreeMap<PartKey, cortexkit_role_compaction::Text>,
     /// The highest tag number any view or this pass reduces for good.
     pub watermark: u64,
     pub cutoff: Option<u64>,
@@ -1217,7 +1225,7 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
                         continue;
                     };
                     let kept: Vec<&str> = tool
-                        .attachments
+                        .attachments()
                         .iter()
                         .filter(|attachment| !matches!(&attachment.item, AttachmentItem::File(media) if is_inline_image(media)))
                         .map(|attachment| attachment.id.as_str())
@@ -1270,7 +1278,7 @@ pub fn spent_control_plane(context: &Context, cutoff: Option<u64>) -> Vec<(PartK
                 // Writes and updates carry intent; only reads and dismissals
                 // are spent. An unreadable action is not spent.
                 "ctx_note" => matches!(
-                    tool.input.get("action").and_then(Value::as_str),
+                    tool.input.get("action").as_ref().and_then(Value::as_str),
                     Some("read" | "dismiss")
                 ),
                 _ => false,
@@ -1305,13 +1313,16 @@ pub fn superseded_edits(
         }
         let Some(path) = ["filePath", "file_path", "path"].iter().find_map(|key| {
             tool.input
-                .get(*key)
-                .and_then(Value::as_str)
+                .get(key)
+                .and_then(|value| match value {
+                    Value::String(path) => Some(path),
+                    _ => None,
+                })
                 .filter(|path| !path.is_empty())
         }) else {
             continue;
         };
-        if seen_files.insert(path.to_owned()) {
+        if seen_files.insert(path) {
             continue;
         }
         if part.tag.is_some_and(|tag| tag <= bookmark) && !recent.contains(entry.mid.as_str()) {
@@ -1600,7 +1611,7 @@ mod tests {
                 Some(tag),
                 Seal::None,
                 PartBody::Text {
-                    text: "x".repeat(bytes),
+                    text: "x".repeat(bytes).into(),
                 },
             )],
         );
@@ -1678,7 +1689,8 @@ mod tests {
             text: format!(
                 "<system-reminder>{}</system-reminder>",
                 "peer update ".repeat(300)
-            ),
+            )
+            .into(),
         };
         assert!(starts_user_turn(&brief));
         assert!(!starts_user_turn(&notice));
@@ -2057,7 +2069,7 @@ mod tests {
     fn the_age_sweep_weighs_only_the_output_of_a_call_that_stays() {
         let mut big_input = read(2, 400);
         if let PartBody::Tool(tool) = &mut big_input.body {
-            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(900)});
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(900)}).into();
         }
         let mut index = Index::default();
         index.extend([
@@ -2120,7 +2132,7 @@ mod tests {
     fn only_the_last_call_of_the_newest_message_stays_a_call() {
         let mut a = read(2, 40);
         if let PartBody::Tool(tool) = &mut a.body {
-            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)});
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)}).into();
         }
         let mut index = Index::default();
         index.extend([entry(1, Role::Assistant, vec![a, read(3, 40)])]);
@@ -2201,7 +2213,7 @@ mod tests {
         // A large input, so the call isn't kept as a small recent one either.
         let mut call = read(2, 4_000);
         if let PartBody::Tool(tool) = &mut call.body {
-            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)});
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)}).into();
         }
         let mut index = Index::default();
         index.extend([
@@ -2236,7 +2248,7 @@ mod tests {
         // call and its user-role result. The empty user row renders nothing.
         let mut call = read(2, 4_000);
         if let PartBody::Tool(tool) = &mut call.body {
-            tool.input = json!({"pattern": "x".repeat(2_000)});
+            tool.input = json!({"pattern": "x".repeat(2_000)}).into();
         }
         let mut index = Index::default();
         index.extend([
