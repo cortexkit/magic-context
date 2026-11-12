@@ -387,10 +387,10 @@ describe("cache-bust attribution contract", () => {
         const cls = classifyCacheBust({ ...bust, decision: joined });
         expect(cls).toBe("accounted_execute_published_history");
         expect(isUnaccountedCacheBustClass(cls)).toBe(false);
-        // The defer really is the class this request used to get, so the two
-        // candidates are not interchangeable.
+        // A scheduler line does not establish a no-change pass. Only the
+        // execute line with appliedRide="publishedHistory" explains this rewrite.
         expect(classifyCacheBust({ ...bust, decision: nextTurnDefer })).toBe(
-            "unaccounted_defer_pass",
+            "no_mc_pass_row",
         );
     });
 

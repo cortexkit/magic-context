@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
  * | cache_scope_changed | yes | the model named in the request or the account changed, or the provider reports model_changed; the request reads a different cache, so it never wakes and is not a second rewrite |
  * | host_messages_removed | yes | the host logged message.removed for this session between requests; a user revert changes the prefix independently of Magic Context and never wakes, even after a reclaim |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
- * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
+ * | no_mc_pass_row | no | no completed MC pass record joins this request; a scheduler-only defer does not prove a no-change pass |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
  * | accounted_force_band | yes | matched pass records a forced emergency drop batch |
  * | accounted_hard_marker_drain | yes | matched HARD/m0 pass records marker_drain or a compaction-marker seam |
@@ -127,6 +127,8 @@ interface SentinelScanOptions extends CacheBustSentinelOptions {
     scanNow?: () => number;
     scanMetrics?: DumpScanMetrics;
     scanIndex?: DumpScanIndex;
+    finalizeNotJudgedBeforeMs?: number;
+    pendingNotJudged?: CacheBustScanProgress["notJudged"];
 }
 
 export interface ActiveCacheBustSession {
@@ -153,6 +155,7 @@ export interface CacheBustEvent {
         divergence_class: string;
         first_divergence: string;
         analyzer_cmd: string;
+        pass_evidence?: string;
         /** Render-identity components the matched pass changed, when it logged them. */
         identity_delta?: string[];
         /** For a bust right after a reclaim: the class the request had on its own. */
@@ -216,12 +219,15 @@ interface SessionWatermarkState {
     lastScannedAtMs?: number;
     pendingFiles?: number;
     oldestPendingTimestampMs?: number;
+    pendingNotJudged?: NonNullable<CacheBustScanProgress["notJudged"]>;
 }
 
 interface SentWindowState {
     divergenceClass: string;
     lastEventId: string;
     eventIds: string[];
+    threadBreakRequests?: string[];
+    threadBreakBeforeMs?: number;
 }
 
 interface SentDeliveryState {
@@ -234,9 +240,10 @@ export interface CacheBustSentinelState {
     sessions: Record<string, SessionWatermarkState>;
     windows: Record<string, SentWindowState>;
     deliveries: Record<string, SentDeliveryState>;
-    suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number; windowStartMs?: number; reason?: "stale" }>;
+    suppressedWindows: Record<string, { divergenceClass: string; rewrittenTokens: number; windowStartMs?: number; reason?: "stale"; threadBreakRequests?: string[]; threadBreakBeforeMs?: number }>;
     lag?: { startedAtMs: number; consecutiveRuns: number; notified: boolean; lagMs: number; pendingFiles: number };
     runner?: RunnerMonitorState;
+    notJudgedRequests?: Record<string, { at: string; file: string; reason: string; final: true }>;
 }
 
 export interface BustWindow {
@@ -261,6 +268,8 @@ export interface SentinelCounters {
     sendRefused: number;
     filesExamined: number;
     bounded: boolean;
+    notJudgedPending: number;
+    notJudgedFinal: number;
     runner?: RunnerRunSummary;
 }
 
@@ -344,6 +353,31 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
     }
 
     const state = defaultState();
+    const readThreadBreaks = (row: Record<string, unknown>) => {
+        if (row.threadBreakRequests === undefined) return {};
+        if (!Array.isArray(row.threadBreakRequests) || !row.threadBreakRequests.every((entry) => typeof entry === "string")) {
+            throw new CacheBustSentinelInputError(`invalid thread-break observations in ${path}`);
+        }
+        if (row.threadBreakBeforeMs !== undefined && finiteNonnegative(row.threadBreakBeforeMs) === undefined) {
+            throw new CacheBustSentinelInputError(`invalid thread-break history boundary in ${path}`);
+        }
+        return { threadBreakRequests: [...row.threadBreakRequests],
+            ...(typeof row.threadBreakBeforeMs === "number" ? { threadBreakBeforeMs: row.threadBreakBeforeMs } : {}) };
+    };
+    const readNotJudged = (raw: unknown) => {
+        const row = recordValue(raw);
+        if (typeof row?.at !== "string" || !Number.isFinite(Date.parse(row.at)) ||
+            typeof row.file !== "string" || typeof row.reason !== "string") {
+            throw new CacheBustSentinelInputError(`invalid not-judged request in ${path}`);
+        }
+        return { at: row.at, file: row.file, reason: row.reason };
+    };
+    if (root.notJudgedRequests !== undefined) {
+        const observations = recordValue(root.notJudgedRequests);
+        if (!observations) throw new CacheBustSentinelInputError(`invalid not-judged state in ${path}`);
+        state.notJudgedRequests = Object.fromEntries(Object.entries(observations).map(([key, row]) =>
+            [key, { ...readNotJudged(row), final: true as const }]));
+    }
     for (const [sessionId, raw] of Object.entries(sessions)) {
         const row = recordValue(raw);
         const highWater = finiteNonnegative(row?.lastAnalyzedRequestTimestampMs);
@@ -361,6 +395,10 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
         const backfill = recordValue(row?.backfillWindow);
         const backfillStart = finiteNonnegative(backfill?.startMs);
         const backfillEnd = finiteNonnegative(backfill?.lastBustMs);
+        const pendingNotJudged = row?.pendingNotJudged;
+        if (pendingNotJudged !== undefined && !Array.isArray(pendingNotJudged)) {
+            throw new CacheBustSentinelInputError(`invalid pending not-judged state in ${path}`);
+        }
         state.sessions[sessionId] = {
             lastAnalyzedRequestTimestampMs: highWater,
             ...(open && startMs !== undefined && lastBustMs !== undefined
@@ -383,6 +421,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             } } : {}),
             ...(finiteNonnegative(row?.pendingFiles) !== undefined ? { pendingFiles: row!.pendingFiles as number } : {}),
             ...(finiteNonnegative(row?.oldestPendingTimestampMs) !== undefined ? { oldestPendingTimestampMs: row!.oldestPendingTimestampMs as number } : {}),
+            ...(Array.isArray(pendingNotJudged) ? { pendingNotJudged: pendingNotJudged.map(readNotJudged) } : {}),
         };
     }
     for (const [key, raw] of Object.entries(windows)) {
@@ -399,6 +438,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             divergenceClass: row.divergenceClass,
             lastEventId: row.lastEventId,
             eventIds: [...row.eventIds],
+            ...readThreadBreaks(row),
         };
     }
     for (const [key, raw] of Object.entries(suppressed)) {
@@ -409,6 +449,7 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
             throw new CacheBustSentinelInputError(`invalid suppressed window state ${key} in ${path}`);
         }
         state.suppressedWindows[key] = { divergenceClass: row.divergenceClass, rewrittenTokens,
+            ...readThreadBreaks(row),
             ...(stale ? { reason: "stale", windowStartMs: row.windowStartMs as number } as const : {}) };
     }
     if (root.lag !== undefined) {
@@ -911,6 +952,8 @@ async function analyzeActiveSession(
             scanNow: options.scanNow,
             scanMetrics: options.scanMetrics,
             scanIndex: options.scanIndex,
+            finalizeNotJudgedBeforeMs: options.finalizeNotJudgedBeforeMs,
+            pendingNotJudged: options.pendingNotJudged,
             anthropicDir: options.anthropicDir,
             mcLogPath: options.mcLogPath,
             openaiDir: options.openaiDir,
@@ -1063,7 +1106,7 @@ export function eventForWindow(
         if (isThresholdedThreadClass(row.divergenceClass as string) && rewrittenTokens < 20_000) {
             // Observations are distinct from sent-event IDs, so an accumulating
             // window can cross the threshold later without being deduplicated.
-            state.suppressedWindows[key] = { divergenceClass: row.divergenceClass as string, rewrittenTokens };
+            state.suppressedWindows[key] = { ...state.suppressedWindows[key], divergenceClass: row.divergenceClass as string, rewrittenTokens };
         }
     }
     const unaccounted = window.rows.filter((row) =>
@@ -1098,6 +1141,7 @@ export function eventForWindow(
             divergence_class: divergenceClass,
             first_divergence: representative.firstDivergence,
             analyzer_cmd: representative.analyzerCmd,
+            ...(representative.passEvidence ? { pass_evidence: representative.passEvidence } : {}),
             ...(representative.identityDelta?.length
                 ? { identity_delta: representative.identityDelta }
                 : {}),
@@ -1108,6 +1152,11 @@ export function eventForWindow(
         divergenceClass,
         lastEventId: eventId,
         eventIds: [...(prior?.eventIds ?? []), eventId],
+        ...((prior?.threadBreakRequests ?? state.suppressedWindows[key]?.threadBreakRequests) ? {
+            threadBreakRequests: prior?.threadBreakRequests ?? state.suppressedWindows[key].threadBreakRequests,
+            ...((prior?.threadBreakBeforeMs ?? state.suppressedWindows[key]?.threadBreakBeforeMs) !== undefined
+                ? { threadBreakBeforeMs: prior?.threadBreakBeforeMs ?? state.suppressedWindows[key]?.threadBreakBeforeMs } : {}),
+        } : {}),
     };
     return event;
 }
@@ -1125,7 +1174,7 @@ export function agentDeliverRequest(
             from_agent: fromAgent,
             from_session_id: SENTINEL_FROM_SESSION_ID,
             from_harness: SENTINEL_FROM_HARNESS,
-            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}${event.payload.cause ? `; cause=${event.payload.cause}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
+            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.pass_evidence ? `; ${event.payload.pass_evidence}` : ""}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}${event.payload.cause ? `; cause=${event.payload.cause}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
             one_way: true,
         },
         urgency: event.urgency ?? "high",
@@ -1298,6 +1347,8 @@ function emptyCounters(): SentinelCounters {
         sendRefused: 0,
         filesExamined: 0,
         bounded: false,
+        notJudgedPending: 0,
+        notJudgedFinal: 0,
     };
 }
 
@@ -1413,6 +1464,8 @@ export async function runSentinelOnce(
             }
             const session = scanQueue[batchIndex];
             const priorSession = state.sessions[session.sessionId];
+            const previouslyObservedThroughMs = Math.max(priorSession?.lastAnalyzedRequestTimestampMs ?? -Infinity,
+                priorSession?.openWindow?.lastBustMs ?? -Infinity, priorSession?.backfillWindow?.lastBustMs ?? -Infinity);
             const priorScanCursor = priorSession?.scanCursor;
             const sinceExclusiveMs =
                 priorSession ? Math.max(priorSession.lastAnalyzedRequestTimestampMs, batchNowMs - maxWakeAgeMs)
@@ -1422,11 +1475,22 @@ export async function runSentinelOnce(
             const decisions = (deps.loadDecisions ?? loadSessionDecisions)(session, options);
             const analysis = await (deps.analyzeSession ?? analyzeActiveSession)(
                 session,
-                sinceExclusiveMs,
+                Math.min(sinceExclusiveMs, ...(priorSession?.pendingNotJudged ?? []).map((row) => Date.parse(row.at) - 1)),
                 decisions,
-                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: legacyDeadlineMs, scanNow: clock, scanMetrics: deps.scanMetrics, scanIndex },
+                { ...options, scanCursor: priorSession?.scanCursor, scanDeadlineMs: legacyDeadlineMs, scanNow: clock, scanMetrics: deps.scanMetrics, scanIndex,
+                    finalizeNotJudgedBeforeMs: batchNowMs - maxWakeAgeMs, pendingNotJudged: priorSession?.pendingNotJudged },
             );
             counters.filesExamined += analysis.filesExamined ?? 0;
+            for (const request of analysis.notJudged ?? []) {
+                if (request.final) {
+                    const observations = state.notJudgedRequests ??= {};
+                    const key = windowKey(session.sessionId, Date.parse(request.at));
+                    if (observations[key]) continue;
+                    observations[key] = { ...request, final: true };
+                    counters.notJudgedFinal += 1;
+                } else counters.notJudgedPending += 1;
+                stderr(JSON.stringify({ kind: "cache_bust_sentinel_not_judged", session_id: session.sessionId, ...request }));
+            }
             const requests = analysis.requests.filter(
                 (request) =>
                     request.session === session.sessionId &&
@@ -1437,11 +1501,50 @@ export async function runSentinelOnce(
             const sessionState: SessionWatermarkState = priorSession ?? {
                 lastAnalyzedRequestTimestampMs: sinceExclusiveMs,
             };
+            const pendingNotJudged = [...new Map([
+                ...(priorSession?.pendingNotJudged ?? []).filter((request) => !analysis.resolvedNotJudged?.includes(request.file)),
+                ...(analysis.notJudged ?? []),
+            ].map((request) => [request.file, request])).values()].filter((request) => !request.final);
+            if (pendingNotJudged.length) sessionState.pendingNotJudged = pendingNotJudged;
+            else delete sessionState.pendingNotJudged;
             sessionState.lastAnalyzedRequestTimestampMs = Math.max(sessionState.lastAnalyzedRequestTimestampMs, sinceExclusiveMs);
             sessionState.lastScannedAtMs = batchNowMs;
             const windows = groupBustWindows(requests, sessionState.openWindow, sessionState.backfillWindow);
             counters.bustWindows += windows.length;
             for (const window of windows) {
+                const threadRows = window.rows.filter((row) => row.divergenceClass === "thread_break_unchanged_client_bytes");
+                const observationKey = windowKey(window.sessionId, window.eventStartMs ?? window.startMs);
+                const priorObservation = state.windows[observationKey] ?? state.suppressedWindows[observationKey];
+                const priorRequests = state.windows[observationKey]?.threadBreakRequests ?? state.suppressedWindows[observationKey]?.threadBreakRequests;
+                const threadBreakBeforeMs = state.windows[observationKey]?.threadBreakBeforeMs ?? state.suppressedWindows[observationKey]?.threadBreakBeforeMs ??
+                    (priorObservation && !priorRequests ? Math.max(previouslyObservedThroughMs, window.eventStartMs ?? window.startMs) : undefined);
+                if (threadRows.length) {
+                    const recorded = new Set(priorRequests ?? []);
+                    for (const row of threadRows) {
+                        const requestKey = row.threadBreak?.requestKey ?? row.at;
+                        if (recorded.has(requestKey)) continue;
+                        recorded.add(requestKey);
+                        // Older window state has no request list. Its saved scan
+                        // progress separates already-recorded requests from new
+                        // arrivals that belong to the same ongoing window.
+                        if (threadBreakBeforeMs !== undefined && row.timestampMs <= threadBreakBeforeMs) continue;
+                        stderr(JSON.stringify({ kind: "cache_bust_thread_break", at: row.at, session_id: row.session,
+                            directory: analysis.directory ?? session.directory ?? session.projectPath,
+                            rewritten_tokens: row.rewrittenTokens, cache_read: row.threadBreak?.cacheRead,
+                            previous_total: row.threadBreak?.previousTotal, gap_ms: row.threadBreak?.gapMs,
+                            continues_since_full: row.threadBreak?.continuesSinceFull,
+                            provider_reason: row.providerCacheMissReason?.type,
+                            provider_missed: row.providerCacheMissReason?.cacheMissedInputTokens }));
+                    }
+                    const threadBreakRequests = [...recorded];
+                    if (state.windows[observationKey]) {
+                        state.windows[observationKey].threadBreakRequests = threadBreakRequests;
+                        if (threadBreakBeforeMs !== undefined) state.windows[observationKey].threadBreakBeforeMs = threadBreakBeforeMs;
+                    }
+                    state.suppressedWindows[observationKey] = { ...state.suppressedWindows[observationKey],
+                        divergenceClass: "thread_break_unchanged_client_bytes", rewrittenTokens: windowRewrittenTokens(window), threadBreakRequests,
+                        ...(threadBreakBeforeMs !== undefined ? { threadBreakBeforeMs } : {}) };
+                }
                 for (const row of window.rows) {
                     if (row.divergenceClass !== "tail_shrink_no_rewrite") continue;
                     stderr(
@@ -1468,7 +1571,7 @@ export async function runSentinelOnce(
                             : (unaccounted.length ? unaccounted : window.rows).reduce((sum, row) => sum + Math.max(0, row.rewrittenTokens ?? 0), 0),
                         windowStartMs: window.startMs, reason: "stale" as const };
                     if (state.suppressedWindows[key]?.reason !== "stale") {
-                        state.suppressedWindows[key] = observation;
+                        state.suppressedWindows[key] = { ...state.suppressedWindows[key], ...observation };
                         stderr(JSON.stringify({ kind: "cache_bust_sentinel_observation", session_id: session.sessionId, ...observation }));
                     }
                     staleBacklog ||= Boolean(priorSession?.scanCursor || analysis.scanBounded);

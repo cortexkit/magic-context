@@ -11,6 +11,8 @@ export interface CacheBustScanProgress {
     scanCursor?: string;
     pendingFiles?: number;
     oldestPendingTimestampMs?: number;
+    notJudged?: { at: string; file: string; reason: string; final?: boolean }[];
+    resolvedNotJudged?: string[];
 }
 
 export const MAX_SCAN_FILES = 32;

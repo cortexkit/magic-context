@@ -70,7 +70,7 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
     type AnalyzedCacheRequest,
     type CacheBustAttributionInput,
@@ -182,6 +182,7 @@ interface Snapshot {
     runnerRequest?: RunnerRequest;
     bytesMissing?: boolean;
     threadType?: "create" | "continue";
+    contextIncomplete?: { at: string; file: string; reason: string };
     tools?: Segment;
     statedCacheTtlMs?: number;
     /** Account routing identity; it does not change which bytes are compared or how lifetime is tracked. */
@@ -266,6 +267,8 @@ export interface OpenCodeCacheBustAnalysisOptions {
     scanDeadlineMs?: number;
     scanNow?: () => number;
     scanMetrics?: DumpScanMetrics;
+    finalizeNotJudgedBeforeMs?: number;
+    pendingNotJudged?: CacheBustScanProgress["notJudged"];
     /** Share only names and small metadata across batches of one sentinel run. */
     scanIndex?: DumpScanIndex;
     /**
@@ -483,15 +486,16 @@ function cacheScopeChange(current: Snapshot, previous?: Snapshot): string | unde
     return changes.length ? changes.join("; ") : undefined;
 }
 
-/** A full body after deltas needs its full baseline and every sent delta in between. */
+/** Recover each full request's newest earlier full body and every intervening delta. */
 function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
-    const extra: Snapshot[] = [];
-    const starts = snapshots.filter((snapshot, index) =>
-        snapshot.threadType !== undefined &&
-        (snapshot.threadType === "create" || snapshots.slice(index + 1).some((later) =>
-            sameRoute(later, snapshot) && later.threadType !== "continue")) &&
-        !snapshots.slice(0, index).some((earlier) => sameRoute(earlier, snapshot)),
-    );
+    const key = (snapshot: Snapshot) => `${snapshot.sourceDir}/${snapshot.file}`;
+    const loaded = new Map(snapshots.map((snapshot) => [key(snapshot), snapshot]));
+    const listings = new Map<string, { file: string; createdAt: string; sequence: number }[]>();
+    // A cursor batch can contain old backfill and new arrivals separated by a
+    // gap. The reference is the newest earlier full request, not the first full
+    // body in that batch: the gap may contain a newer reference and sent deltas.
+    const starts = snapshots.filter((snapshot) => snapshot.threadType !== "continue" &&
+        snapshots.some((other) => sameRoute(other, snapshot) && other.threadType !== undefined));
     for (const first of starts) {
         const candidate: DumpCandidate = {
             source: { provider: first.provider, dir: first.sourceDir, label: "thread context" },
@@ -500,19 +504,17 @@ function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
             totalBytes: 0,
             dumpCount: 0,
         };
-        const files = (args.scanIndex?.contextFiles(first.sourceDir, first.session) ?? listDumpFiles(first.sourceDir, args.scanMetrics))
+        const listingKey = JSON.stringify([first.sourceDir, first.session]);
+        const files = listings.get(listingKey) ?? (args.scanIndex?.contextFiles(first.sourceDir, first.session) ?? listDumpFiles(first.sourceDir, args.scanMetrics))
             .filter((file) => file.endsWith(".meta.json"))
             .flatMap((file) => {
                 const name = parseDumpFilename(file);
                 if (name && name.session !== first.session) return [];
+                if (name) return [{ file, createdAt: name.createdAt, sequence: name.sequence }];
                 try {
                     const meta = readDumpMetadata(first.sourceDir, file, args);
-                    if (!name && String(meta.session ?? "") !== first.session) return [];
-                    return [{
-                        file,
-                        createdAt: name?.createdAt ?? String(meta.createdAt ?? ""),
-                        sequence: name?.sequence ?? (finiteNumber(meta.step) ? meta.step : 0),
-                    }];
+                    if (String(meta.session ?? "") !== first.session) return [];
+                    return [{ file, createdAt: String(meta.createdAt ?? ""), sequence: finiteNumber(meta.step) ? meta.step : 0 }];
                 } catch {
                     // A request's metadata file may still be being written while this scan runs.
                     return [];
@@ -520,22 +522,28 @@ function withThreadContext(snapshots: Snapshot[], args: Args): Snapshot[] {
             })
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt) ||
                 b.sequence - a.sequence || b.file.localeCompare(a.file));
+        listings.set(listingKey, files);
         for (const entry of files) {
             if (entry.createdAt > first.orderCreatedAt ||
                 (entry.createdAt === first.orderCreatedAt &&
                     (entry.sequence > first.sequence ||
                         (entry.sequence === first.sequence && entry.file >= first.file)))) continue;
-            const snapshot = loadCandidateSnapshots(
+            const snapshot = loaded.get(`${first.sourceDir}/${entry.file}`) ?? loadCandidateSnapshots(
                 candidate,
                 { ...args, since: undefined, until: undefined, limit: undefined },
                 [entry.file],
             )[0];
-            if (!snapshot || !sameRoute(snapshot, first)) continue;
-            extra.push(snapshot);
+            if (!snapshot) {
+                first.contextIncomplete = { at: entry.createdAt, file: join(first.sourceDir, entry.file),
+                    reason: `earlier request dump at ${entry.createdAt} is unreadable; no earlier full body available for comparison; client bytes not comparable` };
+                break;
+            }
+            if (!sameRoute(snapshot, first)) continue;
+            loaded.set(key(snapshot), snapshot);
             if (snapshot.threadType !== "continue") break;
         }
     }
-    return [...extra, ...snapshots].sort((a, b) =>
+    return [...loaded.values()].sort((a, b) =>
         a.orderCreatedAt.localeCompare(b.orderCreatedAt) ||
         a.sequence - b.sequence || a.file.localeCompare(b.file));
 }
@@ -1101,6 +1109,16 @@ export function analyzeOpenCodeCacheBustSession(
     let chosenKeys: Set<string> | undefined;
     let cursor: ReturnType<typeof selectScanBatch>["cursor"];
     let priorHighWaterMarkMs: number | null = null;
+    const notJudged: NonNullable<CacheBustScanProgress["notJudged"]> = [];
+    const resolvedNotJudged: string[] = [];
+    // A pending dump can age out of ordinary scan selection. Retry it explicitly
+    // so it is either recovered or finalized, rather than silently forgotten.
+    for (const pending of options.pendingNotJudged ?? []) {
+        const source = sources.find((entry) => resolve(entry.dir) === dirname(resolve(pending.file)));
+        if (source && loadCandidateSnapshots({ source, session: options.sessionId, latestMtimeMs: 0, totalBytes: 0, dumpCount: 0 }, args, [basename(pending.file)]).length) {
+            resolvedNotJudged.push(pending.file);
+        } else notJudged.push(pending);
+    }
     const snapshotKey = (snapshot: Snapshot) => `${String(Date.parse(snapshot.createdAt)).padStart(16, "0")}:${String(snapshot.sequence).padStart(8, "0")}:${snapshot.file}:${sources.find((source) => source.dir === snapshot.sourceDir)?.provider}`;
     const precedingRequestTimestampsMs: number[] = [];
     const snapshots = options.scanDeadlineMs === undefined
@@ -1139,10 +1157,16 @@ export function analyzeOpenCodeCacheBustSession(
                 ...indexed.filter((entry) => !selected.includes(entry))
                     .map((entry) => entry.timestamp),
             );
-            return sources.flatMap((source) => loadCandidateSnapshots(
+            const loaded = sources.flatMap((source) => loadCandidateSnapshots(
                 { source, session: options.sessionId, latestMtimeMs: 0, totalBytes: 0, dumpCount: 0 },
                 args, selected.filter((entry) => entry.source === source).map((entry) => entry.file),
             ));
+            for (const entry of batch.chosen) {
+                if (!loaded.some((snapshot) => snapshotKey(snapshot) === key(entry))) {
+                    notJudged.push({ at: new Date(entry.timestamp).toISOString(), file: join(entry.source.dir, entry.file), reason: "request dump is unreadable" });
+                }
+            }
+            return loaded;
         })();
     const contextualSnapshots = withThreadContext(snapshots, args);
     const inWindow = (snapshot: Snapshot): boolean =>
@@ -1150,6 +1174,19 @@ export function analyzeOpenCodeCacheBustSession(
             ? snapshotKey(snapshot) > options.scanCursor
             : options.sinceExclusiveMs === undefined || Date.parse(snapshot.createdAt) > options.sinceExclusiveMs) &&
         (options.untilInclusiveMs === undefined || Date.parse(snapshot.createdAt) <= options.untilInclusiveMs);
+    for (const snapshot of contextualSnapshots.filter(inWindow)) {
+        if (snapshot.contextIncomplete) notJudged.push(snapshot.contextIncomplete);
+    }
+    const unjudged = [...new Map(notJudged.map((row) => [row.file, { ...row,
+        final: Date.parse(row.at) < (options.finalizeNotJudgedBeforeMs ?? -Infinity) }])).values()];
+    if (unjudged.some((row) => !row.final)) {
+        // Do not advance either end of a disjoint cursor past missing evidence.
+        // Keeping the batch pending retries its requests when the dumps are complete.
+        return { requests: [], highWaterMarkMs: null, filesExamined, scanBounded: true,
+            scanCursor: options.scanCursor, pendingFiles: pendingFiles + (chosenKeys?.size ?? notJudged.length),
+            oldestPendingTimestampMs: Math.min(oldestPendingTimestampMs ?? Infinity, ...unjudged.map((row) => Date.parse(row.at))), notJudged: unjudged,
+            ...(resolvedNotJudged.length ? { resolvedNotJudged } : {}) };
+    }
     const boundedSnapshots = contextualSnapshots.filter((snapshot) => {
         const timestampMs = Date.parse(snapshot.createdAt);
         return (
@@ -1170,7 +1207,7 @@ export function analyzeOpenCodeCacheBustSession(
         withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath),
         { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs: precedingRequestTimestampsMs.filter((at) => !analysisSnapshots.some((snapshot) => snapshot.requestTimestampMs === at)) },
     );
-    const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
+    const requests: AnalyzedCacheRequest[] = rows.flatMap((row, index) => {
         const timestampMs = Date.parse(row.current.createdAt);
             if (!Number.isFinite(timestampMs) || !inWindow(row.current)) return [];
         // This sentinel API reads dump pairs only, not runner meter-only rows.
@@ -1190,12 +1227,29 @@ export function analyzeOpenCodeCacheBustSession(
                 verdict: row.verdict,
                 rewrittenTokens: row.rewrittenTokens,
                 divergenceClass: row.divergenceClass,
+                ...(row.divergenceClass === "thread_break_unchanged_client_bytes" ? {
+                    threadBreak: {
+                        requestKey: `${row.current.sourceDir}/${row.current.file}`,
+                        cacheRead: row.comparableRead, previousTotal: row.prevTotal,
+                        gapMs: (() => {
+                            const previous = rows.slice(0, index).reverse().find((earlier) => earlier.current.session === row.current.session);
+                            return previous ? row.current.requestTimestampMs - previous.current.requestTimestampMs : undefined;
+                        })(),
+                        continuesSinceFull: row.previous ? (() => {
+                            const fullIndex = analysisSnapshots.indexOf(row.previous!);
+                            return fullIndex < 0 ? undefined : analysisSnapshots.slice(fullIndex + 1, analysisSnapshots.indexOf(row.current))
+                                .filter((snapshot) => sameRoute(snapshot, row.current) && snapshot.threadType === "continue").length;
+                        })() : undefined,
+                    },
+                } : {}),
                 ...(row.providerCacheMissReason ? { providerCacheMissReason: row.providerCacheMissReason } : {}),
                 firstDivergence:
                     row.verdict === "BASE"
                         ? "(first request)"
-                        : (row.prefixDivergence?.id ?? row.comparisonNote ?? segment?.id ?? "(identical normalized prefix)"),
+                        : (comparisonDescription(row) ?? segment?.id ?? "(identical normalized prefix)"),
                 analyzerCmd: openCodeAnalyzerCommand(row, options),
+                ...(row.divergenceClass === "no_mc_pass_row" && row.decision?.source === "transform scheduler log"
+                    ? { passEvidence: "no pass record for this request; a scheduler line was found" } : {}),
                 ...(row.decision?.identityDelta
                     ? { identityDelta: row.decision.identityDelta }
                     : {}),
@@ -1206,8 +1260,9 @@ export function analyzeOpenCodeCacheBustSession(
         .filter((snapshot) => !isUsageMissing(snapshot))
         .filter(inWindow)
         .map((snapshot) => Date.parse(snapshot.createdAt));
-    const highWaterMarkMs = analyzedRequestTimestamps.length > 0
-        ? Math.max(priorHighWaterMarkMs ?? -Infinity, ...analyzedRequestTimestamps) : priorHighWaterMarkMs;
+    const completedTimestamps = [...analyzedRequestTimestamps, ...unjudged.filter((row) => row.final).map((row) => Date.parse(row.at))];
+    const highWaterMarkMs = completedTimestamps.length > 0
+        ? Math.max(priorHighWaterMarkMs ?? -Infinity, ...completedTimestamps) : priorHighWaterMarkMs;
     if (scanBounded && cursor) nextCursor = JSON.stringify({ ...cursor, highWaterMarkMs });
     return {
         requests,
@@ -1217,6 +1272,8 @@ export function analyzeOpenCodeCacheBustSession(
         scanCursor: scanBounded ? nextCursor : undefined,
         pendingFiles,
         oldestPendingTimestampMs,
+        ...(unjudged.length ? { notJudged: unjudged } : {}),
+        ...(resolvedNotJudged.length ? { resolvedNotJudged } : {}),
     };
 }
 
@@ -1234,6 +1291,16 @@ function firstDivergence(prev: Segment[], cur: Segment[]): number {
     return prev.length === cur.length ? -1 : n;
 }
 
+/** A length boundary is not evidence that an existing message changed. */
+function comparisonDescription(row: AnalysisRow): string | undefined {
+    if (row.prefixDivergence) return row.prefixDivergence.id;
+    if (row.comparisonNote) return row.comparisonNote;
+    if (row.divergenceIndex >= 0 && (!row.previous?.segments[row.divergenceIndex] || !row.current.segments[row.divergenceIndex])) {
+        return "(common client prefix matches; request length changed, not a changed message)";
+    }
+    return undefined;
+}
+
 interface ByteComparison {
     previous: Snapshot;
     divergenceIndex: number;
@@ -1244,13 +1311,16 @@ interface ByteComparison {
 }
 
 function compareClientBytes(current: Snapshot, previous: Snapshot, history: readonly Snapshot[]): ByteComparison {
+    if (current.contextIncomplete) return { previous, divergenceIndex: -1, specialClass: "full_body_no_baseline", comparisonNote: `(${current.contextIncomplete.reason})` };
     const route = history.filter((snapshot) => sameRoute(snapshot, current) && !snapshot.bytesMissing);
     const latest = route.at(-1);
     const continuation = current.threadType === "continue";
     const afterChain = !continuation && latest?.threadType === "continue";
     if (!continuation && !afterChain) {
         const divergenceIndex = firstDivergence(previous.segments, current.segments);
-        return { previous, divergenceIndex, byteVerdict: bustsReusablePrefix(previous, current, divergenceIndex) ? "BUST" : "STABLE" };
+        const comparisonNote = divergenceIndex >= Math.min(previous.segments.length, current.segments.length)
+            ? "(common client prefix matches; request length changed, not a changed message)" : undefined;
+        return { previous, divergenceIndex, byteVerdict: bustsReusablePrefix(previous, current, divergenceIndex) ? "BUST" : "STABLE", comparisonNote };
     }
     // The provider keeps prior conversation bytes on a continuation. Only the
     // fully transmitted prefix can be compared with the preceding request.
@@ -2041,9 +2111,8 @@ async function main(): Promise<void> {
             continue;
         }
         const index = row.divergenceIndex;
-        const segment =
-            index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
-        const attribution = row.prefixDivergence?.id ?? row.comparisonNote ?? (row.verdict === "EXPIRED" ? "(expired cache)" : segment
+        const segment = index < 0 || !previous.segments[index] ? undefined : row.current.segments[index];
+        const attribution = comparisonDescription(row) ?? (row.verdict === "EXPIRED" ? "(expired cache)" : segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
             : `(identical; bytes ${row.byteVerdict})`);
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
@@ -2061,6 +2130,9 @@ async function main(): Promise<void> {
         }
         if (row.divergenceClass) {
             console.log(`          └─ divergence-class: ${row.divergenceClass}`);
+            if (row.divergenceClass === "no_mc_pass_row" && row.decision?.source === "transform scheduler log") {
+                console.log("          └─ no pass record for this request; a scheduler line was found");
+            }
         }
         if (runner) {
             if (row.runnerClassification) console.log(`          └─ runner-class: ${row.runnerClassification.class}; ${formatRunnerStepTiming(row.runnerClassification)}; ${row.runnerClassification.evidence}`);
@@ -2071,6 +2143,7 @@ async function main(): Promise<void> {
         if (
             (opts.showDiff || opts.allBusts) &&
             index >= 0 &&
+            (row.prefixDivergence || (previous.segments[index] && row.current.segments[index])) &&
             (row.byteVerdict === "BUST" || opts.allRows)
         ) {
             if (opts.allBusts) {
@@ -2086,6 +2159,7 @@ async function main(): Promise<void> {
                     }
                 }
                 for (const diffIndex of diffs) {
+                    if (!previous.segments[diffIndex] || !row.current.segments[diffIndex]) continue;
                     console.log(
                         `          └─ diverge @${diffIndex}: prev=${previous.segments[diffIndex]?.id ?? "—"}/${previous.segments[diffIndex]?.hash ?? "—"}  cur=${row.current.segments[diffIndex]?.id ?? "—"}/${row.current.segments[diffIndex]?.hash ?? "—"}`,
                     );

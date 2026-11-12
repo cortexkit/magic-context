@@ -51,6 +51,8 @@ export interface AnalyzedCacheRequest {
     providerCacheMissReason?: ProviderCacheMissReason;
     firstDivergence: string;
     analyzerCmd: string;
+    passEvidence?: string;
+    threadBreak?: { requestKey: string; cacheRead?: number; previousTotal?: number; gapMs?: number; continuesSinceFull?: number };
     /** Render-identity components the matched pass reported as changed, when it logged them. */
     identityDelta?: string[];
     /**
@@ -624,12 +626,13 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
         return usageMissing ? "usage_missing" : "provider_full_miss";
     }
     if (isTinyFirstRenderDefer) return "unaccounted_defer_pass";
-    // A scheduler-only defer does not show that a compaction actually ran. Nearby
-    // old marker text or a changed billing header cannot prove that mutation.
+    // A scheduler defer says only that usage was below its execute threshold.
+    // It does not prove that the pass made no changes; other processing steps
+    // may still rebuild the request.
     if (decision.source === "transform scheduler log" && canonicalDecision === "defer") {
         if (usageMissing) return "usage_missing";
         if (providerFullMiss) return "provider_full_miss";
-        return "unaccounted_defer_pass";
+        return "no_mc_pass_row";
     }
     // A pass that logged its reclaim ride states outright why it was allowed to
     // mutate, so it outranks the compaction-marker seam below, which only infers

@@ -430,7 +430,8 @@ for (const divergenceClass of [
             expect(output).toHaveLength(shouldWake ? 1 : 0);
             if (!shouldWake && divergenceClass !== "continuation_short_read")
                 expect(Object.values(loadSentinelState(stateFile).suppressedWindows)).toEqual([
-                    { divergenceClass, rewrittenTokens: tokens },
+                    { divergenceClass, rewrittenTokens: tokens,
+                        ...(divergenceClass === "thread_break_unchanged_client_bytes" ? { threadBreakRequests: [row.at] } : {}) },
                 ]);
         });
 }
