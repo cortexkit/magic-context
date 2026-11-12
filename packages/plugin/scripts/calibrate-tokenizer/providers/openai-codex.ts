@@ -1,3 +1,5 @@
+import { CountHttpError } from "./counting";
+
 /**
  * OpenAI ChatGPT-Plus (Codex/Responses API) backend.
  *
@@ -75,8 +77,7 @@ async function streamResponses(
         body: JSON.stringify({ ...body, stream: true, store: false }),
     });
     if (!res.ok || !res.body) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`Codex HTTP ${res.status}: ${text.slice(0, 200)}`);
+        throw new CountHttpError(res.status, res.status === 404 ? "model not found for this credential" : `Codex HTTP ${res.status}`);
     }
 
     let usage: ResponsesUsage | null = null;
@@ -120,7 +121,9 @@ export async function measureOpenAICodex(
     auth: AuthEntry,
     systemText: string,
     toolsArray: unknown[],
+    allowGeneration = false,
 ): Promise<MeasureResult> {
+    if (!allowGeneration) throw new Error("Generation requires --allow-generation");
     if (auth.type !== "oauth" || !auth.access) {
         throw new Error("OpenAI Codex backend requires OAuth auth");
     }

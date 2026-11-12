@@ -1,3 +1,5 @@
+import { postCountJson } from "./counting";
+
 /**
  * OpenAI-compatible backend: covers any provider that exposes the standard
  * /v1/chat/completions endpoint and returns `usage.prompt_tokens` (or the
@@ -129,20 +131,8 @@ async function chatCompletion(
     endpoint: ProviderEndpoint,
     body: Record<string, unknown>,
 ): Promise<number> {
-    const res = await fetch(endpoint.url, {
-        method: "POST",
-        headers: endpoint.headers,
-        body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-    }
-    const json = JSON.parse(text) as {
-        usage?: {
-            prompt_tokens?: number;
-            input_tokens?: number;
-        };
+    const json = await postCountJson(endpoint.url, endpoint.headers, body) as {
+        usage?: { prompt_tokens?: number; input_tokens?: number };
         error?: { message?: string };
     };
     if (json.error) {
@@ -150,7 +140,7 @@ async function chatCompletion(
     }
     const tokens = json.usage?.prompt_tokens ?? json.usage?.input_tokens;
     if (typeof tokens !== "number") {
-        throw new Error(`No token count in response: ${text.slice(0, 200)}`);
+        throw new Error("No token count in response");
     }
     return tokens;
 }
@@ -172,7 +162,9 @@ export async function measureOpenAICompatible(
     auth: AuthEntry,
     systemText: string,
     toolsArray: unknown[],
+    allowGeneration = false,
 ): Promise<MeasureResult> {
+    if (!allowGeneration) throw new Error("Generation requires --allow-generation");
     const endpoint = endpointFor(test.provider, auth);
 
     const baselineBody: Record<string, unknown> = {

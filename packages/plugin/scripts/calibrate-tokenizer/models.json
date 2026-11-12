@@ -1,5 +1,5 @@
 {
-    "_comment": "Models to calibrate. Provider matches auth.json keys. modelId is the provider-native model identifier. tokenizerKey is the matching ai-tokenizer models.json entry (or null to fall back to base claude/o200k_base/etc encoding).",
+    "_comment": "Models to calibrate. Provider selects an explicit environment variable. modelId is the provider-native model identifier. tokenizerKey is the matching ai-tokenizer models.json entry (or null to fall back to base claude/o200k_base/etc encoding).",
     "tests": [
         { "label": "deepseek/deepseek-v4-flash", "provider": "deepseek", "modelId": "deepseek-v4-flash", "tokenizerKey": null },
         { "label": "deepseek/deepseek-v4-pro", "provider": "deepseek", "modelId": "deepseek-v4-pro", "tokenizerKey": null },
@@ -21,6 +21,9 @@
         { "label": "openai/gpt-6-astra", "provider": "openai", "modelId": "gpt-6-astra", "tokenizerKey": "openai/gpt-5" },
         { "label": "openai/gpt-6-sol", "provider": "openai", "modelId": "gpt-6-sol", "tokenizerKey": "openai/gpt-5" },
         { "label": "openai/gpt-6.1-sol", "provider": "openai", "modelId": "gpt-6.1-sol", "tokenizerKey": "openai/gpt-5" },
+        { "label": "anthropic/claude-fable-5-2", "provider": "anthropic", "modelId": "claude-fable-5-2", "tokenizerKey": "anthropic/claude-opus-4.5" },
+        { "label": "anthropic/claude-mythos-5-2", "provider": "anthropic", "modelId": "claude-mythos-5-2", "tokenizerKey": "anthropic/claude-opus-4.5" },
+        { "label": "anthropic/claude-mythos-5-1", "provider": "anthropic", "modelId": "claude-mythos-5-1", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-fable-5-1", "provider": "anthropic", "modelId": "claude-fable-5-1", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-opus-5", "provider": "anthropic", "modelId": "claude-opus-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-opus-5-5", "provider": "anthropic", "modelId": "claude-opus-5-5", "tokenizerKey": "anthropic/claude-opus-4.5" },

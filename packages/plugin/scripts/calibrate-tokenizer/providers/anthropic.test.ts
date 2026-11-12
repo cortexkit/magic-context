@@ -41,3 +41,13 @@ it("uses OAuth count_tokens with the Claude Code system prefix", async () => {
     expect(result).toEqual({ method: "count_tokens", systemApi: 100, toolsApi: 200, proseApi: 300, sections: { docs: 300 } });
     expect(bodies).toHaveLength(5);
 });
+
+it("never falls back to a generation request after a count failure", async () => {
+    const urls: string[] = [];
+    mock = spyOn(globalThis, "fetch").mockImplementation((async (url: string | URL | Request) => {
+        urls.push(String(url));
+        return Response.json({ error: { message: "not echoed" } }, { status: 500 });
+    }) as typeof fetch);
+    await expect(measureAnthropic({ provider: "anthropic", label: "test", modelId: "test" }, { type: "oauth", access: "fake-token" }, "system", [], { docs: "docs" })).rejects.toThrow("HTTP 500");
+    expect(urls).toEqual(["https://api.anthropic.com/v1/messages/count_tokens?beta=true"]);
+});
