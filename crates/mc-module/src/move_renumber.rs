@@ -365,7 +365,17 @@ impl Numbering {
                 if let Some(owner) = by_plugin.last_mut() {
                     owner.covers(message.entry);
                 }
-            } else if !message.finished_summary {
+            } else if message.finished_summary {
+                // The plugin gave this row no number. A runner that keeps it
+                // as an entry (Broca's import does; OpenCode 2 makes it a
+                // marker with no entry) still has it inside the summarized
+                // history, so it belongs to the message before it, as an
+                // added row does. Left unowned, it would sit between two
+                // moved summaries with neither covering it.
+                if let Some(owner) = by_plugin.last_mut() {
+                    owner.covers(message.entry);
+                }
+            } else {
                 by_plugin.push(Numbered::new(&message.mid, message.entry));
             }
         }

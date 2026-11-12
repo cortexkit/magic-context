@@ -452,6 +452,43 @@ fn a_store_converted_to_opencode_2_maps_by_id_and_rows_added_after_a_message_cou
     );
 }
 
+/// A runner can keep the compaction pair as entries of their own (Broca's
+/// import of an OpenCode 1 session does). The plugin numbered the opener and
+/// gave the finished summary no number, so the summary that ends at the
+/// opener must also cover the pair's second row: the next moved summary
+/// starts right after it, with no entry left between the two.
+#[test]
+fn a_finished_summary_the_runner_kept_as_an_entry_counts_with_the_message_before_it() {
+    let row = |mid: &str, entry: u64, finished_summary: bool| HostMessage {
+        source_entry: None,
+        mid: mid.into(),
+        entry: Some(entry),
+        finished_summary,
+        added: false,
+        pi: None,
+    };
+    let rows = vec![
+        row("u1", 1, false),
+        row("a2", 2, false),
+        row("opener", 3, false),
+        row("summary", 4, true),
+        row("u5", 5, false),
+        row("a6", 6, false),
+    ];
+    let store = Store::new("kept-summary");
+    // The plugin's numbers: u1 1, a2 2, opener 3, u5 4, a6 5.
+    store.summary(0, (1, "u1"), (3, "opener"));
+    store.summary(1, (4, "u5"), (5, "a6"));
+    let numbering = Numbering::opencode(&rows, &Cursor::new(6, "a6", "d")).unwrap();
+    run(&store, &numbering).unwrap();
+    assert_eq!(
+        store.query::<String>(
+            "SELECT start_message || '-' || end_message FROM compartments ORDER BY sequence"
+        ),
+        ["1-4", "5-6"]
+    );
+}
+
 #[test]
 fn an_added_row_cannot_be_a_finished_summary() {
     let mut rows = converted();
