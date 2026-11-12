@@ -9,6 +9,7 @@ import {
     noteLkgCapturedPrefix,
 } from "./lkg-recovery-prefix";
 import { providerVisibleMessage } from "./provider-visible-parts";
+import { resetServedCheckForTest } from "./served-check";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgSlot {
@@ -1139,6 +1140,8 @@ export function getLkgDigestsComputedForTest(): number {
 
 export function resetLkgSlotsForTest(): void {
     clearLkgRecoveryPrefixes();
+    // A simulated restart forgets what this process served, as a real one does.
+    resetServedCheckForTest();
     digestMemo.clear();
     digestMemoBytes = 0;
     sharedLkgEntryDigests.clear();
