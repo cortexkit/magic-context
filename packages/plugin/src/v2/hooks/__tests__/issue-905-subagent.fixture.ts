@@ -10,6 +10,7 @@
 // usage reading is that number, so pressure follows from what Magic Context
 // served and is never set by the test.
 import { spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,6 +77,11 @@ export interface Issue905Scenario {
     heavyShare?: number;
     /** Size of the task message, in tokens. */
     taskTokens?: number;
+    /**
+     * false: the provider reports no input usage, so every pass reads only a
+     * local count of its own request.
+     */
+    reportUsage?: boolean;
     /** Extra plugin settings. */
     configOverrides?: Record<string, unknown>;
 }
@@ -115,6 +121,8 @@ export interface Issue905Pass {
     mcPercentage: number | null;
     decision: string | null;
     served: Composition;
+    /** SHA-256 of the messages the hook served, as JSON. */
+    servedDigest: string;
     logs: string[];
     /** `signed thinking hold:` line of this pass, when it logged one. */
     holdLine: string | null;
@@ -234,6 +242,7 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
         outputScale = 1,
         heavyShare = 0.35,
         taskTokens = 400,
+        reportUsage = true,
         configOverrides = {},
     } = scenario;
     const random = rng(seed);
@@ -367,7 +376,7 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
                   time: { created: row.created, completed: row.created + 1000 },
                   finish: "tool-calls",
                   tokens: {
-                      input: row.inputTokens ?? 0,
+                      input: reportUsage ? (row.inputTokens ?? 0) : 0,
                       output: 500,
                       reasoning: row.hiddenThinkingTokens ?? 0,
                       cache: { read: 0, write: 0 },
@@ -561,6 +570,9 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
                     : null,
                 decision: scheduler ? (/decision=(\w+)/.exec(scheduler)?.[1] ?? null) : null,
                 served,
+                servedDigest: createHash("sha256")
+                    .update(JSON.stringify(draft.messages))
+                    .digest("hex"),
                 logs: passLogs,
                 holdLine: find(/signed thinking hold: /),
                 thinkingHold: permission ? /thinking_hold=true/.test(permission) : null,

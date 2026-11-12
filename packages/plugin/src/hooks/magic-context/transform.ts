@@ -234,7 +234,7 @@ import {
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { evaluateRequestToolsRelease, type RequestToolsRelease } from "./request-tools-release";
-import { heuristicsAlreadyRanThisTurn } from "./routine-cleanup-decision";
+import { forceBandConfirmed, heuristicsAlreadyRanThisTurn } from "./routine-cleanup-decision";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
@@ -2047,14 +2047,23 @@ export function createTransform(deps: TransformDeps) {
             effectiveExecuteThresholdPercentage,
         );
         // Prefix-bound thinking models hold prefix changes only right after heavy
-        // reasoning and only below the cap; every other pass busts as on any
-        // other model and strips the turn's signed thinking when it does.
+        // reasoning, only below the cap and never in the force band; every other
+        // pass busts as on any other model and strips the turn's signed thinking
+        // when it does. The force band is read from the reading the postprocess
+        // phase will read unless a priced pass sizes it below (then the hold is
+        // checked again against the sized reading).
         let holdProseRatio: number | undefined;
         const signedThinkingHold: SignedThinkingHoldDecision | null = signedThinkingPrefixBound
             ? decideSignedThinkingHold({
                   messages,
                   usagePercentage: contextUsageEarly.percentage,
                   executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+                  forceBandPressure: forceBandConfirmed({
+                      percentage: contextUsageEarly.percentage,
+                      fromEstimate: hostOverWindow,
+                      forceMaterializationPercentage,
+                      compactionOff,
+                  }),
                   // The session's frozen calibration, read without adopting a new one.
                   estimateTextTokens: (text) => {
                       holdProseRatio ??= sessionDecisionCalibration(db, sessionId).proseRatio;
@@ -3716,6 +3725,30 @@ export function createTransform(deps: TransformDeps) {
                     `transform: unknown provider usage; using ${reading.usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens} pressureTokens=${pressureEstimate.pressureTokens}${reading.grewPastSavedReading ? ` grewPastSavedReading=${savedProviderReading?.percentage.toFixed(1)}` : ""} ${sizedPlan}`,
                 );
             }
+        }
+        // A priced pass with no provider reading is sized just above, after the
+        // hold was decided from the reading it had before (none). When the sized
+        // reading is force-band pressure the hold ends here, as it would have if
+        // that reading had been known: the postprocess phase reads the same
+        // predicate from the same reading when it lifts the hold's gate, so the
+        // two cannot disagree. The history head stays frozen for this pass, since
+        // its refresh and fold were already decided with the hold on, and the
+        // pass was sized without them.
+        if (
+            activeThinkingPrefixHold &&
+            signedThinkingHold?.held === true &&
+            forceBandConfirmed({
+                percentage: contextUsage.percentage,
+                fromEstimate: contextUsageFromEstimate,
+                forceMaterializationPercentage,
+                compactionOff,
+            })
+        ) {
+            activeThinkingPrefixHold = false;
+            sessionLog(
+                sessionId,
+                `signed thinking hold: held=false reason=force_band heavyStepsBack=${signedThinkingHold.heavyStepsBack ?? "none"} heavyStepTokens=${signedThinkingHold.heavyStepTokens} usage=${contextUsage.percentage.toFixed(1)}% cap=${signedThinkingHold.capPercentage}% (sized reading${contextUsageFromEstimate ? ", local count" : ""})`,
+            );
         }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
