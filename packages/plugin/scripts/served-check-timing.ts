@@ -1,5 +1,5 @@
 /**
- * Wall time of the served check (served-check.ts) at 1,000 and 10,000
+ * Wall time of the served check (served-check.ts) at 200, 500, 1,000 and 10,000
  * messages: the appending pass every ordinary turn runs, and a pass whose
  * first message changed, which runs the full content check.
  *
@@ -108,7 +108,7 @@ const collect = (): void => (globalThis as { Bun?: { gc(force: boolean): void } 
 
 const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 
-for (const count of [1_000, 10_000]) {
+for (const count of [200, 500, 1_000, 10_000]) {
     const base = build(count);
     const append: number[] = [];
     const appendShape: number[] = [];
@@ -170,7 +170,7 @@ for (const count of [1_000, 10_000]) {
     setLogLineForwarder(() => undefined);
     const passes = 8;
     try {
-        for (const count of [1_000, 10_000]) {
+        for (const count of [200, 500, 1_000, 10_000]) {
             const sessionId = `timing-pass-${count}`;
             const host = (length: number) =>
                 Array.from({ length }, (_, index) => {
