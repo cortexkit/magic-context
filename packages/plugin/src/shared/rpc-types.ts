@@ -149,8 +149,9 @@ export interface SidebarSnapshot {
         model?: string;
     } | null;
     /**
-     * When the session's history head (m[0]) was last rebuilt. Null before the
-     * first rebuild; absent on older servers.
+     * When the session's history head was last rebuilt: the first message of
+     * the prompt, which carries the summarized history and memories. Null
+     * before the first rebuild; absent on older servers.
      */
     cacheBuiltAt?: number | null;
     /**

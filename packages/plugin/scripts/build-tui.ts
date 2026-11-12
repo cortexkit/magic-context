@@ -15,9 +15,10 @@ const runtimeSpecifiers: Set<string> = new Set(TUI_RUNTIME_SPECIFIERS);
  * `src/tui/vendor/` and from there compiled with our own files.
  * `@cortexkit/opencode-sidebar` asks every consumer to precompile it: loaded
  * from node_modules its JSX would skip the Solid transform and bind no host
- * runtime. The copy also serves the raw-TSX fallback, so the published plugin
- * needs no runtime dependency on the package (whose OpenTUI peer range is
- * narrower than ours). The copy gains the JSX pragma our own TSX files carry,
+ * runtime. When a host registers no OpenTUI runtime modules, `src/tui/entry.mjs`
+ * imports the uncompiled `src/tui/` sources instead; they import this same
+ * copy, so the published plugin needs no runtime dependency on the package
+ * (whose OpenTUI peer range is narrower than ours). The copy gains the JSX pragma our own TSX files carry,
  * which the package source leaves to its consumer.
  */
 const VENDORED_TSX_PACKAGES: ReadonlyMap<string, string> = new Map([

@@ -16,8 +16,9 @@
  *    run against a stand-in host API, drawing the slot it registers;
  *  - `{ kind: "mount-v2", width, directory }`: the OpenCode 2 `setupWithJsx`
  *    run against a stand-in host context, drawing its `sidebar.content` claim.
- * `theme` is `"golden"` (fixed test colours) or `"dark"` / `"light"` (the GA
- * host's default theme recorded in `src/v2/tui/__fixtures__/ga-host-theme.json`).
+ * `theme` is `"golden"` (fixed test colours) or `"dark"` / `"light"` (the default
+ * theme of a released OpenCode 2 host, recorded in
+ * `src/v2/tui/__fixtures__/ga-host-theme.json`).
  *
  * Output (stdout): a JSON array with, per case, `{ frame, spans, ansi }` or
  * `{ error }`. `frame` is the text with trailing blank rows removed, `spans`
