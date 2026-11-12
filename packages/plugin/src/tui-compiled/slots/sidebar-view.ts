@@ -38,7 +38,6 @@ export interface SidebarView {
     progress?: {
         title: string;
         rows: StatRowView[];
-        gauge?: GaugeRowView;
         /** Live or final wording from the server, drawn as plain text. */
         notes: string[];
     };
@@ -184,36 +183,29 @@ function progressStatus(progress: Progress): StatRowView {
 function progressView(progress: Progress): NonNullable<SidebarView["progress"]> {
     const running = progress.phase === "recomp";
     const rows = [progressStatus(progress)];
+    // The share of messages processed so far, drawn as a figure rather than a
+    // gauge: the shared gauge describes what is left of a budget being used up.
+    const done =
+        running && progress.totalMessages > 0
+            ? `${Math.round((progress.processedMessages / progress.totalMessages) * 100)}%`
+            : undefined;
     if (running && progress.kind === "embed") {
+        const count = `${progress.processedMessages}/${progress.totalMessages}`;
         rows.push({
             label: "Embedded",
-            value: `${progress.processedMessages}/${progress.totalMessages}`,
+            value: done ? `${count} · ${done}` : count,
+            ...(done ? { tone: "success" as const } : {}),
         });
     } else if (running) {
         const passes = `${progress.passCount} ${progress.passCount === 1 ? "pass" : "passes"}`;
         rows.push({ label: "Compartments", value: `${progress.compartmentsCreated} · ${passes}` });
+        if (done) rows.push({ label: "Progress", value: done, tone: "success" });
     }
     const notes: string[] = [];
     if ((running || progress.phase === "migration") && progress.note) notes.push(progress.note);
     if ((progress.phase === "failed" || progress.phase === "skipped") && progress.message)
         notes.push(progress.message);
-    return {
-        title: progressTitle(progress),
-        rows,
-        // A progress bar only ever means work done, never pressure, so its
-        // thresholds sit above 100 and it stays in the success colour.
-        ...(running && progress.totalMessages > 0
-            ? {
-                  gauge: {
-                      label: "Progress",
-                      used: (progress.processedMessages / progress.totalMessages) * 100,
-                      warnAt: 101,
-                      errorAt: 101,
-                  },
-              }
-            : {}),
-        notes,
-    };
+    return { title: progressTitle(progress), rows, notes };
 }
 
 function summaryRow(snapshot: SidebarSnapshot | null): StatRowView {

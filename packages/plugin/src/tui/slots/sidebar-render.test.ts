@@ -144,6 +144,36 @@ const STATES: PanelCase[] = [
         }),
     },
     {
+        name: "state-recomp-done-42",
+        width: 42,
+        collapsed: false,
+        snapshot: mockupSnapshot({
+            recompProgress: {
+                kind: "recomp",
+                phase: "done",
+                processedMessages: 450,
+                totalMessages: 450,
+                passCount: 4,
+                compartmentsCreated: 18,
+            },
+        }),
+    },
+    {
+        name: "state-embed-42",
+        width: 42,
+        collapsed: false,
+        snapshot: mockupSnapshot({
+            recompProgress: {
+                kind: "embed",
+                phase: "recomp",
+                processedMessages: 270,
+                totalMessages: 450,
+                passCount: 1,
+                compartmentsCreated: 0,
+            },
+        }),
+    },
+    {
         name: "state-over-execute-42",
         width: 42,
         collapsed: false,

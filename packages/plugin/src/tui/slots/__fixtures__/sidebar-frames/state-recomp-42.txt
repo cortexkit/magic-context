@@ -12,7 +12,7 @@ Model                     Gemini 3.8 Flash
 Recomp                                    
 Status                             running
 Compartments                 14 · 3 passes
-Progress ██████░░░░ 40% left              
+Progress                               60%
 Starting pass 4…                          
                                           
 Prompt cache                              

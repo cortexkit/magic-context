@@ -1,0 +1,20 @@
+ ▼ MAGIC CONTEXT                  v0.49.35
+                                          
+Context                                   
+ctx ██████░░░░ 45% left          483K/872K
+Next summary at                 61% · +49K
+                                          
+History                                   
+Historian                             idle
+Last run                    1h55m ago · ok
+Model                     Gemini 3.8 Flash
+                                          
+Embed                                     
+Status                             running
+Embedded                     270/450 · 60%
+                                          
+Prompt cache                              
+Cache built                        29h ago
+                                          
+Knowledge                                 
+Memories                       225 · 7 new

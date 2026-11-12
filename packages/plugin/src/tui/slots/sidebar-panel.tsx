@@ -120,7 +120,6 @@ export function SidebarPanel(props: SidebarPanelProps) {
                         {(progress) => (
                             <SidebarSection title={progress().title}>
                                 <StatRows rows={progress().rows} />
-                                <Show when={progress().gauge}>{(gauge) => <Gauge gauge={gauge()} />}</Show>
                                 <Index each={progress().notes}>
                                     {(note) => <SidebarTextRow text={note()} />}
                                 </Index>

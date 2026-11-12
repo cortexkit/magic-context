@@ -172,15 +172,6 @@ export function SidebarPanel(props) {
             get rows() {
               return progress().rows;
             }
-          }), _$createComponent(Show, {
-            get when() {
-              return progress().gauge;
-            },
-            children: gauge => _$createComponent(Gauge, {
-              get gauge() {
-                return gauge();
-              }
-            })
           }), _$createComponent(Index, {
             get each() {
               return progress().notes;
