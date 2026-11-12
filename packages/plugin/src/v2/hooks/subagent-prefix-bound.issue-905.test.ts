@@ -30,6 +30,7 @@ import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { servesThinkingBlock } from "../../hooks/magic-context/transform-postprocess-phase";
 import {
     ISSUE_905_CONTEXT,
+    ISSUE_905_EXECUTE_TOKENS,
     ISSUE_905_MODEL,
     type Issue905Pass,
     type Issue905Run,
@@ -200,17 +201,29 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         expect(longest).toBeLessThanOrEqual(5);
     });
 
-    test("the emergency planner's floor counts the thinking and the drops the same pass removes", () => {
+    test("the emergency planner's floor leaves out what the same pass dropped and keeps the thinking it still serves", () => {
         const planned = strips(visible).filter((pass) => pass.emergencyFloor !== null);
         expect(planned.length).toBeGreaterThan(0);
+        // No pass skips the planner as if tool drops could never reach the ceiling.
+        expect(visible.logs.some((line) => line.includes("already exceeds ceiling"))).toBe(false);
         for (const pass of planned) {
             const before = previous(visible, pass).served;
-            // The floor is the previous reading minus what is still an active
-            // tag after this pass's drops, so it holds the system allowance, the
-            // thinking the pass strips and the outputs it drops.
-            expect(pass.emergencyFloor!).toBeGreaterThan(before.overhead + before.thinking);
-            // It is far above what the pass actually serves.
-            expect(pass.emergencyFloor!).toBeGreaterThan(2 * pass.served.total);
+            // The floor is the request this pass serves minus its active tags.
+            // Every tool output, tool input and text part the previous request
+            // served was either dropped by this pass's queued drops (and taken
+            // off the reading) or is still an active tag, so none of it is fixed.
+            expect(pass.emergencyFloor!).toBeLessThanOrEqual(
+                before.overhead +
+                    before.thinking +
+                    before.hiddenThinking +
+                    before.placeholders +
+                    before.other,
+            );
+            // The thinking is still on the request when the planner runs (the
+            // strip comes at the end of the pass) and no tool drop removes it,
+            // so it stays in the floor.
+            expect(pass.emergencyFloor!).toBeGreaterThan(before.thinking);
+            expect(pass.emergencyFloor!).toBeLessThan(ISSUE_905_EXECUTE_TOKENS);
         }
     });
 });

@@ -18,6 +18,8 @@ import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanu
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
     type EmergencyDropTag,
+    type EmergencyServedSnapshot,
+    emergencyServedMassRemovedSince,
     estimateEmergencyDropReclaimTokens,
     measureEmergencyTag,
     planEmergencyDrop,
@@ -79,6 +81,12 @@ export function applyHeuristicCleanup(
             usagePercentage?: number;
             /** Another mutation already rewrites the cached prefix on this pass. */
             passAlreadyPriced?: boolean;
+            /**
+             * The active tags' served content measured before this pass removed
+             * anything. With it, the planner takes what the pass already removed
+             * off `currentTotalInputTokens`, the previous request's reading.
+             */
+            servedBeforePass?: EmergencyServedSnapshot;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -164,6 +172,14 @@ export function applyHeuristicCleanup(
                 ),
             );
         const measuredByTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
+        const removedThisPassTokens = emergency.servedBeforePass
+            ? emergencyServedMassRemovedSince(
+                  emergency.servedBeforePass,
+                  targets,
+                  calibration,
+                  measuredByTag,
+              )
+            : 0;
         const droppableTags = candidateTags
             .flatMap((tag) => {
                 const measured = measuredByTag.get(tag.tagNumber);
@@ -176,6 +192,7 @@ export function applyHeuristicCleanup(
             maxTag,
             protectedCutoff: config.protectedCutoff,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
+            removedThisPassTokens,
             ceilingTokens: emergency.ceilingTokens,
             usagePercentage: emergency.usagePercentage,
             priorInputSample,

@@ -4,11 +4,16 @@ import { describe, expect, it } from "bun:test";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import {
     type EmergencyDropTag,
+    emergencyServedMassRemovedSince,
     estimateEmergencyDropReclaimTokens,
     planEmergencyDrop,
     resolveToolTier,
+    snapshotEmergencyServedMass,
     TARGET_FRACTION,
 } from "./emergency-drop";
+import { estimateTokens } from "./read-session-formatting";
+import { neutralizeDroppedReasoningPart } from "./sentinel";
+import type { MessageLike, TagTarget } from "./tag-messages";
 
 // Most tests exercise selection/latch logic where the floor set equals the
 // candidate set; planWithFloor keeps them on the old single-set shape. The
@@ -702,5 +707,143 @@ describe("issue 731 impossible fixed overhead", () => {
         expect(plan.shouldDrop).toBe(true);
         expect(plan.tagNumbers).toEqual([1, 2]);
         expect(plan.reclaimTokens).toBe(16_100);
+    });
+});
+
+describe("planEmergencyDrop — the request this pass serves", () => {
+    // A force-band pass of a subagent on a prefix-bound thinking model: the
+    // previous request read 288,351 provider tokens, and the queued drops that
+    // landed earlier in the same pass took that request down to 63,730. What is
+    // left active is 8 read results (31,874) and their arguments (287).
+    const reads = Array.from({ length: 8 }, (_, n) =>
+        tag(n + 1, "read", 1, { servedTokens: 4_020, reclaimableTokens: 3_900 }),
+    );
+    const base = {
+        tags: reads,
+        floorTags: reads,
+        maxTag: 8,
+        protectedCutoff: null,
+        currentTotalInputTokens: 288_351,
+        ceilingTokens: 250_000,
+        usagePercentage: 95.4,
+        priorInputSample: 0,
+        hasPriorDrop: false,
+        passAlreadyPriced: true,
+    };
+
+    it("does not count what the same pass already dropped as fixed floor", () => {
+        const plan = planEmergencyDrop({ ...base, removedThisPassTokens: 288_351 - 63_730 });
+        expect(plan.reason).not.toContain("already exceeds ceiling");
+        // Floor of the served request: 63,730 − 8 × 4,020.
+        expect(plan.reason).toContain("floor≈31570");
+        expect(plan.reason).toContain("served≈63730");
+        // That request is far below the ceiling: nothing more to drop.
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.reason).toContain("reclaim<=min");
+    });
+
+    it("still skips a pass whose fixed part of the served request exceeds the ceiling", () => {
+        // Only 5,000 tokens left this pass: the served request still holds
+        // ~251,000 tokens no tool drop can remove.
+        const plan = planEmergencyDrop({ ...base, removedThisPassTokens: 5_000 });
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.tagNumbers).toEqual([]);
+        expect(plan.reason).toContain("fixed floor ≈251191 already exceeds ceiling 250000");
+    });
+
+    it("gauges the gap on the served request, so earlier drops count toward the target", () => {
+        const tools = [tag(1, "bash", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 })];
+        const input = {
+            tags: tools,
+            floorTags: tools,
+            maxTag: 1,
+            protectedCutoff: null,
+            currentTotalInputTokens: 200_000,
+            ceilingTokens: 150_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+        };
+        // Without earlier drops: floor 160,000 exceeds the ceiling.
+        expect(planEmergencyDrop(input).reason).toContain("already exceeds ceiling");
+        // 100,000 already left: floor 60,000, target 60,000 + 0.3 × 90,000 =
+        // 87,000, served 100,000, gap 13,000; the one tool reaches it.
+        const plan = planEmergencyDrop({ ...input, removedThisPassTokens: 100_000 });
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.reclaimTokens).toBe(13_000);
+        expect(plan.tagNumbers).toEqual([1]);
+    });
+});
+
+describe("emergency served-mass snapshot", () => {
+    const calibration = { toolsRatio: 1, proseRatio: 1 };
+    // A fake tool target whose content leaves the request when dropped, taking
+    // the thinking beside it off the request too, as the real drop does.
+    function toolTarget(output: string, thinking: Record<string, unknown>) {
+        let dropped = false;
+        const target: TagTarget = {
+            dropReasoningParts: [thinking],
+            measureReclaim: () => ({
+                beforeTools: dropped ? 0 : estimateTokens(output),
+                afterTools: 0,
+                beforeProse: 0,
+                afterProse: 0,
+            }),
+            setContent: () => false,
+        };
+        return {
+            target,
+            drop: () => {
+                dropped = true;
+                neutralizeDroppedReasoningPart(thinking);
+            },
+        };
+    }
+
+    it("counts the dropped tags and the reasoning they took off the request, each shared block once", () => {
+        const shared = { type: "reasoning", text: "thinking ".repeat(200) };
+        const first = toolTarget("first output ".repeat(300), shared);
+        const second = toolTarget("second output ".repeat(300), shared);
+        const kept = toolTarget("kept output ".repeat(300), {
+            type: "reasoning",
+            text: "kept thinking ".repeat(100),
+        });
+        const targets = new Map<number, TagTarget>([
+            [1, first.target],
+            [2, second.target],
+            [3, kept.target],
+        ]);
+        const tags = [1, 2, 3].map((n) => tag(n, "bash", 1));
+        // A block an earlier pass already took off the request.
+        const unserved = { type: "reasoning", text: "old thinking ".repeat(200) };
+        const fourth = toolTarget("fourth output ".repeat(300), unserved);
+        targets.set(4, fourth.target);
+        tags.push(tag(4, "bash", 1));
+        const messages = [
+            {
+                info: { id: "a1", role: "assistant" },
+                parts: [shared, kept.target.dropReasoningParts![0]],
+            },
+        ] as unknown as MessageLike[];
+        const snapshot = snapshotEmergencyServedMass(tags, targets, calibration, messages);
+        expect(emergencyServedMassRemovedSince(snapshot, targets, calibration)).toBe(0);
+
+        first.drop();
+        second.drop();
+        fourth.drop();
+        const expected =
+            estimateTokens("first output ".repeat(300)) +
+            estimateTokens("second output ".repeat(300)) +
+            estimateTokens("fourth output ".repeat(300)) +
+            estimateTokens("thinking ".repeat(200));
+        expect(emergencyServedMassRemovedSince(snapshot, targets, calibration)).toBe(expected);
+        // Measurements already taken on the current request are reused.
+        expect(
+            emergencyServedMassRemovedSince(
+                snapshot,
+                targets,
+                calibration,
+                new Map([[3, { servedTokens: 0 }]]),
+            ),
+        ).toBe(expected + estimateTokens("kept output ".repeat(300)));
     });
 });
