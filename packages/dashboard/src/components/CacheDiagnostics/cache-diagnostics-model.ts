@@ -8,6 +8,30 @@ import type {
 
 export type HarnessFilter = "all" | Harness;
 
+export type CacheSessionSelection = { harness: Harness; sessionId: string };
+
+/**
+ * Keep the selection inside the visible card list. A Broca card cannot be
+ * selected: the dashboard has only Broca's per-run totals for it, with no
+ * per-request rows to draw a timeline from.
+ */
+export function cacheTimelineSelection(
+  visible: SessionCacheStats[],
+  current: CacheSessionSelection | null,
+): CacheSessionSelection | null {
+  const selectable = visible.filter((row) => row.harness !== "broca");
+  if (
+    current &&
+    selectable.some(
+      (row) => row.harness === current.harness && row.session_id === current.sessionId,
+    )
+  ) {
+    return current;
+  }
+  const newest = selectable[0];
+  return newest ? { harness: newest.harness, sessionId: newest.session_id } : null;
+}
+
 export const cacheHarnessOptions: { value: HarnessFilter; label: string }[] = [
   { value: "all", label: "Harness: All" },
   { value: "opencode", label: "OpenCode" },
@@ -55,10 +79,7 @@ export function cacheEventPercentage(event: DbCacheEvent): string {
 }
 
 /** Tooltip explaining what a row's percentage measures. */
-export function cacheRatioTitle(event: Pick<DbCacheEvent, "aggregate" | "cold_start">): string {
-  if (event.aggregate) {
-    return "Cached share of the whole run: cache reads over every request's prompt, summed. Not compared with other runs.";
-  }
+export function cacheRatioTitle(event: Pick<DbCacheEvent, "cold_start">): string {
   if (event.cold_start) return "First request of the session: nothing was cached yet";
   return "Cache retention vs the previous step's expected prefix";
 }
@@ -170,11 +191,10 @@ export function brocaCardTooltip(summary: BrocaSessionSummary): string {
   return lines.join("\n");
 }
 
-/** Run totals count as runs, per-step rows as events, and an empty window has no data. */
+/** Count recorded requests; an empty window has no data. */
 export function cacheCardCountLabel(events: DbCacheEvent[]): string {
   if (events.length === 0) return "no data";
-  const noun = events.length > 0 && events.every((event) => event.aggregate) ? "run" : "event";
-  return `${events.length} ${noun}${events.length === 1 ? "" : "s"}`;
+  return `${events.length} event${events.length === 1 ? "" : "s"}`;
 }
 
 export interface SessionModelSummary {
@@ -208,50 +228,6 @@ export function sessionModelSummary(events: DbCacheEvent[]): SessionModelSummary
 /** `claude-opus-5-5`, or `claude-opus-5-5 (+1)` when the session mixed models. */
 export function sessionModelLabel(summary: SessionModelSummary): string {
   return summary.others > 0 ? `${summary.model} (+${summary.others})` : summary.model;
-}
-
-export interface CacheSessionHeader {
-  /** The full session name, never truncated. */
-  name: string;
-  tooltip: string;
-  /** For Broca, the harness Broca ran the session for (from its identity). */
-  innerHarness: string | null;
-}
-
-/**
- * Names the selected session above its timeline. A Broca session id is its
- * JSON identity `{project_root, harness, session}`; the header shows the
- * session name and inner harness and keeps the project root in the tooltip.
- */
-export function cacheSessionHeader(
-  harness: Harness,
-  sessionId: string,
-  title: string | undefined,
-): CacheSessionHeader {
-  if (harness === "broca") {
-    try {
-      const identity = JSON.parse(sessionId) as {
-        project_root?: unknown;
-        harness?: unknown;
-        session?: unknown;
-      };
-      const name = typeof identity.session === "string" ? identity.session : title || sessionId;
-      const innerHarness = typeof identity.harness === "string" ? identity.harness : null;
-      const lines = [name];
-      if (innerHarness) lines.push(`harness: ${innerHarness}`);
-      if (typeof identity.project_root === "string")
-        lines.push(`project: ${identity.project_root}`);
-      return { name, tooltip: lines.join("\n"), innerHarness };
-    } catch {
-      // Not a JSON identity: fall through to the plain name.
-    }
-  }
-  const name = title || sessionId;
-  return {
-    name,
-    tooltip: name === sessionId ? name : `${name}\n${sessionId}`,
-    innerHarness: null,
-  };
 }
 
 export function cacheSessionVisible(

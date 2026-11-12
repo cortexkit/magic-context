@@ -279,6 +279,11 @@ async fn invoke_handler(
             json_error(StatusCode::BAD_REQUEST, format!("Invalid arguments: {err}"))
         }
         Err(dispatch::DispatchError::Command(err)) => json_error(StatusCode::BAD_REQUEST, err),
+        Err(dispatch::DispatchError::CacheEvents(err)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err })),
+        )
+            .into_response(),
         Err(dispatch::DispatchError::Serialize(err)) => json_error(
             StatusCode::BAD_REQUEST,
             format!("Failed to encode response: {err}"),

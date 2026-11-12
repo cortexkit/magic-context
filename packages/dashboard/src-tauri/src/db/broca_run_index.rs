@@ -258,14 +258,4 @@ impl BrocaRunIndex {
             .and_then(|run| run.reason.clone());
         Some(summary)
     }
-
-    pub(super) fn run_ids(&self, identity: &str) -> Vec<String> {
-        let mut ids: Vec<_> = self
-            .sessions
-            .get(identity)
-            .map(|facts| facts.runs.keys().cloned().collect())
-            .unwrap_or_default();
-        ids.sort_unstable();
-        ids
-    }
 }

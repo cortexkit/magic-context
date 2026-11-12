@@ -25,7 +25,6 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use magic_context_dashboard_lib::broca_wal;
 use magic_context_dashboard_lib::db::{self, Harness};
 use rusqlite::ffi;
 
@@ -259,7 +258,6 @@ struct Snapshot {
     wal_read: u64,
     temp_read: u64,
     temp_write: u64,
-    broca_wal_read: u64,
     opens: u64,
 }
 
@@ -286,7 +284,6 @@ fn snapshot() -> Snapshot {
         wal_read: WAL_READ.load(Ordering::Relaxed),
         temp_read: TEMP_READ.load(Ordering::Relaxed),
         temp_write: TEMP_WRITE.load(Ordering::Relaxed),
-        broca_wal_read: broca_wal::bytes_read_total(),
         opens: OPENS.load(Ordering::Relaxed),
     }
 }
@@ -314,9 +311,10 @@ fn main() {
     };
     if let Some(session) = arg("--events") {
         // One session's event window exactly as the Cache tab receives it.
-        let harness = harness.unwrap_or(Harness::Broca);
+        let harness = harness.expect("--events requires --harness");
         let limit = arg("--limit").map_or(1000, |n| n.parse().expect("limit"));
-        let events = db::get_session_cache_events(harness, &session, Some(limit), None);
+        let events = db::get_session_cache_events(harness, &session, Some(limit), None)
+            .expect("host does not support a cache timeline");
         println!("{}", serde_json::to_string(&events).unwrap());
         return;
     }
@@ -324,11 +322,12 @@ fn main() {
         let sessions = db::get_session_cache_stats_from_db(50, false, true, harness);
         let windows: Vec<_> = sessions
             .iter()
+            .filter(|row| row.harness != Harness::Broca)
             .map(|row| {
                 serde_json::json!({
                     "harness": row.harness,
                     "session_id": row.session_id,
-                    "events": db::get_session_cache_events(row.harness, &row.session_id, Some(200), None),
+                    "events": db::get_session_cache_events(row.harness, &row.session_id, Some(200), None).unwrap(),
                 })
             })
             .collect();
@@ -340,7 +339,7 @@ fn main() {
     let interval =
         Duration::from_millis(arg("--interval-ms").map_or(1000, |n| n.parse().expect("interval")));
     let mut windows: HashMap<(Harness, String), Window> = HashMap::new();
-    println!("poll,wall_ms,cpu_ms,db_read_mb,sqlite_wal_read_mb,temp_read_mb,temp_write_mb,broca_wal_read_mb,sqlite_opens,listed,fetched");
+    println!("poll,wall_ms,cpu_ms,db_read_mb,sqlite_wal_read_mb,temp_read_mb,temp_write_mb,sqlite_opens,listed,fetched");
     let mut totals = Snapshot::default();
     for poll in 0..polls {
         let started = Instant::now();
@@ -358,12 +357,13 @@ fn main() {
             .take(10)
             .collect();
         let mut fetched = 0;
-        for row in &recent {
+        for row in recent.iter().filter(|row| row.harness != Harness::Broca) {
             let key = (row.harness, row.session_id.clone());
             match windows.get_mut(&key) {
                 None => {
                     let events =
-                        db::get_session_cache_events(row.harness, &row.session_id, Some(200), None);
+                        db::get_session_cache_events(row.harness, &row.session_id, Some(200), None)
+                            .unwrap();
                     windows.insert(
                         key,
                         Window {
@@ -376,7 +376,8 @@ fn main() {
                 Some(win) if row.last_activity_ms > win.last_activity_ms => {
                     let since = (win.last_seen > 0).then_some(win.last_seen);
                     let events =
-                        db::get_session_cache_events(row.harness, &row.session_id, None, since);
+                        db::get_session_cache_events(row.harness, &row.session_id, None, since)
+                            .unwrap();
                     if let Some(last) = events.last() {
                         win.last_seen = win.last_seen.max(last.timestamp);
                     }
@@ -390,14 +391,13 @@ fn main() {
         let wall = started.elapsed();
         let d = |f: fn(&Snapshot) -> u64| f(&after) - f(&before);
         println!(
-            "{poll},{:.1},{:.1},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{}",
+            "{poll},{:.1},{:.1},{:.2},{:.2},{:.2},{:.2},{},{},{}",
             wall.as_secs_f64() * 1000.0,
             d(|s| s.cpu_us) as f64 / 1000.0,
             mb(d(|s| s.db_read)),
             mb(d(|s| s.wal_read)),
             mb(d(|s| s.temp_read)),
             mb(d(|s| s.temp_write)),
-            mb(d(|s| s.broca_wal_read)),
             d(|s| s.opens),
             sessions.len(),
             fetched,
@@ -408,7 +408,6 @@ fn main() {
             totals.wal_read += d(|s| s.wal_read);
             totals.temp_read += d(|s| s.temp_read);
             totals.temp_write += d(|s| s.temp_write);
-            totals.broca_wal_read += d(|s| s.broca_wal_read);
         }
         if poll + 1 < polls {
             std::thread::sleep(interval.saturating_sub(wall));
@@ -417,14 +416,13 @@ fn main() {
     if polls > 1 {
         let n = (polls - 1) as f64;
         println!(
-            "steady-state mean over polls 1..{}: cpu {:.1} ms, db read {:.2} MB, sqlite wal read {:.2} MB, temp read {:.2} MB, temp write {:.2} MB, broca wal read {:.2} MB",
+            "steady-state mean over polls 1..{}: cpu {:.1} ms, db read {:.2} MB, sqlite wal read {:.2} MB, temp read {:.2} MB, temp write {:.2} MB",
             polls - 1,
             totals.cpu_us as f64 / 1000.0 / n,
             mb(totals.db_read) / n,
             mb(totals.wal_read) / n,
             mb(totals.temp_read) / n,
             mb(totals.temp_write) / n,
-            mb(totals.broca_wal_read) / n,
         );
     }
 }

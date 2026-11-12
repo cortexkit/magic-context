@@ -11,10 +11,10 @@ import {
   cacheHarnessOptions,
   cachePercentage,
   cacheRatioTitle,
-  cacheSessionHeader,
   cacheSessionRatio,
   cacheSessionTitle,
   cacheSessionVisible,
+  cacheTimelineSelection,
   sessionModelLabel,
   sessionModelSummary,
 } from "./cache-diagnostics-model";
@@ -53,7 +53,7 @@ describe("cacheActivityNote", () => {
 
 function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
   return {
-    harness: "broca",
+    harness: "opencode",
     message_id: "m",
     session_id: "s",
     timestamp: 1,
@@ -72,10 +72,7 @@ function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
     context_limit_estimated: false,
     is_drop: false,
     context_reduced_by_mc: true,
-    drop_request_size: null,
-    aggregate: false,
     cold_start: false,
-    cache_write_reported: true,
     provider: null,
     model: null,
     ...partial,
@@ -121,39 +118,62 @@ describe("Broca cache sessions", () => {
     expect(cacheSessionVisible(unmanaged, "broca", true, true)).toBe(true);
   });
 
-  test("a run aggregate shows its own cached share and explains it", () => {
-    const run = event({
-      aggregate: true,
-      severity: "aggregate",
-      input_tokens: 993,
-      cache_read: 114_560,
-      hit_ratio: 114_560 / 115_553,
-    });
-    expect(cacheEventPercentage(run)).toBe("99.1%");
-    expect(cacheRatioTitle(run)).toContain("whole run");
-  });
-
   test("a cold first request explains that nothing was cached yet", () => {
     expect(cacheRatioTitle(event({ cold_start: true }))).toContain("First request");
   });
 });
 
-describe("session cards", () => {
-  const run = (partial: Partial<DbCacheEvent>) =>
-    event({ aggregate: true, severity: "aggregate", ...partial });
+describe("visible timeline selection", () => {
+  const oc: SessionCacheStats = { ...brocaRow, harness: "opencode", session_id: "oc" };
+  const pi: SessionCacheStats = { ...brocaRow, harness: "pi", session_id: "pi" };
+  const current = { harness: "opencode" as const, sessionId: "oc" };
 
-  test("a run that reports zero cache reads is neutral, not a red 0%", () => {
-    // A lone run total with a 614-token prompt that reported zero cache reads.
-    const events = [run({ input_tokens: 614, cache_read: 0, cold_start: true })];
+  test("default selection skips export-only cards, and keeps a visible selection", () => {
+    expect(cacheTimelineSelection([brocaRow, oc, pi], null)).toEqual(current);
+    expect(cacheTimelineSelection([brocaRow, pi, oc], current)).toBe(current);
+  });
+
+  test("filtering to another ordinary host selects its newest visible card", () => {
+    const visible = [brocaRow, oc, pi].filter((row) => cacheSessionVisible(row, "pi", false, true));
+    expect(cacheTimelineSelection(visible, current)).toEqual({ harness: "pi", sessionId: "pi" });
+  });
+
+  test("an export-only or empty list clears the selection", () => {
+    expect(cacheTimelineSelection([brocaRow], current)).toBeNull();
+    expect(cacheTimelineSelection([], current)).toBeNull();
+    expect(
+      cacheTimelineSelection([brocaRow, oc], { harness: "broca", sessionId: brocaRow.session_id }),
+    ).toEqual(current);
+  });
+
+  test("subagent, unmanaged, card-count and refresh removals cannot keep a hidden selection", () => {
+    const subagent = { ...oc, is_subagent: true };
+    const unmanaged = { ...oc, harness: "claude_code" as const, managed: false };
+    const visibleSubagents = [subagent, pi].filter((row) =>
+      cacheSessionVisible(row, "all", false, true),
+    );
+    const visibleManaged = [unmanaged, pi].filter((row) =>
+      cacheSessionVisible(row, "all", false, true),
+    );
+    for (const visible of [visibleSubagents, visibleManaged, [pi, oc].slice(0, 1), [pi]]) {
+      expect(cacheTimelineSelection(visible, current)).toEqual({ harness: "pi", sessionId: "pi" });
+    }
+  });
+});
+
+describe("session cards", () => {
+  test("a request that reports zero cache reads is neutral, not a red 0%", () => {
+    // A lone request with a 614-token prompt that reported zero cache reads.
+    const events = [event({ input_tokens: 614, cache_read: 0, cold_start: true })];
     const summary = cacheCardSummary(events);
     expect(summary.tone).toBe("neutral");
     expect(summary.text).toBe(CACHE_FIGURE_PLACEHOLDER);
     expect(summary.note).toBe(CACHE_NO_READS);
-    expect(cacheCardCountLabel(events)).toBe("1 run");
+    expect(cacheCardCountLabel(events)).toBe("1 event");
   });
 
-  test("runs that never report reads are neutral", () => {
-    const summary = cacheCardSummary([run({ cache_reported: false }), run({ turn_id: "t2" })]);
+  test("requests that never report reads are neutral", () => {
+    const summary = cacheCardSummary([event({ cache_reported: false }), event({ turn_id: "t2" })]);
     expect(summary.tone).toBe("neutral");
     expect(summary.text).toBe(CACHE_FIGURE_PLACEHOLDER);
     expect(summary.note).toBe(CACHE_NO_READS);
@@ -163,21 +183,21 @@ describe("session cards", () => {
     const figure = /^(\d+\.\d%|—)$/;
     const cases = [
       [],
-      [run({ cache_reported: false })],
-      [run({ cache_read: 0 })],
-      [run({ turn_id: "r1", cold_start: true }), run({ turn_id: "r2", cache_read: 900 })],
+      [event({ cache_reported: false })],
+      [event({ cache_read: 0 })],
+      [event({ turn_id: "r1", cold_start: true }), event({ turn_id: "r2", cache_read: 900 })],
       [event({ turn_id: "r1", cold_start: true, cache_read: 100, severity: "info" })],
     ];
     for (const events of cases) expect(cacheCardSummary(events).text).toMatch(figure);
   });
 
   test("an unreported session keeps a one-character figure and explains it in small text", () => {
-    const summary = cacheCardSummary([run({ cache_reported: false })]);
+    const summary = cacheCardSummary([event({ cache_reported: false })]);
     expect(summary.text).toBe(CACHE_FIGURE_PLACEHOLDER);
     expect(summary.tone).toBe("neutral");
     expect(summary.note).toBe(CACHE_NOT_REPORTED);
     // Reported sessions have no note: their figure speaks for itself.
-    expect(cacheCardSummary([run({ cache_read: 900, input_tokens: 100 })]).note).toBeNull();
+    expect(cacheCardSummary([event({ cache_read: 900, input_tokens: 100 })]).note).toBeNull();
   });
 
   test("a session with no recorded requests is a neutral no-data card, not 0 events", () => {
@@ -187,7 +207,7 @@ describe("session cards", () => {
     expect(cacheCardCountLabel([])).toBe("no data");
   });
 
-  test("a single cold run with reads is neutral", () => {
+  test("a single cold turn with reads is neutral", () => {
     const steps = [
       event({ turn_id: "r1", cold_start: true, input_tokens: 900, severity: "info" }),
       event({ turn_id: "r1", cache_read: 100, input_tokens: 900, severity: "stable" }),
@@ -198,10 +218,10 @@ describe("session cards", () => {
     expect(cacheCardCountLabel(steps)).toBe("2 events");
   });
 
-  test("a later run is colored by its ratio", () => {
+  test("a later turn is colored by its ratio", () => {
     const summary = cacheCardSummary([
-      run({ turn_id: "r1", cold_start: true, input_tokens: 100 }),
-      run({ turn_id: "r2", cache_read: 900, input_tokens: 100 }),
+      event({ turn_id: "r1", cold_start: true, input_tokens: 100 }),
+      event({ turn_id: "r2", cache_read: 900, input_tokens: 100 }),
     ]);
     expect(summary.tone).toBe("ratio");
     expect(summary.ratio).toBeCloseTo(900 / 1100);
@@ -209,29 +229,6 @@ describe("session cards", () => {
 });
 
 describe("timeline header", () => {
-  test("a Broca session shows its full name and inner harness", () => {
-    const name = "alfonso:consult-00000000-1111-2222-3333-444444444444-synthesis";
-    const header = cacheSessionHeader(
-      "broca",
-      JSON.stringify({ project_root: "/work/app", harness: "runner", session: name }),
-      name,
-    );
-    expect(header.name).toBe(name);
-    expect(header.innerHarness).toBe("runner");
-    expect(header.tooltip).toContain(name);
-    expect(header.tooltip).toContain("/work/app");
-  });
-
-  test("other harnesses show the title and keep the id in the tooltip", () => {
-    const header = cacheSessionHeader("opencode", "ses_123", "Fix the parser");
-    expect(header).toEqual({
-      name: "Fix the parser",
-      tooltip: "Fix the parser\nses_123",
-      innerHarness: null,
-    });
-    expect(cacheSessionHeader("pi", "abc", undefined).name).toBe("abc");
-  });
-
   test("a session on one model shows it plainly", () => {
     const summary = sessionModelSummary([
       event({ timestamp: 1, provider: "anthropic", model: "claude-opus-5" }),

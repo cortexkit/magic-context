@@ -25,6 +25,7 @@
 //! shows up within that minute. OpenCode 2's `session_v2` list is already
 //! one seek per session, so it is simply re-run when the store changed.
 
+use super::file_identity;
 use super::opencode_stores::{open_store, StoreConnection, StoreOpenError};
 use super::{
     filter_opencode_cache_candidates, load_recent_opencode_cache_sessions_with_cache,
@@ -32,7 +33,6 @@ use super::{
     table_exists, CacheSessionListEntry, OpenCodeCachePresenceCache, OpenCodeSessions,
     OpenCodeStoreGeneration,
 };
-use crate::broca_wal::file_identity;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};

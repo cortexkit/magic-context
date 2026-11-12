@@ -1462,17 +1462,21 @@ body {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  cursor: pointer;
+  cursor: default;
   transition:
     border-color var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
-.cache-card:hover {
+button.cache-card {
+  cursor: pointer;
+}
+
+button.cache-card:hover {
   border-color: var(--border-light);
 }
 
-.cache-card.active {
+button.cache-card.active {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
 }

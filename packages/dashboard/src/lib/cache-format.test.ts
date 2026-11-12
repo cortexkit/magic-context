@@ -42,10 +42,7 @@ function ev(partial: Partial<DbCacheEvent>): DbCacheEvent {
     context_limit_estimated: false,
     is_drop: false,
     context_reduced_by_mc: true,
-    drop_request_size: null,
-    aggregate: false,
     cold_start: false,
-    cache_write_reported: true,
     ...partial,
   };
 }
@@ -225,44 +222,18 @@ describe("cache row labels", () => {
     expect(cacheEventLabel(ev({ severity: "info" }))).toBe("COLD START");
   });
 
-  it("labels a run aggregate as a total with no health verdict", () => {
-    const run = ev({ severity: "aggregate", aggregate: true });
-    expect(cacheEventLabel(run)).toBe("RUN TOTAL");
-    expect(cacheEventColorClass(run)).toBe("gray");
-    expect(cacheEventLabel({ ...run, cold_start: true })).toBe("COLD START · RUN TOTAL");
-    expect(cacheEventLabel({ ...run, finish: "completed" })).toBe("RUN TOTAL");
-    expect(cacheEventLabel({ ...run, finish: "error" })).toBe("RUN TOTAL · ERROR");
-  });
-
   it("keeps real busts red", () => {
     expect(cacheEventLabel(ev({ severity: "full_bust" }))).toBe("FULL BUST");
     expect(cacheEventColorClass(ev({ severity: "bust" }))).toBe("red");
   });
-
-  it("aggregate rows do not outrank real verdicts when picking a turn's worst event", () => {
-    const bust = ev({ severity: "bust", timestamp: 1 });
-    const run = ev({ severity: "aggregate", aggregate: true, timestamp: 2 });
-    expect(selectWorstCacheEvent([bust, run])).toBe(bust);
-  });
 });
 
 describe("cacheWriteLabel", () => {
-  it("says not reported when the source omitted cache writes", () => {
-    expect(cacheWriteLabel([ev({ cache_write: 0, cache_write_reported: false })])).toBe(
-      "not reported",
-    );
-  });
-
-  it("sums reported writes and flags a partly reported set", () => {
+  it("sums writes across requests", () => {
     expect(cacheWriteLabel([ev({ cache_write: 1_200 }), ev({ cache_write: 800 })])).toBe(
       (2_000).toLocaleString(),
     );
-    expect(
-      cacheWriteLabel([
-        ev({ cache_write: 5 }),
-        ev({ cache_write: 0, cache_write_reported: false }),
-      ]),
-    ).toBe("5 (partial)");
+    expect(cacheWriteLabel([ev({ cache_write: 0 })])).toBe("0");
   });
 });
 
@@ -357,20 +328,6 @@ describe("drop marker wording", () => {
     });
     expect(cacheDropLine(unmanaged)).toBe(
       "⬇ Prompt tokens dropped — Magic Context does not manage this session.",
-    );
-  });
-
-  it("says what the request size shows when both sizes were recorded", () => {
-    const grew = drop({ context_reduced_by_mc: false, drop_request_size: "not_smaller" });
-    expect(cacheDropText(grew).detail).toBe(
-      "Magic Context does not manage this session. The request did not get smaller; the provider counted fewer tokens.",
-    );
-    expect(cacheDropLine(grew)).toBe(
-      "⬇ Prompt tokens dropped — Magic Context does not manage this session. The request did not get smaller; the provider counted fewer tokens.",
-    );
-    const shrank = drop({ context_reduced_by_mc: false, drop_request_size: "smaller" });
-    expect(cacheDropText(shrank).detail).toBe(
-      "Magic Context does not manage this session. The request got smaller.",
     );
   });
 });

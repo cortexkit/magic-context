@@ -615,7 +615,7 @@ fn two_stores_merge_in_the_session_list_cache_list_and_cache_events() {
     assert_eq!(titles.len(), 2);
 
     // One session's events come from the store that holds it.
-    let events = get_session_cache_events(Harness::Opencode2, "ses-run", None, None);
+    let events = get_session_cache_events(Harness::Opencode2, "ses-run", None, None).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].message_id, "m-ses-run");
 }
@@ -634,7 +634,7 @@ fn a_session_id_in_two_stores_is_shown_once_from_the_first_store() {
     let rows = list_opencode_sessions(&SessionFilter::default());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "own copy");
-    let events = get_session_cache_events(Harness::Opencode2, "ses-dup", None, None);
+    let events = get_session_cache_events(Harness::Opencode2, "ses-dup", None, None).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].timestamp, 100,

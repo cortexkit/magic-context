@@ -258,6 +258,11 @@ export interface SessionSummary {
 
 export type Harness = "opencode" | "opencode2" | "pi" | "omp" | "broca" | "claude_code" | "codex";
 
+export interface CacheEventsError {
+  kind: "unsupported_harness";
+  harness: Harness;
+}
+
 export interface SessionFilter {
   harness?: Harness;
   project_identity?: string;
@@ -628,15 +633,7 @@ export interface DbCacheEvent {
   cache_reported: boolean;
   total_tokens: number;
   hit_ratio: number;
-  severity:
-    | "stable"
-    | "info"
-    | "warning"
-    | "bust"
-    | "full_bust"
-    | "warming"
-    | "unknown"
-    | "aggregate";
+  severity: "stable" | "info" | "warning" | "bust" | "full_bust" | "warming" | "unknown";
   cause: string | null;
   agent: string | null;
   finish?: string;
@@ -655,21 +652,10 @@ export interface DbCacheEvent {
    *  same as `SessionCacheStats.managed`,
    *  which only decides whether the Cache list shows the session by default. */
   context_reduced_by_mc: boolean;
-  /** On a drop, whether the request actually sent got smaller than the
-   *  previous step's. Null unless the source recorded both request sizes. */
-  drop_request_size: "not_smaller" | "smaller" | null;
-  /** True when the row sums several provider requests (a whole Broca run)
-   *  rather than describing one. `hit_ratio` is then the run's total cached
-   *  share and `severity` is "aggregate"; it is never a STABLE/BUST verdict. */
-  aggregate: boolean;
   /** True for a session's first row: its opening request could not read the
    *  cache, so a low share there is a cold start, not a miss. */
   cold_start: boolean;
-  /** False when the source omitted the cache-write count, so `cache_write`
-   *  is an absent value rather than a reported zero. */
-  cache_write_reported: boolean;
-  /** Provider and model that served the request (for a Broca run total, the
-   *  run's last segment). Null when the source does not record them. */
+  /** Provider and model that served the request, when recorded. */
   provider: string | null;
   model: string | null;
 }

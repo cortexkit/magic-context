@@ -23,6 +23,16 @@ afterEach(() => {
 });
 
 describe("platform shim", () => {
+  it("preserves typed unsupported-host refusals from serve mode", async () => {
+    setWindow({});
+    const refusal = { kind: "unsupported_harness", harness: "broca" };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: refusal }), { status: 400 })) as typeof fetch;
+    await expect(
+      invoke("get_session_cache_events", { harness: "broca", sessionId: "fixture" }),
+    ).rejects.toEqual(refusal);
+  });
+
   it("detects Tauri from window internals", () => {
     setWindow({});
     expect(isTauri()).toBe(false);

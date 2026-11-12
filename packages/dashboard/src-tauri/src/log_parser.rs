@@ -1132,7 +1132,7 @@ mod tests {
         LogTailCache, LogTailWork, Regex,
     };
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn golden_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(

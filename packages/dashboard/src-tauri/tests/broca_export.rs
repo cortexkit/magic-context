@@ -63,7 +63,6 @@ fn broca_export_fixture_lists_exactly_four_sessions_without_private_tables() {
     assert_eq!(head.summary.warm_usage.cached_input_tokens, Some(20));
     assert_eq!(head.summary.warm_usage.output_tokens, Some(0));
     assert_eq!(head.summary.warm_usage.cache_write_tokens, None);
-    assert_eq!(index.run_ids(&head.identity), ["run-fixture-3"]);
     assert_eq!(head.summary.last_end_reason.as_deref(), Some("completed"));
     assert_eq!(listed[0].summary.last_end_reason.as_deref(), Some("error"));
     let legacy = &listed[3].summary;

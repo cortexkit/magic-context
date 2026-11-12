@@ -9,6 +9,7 @@ pub enum DispatchError {
     UnknownCommand,
     BadArgs(String),
     Command(String),
+    CacheEvents(db::CacheEventsError),
     Serialize(String),
 }
 
@@ -594,6 +595,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
             let events = match a.harness.parse::<db::Harness>() {
                 Ok(harness) => {
                     db::get_session_cache_events(harness, &a.session_id, a.limit, a.since_timestamp)
+                        .map_err(DispatchError::CacheEvents)?
                 }
                 Err(_) => Vec::new(),
             };
@@ -606,7 +608,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                     harness,
                     &a.session_id,
                     a.target_turns,
-                ),
+                )
+                .map_err(DispatchError::CacheEvents)?,
                 Err(_) => Vec::new(),
             };
             json(events)
@@ -976,6 +979,29 @@ mod tests {
 
     fn state_without_db() -> AppState {
         AppState::with_resolver(|| None)
+    }
+
+    #[tokio::test]
+    async fn broca_timeline_commands_preserve_the_typed_refusal() {
+        for command in [
+            "get_session_cache_events",
+            "get_session_cache_events_by_turns",
+        ] {
+            let args = if command.ends_with("by_turns") {
+                serde_json::json!({ "harness": "broca", "sessionId": "fixture", "targetTurns": 10 })
+            } else {
+                serde_json::json!({ "harness": "broca", "sessionId": "fixture" })
+            };
+            let error = dispatch(&state_without_db(), command, args)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                DispatchError::CacheEvents(db::CacheEventsError::UnsupportedHarness {
+                    harness: db::Harness::Broca
+                })
+            ));
+        }
     }
 
     #[tokio::test]

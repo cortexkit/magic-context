@@ -44,8 +44,8 @@
 //!   calls: an open read snapshot stops the owner's checkpoint, and the
 //!   runner's store is several gigabytes.
 
+use super::file_identity;
 use super::{resolve_opencode_db_for, OpenCodeDbOverrides};
-use crate::broca_wal::file_identity;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::collections::HashSet;

@@ -51,10 +51,11 @@ fn run_pass(label: &str) {
     // serial here so each one's cost is attributable — note the sum vs wall gap).
     let t_windows = Instant::now();
     let mut last_seen: Vec<(Harness, String, i64)> = Vec::new();
-    for row in &recent {
+    for row in recent.iter().filter(|row| row.harness != Harness::Broca) {
         let t = Instant::now();
         let events =
-            db::get_session_cache_events(row.harness, &row.session_id, Some(WINDOW_SIZE), None);
+            db::get_session_cache_events(row.harness, &row.session_id, Some(WINDOW_SIZE), None)
+                .unwrap();
         println!(
             "[2] window {:11} {:24} {:8.1}ms  ({} events)",
             format!("{:?}", row.harness),
@@ -74,7 +75,7 @@ fn run_pass(label: &str) {
     println!("[3] tick: stats re-list: {:8.1}ms", ms(t));
     for (harness, sid, anchor) in &last_seen {
         let t = Instant::now();
-        let fresh = db::get_session_cache_events(*harness, sid, None, Some(*anchor));
+        let fresh = db::get_session_cache_events(*harness, sid, None, Some(*anchor)).unwrap();
         let cost = ms(t);
         if cost > 5.0 {
             println!(

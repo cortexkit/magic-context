@@ -41,6 +41,7 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
+    if (body?.error && typeof body.error === "object") throw body.error;
     throw new Error(body?.error ?? `HTTP ${response.status}`);
   }
   return body as T;

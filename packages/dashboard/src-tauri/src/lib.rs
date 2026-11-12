@@ -1,4 +1,3 @@
-pub mod broca_wal;
 pub mod commands;
 pub mod config;
 pub mod db;

@@ -7,7 +7,6 @@ const SEVERITY_RANK: Record<DbCacheEvent["severity"], number> = {
   warning: 3,
   stable: 2,
   info: 1,
-  aggregate: 1,
   unknown: 0,
 };
 
@@ -45,28 +44,18 @@ export function severityColorClass(severity: string): string {
     case "info":
       return "blue";
     default:
-      return "gray"; // unknown / warming / aggregate
+      return "gray"; // unknown / warming
   }
 }
 
-type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start" | "aggregate" | "finish">;
+type CacheLabelFields = Pick<DbCacheEvent, "severity" | "cold_start">;
 
 /**
  * Pill text for one cache row. A session's first row is a cold start: its
  * opening request had nothing cached to read, so it is labelled neutrally
- * instead of as a miss. A run aggregate sums a whole agent loop and carries
- * no health verdict, so it is labelled as a total rather than STABLE/BUST.
+ * instead of as a miss.
  */
 export function cacheEventLabel(event: CacheLabelFields): string {
-  if (event.aggregate) {
-    const base = event.cold_start ? "COLD START · RUN TOTAL" : "RUN TOTAL";
-    // A run that ended any way other than normally (error, cancelled, max
-    // steps, ...) still billed its requests; name the ending so it is not
-    // mistaken for a completed run.
-    return event.finish && event.finish !== "completed"
-      ? `${base} · ${event.finish.toUpperCase()}`
-      : base;
-  }
   if (event.cold_start || event.severity === "info") return "COLD START";
   if (event.severity === "full_bust") return "FULL BUST";
   if (event.severity === "unknown") return "NO CACHE DATA";
@@ -80,8 +69,7 @@ export function cacheEventColorClass(event: CacheLabelFields): string {
 }
 
 /**
- * A row label in sentence case for the turn list ("COLD START · RUN TOTAL"
- * reads as "Cold start · run total"), so statuses sit quietly in running text.
+ * A row label in sentence case so statuses sit quietly in running text.
  */
 export function sentenceCaseLabel(label: string): string {
   const lower = label.toLowerCase();
@@ -96,18 +84,9 @@ export function cacheReadLabel(event: Pick<DbCacheEvent, "cache_read" | "cache_r
   return event.cache_reported ? event.cache_read.toLocaleString() : "not reported";
 }
 
-/**
- * The `new=` value for a set of rows (one step, or every step of a turn).
- * Several providers never report cache writes, and Broca then omits the
- * field; a missing count must read as "not reported", not as zero writes.
- */
-export function cacheWriteLabel(
-  events: readonly Pick<DbCacheEvent, "cache_write" | "cache_write_reported">[],
-): string {
-  const reported = events.filter((event) => event.cache_write_reported);
-  if (reported.length === 0) return "not reported";
-  const total = reported.reduce((sum, event) => sum + event.cache_write, 0).toLocaleString();
-  return reported.length < events.length ? `${total} (partial)` : total;
+/** The `new=` value for one step or every step of a turn. */
+export function cacheWriteLabel(events: readonly Pick<DbCacheEvent, "cache_write">[]): string {
+  return events.reduce((sum, event) => sum + event.cache_write, 0).toLocaleString();
 }
 
 const CACHE_CAUSE_LABELS: Record<string, string> = {
@@ -142,26 +121,7 @@ export function cacheCauseText(cause: string): string {
 
 export const UNMANAGED_DROP_TITLE = "Prompt tokens dropped";
 export const UNMANAGED_DROP_DETAIL = "Magic Context does not manage this session.";
-export const DROP_REQUEST_NOT_SMALLER =
-  "The request did not get smaller; the provider counted fewer tokens.";
-export const DROP_REQUEST_SMALLER = "The request got smaller.";
-
-type DropFields = Pick<DbCacheEvent, "cause" | "context_reduced_by_mc" | "drop_request_size">;
-
-/**
- * The explanation for a drop in a session Magic Context does not manage. It
- * says what the request size shows only when the source recorded the size of
- * both requests, and otherwise claims no cause.
- */
-function unmanagedDropDetail(event: DropFields): string {
-  if (event.drop_request_size === "not_smaller") {
-    return `${UNMANAGED_DROP_DETAIL} ${DROP_REQUEST_NOT_SMALLER}`;
-  }
-  if (event.drop_request_size === "smaller") {
-    return `${UNMANAGED_DROP_DETAIL} ${DROP_REQUEST_SMALLER}`;
-  }
-  return UNMANAGED_DROP_DETAIL;
-}
+type DropFields = Pick<DbCacheEvent, "cause" | "context_reduced_by_mc">;
 
 /**
  * Title and explanation for a step whose prompt shrank (`is_drop`). Only a
@@ -170,7 +130,7 @@ function unmanagedDropDetail(event: DropFields): string {
  */
 export function cacheDropText(event: DropFields): { title: string; detail: string } {
   if (!event.context_reduced_by_mc) {
-    return { title: UNMANAGED_DROP_TITLE, detail: unmanagedDropDetail(event) };
+    return { title: UNMANAGED_DROP_TITLE, detail: UNMANAGED_DROP_DETAIL };
   }
   return {
     title: "Magic Context reclaimed context",
@@ -181,7 +141,7 @@ export function cacheDropText(event: DropFields): { title: string; detail: strin
 /** The drop line in a timeline bar's tooltip, worded like the drop marker. */
 export function cacheDropLine(event: DropFields): string {
   if (!event.context_reduced_by_mc) {
-    return `⬇ ${UNMANAGED_DROP_TITLE} — ${unmanagedDropDetail(event)}`;
+    return `⬇ ${UNMANAGED_DROP_TITLE} — ${UNMANAGED_DROP_DETAIL}`;
   }
   return `⬇ MC reclaimed context${event.cause ? ` — ${cacheCauseLabel(event.cause)}` : ""}`;
 }

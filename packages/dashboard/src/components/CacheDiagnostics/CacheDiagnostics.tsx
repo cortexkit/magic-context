@@ -1,4 +1,6 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { Dynamic } from "solid-js/web";
+
 import { formatDateTime, getSessionCacheEvents, getSessionCacheStatsFromDb } from "../../lib/api";
 import {
   cacheCauseColor,
@@ -31,8 +33,8 @@ import {
   cacheEventPercentage,
   cacheHarnessOptions,
   cacheRatioTitle,
-  cacheSessionHeader,
   cacheSessionVisible,
+  cacheTimelineSelection,
   isManagedFilterableHarness,
   sessionModelLabel,
   sessionModelSummary,
@@ -40,7 +42,6 @@ import {
 
 export type {
   CacheCardSummary,
-  CacheSessionHeader,
   HarnessFilter,
   SessionModelSummary,
 } from "./cache-diagnostics-model";
@@ -55,7 +56,6 @@ export {
   cacheHarnessOptions,
   cachePercentage,
   cacheRatioTitle,
-  cacheSessionHeader,
   cacheSessionRatio,
   cacheSessionTitle,
   cacheSessionVisible,
@@ -236,6 +236,7 @@ export default function CacheDiagnostics() {
   // prior window. Used on initial load, for a newly-surfaced session, and after
   // a window-size change.
   const loadFullWindow = async (row: CacheSessionStats) => {
+    if (row.harness === "broca") return;
     const events = await getSessionCacheEvents(row.harness, row.session_id, windowSize());
     const key = windowKey(row.harness, row.session_id);
     cachedWindows.set(key, {
@@ -278,17 +279,9 @@ export default function CacheDiagnostics() {
     const recent = recentSessionRows(sessions);
     const recentKeys = new Set(recent.map((s) => windowKey(s.harness, s.session_id)));
 
-    const selected = selectedSession();
-    if (
-      selected &&
-      !sessions.some((s) => s.harness === selected.harness && s.session_id === selected.sessionId)
-    ) {
-      const top = recent.find((s) => !s.is_subagent) ?? recent[0];
-      selectSession(top ? { harness: top.harness, sessionId: top.session_id } : null);
-    }
-
     let changed = false;
     for (const row of recent) {
+      if (row.harness === "broca") continue;
       const key = windowKey(row.harness, row.session_id);
       const win = cachedWindows.get(key);
       if (!win) {
@@ -329,7 +322,9 @@ export default function CacheDiagnostics() {
       applySessionMeta(sessions);
       const recent = recentSessionRows(sessions);
       if (!cachedSelectedSession) {
-        const top = recent.find((s) => !s.is_subagent) ?? recent[0];
+        const top =
+          recent.find((s) => s.harness !== "broca" && !s.is_subagent) ??
+          recent.find((s) => s.harness !== "broca");
         if (top) {
           const key: SelectedSession = { harness: top.harness, sessionId: top.session_id };
           setSelectedSession(key);
@@ -388,6 +383,7 @@ export default function CacheDiagnostics() {
   // Selection helper. Ensures the newly-selected session has a window (loads it
   // immediately if not already held) so its chart appears without a poll lag.
   const selectSession = (next: SelectedSession | null) => {
+    if (next?.harness === "broca") return;
     setSelectedSession(next);
     cachedSelectedSession = next;
     if (next && !cachedWindows.has(windowKey(next.harness, next.sessionId))) {
@@ -397,6 +393,23 @@ export default function CacheDiagnostics() {
       if (row) void loadFullWindow(row).then(bumpWindows);
     }
   };
+
+  const visibleSessionRows = () => {
+    windowsVersion();
+    return cachedSessions
+      .filter((row) =>
+        cacheSessionVisible(row, harnessFilter(), showUnmanagedSessions(), hideSubagents()),
+      )
+      .slice(0, visibleCardCount());
+  };
+
+  createEffect(() => {
+    const current = selectedSession();
+    const next = cacheTimelineSelection(visibleSessionRows(), current);
+    if (next?.harness !== current?.harness || next?.sessionId !== current?.sessionId) {
+      selectSession(next);
+    }
+  });
 
   const setShowUnmanagedSessions = (value: boolean) => {
     setShowUnmanagedSessionsSignal(value);
@@ -424,25 +437,25 @@ export default function CacheDiagnostics() {
     for (const s of cachedSessions) {
       if (!cacheSessionVisible(s, harness, showUnmanagedSessions(), hideSubagents())) continue;
       const win = cachedWindows.get(windowKey(s.harness, s.session_id));
-      if (!win) continue;
+      if (!win && s.harness !== "broca") continue;
       let read = 0;
       let write = 0;
       let input = 0;
       let busts = 0;
       let lastTs = 0;
-      for (const e of win.events) {
+      for (const e of win?.events ?? []) {
         read += e.cache_read;
         write += e.cache_write;
         input += e.input_tokens;
         if (e.severity === "bust" || e.severity === "full_bust") busts++;
         if (e.timestamp > lastTs) lastTs = e.timestamp;
       }
-      const summary = s.broca ? brocaCardSummary(s.broca) : cacheCardSummary(win.events);
+      const summary = s.broca ? brocaCardSummary(s.broca) : cacheCardSummary(win?.events ?? []);
       rows.push({
         ...s,
         harness: s.harness,
         session_id: s.session_id,
-        event_count: win.events.length,
+        event_count: win?.events.length ?? 0,
         total_cache_read: read,
         total_cache_write: write,
         total_input: input,
@@ -450,7 +463,7 @@ export default function CacheDiagnostics() {
         summary,
         countLabel: s.broca
           ? `${s.broca.run_count} ${s.broca.run_count === 1 ? "run" : "runs"}`
-          : cacheCardCountLabel(win.events),
+          : cacheCardCountLabel(win?.events ?? []),
         last_timestamp: s.broca ? s.last_timestamp : new Date(lastTs).toISOString(),
         last_activity_ms: s.broca ? s.last_activity_ms : lastTs,
         bust_count: s.broca ? 0 : busts,
@@ -471,7 +484,13 @@ export default function CacheDiagnostics() {
   const filteredEvents = () => {
     windowsVersion();
     const selected = selectedSession();
-    if (!selected) return [];
+    if (
+      !selected ||
+      !visibleSessionRows().some(
+        (row) => row.harness === selected.harness && row.session_id === selected.sessionId,
+      )
+    )
+      return [];
     const win = cachedWindows.get(windowKey(selected.harness, selected.sessionId));
     return win ? win.events : [];
   };
@@ -598,7 +617,7 @@ export default function CacheDiagnostics() {
                 // top card of the filtered set.
                 const sel = selectedSession();
                 if (sel && harness !== "all" && sel.harness !== harness) {
-                  const top = filteredStats()[0];
+                  const top = filteredStats().find((s) => s.harness !== "broca");
                   selectSession(top ? { harness: top.harness, sessionId: top.session_id } : null);
                 }
                 void reconcile();
@@ -675,18 +694,23 @@ export default function CacheDiagnostics() {
                 // when the tab header's "Show unmanaged" button allows it into the list.
                 const unmanaged = isManagedFilterableHarness(stat.harness) && !stat.managed;
                 return (
-                  <button
-                    type="button"
+                  <Dynamic
+                    component={stat.harness === "broca" ? "div" : "button"}
+                    type={stat.harness === "broca" ? undefined : "button"}
                     class={`cache-card ${isActive() ? "active" : ""}`}
-                    aria-pressed={isActive()}
-                    onClick={() => {
-                      // Select-only: clicking a card focuses that session's
-                      // window. Clicking the already-active card is a no-op
-                      // (there is no combined/merged view to toggle back to).
-                      if (!isActive()) {
-                        selectSession({ harness: stat.harness, sessionId: stat.session_id });
-                      }
-                    }}
+                    aria-pressed={stat.harness === "broca" ? undefined : isActive()}
+                    onClick={
+                      stat.harness === "broca"
+                        ? undefined
+                        : () => {
+                            // Select-only: clicking a card focuses that session's
+                            // window. Clicking the already-active card is a no-op
+                            // (there is no combined/merged view to toggle back to).
+                            if (!isActive()) {
+                              selectSession({ harness: stat.harness, sessionId: stat.session_id });
+                            }
+                          }
+                    }
                   >
                     {/* Every line of a card is one fixed-height, non-wrapping
                         line, so cards in the row stay one height whatever
@@ -726,7 +750,7 @@ export default function CacheDiagnostics() {
                         </span>
                       </Show>
                     </span>
-                  </button>
+                  </Dynamic>
                 );
               }}
             </For>
@@ -743,12 +767,6 @@ export default function CacheDiagnostics() {
               {(selected) => {
                 const label = () =>
                   sessionLabel(
-                    selected().harness,
-                    selected().sessionId,
-                    sessionNames()[windowKey(selected().harness, selected().sessionId)],
-                  );
-                const header = () =>
-                  cacheSessionHeader(
                     selected().harness,
                     selected().sessionId,
                     sessionNames()[windowKey(selected().harness, selected().sessionId)],
@@ -776,9 +794,6 @@ export default function CacheDiagnostics() {
                     </div>
                     <span class="cache-chart-steps">{steps()}</span>
                     <div class="cache-chart-sub">
-                      <Show when={header().innerHarness}>
-                        {(inner) => <span>via {inner()}</span>}
-                      </Show>
                       <Show when={models()}>
                         {(summary) => (
                           <span title={summary().all.join("\n")}>
@@ -822,183 +837,194 @@ export default function CacheDiagnostics() {
       </Show>
 
       {/* Turn list */}
-      <div class="scroll-area">
-        <Show when={!loading()} fallback={<div class="empty-state">Loading cache events...</div>}>
-          <Show
-            when={cacheTurns().length > 0}
-            fallback={
-              <div class="empty-state">
-                <span class="empty-state-icon">
-                  <Icon name="gauge" size={28} />
-                </span>
-                <span>No cache events found</span>
-                <span style={{ "font-size": "11px" }}>
-                  Cache data is read from OpenCode, Pi, Claude Code, and Codex sessions
-                </span>
-              </div>
-            }
-          >
-            <div class="section-eyebrow">Turns</div>
-            <div class="cache-turns">
-              <div class="cache-turn-grid cache-turns-head">
-                <span>Time</span>
-                <span>Status</span>
-                <span class="num">Cache hit</span>
-                <span class="num">Prompt</span>
-                <span class="num">Cached</span>
-                <span class="num">New</span>
-                <span>Steps</span>
-              </div>
-              <For each={[...cacheTurns()].reverse()}>
-                {(turn) => {
-                  // Parent stats reflect the turn's FINAL step (the prompt that
-                  // actually shipped), not an aggregate across steps. Aggregation
-                  // double-counts a bust child and produces nonsense like
-                  // prompt=823k for a 540k actual turn.
-                  const last = turn.events[turn.events.length - 1];
-                  const worstCause = turn.worstEvent.cause;
-                  const isExpanded = () => expandedTurns().has(turn.turnId);
-                  const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
-                  // Retention of the turn's final (shipped) step — hit_ratio now
-                  // carries the cross-step retention computed in the backend.
-                  const turnRetention = last.hit_ratio;
-                  const unreportedTurn = !last.cache_reported;
-                  const isMultiStep = turn.events.length > 1;
-                  // Only multi-step turns are expandable. Interactive rows get a real
-                  // button role + keyboard activation; single-step rows are purely
-                  // presentational with no handlers at all.
-                  const interactiveProps = isMultiStep
-                    ? {
-                        role: "button" as const,
-                        tabindex: 0,
-                        // A getter keeps the attribute reactive through the spread.
-                        get "aria-expanded"() {
-                          return isExpanded();
-                        },
-                        onClick: () => toggleTurn(turn.turnId),
-                        onKeyDown: (e: KeyboardEvent) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            toggleTurn(turn.turnId);
-                          }
-                        },
-                      }
-                    : {};
-                  return (
-                    <div
-                      id={`cache-turn-${turn.turnId}`}
-                      class={`cache-turn tone-${cacheEventColorClass(turn.worstEvent)}`}
-                    >
+      <Show
+        when={
+          selectedSession() !== null &&
+          visibleSessionRows().some(
+            (row) =>
+              row.harness === selectedSession()?.harness &&
+              row.session_id === selectedSession()?.sessionId,
+          )
+        }
+      >
+        <div class="scroll-area">
+          <Show when={!loading()} fallback={<div class="empty-state">Loading cache events...</div>}>
+            <Show
+              when={cacheTurns().length > 0}
+              fallback={
+                <div class="empty-state">
+                  <span class="empty-state-icon">
+                    <Icon name="gauge" size={28} />
+                  </span>
+                  <span>No cache events found</span>
+                  <span style={{ "font-size": "11px" }}>
+                    Cache data is read from OpenCode, Pi, Claude Code, and Codex sessions
+                  </span>
+                </div>
+              }
+            >
+              <div class="section-eyebrow">Turns</div>
+              <div class="cache-turns">
+                <div class="cache-turn-grid cache-turns-head">
+                  <span>Time</span>
+                  <span>Status</span>
+                  <span class="num">Cache hit</span>
+                  <span class="num">Prompt</span>
+                  <span class="num">Cached</span>
+                  <span class="num">New</span>
+                  <span>Steps</span>
+                </div>
+                <For each={[...cacheTurns()].reverse()}>
+                  {(turn) => {
+                    // Parent stats reflect the turn's FINAL step (the prompt that
+                    // actually shipped), not an aggregate across steps. Aggregation
+                    // double-counts a bust child and produces nonsense like
+                    // prompt=823k for a 540k actual turn.
+                    const last = turn.events[turn.events.length - 1];
+                    const worstCause = turn.worstEvent.cause;
+                    const isExpanded = () => expandedTurns().has(turn.turnId);
+                    const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
+                    // Retention of the turn's final (shipped) step — hit_ratio now
+                    // carries the cross-step retention computed in the backend.
+                    const turnRetention = last.hit_ratio;
+                    const unreportedTurn = !last.cache_reported;
+                    const isMultiStep = turn.events.length > 1;
+                    // Only multi-step turns are expandable. Interactive rows get a real
+                    // button role + keyboard activation; single-step rows are purely
+                    // presentational with no handlers at all.
+                    const interactiveProps = isMultiStep
+                      ? {
+                          role: "button" as const,
+                          tabindex: 0,
+                          // A getter keeps the attribute reactive through the spread.
+                          get "aria-expanded"() {
+                            return isExpanded();
+                          },
+                          onClick: () => toggleTurn(turn.turnId),
+                          onKeyDown: (e: KeyboardEvent) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              toggleTurn(turn.turnId);
+                            }
+                          },
+                        }
+                      : {};
+                    return (
                       <div
-                        class={`cache-turn-grid cache-turn-main ${isMultiStep ? "expandable" : ""}`}
-                        {...interactiveProps}
+                        id={`cache-turn-${turn.turnId}`}
+                        class={`cache-turn tone-${cacheEventColorClass(turn.worstEvent)}`}
                       >
-                        <span class="num cache-cell-time">{formatDateTime(turn.startTime)}</span>
-                        <span class="cache-cell-status">
-                          <CacheStatus event={turn.worstEvent} />
-                        </span>
-                        <Show
-                          when={turn.worstSeverity !== "unknown" && !unreportedTurn}
-                          fallback={
-                            <span class="num cache-cell-muted">
-                              {unreportedTurn ? "not reported" : "no data"}
-                            </span>
-                          }
+                        <div
+                          class={`cache-turn-grid cache-turn-main ${isMultiStep ? "expandable" : ""}`}
+                          {...interactiveProps}
                         >
-                          <span class="num cache-cell-hit" title={cacheRatioTitle(last)}>
-                            {(turnRetention * 100).toFixed(1)}%
+                          <span class="num cache-cell-time">{formatDateTime(turn.startTime)}</span>
+                          <span class="cache-cell-status">
+                            <CacheStatus event={turn.worstEvent} />
                           </span>
-                        </Show>
-                        <span class="num">{totalPrompt.toLocaleString()}</span>
-                        <TokenCell text={cacheReadLabel(last)} />
-                        <TokenCell text={cacheWriteLabel(turn.events)} />
-                        <span class="cache-cell-steps">
-                          <Show when={isMultiStep}>
-                            <Icon
-                              name={isExpanded() ? "chevron-down" : "chevron-right"}
-                              size={13}
-                            />
-                            {turn.events.length} steps
-                          </Show>
-                        </span>
-                      </div>
-                      <Show when={worstCause}>
-                        {(cause) => (
-                          <div
-                            class="cache-turn-cause"
-                            style={{ color: `var(--${cacheCauseColor(cause())})` }}
-                            title={cacheCauseTooltip(cause())}
+                          <Show
+                            when={turn.worstSeverity !== "unknown" && !unreportedTurn}
+                            fallback={
+                              <span class="num cache-cell-muted">
+                                {unreportedTurn ? "not reported" : "no data"}
+                              </span>
+                            }
                           >
-                            {cacheCauseText(cause())}
-                          </div>
-                        )}
-                      </Show>
-                      <Show when={isExpanded()}>
-                        <div class="cache-steps">
-                          {/* Newest-step first inside the drill-down so the user
+                            <span class="num cache-cell-hit" title={cacheRatioTitle(last)}>
+                              {(turnRetention * 100).toFixed(1)}%
+                            </span>
+                          </Show>
+                          <span class="num">{totalPrompt.toLocaleString()}</span>
+                          <TokenCell text={cacheReadLabel(last)} />
+                          <TokenCell text={cacheWriteLabel(turn.events)} />
+                          <span class="cache-cell-steps">
+                            <Show when={isMultiStep}>
+                              <Icon
+                                name={isExpanded() ? "chevron-down" : "chevron-right"}
+                                size={13}
+                              />
+                              {turn.events.length} steps
+                            </Show>
+                          </span>
+                        </div>
+                        <Show when={worstCause}>
+                          {(cause) => (
+                            <div
+                              class="cache-turn-cause"
+                              style={{ color: `var(--${cacheCauseColor(cause())})` }}
+                              title={cacheCauseTooltip(cause())}
+                            >
+                              {cacheCauseText(cause())}
+                            </div>
+                          )}
+                        </Show>
+                        <Show when={isExpanded()}>
+                          <div class="cache-steps">
+                            {/* Newest-step first inside the drill-down so the user
                               reads top-to-bottom matching the outer recent-turn
                               ordering (which is also newest-first). */}
-                          <For each={[...turn.events].reverse()}>
-                            {(event) => {
-                              const evTotalPrompt =
-                                event.cache_read + event.cache_write + event.input_tokens;
-                              return (
-                                <div
-                                  id={`cache-step-${event.message_id}`}
-                                  class={`cache-step-row tone-${cacheEventColorClass(event)} ${selectedStepId() === event.message_id ? "selected" : ""}`}
-                                >
-                                  <div class="cache-turn-grid">
-                                    <span class="num cache-cell-time">
-                                      {formatDateTime(event.timestamp)}
-                                    </span>
-                                    <span class="cache-cell-status">
-                                      <CacheStatus event={event} />
-                                    </span>
-                                    <Show
-                                      when={event.severity !== "unknown" && event.cache_reported}
-                                      fallback={
-                                        <span class="num cache-cell-muted">
-                                          {event.cache_reported ? "no data" : "not reported"}
-                                        </span>
-                                      }
-                                    >
-                                      <span
-                                        class="num cache-cell-hit"
-                                        title={cacheRatioTitle(event)}
-                                      >
-                                        {cacheEventPercentage(event)}
+                            <For each={[...turn.events].reverse()}>
+                              {(event) => {
+                                const evTotalPrompt =
+                                  event.cache_read + event.cache_write + event.input_tokens;
+                                return (
+                                  <div
+                                    id={`cache-step-${event.message_id}`}
+                                    class={`cache-step-row tone-${cacheEventColorClass(event)} ${selectedStepId() === event.message_id ? "selected" : ""}`}
+                                  >
+                                    <div class="cache-turn-grid">
+                                      <span class="num cache-cell-time">
+                                        {formatDateTime(event.timestamp)}
                                       </span>
-                                    </Show>
-                                    <span class="num">{evTotalPrompt.toLocaleString()}</span>
-                                    <TokenCell text={cacheReadLabel(event)} />
-                                    <TokenCell text={cacheWriteLabel([event])} />
-                                    <span />
-                                  </div>
-                                  <Show when={event.cause}>
-                                    {(cause) => (
-                                      <div
-                                        class="cache-turn-cause"
-                                        style={{ color: `var(--${cacheCauseColor(cause())})` }}
-                                        title={cacheCauseTooltip(cause())}
+                                      <span class="cache-cell-status">
+                                        <CacheStatus event={event} />
+                                      </span>
+                                      <Show
+                                        when={event.severity !== "unknown" && event.cache_reported}
+                                        fallback={
+                                          <span class="num cache-cell-muted">
+                                            {event.cache_reported ? "no data" : "not reported"}
+                                          </span>
+                                        }
                                       >
-                                        {cacheCauseText(cause())}
-                                      </div>
-                                    )}
-                                  </Show>
-                                </div>
-                              );
-                            }}
-                          </For>
-                        </div>
-                      </Show>
-                    </div>
-                  );
-                }}
-              </For>
-            </div>
+                                        <span
+                                          class="num cache-cell-hit"
+                                          title={cacheRatioTitle(event)}
+                                        >
+                                          {cacheEventPercentage(event)}
+                                        </span>
+                                      </Show>
+                                      <span class="num">{evTotalPrompt.toLocaleString()}</span>
+                                      <TokenCell text={cacheReadLabel(event)} />
+                                      <TokenCell text={cacheWriteLabel([event])} />
+                                      <span />
+                                    </div>
+                                    <Show when={event.cause}>
+                                      {(cause) => (
+                                        <div
+                                          class="cache-turn-cause"
+                                          style={{ color: `var(--${cacheCauseColor(cause())})` }}
+                                          title={cacheCauseTooltip(cause())}
+                                        >
+                                          {cacheCauseText(cause())}
+                                        </div>
+                                      )}
+                                    </Show>
+                                  </div>
+                                );
+                              }}
+                            </For>
+                          </div>
+                        </Show>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
           </Show>
-        </Show>
-      </div>
+        </div>
+      </Show>
     </>
   );
 }
@@ -1006,7 +1032,7 @@ export default function CacheDiagnostics() {
 /**
  * A turn or step's status, said once. Problems (warnings and busts) are a
  * coloured pill so they stand out down the list; everything else (stable, cold
- * start, run totals) is quiet text.
+ * start) is quiet text.
  */
 function CacheStatus(props: { event: DbCacheEvent }) {
   const color = () => cacheEventColorClass(props.event);
@@ -1021,7 +1047,7 @@ function CacheStatus(props: { event: DbCacheEvent }) {
   );
 }
 
-/** A token count cell; "not reported" (and partial counts' note) reads quieter. */
+/** A token count cell; "not reported" reads quieter. */
 function TokenCell(props: { text: string }) {
   return <span class={`num ${/\d/.test(props.text) ? "" : "cache-cell-muted"}`}>{props.text}</span>;
 }
