@@ -9,12 +9,16 @@ runs:
         artifact: ci-dists-${{ github.sha }}
         producer: Preflight (checks and dists)
         timeout-minutes: "10"
-    - uses: actions/download-artifact@v4
-      with:
-        artifact-ids: ${{ steps.wait.outputs.artifact-id }}
-        merge-multiple: true
-        path: ${{ runner.temp }}/ci-dists
+    # GitHub can list an artifact a few seconds before its download endpoint
+    # serves it. The script retries that; actions/download-artifact fails at once
+    # with "None of the provided artifact IDs were found".
     - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT_ID: ${{ steps.wait.outputs.artifact-id }}
+      run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path "$RUNNER_TEMP/ci-dists"
+    - name: Verify and unpack
+      shell: bash
       run: |
         cd "$RUNNER_TEMP/ci-dists"
         test "$(cat ci-dists.commit)" = "$GITHUB_SHA"
