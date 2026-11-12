@@ -700,8 +700,10 @@ function proactiveStripStartIndex(args: {
 
 /**
  * Copies of `owners` as the request will carry them once this pass replays the
- * thinking strips earlier passes froze (binding recovery and merged-reasoning
- * omissions). Those strips run only when the pass finalizes its
+ * thinking strips recorded by earlier passes: a strip of every reasoning part
+ * of a message, recorded after the provider rejected a signature or when an
+ * edit invalidated it, and a strip of chosen reasoning parts of an older
+ * assistant message. Those strips run only when the pass finalizes its
  * representation, after the emergency planner, so the host's fresh messages
  * still hold the original reasoning parts. Surviving parts are the original
  * objects; a stripped one is left out. Only the messages whose reasoning a

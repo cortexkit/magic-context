@@ -113,13 +113,21 @@ export interface PiHeuristicCleanupConfig {
 	 * tags still replay through applyFlushedStatuses on every provider.
 	 */
 	staleReduceStripEnabled: boolean;
-	/** Reports actual new stale-arc edits, not dropped-status replay. */
+	/**
+	 * Called for each old call of the agent's `ctx_reduce` tool (the tool it
+	 * uses to mark earlier context for removal) that this pass newly drops from
+	 * the request (its call and result leave the request for the first time).
+	 * Not called for a call whose drop was recorded on an earlier pass and is
+	 * only replayed from its dropped status.
+	 */
 	onStaleReduceEdit?: (tag: TagEntry) => void;
 	/**
-	 * Tiered target-headroom emergency drop (Phase 2). Provided only on the
-	 * derived force-band materialize (cache-busting) pass; undefined on routine execute
-	 * passes (routine age-based tool drops were removed). Mirrors OpenCode's
-	 * `applyHeuristicCleanup` emergency config.
+	 * The tiered emergency tool drop, which drops tool outputs (least useful
+	 * tools first) until usage is back near a target below the execute
+	 * threshold. Set only on a pass that rebuilds the prompt because usage is
+	 * in the force band; undefined on a routine execute pass, which never drops
+	 * tool outputs by age. Mirrors OpenCode's `applyHeuristicCleanup` emergency
+	 * config.
 	 */
 	emergency?: {
 		currentTotalInputTokens: number;
