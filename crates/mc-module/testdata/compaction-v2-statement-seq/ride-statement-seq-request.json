@@ -1,0 +1,29 @@
+{
+  "method": "compaction.ride",
+  "params": {
+    "causes": [
+      "over_limit"
+    ],
+    "conditions": {
+      "context_window": 32768,
+      "last_prompt_tokens": 1024,
+      "last_prompt_view": 1,
+      "model": {
+        "model": "example-model",
+        "provider": "example-provider",
+        "variant": "standard"
+      },
+      "output_reserve": 4096,
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      },
+      "signed_floor": {
+        "through": "message-a"
+      },
+      "statement_epoch": "89abcdef0123456789abcdef01234567",
+      "statement_seq": 42
+    },
+    "deadline_ms": 1500
+  }
+}

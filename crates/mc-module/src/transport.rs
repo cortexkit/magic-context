@@ -152,6 +152,12 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
+        // The runner marks Setup, notices and rides with `statement_epoch`
+        // and `statement_seq` only for providers declaring this (allowed from
+        // contract 0.3.8 on), so ck-mc can drop a statement from a replaced
+        // history and tell a notice that arrived late from newer runner
+        // state (see `statement_order`).
+        cortexkit_role_compaction::COMPACTION_STATEMENT_SEQ_PROVIDES.to_owned(),
         "mc-app-read/v1".to_owned(),
         "mc-context-read/v1".to_owned(),
         // Core finds tool providers and step-transform providers in
@@ -1925,6 +1931,7 @@ mod manifest_tests {
             "compaction-entry-speaks-for/v1",
             "compaction-signed-floor/v1",
             "compaction-notes-tokens/v1",
+            "compaction-statement-seq/v1",
             "tool-provider/v1",
             "step-transform-provider/v2",
         ] {

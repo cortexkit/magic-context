@@ -157,7 +157,7 @@ impl Session {
         if let Some(ordinal) = self.index.ordinal_of(mid) {
             return Some(ordinal);
         }
-        match crate::reads::named_detail(
+        let read = crate::reads::named_detail(
             client,
             &self.key,
             vec![mid.to_owned()],
@@ -165,8 +165,9 @@ impl Session {
             Detail::Compact,
             |mids| Select::Mids { mids },
         )
-        .await
-        {
+        .await;
+        self.count_read(read.as_ref().ok().map(Vec::len));
+        match read {
             Ok(entries) => entries
                 .iter()
                 .find(|entry| entry.mid == mid)

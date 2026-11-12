@@ -167,7 +167,7 @@ impl Session {
     /// Whether view `view` is still the newest one the runner accepted from
     /// ck-mc or reports applying (`applied_view`), with nothing ck-mc
     /// doesn't expect in between.
-    fn spent_view_holds(&self, view: u64, applied_view: Option<&AppliedView>) -> bool {
+    pub(super) fn spent_view_holds(&self, view: u64, applied_view: Option<&AppliedView>) -> bool {
         !self.runner_differs(applied_view)
             && view == self.newest_applied.max(self.newest_accepted(applied_view))
     }
