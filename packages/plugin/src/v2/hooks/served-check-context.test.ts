@@ -2,10 +2,10 @@
 // The served check through OpenCode 2's real context hook: an ordinary turn
 // logs nothing, a last-good replay that serves exactly the request before it
 // plus the host's new messages logs nothing, a replay that serves a drop the
-// request before it did not carry is a mixed replay, and the compaction-off
-// pass whose first-render strip cannot be saved (an open signed-thinking case)
-// changes the served request without rebuild permission in front of kept
-// thinking.
+// request before it did not carry is a mixed replay. One known, still unfixed
+// defect is shown too: with compaction off, a session's first rendered history
+// head whose signed-thinking strip cannot be saved changes the served request
+// in front of kept thinking, on a pass that was not allowed to rebuild it.
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

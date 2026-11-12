@@ -9144,7 +9144,8 @@ async function runCompactionOffPipeline(
 			// the transaction only the head's text and mural image are compared with
 			// the served head. A head whose text and image match but whose full
 			// messages differ (an envelope field such as a timestamp) is still
-			// stripped below, after the commit, and keeps that window.
+			// stripped below, after the commit, so for that case a failed strip
+			// write can still leave the new head saved without its strip.
 			state.onFoldPrepare = () => {
 				const served = readLastServed();
 				const headIndex = placePiInitialSystemAtHead([

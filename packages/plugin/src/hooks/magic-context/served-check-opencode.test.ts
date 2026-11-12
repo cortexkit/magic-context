@@ -3,9 +3,10 @@
 // ordinary turn logs nothing, a last-good replay that serves exactly the
 // request before it plus the host's new messages logs nothing, and a replay
 // that serves a drop the request before it did not carry is a mixed replay.
-// The change without rebuild permission is driven by the two open
-// signed-thinking cases (compaction-marker-drain-busy-review.test.ts and
-// signed-thinking-prefix-edits.test.ts).
+// A pass that changes the served request although it was not allowed to
+// rebuild it is shown by the two known, still unfixed signed-thinking defects;
+// their tests are in compaction-marker-drain-busy-review.test.ts and
+// signed-thinking-prefix-edits.test.ts.
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { getTagsBySession, openDatabase } from "../../features/magic-context/storage";

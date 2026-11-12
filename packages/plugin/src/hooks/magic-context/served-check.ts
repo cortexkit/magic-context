@@ -248,8 +248,9 @@ export function countServedRefusal(sessionId: string): void {
  * compacted, or the host removed messages from it (a revert or an edit). The
  * next pass of the session is then not compared, and the line logged here
  * tells a reader of the log "not compared" apart from "no difference seen".
- * The last-good slot's invalidations do not drop the record: the record says
- * what the provider last received, not what may be replayed.
+ * Invalidating the last-good request (the copy the wrapper may replay after a
+ * failed pass) does not drop this record: this record says what the provider
+ * last received, not what may be replayed.
  */
 export function dropServedRecord(sessionId: string, reason: string): void {
     try {
