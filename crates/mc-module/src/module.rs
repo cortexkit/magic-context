@@ -818,6 +818,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         principal: &subc_protocol::Principal,
         body: &[u8],
     ) -> Result<Value, subc_protocol::ErrorBody> {
+        let result = self.command_request_inner(principal, body).await;
+        crate::user_commands::audit(body, &result);
+        result
+    }
+
+    async fn command_request_inner(
+        &self,
+        principal: &subc_protocol::Principal,
+        body: &[u8],
+    ) -> Result<Value, subc_protocol::ErrorBody> {
         use crate::user_commands as commands;
         cortexkit_role_user_commands::check_admission(principal, false, false)?;
         let Some(request) = commands::decode(body)? else {

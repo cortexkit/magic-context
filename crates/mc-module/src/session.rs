@@ -4122,18 +4122,14 @@ impl Session {
         let (history, cut) = self.history_ops(settings, flush);
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
-        let context = lanes::Context {
-            index: &self.index,
-            edited: &edited,
-            protected_tools: &settings.protected_tools,
-            keep_first_message: self.features.keep_first_message,
-            signed_floor: self.signed_floor(),
-        };
-        let usable = pass::usable_window(&self.conditions);
-        let floor = settings
-            .protected_tokens
-            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
-        let cutoff = lanes::protected_cutoff(&context, floor);
+        let (context, usable, cutoff) = Self::lane_context(
+            &self.index,
+            &edited,
+            settings,
+            &self.conditions,
+            self.features.keep_first_message,
+            self.signed_floor(),
+        );
         // A part two lanes want keeps the first lane's shape, so the order
         // here decides it: the model's own request first, then the lanes
         // that keep a call, then the rest. A requested part in the protected
@@ -4340,6 +4336,31 @@ impl Session {
         ops.extend(history);
         drop(lanes_timing);
         (self.seal(ops, &covered), freed)
+    }
+
+    /// Commands and rebuilds use the same tail boundary, so queued work is
+    /// reported as ready only after it leaves the recent protected tail.
+    fn lane_context<'a>(
+        index: &'a Index,
+        edited: &'a lanes::Edited,
+        settings: &'a Settings,
+        conditions: &Conditions,
+        keep_first_message: bool,
+        signed_floor: Option<u64>,
+    ) -> (lanes::Context<'a>, u64, Option<u64>) {
+        let context = lanes::Context {
+            index,
+            edited,
+            protected_tools: &settings.protected_tools,
+            keep_first_message,
+            signed_floor,
+        };
+        let usable = pass::usable_window(conditions);
+        let floor = settings
+            .protected_tokens
+            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
+        let cutoff = lanes::protected_cutoff(&context, floor);
+        (context, usable, cutoff)
     }
 
     /// Turn a pass's edits into the next view, and forget the queued drops

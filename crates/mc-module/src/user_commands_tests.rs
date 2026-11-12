@@ -9,6 +9,12 @@ mod durable;
 #[path = "user_commands_review_tests.rs"]
 mod review_tests;
 
+#[path = "user_commands_tail_tests.rs"]
+mod recent_tail;
+
+#[path = "user_commands_audit_tests.rs"]
+mod audit;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
@@ -441,6 +447,7 @@ async fn user_commands_record_real_handler_samples() {
     samples.insert("flush-run.json", result);
     for reason in [
         "nothing_to_land",
+        "queued_in_recent_tail",
         "thinking_hold",
         "not_managed",
         "summary_running",
@@ -448,6 +455,10 @@ async fn user_commands_record_real_handler_samples() {
         let (mut session, client, settings) = ready();
         match reason {
             "nothing_to_land" => session.queued.clear(),
+            "queued_in_recent_tail" => {
+                (session, _, _) = recent_tail::ready_with_recent_tail();
+                session.queued.remove(&("old".into(), "p".into()));
+            }
             "thinking_hold" => hold(&mut session),
             "not_managed" => session.tools_only = true,
             "summary_running" => session.summarizing = true,
@@ -471,6 +482,7 @@ async fn user_commands_record_real_handler_samples() {
         samples.insert(
             match reason {
                 "nothing_to_land" => "flush-preview-nothing-to-land.json",
+                "queued_in_recent_tail" => "flush-preview-queued-in-recent-tail.json",
                 "thinking_hold" => "flush-preview-thinking-hold.json",
                 "not_managed" => "flush-preview-not-managed.json",
                 _ => "flush-preview-summary-running.json",
@@ -485,8 +497,12 @@ async fn user_commands_record_real_handler_samples() {
             );
         }
     }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata/mc-user-commands-samples-v1");
+    let dir = std::env::var_os("MC_USER_COMMAND_SAMPLES_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/mc-user-commands-samples-v1")
+        });
     let update = std::env::var_os("MC_UPDATE_USER_COMMAND_SAMPLES").is_some();
     if update {
         std::fs::create_dir_all(&dir).unwrap();

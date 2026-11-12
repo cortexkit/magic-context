@@ -180,7 +180,30 @@ impl Session {
             .sum();
         let now = self.pressure().last_prompt_tokens.unwrap_or(old_total);
         let after = now.saturating_add(new_total).saturating_sub(old_total);
-        let reason = reason.or_else(|| view.is_none().then_some("nothing_to_land"));
+        let reason = reason.or_else(|| {
+            if view.is_some() {
+                return None;
+            }
+            let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+            let (context, _, cutoff) = Self::lane_context(
+                &self.index,
+                &edited,
+                settings,
+                &self.conditions,
+                self.features.keep_first_message,
+                self.signed_floor(),
+            );
+            let held = !self.queued.is_empty()
+                && self
+                    .queued
+                    .iter()
+                    .all(|key| lanes::in_protected_tail(&context, key, cutoff));
+            Some(if held {
+                "queued_in_recent_tail"
+            } else {
+                "nothing_to_land"
+            })
+        });
         let rewrites = self.rewrite_tokens(view, &old, old_head);
         // Include protected queued parts too: even a drop that cannot land
         // yet invalidates a confirmation of the previous queue.
@@ -337,8 +360,21 @@ impl Session {
             .pressure()
             .last_prompt_tokens
             .unwrap_or(costs.values().sum::<u64>() + head);
-        let usable = pass::usable_window(&self.conditions).max(1) as f64;
-        let queued_tokens: u64 = self.queued.iter().filter_map(|key| costs.get(key)).sum();
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let (context, usable, cutoff) = Self::lane_context(
+            &self.index,
+            &edited,
+            settings,
+            &self.conditions,
+            self.features.keep_first_message,
+            self.signed_floor(),
+        );
+        let usable = usable.max(1) as f64;
+        let (held, queued): (Vec<_>, Vec<_>) = self
+            .queued
+            .iter()
+            .partition(|key| lanes::in_protected_tail(&context, key, cutoff));
+        let queued_tokens: u64 = queued.iter().filter_map(|key| costs.get(*key)).sum();
         let summarized = self.summarized_through();
         let remaining = self
             .index
@@ -354,7 +390,7 @@ impl Session {
             ),
             number(
                 "Queued drops",
-                self.queued.len() as u64,
+                queued.len() as u64,
                 "count",
                 Some("parts"),
                 false,
@@ -370,6 +406,13 @@ impl Session {
         let mut page = vec![
             number("Context now", now, "tokens", None, true),
             number("Queued tokens", queued_tokens, "tokens", None, true),
+            number(
+                "Held in recent tail",
+                held.len() as u64,
+                "count",
+                Some("parts"),
+                false,
+            ),
             number(
                 "History",
                 self.summaries.len() as u64,

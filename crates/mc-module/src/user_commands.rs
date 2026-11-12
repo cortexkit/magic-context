@@ -33,6 +33,41 @@ pub(crate) fn invalid(field: &str) -> ErrorBody {
     wire::ValidationError::new(field).refusal()
 }
 
+/// Read caller and session labels only after handling the call. They explain
+/// who opened a command, but cannot grant admission or change its result.
+/// Never log command arguments.
+pub(crate) fn audit(body: &[u8], result: &Result<Value, ErrorBody>) {
+    let envelope = (body.len() <= 64 * 1024)
+        .then(|| serde_json::from_slice::<Value>(body).ok())
+        .flatten()
+        .unwrap_or(Value::Null);
+    let label = |path| envelope.pointer(path).and_then(Value::as_str).unwrap_or("");
+    let outcome = match result {
+        Err(error) => error.code.as_str(),
+        Ok(reply) => reply
+            .get("reason")
+            .or_else(|| reply.get("outcome"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| match reply.get("available").and_then(Value::as_bool) {
+                Some(true) => "available",
+                Some(false) => "unavailable",
+                None => "ok",
+            }),
+    };
+    tracing::info!(
+        op = label("/method"),
+        command_id = label("/params/id"),
+        runner = label("/params/subject/session/runner"),
+        harness = label("/params/subject/session/harness"),
+        session = label("/params/subject/session/session"),
+        app = label("/params/caller/app"),
+        admission = label("/params/caller/admission"),
+        device = label("/params/caller/device"),
+        outcome,
+        "ck-mc: user command"
+    );
+}
+
 pub(crate) enum Request {
     Preview(ModulePreviewRequest),
     Run(ModuleRunRequest),
