@@ -15,6 +15,9 @@ mod recent_tail;
 #[path = "user_commands_audit_tests.rs"]
 mod audit;
 
+#[path = "user_commands_version_tests.rs"]
+mod version_tests;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
@@ -181,6 +184,7 @@ async fn user_commands_flush_preview_does_not_drain_and_run_lands_exactly_counte
     .await
     .unwrap();
     assert_eq!(answer["outcome"], "scheduled");
+    assert_eq!(answer["facts"].as_array().unwrap().len(), 3);
     assert_eq!(answer["facts"][0]["value"], 1.0);
     assert_eq!(answer["facts"][1]["value"], 1194.0);
     assert_eq!(answer["facts"][2]["value"], 8806.0);
@@ -317,12 +321,9 @@ async fn user_commands_each_unavailable_reason_and_status_shapes() {
         p.facts.as_ref().unwrap()[0].data.unit.as_deref(),
         Some("ratio")
     );
-    assert!(p
-        .table
-        .unwrap()
-        .rows
-        .iter()
-        .any(|r| r.label == "Applied view"));
+    let table = p.table.unwrap();
+    assert_eq!(table.columns, ["Now"]);
+    assert!(table.rows.iter().any(|r| r.label == "Applied view"));
 }
 
 #[tokio::test]

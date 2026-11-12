@@ -207,16 +207,23 @@ impl Session {
         let rewrites = self.rewrite_tokens(view, &old, old_head);
         // Include protected queued parts too: even a drop that cannot land
         // yet invalidates a confirmation of the previous queue.
+        // Approve edit payloads, not view checksums: the latter also cover
+        // the newest-message anchor and edit IDs, which can move without
+        // changing what the flush does. Size estimates are reply data only.
+        let edit_stamp = |view: &View| {
+            serde_json::json!({
+                "edits": view.edits.iter().map(|edit| &edit.op).collect::<Vec<_>>(),
+                "new_signed": view.new_signed,
+            })
+        };
         let stamp = serde_json::json!({
             "applied": self.newest_applied, "version": self.version,
-            "latest": self.latest.as_ref().map(|v| &v.checksum),
-            "plan": view.map(|v| &v.checksum), "queue": self.queued,
+            "latest": self.latest.as_ref().map(edit_stamp),
+            "plan": view.map(edit_stamp), "queue": self.queued,
             "summaries": self.summaries.revision(), "reason": reason,
             "summary_running": self.summarizing, "summary_unshown": self.summary_unshown,
             "summary_wait": self.account_wait.as_ref().map(|w| (&w.refusal.code, w.refusal.until_ms)),
             "usable": pass::usable_window(&self.conditions),
-            "queued_tokens": queued_tokens, "rewrites": rewrites,
-            "now": now, "after": after, "parts": queued.len(), "removed": removed,
         });
         let version = format!(
             "{:x}",
@@ -299,13 +306,11 @@ impl Session {
             return Err(outcome_unknown());
         };
         self.install_command_snapshot(*state);
-        let version = view.version;
         let mut reply = RunReply::new("scheduled");
         reply.facts = Some(vec![
             number("Parts dropped", plan.parts, "count", Some("parts"), false),
             number("Tokens removed", plan.removed, "tokens", None, true),
             number("Prompt after", plan.after, "tokens", None, true),
-            number("View", version, "count", Some("views"), false),
         ]);
         Arc::make_mut(&mut self.command_answers).push(crate::store::CommandAnswer {
             request_id: request.request_id.clone(),
@@ -484,7 +489,7 @@ impl Session {
         preview.effect = Some(effect.into());
         preview.facts = Some(facts);
         preview.table = Some(cortexkit_role_user_commands::Table::new(
-            vec!["Value".into()],
+            vec!["Now".into()],
             page.into_iter()
                 .map(|f| cortexkit_role_user_commands::TableRow::new(f.label, vec![f.data]))
                 .collect(),

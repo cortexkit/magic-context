@@ -17,12 +17,6 @@
       "label": "Prompt after",
       "unit": "tokens",
       "value": 8806.0
-    },
-    {
-      "label": "View",
-      "noun": "views",
-      "unit": "count",
-      "value": 1.0
     }
   ],
   "outcome": "scheduled"
