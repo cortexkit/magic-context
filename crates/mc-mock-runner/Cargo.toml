@@ -9,7 +9,7 @@ description = "Reference llm-runner for the mode-3 contract draft, with mock mod
 cortexkit-role-compaction = { workspace = true }
 cortexkit-role-llm-runner = { workspace = true }
 # A stand-in routing provider for the wire tests (`route.select`).
-cortexkit-role-routing = "=0.5.7"
+cortexkit-role-routing = "=0.7.16"
 cortexkit-compaction-view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

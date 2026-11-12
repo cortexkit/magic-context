@@ -270,11 +270,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "cortexkit-role-routing"
-version = "0.5.7"
+name = "cortexkit-role-media"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f16709cf90027931521cfa83ae5393011af3286c377dd7feb3eb11c9d0ee522"
+checksum = "aea630e7aef3952fe4ce2a7452aeecb764d77dfbbebe4bf95326a0a10b4959de"
 dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "cortexkit-role-routing"
+version = "0.7.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d2c29129720261de69bdd5e852cd246bafb3eceec94724fd91b477a1eab7ab1"
+dependencies = [
+ "cortexkit-role-media",
  "serde",
  "serde_json",
 ]
