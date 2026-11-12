@@ -1,0 +1,1 @@
+{"prompt":"prompt","send_id":"first","route_decision_id":"decision","generation":{"max_output_tokens":1000,"temperature":0.1},"model":{"model":"model","provider":"provider"},"stop_when":{"max_steps":1},"system":"system","tools":[]}

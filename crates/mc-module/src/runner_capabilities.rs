@@ -63,6 +63,18 @@ impl RunnerCapabilities {
             && declared.capabilities.contains("message_marks")
     }
 
+    pub async fn session_class(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::SESSION_CLASS)
+    }
+
     /// Clearing system notes are opt-in, never implied by delivery_order.
     pub async fn turn_system_cleared(
         &self,

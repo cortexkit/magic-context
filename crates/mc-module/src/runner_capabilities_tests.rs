@@ -157,3 +157,35 @@ async fn discovery_failures_are_cached_until_setup() {
             .await
     );
 }
+
+#[tokio::test]
+async fn session_class_uses_only_the_declared_group_and_shares_discovery() {
+    let cache = RunnerCapabilities::default();
+    assert!(cache.session_class("runner", 1, async {
+        Ok(json!({"capabilities": ["session_class", "cache_policy"], "session_class": {"backup_classes": ["summary"]}}))
+    }).await);
+    assert!(
+        cache
+            .cache_policy("runner", 1, async { panic!("shared cached declaration") })
+            .await
+    );
+    for (index, value) in [
+        json!({}),
+        json!({"session_class":{"backup_classes":["summary"]}}),
+        json!({"capabilities":["other"]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !cache
+                .session_class("runner", index as u64 + 2, async { Ok(value) })
+                .await
+        );
+    }
+    assert!(
+        !cache
+            .session_class("unreachable", 1, async { Err(ClientError::new("offline")) })
+            .await
+    );
+}

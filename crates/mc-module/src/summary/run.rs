@@ -646,6 +646,7 @@ async fn call<C: RunnerClient>(
         system: call_on.system,
         deadline: call_on.deadline,
         continuation: false,
+        creates_child: true,
         cache_ttl: if call_on.lane == Lane::Enabled {
             cortexkit_role_llm_runner::cache::Ttl::Short
         } else {
@@ -667,12 +668,14 @@ pub(crate) struct Model<'a> {
     pub output_tokens: u64,
     pub system: &'a str,
     pub deadline: tokio::time::Instant,
-    /// The send continues a child an earlier send created, as the second
-    /// turn does. Runners fix a child's tools when its first send creates it
-    /// and refuse `tools` on every later send, even an unchanged empty list
-    /// (llm-runner §9.3.1), so a continuation leaves them out; the child
-    /// still has none.
+    /// Preserve the existing tools/cache parameter shape. Turn two and its
+    /// memory fact checks omit those members; the first summary turn sends them. Runners
+    /// freeze tools on creation and refuse them on later sends, even an
+    /// unchanged empty list (llm-runner §9.3.1).
     pub continuation: bool,
+    /// This logical send creates its child (including an idempotent retry).
+    /// Storage labels are never repeated on a later send in that conversation.
+    pub creates_child: bool,
     /// A single call cannot reuse a cache write; the second turn follows
     /// within seconds and can reuse the shortest explicit lifetime.
     pub cache_ttl: cortexkit_role_llm_runner::cache::Ttl,
@@ -697,6 +700,11 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
 ) -> Result<Reply, String> {
     let runner = &child.session.runner;
     let with_temperature = !refuses_temperature(runner);
+    let session_class = if how.creates_child && client.child_session_class(child).await {
+        Some("summary".to_owned())
+    } else {
+        None
+    };
     let cache = if !how.continuation && client.child_cache_policy(child).await {
         let mut cache = cortexkit_role_llm_runner::cache::Cache::new();
         cache.ttl = Some(how.cache_ttl);
@@ -707,6 +715,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     };
     let send = |temperature: bool| {
         let mut request = SendRequest::new(prompt, send_id.to_owned());
+        request.session_class = session_class.clone();
         request.cache = cache.clone();
         request.runner_params = run_params(how, temperature);
         // The routing decision is a typed send field: the runner fixes it
@@ -747,6 +756,10 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
             .unwrap_or_default(),
     })
 }
+
+#[cfg(test)]
+#[path = "session_class_tests.rs"]
+pub(crate) mod session_class_tests;
 
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system

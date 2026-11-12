@@ -85,6 +85,11 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn child_cache_policy(&self, _child: &Child) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// Whether this child runner accepts a storage/backup/cost class label.
+    /// Older or undiscoverable runners receive no new send member.
+    fn child_session_class(&self, _child: &Child) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
     /// `session.read`.
     fn read(
         &self,

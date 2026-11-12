@@ -220,8 +220,11 @@ impl Carrier {
             output_tokens: self.output_tokens,
             system,
             deadline: tokio::time::Instant::now() + TIMEOUT,
-            // Turn one created the child.
+            // Preserve the existing second-turn and memory-check parameters.
             continuation: true,
+            // Turn two reuses the first turn's child; memory fact checks use their
+            // own child, even when reattaching an interrupted check by send id.
+            creates_child: child != self.child,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         };
         let mut usage: Option<StepUsage> = None;

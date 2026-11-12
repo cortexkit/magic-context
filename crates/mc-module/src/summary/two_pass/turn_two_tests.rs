@@ -118,3 +118,69 @@ fn turn_two_child_harness_does_not_change_check_keys_or_reported_profiles() {
         .collect();
     assert_eq!(profiles, vec![profile.to_string(), profile.to_string()]);
 }
+
+#[tokio::test]
+async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks_include_it() {
+    use crate::summary::run::session_class_tests::Client;
+    let carrier = Carrier::of(&job("opencode2"));
+    let row = stored(&carrier);
+    let request_before = serde_json::to_vec(&row.request).unwrap();
+    let expected_model = json!({
+        "provider": "provider", "model": "model", "variant": null,
+        "decision": "decision", "outputTokens": 1_000, "language": null,
+    });
+    let mut expected_stage_model = expected_model.clone();
+    expected_stage_model["childHarness"] = json!("opencode2");
+    assert_eq!(row.request, json!({"model": expected_stage_model}));
+    let model_before = carrier.model_json();
+    let check = Check {
+        kind: gates::CheckKind::Disproof,
+        operands: vec![gates::Operand {
+            id: "memory:1@1:1".into(),
+            text: "Ask before pushing.".into(),
+        }],
+        pairs: vec![],
+        input: "Releases need two reviewers.".into(),
+    };
+    let key_before = gates::check_key("decision", &check, &expected_model);
+    for declares in [true, false] {
+        let client = Client::new(declares);
+        carrier
+            .send(&client, &carrier.child, "turn-two", "prompt", "system")
+            .await
+            .unwrap();
+        let recovered = Carrier::from_stage(&row, carrier.project_root.clone()).unwrap();
+        recovered
+            .send(
+                &client,
+                &recovered.child,
+                "stored-stage",
+                "prompt",
+                "system",
+            )
+            .await
+            .unwrap();
+        recovered
+            .send(&client, "check-child", "stored-check", "prompt", "system")
+            .await
+            .unwrap();
+        let sends = client.sends.lock().unwrap();
+        assert_eq!(sends.len(), 3);
+        assert!(sends[..2]
+            .iter()
+            .all(|(_, request)| request.session_class.is_none()));
+        assert_eq!(
+            sends[2].1.session_class.as_deref(),
+            declares.then_some("summary")
+        );
+        assert_eq!(serde_json::to_vec(&row.request).unwrap(), request_before);
+        assert_eq!(recovered.model_json(), model_before);
+        assert_eq!(
+            gates::check_key("decision", &check, &recovered.model_json()),
+            key_before
+        );
+        assert!(!String::from_utf8(request_before.clone())
+            .unwrap()
+            .contains("session_class"));
+    }
+}
