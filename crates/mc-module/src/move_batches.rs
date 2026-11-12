@@ -16,6 +16,10 @@ use std::cell::RefCell;
 
 mod checkpoints;
 mod fts;
+/// How long one write transaction of the mover keeps adding work; the
+/// install's lock measurement reports it beside its transactions.
+#[cfg(all(test, feature = "context-db-timing"))]
+pub(crate) use checkpoints::WRITE_WINDOW;
 pub(crate) use fts::ordinal_update;
 
 const BATCH_WRITES: usize = 32;
@@ -403,6 +407,8 @@ fn transaction_measured<T>(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let started = std::time::Instant::now();
+    #[cfg(feature = "context-db-timing")]
+    let changes = tx.total_changes();
     #[cfg(test)]
     let measure = crate::move_in::tests::Measure::new(phase);
     let result = match write(&tx) {
@@ -415,9 +421,13 @@ fn transaction_measured<T>(
     let held = started.elapsed();
     #[cfg(test)]
     drop(measure);
+    #[cfg(feature = "context-db-timing")]
+    crate::context_db::timing::transaction(phase, conn.total_changes() - changes, held);
     let result = result?;
     #[cfg(test)]
     crate::move_in::tests::after_commit(phase)?;
+    #[cfg(test)]
+    crate::agent_data::crash::after_commit(phase)?;
     let _ = phase;
     Ok((result, held))
 }

@@ -354,14 +354,17 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
 
     /// Drop what this process keeps for a session a move took over: its
     /// worker, which discards the jobs it held, its Setup, its cached
-    /// project, and the request head captured for app reads. For a session whose rows were `replaced` by an install, the
-    /// cached project of the session under any runner goes too: context
-    /// reads match a session by harness and id, and prefer that cache to
-    /// the installed project link.
+    /// project, and what the app reads hold for it (its projection, message
+    /// index and captured request heads). For a session whose rows were
+    /// `replaced` by an install, the cached project and the app reads'
+    /// projection of the session under any runner go too: context and app
+    /// reads match a session by harness and id, and both would otherwise
+    /// answer from the rows the install replaced.
     fn drop_session(&self, session: &SessionRef, cut: &str, replaced: bool) {
-        // The head the app reads show was captured from views of the rows the
-        // move took away or replaced.
-        self.inner.app_read.forget_head(session);
+        // Everything the app reads show was built from the rows and views the
+        // move took away or replaced. Until the session's next Setup, a read
+        // of it is answered as for a session this process never saw.
+        self.inner.app_read.forget_session(session, replaced);
         let worker = self
             .inner
             .workers

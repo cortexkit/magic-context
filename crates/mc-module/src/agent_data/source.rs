@@ -66,7 +66,7 @@ use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use super::busy::{self, HeldFact};
 use super::journal::{self, Contents, Cut, Journal, Moving, MovingState, Prepared, Released};
 use super::service::{canonical, journal_unreadable, After, Done, Host, Park, Parked};
-use super::{door, moved, resolve, snapshot};
+use super::{crash, door, moved, resolve, snapshot};
 use crate::context_db::SCHEMA_VERSION;
 
 /// How long a move waits for a `context.db` lock another host holds. The
@@ -195,6 +195,7 @@ async fn prepare_one<H: Host>(
     check_facts(db, r, session).await?;
     // 2. The freeze, durable before anything is reserved or read.
     freeze(host.journal(), cut, r, session)?;
+    crash::point("prepare frozen").await;
     // A session with no worker at the check may have got one since, from a
     // Setup admitted just before the freeze. Its worker holds every job it
     // takes from now on; parking it waits for one it already started.
@@ -209,6 +210,7 @@ async fn prepare_one<H: Host>(
         busy::log_held_fact(session, &held);
         return Err(held_refusal(r, &held));
     }
+    crash::point("prepare reserved").await;
     // 4. The rows and the schema version, read in one transaction.
     let owner = session.clone();
     let encoded = blocking(db, move |conn| snapshot::read(conn, &owner)).await?;
@@ -229,6 +231,7 @@ async fn prepare_one<H: Host>(
             file.display()
         ))
     })?;
+    crash::point("prepare snapshot written").await;
     // 5. What earlier moves admitted must be in the cloud before this cut
     // builds on it. The door's offsets answer at once; only when the cloud
     // is behind does prepare wait, once, for the door to upload the rest.
@@ -307,6 +310,7 @@ pub(crate) async fn export<H: Host>(
         door::admit(host, &one.session_ref, one.start, &bytes)
             .await
             .map_err(|error| door_refusal(Op::Export, r, record.step, error))?;
+        crash::point("export admitted").await;
         items.push(ExportedItem::new(&one.session_ref, one.end));
     }
     let prepared = record.prepared.clone();
@@ -412,6 +416,7 @@ pub(crate) async fn abort<H: Host>(host: &H, cut: &str) -> Result<Done, ErrorBod
     if let (Some(db), false) = (&db, frozen.is_empty()) {
         let key = moved::reservation(cut);
         let released = blocking(db, move |conn| release_reservation(conn, &key)).await?;
+        crash::point("abort reservation released").await;
         tracing::info!(
             cut = %cut,
             "ck-mc: agent-data cut {cut} is aborted: {released} reserved facts are retryable again"
@@ -471,6 +476,7 @@ async fn unfreeze<H: Host>(host: &H, db: &Path, cut: &str, refusal: ErrorBody) -
             refusal.message, error.message
         ));
     }
+    crash::point("prepare reservation released").await;
     let lifted = host.journal().change(|contents| {
         for session in &froze {
             lift(contents, session, cut);
@@ -487,6 +493,7 @@ async fn unfreeze<H: Host>(host: &H, db: &Path, cut: &str, refusal: ErrorBody) -
             refusal.message
         ));
     }
+    crash::point("prepare unfrozen").await;
     let _ = std::fs::remove_dir_all(cut_folder(db, cut));
     tracing::info!(
         cut = %cut,
@@ -812,7 +819,13 @@ pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
 ) -> Result<T, ErrorBody> {
     let db = db.to_owned();
+    // A test's plan for stopping the op follows its work onto the thread,
+    // so the install's commits can be stopped at too.
+    #[cfg(test)]
+    let plan = crash::current();
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _plan = crash::enter(plan);
         let mut conn = connect(&db)?;
         work(&mut conn)
     })

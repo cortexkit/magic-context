@@ -92,13 +92,14 @@ pub trait Host: Send + Sync {
     /// move no longer does.
     fn resume(&self, session: &SessionRef);
     /// Drop everything this process keeps for a session released to another
-    /// machine by `cut`: its worker with the jobs it held, its Setup and its
-    /// cached project.
+    /// machine by `cut`: its worker with the jobs it held, its Setup, its
+    /// cached project and what the app reads hold for it.
     fn forget(&self, session: &SessionRef, cut: &str);
     /// Drop everything this process keeps for a session whose rows `cut`
     /// just replaced with another machine's copy: its worker with the jobs
-    /// it held, its Setup, and the cached project of the session under any
-    /// runner, since context reads match the session by harness and id.
+    /// it held, its Setup, and the cached project and app-read projection
+    /// of the session under any runner, since context and app reads match
+    /// the session by harness and id.
     fn reset(&self, session: &SessionRef, cut: &str);
     /// Whether the session has a worker in this process: a Setup started
     /// it, and only a move's release or install drops it.
@@ -383,6 +384,7 @@ impl Service {
                     ),
                 )
             })?;
+        super::crash::point(&format!("{} recorded", op.method())).await;
         Ok((reply, after))
     }
 

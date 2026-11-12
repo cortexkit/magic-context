@@ -24,6 +24,7 @@
 //! journal records.
 
 pub mod busy;
+pub(crate) mod crash;
 pub mod door;
 pub mod gate;
 pub mod install;

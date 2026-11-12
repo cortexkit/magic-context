@@ -62,7 +62,7 @@ use super::snapshot::{self, Local, Snapshot};
 use super::source::{
     blocking, busy_refusal, cut_folder, label, no_store, session_ref, unavailable,
 };
-use super::{install, moved, resolve};
+use super::{crash, install, moved, resolve};
 use crate::context_db::SCHEMA_VERSION;
 
 /// The refusal reason for a session whose project `context.db` still
@@ -281,6 +281,7 @@ async fn stage_each<H: Host>(
                 file.display()
             ))
         })?;
+        crash::point("import staged").await;
         let dropped = incoming.snapshot.header.dropped.clone();
         staged.push((
             Staged {
@@ -768,6 +769,7 @@ async fn prepare_install<H: Host>(
                 file.display()
             ))
         })?;
+        crash::point("activate undo image written").await;
         images.insert(one.session_ref.clone(), snapshot::sha256_hex(&image));
     }
     // 4. One journal write: every ref is being installed. From here on the
@@ -793,6 +795,7 @@ async fn prepare_install<H: Host>(
                 "the start of cut {cut}'s install could not be recorded ({error}); nothing was installed, send activate again"
             ))
         })?;
+    crash::point("activate installing").await;
     for session in &sessions {
         tracing::info!(
             cut = %cut,
@@ -877,6 +880,7 @@ async fn release_one<H: Host>(
             label(&session)
         ))
     })?;
+    crash::point("activate state cleared").await;
     let owner = session.clone();
     let reservation = moved::reservation(cut);
     let released = blocking(db, move |conn| {
@@ -891,6 +895,7 @@ async fn release_one<H: Host>(
         .map_err(|error| error.to_string())
     })
     .await?;
+    crash::point("activate facts released").await;
     tracing::info!(
         cut = %cut,
         "ck-mc: session {} is installed by agent-data cut {cut}: its mode3.db rows are cleared and {released} waiting facts are retryable; it is served once the cut is recorded activated",

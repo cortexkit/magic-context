@@ -8,7 +8,7 @@ use rusqlite::Connection;
 mod tests;
 
 pub(super) const TARGET_PAGES: i64 = 16_000;
-pub(super) const WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(18);
+pub(crate) const WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(18);
 
 pub(super) struct Writer<'a> {
     conn: &'a mut Connection,

@@ -1180,3 +1180,85 @@ async fn a_cut_of_two_sessions_installs_both() {
         assert_eq!(b.gate(session), Ok(()));
     }
 }
+
+/// A projection the app reads serve, with `marker` in its meta.
+fn projection(session: SessionRef, marker: &str) -> crate::app_read::Snapshot {
+    crate::app_read::Snapshot {
+        key: session,
+        base: 0,
+        newest: 0,
+        ready: true,
+        meta: json!({"marker": marker}),
+        breakdown: Default::default(),
+        compartments: Vec::new(),
+        messages: Default::default(),
+        decisions: Vec::new(),
+    }
+}
+
+/// The marker of the session's projection, or the app reads' refusal.
+async fn app_meta(machine: &Machine, session: &SessionRef) -> Result<Value, String> {
+    machine
+        .module
+        .app_read()
+        .read(
+            "session_data.read",
+            json!({"session": session, "section": "meta"}),
+        )
+        .await
+        .map(|reply| reply["row"]["marker"].clone())
+        .map_err(|refusal| refusal.code)
+}
+
+/// The app reads hold nothing of a session from before a move once the
+/// move installs another machine's copy over it, under the session's
+/// runner or another runner of the same harness and session: until its
+/// next Setup the session is answered as one this process never saw. The
+/// same holds on the source once it releases the session. Another
+/// session's projection is left as it was.
+#[tokio::test]
+async fn the_app_reads_hold_nothing_of_a_session_a_move_replaced_or_released() {
+    for runner in [RUNNER, "other-runner"] {
+        let (a, b) = machines(&["s1"]);
+        seed(&a.conn(), "s1", PROJECT);
+        let earlier = SessionRef::new(runner, HARNESS, "s1");
+        // What b projected of the session while it ran there before.
+        b.module
+            .app_read()
+            .publish(projection(earlier.clone(), "earlier"));
+        b.module.app_read().publish(projection(key("b1"), "b1"));
+        a.module.app_read().publish(projection(key("s1"), "source"));
+        assert_eq!(app_meta(&b, &earlier).await, Ok(json!("earlier")));
+        assert_eq!(app_meta(&a, &key("s1")).await, Ok(json!("source")));
+
+        move_session(&a, &b, CUT, "machine-b").await;
+        let never_seen = app_meta(&b, &key("never-seen")).await.unwrap_err();
+        assert_eq!(never_seen, "session_not_found");
+        for session in [&earlier, &key("s1")] {
+            assert_eq!(
+                app_meta(&b, session).await,
+                Err(never_seen.clone()),
+                "{runner}"
+            );
+            let refused = b
+                .module
+                .app_request(
+                    "session_data.read",
+                    json!({"session": session, "section": "meta"}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, never_seen, "{runner}");
+        }
+        assert_eq!(app_meta(&b, &key("b1")).await, Ok(json!("b1")));
+        // Past the source's gate, which refuses the session session_moved.
+        assert_eq!(app_meta(&a, &key("s1")).await, Err(never_seen));
+    }
+}
+
+#[path = "crash_tests.rs"]
+mod crash_tests;
+
+#[cfg(feature = "context-db-timing")]
+#[path = "install_lock_tests.rs"]
+mod install_lock_tests;

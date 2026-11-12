@@ -329,7 +329,7 @@ enum Command {
     #[cfg(test)]
     Publish(Box<Snapshot>),
     Update(Update),
-    ForgetHead(SessionRef),
+    ForgetSession(SessionRef, bool),
     Read(String, Value, oneshot::Sender<Result<Value, Refusal>>),
     RunnerHead(
         String,
@@ -396,7 +396,9 @@ impl AppRead {
                         #[cfg(test)]
                         Command::Publish(snapshot) => replica.publish(*snapshot),
                         Command::Update(update) => replica.update(update),
-                        Command::ForgetHead(key) => replica.forget_head(&key),
+                        Command::ForgetSession(key, any_runner) => {
+                            replica.forget_session(&key, any_runner)
+                        }
                         Command::Read(method, params, reply) => {
                             let _ = reply.send(replica.read(&method, &params));
                         }
@@ -423,8 +425,15 @@ impl AppRead {
         let _ = self.tx.send(Command::Update(update));
     }
 
-    pub(crate) fn forget_head(&self, key: &SessionRef) {
-        let _ = self.tx.send(Command::ForgetHead(key.clone()));
+    /// Drop everything this projection holds for a session a move took
+    /// away or replaced, so no read is answered from the rows the move took
+    /// or replaced. `any_runner` drops it under every runner, for an install
+    /// that replaced rows every runner of the session shares. See
+    /// [`Replica::forget_session`].
+    pub(crate) fn forget_session(&self, key: &SessionRef, any_runner: bool) {
+        let _ = self
+            .tx
+            .send(Command::ForgetSession(key.clone(), any_runner));
     }
 
     pub async fn read(&self, method: &str, params: Value) -> Result<Value, Refusal> {
@@ -464,6 +473,53 @@ impl Replica {
         self.head_warnings
             .borrow_mut()
             .retain(|(session, _)| session != key);
+    }
+
+    /// Drop the session's projection, its message boundaries, the heads
+    /// captured for it, and the note that this process knows it. A read of
+    /// the session is then answered as for a session this process has
+    /// never seen, until its next Setup projects it again. Watchers of the
+    /// session are told it changed, so they read it again.
+    fn forget_session(&mut self, key: &SessionRef, any_runner: bool) {
+        let matches = |other: &SessionRef| {
+            if any_runner {
+                other.harness == key.harness && other.session == key.session
+            } else {
+                other == key
+            }
+        };
+        let mut sessions: HashSet<SessionRef> = self
+            .known
+            .iter()
+            .chain(self.snapshots.keys())
+            .chain(self.boundaries.keys())
+            .chain(self.heads.keys())
+            .filter(|other| matches(other))
+            .cloned()
+            .collect();
+        sessions.extend(
+            self.idle_heads
+                .borrow()
+                .keys()
+                .filter(|other| matches(other))
+                .cloned(),
+        );
+        sessions.extend(
+            self.head_warnings
+                .borrow()
+                .iter()
+                .map(|(other, _)| other)
+                .filter(|other| matches(other))
+                .cloned(),
+        );
+        for session in sessions {
+            self.forget_head(&session);
+            self.boundaries.remove(&session);
+            self.known.remove(&session);
+            if self.snapshots.remove(&session).is_some() {
+                self.watches.changed(session);
+            }
+        }
     }
 
     fn warn_head(&self, key: &SessionRef, result: &Value) {

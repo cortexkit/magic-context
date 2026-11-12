@@ -38,6 +38,7 @@ Paths are under `crates/mc-module/src/`.
 | `upkeep.rs`, `embedding.rs`, `chunk_embedding.rs` | Background project work: memory and commit vectors, commit indexing. |
 | `signed_floor.rs`, `move_floor.rs` | Two entries a view must respect. The signed floor: some models sign their reasoning against the bytes before it, so the runner strips that reasoning up to a recorded entry whenever the request's tool list changes, and ck-mc must not count or edit what is already gone. The move floor: the entry a moved session's first view cut through. |
 | `move_in.rs`, `move_renumber.rs`, `rekey.rs` | Offline tools: move a session from a standalone host or another runner, and rename a runner in the store. |
+| `agent_data/` | The `agent-data/v1` participant: moving a runner session's data to another machine (below). |
 | `calibration.rs`, `count.rs`, `tokens.rs`, `prompt_notes.rs` | Token estimates and window geometry, including the notes a runner sends outside the transcript. |
 
 `crates/mc-tokenizer` is the token estimator. `crates/mc-mock-runner` is a runner used only by tests. `crates_old/` holds the 0.49.x module (the retired Rust transform mode and its store); nothing builds it into a release.
@@ -59,6 +60,14 @@ The summarizer runs beside the session's worker, since a run can take minutes. I
 - **`mode3.db`** is ck-mc's own (`store.rs`, schema version in `SCHEMA_VERSION`): per session, the decisions that are not in the runner's transcript or view and must survive a restart, such as held drops and the state of the last view. Views themselves are not kept: after a restart ck-mc takes the runner's current view from the runner. A `mode3.db` newer than the build is refused without being changed. A running module holds a shared lock on `mode3.db.lock`, so an offline tool refuses to run while the module does.
 
 Back up and restore the two together. If `mode3.db` names summaries that `context.db` no longer has, ck-mc trusts `context.db`: it moves the cut back to the summaries that exist, rebuilds the head, and lets the summarizer cover those messages again.
+
+## Moving a session to another machine
+
+`agent_data/` lets ck-mc take part when Entorhinal moves an agent to another machine (the `agent-data/v1` contract). Per runner session it carries, through Engram's session door, the session's `context.db` rows: summaries with their events, scores and facts, session notes, the project link, and the committed publications that still hold facts waiting for the summarizer's second turn. `mode3.db` state, search indexes and project memories stay behind; the runner carries its applied view, and ck-mc adopts it at the first Setup on the destination.
+
+- **The flag.** Serving moves is off unless the build says otherwise. The `agent-data` Cargo feature (off by default) turns it on. A build with debug assertions or with the feature also reads `MAGIC_CONTEXT_AGENT_DATA` (`1` or `0`). A release build without the feature ignores the variable and never serves a move. With the flag off, the manifest declares no `agent-data` service and its requests are refused.
+- **The gate.** Every move is recorded in `agent-data/journal.json` beside `context.db`, and the journal is enforced in every build, flag on or off. A session frozen at the source, or staged or being installed at the destination, is refused `session_moving`. A session released to another machine is refused `session_moved`, and the refusal names the new holder. Both refusals apply to Setup, notices, rides, tool calls, app and context reads, `ck-mc move-in` and `ck-mc rekey-runner`. A journal that cannot be read refuses every session. At startup an install the journal records as started is finished, and the files of ended moves are deleted. Jobs a frozen session's worker holds live only in memory, so a crash loses them: after the move is aborted, the runner's next notice is answered `setup_required`.
+- **Accepted losses.** Note numbers change on the destination, since a note's number is its row id there. A publication travels only while it holds a waiting fact. If the destination decides all of a moved publication's waiting facts, a later move back leaves that publication out, and the original machine's install deletes its hidden copy, decided facts included. The destination keeps the decided rows, and the memories they made sync through Engram on their own.
 
 ## Testing and placing
 

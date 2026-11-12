@@ -36,6 +36,56 @@ impl Recorder {
     }
 }
 
+/// The write transactions the offline mover's write loop runs on a
+/// connection of its own, which no [`Guard`] measures: `ck-mc move-in` and
+/// the install of a session moved here from another machine. Nothing is
+/// kept until [`transactions`] asks for it.
+#[derive(Clone)]
+pub struct Transactions(Arc<Mutex<Vec<Transaction>>>);
+
+/// One write transaction of the mover's write loop: its phase, how many
+/// rows it changed, and how long it held the write lock, from the moment
+/// it had the lock to its commit or rollback.
+#[derive(Debug)]
+pub struct Transaction {
+    pub phase: String,
+    pub rows: u64,
+    pub sample: Sample,
+}
+
+impl Transactions {
+    pub fn take(&self) -> Vec<Transaction> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+static TRANSACTIONS: Mutex<Option<Transactions>> = Mutex::new(None);
+
+/// Record every write transaction of the mover's write loop from now on,
+/// in this process, into the returned recorder.
+pub fn transactions() -> Transactions {
+    let recorder = Transactions(Arc::default());
+    *TRANSACTIONS.lock().unwrap() = Some(recorder.clone());
+    recorder
+}
+
+/// One write transaction of the mover's write loop, which changed `rows`
+/// rows and held the write lock for `elapsed`.
+#[track_caller]
+pub(crate) fn transaction(phase: &str, rows: u64, elapsed: Duration) {
+    if let Some(recorder) = TRANSACTIONS.lock().unwrap().as_ref() {
+        recorder.0.lock().unwrap().push(Transaction {
+            phase: phase.to_owned(),
+            rows,
+            sample: Sample {
+                site: Location::caller(),
+                elapsed,
+                wrote: true,
+            },
+        });
+    }
+}
+
 impl Timing {
     pub(super) fn install(connection: &Connection) -> Self {
         let completions = Arc::new(AtomicU64::new(0));

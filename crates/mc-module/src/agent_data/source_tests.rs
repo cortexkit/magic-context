@@ -1521,3 +1521,87 @@ async fn a_refused_admission_is_answered_by_the_doors_table() {
     f.export(CUT, &["s1"]).await.unwrap();
     assert_eq!(f.status(CUT).await, "exported");
 }
+
+impl Fixture {
+    /// The same machine after a crash: the module and everything it kept in
+    /// memory are gone, jobs its workers held included, and a new module
+    /// starts over the same stores and journal, as `main.rs` starts one.
+    fn restart(self) -> Self {
+        let Self { module, db, _dir } = self;
+        drop(module);
+        let journal = Arc::new(Journal::load(journal_file::path(&db)));
+        source::sweep(&db, &journal);
+        let module = Module::with_journal(
+            Mover::default(),
+            Settings::default(),
+            Some(crate::context_db::ContextDb::open(&db).unwrap()),
+            Some(Store::open(&_dir.path().join("mode3.db")).unwrap()),
+            journal,
+            true,
+        );
+        Self { module, db, _dir }
+    }
+}
+
+/// A notice the frozen worker held is lost with a crash, as any queued job
+/// is. After the restart the session stays refused until the move is
+/// aborted. The runner's next notice is then answered `setup_required`,
+/// since this process never saw the session's Setup, and the Setup that
+/// follows serves a turn.
+#[tokio::test]
+async fn a_notice_held_when_the_process_crashes_is_asked_for_a_setup_after_the_abort() {
+    let f = Fixture::new();
+    seed(&f.conn(), "s1", "content");
+    f.bind("s1");
+    f.settle("s1").await;
+    let before = f.durable("s1");
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.queue("s1", 2);
+    f.module.idle(&key("s1")).await.unwrap();
+    assert_eq!(f.durable("s1"), before, "held, not run");
+
+    let f = f.restart();
+    let refused = |result: Result<NoticeAnswer, ModuleError>| match result {
+        Err(ModuleError::Gated(gated)) => gated.code,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        refused(f.module.notice(&key("s1"), notice(3))),
+        SESSION_MOVING
+    );
+    assert!(matches!(
+        f.module.setup(route("s1"), SetupRequest::new(
+            "head",
+            ModelRef::new("test", "model"),
+            100_000,
+            1000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            vec![],
+            1,
+        )),
+        Err(ModuleError::Gated(gated)) if gated.code == SESSION_MOVING
+    ));
+    assert_eq!(f.moving("s1"), Some((CUT.into(), MovingState::Frozen)));
+    assert_eq!(facts(&f.conn(), "pub-s1"), [reserved(0, CUT), applied(1)]);
+
+    assert_eq!(f.abort(CUT, &["s1"]).await.unwrap(), json!({}));
+    assert_eq!(facts(&f.conn(), "pub-s1"), [waiting(0), applied(1)]);
+    assert_eq!(
+        f.module.notice(&key("s1"), notice(3)),
+        Ok(NoticeAnswer::SetupRequired)
+    );
+    f.settle("s1").await;
+    assert_eq!(
+        f.module.notice(&key("s1"), notice(4)),
+        Ok(NoticeAnswer::Received)
+    );
+    assert!(f
+        .module
+        .ride(
+            &key("s1"),
+            RideRequest::new(vec![RideCause::OverLimit], 1_000, conditions())
+        )
+        .await
+        .is_ok());
+    f.module.idle(&key("s1")).await.unwrap();
+}
