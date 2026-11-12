@@ -1,0 +1,15 @@
+{
+  "external": [],
+  "items": [
+    {
+      "digest": "69907e6d13d6efa1d05217385d530236f08014909c61f63e062cce1c90143bf4",
+      "endOffset": 2286,
+      "format": "mc-agent-data-session/1+context.db/105",
+      "frozen": true,
+      "ref": "sample-head",
+      "ref_kind": "pi-session",
+      "sessionRef": "b074c071d6d442497c87adc482ade789",
+      "stream": "reserved:magic-context"
+    }
+  ]
+}

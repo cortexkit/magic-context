@@ -1,0 +1,22 @@
+{
+  "external": false,
+  "ref_kinds": [],
+  "stores": [
+    {
+      "name": "session-history",
+      "sync_class": "agent"
+    },
+    {
+      "name": "session-state",
+      "sync_class": "machine_local"
+    },
+    {
+      "name": "project-memory",
+      "sync_class": "shared_merged"
+    },
+    {
+      "name": "indexes",
+      "sync_class": "machine_local"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "code": "digest_mismatch",
+  "message": "session b074c071d6d442497c87adc482ade789's stream bytes up to 2944 do not hash to the digest cut 0123456789abcdef0123456789abcdef recorded for them. The cut's bytes do not check out; import it again only once the cut is sealed anew."
+}

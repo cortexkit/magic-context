@@ -1,0 +1,4 @@
+{
+  "code": "cut_not_ready",
+  "message": "Engram's session door refused session.read: not_found (the stand-in door refuses not_found). The cut is not readable through the door yet."
+}

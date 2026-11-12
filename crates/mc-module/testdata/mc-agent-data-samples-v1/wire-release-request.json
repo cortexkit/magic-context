@@ -1,0 +1,17 @@
+{
+  "method": "agent_data.release",
+  "params": {
+    "cutId": "0123456789abcdef0123456789abcdef",
+    "holder": "machine-b",
+    "refs": [
+      {
+        "ref": "wire-moved",
+        "ref_kind": "broca-session"
+      },
+      {
+        "ref": "wire-empty",
+        "ref_kind": "broca-session"
+      }
+    ]
+  }
+}

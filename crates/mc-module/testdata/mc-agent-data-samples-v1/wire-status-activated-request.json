@@ -1,0 +1,16 @@
+{
+  "method": "agent_data.status",
+  "params": {
+    "cutId": "0123456789abcdef0123456789abcdef",
+    "refs": [
+      {
+        "ref": "wire-moved",
+        "ref_kind": "broca-session"
+      },
+      {
+        "ref": "wire-empty",
+        "ref_kind": "broca-session"
+      }
+    ]
+  }
+}

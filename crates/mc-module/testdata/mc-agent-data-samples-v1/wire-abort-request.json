@@ -1,0 +1,16 @@
+{
+  "method": "agent_data.abort",
+  "params": {
+    "cutId": "fedcba9876543210fedcba9876543210",
+    "refs": [
+      {
+        "ref": "wire-moved",
+        "ref_kind": "broca-session"
+      },
+      {
+        "ref": "wire-empty",
+        "ref_kind": "broca-session"
+      }
+    ]
+  }
+}

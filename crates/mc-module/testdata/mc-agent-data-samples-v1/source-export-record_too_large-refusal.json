@@ -1,0 +1,7 @@
+{
+  "code": "participant_failed",
+  "detail": {
+    "reason": "session_door:record_too_large at prepared"
+  },
+  "message": "Engram's session door refused session.admit: record_too_large (the stand-in door refuses record_too_large). Fix this on this machine before the session can move: ck-mc sent the door more than a page; update ck-mc. The order of the cut's ops is not the cause."
+}

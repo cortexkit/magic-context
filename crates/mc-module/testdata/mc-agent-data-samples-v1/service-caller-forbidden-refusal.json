@@ -1,0 +1,4 @@
+{
+  "code": "caller_forbidden",
+  "message": "Only reserved:entorhinal may call agent-data."
+}

@@ -1,0 +1,14 @@
+{
+  "code": "busy",
+  "detail": {
+    "refs": [
+      {
+        "reason": "The session runs on this machine; it can be replaced only while it does not.",
+        "reason_code": "run_active",
+        "ref": "sample-head",
+        "ref_kind": "pi-session"
+      }
+    ]
+  },
+  "message": "pi-session/sample-head cannot be cut now: The session runs on this machine; it can be replaced only while it does not."
+}

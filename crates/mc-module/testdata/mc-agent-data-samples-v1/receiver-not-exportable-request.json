@@ -1,0 +1,16 @@
+{
+  "method": "agent_data.prepare",
+  "params": {
+    "cutId": "0123456789abcdef0123456789abcdef",
+    "refs": [
+      {
+        "ref": "sample-head",
+        "ref_kind": "pi-session"
+      },
+      {
+        "ref": "sample-alias",
+        "ref_kind": "pi-session"
+      }
+    ]
+  }
+}

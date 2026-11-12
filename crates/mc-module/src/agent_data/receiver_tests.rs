@@ -33,6 +33,9 @@ const HARNESS: &str = "pi";
 const PROJECT: &str = "git:proj";
 const OTHER_PROJECT: &str = "git:other";
 
+#[path = "receiver_samples_tests.rs"]
+mod samples;
+
 /// Engram's session door, shared by both machines: one append-only stream
 /// per session, and the cuts Entorhinal sealed, each with its end and
 /// digest per session.

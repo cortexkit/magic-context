@@ -1,0 +1,11 @@
+{
+  "method": "agent_data.busy",
+  "params": {
+    "refs": [
+      {
+        "ref": "sample-head",
+        "ref_kind": "pi-session"
+      }
+    ]
+  }
+}

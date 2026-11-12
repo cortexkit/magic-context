@@ -1,0 +1,12 @@
+{
+  "method": "agent_data.abort",
+  "params": {
+    "cutId": "fedcba9876543210fedcba9876543210",
+    "refs": [
+      {
+        "ref": "sample-head",
+        "ref_kind": "pi-session"
+      }
+    ]
+  }
+}

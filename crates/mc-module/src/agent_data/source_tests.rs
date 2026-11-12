@@ -293,6 +293,9 @@ struct Fixture {
     _dir: tempfile::TempDir,
 }
 
+#[path = "source_samples_tests.rs"]
+mod samples;
+
 fn key(session: &str) -> SessionRef {
     SessionRef::new(RUNNER, HARNESS, session)
 }

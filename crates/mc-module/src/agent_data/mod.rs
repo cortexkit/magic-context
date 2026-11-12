@@ -42,6 +42,9 @@ mod midstate_tests;
 #[cfg(test)]
 mod moved_tests;
 #[cfg(test)]
+#[path = "../../tests/support/agent_data_sample_files.rs"]
+pub(crate) mod sample_files;
+#[cfg(test)]
 mod service_tests;
 #[cfg(test)]
 mod snapshot_tests;

@@ -1,0 +1,7 @@
+{
+  "code": "participant_failed",
+  "detail": {
+    "reason": "project_writes_guarded"
+  },
+  "message": "context.db still has write guards from the removed Rust transform mode for project git:proj (authority_managed or authority_repair_pending), and they refuse the install's note writes; session thalamus-harness/pi/sample-head cannot be installed here until they are removed"
+}

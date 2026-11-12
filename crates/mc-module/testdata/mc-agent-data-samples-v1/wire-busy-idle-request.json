@@ -1,0 +1,11 @@
+{
+  "method": "agent_data.busy",
+  "params": {
+    "refs": [
+      {
+        "ref": "wire-moved",
+        "ref_kind": "broca-session"
+      }
+    ]
+  }
+}

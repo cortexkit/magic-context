@@ -1,0 +1,9 @@
+{
+  "refs": [
+    {
+      "reason": "A summarizer run or its second turn is in flight for this session.",
+      "reason_code": "historian_running",
+      "state": "busy"
+    }
+  ]
+}

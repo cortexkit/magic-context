@@ -40,6 +40,9 @@ use subc_protocol::{BindIdentity, RouteTarget, SUBC_MODULE_ID_ENV};
 
 use super::{answer, dev_copy, required_binary, spawn, Process, Root, COUNTER, START_TIMEOUT};
 
+#[path = "agent_data_samples.rs"]
+mod samples;
+
 /// Which stand-in a copy of this binary the daemon launched serves:
 /// `entorhinal` or `engram`.
 const STAND_IN: &str = "MC_WIRE_STAND_IN";

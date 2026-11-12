@@ -1,0 +1,9 @@
+{
+  "refs": [
+    {
+      "reason": "The session's worker did not answer in time.",
+      "reason_code": "unknown",
+      "state": "unknown"
+    }
+  ]
+}

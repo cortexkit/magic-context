@@ -30,6 +30,9 @@ const ENTORHINAL: &str = "reserved:entorhinal";
 const CUT: &str = "0123456789abcdef0123456789abcdef";
 const OTHER_CUT: &str = "fedcba9876543210fedcba9876543210";
 
+#[path = "service_samples_tests.rs"]
+mod samples;
+
 /// A catalog entry for `module`, as the daemon lists a registered module.
 fn entry(module: &str, ready: bool, verified: bool, claims: &[&str]) -> CatalogEntry {
     let mut entry = CatalogEntry::new(module, Vec::new(), Vec::new());

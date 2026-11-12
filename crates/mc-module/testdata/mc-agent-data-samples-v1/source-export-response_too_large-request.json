@@ -1,0 +1,12 @@
+{
+  "method": "agent_data.export",
+  "params": {
+    "cutId": "0123456789abcdef0123456789abcdef",
+    "refs": [
+      {
+        "ref": "sample-head",
+        "ref_kind": "pi-session"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "code": "unknown_ref",
+  "detail": {
+    "ref": "missing",
+    "ref_kind": "pi-session"
+  },
+  "message": "Magic Context does not hold pi-session/missing: Entorhinal has no session under this ref."
+}

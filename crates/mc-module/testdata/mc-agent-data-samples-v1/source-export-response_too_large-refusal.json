@@ -1,0 +1,7 @@
+{
+  "code": "participant_failed",
+  "detail": {
+    "reason": "session_door:response_too_large at prepared"
+  },
+  "message": "Engram's session door refused session.admit: response_too_large (the stand-in door refuses response_too_large). Fix this on this machine before the session can move: the door's answer did not fit its frame; update Engram. The order of the cut's ops is not the cause."
+}
