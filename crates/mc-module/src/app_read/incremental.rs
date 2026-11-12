@@ -50,6 +50,7 @@ struct PartInfo {
     /// floor.
     signed: bool,
 }
+#[derive(Clone)]
 struct Cached {
     mid: String,
     digest: String,
@@ -74,6 +75,7 @@ struct Usage {
 }
 /// One history-head insert's token counts, kept while the view replays its
 /// bytes unchanged (same `since`).
+#[derive(Clone)]
 struct HeadSlot {
     since: u64,
     /// The whole insert.
@@ -82,12 +84,13 @@ struct HeadSlot {
     counts: [u64; 3],
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Replacement {
     since: u64,
     tokens: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct Projection {
     pub(crate) head_read: crate::app_read::head::ReadState,
     identity: u64,
@@ -145,11 +148,13 @@ pub(crate) struct Projection {
     pub(crate) head_rebuilds: usize,
 }
 
-// A timer belongs to the projection, not the runner. Replacing or dropping the
-// session must cancel it rather than leaving work addressed to its old key.
-struct SnapshotTimer(tokio::task::AbortHandle);
+// Speculative session copies share ownership of the timer, not cancellation:
+// discarding a plan must not cancel the live projection's checkpoint.
+type SnapshotTimer = Arc<CancelSnapshotTimer>;
 
-impl Drop for SnapshotTimer {
+struct CancelSnapshotTimer(tokio::task::AbortHandle);
+
+impl Drop for CancelSnapshotTimer {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -918,7 +923,7 @@ impl Session {
     }
 
     pub(crate) fn app_arm_snapshot(&mut self, timer: tokio::task::AbortHandle) {
-        self.app_projection.snapshot_timer = Some(SnapshotTimer(timer));
+        self.app_projection.snapshot_timer = Some(Arc::new(CancelSnapshotTimer(timer)));
     }
 
     pub(crate) fn app_checkpoint_if_due(&mut self, flush: bool) {

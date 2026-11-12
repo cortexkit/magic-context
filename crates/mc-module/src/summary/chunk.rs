@@ -138,7 +138,7 @@ pub fn build_with(
 /// Headers and separators are added separately: token merges at
 /// message joins may differ slightly, which is sufficient for a trigger decision.
 /// Estimated models retain their merged-line counts for compatibility.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct CountCache {
     family: Option<Option<cortexkit_tokens::Family>>,
     counts: std::collections::HashMap<(u64, u64, Vec<String>), u64>,

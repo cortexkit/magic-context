@@ -62,6 +62,7 @@ use super::*;
 /// A floor a refusal showed the runner does not apply, while its conditions
 /// keep naming it. Kept in memory only: after a restart a contradicting
 /// runner's floor is taken again, and its next refusal drops it again.
+#[derive(Clone)]
 pub(super) struct Disproved {
     /// The floor the refusal disproved.
     floor: String,

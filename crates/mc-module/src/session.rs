@@ -51,6 +51,7 @@ use crate::view_builder;
 /// messages again ([`Session::hold_transcript_behind`]).
 const IMPLICIT_FORGET_LIMIT: usize = 3;
 
+#[derive(Clone)]
 pub struct Session {
     command_answers: Arc<Vec<crate::store::CommandAnswer>>,
     app: crate::app_read::SessionState,
@@ -447,6 +448,23 @@ struct RunnerReads {
     applied_view_failed: AtomicU64,
 }
 
+impl Clone for RunnerReads {
+    fn clone(&self) -> Self {
+        let Self {
+            reads,
+            entries,
+            applied_view,
+            applied_view_failed,
+        } = self;
+        Self {
+            reads: AtomicU64::new(reads.load(Ordering::Relaxed)),
+            entries: AtomicU64::new(entries.load(Ordering::Relaxed)),
+            applied_view: AtomicU64::new(applied_view.load(Ordering::Relaxed)),
+            applied_view_failed: AtomicU64::new(applied_view_failed.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 /// What [`RunnerReads`] counted over some stretch, such as one Setup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ReadCounts {
@@ -519,6 +537,7 @@ enum SummaryCheck {
 }
 
 /// What a summary run changed when it started ([`Session::summary_due`]).
+#[derive(Clone)]
 struct RunStart {
     /// The floor lift the run spent, if it spent one.
     lift: Option<SpentLift>,
@@ -527,6 +546,7 @@ struct RunStart {
 }
 
 /// A floor lift a summary run spent when it started.
+#[derive(Clone)]
 struct SpentLift {
     /// The floor mark the run took.
     mark: Option<(u64, String)>,

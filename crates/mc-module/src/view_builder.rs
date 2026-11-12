@@ -20,7 +20,7 @@ use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 /// Positive certificates for inserted payloads. The full planner still checks
 /// IDs, anchors, conflicts, cuts and transcript targets on every build; only
 /// immutable text/image validation is reused after an exact payload match.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ValidationCache {
     inserts: Vec<EditOp>,
     hash_prefix: Vec<(Edit, sha2::Sha256)>,

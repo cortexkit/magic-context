@@ -39,54 +39,25 @@ fn ratio(label: &str, value: f64) -> Fact {
 
 struct Plan {
     preview: Preview,
-    built: Option<(View, BuildState)>,
+    built: Option<(View, Box<Session>)>,
     parts: u64,
     removed: u64,
     after: u64,
 }
 
-// The builder's mutable decisions travel with its planned view. A run installs
-// these exact decisions, rather than re-reading inputs and building twice.
-macro_rules! build_state {
-    ($($field:ident: $kind:ty),+ $(,)?) => {
-        struct BuildState { $($field: $kind,)+ }
-        impl BuildState {
-            fn capture(session: &Session) -> Self {
-                Self { $($field: session.$field.clone(),)+ }
-            }
-            fn install(self, session: &mut Session) {
-                $(session.$field = self.$field;)+
-            }
-        }
-    };
-}
-build_state! {
-    app_cause: String,
-    next_keep: Option<BTreeSet<lanes::PartKey>>,
-    head_summaries: Option<HeadSummaries>,
-    next_baseline: Option<Arc<Baseline>>,
-    next_flush: bool,
-    mural_image: Option<(String, String)>,
-    next_latch: bool,
-    next_rearm: bool,
-    emergency_latched: bool,
-    next_caveman: Option<lanes::CavemanState>,
-    next_reclaim_bookmark: Option<u64>,
-    next_notice_reclaim_bookmark: Option<u64>,
-    pending_keep: Option<BTreeSet<lanes::PartKey>>,
-    move_floor_held: bool,
-    version: u64,
-    next_covered: Vec<lanes::PartKey>,
-    reclaim_bookmark: u64,
-    notice_reclaim_bookmark: u64,
-    queued: BTreeSet<lanes::PartKey>,
-    baseline: Option<Arc<Baseline>>,
-    fold_due: bool,
-    caveman: lanes::CavemanState,
-    failed_parts: BTreeSet<lanes::PartKey>,
-}
-
 impl Session {
+    fn command_snapshot(&mut self) -> Self {
+        let validation = std::mem::take(&mut self.view_validation);
+        let snapshot = self.clone();
+        self.view_validation = validation;
+        snapshot
+    }
+
+    fn install_command_snapshot(&mut self, snapshot: Self) {
+        let validation = std::mem::take(&mut self.view_validation);
+        *self = snapshot;
+        self.view_validation = validation;
+    }
     /// Request ids are scoped to this session subject. The full body digest
     /// still detects changed args, preview versions and forwarded caller facts.
     fn command_replay(&mut self, request: &ModuleRunRequest, digest: &str) -> Option<RunReply> {
@@ -158,15 +129,16 @@ impl Session {
         }
     }
 
-    /// Plan with the ordinary builder, then put back every decision it may
-    /// advance. Only its validation cache is retained; preview publishes no
-    /// view, drains no queue, and performs no runner or model call.
-    fn planned_flush(&mut self, settings: &Settings) -> Option<(View, BuildState)> {
-        let before = BuildState::capture(self);
-        let (view, _) = self.build_for(settings, None, false, None, true);
-        let after = BuildState::capture(self);
-        before.install(self);
-        view.map(|view| (view, after))
+    /// Build only on a complete session copy. Deriving Clone on Session makes
+    /// new fields part of the transaction automatically; no mutation-field
+    /// inventory can silently omit a future builder decision or app stamp.
+    /// Only exact-payload validation certificates return to the live session.
+    fn planned_flush(&mut self, settings: &Settings) -> Option<(View, Box<Session>)> {
+        let mut planned = self.command_snapshot();
+        std::mem::swap(&mut self.view_validation, &mut planned.view_validation);
+        let (view, _) = planned.build_for(settings, None, false, None, true);
+        std::mem::swap(&mut self.view_validation, &mut planned.view_validation);
+        view.map(|view| (view, Box::new(planned)))
     }
 
     fn flush_plan(&mut self, settings: &Settings) -> Plan {
@@ -282,6 +254,7 @@ impl Session {
                 "preview_stale"
             }));
         }
+        let before = self.command_snapshot();
         let mut plan = self.flush_plan(settings);
         if plan.preview.version != request.preview_version {
             return Ok(RunReply::new("preview_stale"));
@@ -298,7 +271,7 @@ impl Session {
         let Some((view, state)) = plan.built.take() else {
             return Err(outcome_unknown());
         };
-        state.install(self);
+        self.install_command_snapshot(*state);
         let version = view.version;
         let mut reply = RunReply::new("scheduled");
         reply.facts = Some(vec![
@@ -322,13 +295,21 @@ impl Session {
         if delivered {
             return Ok(reply);
         }
-        self.next_flush = false;
-        let answer = Arc::make_mut(&mut self.command_answers)
-            .last_mut()
-            .expect("new command answer");
+        let version = self.version;
+        let mut answer = self
+            .command_answers
+            .last()
+            .expect("new command answer")
+            .clone();
+        // A person's failed attempt is not an automatic retry. Restore every
+        // pre-run decision, including refusal history and app state, rather
+        // than saving the ordinary pass's repeated-refusal penalties.
+        self.install_command_snapshot(before);
+        self.version = self.version.max(version);
         answer.answer = RunReply::new("failed");
         answer.stored_at = wall_now();
         let failed = answer.answer.clone();
+        Arc::make_mut(&mut self.command_answers).push(answer);
         if self.save().is_err() {
             // Do not expose a failed answer that was never saved. Restore the
             // last durable view and answer together; retries then see exactly
