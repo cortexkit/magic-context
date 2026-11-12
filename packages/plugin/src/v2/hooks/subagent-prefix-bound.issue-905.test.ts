@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 // Characterization of GitHub issue 905: an OpenCode 2 subagent on a
-// prefix-bound thinking model (claude-mythos-5-2) that works on one task
+// prefix-bound thinking model (claude-mythos-5-2, where any edit in front of a
+// signed thinking block invalidates that block) that works on one task
 // message as a single turn of many tool steps, with the reporter's limits
 // (`limit.context` 302,222, `execute_threshold_tokens` 250,000,
 // `protected_tokens` 16,000). The session runs through the real OpenCode 2
@@ -59,7 +60,7 @@ beforeAll(async () => {
     // stored, as with Anthropic's `display: "omitted"`); the host still
     // records each step's reasoning-token count.
     omitted = await runIssue905Session({ seed: 9051, steps: 70, thinking: "omitted" });
-    // A conversation that no lane can shrink (a 100,000-token task message)
+    // A 100,000-token task message, which no automatic reduction can shrink,
     // keeps the session near the threshold after each rebuild.
     largeConversation = await runIssue905Session({
         seed: 9052,
@@ -255,7 +256,7 @@ describe("issue 905, OpenCode 2 subagent, thinking text omitted", () => {
     });
 });
 
-describe("issue 905, a conversation no lane can shrink", () => {
+describe("issue 905, a conversation no automatic reduction can shrink", () => {
     test("back-to-back execute passes each freeze only the assistants added since the previous strip", () => {
         const consecutive = strips(largeConversation).filter(
             (pass) => (previous(largeConversation, pass).proactiveStripFroze ?? 0) > 0,
