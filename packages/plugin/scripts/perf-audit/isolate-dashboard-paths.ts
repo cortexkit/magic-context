@@ -31,9 +31,9 @@ try {
     if (credentials.length) throw new Error("snapshot credentials have not been scrubbed");
     db.exec("BEGIN");
     for (const [table, column] of [["session", "directory"], ["session_v2", "directory"], ["project", "worktree"]]) {
-        if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1").get(table)) continue;
+        if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
         const rows = db.query<{ value: string }, []>(`SELECT DISTINCT ${column} value FROM ${table} WHERE ${column} IS NOT NULL AND ${column} != ''`).all();
-        const update = db.prepare(`UPDATE ${table} SET ${column}=?1 WHERE ${column}=?2`);
+        const update = db.prepare(`UPDATE ${table} SET ${column}=? WHERE ${column}=?`);
         for (const row of rows) update.run(reroot(row.value), row.value);
     }
     db.exec("COMMIT");

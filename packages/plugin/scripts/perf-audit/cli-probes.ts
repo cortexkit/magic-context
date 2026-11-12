@@ -24,8 +24,8 @@ for (const count of [1_000, 10_000, 60_000]) {
     context.exec("CREATE TABLE session_projects(session_id TEXT, harness TEXT, project_path TEXT); CREATE TABLE memories(project_path TEXT); CREATE TABLE notes(project_path TEXT)");
     const directory = join(root, "project");
     mkdirSync(directory, { recursive: true });
-    const insertHost = host.prepare("INSERT INTO session VALUES (?1, ?2)");
-    const insertContext = context.prepare("INSERT INTO session_projects VALUES (?1, 'opencode', ?2)");
+    const insertHost = host.prepare("INSERT INTO session VALUES (?, ?)");
+    const insertContext = context.prepare("INSERT INTO session_projects VALUES (?, 'opencode', ?)");
     host.exec("BEGIN"); context.exec("BEGIN");
     for (let i = 0; i < count; i++) { insertHost.run(`s${i}`, directory); insertContext.run(`s${i}`, i % 2 ? "git:aaa" : "dir:bbb"); }
     host.exec("COMMIT; PRAGMA query_only=ON"); context.exec("COMMIT; PRAGMA query_only=ON");

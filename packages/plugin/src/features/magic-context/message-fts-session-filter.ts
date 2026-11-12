@@ -2,11 +2,13 @@ import type { Database, Statement } from "../../shared/sqlite";
 
 // Screen posting rowids before reading any UNINDEXED content columns. Unary +
 // prevents SQLite from restarting MATCH for each mapped rowid, which is much
-// slower on warm stores. ?1 is the first session binding in every query (all
-// compound probe branches search the same session). Keep the ordinary session
-// predicate too, so a stale sidecar row cannot expose another session's content.
+// slower on warm stores. Bind the session id once for this fragment, then again
+// for the ordinary session predicate, in each compound branch's SQL text order.
+// Numbered placeholders reject positional arguments on supported older node:sqlite
+// runtimes. Keep the ordinary predicate so a stale message_fts_rowid_map row
+// cannot expose another session's content.
 export const MESSAGE_FTS_SESSION_FILTER_SQL = `+message_history_fts.rowid IN (
-    SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1
+    SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?
 ) AND `;
 
 interface CoverageCache {

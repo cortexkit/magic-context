@@ -530,7 +530,7 @@ function getMessageSearchStatement(db: Database, sessionFirst: boolean): Prepare
     let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ?1 AND message_history_fts MATCH ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
+            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
         );
         statements.set(db, stmt);
     }
@@ -555,7 +555,7 @@ function getMessageSearchStatementWithCutoff(
     let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ?1 AND message_history_fts MATCH ? AND CAST(message_ordinal AS INTEGER) <= ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
+            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ? AND CAST(message_ordinal AS INTEGER) <= ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
         );
         statements.set(db, stmt);
     }
@@ -584,7 +584,7 @@ function getMessageSearchStatementWithDateRange(
                JOIN message_fts_rowid_map AS map
                  ON map.session_id = message_history_fts.session_id
                 AND map.fts_rowid = message_history_fts.rowid
-              WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}message_history_fts.session_id = ?1
+              WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}message_history_fts.session_id = ?
                  AND message_history_fts MATCH ?
                  AND map.message_time_ms BETWEEN ? AND ?
                 ${withCutoff ? "AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?" : ""}
@@ -620,7 +620,7 @@ function getMessageSearchDiagnosticStatement(
                     CAST(message_ordinal AS INTEGER) AS ordinalValue,
                     bm25(message_history_fts) AS ftsRank
                 FROM message_history_fts
-                WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ?1 AND message_history_fts MATCH ?
+                WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ?
             ),
             eligible AS (
                 SELECT * FROM matches
@@ -669,7 +669,7 @@ function getMessageSearchDiagnosticStatementWithDateRange(db: Database): Prepare
                 JOIN message_fts_rowid_map AS map
                   ON map.session_id = message_history_fts.session_id
                  AND map.fts_rowid = message_history_fts.rowid
-                WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}message_history_fts.session_id = ?1
+                WHERE ${MESSAGE_FTS_SESSION_FILTER_SQL}message_history_fts.session_id = ?
                    AND message_history_fts MATCH ?
                    AND map.message_time_ms BETWEEN ? AND ?
             ),
@@ -734,7 +734,7 @@ function getBatchedFtsCountStatement(
                 (_, index) =>
                     `SELECT ${index} AS queryIndex, COUNT(*) AS count
                        FROM message_history_fts${joinSql}
-                      WHERE ${sessionFirst || dateRange !== null ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ${index === 0 ? "?1" : "?"}
+                      WHERE ${sessionFirst || dateRange !== null ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ?
                          AND message_history_fts MATCH ?${dateSql}${cutoffSql}`,
             ).join("\nUNION ALL\n"),
         );
@@ -765,6 +765,7 @@ function countSessionFtsMatchesBatch(
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
+        if (sessionFirst || dateRange !== null) bindings.push(sessionId);
         bindings.push(sessionId, contentOnlyMessageQuery(query));
         if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
@@ -1208,21 +1209,28 @@ function runMessageFtsQuery(
     let rawRows: unknown[];
     const matchQuery = contentOnlyMessageQuery(ftsQuery);
     if (dateRange !== null) {
-        const bindings: unknown[] = [sessionId, matchQuery, dateRange.from, dateRange.to];
+        const bindings: unknown[] = [
+            sessionId,
+            sessionId,
+            matchQuery,
+            dateRange.from,
+            dateRange.to,
+        ];
         if (cutoff !== null) bindings.push(cutoff);
         bindings.push(fetchLimit);
         rawRows = getMessageSearchStatementWithDateRange(db, cutoff !== null).all(...bindings);
     } else {
+        const sessionBindings = sessionFirst ? [sessionId, sessionId] : [sessionId];
         rawRows =
             cutoff !== null
                 ? getMessageSearchStatementWithCutoff(db, sessionFirst).all(
-                      sessionId,
+                      ...sessionBindings,
                       matchQuery,
                       cutoff,
                       fetchLimit,
                   )
                 : getMessageSearchStatement(db, sessionFirst).all(
-                      sessionId,
+                      ...sessionBindings,
                       matchQuery,
                       fetchLimit,
                   );
@@ -1251,13 +1259,14 @@ function runMessageFtsQueryWithDiagnostics(args: {
     const rawRows = (
         args.dateRange === null
             ? getMessageSearchDiagnosticStatement(args.db, args.sessionFirst).all(
-                  args.sessionId,
+                  ...(args.sessionFirst ? [args.sessionId, args.sessionId] : [args.sessionId]),
                   matchQuery,
                   args.cutoff,
                   args.fetchLimit,
                   args.cutoff,
               )
             : getMessageSearchDiagnosticStatementWithDateRange(args.db).all(
+                  args.sessionId,
                   args.sessionId,
                   matchQuery,
                   args.dateRange.from,
@@ -1311,7 +1320,7 @@ function getBatchedMessageSearchStatement(
                        message_history_fts.content AS content,
                        bm25(message_history_fts) AS ftsRank
                   FROM message_history_fts${joinSql}
-                 WHERE ${sessionFirst || dateRange !== null ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ${index === 0 ? "?1" : "?"}
+                 WHERE ${sessionFirst || dateRange !== null ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ?
                     AND message_history_fts MATCH ?${dateSql}${cutoffSql}
                  ORDER BY ftsRank
                  LIMIT ?
@@ -1338,6 +1347,7 @@ function runMessageFtsQueriesBatch(
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
+        if (sessionFirst || dateRange !== null) bindings.push(sessionId);
         bindings.push(sessionId, contentOnlyMessageQuery(query));
         if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
