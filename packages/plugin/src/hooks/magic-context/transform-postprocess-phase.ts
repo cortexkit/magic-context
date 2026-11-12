@@ -142,6 +142,7 @@ import {
     originateExecuteReclaim,
     readExecuteReclaimState,
 } from "./execute-reclaim";
+import { openCode2ThinkingPayload } from "./final-wire-token-estimate";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
@@ -695,7 +696,8 @@ function proactiveStripStartIndex(args: {
  * (`isAnthropicThinkingPart`): on an Anthropic-family route (Anthropic,
  * Bedrock, Vertex, Copilot) every thinking part counts, whichever metadata key
  * holds its signature. Parts that never reach the provider do not count: an
- * ignored part, or an empty one that carries no redacted payload. On a
+ * ignored part, or an empty one that carries no redacted payload (and, in
+ * OpenCode 2's part shape, no signature either). On a
  * prefix-bound model such a block is bound to every byte in front of it, the
  * system prompt included, so this is the fact that decides whether the system
  * date may move. It reads the outcome of every strip the pass made instead of
@@ -717,6 +719,13 @@ export function servesThinkingBlock(
             const records = isRecord(part.metadata) ? Object.values(part.metadata) : [];
             if (records.some((record) => isRecord(record) && record.redactedData !== undefined))
                 return true;
+            // A signature-only part reaches the provider on OpenCode 2, whose
+            // encoder sends it as a thinking block with empty text (see
+            // openCode2ThinkingPayload). OpenCode 1's signature under `metadata`
+            // is left out on purpose: OpenCode 1's Anthropic adapter drops an
+            // empty reasoning part before the request is sent (see
+            // modelAcceptsEmptyContent), so that block never reaches the provider.
+            if (openCode2ThinkingPayload(part) !== undefined) return true;
         }
     }
     return false;
