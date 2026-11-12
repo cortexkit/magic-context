@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use contract::busy::BusyReply;
@@ -23,6 +23,7 @@ use super::journal::{self, Cut};
 use super::service::{canonical, ready_participants, receipt, Done, Host, Park, Probe, Service};
 use super::Journal;
 use crate::client::{DoorRefusal, EntorhinalRefusal};
+use crate::test_log::logged_async as logged;
 use subc_client_rs::CatalogEntry;
 
 const ENTORHINAL: &str = "reserved:entorhinal";
@@ -907,32 +908,6 @@ fn publication(
         )
         .unwrap();
     });
-}
-
-/// Run `body` with the log captured, and return what it logged.
-async fn logged<F: std::future::Future>(body: F) -> (F::Output, String) {
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    use tracing::instrument::WithSubscriber;
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let result = body.with_subscriber(subscriber).await;
-    let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
-    (result, text)
 }
 
 /// `busy` answers per ref, in request order, with the first cause that

@@ -87,20 +87,6 @@ fn an_accepted_lane_or_history_rewrite_rearms_an_emergency_episode_without_a_bat
     }
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[test]
 fn a_view_failing_the_pre_publish_check_logs_the_refusal_reason() {
     let (mut session, client, _, _, _) = fixture();
@@ -108,14 +94,7 @@ fn a_view_failing_the_pre_publish_check_logs_the_refusal_reason() {
     session.index_ready = true;
     let key = ("final-message".into(), "p".into());
     session.queued.insert(key.clone());
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _logging = tracing::subscriber::set_default(subscriber);
+    let output = crate::test_log::capture();
 
     // Bypass lane selection to model a lane bug: removing the final message
     // is forbidden by the same pre-publish check the runner uses.
@@ -131,7 +110,7 @@ fn a_view_failing_the_pre_publish_check_logs_the_refusal_reason() {
     assert!(client.offered.lock().unwrap().is_empty());
     assert!(!session.queued.contains(&key));
     assert!(session.failed_parts.contains(&key));
-    let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let logs = output.text();
     assert!(
         logs.lines().any(|line| {
             line.contains("WARN")

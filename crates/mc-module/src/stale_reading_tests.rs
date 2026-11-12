@@ -411,20 +411,6 @@ fn stale_an_over_limit_ride_sizes_its_emergency_drop_from_its_own_estimate() {
     );
 }
 
-/// Log output, for counting warnings.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// The in-flight request's reading may repeat, and stays ignored. A
 /// different reading that still names a view the runner replaced was
 /// measured on a request sent later: the runner is at fault. ck-mc warns
@@ -432,14 +418,7 @@ impl std::io::Write for Captured {
 /// after the next Setup.
 #[tokio::test]
 async fn stale_a_second_different_stale_reading_distrusts_the_runner_until_setup() {
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _logging = tracing::subscriber::set_default(subscriber);
+    let output = crate::test_log::capture();
 
     let (mut session, client, settings, applied) = under_view_two().await;
     for seq in [2, 3] {
@@ -463,7 +442,7 @@ async fn stale_a_second_different_stale_reading_distrusts_the_runner_until_setup
         offered.first().is_some_and(|view| drops(view, "old", "p2")),
         "the reading that showed the fault did not count: {offered:?}"
     );
-    let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let logs = output.text();
     assert_eq!(
         logs.matches("a second stale reading").count(),
         1,

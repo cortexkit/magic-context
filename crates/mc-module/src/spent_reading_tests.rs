@@ -8,6 +8,7 @@
 //! the cache twice. A different size is a new measurement and counts.
 
 use super::*;
+use crate::test_log::capture;
 
 /// At the execute threshold (64,350 of the fixture's 99,000 usable tokens),
 /// below the force band (84,150).
@@ -94,47 +95,6 @@ fn drops(view: &View, mid: &str, part: &str) -> bool {
     })
 }
 
-/// Log output, for reading the lines ck-mc writes.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-/// Capture this thread's log lines until the guard drops.
-fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (output, tracing::subscriber::set_default(subscriber))
-}
-
-/// Let every log call see the subscriber `capture` installed. Tests run in
-/// parallel, and `tracing` keeps one answer per call site to whether any
-/// subscriber wants it: a call site another test reaches first while this
-/// subscriber is being installed can keep the answer "none does" until
-/// the answers are worked out again, as they are here.
-fn refresh_log_interest() {
-    tracing::callsite::rebuild_interest_cache();
-}
-
 /// The line logged when a repeat of the reading view `view` was built on is
 /// ignored.
 fn ignored_line(view: u64) -> String {
@@ -175,11 +135,10 @@ async fn built_on_the_reading(session: &mut Session, client: &Client, settings: 
 #[tokio::test]
 async fn spent_a_repeat_of_the_reading_a_view_was_built_on_builds_nothing() {
     for applied in [false, true] {
-        let (logs, _logging) = capture();
+        let logs = capture();
         let (mut session, client, settings) = worker();
         let first = built_on_the_reading(&mut session, &client, &settings).await;
         let shown = applied.then_some(&first);
-        refresh_log_interest();
 
         session.queued.insert(("mid".into(), "m1".into()));
         let request = reading(&session, &client, 2, READING, shown);
@@ -226,10 +185,9 @@ async fn spent_a_repeat_of_the_reading_a_view_was_built_on_builds_nothing() {
 /// different reading lands every drop queued meanwhile in one view.
 #[tokio::test]
 async fn spent_repeats_with_new_entries_and_queued_drops_build_nothing() {
-    let (logs, _logging) = capture();
+    let logs = capture();
     let (mut session, client, settings) = worker();
     let first = built_on_the_reading(&mut session, &client, &settings).await;
-    refresh_log_interest();
     for (seq, part) in [(2, "m1"), (3, "m2"), (4, "m3")] {
         grow(&client, seq + 6);
         session.queued.insert(("mid".into(), part.into()));

@@ -5,6 +5,7 @@ use super::*;
 use crate::agent_data::journal::{Contents, Cut, Moving, MovingState, Released};
 use crate::agent_data::{Journal, SESSION_MOVED, SESSION_MOVING};
 use crate::client::{Child, ClientError};
+use crate::test_log::logged;
 use cortexkit_role_agent_data::step::Step;
 use cortexkit_role_compaction::{
     notice::Conditions,
@@ -383,31 +384,6 @@ async fn every_surface_refuses_a_held_session_at_admission_and_serves_others() {
     assert_eq!(refused.detail, Some(json!({"holder": "mac-b"})));
 }
 
-/// Run `body` with the log captured, and return what it logged.
-fn logged(body: impl FnOnce()) -> String {
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, body);
-    let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
-    text
-}
-
 /// `busy`'s `historian_running` counts a run for its session until the
 /// worker has handled the run's result. A result the worker holds because
 /// a move holds the session keeps counting, so a move never starts while a
@@ -548,7 +524,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
     }
     // The restart, with moves off.
     let journal = Arc::new(Journal::load(path));
-    let log = logged(|| journal.log_held(false));
+    let ((), log) = logged(|| journal.log_held(false));
     let lines: Vec<&str> = log.lines().collect();
     for (session, cut, remedy) in [
         (
@@ -574,7 +550,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
             "{session}: {log}"
         );
     }
-    let with_moves_on = logged(|| journal.log_held(true));
+    let ((), with_moves_on) = logged(|| journal.log_held(true));
     assert!(
         with_moves_on.contains("until Entorhinal aborts or finishes the move"),
         "{with_moves_on}"

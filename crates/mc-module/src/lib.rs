@@ -108,6 +108,8 @@ pub const MODULE_ID: &str = "magic-context";
 pub mod engram_catalog;
 pub mod private_permissions;
 pub mod storage_paths;
+#[cfg(test)]
+pub(crate) mod test_log;
 
 /// The version line ck-mc reports: its package version, and the commit it
 /// was built from when the build set `MC_BUILD_SHA`.

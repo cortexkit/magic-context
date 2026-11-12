@@ -7,6 +7,7 @@ use crate::agent_data::journal::{self as journal_file, MovingState};
 use crate::agent_data::{snapshot, source, Journal, SESSION_MOVED, SESSION_MOVING};
 use crate::client::{Child, ClientError, DoorRefusal, EntorhinalRefusal};
 use crate::context_db::SCHEMA_VERSION;
+use crate::test_log::capture;
 use cortexkit_role_agent_data::errors::{ErrorBody, RefusalCode};
 use cortexkit_role_agent_data::step::Step;
 use cortexkit_role_compaction::{
@@ -643,34 +644,6 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Capture every log line written on this thread from here on: a test's
-/// runtime runs the module's workers on the test's own thread.
-fn capture() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
-    #[derive(Clone)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let writer = Captured(output.clone());
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (output, tracing::subscriber::set_default(subscriber))
-}
-
-fn text(output: &Arc<Mutex<Vec<u8>>>) -> String {
-    String::from_utf8(output.lock().unwrap().clone()).unwrap()
-}
-
 /// `prepare` on a session with a worker: the worker is parked between two
 /// jobs while the session is checked, frozen, reserved and read. The reply
 /// names the session's door stream and the cut's end and digest, frozen.
@@ -905,7 +878,7 @@ fn the_reservation_refuses_in_its_own_transaction_when_a_send_holds_a_fact() {
 /// notice its worker held during the freeze runs.
 #[tokio::test]
 async fn a_prepare_refused_on_one_ref_leaves_neither_frozen_nor_reserved() {
-    let (log, _guard) = capture();
+    let log = capture();
     let f = Fixture::new();
     let conn = f.conn();
     for session in ["s1", "s2"] {
@@ -939,7 +912,7 @@ async fn a_prepare_refused_on_one_ref_leaves_neither_frozen_nor_reserved() {
     assert_eq!(facts(&conn, "pub-s1"), [waiting(0), applied(1)]);
     assert!(!source::cut_folder(&f.db, CUT).exists());
     f.module.idle(&key("s1")).await.unwrap();
-    let logged = text(&log);
+    let logged = log.text();
     assert!(
         logged.contains("thalamus-harness/pi/s1: holding its Setup and notices"),
         "{logged}"
@@ -1046,7 +1019,7 @@ async fn a_later_cut_of_a_session_builds_on_what_its_stream_already_holds() {
 /// nor a later `prepare` takes them; other sessions are served as before.
 #[tokio::test]
 async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
-    let (log, _guard) = capture();
+    let log = capture();
     let f = Fixture::new();
     let conn = f.conn();
     seed(&conn, "s1", "content");
@@ -1073,12 +1046,12 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
         "session thalamus-harness/pi/s1 was released to another machine by agent-data cut {CUT}; discarding the 1 Setup, notice and summary jobs held during the move"
     );
     for _ in 0..100 {
-        if text(&log).contains(&discarded) {
+        if log.text().contains(&discarded) {
             break;
         }
         tokio::task::yield_now().await;
     }
-    let logged = text(&log);
+    let logged = log.text();
     assert!(logged.contains(&discarded), "{logged}");
     assert!(!f
         .module

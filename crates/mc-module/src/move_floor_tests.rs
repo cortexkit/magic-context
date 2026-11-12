@@ -8,40 +8,6 @@ use cortexkit_role_compaction::ride::RideCause;
 /// The move's cut: the entry before the newest one when the session moved.
 const FLOOR: (u64, &str) = (9, "m9");
 
-/// Log output, for counting the hold's log lines.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish(),
-        )
-    }
-
-    fn count(&self, needle: &str) -> usize {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .matches(needle)
-            .count()
-    }
-}
-
 fn summary(
     db: &ContextDb,
     sequence: i64,
@@ -171,8 +137,7 @@ impl Moved {
 /// view the move installed. The hold is logged once, not on every pass.
 #[tokio::test]
 async fn move_floor_summaries_below_the_floor_publish_no_view() {
-    let logs = Captured::default();
-    let _logging = logs.install();
+    let logs = crate::test_log::capture();
     let mut moved = moved("below-floor", true);
     moved.set_up().await;
     assert!(moved.session.head_stale, "the head must be rebuilt");
@@ -198,8 +163,7 @@ async fn move_floor_summaries_below_the_floor_publish_no_view() {
 /// view again, cutting where that summary ends.
 #[tokio::test]
 async fn move_floor_a_summary_past_the_floor_publishes_again() {
-    let logs = Captured::default();
-    let _logging = logs.install();
+    let logs = crate::test_log::capture();
     let mut moved = moved("back-above", true);
     moved.set_up().await;
     moved.notice(1).await;

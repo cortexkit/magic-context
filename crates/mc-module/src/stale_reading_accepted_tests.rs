@@ -11,6 +11,7 @@
 //! toward the check that stops trusting the views a runner names.
 
 use super::*;
+use crate::test_log::capture;
 
 /// 76% of the fixture's 99,000 usable tokens: over the execute threshold
 /// (64,350), below the force band (84,150).
@@ -118,38 +119,6 @@ fn drops(view: &View, mid: &str, part: &str) -> bool {
     })
 }
 
-/// Log output, for reading the lines ck-mc writes.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-/// Capture this thread's log lines until the guard drops.
-fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (output, tracing::subscriber::set_default(subscriber))
-}
-
 /// The order seen on a live runner: ck-mc publishes view 19 and the runner
 /// accepts it; then the notice for a request rendered before that arrives,
 /// reporting view 18 applied and measured under view 18, at 76%. It builds
@@ -158,7 +127,7 @@ fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
 /// after it.
 #[tokio::test]
 async fn stale_accepted_a_reading_from_before_the_runner_took_the_view_builds_nothing() {
-    let (logs, _logging) = capture();
+    let logs = capture();
     let (mut session, client, settings, eighteen) = under_view_eighteen().await;
     let nineteen = hand_over(&mut session, &client).await;
 
@@ -267,7 +236,7 @@ async fn stale_accepted_a_ride_view_counts_until_its_answer_is_lost() {
 /// fault that check is for.
 #[tokio::test]
 async fn stale_accepted_the_reading_in_flight_is_excused_with_its_repeats() {
-    let (logs, _logging) = capture();
+    let logs = capture();
     let (mut session, client, settings, eighteen) = under_view_eighteen().await;
     let nineteen = hand_over(&mut session, &client).await;
     for seq in [2, 3] {
@@ -315,7 +284,7 @@ async fn stale_accepted_the_reading_in_flight_is_excused_with_its_repeats() {
 /// or refuse.
 #[tokio::test]
 async fn stale_accepted_a_second_different_reading_stops_the_view_counting() {
-    let (logs, _logging) = capture();
+    let logs = capture();
     let (mut session, client, settings, eighteen) = under_view_eighteen().await;
     let nineteen = hand_over(&mut session, &client).await;
     let request = reading(&session, &client, 2, HIGH, 18, &eighteen);

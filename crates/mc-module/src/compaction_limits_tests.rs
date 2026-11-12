@@ -297,37 +297,9 @@ async fn named_tags_smaller_larger_zero_limits_and_missing_names() {
     assert_eq!(client.reads.lock().unwrap().len(), 2);
 }
 
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-impl std::io::Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-impl Capture {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish(),
-        )
-    }
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
 #[tokio::test]
 async fn runner_fault_empty_continuing_page_fails_compact_and_full_reads_once() {
-    let capture = Capture::default();
-    let _guard = capture.install();
+    let capture = crate::test_log::capture();
     for compact in [true, false] {
         let (mut session, client, _, _, _) = fixture();
         let mut page = ReadPage::new(vec![], Head::new());
@@ -362,8 +334,7 @@ async fn runner_fault_empty_continuing_page_fails_compact_and_full_reads_once() 
 
 #[tokio::test]
 async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
-    let capture = Capture::default();
-    let _guard = capture.install();
+    let capture = crate::test_log::capture();
     for mids in [true, false] {
         let (_, client, route, _, _) = fixture();
         let mut page = ReadPage::new(vec![], Head::new());
@@ -406,8 +377,7 @@ async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
 
 #[tokio::test]
 async fn window_flag_logs_once_per_crossing_and_changes_no_policy() {
-    let capture = Capture::default();
-    let _guard = capture.install();
+    let capture = crate::test_log::capture();
     let (mut session, client, _, _, settings) = fixture();
     session.features.summarizer = true;
     session.index.extend([text(1, "one")]);
@@ -486,8 +456,7 @@ async fn window_flag_logs_once_per_crossing_and_changes_no_policy() {
 
 #[tokio::test]
 async fn flag_without_a_stated_window_budget_logs_fault_and_still_does_nothing() {
-    let capture = Capture::default();
-    let _guard = capture.install();
+    let capture = crate::test_log::capture();
     let (mut session, client, _, _, settings) = fixture();
     session.index_ready = true;
     let mut n = notice(&session, 1, None);
@@ -543,8 +512,7 @@ async fn named_larger_stated_select_max_keeps_our_256_name_request_size() {
 
 #[tokio::test]
 async fn named_runner_fault_in_a_view_build_warns_only_once() {
-    let capture = Capture::default();
-    let _guard = capture.install();
+    let capture = crate::test_log::capture();
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![super::named_read_tests::image_result(1)];
     super::named_read_tests::hold_compact_images(&mut session, &entries);

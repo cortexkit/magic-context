@@ -5,40 +5,9 @@
 //! runner that declares `view_anchor` receives.
 
 use super::*;
+use crate::test_log::capture;
 use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
 use cortexkit_role_compaction::view::{InsertAt, InsertedMessage};
-
-/// Log output, for reading the lines ck-mc writes.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-/// Capture this thread's log lines until the guard drops.
-fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (output, tracing::subscriber::set_default(subscriber))
-}
 
 /// A session on the `head` preset (the one that gets a history head and a
 /// cut) on a Claude model whose runner declares `view_anchor`,
@@ -232,9 +201,9 @@ async fn restart_a_refused_offer_logs_the_policy_members_it_carried() {
     let mut handed = handed("refused-offer").await;
     *handed.client.refuse.lock().unwrap() = true;
     *handed.client.refusal.lock().unwrap() = Some(ViewRefusal::BadChecksum);
-    let (logs, guard) = capture();
+    let mut logs = capture();
     handed.restart().await;
-    drop(guard);
+    logs.stop();
     assert!(
         logs.text().contains(
             "runner refused view 2 offered again: BadChecksum (built_through present, new_signed strip)"
@@ -290,9 +259,9 @@ async fn restart_a_view_saved_without_its_policy_members_is_rebuilt_not_offered_
     let loaded = handed.store.load(&handed.route.session).unwrap();
     assert!(!loaded.unconfirmed[0].view.verify());
     let before = handed.offered().len();
-    let (logs, guard) = capture();
+    let mut logs = capture();
     handed.restart().await;
-    drop(guard);
+    logs.stop();
     assert_eq!(
         handed.offered().len(),
         before,

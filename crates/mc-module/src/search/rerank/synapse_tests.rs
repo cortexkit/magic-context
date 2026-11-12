@@ -185,20 +185,6 @@ async fn other_failures_do_not_reset_or_extend_an_expired_absence() {
     assert_eq!(client.calls(), 5);
 }
 
-#[derive(Clone, Default)]
-struct Captured(std::sync::Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn absent_synapse_logs_the_existing_fallback_once_even_after_reprobes() {
     let cache = SynapseCatalog::new();
@@ -207,21 +193,14 @@ async fn absent_synapse_logs_the_existing_fallback_once_even_after_reprobes() {
         absent(),
         absent(),
     ]);
-    let output = Captured::default();
-    let writer = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let output = crate::test_log::capture();
     for delay in [0, 0, 0, 30, 600] {
         tokio::time::advance(Duration::from_secs(delay)).await;
         let Skipped(reason) = cache.pin(client.call("models.list")).await.unwrap_err();
         log_fallback(&reason);
     }
     assert_eq!(client.calls(), 3);
-    let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let text = output.text();
     assert_eq!(
         text.matches(
             "ck-mc: ctx_search rerank fallback (unknown_module); keeping the original ranking"

@@ -355,7 +355,6 @@ pub fn write_catalog_at_startup(data_dir: &Path) -> io::Result<CatalogWrite> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     /// The descriptor's exact published bytes. A change here is a change to what
     /// Engram backs up, so it must be made on purpose and reviewed as such. The
@@ -591,20 +590,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), catalog_bytes());
     }
 
-    /// Captures formatted log lines so the test can count the warning.
-    #[derive(Clone)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn an_unwritable_data_folder_logs_once_and_continues() {
         let temp = tempfile::tempdir().unwrap();
@@ -613,18 +598,9 @@ mod tests {
         let data_dir = temp.path().join("magic-context");
         std::fs::write(&data_dir, b"not a directory").unwrap();
 
-        let output = Captured(Arc::new(Mutex::new(Vec::new())));
-        let writer = output.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let outcome =
-            tracing::subscriber::with_default(subscriber, || write_catalog_at_startup(&data_dir));
+        let (outcome, logs) = crate::test_log::logged(|| write_catalog_at_startup(&data_dir));
 
         assert!(outcome.is_err(), "the failure is reported to the caller");
-        let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert_eq!(
             logs.matches("engram catalog not written").count(),
             1,

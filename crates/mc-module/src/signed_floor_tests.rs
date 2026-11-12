@@ -6,40 +6,6 @@
 use super::*;
 use cortexkit_role_compaction::SignedFloor;
 
-/// Log output, for counting how often the floor's move is logged.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish(),
-        )
-    }
-
-    fn count(&self, needle: &str) -> usize {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .matches(needle)
-            .count()
-    }
-}
-
 const MOVED: &str = "signed floor moved";
 const REGRESSED: &str = "signed_floor_regressed";
 const CONTRADICTED: &str = "signed_floor_contradicted";
@@ -73,8 +39,7 @@ async fn set_up(floor: Option<&str>) -> (Session, Client, Route, SetupRequest, S
 
 #[tokio::test]
 async fn signed_floor_setup_reports_it_and_ck_mc_takes_it() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (session, ..) = set_up(Some("m2")).await;
     assert_eq!(session.signed_floor.as_deref(), Some("m2"));
     assert_eq!(session.signed_floor(), Some(2));
@@ -89,8 +54,7 @@ async fn signed_floor_setup_reports_it_and_ck_mc_takes_it() {
 /// named, newer or older, and none when none is named.
 #[tokio::test]
 async fn signed_floor_conditions_state_it_in_full() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, _, _, settings) = set_up(Some("m2")).await;
     session
         .notice(&client, &settings, floor_notice(&session, 1, "m3"))
@@ -401,8 +365,7 @@ fn check_without_floor(session: &Session, view: &View) {
 /// the runner refuses every view it builds.
 #[tokio::test]
 async fn signed_floor_a_setup_naming_none_takes_it_away() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, route, request, settings) = bound_set_up(Some("floor")).await;
     assert_eq!(session.signed_floor(), Some(4));
     let mut lost = request;
@@ -468,8 +431,7 @@ async fn signed_floor_a_setup_naming_an_older_floor_is_taken() {
 /// holds. That is no floor going away, so nothing warns.
 #[tokio::test]
 async fn signed_floor_a_setup_naming_an_entry_ck_mc_does_not_hold_covers_nothing() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, route, request, settings) = bound_set_up(Some("floor")).await;
     let elsewhere = request.with_signed_floor(SignedFloor::new("elsewhere"), true);
     session
@@ -490,8 +452,7 @@ async fn signed_floor_a_setup_naming_an_entry_ck_mc_does_not_hold_covers_nothing
 /// the floor, and the drops the view carried are not held against it.
 #[tokio::test]
 async fn signed_floor_a_refusal_at_or_before_it_drops_it_and_costs_no_drops() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, _, _, settings) = bound_set_up(Some("floor")).await;
     let (view, _) = session.build(&settings, None, false, None);
     let view = view.expect("the requested drops build a view");
@@ -520,8 +481,7 @@ async fn signed_floor_a_refusal_at_or_before_it_drops_it_and_costs_no_drops() {
 /// floor: the floor stays and the usual refusal guard applies.
 #[tokio::test]
 async fn signed_floor_a_refusal_after_it_keeps_the_usual_guard() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, _, _, settings) = bound_set_up(Some("task")).await;
     let (view, _) = session.build(&settings, None, false, None);
     *client.refuse.lock().unwrap() = true;
@@ -573,8 +533,7 @@ fn retried(session: &Session, client: &Client, refused: u64) {
 /// floor or none.
 #[tokio::test]
 async fn signed_floor_a_refused_floor_the_runner_keeps_naming_is_ignored_until_it_states_another() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, _, _, settings) = bound_set_up(Some("floor")).await;
     let refused = refused_at_boundary(&mut session, &client, &settings, Some("floor")).await;
     assert_eq!(session.signed_floor, None);
@@ -606,8 +565,7 @@ async fn signed_floor_a_refused_floor_the_runner_keeps_naming_is_ignored_until_i
 /// in `signed_floor_review_a_refusal_after_ck_mc_followed_the_floor_away_costs_no_drops`.
 #[tokio::test]
 async fn signed_floor_a_refusal_with_no_floor_named_then_the_same_floor_named_again() {
-    let captured = Captured::default();
-    let _guard = captured.install();
+    let captured = crate::test_log::capture();
     let (mut session, client, _, _, settings) = bound_set_up(Some("floor")).await;
     let refused = refused_at_boundary(&mut session, &client, &settings, None).await;
     assert_eq!(session.signed_floor, None);

@@ -4,6 +4,7 @@
 //! (see `IMPLICIT_FORGET_LIMIT`).
 
 use super::*;
+use crate::test_log::Capture;
 use cortexkit_role_compaction::ride::RideCause;
 
 /// How many summaries the session has, each covering `SPAN` messages.
@@ -17,40 +18,12 @@ const HOLD_LOG: &str = "transcript_behind_summaries";
 /// the newest three, which are always protected.
 const DROPPABLE: u64 = SUMMARIES * SPAN + 1;
 
-/// Log output, for counting the hold's log lines.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish(),
-        )
-    }
-
-    /// Lines logged under the hold's name at `level`.
-    fn lines(&self, level: &str) -> usize {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains(HOLD_LOG) && line.contains(level))
-            .count()
-    }
+/// Lines logged under the hold's name at `level`.
+fn hold_lines(log: &Capture, level: &str) -> usize {
+    log.text()
+        .lines()
+        .filter(|line| line.contains(HOLD_LOG) && line.contains(level))
+        .count()
 }
 
 /// Messages 1 to `through`, named `m1`, `m2`, ...: a person's text up to the
@@ -104,8 +77,7 @@ struct Fixture {
     route: Route,
     setup: SetupRequest,
     settings: Settings,
-    log: Captured,
-    _log: tracing::subscriber::DefaultGuard,
+    log: Capture,
     dir: std::path::PathBuf,
 }
 
@@ -126,8 +98,7 @@ impl Fixture {
     /// [`Fixture::new`] with `count` summaries, covering messages 1 to
     /// `count * SPAN`.
     async fn with_summaries(label: &str, count: u64) -> Self {
-        let log = Captured::default();
-        let guard = log.install();
+        let log = crate::test_log::capture();
         let (mut session, client, route, setup, settings) = fixture();
         let dir = scratch(label);
         let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
@@ -153,7 +124,6 @@ impl Fixture {
             setup,
             settings,
             log,
-            _log: guard,
             dir,
         };
         fixture.set_up().await;
@@ -243,7 +213,9 @@ impl Fixture {
     /// Held: the index is not ready, and the hold logged its ERROR line and
     /// has not logged its release.
     fn held(&self) -> bool {
-        !self.session.index_ready && self.log.lines("ERROR") == 1 && self.log.lines("INFO") == 0
+        !self.session.index_ready
+            && hold_lines(&self.log, "ERROR") == 1
+            && hold_lines(&self.log, "INFO") == 0
     }
 
     /// Ready, and a view can be built: a drop of message 101's tool result
@@ -306,7 +278,11 @@ async fn a_setup_against_a_replaced_transcript_forgets_nothing_and_holds() {
         "the restored session read nothing"
     );
     assert!(!fixture.held());
-    assert_eq!(fixture.log.lines("INFO"), 1, "the release was not logged");
+    assert_eq!(
+        hold_lines(&fixture.log, "INFO"),
+        1,
+        "the release was not logged"
+    );
     assert_eq!(fixture.rows(), SUMMARIES as usize);
     assert_eq!(fixture.session.summaries.len(), SUMMARIES as usize);
     assert_eq!(fixture.session.cut, kept.cut);
@@ -343,7 +319,7 @@ async fn a_setup_after_a_missed_revert_of_the_newest_two_summaries_forgets_them(
     assert_eq!(fixture.session.summaries.len(), 18);
     assert_eq!(fixture.session.cut, Some(90));
     assert!(fixture.session.index_ready, "the session is not ready");
-    assert_eq!(fixture.log.lines("ERROR"), 0);
+    assert_eq!(hold_lines(&fixture.log, "ERROR"), 0);
 }
 
 #[tokio::test]
@@ -359,7 +335,7 @@ async fn a_setup_whose_three_summaries_all_fail_forgets_them_all() {
     assert!(fixture.session.summaries.is_empty());
     assert_eq!(fixture.session.cut, None);
     assert!(fixture.session.index_ready, "the session is not ready");
-    assert_eq!(fixture.log.lines("ERROR"), 0);
+    assert_eq!(hold_lines(&fixture.log, "ERROR"), 0);
 }
 
 #[tokio::test]
@@ -395,7 +371,7 @@ async fn a_reported_revert_ten_summaries_deep_still_forgets_ten() {
     assert_eq!(fixture.rows(), 10);
     assert_eq!(fixture.session.summaries.len(), 10);
     assert_eq!(fixture.session.cut, Some(50));
-    assert_eq!(fixture.log.lines("ERROR"), 0);
+    assert_eq!(hold_lines(&fixture.log, "ERROR"), 0);
 }
 
 #[tokio::test]
@@ -456,7 +432,11 @@ async fn a_transcript_replaced_mid_session_holds_on_the_next_notice_and_recovers
         fixture.session.index_ready,
         "the notice did not resume the session"
     );
-    assert_eq!(fixture.log.lines("INFO"), 1, "the release was not logged");
+    assert_eq!(
+        hold_lines(&fixture.log, "INFO"),
+        1,
+        "the release was not logged"
+    );
     assert_eq!(fixture.rows(), SUMMARIES as usize);
     assert_eq!(fixture.session.summaries.len(), SUMMARIES as usize);
     assert_eq!(fixture.session.cut, kept.cut);
@@ -477,5 +457,5 @@ async fn a_transcript_ending_before_the_cut_forgets_the_two_summaries_a_missed_r
     assert_eq!(fixture.session.summaries.len(), 18);
     assert_eq!(fixture.session.cut, Some(90));
     assert!(fixture.session.index_ready);
-    assert_eq!(fixture.log.lines("ERROR"), 0);
+    assert_eq!(hold_lines(&fixture.log, "ERROR"), 0);
 }
