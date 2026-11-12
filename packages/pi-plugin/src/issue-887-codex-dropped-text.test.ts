@@ -298,7 +298,6 @@ describe("a dropped reply whose signature Oh My Pi removed", () => {
 	});
 
 	const guards: [string, (message: any) => void, string?][] = [
-		["an edit that is not a drop placeholder", () => {}, "Checking parser."],
 		[
 			"native text that differs from the block it is paired with",
 			(message) => {

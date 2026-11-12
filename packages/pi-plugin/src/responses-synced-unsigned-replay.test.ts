@@ -6,6 +6,7 @@ import {
 	getPendingOps,
 	getTagsBySession,
 	queuePendingOp,
+	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
@@ -446,32 +447,105 @@ describe("guarded context after a hook-cleaned reply", () => {
 			});
 });
 
-describe("a drop is written into the replayed native item", () => {
+describe("an edit is written into the replayed native item", () => {
+	const edits = [
+		{ name: "a drop", text: PLACEHOLDER, native: PLACEHOLDER },
+		// Caveman compression, for example, rewrites an older reply in place and
+		// keeps the block's tag label.
+		{
+			name: "a compression",
+			text: "§7§ Check proposal vs code before write-up.",
+			native: "Check proposal vs code before write-up.",
+		},
+	];
 	for (const host of hosts)
 		for (const phase of phases)
-			test(`${host.version} ${phase}: the placeholder request is admitted and the stored native bytes are refused`, async () => {
+			for (const change of edits)
+				test(`${host.version} ${phase}: ${change.name} is admitted and the stored native bytes are refused`, async () => {
+					__setPiHarnessKindForTesting("omp");
+					const { message } = await finish(
+						host,
+						turn(`§7§ ${NATIVE}`, `§7§ ${NATIVE}`, phase),
+					);
+					const stored = native(message).content[0].text;
+					expect(stored).toBe(host.sync ? NATIVE : `§7§ ${NATIVE}`);
+					const messages = history(structuredClone(message));
+					const next = edit(messages, change.text);
+					expect(native(next).content[0].text).toBe(change.native);
+					expect(native(next).phase).toBe(phase);
+					const request = prepare(messages);
+					const input = encode(host, request.messages);
+					expect(JSON.stringify(input)).not.toContain(NATIVE);
+					expect(request.mismatch(input)).toBeUndefined();
+					const stale = structuredClone(input);
+					const item = stale.find(
+						(entry: any) =>
+							entry.type === "message" && entry.role === "assistant",
+					);
+					item.content[0].text = stored;
+					expect(request.mismatch(stale)).toContain("comparison=content");
+				});
+});
+
+describe("inline thinking stripped from an older Responses reply", () => {
+	const THOUGHT = "<think>weighing the options</think>";
+	for (const host of hosts)
+		for (const [label, raw] of [
+			["hook-cleaned", `§7§ ${THOUGHT}${NATIVE}`],
+			["signed", `${THOUGHT}${NATIVE}`],
+		] as const)
+			test(`${host.version} ${label}: the strip reaches the native item and the request is admitted`, async () => {
 				__setPiHarnessKindForTesting("omp");
-				const { message } = await finish(
-					host,
-					turn(`§7§ ${NATIVE}`, `§7§ ${NATIVE}`, phase),
-				);
-				const stored = native(message).content[0].text;
-				expect(stored).toBe(host.sync ? NATIVE : `§7§ ${NATIVE}`);
-				const messages = history(structuredClone(message));
-				const next = edit(messages, PLACEHOLDER);
-				expect(native(next).content[0].text).toBe(PLACEHOLDER);
-				expect(native(next).phase).toBe(phase);
-				const request = prepare(messages);
-				const input = encode(host, request.messages);
-				expect(JSON.stringify(input)).not.toContain(NATIVE);
-				expect(request.mismatch(input)).toBeUndefined();
-				const stale = structuredClone(input);
-				const item = stale.find(
-					(entry: any) =>
-						entry.type === "message" && entry.role === "assistant",
-				);
-				item.content[0].text = stored;
-				expect(request.mismatch(stale)).toContain("comparison=content");
+				const { message } = await finish(host, turn(raw, raw, "commentary"));
+				expect("textSignature" in message.content[1]).toBe(label === "signed");
+				const source = history(message);
+				const sessionId = `inline-thinking-${host.version}-${label}`;
+				const db = createTestDb();
+				const fake = createFakePi();
+				const pass = async () => {
+					const messages = structuredClone(source);
+					const ctx = {
+						...fakeContext(
+							sessionId,
+							root,
+							messages.map((_, index) => `e${index}`),
+							messages as never,
+						),
+						model,
+						abort: () => {},
+					};
+					const result = await (fake.handlers.get("context") as any)(
+						{ messages },
+						ctx,
+					);
+					const input = encode(host, result.messages);
+					const refused = await (
+						fake.handlers.get("before_provider_request") as any
+					)({ payload: { input } }, ctx);
+					return { wire: JSON.stringify(input), refused };
+				};
+				try {
+					registerPiContextHandler(fake.pi as never, {
+						db,
+						protectedTags: 0,
+						injection: { injectionBudgetTokens: 10000 },
+					});
+					const first = await pass();
+					expect(first.wire).toContain("weighing the options");
+					expect(first.refused).toBeUndefined();
+					// Every pass replays the inline-thinking strip up to this watermark.
+					updateSessionMeta(db, sessionId, {
+						clearedReasoningThroughTag: 10_000,
+					});
+					const stripped = await pass();
+					expect(stripped.wire).not.toContain("weighing the options");
+					expect(stripped.wire).toContain(NATIVE);
+					expect(stripped.refused).toBeUndefined();
+				} finally {
+					clearContextHandlerSession(sessionId);
+					await drainPiTagSnapshotSession(sessionId);
+					db.close();
+				}
 			});
 });
 

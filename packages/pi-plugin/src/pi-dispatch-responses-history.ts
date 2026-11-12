@@ -312,8 +312,8 @@ export function piResponsesAssistantTexts(
 	// for the whole request and compares every row against it.
 	//
 	// That rests on one precondition: the pass itself decides the native item's
-	// bytes. A drop placeholder or historical tag strip it applies to a block is
-	// written into the paired native item as well (`rewriteNativeAssistantTexts`,
+	// bytes. An edit it applies to a block (a drop placeholder, compression) or a
+	// historical tag strip is written into the paired native item as well (`rewriteNativeAssistantTexts`,
 	// `applyNativeResponseTagReplayPi`), so both alternatives carry the pass's
 	// choice and a request still holding the stored native bytes is refused.
 	if (unsigned && alternatives) {

@@ -24,12 +24,11 @@ import { createPiTranscript } from "./transcript-pi";
 
 // Witnesses for the dispatch check on Oh My Pi's OpenAI Responses route, which
 // refuses a request whose assistant rows differ from what the context pass
-// prepared. The first describe block fails today: an edited reply that lost its
-// text signature is refused on every later request, because the edit never
-// reaches the stored native item Oh My Pi replays. The control shows a signed
-// reply under the same edit is admitted. The last block passes: tag-free text
-// with surrounding whitespace keeps its signature and is admitted after real
-// tagging passes.
+// prepared. The first describe block covers an edited reply that lost its text
+// signature: the edit must reach the stored native item Oh My Pi replays, or
+// every later request is refused. The control shows a signed reply under the
+// same edit is admitted. The last block shows tag-free text with surrounding
+// whitespace keeps its signature and is admitted after real tagging passes.
 const { dir: root, cleanup } = createTestTempDir("mc-issue-909-witness-");
 const keys = [
 	"HOME",
@@ -187,7 +186,7 @@ function editAndPrepare(message: any, text: string) {
 	};
 }
 
-describe("WITNESS (fails today): a non-drop edit of a hook-cleaned reply", () => {
+describe("witness: a non-drop edit of a hook-cleaned reply", () => {
 	// 18.19.0 stored shape after the hook removed an echoed tag: the block lost
 	// its signature and Oh My Pi copied the cleaned text into the native item.
 	test("an unsigned reply's edited text reaches its native item and the warm request is admitted", () => {
@@ -195,10 +194,9 @@ describe("WITNESS (fails today): a non-drop edit of a hook-cleaned reply", () =>
 			turn(NATIVE, NATIVE, false),
 			`§42§ ${COMPRESSED}`,
 		);
-		// rewriteNativeAssistantTexts mirrors only a drop placeholder into an
-		// unsigned block's native item. When Oh My Pi replays stored native
-		// history (its warm path), it still sends the uncompressed text, and the
-		// dispatch check refuses every request.
+		// Without mirroring the edit into the unsigned block's native item, Oh
+		// My Pi's warm path (replaying stored native history) would still send
+		// the uncompressed text, and the dispatch check would refuse it.
 		expect(mismatch).toBeUndefined();
 		expect(native(next).content[0].text).toBe(COMPRESSED);
 	});

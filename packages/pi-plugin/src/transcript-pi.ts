@@ -278,10 +278,10 @@ export function createPiTranscript(
 			if (committed) return;
 			committed = true;
 			for (const index of dirtyMessages) {
-				// Only Oh My Pi's assistant-message hook leaves unsigned text over an
-				// unchanged native item, and only its dispatch check pairs them.
+				// Only Oh My Pi's assistant-message hook leaves unsigned text paired
+				// with a replayed native item, and only its dispatch check pairs them.
 				rewriteNativeAssistantTexts(working[index], source[index], sessionId, {
-					unsignedDrops: harness === "omp",
+					unsignedEdits: harness === "omp",
 				});
 			}
 			for (const [index, parts] of removals) {
