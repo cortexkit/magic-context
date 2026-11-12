@@ -1,6 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
+import {
+    type DiagnosticReport,
+    describeOutdatedPluginInstall,
+    renderDiagnosticsMarkdown,
+} from "./diagnostics-opencode";
 import { capBodyToGithubLimit, prepareIssueReport } from "./issue-body";
 import { parseLogLine, readLogLines } from "./log-lines";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
@@ -113,6 +117,7 @@ export async function bundleIssueReport(
     const sanitizedConfigPath = sanitizeDiagnosticText(report.configPaths.magicContextConfig);
     const sanitizedDescription = privacy.userText(description);
     const sanitizedTitle = privacy.userText(title).trim();
+    const outdatedLine = describeOutdatedPluginInstall(report.pluginCache);
 
     const selectedSession = sessionFilter
         ? (report.recentSessions.available ? report.recentSessions.rows : []).find(
@@ -137,7 +142,10 @@ export async function bundleIssueReport(
         privacy.notice,
         "",
         "## Environment",
-        `- Plugin: v${report.pluginVersion}`,
+        // An outdated plugin explains many reports, so it is the first thing a reader sees.
+        ...(outdatedLine ? [`- ${outdatedLine}`] : []),
+        // pluginVersion is this CLI's own version, not the plugin OpenCode loads.
+        `- magic-context CLI: v${report.pluginVersion}${report.pluginCache.cached ? ` (installed plugin: v${report.pluginCache.cached})` : ""}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         `- OpenCode: ${report.opencodeVersion ?? "not installed"}`,

@@ -21,6 +21,7 @@ import {
 } from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc } from "comment-json";
 import { pluginEntryPackage } from "../adapters/opencode";
+import { compareSemverPrecedence } from "../commands/doctor-opencode2-cache";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -28,6 +29,7 @@ import {
     getOpenCodePluginCacheRoots,
     getOpenCodePluginPackageJsonPath,
     getOpenCodeV2PluginCacheSlot,
+    isOpenCodePluginDistTag,
     listOpenCodeV2PluginCacheSlots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
@@ -61,6 +63,12 @@ export interface DiagnosticReport {
         path: string;
         cached?: string;
         latest?: string;
+        /**
+         * Where `latest` came from: `npm` when the newest published version of
+         * the tag the install follows was fetched, `cli` when that fetch failed
+         * and `latest` is only this CLI's own version.
+         */
+        latestSource?: "npm" | "cli";
         /** Every Magic Context install found across OpenCode 1 and OpenCode 2 cache layouts. */
         installs?: PluginCacheInstall[];
     };
@@ -272,6 +280,7 @@ function readLegacyCachedVersion(root: string): string | undefined {
 export function collectOpenCodePluginCacheReport(
     hostGeneration: OpenCodeHostGeneration,
     opencodeConfig: Record<string, unknown> | null,
+    npmVersions: NpmPluginVersions = {},
 ): DiagnosticReport["pluginCache"] {
     const installs: PluginCacheInstall[] = [];
     for (const root of getOpenCodePluginCacheRoots()) {
@@ -295,19 +304,45 @@ export function collectOpenCodePluginCacheReport(
 
     let path: string;
     let cached: string | undefined;
+    // The dist-tag whose newest version the reported install is compared with:
+    // an OpenCode 2 entry may follow `@beta` or `@next`, OpenCode 1 only `latest`.
+    let distTag = "latest";
     if (hostGeneration === "v2") {
-        path = getOpenCodeV2PluginCacheSlot(
-            undefined,
-            readConfiguredOpenCodePluginSpec(opencodeConfig),
-        );
+        const spec = readConfiguredOpenCodePluginSpec(opencodeConfig);
+        path = getOpenCodeV2PluginCacheSlot(undefined, spec);
         cached = readOpenCodeV2CachedPluginVersion(path);
+        if (isOpenCodePluginDistTag(spec)) distTag = spec;
     } else {
         [path = ""] = getOpenCodePluginCacheRoots();
         cached = installs.find(
             (install) => install.layout === "opencode1" && install.cached,
         )?.cached;
     }
-    return { path, cached, latest: getSelfVersion(), installs };
+    const newest = npmVersions[distTag];
+    return newest
+        ? { path, cached, latest: newest, latestSource: "npm", installs }
+        : { path, cached, latest: getSelfVersion(), latestSource: "cli", installs };
+}
+
+/**
+ * Newest published plugin versions by dist-tag (`latest`, `beta`, ...), as
+ * fetched from npm by the caller. A tag that could not be fetched is absent.
+ */
+export type NpmPluginVersions = Readonly<Record<string, string>>;
+
+/**
+ * The plain-language line an issue shows when the reported plugin install is
+ * older than the newest published version, or null when it is current, when
+ * either version is unknown, or when `latest` is only the CLI's own version.
+ */
+export function describeOutdatedPluginInstall(
+    pluginCache: DiagnosticReport["pluginCache"],
+): string | null {
+    const { cached, latest, latestSource } = pluginCache;
+    if (latestSource !== "npm" || !cached || !latest) return null;
+    const comparison = compareSemverPrecedence(cached, latest);
+    if (comparison === null || comparison >= 0) return null;
+    return `Plugin is outdated: installed ${cached}, newest ${latest}.`;
 }
 
 function getStorageResolution(): ReturnType<typeof getMagicContextStorageResolution> {
@@ -742,7 +777,14 @@ export function openCodeIssueLogHarnesses(
 
 // ── Main entry ─────────────────────────────────────────────────────
 
-export async function collectDiagnostics(): Promise<DiagnosticReport> {
+export interface CollectDiagnosticsOptions {
+    /** Newest published plugin versions the caller already fetched from npm. */
+    npmVersions?: NpmPluginVersions;
+}
+
+export async function collectDiagnostics(
+    options: CollectDiagnosticsOptions = {},
+): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
     const configPaths = detectConfigPaths();
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
@@ -800,7 +842,11 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             ...(magicContextConfig.error ? { parseError: magicContextConfig.error } : {}),
             flags: (sanitizeValue(magicContextConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
-        pluginCache: collectOpenCodePluginCacheReport(hostGeneration, opencodeConfig.value),
+        pluginCache: collectOpenCodePluginCacheReport(
+            hostGeneration,
+            opencodeConfig.value,
+            options.npmVersions,
+        ),
         storageDir: {
             path: storageDirPath,
             source: storageResolution.source,
@@ -854,6 +900,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         path: sanitizeString(report.pluginCache.path),
         cached: report.pluginCache.cached ?? null,
         latest: report.pluginCache.latest ?? null,
+        latest_source: report.pluginCache.latestSource ?? "cli",
         installs: (report.pluginCache.installs ?? []).map((install) => ({
             ...install,
             path: sanitizeString(install.path),
@@ -913,7 +960,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
 
     return [
         `- Timestamp: ${report.timestamp}`,
-        `- Plugin: v${report.pluginVersion}`,
+        `- magic-context CLI: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,

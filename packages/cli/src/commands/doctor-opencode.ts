@@ -68,7 +68,11 @@ import {
     UnsupportedSchemaVersionError,
 } from "../lib/database-access";
 import { formatDatabaseRepairGuidance } from "../lib/database-repair-guidance";
-import { collectDiagnostics, type DiagnosticReport } from "../lib/diagnostics-opencode";
+import {
+    type CollectDiagnosticsOptions,
+    collectDiagnostics,
+    type DiagnosticReport,
+} from "../lib/diagnostics-opencode";
 import {
     checkLocalEmbeddingRuntime,
     formatLocalEmbeddingRuntimeDoctorWarning,
@@ -142,6 +146,7 @@ import {
     checkOpenCodeV2PluginCache,
     compareSemverPrecedence,
     configuredOpenCodeV2DistTag,
+    type OpenCodeV2CacheResult,
     openCodeHostDatabaseFiles,
     reportOpenCodeV2PluginCache,
 } from "./doctor-opencode2-cache";
@@ -613,14 +618,114 @@ function openBrowser(url: string): void {
     }
 }
 
+export interface IssuePluginFreshness {
+    /** Newest published plugin version per dist-tag that was fetched (`latest`, `beta`, ...). */
+    npmVersions: Record<string, string>;
+    /** OpenCode 2's stale-install check, run without `--fix` so nothing is removed. */
+    openCode2?: OpenCodeV2CacheResult;
+}
+
+export interface IssuePluginFreshnessDeps {
+    fetchNpmLatest?: (pkg: string, distTag?: string) => Promise<string | null>;
+}
+
+/**
+ * The outdated-install check plain doctor runs, without removing anything:
+ * fetch the newest published version of the tag the configured entry follows
+ * and compare OpenCode 2's cached install with it. OpenCode 1 has no such
+ * check in plain doctor (it clears an outdated copy instead), so only the
+ * fetched versions are returned for it, for the issue body. Skipped, like the
+ * plain doctor's cache steps, when the config does not register Magic Context.
+ */
+export async function checkPluginFreshnessForIssue(
+    deps: IssuePluginFreshnessDeps = {},
+): Promise<IssuePluginFreshness> {
+    const fetchLatest = deps.fetchNpmLatest ?? fetchNpmLatest;
+    const paths = detectConfigPaths();
+    if (paths.opencodeConfigFormat === "none") return { npmVersions: {} };
+    let config: Record<string, unknown> | undefined;
+    try {
+        config = parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<string, unknown>;
+    } catch {
+        // An unreadable config cannot show the plugin is absent; check as plain doctor does.
+    }
+    const configDir = dirname(paths.opencodeConfig);
+    if (config && !isOpenCodePluginRegistered(config, configDir)) return { npmVersions: {} };
+
+    const npmVersions: Record<string, string> = {};
+    const latest = await fetchLatest(PLUGIN_NAME);
+    if (latest) npmVersions.latest = latest;
+    const distTag = configuredOpenCodeV2DistTag(config);
+    if (distTag) {
+        const tagged = await fetchLatest(PLUGIN_NAME, distTag);
+        if (tagged) npmVersions[distTag] = tagged;
+    }
+    const openCode2 = checkOpenCodeV2PluginCache({
+        latestVersion: npmVersions[distTag ?? "latest"] ?? null,
+        distTag,
+        hostFiles: [],
+        referencedSpecs: config
+            ? readOpenCodePluginConfigUse(config, configDir).referencedSpecs.opencode2
+            : undefined,
+    });
+    return { npmVersions, openCode2 };
+}
+
+export interface IssueFlowDeps {
+    collectDiagnostics: (options?: CollectDiagnosticsOptions) => Promise<DiagnosticReport>;
+    /** Defaults to the real check; tests pass a fake npm lookup through it. */
+    checkPluginFreshness?: () => Promise<IssuePluginFreshness>;
+    /** The system the update advice is for; defaults to the one doctor runs on. */
+    platform?: NodeJS.Platform;
+    /** Whether a person can answer prompts; defaults to stdin being a terminal. */
+    isInteractive?: () => boolean;
+}
+
+/**
+ * Warn before filing an issue from an outdated OpenCode 2 install, with the
+ * same text plain doctor prints. Returns false when the user chose to stop and
+ * update first; a non-interactive run only warns.
+ */
+async function warnOutdatedBeforeIssue(
+    freshness: IssuePluginFreshness,
+    options: { platform: NodeJS.Platform; interactive: boolean },
+): Promise<boolean> {
+    if (freshness.openCode2?.action !== "stale") return true;
+    reportOpenCodeV2PluginCache(
+        freshness.openCode2,
+        {
+            pass: (message) => log.success(message),
+            warn: (message) => log.warn(message),
+            info: (message) => log.info(message),
+        },
+        { reportMissing: false, platform: options.platform },
+    );
+    if (!options.interactive) return true;
+    const proceed = await confirm(
+        "Continue filing the issue? No stops here so you can update first.",
+        false,
+    );
+    if (!proceed) {
+        outro(
+            "Issue not filed. Update the plugin, then run `magic-context doctor --issue` again if the problem remains.",
+        );
+    }
+    return proceed;
+}
+
 export async function runIssueFlow(
     options: { reportPath?: string } = {},
-    deps: { collectDiagnostics: () => Promise<DiagnosticReport> } = { collectDiagnostics },
+    deps: IssueFlowDeps = { collectDiagnostics },
 ): Promise<number> {
+    const platform = deps.platform ?? process.platform;
+    const checkFreshness = deps.checkPluginFreshness ?? checkPluginFreshnessForIssue;
+
     if (options.reportPath) {
         // Scripted runs (CI, bug templates) need a report without prompts.
+        const freshness = await checkFreshness();
+        await warnOutdatedBeforeIssue(freshness, { platform, interactive: false });
         try {
-            const report = await deps.collectDiagnostics();
+            const report = await deps.collectDiagnostics({ npmVersions: freshness.npmVersions });
             const bundled = await bundleIssueReport(
                 report,
                 "Generated non-interactively by `doctor --issue --report`.",
@@ -642,6 +747,10 @@ export async function runIssueFlow(
 
     intro("Magic Context Issue Report");
 
+    const interactive = (deps.isInteractive ?? (() => process.stdin.isTTY === true))();
+    const freshness = await checkFreshness();
+    if (!(await warnOutdatedBeforeIssue(freshness, { platform, interactive }))) return 0;
+
     const title = await text("Issue title", {
         placeholder: "Short summary of the problem",
         validate: (value) => (value.trim() ? undefined : "Title is required"),
@@ -655,7 +764,7 @@ export async function runIssueFlow(
     s.start("Collecting diagnostics");
 
     try {
-        const report = await deps.collectDiagnostics();
+        const report = await deps.collectDiagnostics({ npmVersions: freshness.npmVersions });
         s.stop("Diagnostics collected");
 
         // Ask the user which session this issue relates to. Only show the

@@ -359,6 +359,8 @@ export function reportOpenCodeV2PluginCache(
         reportMissing: boolean;
         /** The local path the config loads Magic Context from, for the unused-copy line. */
         loadedFrom?: string;
+        /** The system the advice is for; defaults to the one doctor runs on. */
+        platform?: NodeJS.Platform;
     },
 ): { fixed: boolean; issue: boolean } {
     const tag = result.distTag ?? "latest";
@@ -386,8 +388,13 @@ export function reportOpenCodeV2PluginCache(
                 `OpenCode 2 is running an outdated Magic Context${slotName} (${versions}); OpenCode does not install new releases on its own`,
             );
             report.info(`  To upgrade, ${OPENCODE_V2_PLUGIN_UPDATE_HINT},`);
+            // On Windows `doctor --fix` can never prove the slot unused (see
+            // probeHostProcessesUsing), so it would leave the slot in place;
+            // point at the step that works there instead.
             report.info(
-                "  or quit OpenCode (including `opencode service stop`) and run `magic-context doctor --fix`.",
+                (options.platform ?? process.platform) === "win32"
+                    ? `  or quit OpenCode and delete ${result.slot}; the next start installs the current ${result.distTag ? `${tag} ` : ""}release.`
+                    : "  or quit OpenCode (including `opencode service stop`) and run `magic-context doctor --fix`.",
             );
             // An available update is advice, not a broken install: OpenCode's own
             // plugins dialog shows it the same way, so doctor warns without failing.

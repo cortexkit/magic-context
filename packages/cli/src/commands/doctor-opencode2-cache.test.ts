@@ -275,7 +275,7 @@ describe("doctor OpenCode 2 plugin cache check", () => {
                 warn: (m) => lines.push(`warn ${m}`),
                 info: (m) => lines.push(`info ${m}`),
             },
-            { reportMissing: true },
+            { reportMissing: true, platform: "linux" },
         );
         // An available update warns but doesn't fail doctor: it isn't a broken install.
         expect(outcome).toEqual({ fixed: false, issue: false });
@@ -284,6 +284,50 @@ describe("doctor OpenCode 2 plugin cache check", () => {
         expect(lines.join("\n")).toContain("ctrl+u");
         expect(lines.join("\n")).toContain("`opencode plugin update`");
         expect(lines.join("\n")).toContain("doctor --fix");
+    });
+
+    it("prints the same stale advice per system, without doctor --fix on Windows", () => {
+        const slot =
+            "C:\\Users\\me\\.cache\\opencode\\npm\\@cortexkit\\opencode-magic-context@latest";
+        const adviceFor = (platform: NodeJS.Platform, distTag?: string) => {
+            const lines: string[] = [];
+            reportOpenCodeV2PluginCache(
+                {
+                    action: "stale",
+                    slot,
+                    cached: "0.49.34",
+                    latest: "0.49.52",
+                    ...(distTag ? { distTag } : {}),
+                },
+                {
+                    pass: (m) => lines.push(`pass ${m}`),
+                    warn: (m) => lines.push(`warn ${m}`),
+                    info: (m) => lines.push(`info ${m}`),
+                },
+                { reportMissing: true, platform },
+            );
+            return lines;
+        };
+        const warning =
+            "warn OpenCode 2 is running an outdated Magic Context (cached: 0.49.34, latest: 0.49.52); OpenCode does not install new releases on its own";
+        const fromOpenCode =
+            "info   To upgrade, update it from OpenCode: open /plugins, select Magic Context and press ctrl+u (ctrl+r only re-checks), or run `opencode plugin update`,";
+        for (const platform of ["linux", "darwin"] as const) {
+            expect(adviceFor(platform)).toEqual([
+                warning,
+                fromOpenCode,
+                "info   or quit OpenCode (including `opencode service stop`) and run `magic-context doctor --fix`.",
+            ]);
+        }
+        // doctor --fix cannot prove the slot unused on Windows and would leave it in place.
+        expect(adviceFor("win32")).toEqual([
+            warning,
+            fromOpenCode,
+            `info   or quit OpenCode and delete ${slot}; the next start installs the current release.`,
+        ]);
+        expect(adviceFor("win32", "beta").at(-1)).toEndWith(
+            "; the next start installs the current beta release.",
+        );
     });
 });
 
