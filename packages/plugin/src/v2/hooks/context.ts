@@ -102,6 +102,7 @@ import {
 } from "../../hooks/magic-context/read-session-formatting";
 import { createM0RenderOptions } from "../../hooks/magic-context/render-options";
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
+import { clearSidebarObservations } from "../../hooks/magic-context/sidebar-observations";
 import {
     STORAGE_BUSY_MESSAGE,
     StorageBusyRefusalError,
@@ -1815,6 +1816,7 @@ export async function registerContext(context: V2Context) {
                             continue;
                         }
                         if (event.type === "session.deleted") {
+                            clearSidebarObservations(sessionID);
                             overflowRecovery.forget(sessionID);
                             hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);

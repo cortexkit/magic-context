@@ -91,6 +91,25 @@ async function startServer(
 }
 
 describe("TUI context RPC data", () => {
+    test("loadSidebarSnapshot throwOnFailure exposes RPC failures instead of a cached snapshot", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-scheduled";
+        const sessionId = "ses_scheduled";
+        let response: Record<string, unknown> = snapshot(sessionId, 250) as unknown as Record<
+            string,
+            unknown
+        >;
+        await startServer(dataHome, directory, () => response);
+        initRpcClient(directory);
+        expect(
+            (await loadSidebarSnapshot(sessionId, directory, { throwOnFailure: true })).inputTokens,
+        ).toBe(250);
+        response = { error: "database busy" };
+        await expect(
+            loadSidebarSnapshot(sessionId, directory, { throwOnFailure: true }),
+        ).rejects.toThrow("database busy");
+        expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(250);
+    });
     test("uses an unexpired sticky snapshot only for failed responses", async () => {
         const dataHome = makeDataHome();
         const directory = "/repo-sticky";

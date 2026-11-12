@@ -1,0 +1,1372 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`option B sidebar preserves the expanded and incident render output 1`] = `
+[
+  {
+    "collapsed": null,
+    "frame": [
+      " ▼ MAGIC CONTEXT                  v0.49.52",
+      "                                          ",
+      "Context                                   ",
+      "ctx ██████░░░░ 45% left          483K/872K",
+      "Next summary                 at 61% · +49K",
+      "                                          ",
+      "History                                   ",
+      "Historian                             idle",
+      "Last run                    1h55m ago · ok",
+      "Model                     Gemini 3.8 Flash",
+      "Waiting                           140 msgs",
+      "                                          ",
+      "Prompt cache                              ",
+      "Cache built                        29h ago",
+      "Since then        6 summaries · 7 memories",
+      "Queued drops         151 · ≈49K at rebuild",
+      "                                          ",
+      "Knowledge                                 ",
+      "Memories                       225 · 7 new",
+      "Notes                  4 · 1 smart waiting",
+      "                                          ",
+      "Dreamer                                   ",
+      "Last run                    2h30m ago · ok",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "",
+    ],
+    "lines": [
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#000000",
+          "text": "▼ MAGIC CONTEXT",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "v0.49.52",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Context",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "ctx ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#00ff00",
+          "text": "██████░░░░",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#00ff00",
+          "text": "45% left",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "          ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "483K/872K",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Next summary",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "at 61% · +49K",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "History",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Historian",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                             ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "idle",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Last run",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                    ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "1h55m ago · ok",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Model",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                     ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Gemini 3.8 Flash",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Waiting",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                           ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "140 msgs",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Prompt cache",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                              ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Cache built",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                        ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "29h ago",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Since then",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "        ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "6 summaries · 7 memories",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Queued drops",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "         ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "151 · ≈49K at rebuild",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Knowledge",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                 ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Memories",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                       ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "225 · 7 new",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Notes",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                  ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "4 · 1 smart waiting",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Dreamer",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Last run",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                    ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "2h30m ago · ok",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+    ],
+  },
+  {
+    "collapsed": null,
+    "frame": [
+      " ▼ MAGIC CONTEXT                  v0.49.52",
+      "                                          ",
+      "Context                                   ",
+      "ctx ██████░░░░ 45% left          483K/872K",
+      "Next summary                 at 61% · +49K",
+      "                                          ",
+      "History                                   ",
+      "Historian                      summarizing",
+      "Last run                 1m ago · fallback",
+      "Model                  DeepSeek V4.1 Flash",
+      "Waiting                            28 msgs",
+      "                                          ",
+      "Prompt cache                              ",
+      "Cache built                        29h ago",
+      "Since then        6 summaries · 7 memories",
+      "Queued drops         151 · ≈49K at rebuild",
+      "                                          ",
+      "Knowledge                                 ",
+      "Memories                       225 · 7 new",
+      "Notes                  4 · 1 smart waiting",
+      "                                          ",
+      "Dreamer                                   ",
+      "Last run                    2h30m ago · ok",
+      "                                          ",
+      "Health                                    ",
+      "Historian              Gemini 4/4 rejected",
+      "Fallback                   finished 2 runs",
+      "/ctx-status shows details                 ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "                                          ",
+      "",
+    ],
+    "lines": [
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#000000",
+          "text": "▼ MAGIC CONTEXT",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "v0.49.52",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Context",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "ctx ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#00ff00",
+          "text": "██████░░░░",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": " ",
+        },
+        {
+          "attributes": 0,
+          "fg": "#00ff00",
+          "text": "45% left",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "          ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "483K/872K",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Next summary",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "at 61% · +49K",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "History",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Historian",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                      ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "summarizing",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Last run",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "1m ago · fallback",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Model",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                  ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "DeepSeek V4.1 Flash",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Waiting",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                            ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "28 msgs",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Prompt cache",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                              ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Cache built",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                        ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "29h ago",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Since then",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "        ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "6 summaries · 7 memories",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Queued drops",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "         ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "151 · ≈49K at rebuild",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Knowledge",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                 ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Memories",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                       ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "225 · 7 new",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Notes",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                  ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "4 · 1 smart waiting",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Dreamer",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                   ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Last run",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                    ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "2h30m ago · ok",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 1,
+          "fg": "#ffffff",
+          "text": "Health",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                    ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Historian",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "              ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ff8800",
+          "text": "Gemini 4/4 rejected",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "Fallback",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                   ",
+        },
+        {
+          "attributes": 1,
+          "fg": "#ff8800",
+          "text": "finished 2 runs",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#888888",
+          "text": "/ctx-status shows details",
+        },
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                 ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+      [
+        {
+          "attributes": 0,
+          "fg": "#ffffff",
+          "text": "                                          ",
+        },
+      ],
+    ],
+  },
+]
+`;
