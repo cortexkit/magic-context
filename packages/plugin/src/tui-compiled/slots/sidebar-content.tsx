@@ -176,7 +176,7 @@ const SidebarContent = props => {
       waiting: present(data?.waitingMessages) ? `${data?.waitingMessages} msgs` : "no reading",
       cacheBuilt: present(cacheAt) ? relativeTime(cacheAt) : "—",
       sinceThen: present(data?.summariesSinceCache) && present(data?.memoriesSinceCache) ? `${data?.summariesSinceCache} summaries · ${data?.memoriesSinceCache} memories` : "—",
-      drops: present(data?.queuedDropCount) && present(drops) ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild` : "—",
+      drops: present(data?.queuedDropCount) ? present(drops) ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild` : `${data?.queuedDropCount} · no reading` : "—",
       memories: present(data?.memoryCount) ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new` : "—",
       notes: present(data?.sessionNoteCount) && present(data?.readySmartNoteCount) ? `${data?.sessionNoteCount} · ${data?.readySmartNoteCount} smart waiting` : "—",
       dreamerLastRun: present(lastDream) ? `${relativeTime(lastDream)} · ${data?.dreamerFailures?.length ? "failed" : "ok"}` : "—",

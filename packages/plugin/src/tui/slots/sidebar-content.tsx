@@ -262,10 +262,11 @@ const SidebarContent = (props: {
                 present(data?.summariesSinceCache) && present(data?.memoriesSinceCache)
                     ? `${data?.summariesSinceCache} summaries · ${data?.memoriesSinceCache} memories`
                     : "—",
-            drops:
-                present(data?.queuedDropCount) && present(drops)
+            drops: present(data?.queuedDropCount)
+                ? present(drops)
                     ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild`
-                    : "—",
+                    : `${data?.queuedDropCount} · no reading`
+                : "—",
             memories: present(data?.memoryCount)
                 ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new`
                 : "—",

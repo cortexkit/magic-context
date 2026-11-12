@@ -171,6 +171,7 @@ const cases = [
         toggleHeader: true,
         preferences: { "magic-context": { rememberCollapsed: true } },
     },
+    { snapshot: { ...healthy, queuedDropCount: 2, queuedDropTokens: undefined } },
 ];
 type Result = {
     frame: string;
@@ -251,6 +252,9 @@ describe("option B sidebar", () => {
     test("labels only drop operations as queued drops", () => {
         row(21, "Queued drops", "3 · ≈49K at rebuild");
         row(22, "Cache", "3 drops queued ●");
+    });
+    test("shows the queued-drop count without a token estimate when none is reported", () => {
+        row(cases.length - 1, "Queued drops", "2 · no reading");
     });
     test("does not credit a later primary model for cumulative fallback runs", () => {
         row(23, "Fallback", "finished 2 runs");
