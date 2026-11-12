@@ -115,6 +115,37 @@ test("a session that read normally after T0 and then reads zero is a new urgent 
     expect(s.args.state.wave.open?.members).toHaveLength(3);
 });
 
+test("a fresh burst while an older wave is open opens a new wave with one wake", async () => {
+    const later = T0 + 3 * HOUR;
+    const s = fixture();
+    await s.start();
+    await s.feed([
+        ...pair("first", later, later - 5 * MINUTE),
+        ...pair("second", later + 2 * MINUTE, later - 4 * MINUTE),
+        ...pair("third", later + 6 * MINUTE, later - 3 * MINUTE)], later + 7 * MINUTE);
+    // The first uncovered rewrite still wakes on its own; the second opens the
+    // new wave; the third joins it silently.
+    expect(s.alerts.map((alert) => [alert.session, alert.class])).toEqual([
+        ["alpha", "unexplained"], ["beta", "zero_read_wave"],
+        ["first", "unexplained"], ["second", "zero_read_wave"],
+    ]);
+    expect(s.args.state.wave.open?.startedAt).toBe(later);
+    expect(s.args.state.wave.open?.members.map((member) => member.session)).toEqual(["first", "second", "third"]);
+    const closed = s.logs.map((line) => JSON.parse(line)).filter((line) => line.kind === "runner_zero_read_wave_closed");
+    expect(closed).toMatchObject([{ startedAt: T0, supersededBy: later, sessions: 3 }]);
+});
+
+test("a second rewrite of an open wave's member stays its own urgent event", async () => {
+    const later = T0 + 3 * HOUR;
+    const s = fixture();
+    await s.start();
+    await s.feed([row("alpha", later - MINUTE, 100_000, 0), row("alpha", later),
+        ...pair("other", later + MINUTE, later - MINUTE)], later + 2 * MINUTE);
+    expect(s.args.state.wave.open?.startedAt).toBe(T0);
+    expect(s.alerts.filter((alert) => alert.class === "unexplained").map((alert) => alert.session))
+        .toEqual(["alpha", "alpha", "other"]);
+});
+
 test("expiry wins over the wave, while model changes, small writes and nonzero reads never join", async () => {
     const expired = pair("expired", T0 + 5 * MINUTE, T0 - 2 * HOUR);
     const changed = pair("changed", T0 + 5 * MINUTE);

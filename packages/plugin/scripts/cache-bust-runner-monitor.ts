@@ -492,6 +492,10 @@ export async function scanRunnerFeed(args: {
         if (waveResult.member) {
             attributeRunnerWave(classified, state.wave.open!.startedAt);
         }
+        if (waveResult.superseded) args.log?.(JSON.stringify({
+            kind: "runner_zero_read_wave_closed", startedAt: waveResult.superseded.startedAt,
+            at: step.at, supersededBy: waveResult.opened!.startedAt, ...runnerWaveTotals(waveResult.superseded),
+        }));
         if (waveResult.opened) {
             args.log?.(JSON.stringify({ kind: "runner_zero_read_wave_opened", startedAt: waveResult.opened.startedAt, members: waveResult.opened.members, ...runnerWaveTotals(waveResult.opened) }));
             // Attribute earlier members' saved summary rows to the opened wave as well.

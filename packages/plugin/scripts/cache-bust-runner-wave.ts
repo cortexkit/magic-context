@@ -44,28 +44,36 @@ export function observeRunnerWave(
     previous: RunnerMeterStep,
     current: RunnerMeterStep,
     classification: RunnerClassification,
-): { member?: RunnerWaveMember; opened?: RunnerZeroReadWave } {
+): { member?: RunnerWaveMember; opened?: RunnerZeroReadWave; superseded?: RunnerZeroReadWave } {
     if (classification.class !== "unexplained" || current.read !== 0 || current.write < 20_000 ||
         (previous.prompt ?? previous.read + previous.write) < 20_000 || previous.model !== current.model) return {};
     const member: RunnerWaveMember = {
         ...identity, at: current.at, written: current.write, previousStepAt: previous.at,
     };
     if (state.open) {
-        if (state.open.members.some((prior) => prior.session === member.session) ||
-            previous.at >= state.open.startedAt) return {};
-        state.open.members.push(member);
-        return { member };
+        // A member's second rewrite stays its own urgent event.
+        if (state.open.members.some((prior) => prior.session === member.session)) return {};
+        if (previous.at < state.open.startedAt) {
+            state.open.members.push(member);
+            return { member };
+        }
+        // This session's previous step came after the open wave began, so that
+        // wave can't explain the rewrite. It becomes a candidate for a new wave:
+        // if a second session has such a rewrite within the window, they open a
+        // new wave with one wake (typically routing moved more sessions off
+        // another account) instead of each rewrite waking on its own.
     }
     // Keep the first rewrite per session, not a later repeat that could hide a defect.
     if (!state.candidates.some((prior) => prior.session === member.session)) state.candidates.push(member);
     if (state.candidates.length < 2) return {};
+    const superseded = state.open;
     const members = state.candidates;
     const opened: RunnerZeroReadWave = {
         startedAt: members[0]!.at, members, summarizedMembers: members.length,
     };
     state.open = opened;
     state.candidates = [];
-    return { member, opened };
+    return { member, opened, ...(superseded ? { superseded } : {}) };
 }
 
 export function attributeRunnerWave(classification: RunnerClassification, startedAt: number): void {
