@@ -1,7 +1,8 @@
 // In-process reproduction of the session in GitHub issue 905: an OpenCode 2
-// subagent on a prefix-bound thinking model that works on one task message as a
-// single turn of many tool steps, with signed reasoning on every step, and calls
-// ctx_reduce on most of its tool outputs as it goes.
+// subagent on a prefix-bound thinking model (one where any edit in front of a
+// kept signed thinking block invalidates that block) that works on one task
+// message as a single turn of many tool steps, with signed reasoning on every
+// step, and calls ctx_reduce on most of its tool outputs as it goes.
 //
 // The real OpenCode 2 context hook serves every request. Each assistant step is
 // then stored with the provider input of the request that produced it, computed
@@ -158,7 +159,7 @@ export interface Issue905Run {
     passes: Issue905Pass[];
     /** Every session log line of the run. */
     logs: string[];
-    /** Channel-2 synthetic messages the hook asked the host to deliver. */
+    /** Notices the hook asked the host to deliver as synthetic messages. */
     synthetic: unknown[];
     /** Tool tags the agent queued drops for. */
     reducedTags: number;
@@ -324,9 +325,9 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
                 hooks.set(name, callback);
             },
             get: async () => ({ location: { directory: root } }),
-            // Channel-2 notices (for example a ctx_reduce reminder) are delivered
-            // as host synthetic messages; the run records them and does not add
-            // them to the conversation.
+            // Notices (such as a ctx_reduce reminder) are delivered as host
+            // synthetic messages; the run records them and does not add them to
+            // the conversation.
             synthetic: async (input: unknown) => {
                 synthetic.push(input);
             },

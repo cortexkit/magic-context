@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as configLoader from "../../config";
 import { setHostInstructionRetentionEnabledForTests } from "../../features/magic-context/storage-host-instruction-retention";
+import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { setCoveredInstructionSupersessionEnabledForTests } from "../fold/instruction-supersession";
 import {
     instructionRow,
@@ -12,11 +13,17 @@ import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import type { SessionContext } from "./types";
 
 // Review witnesses for OpenCode 2 instruction supersession over rows the
-// history summary covers. A pass held for recent heavy signed reasoning may
-// still rebuild in the force band when the execute threshold sits within ten
-// points of it (here 80%: the hold cap is 90%, the force band starts at 85%).
-// Such a pass may not strip the held turn's signed thinking, so it must not
-// change any byte in front of it either.
+// history summary covers. On a prefix-bound model a signed thinking block is
+// valid only while every byte in front of it is unchanged, so a pass must
+// never serve an edit in front of signed thinking it keeps.
+//
+// With the execute threshold at 80% the hold's cap is 90% and the force band
+// starts at 85%. The hold never applies in the force band, so a pass there
+// after heavy signed reasoning is unheld: it may edit the prefix, and strips
+// the turn's signed thinking when it does. A pass still held but permitted to
+// rewrite exists only on a first render whose new head changes no bytes (a
+// host-checkpoint head change or a changed tool list strips the thinking
+// instead), and such a pass may change nothing in front of the held thinking.
 
 const options = {
     area: "issue-886-review",
@@ -49,7 +56,7 @@ const instructionTexts = (draft: SessionContext) =>
 // About 2,900 tokens of signed reasoning: above the 1,500-token heavy step.
 const HELD = `HELD_SIGNED_REASONING ${"Weighing the cache invalidation order step by step. ".repeat(220)}`;
 
-async function heldForceBandFixture(seed: number) {
+async function heavyThinkingFixture(seed: number) {
     const f = await oc2ContextFixture(seed, options);
     // The fixture's config object is the one the mocked loader returns; the
     // hook reads it again on restart.
@@ -71,85 +78,182 @@ async function heldForceBandFixture(seed: number) {
     return {
         f,
         pass,
-        /** The provider answers with heavy signed reasoning, at 86% of the window. */
-        respondWithHeldThinking() {
-            f.respond(1, 260000);
+        /**
+         * The provider answers with heavy signed reasoning; by default at 86% of
+         * the window, in the force band.
+         */
+        respondWithHeavyThinking(inputTokens = 260000) {
+            f.respond(1, inputTokens);
             signedID = f.rows.at(-1)!.id;
         },
     };
 }
 
+/** The force-band pass after heavy reasoning: unheld, and permitted to rewrite. */
+function expectUnheldForceBandPass(logs: readonly string[]) {
+    expect(
+        logs.some((line) => line.includes("signed thinking hold: held=false reason=force_band")),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("thinking_hold=false"))).toBe(true);
+    expect(logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(true);
+}
+
+/** A first render after heavy reasoning: held, and still permitted to rewrite. */
+function expectHeldFirstRenderPass(logs: readonly string[]) {
+    expect(logs.some((line) => line.includes("thinking_hold=true"))).toBe(true);
+    expect(logs.some((line) => line.includes("first_render=true"))).toBe(true);
+    expect(logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(true);
+}
+
+/**
+ * The covered-row scenario: a summary covers a row that drops github, and a
+ * newer row names github again. `beforeNewerRow` runs once the covered row is
+ * served alone; the reply after the newer row carries heavy signed reasoning.
+ */
+async function coveredRowScenario(
+    fixture: Awaited<ReturnType<typeof heavyThinkingFixture>>,
+    inputTokens: number,
+    beforeHeavyPass: () => void = () => {},
+) {
+    const { f, pass, respondWithHeavyThinking } = fixture;
+    await pass();
+    const githubGone = catalogRow("COVERED_GONE", [docs, github], [docs]);
+    f.instruction(githubGone, both);
+    f.user("First batch.", 1000);
+    f.respond();
+    // The summary covers the row; the force-band rebuild after it moves the
+    // cut (no signed thinking yet, so nothing is held).
+    f.compartment(f.rows.length - 1);
+    f.user("Second batch.", 1000);
+    f.respond(1, 260000);
+    await pass();
+    f.respond();
+    const previous = await pass();
+    expect(instructionTexts(previous.draft)).toEqual([githubGone]);
+    // A newer row restates the catalog and names github again, and the reply
+    // carries heavy signed reasoning.
+    const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
+    f.instruction(githubBack, both);
+    f.user("Third batch.", 1000);
+    respondWithHeavyThinking(inputTokens);
+    beforeHeavyPass();
+    const heavy = await pass();
+    return { githubGone, githubBack, previous, heavy };
+}
+
+/** The same edit on a row after the cut (no summary covers it). */
+async function uncoveredRowScenario(
+    fixture: Awaited<ReturnType<typeof heavyThinkingFixture>>,
+    inputTokens: number,
+    beforeHeavyPass: () => void = () => {},
+) {
+    const { f, pass, respondWithHeavyThinking } = fixture;
+    await pass();
+    const githubGone = catalogRow("UNCOVERED_GONE", [docs, github], [docs]);
+    f.instruction(githubGone, both);
+    f.user("First batch.", 1000);
+    f.respond();
+    const previous = await pass();
+    const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
+    f.instruction(githubBack, both);
+    f.user("Second batch.", 1000);
+    respondWithHeavyThinking(inputTokens);
+    beforeHeavyPass();
+    const heavy = await pass();
+    return { githubGone, githubBack, previous, heavy };
+}
+
 // Witnesses. Their hold and permission preconditions are asserted too, so a
-// failing run shows which part fails.
-test("a held force-band pass does not retire a covered row in front of the held signed thinking", async () => {
-    const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(37886);
+// failing run shows which part fails. The invariant in each (never a retired
+// row together with kept thinking) is the property; the force-band tests then
+// also pin the outcome the unheld pass has.
+test("a force-band pass after heavy reasoning is unheld: it retires a covered row in front of the turn's signed thinking and strips that thinking in the same pass", async () => {
+    const fixture = await heavyThinkingFixture(37886);
     try {
-        await pass();
-        const githubGone = catalogRow("COVERED_GONE", [docs, github], [docs]);
-        f.instruction(githubGone, both);
-        f.user("First batch.", 1000);
-        f.respond();
-        // The summary covers the row; the force-band rebuild after it moves the
-        // cut (no signed thinking yet, so nothing is held).
-        f.compartment(f.rows.length - 1);
-        f.user("Second batch.", 1000);
-        f.respond(1, 260000);
-        await pass();
-        f.respond();
-        const covered = await pass();
-        expect(instructionTexts(covered.draft)).toEqual([githubGone]);
-        // A newer row restates the catalog and names github again, and the
-        // reply carries heavy signed reasoning: the next pass is held, but it
-        // is in the force band, so it may rebuild.
-        const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
-        f.instruction(githubBack, both);
-        f.user("Third batch.", 1000);
-        respondWithHeldThinking();
-        const held = await pass();
-        expect(held.logs.some((line) => line.includes("thinking_hold=true"))).toBe(true);
-        expect(held.logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(
-            true,
-        );
-        const coveredGone = !instructionTexts(held.draft).includes(githubGone);
-        const thinkingKept = held.bytes.includes("HELD_SIGNED_REASONING");
-        // Either the covered row stays until a pass that may strip the held
-        // thinking, or the thinking leaves with it. Serving the edit with the
-        // held block bound to the old bytes is what a prefix-bound model rejects.
+        const { githubGone, heavy } = await coveredRowScenario(fixture, 260000);
+        expectUnheldForceBandPass(heavy.logs);
+        const coveredGone = !instructionTexts(heavy.draft).includes(githubGone);
+        const thinkingKept = heavy.bytes.includes("HELD_SIGNED_REASONING");
+        // Serving the edit with the signed block bound to the old bytes is what
+        // a prefix-bound model rejects.
         expect({ coveredGone, thinkingKept }).not.toEqual({
             coveredGone: true,
             thinkingKept: true,
         });
+        expect({ coveredGone, thinkingKept }).toEqual({ coveredGone: true, thinkingKept: false });
     } finally {
-        await f.cleanup();
+        await fixture.f.cleanup();
     }
 }, 60000);
 
 // The same edit on a row after the cut. Unlike the covered case, this one
 // predates covered rows following supersession: it also fails when only rows
 // after the cut are reclaimed.
-test("a held force-band pass does not retire an uncovered row in front of the held signed thinking", async () => {
-    const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(38886);
+test("a force-band pass after heavy reasoning is unheld: it retires an uncovered row in front of the turn's signed thinking and strips that thinking in the same pass", async () => {
+    const fixture = await heavyThinkingFixture(38886);
     try {
-        await pass();
-        const githubGone = catalogRow("UNCOVERED_GONE", [docs, github], [docs]);
-        f.instruction(githubGone, both);
-        f.user("First batch.", 1000);
-        f.respond();
-        await pass();
-        const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
-        f.instruction(githubBack, both);
-        f.user("Second batch.", 1000);
-        respondWithHeldThinking();
-        const held = await pass();
-        expect(held.logs.some((line) => line.includes("thinking_hold=true"))).toBe(true);
-        expect(held.logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(
-            true,
+        const { githubGone, heavy } = await uncoveredRowScenario(fixture, 260000);
+        expectUnheldForceBandPass(heavy.logs);
+        const rowGone = !instructionTexts(heavy.draft).includes(githubGone);
+        const thinkingKept = heavy.bytes.includes("HELD_SIGNED_REASONING");
+        expect({ rowGone, thinkingKept }).not.toEqual({ rowGone: true, thinkingKept: true });
+        expect({ rowGone, thinkingKept }).toEqual({ rowGone: true, thinkingKept: false });
+    } finally {
+        await fixture.f.cleanup();
+    }
+}, 60000);
+
+// A pass held for heavy reasoning may still be permitted to rewrite on a first
+// render: the cached history head is gone (cleared here, as after a lost cache
+// row), so the pass renders it again. At 70% the pass is below the cap and
+// outside the force band. With a summary in the head, the new head changes
+// bytes in front of the turn's thinking, so the pass releases that thinking
+// (strips it) instead of staying held.
+test("a first-render pass after heavy reasoning that renders a changed head releases the signed thinking before it retires a covered row", async () => {
+    const fixture = await heavyThinkingFixture(43886);
+    try {
+        const { githubGone, heavy } = await coveredRowScenario(fixture, 211000, () =>
+            clearCachedM0M1(fixture.f.db, fixture.f.session),
         );
-        const rowGone = !instructionTexts(held.draft).includes(githubGone);
-        const thinkingKept = held.bytes.includes("HELD_SIGNED_REASONING");
+        expect(
+            heavy.logs.some((line) =>
+                line.includes("signed thinking hold: held=true reason=heavy_reasoning"),
+            ),
+        ).toBe(true);
+        expect(
+            heavy.logs.some(
+                (line) =>
+                    line.includes("rewrite permission: allowed=true") &&
+                    line.includes("signed_prefix_release=true") &&
+                    line.includes("first_render=true"),
+            ),
+        ).toBe(true);
+        const coveredGone = !instructionTexts(heavy.draft).includes(githubGone);
+        const thinkingKept = heavy.bytes.includes("HELD_SIGNED_REASONING");
+        expect({ coveredGone, thinkingKept }).not.toEqual({
+            coveredGone: true,
+            thinkingKept: true,
+        });
+        expect(thinkingKept).toBe(false);
+    } finally {
+        await fixture.f.cleanup();
+    }
+}, 60000);
+
+// The same first render without a summary in the head: the head bytes do not
+// change, so the pass stays held while the first render permits it to rewrite.
+test("a held first-render pass does not retire an uncovered row in front of the held signed thinking", async () => {
+    const fixture = await heavyThinkingFixture(44886);
+    try {
+        const { githubGone, heavy } = await uncoveredRowScenario(fixture, 211000, () =>
+            clearCachedM0M1(fixture.f.db, fixture.f.session),
+        );
+        expectHeldFirstRenderPass(heavy.logs);
+        const rowGone = !instructionTexts(heavy.draft).includes(githubGone);
+        const thinkingKept = heavy.bytes.includes("HELD_SIGNED_REASONING");
         expect({ rowGone, thinkingKept }).not.toEqual({ rowGone: true, thinkingKept: true });
     } finally {
-        await f.cleanup();
+        await fixture.f.cleanup();
     }
 }, 60000);
 
@@ -290,45 +394,32 @@ test("the pass that turns host instruction retention on strips the signed thinki
     }
 }, 60000);
 
-// A held pass in the force band (see the top of this file) may rebuild, but
-// it may not rewrite anything in front of the held signed block, so it serves
-// exactly the instruction rows of the request before it. A retirement it
-// would have selected waits for the next pass that may rewrite the whole
-// prefix.
-test("a held force-band pass serves the previous request's rows and leaves the retirement to the next whole-prefix pass", async () => {
-    const { f, pass, respondWithHeldThinking } = await heldForceBandFixture(42886);
+// A held pass permitted to rewrite (a first render: the cached history head is
+// gone, here cleared as after a lost cache row) may not rewrite anything in
+// front of the held signed block, so it serves exactly the instruction rows of
+// the request before it. A retirement it would have selected waits for the
+// next pass that may rewrite the whole prefix. In the force band no pass is
+// held any more, so the first render is where this can still happen.
+test("a held first-render pass serves the previous request's rows and leaves the retirement to the next whole-prefix pass", async () => {
+    const fixture = await heavyThinkingFixture(42886);
+    const { f, pass } = fixture;
     try {
-        await pass();
-        const githubGone = catalogRow("COVERED_GONE", [docs, github], [docs]);
-        f.instruction(githubGone, both);
-        f.user("First batch.", 1000);
-        f.respond();
-        f.compartment(f.rows.length - 1);
-        f.user("Second batch.", 1000);
-        f.respond(1, 260000);
-        await pass();
-        f.respond();
-        const previous = await pass();
-        expect(instructionTexts(previous.draft)).toEqual([githubGone]);
-        const githubBack = catalogRow("LIVE_BACK", [docs], [docs, github]);
-        f.instruction(githubBack, both);
-        f.user("Third batch.", 1000);
-        respondWithHeldThinking();
-        const held = await pass();
-        expect(held.logs.some((line) => line.includes("thinking_hold=true"))).toBe(true);
-        expect(held.logs.some((line) => line.includes("rewrite permission: allowed=true"))).toBe(
-            true,
+        const { githubGone, githubBack, previous, heavy } = await uncoveredRowScenario(
+            fixture,
+            211000,
+            () => clearCachedM0M1(f.db, f.session),
         );
-        expect(instructionTexts(held.draft)).toEqual([githubGone, githubBack]);
-        expect(JSON.stringify(held.draft.system)).toBe(JSON.stringify(previous.draft.system));
-        expect(JSON.stringify(held.draft.messages.slice(0, previous.draft.messages.length))).toBe(
+        expectHeldFirstRenderPass(heavy.logs);
+        expect(instructionTexts(heavy.draft)).toEqual([githubGone, githubBack]);
+        expect(JSON.stringify(heavy.draft.system)).toBe(JSON.stringify(previous.draft.system));
+        expect(JSON.stringify(heavy.draft.messages.slice(0, previous.draft.messages.length))).toBe(
             JSON.stringify(previous.draft.messages),
         );
-        expect(held.bytes).toContain("HELD_SIGNED_REASONING");
-        // A later turn without heavy reasoning ends the hold; that pass may
-        // rewrite the whole prefix, retires the covered row and strips the
-        // older signed block in front of which it edits.
-        f.user("Fourth batch.", 1000);
+        expect(heavy.bytes).toContain("HELD_SIGNED_REASONING");
+        // A later turn without heavy reasoning ends the hold; that pass, in the
+        // force band, may rewrite the whole prefix, retires the row and strips
+        // the older signed block in front of which it edits.
+        f.user("Third batch.", 1000);
         f.respond(1, 260000);
         const unheld = await pass();
         expect(unheld.logs.some((line) => line.includes("thinking_hold=false"))).toBe(true);
