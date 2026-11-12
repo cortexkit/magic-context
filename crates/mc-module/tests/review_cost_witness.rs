@@ -217,6 +217,7 @@ impl Router for Runner {
         Err(RouteError {
             code: "routing_unavailable".into(),
             message: "no routing in this test".into(),
+            detail: None,
         })
     }
 

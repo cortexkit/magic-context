@@ -201,8 +201,13 @@ pub async fn run<C: RunnerClient + Router>(
             .await
         {
             Ok(answer) => answer,
-            // No route left after a failure: the failure is what to report.
-            Err(error) => return Err(failure.unwrap_or_else(|| error.to_string()).into()),
+            Err(error) => {
+                if let Some(wait) = AccountWait::of_routing(&error, SendKind::TurnOne, now_ms()) {
+                    return Err(SummaryError::AccountWait(wait));
+                }
+                // No route left after a failure: the failure is what to report.
+                return Err(failure.unwrap_or_else(|| error.to_string()).into());
+            }
         };
         tried.push(answer.route.route_key());
         let window = fit::Window {

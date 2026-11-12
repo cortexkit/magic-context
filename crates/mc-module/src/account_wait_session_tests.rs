@@ -111,6 +111,50 @@ async fn account_wait_ends_a_run_waiting_with_no_failure_charged() {
 }
 
 #[tokio::test]
+async fn routing_account_wait_releases_quota_preserves_views_and_stops_repeat_notices() {
+    let (mut session, client, settings) = ready();
+    assert!(session.decide_notice(&settings).summary.is_some());
+    assert!(session.drain.spent > 0);
+    let now = now_ms();
+    let wait = AccountWait::of_routing(
+        &crate::routing::RouteError {
+            code: "no_route".into(),
+            message: "blocked routes".into(),
+            detail: Some(json!({"reason": "all_inadequate", "reset_at_ms": now + 20 * 60_000})),
+        },
+        SendKind::TurnOne,
+        now,
+    )
+    .unwrap();
+    session
+        .summary_finished(
+            &client,
+            &settings,
+            Err(run::SummaryError::AccountWait(wait)),
+            now,
+        )
+        .await;
+    assert_eq!(session.app.failures, 0);
+    assert_eq!(session.app.last_error, None);
+    assert_eq!(session.drain.spent, 0);
+    assert_eq!(session.drain.failure_at, 0);
+    assert_eq!(session.no_progress, None);
+    for _ in 0..2 {
+        let pass = session.decide_notice(&settings);
+        assert!(pass.summary.is_none());
+        assert!(pass.rebuild);
+    }
+    assert!(session.account_wait.as_ref().unwrap().holds(now + 4_000));
+    let (view, _) = session.build(&settings, None, false, None);
+    assert!(serde_json::to_string(&view.unwrap())
+        .unwrap()
+        .contains("\"m2\""));
+    at_usage(&mut session, 96.0);
+    assert!(session.decide_notice(&settings).summary.is_some());
+    assert!(session.decide_notice(&settings).summary.is_none());
+}
+
+#[tokio::test]
 async fn account_wait_starts_no_run_and_lets_held_drops_land() {
     let (mut session, client, settings) = ready();
     refused_run(&mut session, &client, &settings).await;

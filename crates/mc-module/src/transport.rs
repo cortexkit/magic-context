@@ -351,6 +351,7 @@ impl SubcRunnerClient {
         let unavailable = |message: String| RouteError {
             code: "routing_unavailable".into(),
             message,
+            detail: None,
         };
         let consumer = self.consumer().await.map_err(unavailable)?;
         let providers = consumer
@@ -368,6 +369,7 @@ impl SubcRunnerClient {
                         many.len(),
                         many.join(", ")
                     ),
+                    detail: None,
                 })
             }
         };
@@ -388,12 +390,14 @@ impl SubcRunnerClient {
                 subc_client_rs::CallError::Module(body) => RouteError {
                     code: body.code,
                     message: body.message,
+                    detail: body.detail,
                 },
                 other => unavailable(format!("{method}: {other:?}")),
             })?;
         let mut body: Value = serde_json::from_slice(&reply).map_err(|error| RouteError {
             code: "routing_unavailable".into(),
             message: format!("{method} answer: {error}"),
+            detail: None,
         })?;
         Ok(body["result"].take())
     }
@@ -405,6 +409,7 @@ impl crate::routing::Router for SubcRunnerClient {
         serde_json::from_value(result).map_err(|error| RouteError {
             code: "routing_unavailable".into(),
             message: format!("route.select answer: {error}"),
+            detail: None,
         })
     }
 

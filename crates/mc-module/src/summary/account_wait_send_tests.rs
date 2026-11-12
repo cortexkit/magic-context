@@ -91,6 +91,7 @@ impl Answer {
 
 pub(crate) struct Client {
     answer: Answer,
+    route_refusal: Option<RouteError>,
     pub(crate) sends: Mutex<usize>,
     selects: Mutex<usize>,
     reports: Mutex<Vec<Outcome>>,
@@ -100,6 +101,7 @@ impl Client {
     pub(crate) fn new(answer: Answer) -> Self {
         Self {
             answer,
+            route_refusal: None,
             sends: Mutex::new(0),
             selects: Mutex::new(0),
             reports: Mutex::new(Vec::new()),
@@ -164,6 +166,9 @@ impl Router for Client {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
         let mut selects = self.selects.lock().unwrap();
         *selects += 1;
+        if let Some(error) = &self.route_refusal {
+            return Err(error.clone());
+        }
         let route = RouteRef::new("test", format!("model-{selects}"));
         let runner = RunnerRef::new(
             request.runners.unwrap_or_default()[0].clone(),
@@ -540,3 +545,7 @@ async fn account_pause_0842_older_provider_code_only_body_keeps_its_wait() {
     let wait = pause_at_deadline(&client).await;
     assert_eq!(wait.until_ms, wait.at_ms + 120_000);
 }
+
+#[cfg(test)]
+#[path = "routing_wait_tests.rs"]
+mod routing_wait_tests;

@@ -128,6 +128,7 @@ impl Router for HostClient {
             return Err(RouteError {
                 code: "no_route".into(),
                 message: "nothing fits".into(),
+                detail: None,
             });
         }
         let excluded = request.exclude.clone().unwrap_or_default();
@@ -140,6 +141,7 @@ impl Router for HostClient {
                     return Err(RouteError {
                         code: "no_route".into(),
                         message: "every route excluded".into(),
+                        detail: None,
                     })
                 }
             }
@@ -4034,6 +4036,7 @@ impl Router for StuckClient {
         Err(RouteError {
             code: "routing_unavailable".into(),
             message: "no routing here".into(),
+            detail: None,
         })
     }
 
@@ -4675,6 +4678,7 @@ impl Router for SynapseClient {
         Err(RouteError {
             code: "routing_unavailable".into(),
             message: "no routing here".into(),
+            detail: None,
         })
     }
 

@@ -35,6 +35,10 @@ pub const DEFAULT_WAIT_MS: i64 = 5 * 60 * 1000;
 /// once this has passed, one run is tried, and its answer names the next
 /// time if the account is still out.
 pub const MAX_WAIT_MS: i64 = 6 * 60 * 60 * 1000;
+/// Routing probes reach no model and create no child. They may be retried
+/// sooner than runner sends, since a manual reset or sign-in can restore a
+/// route before its stated reset time.
+pub const MAX_ROUTING_WAIT_MS: i64 = 60 * 60 * 1000;
 /// The shortest wait. A hint of zero, or a reset time already past (a
 /// runner with a stale clock or quota record), would otherwise let every
 /// notice start a new summarizer run against the same accounts, with no
@@ -80,6 +84,43 @@ pub struct AccountWait {
 }
 
 impl AccountWait {
+    /// Routing can refuse before any child starts. A stated recovery time
+    /// wins for any reason; only quota or blocked accounts wait without one.
+    pub fn of_routing(
+        error: &crate::routing::RouteError,
+        send: SendKind,
+        now_ms: i64,
+    ) -> Option<Self> {
+        use cortexkit_role_routing::errors::NoRouteReason;
+
+        let detail = error.detail.as_ref().unwrap_or(&Value::Null);
+        // Decode independently: a malformed reason must not discard a usable
+        // reset, nor a malformed reset hide a known temporary reason.
+        let reason = detail
+            .get("reason")
+            .cloned()
+            .and_then(|reason| serde_json::from_value::<NoRouteReason>(reason).ok());
+        let reset = detail.get("reset_at_ms").and_then(Value::as_u64);
+        if reset.is_none()
+            && !matches!(
+                reason,
+                Some(NoRouteReason::QuotaOrCooldown | NoRouteReason::AccountsBlocked)
+            )
+        {
+            return None;
+        }
+        let code = match reason {
+            Some(reason) => format!("{}:{}", error.code, reason.as_str()),
+            None => error.code.clone(),
+        };
+        Some(Self {
+            code,
+            until_ms: until(now_ms, None, reset).min(now_ms.saturating_add(MAX_ROUTING_WAIT_MS)),
+            at_ms: now_ms,
+            send,
+        })
+    }
+
     /// The wait a refused `session.send` names, from the error body's outer
     /// `code` and its `detail`. Only the outer code decides whether it is an
     /// account wait; the detail only says how long.

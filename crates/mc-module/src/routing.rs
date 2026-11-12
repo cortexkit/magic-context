@@ -32,6 +32,9 @@ pub struct RouteError {
     /// `routing_ambiguous` (more than one).
     pub code: String,
     pub message: String,
+    /// The provider's open refusal detail. Its fields are optional to readers:
+    /// an absent or malformed timing hint must not hide the refusal itself.
+    pub detail: Option<serde_json::Value>,
 }
 
 impl std::fmt::Display for RouteError {
