@@ -1,5 +1,9 @@
 import { compareOpenCodeMessagesByCanonicalOrder } from "../../features/magic-context/compaction-marker";
 import {
+    type FrozenReasoningPart,
+    readFrozenMergedReasoningParts,
+} from "../../features/magic-context/merged-reasoning-decisions";
+import {
     mergeProtectedTools,
     normalizeProtectedToolName,
     protectedToolTagNumbers,
@@ -130,7 +134,11 @@ import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
-import { snapshotEmergencyServedMass } from "./emergency-drop";
+import {
+    type EmergencyServedSnapshot,
+    snapshotEmergencyServedMass,
+    tagsSinceReading,
+} from "./emergency-drop";
 import {
     contextRefusalError,
     EmergencyFailClosedError,
@@ -688,6 +696,68 @@ function proactiveStripStartIndex(args: {
     });
     if (lastServed.proven) return divergence;
     return divergence ?? lastServed.messages.length;
+}
+
+/**
+ * Copies of `owners` as the request will carry them once this pass replays the
+ * thinking strips earlier passes froze (binding recovery and merged-reasoning
+ * omissions). Those strips run only when the pass finalizes its
+ * representation, after the emergency planner, so the host's fresh messages
+ * still hold the original reasoning parts. Surviving parts are the original
+ * objects; a stripped one is left out. Only the messages whose reasoning a
+ * queued drop could take are needed, so only they are copied. A legacy merged
+ * entry that names no exact parts is replayed by a layout rule that depends on
+ * the whole array; its message counts as stripped whole, which can only leave
+ * reasoning out of the credit, never add it.
+ */
+function messagesAfterReplayedThinkingStrips(
+    args: Pick<
+        RunPostTransformPhaseArgs,
+        "db" | "sessionId" | "resolvedProviderID" | "restoreThinkingMessageIds"
+    >,
+    owners: Iterable<MessageLike>,
+    compactionOff: boolean,
+    compactionOffFrozenThinking: ReadonlySet<string>,
+): MessageLike[] {
+    const mergedIds = compactionOff
+        ? new Set<string>()
+        : new Set(getMergedReasoningStrippedIds(args.db, args.sessionId));
+    const bindingIds = compactionOff
+        ? new Set(compactionOffFrozenThinking)
+        : new Set(
+              [...mergedIds]
+                  .filter((id) => id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
+                  .map((id) => id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length)),
+          );
+    const mergedReplays = args.resolvedProviderID === "anthropic";
+    const exactParts = mergedReplays
+        ? readFrozenMergedReasoningParts(mergedIds)
+        : new Map<string, FrozenReasoningPart[]>();
+    const reasoningType = (part: unknown) =>
+        isRecord(part) &&
+        ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type));
+    const copies: MessageLike[] = [];
+    for (const message of new Set(owners)) {
+        const id = typeof message.info.id === "string" ? message.info.id : undefined;
+        if (id === undefined || args.restoreThinkingMessageIds?.has(id)) {
+            copies.push(message);
+            continue;
+        }
+        const legacy = mergedReplays && mergedIds.has(id);
+        const whole = bindingIds.has(id) || legacy;
+        const exact = exactParts.get(id);
+        copies.push({
+            ...message,
+            parts: message.parts.filter((part, index) => {
+                if (!reasoningType(part)) return true;
+                if (whole) return false;
+                if (!exact) return true;
+                const partId = isRecord(part) && typeof part.id === "string" ? part.id : undefined;
+                return !exact.includes(index) && !(partId !== undefined && exact.includes(partId));
+            }),
+        });
+    }
+    return copies;
 }
 
 /**
@@ -3469,23 +3539,48 @@ export async function runPostTransformPhase(
     let autoReclaimDidMutateThisPass = false;
     // The emergency planner below reads the provider's measure of the previous
     // request, while queued drops landing first take content (and the
-    // reasoning beside it) out of the request this pass serves. Measure the
-    // tagged content before anything lands, so the planner can take exactly
-    // that removed mass off the reading instead of treating it as a fixed part
-    // of the request. Only passes where the planner can run pay for this.
+    // reasoning beside it) out of the request this pass serves. Measure what
+    // those drops can remove before anything lands, so the planner can take
+    // exactly that mass off the reading instead of treating it as a fixed part
+    // of the request. Only the queued drops' own tags can leave in the drain,
+    // so only they are measured, and only on a pass where the planner can run
+    // and the drain has work. A pass whose emergency episode is latched has
+    // nothing to measure unless the drain applies something, and then the
+    // drain itself rearms the episode, so the latch is no reason to skip.
     const emergencyPlannerMayRun =
         shouldRunHeuristics &&
         forceBandConfirmed &&
         args.emergencyCeilingTokens !== undefined &&
         args.emergencyCeilingTokens > 0;
-    const servedBeforeRemovals = emergencyPlannerMayRun
-        ? snapshotEmergencyServedMass(
-              args.tags,
-              newTargets,
-              sessionDecisionCalibration(args.db, args.sessionId),
-              args.messages,
-          )
+    // Tags the previous reading never measured (the newest step's output and
+    // text): they must not lower the planner's fixed floor.
+    const tagsNewerThanReading = emergencyPlannerMayRun
+        ? tagsSinceReading(args.messages, newTargets)
         : undefined;
+    let servedBeforeRemovals: EmergencyServedSnapshot | undefined;
+    if (emergencyPlannerMayRun && shouldApplyPendingOps && pendingOps.length > 0) {
+        const queued = new Set(pendingOps.map((op) => op.tagId));
+        const owners = new Set<MessageLike>();
+        for (const tagNumber of queued) {
+            const target = newTargets.get(tagNumber);
+            if (!target?.dropReasoningParts?.length) continue;
+            for (const { message } of target.mutationParts ?? []) owners.add(message);
+            if (target.message) owners.add(target.message);
+        }
+        servedBeforeRemovals = snapshotEmergencyServedMass(
+            args.tags.filter(
+                (tag) => queued.has(tag.tagNumber) && !tagsNewerThanReading?.has(tag.tagNumber),
+            ),
+            newTargets,
+            sessionDecisionCalibration(args.db, args.sessionId),
+            messagesAfterReplayedThinkingStrips(
+                args,
+                owners,
+                compactionOff,
+                compactionOffFrozenThinking,
+            ),
+        );
+    }
     // Pending-op read, temporal decisions, the background permission observer
     // start and the reasoning-removal read.
     logTransformTiming(
@@ -3622,6 +3717,7 @@ export async function runPostTransformPhase(
                                   usagePercentage: args.contextUsage.percentage,
                                   passAlreadyPriced: emergencyRewriteAlreadyPriced,
                                   servedBeforePass: servedBeforeRemovals,
+                                  sinceReading: tagsNewerThanReading,
                               }
                             : undefined,
                     routine: routineCleanupApplied,

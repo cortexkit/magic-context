@@ -10,6 +10,7 @@ import {
     resolveToolTier,
     snapshotEmergencyServedMass,
     TARGET_FRACTION,
+    tagsSinceReading,
 } from "./emergency-drop";
 import { estimateTokens } from "./read-session-formatting";
 import { neutralizeDroppedReasoningPart } from "./sentinel";
@@ -787,6 +788,45 @@ describe("planEmergencyDrop — the request this pass serves", () => {
         expect(partial.reason).toContain("served≈100000 after ≈30000 removed this pass");
     });
 
+    it("a tag newer than the reading adds to what the pass serves without lowering the floor", () => {
+        // The reading (100,000) measured 8 reads of 4,020 each; the newest
+        // step's 30,000-token output arrived after it.
+        const reads = Array.from({ length: 8 }, (_, n) =>
+            tag(n + 1, "read", 1, { servedTokens: 4_020, reclaimableTokens: 3_900 }),
+        );
+        const input = {
+            tags: reads,
+            maxTag: 9,
+            protectedCutoff: null,
+            currentTotalInputTokens: 100_000,
+            ceilingTokens: 60_000,
+            usagePercentage: 90,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const newest = tag(9, "bash", 1, { servedTokens: 30_000, reclaimableTokens: 30_000 });
+        const withNewest = planEmergencyDrop({
+            ...input,
+            floorTags: [...reads, { ...newest, sinceReading: true }],
+        });
+        const without = planEmergencyDrop({ ...input, floorTags: reads });
+        // The fixed part the reading holds is 100,000 − 8 × 4,020 either way.
+        expect(withNewest.reason).toContain("fixed floor ≈67840 already exceeds ceiling 60000");
+        expect(without.reason).toContain("fixed floor ≈67840 already exceeds ceiling 60000");
+        // Counted as present at the reading, the same tag would have lowered it.
+        const biased = planEmergencyDrop({ ...input, floorTags: [...reads, newest] });
+        expect(biased.reason).toContain("floor≈37840");
+        // Below the ceiling, the newer tag adds to the gap the drop must close.
+        const room = { ...input, ceilingTokens: 120_000 };
+        const gapWith = planEmergencyDrop({
+            ...room,
+            floorTags: [...reads, { ...newest, sinceReading: true }],
+        });
+        const gapWithout = planEmergencyDrop({ ...room, floorTags: reads });
+        expect(gapWith.reclaimTokens - gapWithout.reclaimTokens).toBe(30_000);
+    });
+
     it("gauges the gap on the served request, so earlier drops count toward the target", () => {
         const tools = [tag(1, "bash", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 })];
         const input = {
@@ -881,5 +921,39 @@ describe("emergency served-mass snapshot", () => {
                 new Map([[3, { servedTokens: 0 }]]),
             ),
         ).toBe(expected + estimateTokens("kept output ".repeat(300)));
+    });
+});
+
+describe("tagsSinceReading", () => {
+    it("marks the tags of the newest assistant with content and everything after it", () => {
+        const message = (role: string, parts: unknown[]) => ({ info: { role }, parts });
+        const oldText = { type: "text", text: "old" };
+        const oldTool = { type: "tool", callID: "a" };
+        const newText = { type: "text", text: "new" };
+        const newTool = { type: "tool", callID: "b" };
+        const followUp = { type: "text", text: "follow-up" };
+        const messages = [
+            message("user", [{ type: "text", text: "task" }]),
+            message("assistant", [oldText, oldTool]),
+            message("assistant", [newText, newTool]),
+            message("user", [followUp]),
+            // A pending shell with no content is not the reply to the reading.
+            message("assistant", []),
+        ];
+        const target = (part: unknown, owner: (typeof messages)[number]): TagTarget => ({
+            mutationParts: [{ message: owner as never, part }],
+            setContent: () => false,
+        });
+        const targets = new Map<number, TagTarget>([
+            [1, target(oldText, messages[1]!)],
+            [2, target(oldTool, messages[1]!)],
+            [3, target(newText, messages[2]!)],
+            [4, target(newTool, messages[2]!)],
+            [5, target(followUp, messages[3]!)],
+            // A target known only by its message.
+            [6, { message: messages[2] as never, setContent: () => false }],
+        ]);
+        expect([...tagsSinceReading(messages, targets)].sort()).toEqual([3, 4, 5, 6]);
+        expect(tagsSinceReading([], targets).size).toBe(0);
     });
 });

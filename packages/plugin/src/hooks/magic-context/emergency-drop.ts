@@ -88,6 +88,12 @@ export interface EmergencyDropTag {
     /** Provider-token observations from the current representation, never persisted raw tag counts. */
     servedTokens?: number;
     reclaimableTokens?: number;
+    /**
+     * Created after the provider reading the planner works from (the newest
+     * step's output and text), so that reading never measured it: it adds to
+     * the request this pass serves but is not subtracted from the reading.
+     */
+    sinceReading?: boolean;
 }
 
 /**
@@ -124,7 +130,8 @@ export function estimateEmergencyDropReclaimTokens(tag: EmergencyDropTag): numbe
  *
  * fixedFloor is estimated as the provider input of the request this pass serves
  * (the last reading minus what this pass already removed) minus the measured
- * active-tail mass.
+ * mass of the active tags that reading measured. Tags created after the reading
+ * add to what this pass serves without lowering the floor.
  * Content with no observable token count remains in that fixed portion. This is
  * conservative reclaim planning, not proof that every remaining token is irreducible.
  *
@@ -226,39 +233,48 @@ export function planEmergencyDrop(input: {
     // selected tag below actually reclaims its bytes; the floor sum deliberately
     // includes everything else (message text, files, reasoning, non-droppable
     // tools) because those bytes are on the wire and NOT irreducible prefix.
+    //
+    // The provider's reading measured the previous request. Tags created after
+    // it (the newest step's output and text) are not part of that reading, so
+    // only the tags present at the reading are subtracted from it; the newer
+    // ones only add to what this pass serves.
     let tailTokens = 0;
+    let newerTailTokens = 0;
     for (const tag of floorTags) {
         if (tag.status !== "active") continue;
-        tailTokens += tag.servedTokens ?? estimateEmergencyDropReclaimTokens(tag);
+        const tokens = tag.servedTokens ?? estimateEmergencyDropReclaimTokens(tag);
+        if (tag.sinceReading) newerTailTokens += tokens;
+        else tailTokens += tokens;
     }
-    // The provider's reading measured the previous request, but `floorTags` is
-    // the active set after this pass's own earlier drops. Take those drops off
-    // the reading first, so the floor and the active mass subtracted from it
-    // describe the same request: the one this pass serves. Otherwise everything
-    // the pass just dropped is counted as fixed overhead, and a pass that has
-    // already shrunk the request far below the ceiling skips as if tool drops
-    // could never reach it.
+    // `floorTags` is the active set after this pass's own earlier drops. Take
+    // those drops off the reading first, so the floor and the active mass
+    // subtracted from it describe the same request: the one this pass serves.
+    // Otherwise everything the pass just dropped is counted as fixed overhead,
+    // and a pass that has already shrunk the request far below the ceiling
+    // skips as if tool drops could never reach it.
     //
-    // The removed mass comes out of the floor only. The active tags are
-    // measured on the request this pass serves, so it holds at least them. A
-    // reading too small to hold the removed mass and the active tags together
-    // does not describe this request: a test that sets usage directly, or the
-    // newest results arriving after the reading. Such a reading keeps today's
-    // meaning, the size the planner works against, and is never reduced below
-    // the active mass it would have to contain.
+    // The removed mass comes out of the floor only: at most what the reading
+    // holds beyond the active tags it measured. A reading too small to hold
+    // even those tags does not describe this request (a test that sets usage
+    // directly, or a usage sample taken in other units than the local count):
+    // it keeps today's meaning, the size the planner works against, with a
+    // fixed floor of zero.
     const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
+    const readingHoldsActive = currentTotalInputTokens >= tailTokens;
     const removedThisPass = Math.min(
         removedMeasured,
         Math.max(currentTotalInputTokens - tailTokens, 0),
     );
-    const servedInputTokens = currentTotalInputTokens - removedThisPass;
-    const fixedFloor = Math.max(servedInputTokens - tailTokens, 0);
+    const fixedFloor = Math.max(currentTotalInputTokens - removedThisPass - tailTokens, 0);
+    const servedInputTokens = readingHoldsActive
+        ? currentTotalInputTokens - removedThisPass + newerTailTokens
+        : currentTotalInputTokens;
     const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
     const target = fixedFloor + TARGET_FRACTION * workingSpan;
     const reclaimTokens = Math.round(servedInputTokens - target);
     const servedNote =
-        removedMeasured > 0
-            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}`
+        removedMeasured > 0 || newerTailTokens > 0
+            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading` : ""}`
             : "";
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass
@@ -445,17 +461,21 @@ function servedReasoningTokens(part: unknown, calibration: EmergencyCalibration)
     );
 }
 
-/** Measure the active tags' served content before this pass's first removal. */
+/**
+ * Measure the given tags' served content before this pass's first removal.
+ * `servedMessages` must hold only the parts the request will still carry once
+ * the pass replays its earlier decisions: a reasoning part an earlier pass
+ * already stripped (and that the end of this pass strips again) is not on the
+ * request, so a drop that neutralizes it now removes nothing.
+ */
 export function snapshotEmergencyServedMass(
     tags: readonly Pick<EmergencyDropTag, "tagNumber" | "type" | "status">[],
     targets: ReadonlyMap<number, TagTarget>,
     calibration: EmergencyCalibration,
-    messages: readonly MessageLike[],
+    servedMessages: readonly MessageLike[],
 ): EmergencyServedSnapshot {
-    // A target can still name reasoning that an earlier pass already took off
-    // the request; neutralizing it now removes nothing from this request.
     const servedParts = new Set<unknown>();
-    for (const message of messages) for (const part of message.parts) servedParts.add(part);
+    for (const message of servedMessages) for (const part of message.parts) servedParts.add(part);
     const tagTokens = new Map<number, { type: EmergencyDropTag["type"]; tokens: number }>();
     const reasoning = new Map<unknown, number>();
     for (const tag of tags) {
@@ -471,6 +491,43 @@ export function snapshotEmergencyServedMass(
         }
     }
     return { tags: tagTokens, reasoning };
+}
+
+/**
+ * Tag numbers created after the provider reading the emergency planner works
+ * from. The reading measured the request whose reply is the newest assistant
+ * message with content, so that message and everything after it (its tool
+ * results, a new user message) are newer than the reading. A tag counts as
+ * newer when any part it edits lies there. Messages are matched by their
+ * `info` object, which both hosts keep stable for a pass (Pi's transcript
+ * builds a fresh part list on every read, so parts can't be matched by
+ * identity there). Works on OpenCode's messages and on Pi's transcript.
+ */
+export function tagsSinceReading(
+    messages: readonly { info: { role?: string }; parts: readonly unknown[] }[],
+    targets: ReadonlyMap<number, TagTarget>,
+): Set<number> {
+    let boundary = messages.length - 1;
+    while (
+        boundary >= 0 &&
+        !(
+            messages[boundary]?.info.role === "assistant" &&
+            (messages[boundary]?.parts.length ?? 0) > 0
+        )
+    )
+        boundary -= 1;
+    const since = new Set<number>();
+    if (boundary < 0) return since;
+    const newerInfos = new Set<unknown>(messages.slice(boundary).map((message) => message.info));
+    for (const [tagNumber, target] of targets) {
+        const parts = target.mutationParts;
+        const newer =
+            parts && parts.length > 0
+                ? parts.some(({ message }) => newerInfos.has(message.info))
+                : target.message !== undefined && newerInfos.has(target.message.info);
+        if (newer) since.add(tagNumber);
+    }
+    return since;
 }
 
 /**

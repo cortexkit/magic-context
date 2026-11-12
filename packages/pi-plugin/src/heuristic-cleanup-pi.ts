@@ -136,6 +136,11 @@ export interface PiHeuristicCleanupConfig {
 		 * previous request's reading.
 		 */
 		servedBeforePass?: PiEmergencyServedSnapshot;
+		/**
+		 * Tags created after the provider reading (see `tagsSinceReading`): the
+		 * reading never measured them, so they do not lower the floor.
+		 */
+		sinceReading?: ReadonlySet<number>;
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
@@ -561,7 +566,7 @@ export function applyPiHeuristicCleanup(
 								},
 							}
 						: target;
-				return measureEmergencyTag(
+				const measured = measureEmergencyTag(
 					tag,
 					measuredTarget,
 					calibration,
@@ -570,6 +575,9 @@ export function applyPiHeuristicCleanup(
 							recentTags.has(tag.tagNumber) &&
 							hasSmallToolInput(targets.get(tag.tagNumber))),
 				);
+				return emergency.sinceReading?.has(tag.tagNumber)
+					? { ...measured, sinceReading: true }
+					: measured;
 			});
 		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
 		const removedThisPassTokens = emergency.servedBeforePass

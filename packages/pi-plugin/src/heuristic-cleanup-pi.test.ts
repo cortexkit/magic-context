@@ -11,6 +11,7 @@ import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
+import { tagsSinceReading } from "@magic-context/core/hooks/magic-context/emergency-drop";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -868,4 +869,28 @@ describe("applyPiHeuristicCleanup emergency planner on the request this pass ser
 			closeQuietly(db);
 		}
 	});
+});
+
+it("Pi: only the newest step's tags are newer than the reading", () => {
+	const db = createTestDb();
+	try {
+		const sessionId = "ses-pi-since-reading";
+		const messages: unknown[] = [
+			userMessage("run the checks", 1),
+			assistantToolCall("call-old", "bash", { command: "old" }, 2),
+			{ ...toolResultMessage("call-old", "old output", 3), toolName: "bash" },
+			assistantToolCall("call-new", "bash", { command: "new" }, 4),
+			{ ...toolResultMessage("call-new", "new output", 5), toolName: "bash" },
+		];
+		const { transcript, targets } = tagMessages(sessionId, db, messages);
+		const tools = getActiveTagsBySession(db, sessionId)
+			.filter((tag) => tag.type === "tool")
+			.sort((a, b) => a.tagNumber - b.tagNumber);
+		expect(tools).toHaveLength(2);
+		const since = tagsSinceReading(transcript.messages, targets);
+		expect(since.has(tools[0]?.tagNumber ?? -1)).toBe(false);
+		expect(since.has(tools[1]?.tagNumber ?? -1)).toBe(true);
+	} finally {
+		closeQuietly(db);
+	}
 });
