@@ -284,7 +284,7 @@ test("issue 905: a declared output limit shrinks the usable window, clamps the t
     ).toBe(true);
 });
 
-test("issue 905: Magic Context counts nothing for an OpenCode 2 thinking block whose text is omitted", () => {
+test("issue 905: an OpenCode 2 thinking block whose text is omitted is counted and served; OpenCode 1's is counted and not served", () => {
     const opencode2 = {
         type: "reasoning",
         text: "",
@@ -308,12 +308,14 @@ test("issue 905: Magic Context counts nothing for an OpenCode 2 thinking block w
             modelID: ISSUE_905_MODEL,
             agentName: undefined,
         }).messageTokens.conversation;
-    // OpenCode 1 keeps the signature under `metadata` and gets an opaque charge;
-    // OpenCode 2 keeps it under `providerMetadata` and is charged only its text.
-    expect(estimate(opencode1)).toBeGreaterThan(estimate(opencode2) + 900);
-    expect(estimate(opencode2)).toBe(estimate({ type: "text", text: "" }));
-    // The served-thinking check treats that block as never reaching the provider.
-    expect(servesThinkingBlock([assistant(opencode2)], "anthropic", ISSUE_905_MODEL)).toBe(false);
+    // Both hosts' signature-only blocks get the same opaque charge: OpenCode 1
+    // keeps the signature under `metadata`, OpenCode 2 under `providerMetadata`.
+    expect(estimate(opencode2)).toBe(estimate(opencode1));
+    expect(estimate(opencode2)).toBeGreaterThan(estimate({ type: "text", text: "" }) + 900);
+    // OpenCode 2's encoder sends that block as a thinking block with empty
+    // text; OpenCode 1's Anthropic adapter drops an empty reasoning part.
+    expect(servesThinkingBlock([assistant(opencode2)], "anthropic", ISSUE_905_MODEL)).toBe(true);
+    expect(servesThinkingBlock([assistant(opencode1)], "anthropic", ISSUE_905_MODEL)).toBe(false);
 });
 
 test("issue 905: claude-mythos-5-2 has no measured calibration of its own, so no estimate of its requests is refusal grade", () => {

@@ -16,8 +16,10 @@ import {
     createFinalWireUsageTracker,
     describeFinalWireTail,
     estimateFinalWireInputTokens,
+    estimateMessageTokens,
     estimateOutgoingWireForRefusal,
     type FinalWireTokenEstimate,
+    openCode2ThinkingPayload,
 } from "./final-wire-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -584,4 +586,43 @@ it("nonfinite system mass cannot be trusted even with known tool definitions", (
         systemPromptTokens: Number.POSITIVE_INFINITY,
     });
     expect(result.trusted).toBe(false);
+});
+
+describe("OpenCode 2 signature-only reasoning", () => {
+    const conversation = (part: Record<string, unknown>) =>
+        estimateMessageTokens({
+            info: { id: "a", role: "assistant" },
+            parts: [part],
+        } as unknown as MessageLike).conversation;
+    const opaqueCharge = conversation({
+        type: "reasoning",
+        text: "",
+        metadata: { anthropic: { signature: "sig" } },
+    });
+
+    it("charges a signature under providerMetadata or in encrypted like OpenCode 1's metadata", () => {
+        expect(opaqueCharge).toBeGreaterThan(0);
+        for (const part of [
+            { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: "sig" } } },
+            // Vertex and other Anthropic routes key the record by their own name.
+            {
+                type: "reasoning",
+                text: "",
+                providerMetadata: { "google-vertex-anthropic": { signature: "sig" } },
+            },
+            { type: "reasoning", text: "", encrypted: "sig" },
+            { type: "reasoning", text: "", providerMetadata: { anthropic: { redactedData: "x" } } },
+        ])
+            expect(conversation(part)).toBe(opaqueCharge);
+    });
+
+    it("charges nothing for a part OpenCode 2 skips: no text and no usable signature", () => {
+        for (const part of [
+            { type: "reasoning", text: "" },
+            { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: "  " } } },
+            { type: "reasoning", text: "", providerMetadata: { anthropic: {} } },
+        ])
+            expect(conversation(part)).toBe(0);
+        expect(openCode2ThinkingPayload({ type: "reasoning", text: "" })).toBeUndefined();
+    });
 });
