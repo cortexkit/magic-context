@@ -3,6 +3,7 @@ import { escalationBands } from "../../shared/escalation-bands";
 import { forceBandConfirmed } from "./routine-cleanup-decision";
 import {
     decideSignedThinkingHold,
+    readingEndsHold,
     recordedReasoningTokens,
     stepReasoningTokens,
 } from "./signed-thinking-hold";
@@ -124,7 +125,13 @@ describe("decideSignedThinkingHold", () => {
         expect(at(88, 95, true).reason).toBe("force_band");
     });
 
-    it("at the default threshold the force band never ends a hold the cap has not already ended", () => {
+    // True when the cap and the force band are judged on one reading. A pass
+    // that starts with no provider reading (the first after a restart, or any
+    // pass on a provider that reports no usage) is decided at 0% and judged
+    // again once it is sized (readingEndsHold below); before the force band
+    // ended holds, such a pass stayed held at any sized reading, so the default
+    // threshold does change for it.
+    it("at the default threshold, judged on one reading, the force band never ends a hold the cap has not already ended", () => {
         const messages = turn(10, [{ back: 3, tokens: 1_600 }]);
         for (const fromEstimate of [false, true])
             for (let tenths = 0; tenths <= 1_200; tenths++) {
@@ -138,6 +145,25 @@ describe("decideSignedThinkingHold", () => {
                 });
                 expect(decision.reason).toBe(usage < 75 ? "heavy_reasoning" : "above_cap");
             }
+    });
+
+    it("a sized reading ends the hold at its cap first, then in force-band pressure", () => {
+        const ends = (usage: number, cap: number, threshold: number, fromEstimate: boolean) =>
+            readingEndsHold({
+                usagePercentage: usage,
+                capPercentage: cap,
+                forceBandPressure: forceBand(threshold, usage, fromEstimate),
+            });
+        // Default threshold, a pass decided at 0% and sized by a local count.
+        expect(ends(74.9, 75, 65, true)).toBeNull();
+        expect(ends(75, 75, 65, true)).toBe("above_cap");
+        expect(ends(99, 75, 65, true)).toBe("above_cap");
+        // Threshold 82.7%: cap 92.7%, force band from 85% (95% for a local count).
+        expect(ends(88, 92.7, 82.7, false)).toBe("force_band");
+        expect(ends(88, 92.7, 82.7, true)).toBeNull();
+        expect(ends(92.7, 92.7, 82.7, true)).toBe("above_cap");
+        // A reading that is not a number ends the hold, as in the hold decision.
+        expect(ends(Number.NaN, 75, 65, false)).toBe("above_cap");
     });
 
     it("does not hold when the heavy step is 16 steps back", () => {

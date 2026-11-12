@@ -19,7 +19,11 @@ import {
 import { addRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { type PricedPassSizingInput, servedRequestForSizing } from "./priced-pass-sizing";
+import {
+    type PricedPassSizingInput,
+    planPricedPass,
+    servedRequestForSizing,
+} from "./priced-pass-sizing";
 import type { MessageLike } from "./tag-messages";
 
 const SESSION = "priced-pass-sizing-session";
@@ -107,5 +111,61 @@ describe("a priced pass is sized without the reasoning earlier passes removed", 
             clearsReasoning: false,
         });
         expect(reasoningOf(counted)).toEqual(["a1", "a3"]);
+    });
+});
+
+describe("the plan ends a bounded signed-thinking hold where the pass's sized reading does", () => {
+    // A subagent execute pass whose force band starts at 85%, with the cap the
+    // caller passes (75% at the default threshold). Its only ride is the subagent execute, which a held pass may not
+    // take, so `editsWholePrefix` shows whether the plan still counts it held.
+    const plan = (
+        db: ContextDatabase,
+        usage: { percentage: number; fromEstimate: boolean },
+        cap: number | undefined,
+    ) =>
+        planPricedPass(
+            {
+                db,
+                sessionId: SESSION,
+                compactionOff: false,
+                fullFeatureMode: false,
+                schedulerDecision: "execute",
+                forceMaterializationPercentage: 85,
+                signedThinkingHold: true,
+                signedThinkingHoldCapPercentage: cap,
+                firstRender: false,
+                folds: false,
+                explicitFlush: false,
+                materializationRequested: false,
+                historyRebuilt: false,
+                alreadyRanThisTurn: false,
+            },
+            usage,
+        );
+
+    it("keeps the hold below the cap and outside the force band", () => {
+        expect(plan(database(), { percentage: 70, fromEstimate: true }, 75).editsWholePrefix).toBe(
+            false,
+        );
+    });
+
+    it("ends the hold in force-band pressure below the cap", () => {
+        // A cap above the force band, as with an 82.7% threshold (cap 92.7%).
+        expect(
+            plan(database(), { percentage: 88, fromEstimate: false }, 92.7).editsWholePrefix,
+        ).toBe(true);
+        expect(
+            plan(database(), { percentage: 88, fromEstimate: false }, undefined).editsWholePrefix,
+        ).toBe(true);
+        // A local count below 95% is not force-band pressure.
+        expect(
+            plan(database(), { percentage: 88, fromEstimate: true }, 92.7).editsWholePrefix,
+        ).toBe(false);
+    });
+
+    it("ends the hold at the cap of a local count below the force band", () => {
+        expect(plan(database(), { percentage: 80, fromEstimate: true }, 75).editsWholePrefix).toBe(
+            true,
+        );
     });
 });

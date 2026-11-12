@@ -160,16 +160,13 @@ export function decideSignedThinkingHold(args: {
             heavyStepTokens,
             capPercentage,
         };
-    if (!(args.usagePercentage < capPercentage))
-        return { held: false, reason: "above_cap", heavyStepsBack, heavyStepTokens, capPercentage };
-    if (args.forceBandPressure)
-        return {
-            held: false,
-            reason: "force_band",
-            heavyStepsBack,
-            heavyStepTokens,
-            capPercentage,
-        };
+    const ended = readingEndsHold({
+        usagePercentage: args.usagePercentage,
+        capPercentage,
+        forceBandPressure: args.forceBandPressure,
+    });
+    if (ended !== null)
+        return { held: false, reason: ended, heavyStepsBack, heavyStepTokens, capPercentage };
     return {
         held: true,
         reason: "heavy_reasoning",
@@ -177,4 +174,21 @@ export function decideSignedThinkingHold(args: {
         heavyStepTokens,
         capPercentage,
     };
+}
+
+/**
+ * Whether a usage reading ends a hold the turn's heavy reasoning would
+ * otherwise keep, and why: at or above the cap, or in force-band pressure.
+ * The hold decision uses it for the reading a pass starts with; a pass that is
+ * sized later (it started with no provider reading) asks it again with the
+ * sized reading, so the cap and the force band both apply to the reading the
+ * pass is served at.
+ */
+export function readingEndsHold(args: {
+    usagePercentage: number;
+    capPercentage: number;
+    forceBandPressure: boolean;
+}): "above_cap" | "force_band" | null {
+    if (!(args.usagePercentage < args.capPercentage)) return "above_cap";
+    return args.forceBandPressure ? "force_band" : null;
 }

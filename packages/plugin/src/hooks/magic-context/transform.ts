@@ -239,7 +239,11 @@ import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
 import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
-import { decideSignedThinkingHold, type SignedThinkingHoldDecision } from "./signed-thinking-hold";
+import {
+    decideSignedThinkingHold,
+    readingEndsHold,
+    type SignedThinkingHoldDecision,
+} from "./signed-thinking-hold";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -2050,8 +2054,8 @@ export function createTransform(deps: TransformDeps) {
         // reasoning, only below the cap and never in the force band; every other
         // pass busts as on any other model and strips the turn's signed thinking
         // when it does. The force band is read from the reading the postprocess
-        // phase will read unless a priced pass sizes it below (then the hold is
-        // checked again against the sized reading).
+        // phase will read unless a priced pass sizes it below (then the cap and
+        // the force band are checked again against the sized reading).
         let holdProseRatio: number | undefined;
         const signedThinkingHold: SignedThinkingHoldDecision | null = signedThinkingPrefixBound
             ? decideSignedThinkingHold({
@@ -3537,6 +3541,10 @@ export function createTransform(deps: TransformDeps) {
                     schedulerDecision,
                     forceMaterializationPercentage,
                     signedThinkingHold: activeThinkingPrefixHold,
+                    signedThinkingHoldCapPercentage:
+                        !compactionOff && signedThinkingHold?.held === true
+                            ? signedThinkingHold.capPercentage
+                            : undefined,
                     firstRender:
                         servesHead &&
                         !(sessionMeta.cachedM0Bytes != null && sessionMeta.cachedM1Bytes != null) &&
@@ -3727,27 +3735,32 @@ export function createTransform(deps: TransformDeps) {
             }
         }
         // A priced pass with no provider reading is sized just above, after the
-        // hold was decided from the reading it had before (none). When the sized
-        // reading is force-band pressure the hold ends here, as it would have if
-        // that reading had been known: the postprocess phase reads the same
-        // predicate from the same reading when it lifts the hold's gate, so the
-        // two cannot disagree. The history head stays frozen for this pass, since
-        // its refresh and fold were already decided with the hold on, and the
-        // pass was sized without them.
-        if (
-            activeThinkingPrefixHold &&
-            signedThinkingHold?.held === true &&
-            forceBandConfirmed({
-                percentage: contextUsage.percentage,
-                fromEstimate: contextUsageFromEstimate,
-                forceMaterializationPercentage,
-                compactionOff,
-            })
-        ) {
+        // hold was decided from the reading it had before (none). The hold is
+        // then judged again on the sized reading, as it would have been had that
+        // reading been known: it ends at or above its cap, and in force-band
+        // pressure (the postprocess phase reads that same predicate from the
+        // same reading when it lifts the hold's gate, so the two cannot
+        // disagree). The history head stays frozen for this pass, since its
+        // refresh and fold were already decided with the hold on, and the pass
+        // was sized without them. Compaction off keeps its blanket hold.
+        const sizedHoldEnd =
+            activeThinkingPrefixHold && !compactionOff && signedThinkingHold?.held === true
+                ? readingEndsHold({
+                      usagePercentage: contextUsage.percentage,
+                      capPercentage: signedThinkingHold.capPercentage,
+                      forceBandPressure: forceBandConfirmed({
+                          percentage: contextUsage.percentage,
+                          fromEstimate: contextUsageFromEstimate,
+                          forceMaterializationPercentage,
+                          compactionOff,
+                      }),
+                  })
+                : null;
+        if (sizedHoldEnd !== null && signedThinkingHold) {
             activeThinkingPrefixHold = false;
             sessionLog(
                 sessionId,
-                `signed thinking hold: held=false reason=force_band heavyStepsBack=${signedThinkingHold.heavyStepsBack ?? "none"} heavyStepTokens=${signedThinkingHold.heavyStepTokens} usage=${contextUsage.percentage.toFixed(1)}% cap=${signedThinkingHold.capPercentage}% (sized reading${contextUsageFromEstimate ? ", local count" : ""})`,
+                `signed thinking hold: held=false reason=${sizedHoldEnd} heavyStepsBack=${signedThinkingHold.heavyStepsBack ?? "none"} heavyStepTokens=${signedThinkingHold.heavyStepTokens} usage=${contextUsage.percentage.toFixed(1)}% cap=${signedThinkingHold.capPercentage}% (sized reading${contextUsageFromEstimate ? ", local count" : ""})`,
             );
         }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;

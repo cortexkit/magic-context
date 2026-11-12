@@ -1,13 +1,15 @@
-// Review witnesses for the change that ends the signed-thinking hold where
-// force-band pressure begins (issue 905). Each test states a property the
-// change claims or relies on and is expected to FAIL while the defect it names
-// is present; see .cortexkit/internal-docs/audits/issue-905-hold-review.md.
+// Review findings on the change that ends the signed-thinking hold where
+// force-band pressure begins (issue 905), pinned as tests; see
+// .cortexkit/internal-docs/audits/issue-905-hold-review.md.
 //
 // The session is the issue 905 subagent (see __tests__/issue-905-subagent.fixture.ts)
 // at the default 65% execute threshold, on a provider that reports no input
 // usage. Every pass then starts with no usage reading: the hold is decided from
 // that empty reading, and a priced pass is sized from a local count of its own
-// request afterwards.
+// request afterwards. The hold is judged again on that sized reading: it ends
+// at or above its cap and in force-band pressure. Before, such a session stayed
+// held at any sized reading and its queued drops waited (in this run from 99%
+// to 136% of the window), so the default threshold does change here.
 import { beforeAll, describe, expect, test } from "bun:test";
 import {
     type Issue905Pass,
@@ -41,38 +43,47 @@ const localReading = (pass: Issue905Pass): number | null => {
 };
 
 describe("issue 905 review, default threshold, no provider usage", () => {
-    test("the run is at the default threshold and reaches the 95% local-count line", () => {
+    test("the run is at the default threshold and its sized readings pass the hold's cap", () => {
         expect(new Set(run.passes.map((pass) => pass.threshold))).toEqual(new Set([65]));
-        expect(run.passes.some((pass) => (localReading(pass) ?? 0) >= 95)).toBe(true);
+        expect(run.passes.some((pass) => (localReading(pass) ?? 0) >= CAP)).toBe(true);
     });
 
-    // The change claims that at the default threshold every decision is
-    // unchanged, because the hold's cap (75%) ends a hold before the force band
-    // (85%) can. That holds for one reading, but the cap is judged on the
-    // reading the pass starts with and the re-check after sizing judges the
-    // force band on the sized reading. A pass that starts with no reading is
-    // held, and the re-check then ends the hold at the sized reading: a decision
-    // that did not exist before the change.
-    test("WITNESS: at the default threshold no hold is ended by the force band", () => {
-        const endedByForceBand = run.passes.filter((pass) =>
-            pass.logs.some((line) =>
-                line.includes("signed thinking hold: held=false reason=force_band"),
-            ),
-        );
-        expect(
-            endedByForceBand.map((pass) => ({ step: pass.step, localReading: localReading(pass) })),
-        ).toEqual([]);
-    });
-
-    // The cap reads only the reading the pass starts with, so on a provider that
-    // reports no usage it never ends a hold, and a held pass can be served far
-    // above the cap.
-    test("WITNESS: no pass is held above the cap of its sized reading", () => {
+    // The cap is judged on the reading a pass is sized at, not only on the
+    // reading it starts with, so a provider that reports no usage is capped too.
+    test("no pass is held above the cap of its sized reading", () => {
         const heldAboveCap = run.passes.filter(
             (pass) => pass.thinkingHold === true && (localReading(pass) ?? 0) >= CAP,
         );
         expect(
             heldAboveCap.map((pass) => ({ step: pass.step, localReading: localReading(pass) })),
         ).toEqual([]);
+    });
+
+    test("a pass whose sized reading ends the hold lands its queued drops and strips the kept thinking", () => {
+        const ended = run.passes.filter((pass) =>
+            pass.logs.some((line) =>
+                /signed thinking hold: held=false reason=(above_cap|force_band) .*\(sized reading/.test(
+                    line,
+                ),
+            ),
+        );
+        expect(ended.length).toBeGreaterThanOrEqual(2);
+        for (const pass of ended) {
+            expect(localReading(pass) ?? 0).toBeGreaterThanOrEqual(CAP);
+            expect(pass.thinkingHold).toBe(false);
+            expect(pass.pendingQueuedBefore).toBeGreaterThan(0);
+            expect(pass.pendingQueuedAfter).toBeLessThan(pass.pendingQueuedBefore);
+            expect(pass.served.thinkingBlocks).toBe(0);
+        }
+    });
+
+    // The session never reaches 95% held: every pass at the local-count line
+    // has landed its queued drops.
+    test("no pass with a sized reading of 95% or more is held or keeps a queued drop", () => {
+        const atLine = run.passes.filter((pass) => (localReading(pass) ?? 0) >= 95);
+        for (const pass of atLine) {
+            expect(pass.thinkingHold).toBe(false);
+            expect(pass.pendingQueuedAfter).toBeLessThan(Math.max(1, pass.pendingQueuedBefore));
+        }
     });
 });

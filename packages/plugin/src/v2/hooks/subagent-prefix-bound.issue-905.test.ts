@@ -9,6 +9,13 @@
 // behaviour, so a change to any of it shows up here. The signed-thinking hold
 // ends where force-band pressure begins (85% here), so a held stretch never
 // keeps the force band from landing the queued drops.
+//
+// At the default 65% threshold the hold's cap (75%) lies below the force band,
+// so for a pass judged on one reading nothing changes. A pass that starts with
+// no provider reading (the first after a restart, or any pass on a provider
+// that reports no usage) is judged again on the reading it is sized at; there
+// the cap and the force band now end holds that used to stay on at any sized
+// reading (see subagent-prefix-bound.issue-905-review.test.ts).
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -340,14 +347,16 @@ test("issue 905: an omitted-text step is heavy for the hold on OpenCode 1, which
 
 /**
  * The decisions and served bytes of every pass of the default-threshold run,
- * recorded with the code from before the force band ended the hold. At 65% the
- * hold's cap (75%) lies below the force band (85%), so ending the hold there
- * must change nothing: the same digest proves it.
+ * recorded with the code from before the force band ended the hold. The run's
+ * provider reports its usage, so every hold is judged on the reading the pass
+ * starts with; at 65% the hold's cap (75%) lies below the force band (85%), so
+ * ending the hold there changes nothing for it: the same digest proves it. A
+ * provider that reports no usage does change (see the review test file).
  */
 const DEFAULT_THRESHOLD_DIGEST = "a40ff2cf6771e026884a8fcdd85a3d52c27928eb29352ed5e47ef24f9e1d5efb";
 
 describe("issue 905, the default 65% threshold", () => {
-    test("nothing changes: every pass decides and serves exactly what it did before", () => {
+    test("with a provider that reports usage nothing changes: every pass decides and serves exactly what it did before", () => {
         const passes = defaultThreshold.passes;
         expect(new Set(passes.map((pass) => pass.threshold))).toEqual(new Set([65]));
         const usage = (pass: Issue905Pass) => pass.mcPercentage ?? 0;
@@ -399,12 +408,14 @@ describe("issue 905, a provider that reports no usage", () => {
         return match ? Number(match[1]) : null;
     };
 
-    test("between 85% and 95% of a local count the hold stays on and nothing lands", () => {
+    // A local count is force-band pressure only from 95%, but the hold's cap
+    // (92.72% here) applies to the sized reading too and ends it first.
+    test("between 85% of a local count and the hold's cap the hold stays on and nothing lands", () => {
         const between = localCount.passes.filter((pass) => {
             const reading = localReading(pass);
-            return reading !== null && reading >= FORCE_BAND && reading < 95;
+            return reading !== null && reading >= FORCE_BAND && reading < CAP;
         });
-        expect(between.length).toBeGreaterThanOrEqual(3);
+        expect(between.length).toBeGreaterThanOrEqual(2);
         for (const pass of between) {
             expect(pass.thinkingHold).toBe(true);
             expect(pass.rewriteAllowed).toBe(false);
@@ -415,12 +426,12 @@ describe("issue 905, a provider that reports no usage", () => {
         }
     });
 
-    test("from 95% of a local count the hold ends: the pass lands the queued drops and strips the kept thinking once", () => {
-        const atEmergency = localCount.passes.filter((pass) => (localReading(pass) ?? 0) >= 95);
-        expect(atEmergency.length).toBeGreaterThanOrEqual(2);
-        for (const pass of atEmergency) {
+    test("from the hold's cap of a local count the hold ends: the pass lands the queued drops and strips the kept thinking once", () => {
+        const atCap = localCount.passes.filter((pass) => (localReading(pass) ?? 0) >= CAP);
+        expect(atCap.length).toBeGreaterThanOrEqual(2);
+        for (const pass of atCap) {
             expect(pass.thinkingHold).toBe(false);
-            expect(pass.logs.some((line) => line.includes("held=false reason=force_band"))).toBe(
+            expect(pass.logs.some((line) => line.includes("held=false reason=above_cap"))).toBe(
                 true,
             );
             expect(pass.pendingQueuedAfter).toBeLessThan(pass.pendingQueuedBefore);

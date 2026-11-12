@@ -27,6 +27,7 @@ import {
     routinePressureAlreadyApplied,
     safeReasoningCutoff,
 } from "./routine-cleanup-decision";
+import { readingEndsHold } from "./signed-thinking-hold";
 import { stripReasoningFromAssistantIds } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 
@@ -99,6 +100,12 @@ export interface PricedPassPlanInput {
     forceMaterializationPercentage: number;
     /** The pass's signed-thinking hold as decided before the pass was sized. */
     signedThinkingHold: boolean;
+    /**
+     * The bounded hold's cap (execute threshold plus ten points), when the
+     * hold above is that bounded hold; absent for compaction off's blanket
+     * hold, which no reading ends.
+     */
+    signedThinkingHoldCapPercentage?: number;
     /** The pass renders the session's first history head. */
     firstRender: boolean;
     /** The pass folds m[0]. */
@@ -142,10 +149,18 @@ export function planPricedPass(
         schedulerDecision: input.schedulerDecision,
     });
     const emergencySample = () => getEmergencyInputSample(input.db, input.sessionId);
-    // The signed-thinking hold never applies in the force band (see
-    // decideSignedThinkingHold); the caller ends it after sizing when the sized
-    // reading is there, so the plan counts the request that pass then serves.
-    const signedThinkingHold = input.signedThinkingHold && !bands.forceBandConfirmed;
+    // The caller ends a bounded hold after sizing when the sized reading is at
+    // or above the hold's cap or in force-band pressure (readingEndsHold), so
+    // the plan counts the request that pass then serves.
+    const signedThinkingHold =
+        input.signedThinkingHold &&
+        (input.signedThinkingHoldCapPercentage === undefined
+            ? !bands.forceBandConfirmed
+            : readingEndsHold({
+                  usagePercentage: usage.percentage,
+                  capPercentage: input.signedThinkingHoldCapPercentage,
+                  forceBandPressure: bands.forceBandConfirmed,
+              }) === null);
     const rides: ReclaimRideSignals = {
         hardFold: input.folds || input.firstRender,
         force: forceRide({
