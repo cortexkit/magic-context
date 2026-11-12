@@ -5,7 +5,14 @@
 //   MC_HOLD_DIFF_BASE  a checkout of the base revision (node_modules linked)
 //   MC_HOLD_DIFF_HEAD  a checkout of this revision (node_modules linked)
 // Each snapshot is imported as its own module graph, so its process-local state
-// is separate from this file's.
+// is separate from this file's. Neither may be the checkout running this file:
+// the snapshot's graph would then be this file's own.
+// Optional:
+//   MC_HOLD_DIFF_EXPECT     "identical" (default): no pass may differ; or
+//                           "differing": at least one pass must differ (a change
+//                           that is meant to bust where base held)
+//   MC_HOLD_DIFF_THRESHOLD  the execute threshold percentage (default 65)
+//   MC_HOLD_DIFF_PASSES, MC_HOLD_DIFF_SEED
 //
 // One seeded session runs here, warm, through this checkout's handler. Before
 // every pass the session database is copied twice, and the same input runs
@@ -23,7 +30,7 @@
 //   identical provider-visible bytes in front of it on both.
 import { afterAll, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { copyFileSync, rmSync } from "node:fs";
+import { copyFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -61,6 +68,19 @@ const BASE = process.env.MC_HOLD_DIFF_BASE;
 const HEAD = process.env.MC_HOLD_DIFF_HEAD;
 const PASSES = Number(process.env.MC_HOLD_DIFF_PASSES ?? 420);
 const SEED = Number(process.env.MC_HOLD_DIFF_SEED ?? 729);
+const EXPECT = process.env.MC_HOLD_DIFF_EXPECT ?? "identical";
+const THRESHOLD = Number(process.env.MC_HOLD_DIFF_THRESHOLD ?? 65);
+// This file's own checkout (packages/pi-plugin/src -> root).
+const RUNNING_CHECKOUT = join(import.meta.dir, "../../..");
+
+function snapshotRoot(name: string, root: string): string {
+	const resolved = realpathSync(root);
+	if (resolved === realpathSync(RUNNING_CHECKOUT))
+		throw new Error(
+			`${name} is the checkout running this test; point it at a separate snapshot (for example a git archive of the revision with node_modules linked)`,
+		);
+	return resolved;
+}
 const MODEL = "claude-opus-5-5";
 
 type Graph = {
@@ -217,8 +237,12 @@ afterAll(() => {
 test.skipIf(!BASE || !HEAD)(
 	`Pi: bounded hold differential against base over ${PASSES} passes`,
 	async () => {
-		const base = await loadGraph(BASE!);
-		const headCold = await loadGraph(HEAD!);
+		if (EXPECT !== "identical" && EXPECT !== "differing")
+			throw new Error(
+				`MC_HOLD_DIFF_EXPECT must be identical or differing, not ${EXPECT}`,
+			);
+		const base = await loadGraph(snapshotRoot("MC_HOLD_DIFF_BASE", BASE!));
+		const headCold = await loadGraph(snapshotRoot("MC_HOLD_DIFF_HEAD", HEAD!));
 		const quiet = (module: typeof logger) =>
 			spyOn(module, "sessionLog").mockImplementation(() => {});
 		const spies = [quiet(logger), quiet(base.logger), quiet(headCold.logger)];
@@ -261,7 +285,7 @@ test.skipIf(!BASE || !HEAD)(
 				injectDocs: false,
 			},
 			heuristics: { keepReasoningTokens: 2000 },
-			scheduler: { executeThresholdPercentage: 65 },
+			scheduler: { executeThresholdPercentage: THRESHOLD },
 		});
 		const tools = () => ({
 			getAllTools: () => [
@@ -598,10 +622,13 @@ test.skipIf(!BASE || !HEAD)(
 				}
 				previous = warmServed.messages;
 			}
-			report.push(`pi differential (seed ${SEED}): ${JSON.stringify(counts)}`);
+			report.push(
+				`pi differential (seed ${SEED}, threshold ${THRESHOLD}%, expect ${EXPECT}): ${JSON.stringify(counts)}`,
+			);
 			expect(failures).toEqual([]);
 			expect(counts.passes).toBe(PASSES);
-			expect(counts.differing).toBeGreaterThan(0);
+			if (EXPECT === "differing") expect(counts.differing).toBeGreaterThan(0);
+			else expect(counts.differing).toBe(0);
 			expect(counts.warmUnchangedPrefixPasses).toBeGreaterThan(0);
 		} finally {
 			for (const spy of spies) spy.mockRestore();

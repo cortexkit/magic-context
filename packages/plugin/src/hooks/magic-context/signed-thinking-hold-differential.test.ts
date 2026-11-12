@@ -7,7 +7,15 @@
 //   MC_HOLD_DIFF_BASE  a checkout of the base revision (node_modules linked)
 //   MC_HOLD_DIFF_HEAD  a checkout of this revision (node_modules linked)
 // Each snapshot is imported as its own module graph, so its process-local state
-// (last-known-good slots, caches) is separate from this file's.
+// (last-known-good slots, caches) is separate from this file's. Neither may be
+// the checkout running this file: the snapshot's graph would then be this
+// file's own, and closing its copy's database closes the warm session's too.
+// Optional:
+//   MC_HOLD_DIFF_EXPECT     "identical" (default): no pass may differ; or
+//                           "differing": at least one pass must differ (a change
+//                           that is meant to bust where base held)
+//   MC_HOLD_DIFF_THRESHOLD  the execute threshold percentage (default 65)
+//   MC_HOLD_DIFF_PASSES, MC_HOLD_DIFF_SEED
 //
 // One seeded session runs here, warm, through this checkout's transform. Before
 // every pass the session database is copied twice, and the same input runs
@@ -16,7 +24,8 @@
 // - D1: a warm defer pass serves its predecessor byte for byte (new messages
 //   only at the end);
 // - D2: a pass where head and base serve different bytes is a pass base held
-//   (it logged its active-thinking freeze) and head busted, and head serves no
+//   (it logged its active-thinking freeze or a held rewrite permission) and
+//   head busted, and head serves no
 //   signed reasoning block while keeping every other part of the turn's steps;
 // - D3: the warm pass serves what the fresh head transform served on the same
 //   state (restart determinism), counted and reported;
@@ -24,7 +33,7 @@
 //   identical provider-visible bytes in front of it on both.
 import { afterAll, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -48,6 +57,19 @@ const BASE = process.env.MC_HOLD_DIFF_BASE;
 const HEAD = process.env.MC_HOLD_DIFF_HEAD;
 const PASSES = Number(process.env.MC_HOLD_DIFF_PASSES ?? 420);
 const SEED = Number(process.env.MC_HOLD_DIFF_SEED ?? 729);
+const EXPECT = process.env.MC_HOLD_DIFF_EXPECT ?? "identical";
+const THRESHOLD = Number(process.env.MC_HOLD_DIFF_THRESHOLD ?? 65);
+// This file's own checkout (packages/plugin/src/hooks/magic-context -> root).
+const RUNNING_CHECKOUT = join(import.meta.dir, "../../../../..");
+
+function snapshotRoot(name: string, root: string): string {
+    const resolved = realpathSync(root);
+    if (resolved === realpathSync(RUNNING_CHECKOUT))
+        throw new Error(
+            `${name} is the checkout running this test; point it at a separate snapshot (for example a git archive of the revision with node_modules linked)`,
+        );
+    return resolved;
+}
 
 type Message = { info: Record<string, unknown>; parts: Array<Record<string, unknown>> };
 type Graph = {
@@ -155,8 +177,12 @@ for (const host of ["opencode1", "opencode2"] as const) {
     it.skipIf(!BASE || !HEAD)(
         `${host}: bounded hold differential against base over ${PASSES} passes`,
         async () => {
-            const base = await loadGraph(BASE!);
-            const headCold = await loadGraph(HEAD!);
+            if (EXPECT !== "identical" && EXPECT !== "differing")
+                throw new Error(
+                    `MC_HOLD_DIFF_EXPECT must be identical or differing, not ${EXPECT}`,
+                );
+            const base = await loadGraph(snapshotRoot("MC_HOLD_DIFF_BASE", BASE!));
+            const headCold = await loadGraph(snapshotRoot("MC_HOLD_DIFF_HEAD", HEAD!));
             const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
             const baseLines: string[] = [];
             const headLines: string[] = [];
@@ -248,7 +274,8 @@ for (const host of ["opencode1", "opencode2"] as const) {
                     return g.createTransform({
                         db: database as never,
                         tagger: g.createTagger(),
-                        scheduler: g.createScheduler({ executeThresholdPercentage: 65 }),
+                        executeThresholdPercentage: THRESHOLD,
+                        scheduler: g.createScheduler({ executeThresholdPercentage: THRESHOLD }),
                         contextUsageMap: new Map([[sessionId, usageEntry()]]),
                         historyRefreshSessions: sets.history,
                         pendingMaterializationSessions: sets.pending,
@@ -270,7 +297,8 @@ for (const host of ["opencode1", "opencode2"] as const) {
                     return createTransform({
                         db,
                         tagger: createTagger(),
-                        scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+                        executeThresholdPercentage: THRESHOLD,
+                        scheduler: createScheduler({ executeThresholdPercentage: THRESHOLD }),
                         contextUsageMap: warmUsage,
                         historyRefreshSessions: warmHistory,
                         pendingMaterializationSessions: warmPending,
@@ -461,8 +489,11 @@ for (const host of ["opencode1", "opencode2"] as const) {
                     headLines.length = 0;
                     warmLines.length = 0;
                     const baseServed = await run(base, "base");
-                    const baseHeld = baseLines.some((line) =>
-                        line.includes("m[0]/m[1] frozen: active thinking turn"),
+                    const baseHeld = baseLines.some(
+                        (line) =>
+                            line.includes("m[0]/m[1] frozen: active thinking turn") ||
+                            (line.startsWith("rewrite permission:") &&
+                                line.includes("thinking_hold=true")),
                     );
                     const headServed = await run(headCold, "head");
                     rmSync(snapshot, { force: true });
@@ -536,10 +567,13 @@ for (const host of ["opencode1", "opencode2"] as const) {
                     }
                     previous = warmServed;
                 }
-                report.push(`${host} differential (seed ${SEED}): ${JSON.stringify(counts)}`);
+                report.push(
+                    `${host} differential (seed ${SEED}, threshold ${THRESHOLD}%, expect ${EXPECT}): ${JSON.stringify(counts)}`,
+                );
                 expect(failures).toEqual([]);
                 expect(counts.passes).toBe(PASSES);
-                expect(counts.differing).toBeGreaterThan(0);
+                if (EXPECT === "differing") expect(counts.differing).toBeGreaterThan(0);
+                else expect(counts.differing).toBe(0);
                 expect(counts.warmDefer).toBeGreaterThan(0);
             } finally {
                 logs.mockRestore();
