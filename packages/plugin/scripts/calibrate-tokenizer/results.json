@@ -1230,5 +1230,50 @@
     },
     "error": null,
     "durationMs": 1624
+  },
+  {
+    "method": "count_tokens",
+    "proseRatio": 1.571949447597116,
+    "proseTokens": {
+      "local_raw": 36477,
+      "api": 57340
+    },
+    "proseSections": {
+      "docs": {
+        "local_raw": 10692,
+        "api": 15696,
+        "ratio": 1.468013468013468
+      },
+      "history": {
+        "local_raw": 23430,
+        "api": 37430,
+        "ratio": 1.597524541186513
+      },
+      "memory": {
+        "local_raw": 2351,
+        "api": 4214,
+        "ratio": 1.7924287537218204
+      }
+    },
+    "label": "anthropic/claude-fable-5-2",
+    "provider": "anthropic",
+    "modelId": "claude-fable-5-2",
+    "tokenizerKey": "anthropic/claude-opus-4.5",
+    "systemTokens": {
+      "local_raw": 16352,
+      "local_sdk": 18000,
+      "api": 24740,
+      "ratio_raw": 1.513,
+      "ratio_sdk": 1.374
+    },
+    "toolsTokens": {
+      "local_raw": 21418,
+      "local_sdk": 16477,
+      "api": 33233,
+      "ratio_raw": 1.552,
+      "ratio_sdk": 2.017
+    },
+    "error": null,
+    "durationMs": 1426
   }
 ]
