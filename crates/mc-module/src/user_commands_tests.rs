@@ -6,6 +6,9 @@ use serde_json::json;
 #[path = "user_commands_durable_tests.rs"]
 mod durable;
 
+#[path = "user_commands_review_tests.rs"]
+mod review_tests;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
