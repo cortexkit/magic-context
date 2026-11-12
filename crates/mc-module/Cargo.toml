@@ -64,6 +64,7 @@ nix = { version = "0.31.3", features = ["fs"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.
 cortexkit-role-agent-data = { version = "=0.3.0", features = ["test-vectors"] }

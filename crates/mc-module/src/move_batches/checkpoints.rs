@@ -10,6 +10,43 @@ mod tests;
 pub(super) const TARGET_PAGES: i64 = 16_000;
 pub(crate) const WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(18);
 
+// Tests fix the grouping clock; production uses the measured lock hold time.
+#[cfg(not(test))]
+fn grouping_duration(held: std::time::Duration) -> std::time::Duration {
+    held
+}
+
+#[cfg(test)]
+fn grouping_duration(held: std::time::Duration) -> std::time::Duration {
+    crate::move_in::tests::writer::grouping_duration(held)
+}
+
+// Tests can seed the cap without adaptive warmup; production starts at one unit.
+#[cfg(not(test))]
+fn initial_units() -> usize {
+    1
+}
+
+#[cfg(test)]
+fn initial_units() -> usize {
+    crate::move_in::tests::writer::initial_units()
+}
+
+#[cfg(test)]
+#[test]
+fn move_in_adaptive_limit_cannot_grow_past_4096_units() {
+    let _clock = crate::move_in::tests::writer::fixed_clock(
+        crate::move_in::tests::writer::Clock::Continue,
+        4096,
+    );
+    let mut conn = Connection::open_in_memory().unwrap();
+    let mut writer = Writer::new(&mut conn).unwrap();
+    // Even an arbitrarily cheap 4096-unit group must not double the hard cap.
+    writer.grouped("cap", |_| Ok(4096)).unwrap();
+    assert_eq!(writer.limit("cap"), 4096);
+    writer.finish().unwrap();
+}
+
 pub(super) struct Writer<'a> {
     conn: &'a mut Connection,
     previous: i64,
@@ -45,7 +82,7 @@ impl<'a> Writer<'a> {
             log: 0,
             copied: 0,
             finished: false,
-            units: 1,
+            units: initial_units(),
         })
     }
 
@@ -61,7 +98,7 @@ impl<'a> Writer<'a> {
         if phase == self.phase {
             self.units
         } else {
-            1
+            initial_units()
         }
     }
 
@@ -76,7 +113,8 @@ impl<'a> Writer<'a> {
         // lock and cap prefetched units independently of the elapsed-time stop.
         // Aim for 20 ms including COMMIT; the write loop stops at 18 ms to
         // leave room for the final progress update and commit bookkeeping.
-        let proposed = (count as u128 * 20_000_000 / held.as_nanos().max(1)).max(1) as usize;
+        let proposed = (count as u128 * 20_000_000 / grouping_duration(held).as_nanos().max(1))
+            .max(1) as usize;
         self.units = proposed.min(count.saturating_mul(2)).clamp(1, 4096);
         Ok(count)
     }

@@ -25,6 +25,17 @@ pub(crate) use fts::ordinal_update;
 const BATCH_WRITES: usize = 32;
 const DISCOVERY_ROWS: usize = 512;
 
+// Tests can fix the write-loop clock; production always reads the real clock.
+#[cfg(not(test))]
+fn write_window_open(started: std::time::Instant) -> bool {
+    started.elapsed() < checkpoints::WRITE_WINDOW
+}
+
+#[cfg(test)]
+fn write_window_open(started: std::time::Instant) -> bool {
+    crate::move_in::tests::writer::write_window_open(started, checkpoints::WRITE_WINDOW)
+}
+
 pub(crate) fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
@@ -241,8 +252,7 @@ impl Plan {
             staged += writer.grouped("stage/batch", |tx| {
                 let started = std::time::Instant::now();
                 let mut count = 0;
-                while count < limit && (count == 0 || started.elapsed() < checkpoints::WRITE_WINDOW)
-                {
+                while count < limit && (count == 0 || write_window_open(started)) {
                     let Some((index, body)) = pending.pop_front() else {
                         break;
                     };
@@ -338,7 +348,7 @@ pub(crate) fn resume(conn: &mut Connection, key: &str) -> Result<bool, String> {
                 && pending
                     .front()
                     .is_some_and(|(_, batch)| batch.phase == phase)
-                && (count == 0 || started.elapsed() < checkpoints::WRITE_WINDOW)
+                && (count == 0 || write_window_open(started))
             {
                 let (index, batch) = pending.pop_front().unwrap();
                 for mut write in batch.writes {
