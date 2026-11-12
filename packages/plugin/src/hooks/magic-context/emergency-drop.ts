@@ -260,21 +260,44 @@ export function planEmergencyDrop(input: {
     // it keeps today's meaning, the size the planner works against, with a
     // fixed floor of zero.
     const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
-    const readingHoldsActive = currentTotalInputTokens >= tailTokens;
-    const removedThisPass = Math.min(
-        removedMeasured,
-        Math.max(currentTotalInputTokens - tailTokens, 0),
-    );
-    const fixedFloor = Math.max(currentTotalInputTokens - removedThisPass - tailTokens, 0);
-    const servedInputTokens = readingHoldsActive
-        ? currentTotalInputTokens - removedThisPass + newerTailTokens
-        : currentTotalInputTokens;
-    const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
-    const target = fixedFloor + TARGET_FRACTION * workingSpan;
-    const reclaimTokens = Math.round(servedInputTokens - target);
+    // Floor, served size and gap of one accounting. `newerInReading` says
+    // whether the tags newer than the reading are treated as part of it.
+    const account = (newerInReading: boolean) => {
+        const measuredTail = newerInReading ? tailTokens + newerTailTokens : tailTokens;
+        const removed = Math.min(
+            removedMeasured,
+            Math.max(currentTotalInputTokens - measuredTail, 0),
+        );
+        const floor = Math.max(currentTotalInputTokens - removed - measuredTail, 0);
+        const served =
+            currentTotalInputTokens >= measuredTail
+                ? currentTotalInputTokens - removed + (newerInReading ? 0 : newerTailTokens)
+                : currentTotalInputTokens;
+        const target = floor + TARGET_FRACTION * Math.max(ceilingTokens - floor, 0);
+        return { removed, floor, served, reclaim: Math.round(served - target) };
+    };
+    let accounting = account(false);
+    let olderAccounting = false;
+    // Tool drops cannot repair oversized fixed overhead, so a floor above the
+    // ceiling skips the pass (below). Content that arrived after the reading
+    // is not overhead, though: it is what pushed the request past the reading,
+    // and at 95% or more the newest results are candidates and the refusal
+    // path waits if they stay. There a floor that exceeds the ceiling only
+    // because the newer tags are left out of it falls back to the older
+    // accounting, which treats them as part of the reading, so a request
+    // those drops would make fit is never refused for keeping them.
+    if (accounting.floor > ceilingTokens && absoluteEmergency && newerTailTokens > 0) {
+        const older = account(true);
+        if (older.floor <= ceilingTokens) {
+            accounting = older;
+            olderAccounting = true;
+        }
+    }
+    const { removed: removedThisPass, floor: fixedFloor, served: servedInputTokens } = accounting;
+    const reclaimTokens = accounting.reclaim;
     const servedNote =
         removedMeasured > 0 || newerTailTokens > 0
-            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading` : ""}`
+            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading${olderAccounting ? " (counted in the reading)" : ""}` : ""}`
             : "";
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass

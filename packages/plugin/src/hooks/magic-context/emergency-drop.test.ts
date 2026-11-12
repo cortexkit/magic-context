@@ -827,6 +827,50 @@ describe("planEmergencyDrop — the request this pass serves", () => {
         expect(gapWith.reclaimTokens - gapWithout.reclaimTokens).toBe(30_000);
     });
 
+    it("at 95% a result that arrived after the reading is dropped even when the reading's own fixed part exceeds the ceiling", () => {
+        // The previous request read 15,360 tokens, almost none of it tagged;
+        // then a 325,000-token result arrived. The fixed part of the reading
+        // (15,329) exceeds the 10,400 ceiling, but the request only overflows
+        // the window because of the newer result, which a drop removes.
+        const old = tag(1, "bash", 1, { servedTokens: 31, reclaimableTokens: 31 });
+        const newest = {
+            ...tag(2, "read", 1, { servedTokens: 325_852, reclaimableTokens: 325_841 }),
+            sinceReading: true,
+        };
+        const input = {
+            tags: [old, newest],
+            floorTags: [old, newest],
+            maxTag: 2,
+            protectedCutoff: null,
+            currentTotalInputTokens: 15_360,
+            ceilingTokens: 10_400,
+            usagePercentage: 96,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const plan = planEmergencyDrop(input);
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toContain(2);
+        expect(plan.reason).toContain("newer than the reading (counted in the reading)");
+        // The same plan as when the newer result is counted in the reading.
+        const counted = planEmergencyDrop({
+            ...input,
+            tags: [old, { ...newest, sinceReading: false }],
+            floorTags: [old, { ...newest, sinceReading: false }],
+        });
+        expect(plan.tagNumbers).toEqual(counted.tagNumbers);
+        expect(plan.reclaimTokens).toBe(counted.reclaimTokens);
+        // Below 95% the accurate floor stands and the pass skips.
+        expect(planEmergencyDrop({ ...input, usagePercentage: 90 }).reason).toContain(
+            "fixed floor ≈15329 already exceeds ceiling 10400",
+        );
+        // With nothing newer, a fixed part above the ceiling still skips at 95%.
+        const fixedOnly = planEmergencyDrop({ ...input, tags: [old], floorTags: [old] });
+        expect(fixedOnly.shouldDrop).toBe(false);
+        expect(fixedOnly.reason).toContain("already exceeds ceiling");
+    });
+
     it("gauges the gap on the served request, so earlier drops count toward the target", () => {
         const tools = [tag(1, "bash", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 })];
         const input = {
