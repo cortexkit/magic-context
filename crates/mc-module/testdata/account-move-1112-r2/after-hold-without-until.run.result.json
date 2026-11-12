@@ -1,0 +1,20 @@
+{
+  "usage": {
+    "steps": 0,
+    "unreported_steps": 0,
+    "by_model": []
+  },
+  "run_id": "r1",
+  "state": "error",
+  "error": {
+    "class": "transient",
+    "message": "the account's usage window is spent",
+    "status": 429,
+    "provider_code": "account_limit_exhausted",
+    "resets_at_ms": 1900000000000,
+    "limit_window": "seven_day",
+    "account_continue": {
+      "routing_code": "no_compatible_account"
+    }
+  }
+}

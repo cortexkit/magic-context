@@ -69,6 +69,12 @@ mod named_read_tests;
 #[path = "compaction_limits_tests.rs"]
 mod compaction_limits_tests;
 
+#[path = "account_wait_session_tests.rs"]
+mod account_wait_session_tests;
+
+#[path = "account_wait_review_tests.rs"]
+mod account_wait_review_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

@@ -149,9 +149,12 @@ enum Job {
     /// keeps the run counted for the session until the worker has handled
     /// the result.
     SummaryFinished(
-        Box<Result<Option<run::Summarized>, String>>,
+        Box<Result<Option<run::Summarized>, run::SummaryError>>,
         crate::agent_data::busy::RunGuard,
     ),
+    /// A second turn met the runner's account wait: the session's summaries
+    /// wait for the time it named, as after a first turn that met it.
+    AccountWait(crate::summary::account_wait::AccountWait),
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -913,13 +916,18 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             if let Some(job) = continuation.and_then(|continuation| {
                                 session.turn_two_job(settings, continuation)
                             }) {
-                                start_turn_two(&inner, job, &held_key);
+                                start_turn_two(&inner, own.clone(), job, &held_key);
                             }
                         }
                         // The run stops counting only now that its result is
                         // handled and any second turn it started counts for
                         // itself.
                         drop(counted);
+                    }
+                    Job::AccountWait(wait) => {
+                        if let Some(session) = &mut session {
+                            session.account_refused(wait);
+                        }
                     }
                     Job::Ride(ride, reply) => {
                         // A held session checks its summaries again first,
@@ -1211,7 +1219,7 @@ fn hold(
     key: &SessionRef,
 ) -> Option<Job> {
     match job {
-        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) => {
+        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) | Job::AccountWait(_) => {
             if held.is_empty() {
                 tracing::info!(
                     "ck-mc: session {}/{}/{}: holding its Setup and notices while a move holds it ({}); they run if the move is aborted",
@@ -1311,10 +1319,12 @@ fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
 
 /// Run the two-pass historian's second turn beside the session's worker.
 /// It writes only memories and candidate rows, never the session's state,
-/// so nothing comes back to the worker; [`Module::idle`] waits for it as for
-/// a summary, and it counts for `session` until it ends.
+/// so nothing comes back to the worker but an account wait it met;
+/// [`Module::idle`] waits for it as for a summary, and it counts for
+/// `session` until it ends.
 fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
+    worker: mpsc::WeakUnboundedSender<Job>,
     job: crate::summary::two_pass::turn_two::Job,
     session: &SessionRef,
 ) {
@@ -1331,6 +1341,11 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
             "ck-mc: session {}: turn two: {outcome:?}",
             job.owner.session
         );
+        if let crate::summary::two_pass::turn_two::Outcome::AccountWait(wait) = outcome {
+            if let Some(worker) = worker.upgrade() {
+                let _ = worker.send(Job::AccountWait(wait));
+            }
+        }
         drop(counted);
         *inner.summaries_running.lock().expect("summary count") -= 1;
     });

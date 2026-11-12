@@ -15,6 +15,7 @@ use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
+use super::account_wait::{AccountWait, SendKind};
 use super::two_pass::turn_one::{self, Lane};
 use super::{chunk, fit};
 use std::sync::OnceLock;
@@ -173,7 +174,7 @@ pub async fn run<C: RunnerClient + Router>(
     client: &C,
     db: Option<&ContextDb>,
     job: &Request,
-) -> Result<Option<Summarized>, String> {
+) -> Result<Option<Summarized>, SummaryError> {
     let entries = read_range(client, job).await?;
     if entries.is_empty() {
         return Ok(None);
@@ -201,7 +202,7 @@ pub async fn run<C: RunnerClient + Router>(
         {
             Ok(answer) => answer,
             // No route left after a failure: the failure is what to report.
-            Err(error) => return Err(failure.unwrap_or_else(|| error.to_string())),
+            Err(error) => return Err(failure.unwrap_or_else(|| error.to_string()).into()),
         };
         tried.push(answer.route.route_key());
         let window = fit::Window {
@@ -255,6 +256,9 @@ pub async fn run<C: RunnerClient + Router>(
             Ok(_) => Outcome::Completed,
             // The prompt never went out: this model's window cannot hold it.
             Err(Failure::NotSent(_)) => Outcome::Cancelled,
+            // The runner held the send for an account: no model was asked,
+            // so this says nothing against the route.
+            Err(Failure::AccountWait(_)) => Outcome::Cancelled,
             Err(Failure::Failed(_) | Failure::Final(_)) => Outcome::Failed,
         };
         client
@@ -266,11 +270,52 @@ pub async fn run<C: RunnerClient + Router>(
             .await;
         match outcome {
             Ok(result) => return Ok(result),
-            Err(Failure::Final(error)) => return Err(error),
+            Err(Failure::Final(error)) => return Err(error.into()),
+            // Another model would draw on the same accounts, and the
+            // runner named when to ask again: the run ends waiting.
+            Err(Failure::AccountWait(wait)) => return Err(SummaryError::AccountWait(wait)),
             Err(Failure::NotSent(error) | Failure::Failed(error)) => failure = Some(error),
         }
     }
-    Err(failure.unwrap_or_default())
+    Err(failure.unwrap_or_default().into())
+}
+
+/// Why a summarizer send, or a whole run, produced no reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SummaryError {
+    /// The runner holds summarizer sends back until an account has room.
+    /// Nothing reached a model, and the contract forbids treating it as a
+    /// failure.
+    AccountWait(AccountWait),
+    /// Any other failure, as text.
+    Failed(String),
+}
+
+impl std::fmt::Display for SummaryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccountWait(wait) => write!(
+                f,
+                "{}: the {} waits for an account until {} ms since the epoch",
+                wait.code,
+                wait.send.name(),
+                wait.until_ms
+            ),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<String> for SummaryError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for SummaryError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_owned())
+    }
 }
 
 /// Why one model did not produce a summary.
@@ -282,6 +327,17 @@ enum Failure {
     /// The two-pass historian's first turn gave no valid reply: the run ends
     /// without trying another model.
     Final(String),
+    /// The runner holds summarizer sends back until an account has room.
+    AccountWait(AccountWait),
+}
+
+impl From<SummaryError> for Failure {
+    fn from(error: SummaryError) -> Self {
+        match error {
+            SummaryError::AccountWait(wait) => Self::AccountWait(wait),
+            SummaryError::Failed(error) => Self::Failed(error),
+        }
+    }
 }
 
 /// How one model is asked.
@@ -465,7 +521,7 @@ async fn summarize_on<C: RunnerClient>(
     };
     let (first, answered_in) = attempt(client, job, &label, &prompt, call, usage)
         .await
-        .map_err(Failure::Failed)?;
+        .map_err(Failure::from)?;
     let hashes = super::hashes::by_ordinal(entries);
     let checked = |reply: &str| {
         validate_historian_output(reply, &chunk.validation, &prior, options()).map(
@@ -567,7 +623,7 @@ async fn summarize_on<C: RunnerClient>(
         usage,
     )
     .await
-    .map_err(Failure::Failed)?;
+    .map_err(Failure::from)?;
     checked(&repaired)
         .map(|validated| Some(publish(validated, None)))
         .map_err(|error| Failure::Failed(format!("invalid after repair: {}", error.message)))
@@ -598,7 +654,7 @@ async fn attempt<C: RunnerClient>(
     prompt: &str,
     call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
-) -> Result<(String, Child), String> {
+) -> Result<(String, Child), SummaryError> {
     let mut retry = 0;
     loop {
         let child = Child {
@@ -617,13 +673,21 @@ async fn attempt<C: RunnerClient>(
         let send_id = child.session.session.clone();
         match call(client, &child, &send_id, prompt, call_on, usage).await {
             Ok(text) => return Ok((text, child)),
-            Err(error) if retry < MAX_RETRIES && retryable(&error) => {
+            Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
                 retry += 1;
             }
             // The child names the run to the runner's owner, who can match it
             // against the runner's own records.
-            Err(error) => return Err(format!("{error} (child {})", child.session.session)),
+            Err(SummaryError::Failed(error)) => {
+                return Err(SummaryError::Failed(format!(
+                    "{error} (child {})",
+                    child.session.session
+                )))
+            }
+            // An account wait is never retried here: the runner named when
+            // to send again, and that is minutes or hours away.
+            Err(wait @ SummaryError::AccountWait(_)) => return Err(wait),
         }
     }
 }
@@ -637,7 +701,7 @@ async fn call<C: RunnerClient>(
     prompt: &str,
     call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
-) -> Result<String, String> {
+) -> Result<String, SummaryError> {
     let target = call_on.target;
     let how = Model {
         model: &target.model,
@@ -647,6 +711,7 @@ async fn call<C: RunnerClient>(
         deadline: call_on.deadline,
         continuation: false,
         creates_child: true,
+        send: SendKind::TurnOne,
         cache_ttl: if call_on.lane == Lane::Enabled {
             cortexkit_role_llm_runner::cache::Ttl::Short
         } else {
@@ -679,6 +744,8 @@ pub(crate) struct Model<'a> {
     /// A single call cannot reuse a cache write; the second turn follows
     /// within seconds and can reuse the shortest explicit lifetime.
     pub cache_ttl: cortexkit_role_llm_runner::cache::Ttl,
+    /// Which summarizer send this is, named by an account wait it meets.
+    pub send: SendKind,
 }
 
 /// A completed call's reply.
@@ -689,7 +756,9 @@ pub(crate) struct Reply {
 }
 
 /// Send `prompt` in `child` under `send_id` and wait for the run to end. A
-/// run that ends other than `completed` is an error naming its state.
+/// run that ends other than `completed` is an error naming its state. A
+/// refusal to wait for an account, at the send or as the run's error, is
+/// [`SummaryError::AccountWait`].
 pub(crate) async fn send_and_wait<C: RunnerClient>(
     client: &C,
     child: &Child,
@@ -697,7 +766,7 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
-) -> Result<Reply, String> {
+) -> Result<Reply, SummaryError> {
     let runner = &child.session.runner;
     let with_temperature = !refuses_temperature(runner);
     let session_class = if how.creates_child && client.child_session_class(child).await {
@@ -733,20 +802,27 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
         }
         other => other,
     }
-    .map_err(|error| send_error(&error))?;
+    .map_err(|error| send_refused(&error, how.send))?;
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
-        return Err(format!("the runner did not start a run: {}", reply.state));
+        return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
-    let result = wait_for(client, child, &run_id, how.deadline).await?;
+    let result = wait_for(client, child, &run_id, how.deadline, how.send).await?;
     if let Some(reported) = &result.usage {
         *usage = Some(add_usage(usage.take(), &step_usage(reported)));
     }
     if result.state != states::COMPLETED {
+        // A runner that queued the send refuses it at the run's own
+        // admission, and says so in the error the run ends with.
+        if let Some(wait) = result.error.as_ref().and_then(|error| {
+            AccountWait::of_run_error(error, how.send, super::account_wait::now_ms())
+        }) {
+            return Err(SummaryError::AccountWait(wait));
+        }
         let error = result
             .error
             .as_ref()
             .map_or_else(String::new, |error| error.message.clone());
-        return Err(format!("the run ended {}: {error}", result.state));
+        return Err(format!("the run ended {}: {error}", result.state).into());
     }
     Ok(Reply {
         length_capped: result.finish == Some(Finish::Length),
@@ -760,6 +836,10 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
 #[cfg(test)]
 #[path = "session_class_tests.rs"]
 pub(crate) mod session_class_tests;
+
+#[cfg(test)]
+#[path = "account_wait_send_tests.rs"]
+pub(crate) mod account_wait_send_tests;
 
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system
@@ -847,6 +927,23 @@ fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
 /// with the parent session failed the whole summary run.
 const RUNNER_TRANSIENT: &str = "the runner refused it as transient: ";
 
+/// A failed `session.send`: an account wait when the runner refused it as
+/// one, otherwise the run's error text.
+fn send_refused(error: &crate::client::ClientError, send: SendKind) -> SummaryError {
+    let wait = error.code.as_deref().and_then(|code| {
+        AccountWait::of_refusal(
+            code,
+            error.detail.as_ref(),
+            send,
+            super::account_wait::now_ms(),
+        )
+    });
+    match wait {
+        Some(wait) => SummaryError::AccountWait(wait),
+        None => SummaryError::Failed(send_error(error)),
+    }
+}
+
 /// A failed `session.send` as the run's error text.
 fn send_error(error: &crate::client::ClientError) -> String {
     if error.code.as_deref() == Some("transient") {
@@ -911,28 +1008,84 @@ async fn read_range<C: RunnerClient>(
 }
 
 /// Wait for a run's result until `deadline`, the run's overall limit. The
-/// wait for each answer is bounded by it too.
+/// wait for each answer is bounded by it too. A `paused` run has not ended
+/// (llm-runner §6): a runner may pause it, for example until an account has
+/// room, and continue it by itself, so it is waited for like an active one.
+/// A run still paused at the deadline is cancelled first: left paused, it
+/// could continue later with nobody reading its reply. If the pause's own
+/// run error names an account wait, as a runner pausing for an account
+/// limit reports it, the call ends with that wait (`send` names which call);
+/// otherwise it times out as an active run does.
 async fn wait_for<C: RunnerClient>(
     client: &C,
     child: &Child,
     run_id: &str,
     deadline: tokio::time::Instant,
-) -> Result<RunResult, String> {
+    send: SendKind,
+) -> Result<RunResult, SummaryError> {
+    let mut paused: Option<RunResult> = None;
     loop {
-        let result = tokio::time::timeout_at(
+        let answer = tokio::time::timeout_at(
             deadline,
             client.child_result(child, RunResultRequest::new(run_id)),
         )
-        .await
-        .map_err(|_| "the run did not finish in time".to_owned())?
-        .map_err(|error| format!("run.result: {error:?}"))?;
-        if result.state != states::ACTIVE {
+        .await;
+        let result = match answer {
+            Ok(answer) => answer.map_err(|error| format!("run.result: {error:?}"))?,
+            Err(_) => return Err(timed_out(client, child, run_id, paused, send).await),
+        };
+        if result.state == states::PAUSED {
+            paused = Some(result);
+        } else if result.state == states::ACTIVE {
+            paused = None;
+        } else {
             return Ok(result);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("the run did not finish in time".into());
+            return Err(timed_out(client, child, run_id, paused, send).await);
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// How a wait that reached its deadline ends: a run last seen `paused` is
+/// cancelled, and ends as the account wait its error names, if it names
+/// one; anything else is the timeout.
+async fn timed_out<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    run_id: &str,
+    paused: Option<RunResult>,
+    send: SendKind,
+) -> SummaryError {
+    let Some(paused) = paused else {
+        return SummaryError::Failed("the run did not finish in time".into());
+    };
+    cancel_paused(client, child, run_id).await;
+    match paused
+        .error
+        .as_ref()
+        .and_then(|error| AccountWait::of_run_error(error, send, super::account_wait::now_ms()))
+    {
+        Some(wait) => SummaryError::AccountWait(wait),
+        None => SummaryError::Failed("the run did not finish in time".into()),
+    }
+}
+
+/// Cancel a run still paused when its wait ran out, where the runner serves
+/// `run.cancel`. Best effort: a cancel that fails is logged and changes
+/// nothing else.
+async fn cancel_paused<C: RunnerClient>(client: &C, child: &Child, run_id: &str) {
+    match client.cancel_child_run(child, run_id).await {
+        Ok(true) => tracing::info!(
+            "ck-mc: summarizer run {run_id} in {} was still paused when its time ran out; cancelled it",
+            child.session.session
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            "ck-mc: summarizer run {run_id} in {} was still paused when its time ran out; cancelling it failed: {error}",
+            child.session.session
+        ),
     }
 }
 

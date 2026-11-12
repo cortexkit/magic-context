@@ -533,6 +533,28 @@ impl RunnerClient for SubcRunnerClient {
         self.child_call(child, ops::RUN_RESULT, &request).await
     }
 
+    async fn cancel_child_run(&self, child: &Child, run_id: &str) -> Result<bool, ClientError> {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        let declared = self
+            .runner_capabilities
+            .run_cancel(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
+            .await;
+        if !declared {
+            return Ok(false);
+        }
+        let request = cortexkit_role_llm_runner::run::RunCancelRequest::new(run_id);
+        self.child_call::<_, Value>(child, cortexkit_role_llm_runner::ops::RUN_CANCEL, &request)
+            .await
+            .map(|_| true)
+    }
+
     /// Synapse admits any principal on its management surface and reads no
     /// project from the bind, so the route is opened unscoped, bound to the
     /// `magic-context` harness and the session the search is for.
@@ -1557,9 +1579,16 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
         .route_open_refusal()
         .map(|body| body.code.clone())
         .or_else(|| error.code().map(str::to_owned));
+    // A runner's own refusal keeps its detail: some refusals, such as an
+    // account wait, say in it when to ask again.
+    let detail = match error {
+        subc_client_rs::CallError::Module(body) => body.detail.clone(),
+        _ => None,
+    };
     ClientError {
         message: format!("{method}: {error:?}"),
         code,
+        detail,
     }
 }
 

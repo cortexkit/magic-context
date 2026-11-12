@@ -1,0 +1,1 @@
+{"code":"account_selection_final","message":"the routing module refused to choose a provider account for this send (route_state_unavailable); retry after 60 s","detail":{"routing_code":"route_state_unavailable","class":"permanent","retry_after_s":60,"retry_after_secs":60.0,"routing_detail":{"retry_after_s":60}}}

@@ -1,0 +1,1 @@
+{"result":{"state":"error","undelivered_steers":[],"usage":{"steps":0,"unreported_steps":0,"by_model":[]},"retries_used":0,"error":{"class":"transient","message":"the routing module refused to choose a provider account for this send (account_selection_unavailable); retry after 30 s","retry_after_secs":30.0,"provider_code":"account_selection_refused"}}}

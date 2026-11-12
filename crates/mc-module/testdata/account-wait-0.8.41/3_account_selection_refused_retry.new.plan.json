@@ -1,0 +1,1 @@
+{"code":"account_selection_refused","message":"the routing module refused to choose a provider account for this send (account_selection_unavailable); retry after 30 s","detail":{"routing_code":"account_selection_unavailable","class":"transient","retry_after_s":30,"retry_after_secs":30.0,"routing_detail":{"retry_after_s":30}}}

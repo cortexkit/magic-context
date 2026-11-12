@@ -1,0 +1,1 @@
+{"result":{"state":"error","undelivered_steers":[],"usage":{"steps":0,"unreported_steps":0,"by_model":[]},"retries_used":0,"error":{"class":"permanent","message":"the routing module refused to choose a provider account for this send (account_not_authorized)","provider_code":"account_selection_final"}}}

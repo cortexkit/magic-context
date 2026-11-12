@@ -198,6 +198,15 @@ pub struct Session {
     baseline: Option<Arc<Baseline>>,
     /// A summarizer run is in progress.
     summarizing: bool,
+    /// The runner held a summarizer send back until an account has room:
+    /// no summary run starts before the time it named. Kept in memory only.
+    account_wait: Option<crate::summary::account_wait::Waiting>,
+    /// What the summary run in flight changed when it started, so a run the
+    /// runner refuses for an account can give it back.
+    run_start: Option<RunStart>,
+    /// When a summary run of this session was last served, in milliseconds
+    /// since the Unix epoch: an account refusal older than that is stale.
+    last_served_ms: i64,
     /// The next view re-renders the baseline (`m[0]`), because the
     /// request's prefix changes anyway or `m[0]`'s settings changed.
     fold_due: bool,
@@ -419,6 +428,34 @@ enum SummaryCheck {
     Behind { failed: usize },
 }
 
+/// What a summary run changed when it started ([`Session::summary_due`]).
+struct RunStart {
+    /// The floor lift the run spent, if it spent one.
+    lift: Option<SpentLift>,
+    /// The run started at 95% usage or above.
+    emergency: bool,
+}
+
+/// A floor lift a summary run spent when it started.
+struct SpentLift {
+    /// The floor mark the run took.
+    mark: Option<(u64, String)>,
+    /// The prompt the floor was lifted for before the run.
+    lifted_before: Option<String>,
+}
+
+/// How the account wait lets a summary run start
+/// ([`Session::account_wait_admits`]).
+enum AccountAdmit {
+    /// The session waits for no account.
+    NoWait,
+    /// The wait's time has passed: this is the first run after it.
+    AfterWait,
+    /// Inside the wait at emergency usage: one try for the history that
+    /// ends on this message.
+    Emergency(Option<String>),
+}
+
 /// A session's summaries, oldest first (in sequence order), with a revision
 /// that every change moves on. Values derived from the summaries are kept
 /// against the revision they were derived at, instead of being derived again
@@ -617,6 +654,9 @@ impl Session {
             refused_once: BTreeSet::new(),
             transcript_retry: None,
             summarizing: false,
+            account_wait: None,
+            run_start: None,
+            last_served_ms: 0,
             fold_due: false,
             head_stale: false,
             nudges: crate::nudges::State::default(),
@@ -1612,7 +1652,12 @@ impl Session {
         // shrunk cannot re-arm the same mark on this evaluation. A pass after
         // a stale reading leaves the mark for the next current one, since
         // lifting the floor is for a pass at the threshold.
-        let lift_floor = !self.reading_stale && self.floor_pending_for.take().is_some();
+        let taken_mark = if self.reading_stale {
+            None
+        } else {
+            self.floor_pending_for.take()
+        };
+        let lift_floor = taken_mark.is_some();
         let mut until = bounded(tail, force || lift_floor);
         let mut decision = decide(until);
         if decision.is_none() && force {
@@ -1660,6 +1705,13 @@ impl Session {
             ));
             return None;
         }
+        let Some(admitted) = self.account_wait_admits(usage) else {
+            // The floor's lift is for the run after the wait.
+            if lift_floor {
+                self.floor_pending_for = taken_mark;
+            }
+            return None;
+        };
         let requested: u64 = self
             .index
             .entries()
@@ -1681,6 +1733,14 @@ impl Session {
             "ck-mc: session {}: summary started over messages {from}..{until} (~{requested} tokens)",
             self.key.session
         );
+        self.note_account_run(admitted, usage);
+        self.run_start = Some(RunStart {
+            lift: lift_floor.then(|| SpentLift {
+                mark: taken_mark,
+                lifted_before: self.floor_lifted_for.clone(),
+            }),
+            emergency: usage >= 95.0,
+        });
         // The lift is spent only by a run that actually starts.
         if lift_floor {
             self.floor_lifted_for = prompt.map(|(_, mid)| mid);
@@ -1811,6 +1871,110 @@ impl Session {
             _ => force,
         };
         self.no_progress = Some((newest, retried));
+    }
+
+    /// Whether the account wait lets the run due now start, and how. `None`
+    /// holds it back; the first run held back in a wait is logged, later
+    /// ones are not. From 95% usage, where a primary session's turns wait
+    /// for its summary, one run per newest message may start inside the
+    /// wait: the account may have recovered, and the alternative is a
+    /// refused turn. A refused try leaves nothing to retry until a newer
+    /// message arrives.
+    fn account_wait_admits(&mut self, usage: f64) -> Option<AccountAdmit> {
+        let now = crate::summary::account_wait::now_ms();
+        let newest = self.index.entries().last().map(|entry| entry.mid.clone());
+        let session = &self.key.session;
+        let Some(waiting) = &mut self.account_wait else {
+            return Some(AccountAdmit::NoWait);
+        };
+        if !waiting.holds(now) {
+            return Some(AccountAdmit::AfterWait);
+        }
+        if usage >= 95.0 && newest.is_some() && waiting.emergency_at != newest {
+            return Some(AccountAdmit::Emergency(newest));
+        }
+        if !waiting.skip_logged {
+            waiting.skip_logged = true;
+            tracing::info!(
+                "ck-mc: session {session}: summary skipped at {usage:.0}%: summaries wait for the account until {} ms since the epoch ({} after the {}); no summary run starts before then",
+                waiting.refusal.until_ms,
+                waiting.refusal.code,
+                waiting.refusal.send.name()
+            );
+        }
+        None
+    }
+
+    /// A run [`Session::account_wait_admits`] let through has started.
+    fn note_account_run(&mut self, admitted: AccountAdmit, usage: f64) {
+        let session = &self.key.session;
+        match admitted {
+            AccountAdmit::NoWait => {}
+            AccountAdmit::AfterWait => {
+                if let Some(waiting) = self.account_wait.take() {
+                    tracing::info!(
+                        "ck-mc: session {session}: the first summary run after the account wait started (the wait ran until {} ms since the epoch)",
+                        waiting.refusal.until_ms
+                    );
+                }
+            }
+            AccountAdmit::Emergency(newest) => {
+                if let Some(waiting) = &mut self.account_wait {
+                    waiting.emergency_at = newest;
+                    tracing::info!(
+                        "ck-mc: session {session}: summary run started at {usage:.0}% inside the account wait (until {} ms since the epoch): one try for this history",
+                        waiting.refusal.until_ms
+                    );
+                }
+            }
+        }
+    }
+
+    /// The runner held a summarizer send back until an account has room:
+    /// no summary run starts for this session before the time it named. A
+    /// try at emergency usage that met it again keeps its mark, so the next
+    /// such try waits for newer history.
+    pub(crate) fn account_refused(&mut self, wait: crate::summary::account_wait::AccountWait) {
+        self.account_refused_at(wait, None);
+    }
+
+    /// [`Session::account_refused`] for a run that met the wait with
+    /// `emergency_at` as its history: a run started at emergency usage,
+    /// which asks again only once newer history arrives. A refusal received
+    /// before the session's last served run is ignored: a second turn's wait
+    /// can arrive after a later first turn found the accounts open again.
+    fn account_refused_at(
+        &mut self,
+        wait: crate::summary::account_wait::AccountWait,
+        emergency_at: Option<String>,
+    ) {
+        if wait.at_ms < self.last_served_ms {
+            return;
+        }
+        let emergency_at = emergency_at.or_else(|| {
+            self.account_wait
+                .take()
+                .and_then(|waiting| waiting.emergency_at)
+        });
+        let seconds = (wait.until_ms - crate::summary::account_wait::now_ms()).max(0) / 1000;
+        tracing::info!(
+            "ck-mc: session {}: summaries wait for the account until {} ms since the epoch (in {seconds} s): the runner refused the {} with {}",
+            self.key.session,
+            wait.until_ms,
+            wait.send.name(),
+            wait.code
+        );
+        self.account_wait = Some(crate::summary::account_wait::Waiting::new(
+            wait,
+            emergency_at,
+        ));
+    }
+
+    /// The session's summaries wait for an account right now.
+    fn summaries_wait_for_account(&self) -> bool {
+        self.account_wait
+            .as_ref()
+            .is_some_and(|waiting| waiting.holds(crate::summary::account_wait::now_ms()))
     }
 
     /// The project's memories for the summarizer's `<project-memory>` block;
@@ -2113,17 +2277,25 @@ impl Session {
         &mut self,
         client: &C,
         settings: &Settings,
-        result: Result<Option<run::Summarized>, String>,
+        result: Result<Option<run::Summarized>, run::SummaryError>,
         now_ms: i64,
     ) -> Option<run::Continuation> {
         self.summarizing = false;
         let reservation = self.reservation.take();
+        let started = self.run_start.take();
         let (validated, publication, continuation) = match result {
-            Ok(Some(summarized)) => (
-                summarized.validated,
-                summarized.publication,
-                summarized.continuation,
-            ),
+            Ok(Some(summarized)) => {
+                // The runner served the summarizer, so whatever account wait
+                // an earlier send met is over, and an older one that arrives
+                // late is stale.
+                self.account_wait = None;
+                self.last_served_ms = crate::summary::account_wait::now_ms();
+                (
+                    summarized.validated,
+                    summarized.publication,
+                    summarized.continuation,
+                )
+            }
             Ok(None) => {
                 if let Some(reservation) = reservation {
                     self.drain.release(reservation);
@@ -2131,12 +2303,38 @@ impl Session {
                 self.record_no_progress(settings);
                 return None;
             }
+            // The runner held the send back until an account has room. That
+            // is no failure: nothing reached a model, so the reservation goes
+            // back, and no failure, backoff or error is recorded. The session
+            // waits for the time the runner named instead.
+            Err(run::SummaryError::AccountWait(wait)) => {
+                if let Some(reservation) = reservation {
+                    self.drain.release(reservation);
+                }
+                let mut emergency_at = None;
+                if let Some(started) = started {
+                    // A floor lift the run spent comes back for the run after
+                    // the wait, as when the wait holds a run back before it
+                    // starts.
+                    if let Some(lift) = started.lift {
+                        self.floor_pending_for = lift.mark;
+                        self.floor_lifted_for = lift.lifted_before;
+                    }
+                    // A run started at emergency usage was that history's
+                    // one try.
+                    if started.emergency {
+                        emergency_at = self.index.entries().last().map(|entry| entry.mid.clone());
+                    }
+                }
+                self.account_refused_at(wait, emergency_at);
+                return None;
+            }
             // The summarizer failed: the reservation stays spent, so a broken
             // summarizer does not run again on every pass. The wait for new
             // history is only for a run that published nothing (the plugin's
             // `historian-history-wait.ts`): a provider that recovers may run
             // again on the same history while the quota lasts.
-            Err(error) => {
+            Err(run::SummaryError::Failed(error)) => {
                 self.app.failures += 1;
                 self.app.last_error = Some(error.clone());
                 tracing::warn!(
@@ -3089,7 +3287,11 @@ impl Session {
     }
 
     fn summary_on_its_way(&self) -> bool {
-        self.features.summarizer && (self.summarizing || self.floor_pending_for.is_some())
+        // A floor mark promises a summary on the next notice, which an
+        // account wait would not start: the drops it holds land now instead.
+        self.features.summarizer
+            && (self.summarizing
+                || (self.floor_pending_for.is_some() && !self.summaries_wait_for_account()))
     }
 
     /// The history head, and the cut when the newest summary's last message

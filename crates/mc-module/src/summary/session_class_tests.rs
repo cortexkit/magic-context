@@ -79,6 +79,7 @@ async fn creating_summary_send_is_labelled_only_for_a_declaring_runner() {
             continuation: false,
             creates_child: true,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
+            send: SendKind::TurnOne,
         };
         send_and_wait(&client, &child(), "first", "prompt", &how, &mut None)
             .await
@@ -112,6 +113,7 @@ async fn later_send_in_the_same_child_has_no_label_or_discovery() {
         continuation: false,
         creates_child: true,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
+        send: SendKind::TurnOne,
     };
     send_and_wait(&client, &child(), "first", "prompt", &how, &mut None)
         .await

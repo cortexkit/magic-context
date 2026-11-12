@@ -24,12 +24,14 @@ pub struct Child {
 }
 
 /// A call to the runner that got no answer, or a refusal.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClientError {
     pub message: String,
     /// The refusal's code, when the runner or the daemon refused the call or
     /// its route by name.
     pub code: Option<String>,
+    /// The refusal's `detail`, when the runner's error body carried one.
+    pub detail: Option<serde_json::Value>,
 }
 
 impl ClientError {
@@ -37,6 +39,7 @@ impl ClientError {
         Self {
             message: message.into(),
             code: None,
+            detail: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl ClientError {
         Self {
             message: message.into(),
             code: Some(code.into()),
+            detail: None,
         }
     }
 
@@ -54,6 +58,17 @@ impl ClientError {
     pub fn not_permitted(&self) -> bool {
         self.code.as_deref()
             == Some(cortexkit_role_compaction::wire::codes::COMPACTION_NOT_PERMITTED)
+    }
+}
+
+impl std::fmt::Debug for ClientError {
+    /// Leaves `detail` out: errors are logged and shown to the apps in this
+    /// form, which predates the field and should not grow with it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientError")
+            .field("message", &self.message)
+            .field("code", &self.code)
+            .finish()
     }
 }
 
@@ -125,6 +140,16 @@ pub trait RunnerClient: Send + Sync + 'static {
         child: &Child,
         request: RunResultRequest,
     ) -> impl Future<Output = Result<RunResult, ClientError>> + Send;
+    /// `run.cancel` of `run_id` on the child's route, when the child's runner
+    /// declares the `run_cancel` group. `Ok(false)` when it does not, so
+    /// nothing was asked.
+    fn cancel_child_run(
+        &self,
+        _child: &Child,
+        _run_id: &str,
+    ) -> impl Future<Output = Result<bool, ClientError>> + Send {
+        async { Ok(false) }
+    }
     /// One call to the Synapse module's management surface on the session's
     /// behalf, for `ctx_search`'s rerank (`models.list`, `rerank.score`),
     /// within [`crate::search::rerank::SYNAPSE_DEADLINE`]. The answer is the

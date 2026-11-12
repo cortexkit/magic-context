@@ -1,0 +1,1 @@
+{"result":{"state":"error","undelivered_steers":[],"usage":{"steps":0,"unreported_steps":0,"by_model":[]},"retries_used":0,"error":{"class":"transient","message":"the routing module refused to choose a provider account for this send (account_pool_exhausted); retry after 120 s","retry_after_secs":120.0,"provider_code":"account_limit_exhausted","resets_at_ms":4102444800000}}}
