@@ -53,7 +53,7 @@ cortexkit-role-compaction = "=0.3.8"
 # same library, so both sides render a view the same way.
 cortexkit-compaction-view = "=0.3.0"
 # session.send and run.result, which the compaction contract reuses.
-cortexkit-role-llm-runner = "=0.8.41"
+cortexkit-role-llm-runner = "=0.8.42"
 
 # Internal crates.
 mc-tokenizer = { path = "crates/mc-tokenizer" }

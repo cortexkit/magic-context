@@ -11,7 +11,7 @@ use std::time::Duration;
 use cortexkit_role_compaction::read::SessionRef;
 use cortexkit_role_compaction::setup::ModelRef;
 use cortexkit_role_llm_runner::finish::Finish;
-use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest, RunStatusRequest};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
@@ -1013,8 +1013,8 @@ async fn read_range<C: RunnerClient>(
 /// room, and continue it by itself, so it is waited for like an active one.
 /// A run still paused at the deadline is cancelled first: left paused, it
 /// could continue later with nobody reading its reply. If the pause's own
-/// run error names an account wait, as a runner pausing for an account
-/// limit reports it, the call ends with that wait (`send` names which call);
+/// reason or run error names an account wait, the call ends with that wait
+/// (`send` names which call);
 /// otherwise it times out as an active run does.
 async fn wait_for<C: RunnerClient>(
     client: &C,
@@ -1049,8 +1049,8 @@ async fn wait_for<C: RunnerClient>(
 }
 
 /// How a wait that reached its deadline ends: a run last seen `paused` is
-/// cancelled, and ends as the account wait its error names, if it names
-/// one; anything else is the timeout.
+/// cancelled, and ends as the account wait its reason or error names, if it
+/// names one; anything else is the timeout.
 async fn timed_out<C: RunnerClient>(
     client: &C,
     child: &Child,
@@ -1061,12 +1061,22 @@ async fn timed_out<C: RunnerClient>(
     let Some(paused) = paused else {
         return SummaryError::Failed("the run did not finish in time".into());
     };
-    cancel_paused(client, child, run_id).await;
-    match paused
-        .error
-        .as_ref()
-        .and_then(|error| AccountWait::of_run_error(error, send, super::account_wait::now_ms()))
+    let wait = if AccountWait::of_paused_run(&paused, None, send, super::account_wait::now_ms())
+        .is_some()
     {
+        // Read before cancelling: cancellation may clear the pause's resume
+        // time. run.result carries the reason and error, but not this floor.
+        let resume = client
+            .child_status(child, RunStatusRequest::new().with_run_id(run_id))
+            .await
+            .ok()
+            .and_then(|status| status.resume_not_before_ms);
+        AccountWait::of_paused_run(&paused, resume, send, super::account_wait::now_ms())
+    } else {
+        None
+    };
+    cancel_paused(client, child, run_id).await;
+    match wait {
         Some(wait) => SummaryError::AccountWait(wait),
         None => SummaryError::Failed("the run did not finish in time".into()),
     }

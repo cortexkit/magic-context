@@ -7,7 +7,7 @@
 //! another run and refused at its own admission, or a runner that picks an
 //! account per model request. A runner may also pause a run for an account
 //! limit and resume it by itself: ck-mc waits through the pause, and a run
-//! still paused at its deadline whose run error names an account wait is
+//! still paused at its deadline whose reason or run error names an account wait is
 //! cancelled and ends as that wait. In every case the contract forbids failing the
 //! work for it and forbids asking the same account again before the time
 //! the runner names, so a summary that meets it waits instead of counting as
@@ -24,7 +24,7 @@
 //! its facts back to a later second turn in that run's own child.
 
 use cortexkit_role_llm_runner::errors;
-use cortexkit_role_llm_runner::run::RunError;
+use cortexkit_role_llm_runner::run::{RunError, RunResult};
 use serde_json::Value;
 
 /// How long summaries wait when the runner names no time. The contract
@@ -120,6 +120,42 @@ impl AccountWait {
             until_ms: until(now_ms, error.retry_after_secs, error.resets_at_ms),
             at_ms: now_ms,
             send,
+        })
+    }
+
+    /// A pause still present at the caller's deadline. The runner's exact
+    /// resume floor takes priority over the error's retry hint or reset.
+    /// Older runners name only the provider code, so keep accepting it.
+    pub fn of_paused_run(
+        paused: &RunResult,
+        resume_not_before_ms: Option<u64>,
+        send: SendKind,
+        now_ms: i64,
+    ) -> Option<Self> {
+        let fallback = paused
+            .error
+            .as_ref()
+            .and_then(|error| Self::of_run_error(error, send, now_ms));
+        let wait = fallback.or_else(|| {
+            (paused.reason.as_deref() == Some("account_limit")).then(|| Self {
+                code: errors::ACCOUNT_LIMIT_EXHAUSTED.to_owned(),
+                until_ms: until(
+                    now_ms,
+                    paused
+                        .error
+                        .as_ref()
+                        .and_then(|error| error.retry_after_secs),
+                    paused.error.as_ref().and_then(|error| error.resets_at_ms),
+                ),
+                at_ms: now_ms,
+                send,
+            })
+        });
+        wait.map(|mut wait| {
+            if let Some(resume) = resume_not_before_ms {
+                wait.until_ms = until(now_ms, None, Some(resume));
+            }
+            wait
         })
     }
 }

@@ -7,7 +7,7 @@ use std::future::Future;
 
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
-use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest, RunStatus, RunStatusRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 
 /// A child session of ck-mc's own on a session's runner, where a summarizer
@@ -140,6 +140,15 @@ pub trait RunnerClient: Send + Sync + 'static {
         child: &Child,
         request: RunResultRequest,
     ) -> impl Future<Output = Result<RunResult, ClientError>> + Send;
+    /// `run.status` on the child's route, to read an account pause's resume time.
+    /// An older runner or an unavailable read leaves the run error's timing in use.
+    fn child_status(
+        &self,
+        _child: &Child,
+        _request: RunStatusRequest,
+    ) -> impl Future<Output = Result<RunStatus, ClientError>> + Send {
+        async { Err(ClientError::new("run.status unavailable")) }
+    }
     /// `run.cancel` of `run_id` on the child's route, when the child's runner
     /// declares the `run_cancel` group. `Ok(false)` when it does not, so
     /// nothing was asked.

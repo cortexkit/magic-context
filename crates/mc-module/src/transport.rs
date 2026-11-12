@@ -15,7 +15,7 @@ use cortexkit_role_compaction::wire::{self, codes, Refusal};
 use cortexkit_role_compaction::{
     ops, COMPACTION_PROVIDES, COMPACTION_ROLE, COMPACTION_RUNNER_ROLE, LLM_RUNNER_ROLE,
 };
-use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest, RunStatus, RunStatusRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
@@ -537,6 +537,15 @@ impl RunnerClient for SubcRunnerClient {
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
         self.child_call(child, ops::RUN_RESULT, &request).await
+    }
+
+    async fn child_status(
+        &self,
+        child: &Child,
+        request: RunStatusRequest,
+    ) -> Result<RunStatus, ClientError> {
+        self.child_call(child, cortexkit_role_llm_runner::ops::RUN_STATUS, &request)
+            .await
     }
 
     async fn cancel_child_run(&self, child: &Child, run_id: &str) -> Result<bool, ClientError> {

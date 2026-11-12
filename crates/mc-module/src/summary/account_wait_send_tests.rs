@@ -8,7 +8,7 @@ use crate::routing::RouteError;
 use cortexkit_role_compaction::part::{Part, PartBody};
 use cortexkit_role_compaction::read::{Entry, Head, ReadPage, ReadRequest, Role};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
-use cortexkit_role_llm_runner::run::RunStatus;
+use cortexkit_role_llm_runner::run::{RunStatus, RunStatusRequest};
 use cortexkit_role_llm_runner::send::SendReply;
 use cortexkit_role_routing::report::ReportRequest;
 use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
@@ -311,8 +311,26 @@ fn refusal_of(result: Result<Reply, SummaryError>) -> SummaryError {
 /// run error, and which serves `run.cancel` when `cancels` is set.
 struct PausedRunner {
     cancels: bool,
+    reason: Option<&'static str>,
     error: Option<cortexkit_role_llm_runner::run::RunError>,
+    resume_not_before_ms: Option<u64>,
+    status_fails: bool,
+    status_reads: Mutex<Vec<String>>,
     cancelled: Mutex<Vec<String>>,
+}
+
+impl PausedRunner {
+    fn new(reason: Option<&'static str>) -> Self {
+        Self {
+            cancels: true,
+            reason,
+            error: None,
+            resume_not_before_ms: None,
+            status_fails: false,
+            status_reads: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl RunnerClient for PausedRunner {
@@ -339,16 +357,29 @@ impl RunnerClient for PausedRunner {
     }
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
         let mut paused = RunResult::new("run", states::PAUSED);
-        paused.reason = Some(
-            if self.error.is_some() {
-                "account_limit"
-            } else {
-                "auth_required"
-            }
-            .into(),
-        );
+        paused.reason = self.reason.map(str::to_owned);
         paused.error = self.error.clone();
         Ok(paused)
+    }
+    async fn child_status(
+        &self,
+        _: &Child,
+        request: RunStatusRequest,
+    ) -> Result<RunStatus, ClientError> {
+        assert!(
+            self.cancelled.lock().unwrap().is_empty(),
+            "read before cancel"
+        );
+        self.status_reads
+            .lock()
+            .unwrap()
+            .push(request.run_id.unwrap());
+        if self.status_fails {
+            return Err(ClientError::new("status read failed"));
+        }
+        let mut status = RunStatus::new(states::PAUSED);
+        status.resume_not_before_ms = self.resume_not_before_ms;
+        Ok(status)
     }
     async fn cancel_child_run(&self, _: &Child, run_id: &str) -> Result<bool, ClientError> {
         if !self.cancels {
@@ -368,8 +399,7 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
     for cancels in [true, false] {
         let client = PausedRunner {
             cancels,
-            error: None,
-            cancelled: Mutex::new(Vec::new()),
+            ..PausedRunner::new(Some("auth_required"))
         };
         let model = ModelRef::new("provider", "model");
         let mut how = how(&model);
@@ -382,6 +412,7 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
         );
         let expected: Vec<String> = if cancels { vec!["run".into()] } else { vec![] };
         assert_eq!(*client.cancelled.lock().unwrap(), expected);
+        assert!(client.status_reads.lock().unwrap().is_empty());
     }
 }
 
@@ -391,9 +422,8 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
 #[tokio::test]
 async fn account_wait_a_run_paused_for_an_account_at_its_deadline_is_a_wait() {
     let client = PausedRunner {
-        cancels: true,
         error: Answer::RunEndsRefused.run_end().error,
-        cancelled: Mutex::new(Vec::new()),
+        ..PausedRunner::new(Some("account_limit"))
     };
     let model = ModelRef::new("provider", "model");
     let mut how = how(&model);
@@ -404,4 +434,109 @@ async fn account_wait_a_run_paused_for_an_account_at_its_deadline_is_a_wait() {
         refusal_of(send_and_wait(&client, &child(), "send", "prompt", &how, &mut None).await);
     assert_waits_120_s(error, before, SendKind::TurnOne);
     assert_eq!(*client.cancelled.lock().unwrap(), vec!["run".to_owned()]);
+}
+
+async fn pause_at_deadline(client: &PausedRunner) -> AccountWait {
+    let error = wait_for(
+        client,
+        &child(),
+        "run",
+        tokio::time::Instant::now() + Duration::from_millis(10),
+        SendKind::TurnOne,
+    )
+    .await
+    .expect_err("the run stays paused");
+    let SummaryError::AccountWait(wait) = error else {
+        panic!("the pause counted as a failure: {error:?}");
+    };
+    assert_eq!(*client.status_reads.lock().unwrap(), vec!["run"]);
+    assert_eq!(*client.cancelled.lock().unwrap(), vec!["run"]);
+    wait
+}
+
+#[tokio::test]
+async fn account_pause_0842_reason_and_resume_time_override_the_error_hints() {
+    let resume = super::super::account_wait::now_ms() + 20 * 60_000;
+    let client = PausedRunner {
+        error: Answer::RunEndsRefused.run_end().error,
+        resume_not_before_ms: Some(resume as u64),
+        ..PausedRunner::new(Some("account_limit"))
+    };
+    let wait = pause_at_deadline(&client).await;
+    assert_eq!(wait.until_ms, resume);
+    assert_eq!(wait.send, SendKind::TurnOne);
+}
+
+#[tokio::test]
+async fn account_pause_0842_reason_alone_waits_without_a_run_error() {
+    let client = PausedRunner::new(Some("account_limit"));
+    let wait = pause_at_deadline(&client).await;
+    assert_eq!(wait.until_ms, wait.at_ms + 5 * 60_000);
+}
+
+#[tokio::test]
+async fn account_pause_0842_reason_without_resume_uses_error_timing_then_default() {
+    use cortexkit_role_llm_runner::run::RunError;
+    for (error, expected) in [
+        (Answer::RunEndsRefused.run_end().error, 120_000),
+        (
+            Some(
+                RunError::new("transient", "limit", "new_provider_code")
+                    .with_resets_at_ms((super::super::account_wait::now_ms() + 600_000) as u64),
+            ),
+            0,
+        ),
+    ] {
+        let reset = error.as_ref().and_then(|error| error.resets_at_ms);
+        let client = PausedRunner {
+            error,
+            ..PausedRunner::new(Some("account_limit"))
+        };
+        let wait = pause_at_deadline(&client).await;
+        if expected == 0 {
+            assert_eq!(wait.until_ms, reset.unwrap() as i64);
+        } else {
+            assert_eq!(wait.until_ms, wait.at_ms + expected);
+        }
+    }
+}
+
+#[tokio::test]
+async fn account_pause_0842_status_failure_keeps_the_account_wait_and_error_timing() {
+    let mut error =
+        cortexkit_role_llm_runner::run::RunError::new("transient", "limit", "new_provider_code");
+    error.retry_after_secs = Some(120.0);
+    let client = PausedRunner {
+        status_fails: true,
+        error: Some(error),
+        ..PausedRunner::new(Some("account_limit"))
+    };
+    let wait = pause_at_deadline(&client).await;
+    assert_eq!(wait.until_ms, wait.at_ms + 120_000);
+}
+
+#[tokio::test]
+async fn account_pause_0842_resume_floor_is_bounded_to_one_minute_and_six_hours() {
+    let now = super::super::account_wait::now_ms();
+    for (resume, expected) in [
+        (now - 60_000, 60_000),
+        (now + 10 * 3_600_000, 6 * 3_600_000),
+    ] {
+        let client = PausedRunner {
+            resume_not_before_ms: Some(resume as u64),
+            ..PausedRunner::new(Some("account_limit"))
+        };
+        let wait = pause_at_deadline(&client).await;
+        assert_eq!(wait.until_ms, wait.at_ms + expected);
+    }
+}
+
+#[tokio::test]
+async fn account_pause_0842_older_provider_code_only_body_keeps_its_wait() {
+    let client = PausedRunner {
+        error: Answer::RunEndsRefused.run_end().error,
+        ..PausedRunner::new(None)
+    };
+    let wait = pause_at_deadline(&client).await;
+    assert_eq!(wait.until_ms, wait.at_ms + 120_000);
 }
