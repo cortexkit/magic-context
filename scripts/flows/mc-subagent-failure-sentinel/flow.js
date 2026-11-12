@@ -1,6 +1,7 @@
 // Magic Context subagent failure sentinel, run by basal every five minutes.
 //
-// It reads finished subagent invocations from ck-mc's read-only
+// It reads finished subagent invocations from ck-mc's (Magic Context's
+// module in the CortexKit daemon) read-only
 // `subagent_invocations.read` op and wakes MC when failures look new or are
 // growing. The rules are a port of `evaluateFailures` in
 // packages/plugin/scripts/subagent-failure-sentinel.ts, and
