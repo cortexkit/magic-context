@@ -59,10 +59,12 @@ import {
 	measureEmergencyTag,
 	planEmergencyDrop,
 } from "@magic-context/core/hooks/magic-context/emergency-drop";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import type { TranscriptPart } from "@magic-context/core/shared/transcript";
 
 /**
  * Same DEDUP_SAFE_TOOLS list OpenCode uses. Read-only tools whose
@@ -127,12 +129,122 @@ export interface PiHeuristicCleanupConfig {
 		passAlreadyPriced?: boolean;
 		serializedImageTokens?: ReadonlyMap<string, number>;
 		fitCalibration?: { toolsRatio: number; proseRatio: number };
+		/**
+		 * Local token counts of each active tag's content, read before this pass
+		 * removed anything (snapshotPiEmergencyServedMass). With it, the planner
+		 * takes what the pass already removed off `currentTotalInputTokens`, the
+		 * previous request's reading.
+		 */
+		servedBeforePass?: PiEmergencyServedSnapshot;
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
 	 * for forwarding this only for primary sessions where caveman is enabled.
 	 */
 	caveman?: CavemanCleanupConfig;
+}
+
+/**
+ * Local token counts of each active tag's content, read before a pass removes
+ * anything. Tool content counts under `tools`, other content under `prose`.
+ */
+export type PiEmergencyServedSnapshot = ReadonlyMap<
+	number,
+	{
+		tag: Pick<TagEntry, "type" | "messageId">;
+		tools: number;
+		prose: number;
+	}
+>;
+
+/**
+ * Local token counts of what a tag's content currently puts on the request,
+ * read from its parts' text and tool input only. Unlike `measureReclaim`, this
+ * never asks whether a call may be removed: on Pi that question freezes a
+ * durable native-removal decision, and a measurement must not write state.
+ * Tool-result images count only when the caller supplies their serialized
+ * token counts (provider-overflow recovery), as in the emergency measurement.
+ */
+function piServedLocalTokens(
+	tag: Pick<TagEntry, "type" | "messageId">,
+	target: TagTarget | undefined,
+	imageTokens: ReadonlyMap<string, number> | undefined,
+): { tools: number; prose: number } {
+	let tokens = 0;
+	const parts = target?.mutationParts;
+	if (parts && parts.length > 0) {
+		for (const { part } of parts) {
+			const transcriptPart = part as Partial<TranscriptPart>;
+			const text =
+				transcriptPart.kind === "tool_use" && transcriptPart.getToolInput
+					? JSON.stringify(transcriptPart.getToolInput() ?? {})
+					: (transcriptPart.getText?.() ?? "");
+			tokens += estimateTokens(text);
+		}
+	} else {
+		const content = target?.getContent?.();
+		tokens = content ? estimateTokens(content) : 0;
+	}
+	if (tag.type !== "tool") return { tools: 0, prose: tokens };
+	return { tools: tokens + (imageTokens?.get(tag.messageId) ?? 0), prose: 0 };
+}
+
+/**
+ * Measure the active tags' content before this pass's first removal, so the
+ * emergency planner can later take what the pass removed off the provider's
+ * reading of the previous request. Reads only; writes no state.
+ */
+export function snapshotPiEmergencyServedMass(
+	tags: readonly Pick<
+		TagEntry,
+		"tagNumber" | "type" | "status" | "messageId"
+	>[],
+	targets: ReadonlyMap<number, TagTarget>,
+	imageTokens?: ReadonlyMap<string, number>,
+): PiEmergencyServedSnapshot {
+	const snapshot = new Map<
+		number,
+		{ tag: Pick<TagEntry, "type" | "messageId">; tools: number; prose: number }
+	>();
+	for (const tag of tags) {
+		if (tag.status !== "active") continue;
+		snapshot.set(tag.tagNumber, {
+			tag: { type: tag.type, messageId: tag.messageId },
+			...piServedLocalTokens(tag, targets.get(tag.tagNumber), imageTokens),
+		});
+	}
+	return snapshot;
+}
+
+/**
+ * Provider tokens of snapshot content that this pass has since removed.
+ * A tag that is no longer active was dropped: whatever of it is still
+ * measurable (a skeleton's arguments, a placeholder) stays, the rest left.
+ * A call removed whole keeps its text until the transcript commits the
+ * removal at the end of the pass, so a dropped tag whose content is unchanged
+ * counts as removed in full.
+ */
+export function piServedMassRemovedSince(
+	snapshot: PiEmergencyServedSnapshot,
+	activeNow: ReadonlySet<number>,
+	targets: ReadonlyMap<number, TagTarget>,
+	calibration: { toolsRatio: number; proseRatio: number },
+	imageTokens?: ReadonlyMap<string, number>,
+): number {
+	const provider = (counts: { tools: number; prose: number }) =>
+		counts.tools * calibration.toolsRatio +
+		counts.prose * calibration.proseRatio;
+	let removed = 0;
+	for (const [tagNumber, counts] of snapshot) {
+		const before = provider(counts);
+		const now = provider(
+			piServedLocalTokens(counts.tag, targets.get(tagNumber), imageTokens),
+		);
+		if (activeNow.has(tagNumber)) removed += Math.max(before - now, 0);
+		else if (now === before) removed += before;
+		else removed += Math.max(before - now, 0);
+	}
+	return removed;
 }
 
 export interface PiHeuristicCleanupResult {
@@ -460,6 +572,15 @@ export function applyPiHeuristicCleanup(
 				);
 			});
 		const byTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
+		const removedThisPassTokens = emergency.servedBeforePass
+			? piServedMassRemovedSince(
+					emergency.servedBeforePass,
+					new Set(activeTags.map((tag) => tag.tagNumber)),
+					targets,
+					calibration,
+					emergency.serializedImageTokens,
+				)
+			: 0;
 		const droppableTags = candidateTags
 			.flatMap((tag) => {
 				const measured = byTag.get(tag.tagNumber);
@@ -482,6 +603,7 @@ export function applyPiHeuristicCleanup(
 			maxTag,
 			protectedCutoff,
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
+			removedThisPassTokens,
 			ceilingTokens: emergency.ceilingTokens,
 			usagePercentage: emergency.usagePercentage,
 			priorInputSample,

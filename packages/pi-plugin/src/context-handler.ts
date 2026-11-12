@@ -350,6 +350,7 @@ import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
+	snapshotPiEmergencyServedMass,
 } from "./heuristic-cleanup-pi";
 import { readPiHistorianTail } from "./historian-tail-pi";
 import {
@@ -10883,6 +10884,28 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredHistoryRefresh =
 		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
 	const shouldApplyPendingOps = publishedWorkDrainAllowed;
+	// The emergency planner reads the provider's measure of the previous
+	// request, while the queued drops landing first take content out of the
+	// request this pass serves. Measure the tagged content before anything
+	// lands, so the planner takes exactly that removed mass off the reading
+	// instead of treating it as fixed. Unlike OpenCode, Pi's targets do not name
+	// the reasoning a drop takes off the request, so that reasoning stays in the
+	// floor: the floor can only be too high, which may skip a pass but never
+	// drops more than needed. Only passes where the planner can run pay for this.
+	const emergencyServedBeforeDrain =
+		shouldRunHeuristics &&
+		args.heuristics !== undefined &&
+		args.forceMaterialization === true &&
+		args.emergencyCeilingTokens !== undefined &&
+		args.emergencyCeilingTokens > 0
+			? snapshotPiEmergencyServedMass(
+					getPiActiveTagSnapshotView(args.db, args.sessionId),
+					newTargets,
+					args.providerOverflowRecovery === true
+						? piRecoveryToolImageTokens(workingMessages)
+						: undefined,
+				)
+			: undefined;
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,
@@ -11265,6 +11288,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 										fitCalibration: providerOverflow
 											? piRecoveryFitCalibration(recoveryCalibration)
 											: undefined,
+										servedBeforePass: emergencyServedBeforeDrain,
 									}
 								: undefined,
 						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
