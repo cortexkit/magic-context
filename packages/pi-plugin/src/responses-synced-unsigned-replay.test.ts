@@ -416,7 +416,15 @@ describe("guarded context after a hook-cleaned reply", () => {
 					const refused = await (
 						fake.handlers.get("before_provider_request") as any
 					)({ payload: { input } }, ctx);
-					return { wire: JSON.stringify(input), refused };
+					const reply = result.messages.find(
+						(entry: any) => entry.role === "assistant",
+					);
+					return {
+						wire: JSON.stringify(input),
+						refused,
+						block: reply.content[1],
+						payload: JSON.stringify(reply.providerPayload),
+					};
 				};
 				try {
 					registerPiContextHandler(fake.pi as never, {
@@ -427,6 +435,11 @@ describe("guarded context after a hook-cleaned reply", () => {
 					const first = await pass();
 					expect(first.wire).toContain(NATIVE);
 					expect(first.refused).toBeUndefined();
+					// Tagging alone changes only the block's leading label, so the
+					// native item keeps its stored bytes: on Oh My Pi 18.18 that is still the
+					// model's original text, echoed tag included.
+					expect(first.block.text).toMatch(/^§\d+§ /u);
+					expect(first.payload).toBe(JSON.stringify(message.providerPayload));
 					const second = await pass();
 					expect(second.wire).toBe(first.wire);
 					expect(second.refused).toBeUndefined();
@@ -485,6 +498,28 @@ describe("an edit is written into the replayed native item", () => {
 					item.content[0].text = stored;
 					expect(request.mismatch(stale)).toContain("comparison=content");
 				});
+});
+
+describe("a tagging-only pass leaves the native item alone", () => {
+	for (const host of hosts)
+		for (const phase of phases)
+			test(`${host.version} ${phase}: the stored native bytes stay and the warm request is admitted`, async () => {
+				__setPiHarnessKindForTesting("omp");
+				const { message } = await finish(
+					host,
+					turn(`§7§ ${NATIVE}`, `§7§ ${NATIVE}`, phase),
+				);
+				const stored = JSON.stringify(message.providerPayload);
+				const messages = history(structuredClone(message));
+				const next = edit(messages, `§9§ ${NATIVE}`);
+				expect(JSON.stringify(next.providerPayload)).toBe(stored);
+				const request = prepare(messages);
+				const input = encode(host, request.messages);
+				expect(wireTexts(input)).toEqual([
+					pair(host.sync ? NATIVE : `§7§ ${NATIVE}`, phase),
+				]);
+				expect(request.mismatch(input)).toBeUndefined();
+			});
 });
 
 describe("inline thinking stripped from an older Responses reply", () => {
