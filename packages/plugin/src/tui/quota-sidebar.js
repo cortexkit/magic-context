@@ -1,5 +1,5 @@
 // @bun
-// ../../node_modules/.bun/@cortexkit+opencode-sidebar@0.2.0+4f25175b99662f85/node_modules/@cortexkit/opencode-sidebar/src/index.tsx
+// ../../node_modules/.bun/@cortexkit+opencode-sidebar@0.2.0+a24dd7ca87f30650/node_modules/@cortexkit/opencode-sidebar/src/index.tsx
 import { createComponent as _$createComponent } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { use as _$use } from "@opentui/solid";

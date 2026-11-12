@@ -951,21 +951,14 @@ export function countNewMemoriesForM1Union(
     ownIdentities?: readonly string[],
     shareCategories?: readonly string[] | null,
 ): number {
-    const identities = uniqueValues(projectPaths);
-    if (identities.length === 0) return 0;
-    const sharingFilter = buildWorkspaceMemorySqlFilter({
-        identities,
+    return readNewMemoriesForM1Union(
+        db,
+        projectPaths,
+        afterId,
+        expiryCutoff,
         ownIdentities,
         shareCategories,
-        includeClassificationFields: hasMemoryShareableColumn(db) && hasMemoryScopeColumn(db),
-    });
-    const row = db
-        .prepare(`SELECT COUNT(*) AS count FROM memories
-        WHERE project_path IN (${sqlPlaceholders(identities)}) AND id > ?
-          AND status IN ('active', 'permanent')
-          AND (expires_at IS NULL OR expires_at > ?)${sharingFilter.clause}`)
-        .get(...identities, afterId, expiryCutoff, ...sharingFilter.params) as { count: number };
-    return row.count;
+    ).length;
 }
 
 export function readNewMemoriesForM1Union(

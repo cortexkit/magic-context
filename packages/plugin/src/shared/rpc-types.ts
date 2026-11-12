@@ -70,6 +70,7 @@ export interface SidebarSnapshot {
     memoryCount: number;
     memoryBlockCount: number;
     pendingOpsCount: number;
+    queuedDropCount?: number;
     queuedDropTokens?: number;
     historianRun?: SidebarHistorianRun;
     waitingMessages?: number;

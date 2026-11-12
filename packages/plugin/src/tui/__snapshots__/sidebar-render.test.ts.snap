@@ -699,7 +699,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
       "                                          ",
       "Health                                    ",
       "Historian              Gemini 4/4 rejected",
-      "Fallback          DeepSeek finished 2 runs",
+      "Fallback                   finished 2 runs",
       "/ctx-status shows details                 ",
       "                                          ",
       "                                          ",
@@ -1122,12 +1122,12 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
         {
           "attributes": 0,
           "fg": "#ffffff",
-          "text": "          ",
+          "text": "                   ",
         },
         {
           "attributes": 1,
           "fg": "#ff8800",
-          "text": "DeepSeek finished 2 runs",
+          "text": "finished 2 runs",
         },
       ],
       [

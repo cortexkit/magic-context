@@ -453,22 +453,26 @@ export function buildSidebarSnapshot(
 
         let pendingOpsCount = 0;
         let queuedDropTokens = 0;
+        let queuedDropCount = 0;
         try {
             const pendingRow = db
-                .prepare<[string], { count: number; tokens: number }>(
+                .prepare<[string], { count: number; tokens: number; drops: number }>(
                     `SELECT COUNT(*) AS count,
+                        COALESCE(SUM(CASE WHEN p.operation = 'drop' THEN 1 ELSE 0 END), 0) AS drops,
                         COALESCE(SUM(CASE WHEN p.operation = 'drop' THEN t.token_count ELSE 0 END), 0) AS tokens
-                     FROM pending_ops p LEFT JOIN tags t ON t.id = p.tag_id AND t.session_id = p.session_id
+                     FROM pending_ops p LEFT JOIN tags t ON t.tag_number = p.tag_id AND t.session_id = p.session_id
                      WHERE p.session_id = ?`,
                 )
                 .get(sessionId);
             pendingOpsCount = pendingRow?.count ?? 0;
             queuedDropTokens = pendingRow?.tokens ?? 0;
+            queuedDropCount = pendingRow?.drops ?? 0;
         } catch {
             // pending_ops table may not exist
         }
         if (typeof moduleStatus?.pending_drop_count === "number") {
             pendingOpsCount = moduleStatus.pending_drop_count;
+            queuedDropCount = moduleStatus.pending_drop_count;
         }
 
         let sessionNoteCount = 0;
@@ -747,6 +751,7 @@ export function buildSidebarSnapshot(
             memoryBlockCount,
             pendingOpsCount,
             queuedDropTokens,
+            queuedDropCount,
             ...(config?.transform_mode === "rust" ? {} : sidebarObservations(sessionId)),
             proactiveFloor: getProactiveCompartmentTriggerPercentage(executeThreshold),
             cachedM0MaterializedAt,

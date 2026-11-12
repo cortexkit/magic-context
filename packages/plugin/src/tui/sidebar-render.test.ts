@@ -1,8 +1,10 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { SidebarSnapshot } from "../shared/rpc-types";
+import { createTestTempDir } from "../shared/test-temp-dir";
 
-const now = Date.now();
+const now = 1_800_000_000_000;
 const older: SidebarSnapshot = {
     sessionId: "fixture",
     usagePercentage: 55,
@@ -39,6 +41,7 @@ const healthy: SidebarSnapshot = {
     summariesSinceCache: 6,
     memoriesSinceCache: 7,
     queuedDropTokens: 49_000,
+    queuedDropCount: 151,
     historianRun: {
         finishedAt: now - 6_900_000,
         outcome: "ok",
@@ -132,6 +135,42 @@ const cases = [
     { snapshot: incident, preferences: { "magic-context": { startCollapsed: true } } },
     { snapshot: null, preferences: { "magic-context": { startCollapsed: true } } },
     { snapshot: off, preferences: { "magic-context": { startCollapsed: true } } },
+    { snapshot: { ...off, native_context_usage_percentage: 41 } },
+    { snapshot: { ...healthy, pendingOpsCount: 999, queuedDropCount: 3 } },
+    {
+        snapshot: { ...healthy, pendingOpsCount: 999, queuedDropCount: 3 },
+        preferences: { "magic-context": { startCollapsed: true } },
+    },
+    {
+        snapshot: {
+            ...incident,
+            historianRun: {
+                ...incident.historianRun!,
+                outcome: "ok",
+                model: "google/gemini-3.8-flash",
+                fallback: false,
+            },
+        },
+    },
+    ...(["failed", "skipped"] as const).map((phase) => ({
+        snapshot: {
+            ...healthy,
+            recompProgress: {
+                kind: "upgrade" as const,
+                phase,
+                processedMessages: 0,
+                totalMessages: 100,
+                passCount: 0,
+                compartmentsCreated: 0,
+                message: "Rebuild fixture reason",
+            },
+        },
+    })),
+    {
+        snapshot: healthy,
+        toggleHeader: true,
+        preferences: { "magic-context": { rememberCollapsed: true } },
+    },
 ];
 type Result = {
     frame: string;
@@ -141,7 +180,10 @@ type Result = {
 };
 let results: Result[];
 let rawResult: Result;
+let wrotePreferences = false;
 beforeAll(() => {
+    const { dir } = createTestTempDir("sidebar-render-preferences-");
+    const preferenceFile = join(dir, "preferences.json");
     const child = Bun.spawnSync(
         [
             process.execPath,
@@ -149,14 +191,18 @@ beforeAll(() => {
             join(import.meta.dir, "../../scripts/render-compiled-sidebar.ts"),
         ],
         {
-            stdin: new TextEncoder().encode(JSON.stringify(cases)),
+            stdin: new TextEncoder().encode(
+                JSON.stringify(cases.map((entry) => ({ ...entry, now }))),
+            ),
             stdout: "pipe",
             stderr: "pipe",
-            env: { ...process.env, BUN_BE_BUN: "1" },
+            env: { ...process.env, BUN_BE_BUN: "1", OPENCODE_TUI_PREFERENCES_FILE: preferenceFile },
             windowsHide: true,
         },
     );
     if (child.exitCode !== 0) throw new Error(child.stderr.toString());
+    wrotePreferences = existsSync(preferenceFile);
+    rmSync(dir, { recursive: true, force: true });
     results = JSON.parse(child.stdout.toString());
     for (const result of results) expect(result.error).toBeUndefined();
     const raw = Bun.spawnSync(
@@ -167,7 +213,7 @@ beforeAll(() => {
             "--raw-frame",
         ],
         {
-            stdin: new TextEncoder().encode(JSON.stringify([{ snapshot: healthy }])),
+            stdin: new TextEncoder().encode(JSON.stringify([{ snapshot: healthy, now }])),
             stdout: "pipe",
             stderr: "pipe",
             env: { ...process.env, BUN_BE_BUN: "1" },
@@ -195,6 +241,26 @@ function tone(index: number, text: string, color: string) {
 }
 
 describe("option B sidebar", () => {
+    test("render fixtures never persist remembered header toggles", () => {
+        expect(wrotePreferences).toBe(false);
+    });
+    test("uses native-window pressure when supplied and retains the legacy fallback", () => {
+        expect(results[20]!.frame).toContain("59% left");
+        expect(results[3]!.frame).toContain("45% left");
+    });
+    test("labels only drop operations as queued drops", () => {
+        row(21, "Queued drops", "3 · ≈49K at rebuild");
+        row(22, "Cache", "3 drops queued ●");
+    });
+    test("does not credit a later primary model for cumulative fallback runs", () => {
+        row(23, "Fallback", "finished 2 runs");
+    });
+    test("keeps failed and stopped rebuilds and their explanations visible", () => {
+        row(24, "Upgrade", "✗ Upgrade failed");
+        row(25, "Upgrade", "stopped");
+        for (const index of [24, 25])
+            expect(results[index]!.frame).toContain("Rebuild fixture reason");
+    });
     test("preserves the expanded and incident render output", () => {
         expect(
             results.slice(0, 2).map((result) => ({ ...result, frame: result.frame.split("\n") })),
@@ -246,12 +312,12 @@ describe("option B sidebar", () => {
         tone(0, "idle", "#ffffff");
         tone(0, "Historian", "#888888");
     });
-    test("shows primary rejections and the producing fallback in one Health section", () => {
+    test("shows primary rejections and cumulative fallback runs in one Health section", () => {
         row(1, "Historian", "summarizing");
         row(1, "Last run", "1m ago · fallback");
         row(1, "Model", "DeepSeek V4.1 Flash");
         row(1, "Historian", "Gemini 4/4 rejected");
-        row(1, "Fallback", "DeepSeek finished 2 runs");
+        row(1, "Fallback", "finished 2 runs");
         expect(results[1]!.frame).toContain("Health");
         expect(results[1]!.frame.match(/\/ctx-status shows details/g)).toHaveLength(1);
         tone(1, "4/4 rejected", "#ff8800");
@@ -260,15 +326,9 @@ describe("option B sidebar", () => {
     });
     test("uses dashes rather than fabricated values for older snapshots and the first read", () => {
         for (const index of [2, 5]) {
-            for (const label of [
-                "Next summary",
-                "Last run",
-                "Model",
-                "Waiting",
-                "Cache built",
-                "Since then",
-            ])
+            for (const label of ["Next summary", "Last run", "Model", "Cache built", "Since then"])
                 row(index, label, "—");
+            row(index, "Waiting", "no reading");
             expect(results[index]!.frame).not.toContain("Health");
         }
     });
