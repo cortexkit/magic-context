@@ -1003,6 +1003,70 @@ async fn an_install_cut_short_is_finished_by_a_repeat_and_never_aborted() {
     assert_eq!(b.op("activate", CUT, &["s1"]).await.unwrap(), json!({}));
 }
 
+/// The facts a second turn of the project sends for `publication`: its own
+/// `retryable` facts, then the backlog of every other committed
+/// publication's `retryable` facts. These are the two queries of the
+/// second turn's fact selection (`select_facts` in
+/// `summary/two_pass/turn_two.rs`), without its backlog limit.
+fn second_turn(conn: &Connection, publication: &str) -> Vec<String> {
+    let mut own: Vec<String> = conn
+        .prepare(
+            "SELECT f.content FROM memory_pending_facts f
+             WHERE f.project_path = ?1 AND f.publication_id = ?2 AND f.state = 'retryable' ORDER BY f.id",
+        )
+        .unwrap()
+        .query_map(params![PROJECT, publication], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let backlog: Vec<String> = conn
+        .prepare(
+            "SELECT f.content FROM memory_pending_facts f
+             JOIN memory_publications p ON p.publication_id = f.publication_id
+             WHERE f.project_path = ?1 AND f.publication_id != ?2 AND f.state = 'retryable'
+               AND p.commit_order IS NOT NULL
+             ORDER BY p.commit_order, f.id",
+        )
+        .unwrap()
+        .query_map(params![PROJECT, publication], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    own.extend(backlog);
+    own
+}
+
+/// The install inserts the moved session's waiting facts reserved under
+/// the cut's key, and they stay reserved until `activate` lets them go
+/// after the install. A second turn of another session of the project that
+/// runs meanwhile, here while `activate` is stopped after the install,
+/// sends none of them and still sends its own. Once `activate` finishes,
+/// the next second turn takes them up as backlog, after the receiver's own.
+#[tokio::test]
+async fn a_second_turn_during_the_install_sends_none_of_the_moved_facts() {
+    let (a, b) = machines(&["s1"]);
+    seed(&a.conn(), "s1", PROJECT);
+    seed(&b.conn(), "b1", PROJECT);
+    a.send_out(CUT, &["s1"]).await;
+    b.op("import", CUT, &["s1"]).await.unwrap();
+    a.release(CUT, &["s1"], "machine-b").await;
+
+    let lock = hold_store(&b);
+    let refused = b.op("activate", CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(code(&refused), "unavailable");
+    assert_eq!(b.moving("s1"), Some((CUT.into(), MovingState::Activating)));
+    assert_eq!(b.fingerprint("s1"), a.fingerprint("s1"));
+    assert_eq!(facts(&b.conn(), "pub-s1"), [reserved(0, CUT), applied(1)]);
+    assert_eq!(second_turn(&b.conn(), "pub-b1"), ["fact pub-b1 0"]);
+
+    drop(lock);
+    assert_eq!(b.op("activate", CUT, &["s1"]).await.unwrap(), json!({}));
+    assert_eq!(
+        second_turn(&b.conn(), "pub-b1"),
+        ["fact pub-b1 0", "fact pub-s1 0"]
+    );
+}
+
 /// A restart finishes an install the last run recorded as started, in a
 /// build that does not serve moves too, and writes the receipt the
 /// driver's repeat then gets back. Nothing of the finished cut runs again

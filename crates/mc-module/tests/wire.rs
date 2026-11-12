@@ -41,6 +41,9 @@ mod rehearsal;
 #[path = "support/synapse.rs"]
 mod synapse;
 
+#[path = "support/agent_data_wire.rs"]
+mod agent_data_wire;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A process the test started; killed when the test ends.

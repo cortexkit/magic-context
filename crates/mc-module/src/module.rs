@@ -1370,6 +1370,10 @@ mod agent_data_source_tests;
 mod agent_data_receiver_tests;
 
 #[cfg(test)]
+#[path = "agent_data/runner_tests.rs"]
+mod agent_data_runner_tests;
+
+#[cfg(test)]
 mod config_tests {
     use super::*;
     use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};

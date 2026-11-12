@@ -1168,3 +1168,7 @@ async fn with_moves_off_no_request_runs() {
     assert_eq!(refused.code, RefusalCode::Unavailable);
     assert_eq!(host.reads(), 0);
 }
+
+/// The contract's remaining published vectors, run against this service.
+#[path = "vectors_tests.rs"]
+mod vectors;
