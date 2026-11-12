@@ -175,6 +175,7 @@ import {
     protectNewTagMutations,
     retainedActiveThinkingParts,
 } from "./latest-assistant-turn";
+import { isLatestThinkingRecoveryTarget } from "./latest-thinking-recovery";
 import { markNoteNudgeDelivered, observeNoteNudgeServe, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
@@ -1142,7 +1143,7 @@ function applyRustModeThinkingStrips(
                 !args.activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel
                     ? getThinkingBindingRecoveryTarget(args.db, args.sessionId)
                     : null;
-            if (flagTarget) {
+            if (flagTarget && !isLatestThinkingRecoveryTarget(flagTarget)) {
                 thinkingBindingRecovery = freezeAllReasoningForBindingRecovery({
                     db: args.db,
                     sessionId: args.sessionId,
@@ -4866,7 +4867,9 @@ export async function runPostTransformPhase(
                 !activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel
                     ? (replaySnapshot?.thinkingBindingRecoveryTarget ?? null)
                     : null;
-            if (flagTarget) {
+            // The latest-turn thinking recovery shares the column; its state
+            // is not an armed binding flag and must not strip every block.
+            if (flagTarget && !isLatestThinkingRecoveryTarget(flagTarget)) {
                 thinkingBindingRecovery = freezeAllReasoningForBindingRecovery({
                     db: args.db,
                     sessionId: args.sessionId,

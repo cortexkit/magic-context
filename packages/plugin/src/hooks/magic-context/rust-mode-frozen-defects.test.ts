@@ -1072,8 +1072,9 @@ describe("the replay registry follows the adapter's lifetime", () => {
 // signed turn and an open signed tool loop (a4..a6 signed, a7 unsigned), before and after
 // a force-band pass, an idle-expired pass, and a pass whose m0/m1 head was rebuilt. A signed thinking block is valid only while every byte before it is unchanged.
 // Force and idle passes keep the head, so every block through the last kept reasoning must
-// stay; a rewritten head invalidates all of them, so none may be served, in the healthy,
-// reactive-recovery and previously frozen host states alike.
+// stay in the healthy and previously frozen host states; after a provider rejection of the
+// open turn, only that turn's thinking goes. A rewritten head invalidates all of them, so
+// none may be served, in the healthy, reactive-recovery and previously frozen states alike.
 type HostFixture = {
     input: MessageLike[];
     before: { native_messages: MessageLike[] };
@@ -1149,7 +1150,7 @@ async function runSignedThinkingFixture(
 
 describe("Rust host thinking strips with real engine output", () => {
     for (const kind of ["force", "idle"] as const) {
-        for (const mode of ["healthy", "reactive", "frozen"] as const) {
+        for (const mode of ["healthy", "frozen"] as const) {
             it(`keeps every block through the kept thinking on ${kind} (${mode})`, async () => {
                 const fixture = signedThinkingFixtures[kind];
                 expect(fixture.pressured.prefix_bust_permitted).toBe(true);
@@ -1163,6 +1164,31 @@ describe("Rust host thinking strips with real engine output", () => {
                 expect(prefixThroughKeptThinking(after)).toBe(prefixThroughKeptThinking(before));
             });
         }
+        // The provider rejected the open turn (a4..a7) while it carried all its
+        // original thinking, so restoring would resend the refused bytes. The
+        // recovery removes that turn's thinking instead; every byte before the
+        // turn, the older turn's kept block included, stays as it was served.
+        it(`removes only the rejected open turn's thinking on ${kind} (reactive)`, async () => {
+            const fixture = signedThinkingFixtures[kind];
+            expect(fixture.pressured.prefix_bust_permitted).toBe(true);
+            expect(fixture.pressured.signed_thinking_reset ?? false).toBe(false);
+            const { before, after } = await runSignedThinkingFixture(
+                `signed-${kind}-reactive`,
+                fixture,
+                "reactive",
+                "SOFT",
+            );
+            const beforeTurn = (messages: MessageLike[]) => {
+                const start = messages.findIndex((message) => message.info.id === "a4");
+                expect(start).toBeGreaterThan(0);
+                return JSON.stringify(messages.slice(0, start));
+            };
+            expect(beforeTurn(after)).toBe(beforeTurn(before));
+            expect(reasoningIds(before)).toEqual(expect.arrayContaining(["a4", "a5", "a6"]));
+            expect(reasoningIds(after)).toEqual(
+                reasoningIds(before).filter((id) => !["a4", "a5", "a6"].includes(id)),
+            );
+        });
     }
     for (const mode of ["healthy", "reactive", "frozen"] as const) {
         it(`a rewritten head serves no signed thinking, now or on the next pass (${mode})`, async () => {

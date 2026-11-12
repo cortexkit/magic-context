@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { detectLatestTurnThinkingMismatch } from "../../features/magic-context/overflow-detection";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { addMergedReasoningStrippedIds } from "../../features/magic-context/storage-meta-persisted";
+import {
+    addMergedReasoningStrippedIds,
+    getMergedReasoningStrippedIds,
+} from "../../features/magic-context/storage-meta-persisted";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -65,7 +68,7 @@ test("accepted legacy thinking never arms restoration or changes replay state", 
     expect(JSON.stringify(messages)).toBe(before);
 });
 
-test("a rejected turn restores original thinking and its envelope durably until a real user", () => {
+test("a rejected turn restores original thinking and its envelope durably while it is the provider's latest turn", () => {
     const { db, messages, prepare } = fixture();
     addMergedReasoningStrippedIds(db, "session", ["binding_mismatch:a", "@tool-sweep-scoped"]);
     // The pass that built the rejected request names the turn the rejection binds to.
@@ -78,9 +81,17 @@ test("a rejected turn restores original thinking and its envelope durably until 
     restore();
     expect(JSON.stringify(messages)).toBe(before);
     expect(prepare()).toEqual({ restore: true, ended: false });
+    // The provider checks the last assistant turn even when a real user message
+    // follows it, so a new user message keeps the restore.
     messages.push({
         info: { id: "next", role: "user" },
         parts: [{ type: "text", text: "new turn" }],
+    });
+    expect(prepare()).toEqual({ restore: true, ended: false });
+    // A newer assistant turn proves a later request was accepted: the restore ends.
+    messages.push({
+        info: { id: "next-a", role: "assistant" },
+        parts: [{ type: "text", text: "newer answer" }],
     });
     expect(prepare()).toEqual({ restore: false, ended: true });
 });
@@ -112,20 +123,55 @@ test("a rejection bound to its turn is disarmed by a later real user before any 
     ).toBe("");
 });
 
-test("missing thinking originals refuse locally rather than resend a rejected turn", () => {
+test("a rejected turn Magic Context never edited has its thinking removed, not resent", () => {
     const { db, messages, prepare } = fixture();
+    // The only frozen decision names a message outside the turn: the turn was
+    // served with all its original thinking, so restoring would change nothing.
     addMergedReasoningStrippedIds(db, "session", ["binding_mismatch:missing"]);
     expect(prepare()).toEqual({ restore: false, ended: false });
     armLatestThinkingRecovery(db, "session");
-    expect(prepare).toThrow("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
+    expect(prepare()).toEqual({
+        restore: false,
+        ended: false,
+        removedThisPass: true,
+        removedIds: ["a"],
+    });
+    expect(getMergedReasoningStrippedIds(db, "session").has("binding_mismatch:a")).toBe(true);
+    // Later passes replay the persisted removal; a real user message changes
+    // nothing. The recovery still names the turn's removed ids.
     messages.push({
         info: { id: "next", role: "user" },
         parts: [{ type: "text", text: "new turn" }],
     });
-    expect(prepare()).toEqual({ restore: false, ended: true });
+    expect(prepare()).toEqual({ restore: false, ended: false, removedIds: ["a"] });
 });
 
-test("a host failure event arms restoration only for Anthropic-family active-turn rejections", () => {
+test("missing thinking originals with nothing left to remove refuse locally rather than resend a rejected turn", () => {
+    const { db, messages, prepare } = fixture();
+    // The turn's thinking is already omitted, and the originals cannot be
+    // restored because another frozen decision names a message that is gone.
+    addMergedReasoningStrippedIds(db, "session", [
+        "binding_mismatch:a",
+        "binding_mismatch:missing",
+    ]);
+    expect(prepare()).toEqual({ restore: false, ended: false });
+    armLatestThinkingRecovery(db, "session");
+    expect(prepare).toThrow("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
+    // A new user message does not end the provider's check of the turn.
+    messages.push({
+        info: { id: "next", role: "user" },
+        parts: [{ type: "text", text: "new turn" }],
+    });
+    expect(prepare).toThrow("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
+    // A newer assistant turn proves a later request was accepted.
+    messages.push({
+        info: { id: "next-a", role: "assistant" },
+        parts: [{ type: "text", text: "newer answer" }],
+    });
+    expect(prepare()).toEqual({ restore: false, ended: false });
+});
+
+test("a host failure event arms recovery only for Anthropic-family rejections", () => {
     const { db, prepare } = fixture();
     const error = {
         statusCode: 400,
@@ -148,14 +194,30 @@ test("a host failure event arms restoration only for Anthropic-family active-tur
     expect(arm("openai", "gpt-5")).toBe(true);
     expect(prepare()).toEqual({ restore: false, ended: false });
     expect(arm("google-vertex", "claude-sonnet-5")).toBe(true);
-    expect(prepare()).toEqual({ restore: true, ended: false });
+    // The turn carries all its original thinking, so the recovery removes it.
+    expect(prepare()).toEqual({
+        restore: false,
+        ended: false,
+        removedThisPass: true,
+        removedIds: ["a"],
+    });
 });
 
-test("a rejected restoration is quarantined instead of entering a 400 loop", () => {
+test("a rejected restoration removes the turn's thinking, and only a third rejection refuses", () => {
     const { db, prepare } = fixture();
+    // A saved reasoning-strip decision (a bare message id) edited the open
+    // turn's thinking, so the first rejection restores the originals.
+    addMergedReasoningStrippedIds(db, "session", ["a"]);
     expect(prepare().restore).toBe(false);
     armLatestThinkingRecovery(db, "session");
     expect(prepare().restore).toBe(true);
+    armLatestThinkingRecovery(db, "session");
+    expect(prepare()).toEqual({
+        restore: false,
+        ended: false,
+        removedThisPass: true,
+        removedIds: ["a"],
+    });
     armLatestThinkingRecovery(db, "session");
     expect(prepare).toThrow("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
 });

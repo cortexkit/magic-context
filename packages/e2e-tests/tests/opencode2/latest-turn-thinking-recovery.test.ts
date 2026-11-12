@@ -7,10 +7,11 @@
  * two assistants of its active tool loop. Replaying it omits their signed
  * thinking and the mock rejects the request with the provider's 400. OpenCode 2
  * reports that only through its session event stream, where Magic Context arms
- * recovery bound to the real user message that started the rejected turn.
- * OpenCode 2.0.22 has no same-turn resubmission; its resume path is a new
- * user-role message, which ends the rejected turn, so recovery disarms without
- * restoring anything and the provider accepts the continued session.
+ * recovery bound to the provider's latest turn, the tool loop. OpenCode 2.0.22
+ * has no same-turn resubmission; its resume path is a new user-role message.
+ * The provider still checks the tool loop before that message, so the resumed
+ * request goes out with the loop's thinking removed, and the next turn's
+ * acceptance unbinds the recovery.
  */
 import { Database } from "bun:sqlite";
 import { openTestDb } from "../../src/test-db";
@@ -46,7 +47,7 @@ const thinkingBlocks = (messages: unknown[]) =>
 		})
 		.filter((block) => (block as { type?: string }).type === "thinking");
 
-test("OC2 arms thinking recovery for the rejected turn from its event stream and its resume ends that turn without a restore", async () => {
+test("OC2 arms thinking recovery for the rejected turn from its event stream and its resume removes that turn's thinking", async () => {
 	const isolated = isolation();
 	const mock = new MockProvider();
 	const provider = await mock.start({
@@ -180,7 +181,8 @@ test("OC2 arms thinking recovery for the rejected turn from its event stream and
 		expect(bytes(thinkingBlocks(rejected))).toBe(bytes([thinking(3)]));
 
 		// OpenCode 2 reports the failure only on its event stream; recovery is armed
-		// there, bound to the real user message that started the rejected turn.
+		// there, bound to the provider's latest turn of the rejected request: the
+		// tool loop, named by its first and last assistant message.
 		const store = openTestDb(join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"), {
 			readonly: true,
 		});
@@ -196,32 +198,49 @@ test("OC2 arms thinking recovery for the rejected turn from its event stream and
 		} finally {
 			store.close();
 		}
-		expect(target(session.id)).toBe(`latest_thinking_original_armed:${userID}`);
+		const state = () => {
+			const value = target(session.id) ?? "";
+			return value.startsWith("latest_thinking_original_turn:")
+				? (JSON.parse(value.slice("latest_thinking_original_turn:".length)) as Record<string, unknown>)
+				: value;
+		};
+		console.log(JSON.stringify({ armed: state(), userID }));
+		expect(state()).toMatchObject({ stage: "armed", rejections: 1 });
 
 		// OpenCode 2.0.22 has no same-turn resubmission: re-sending the rejected
 		// turn's own user message is deduplicated by the inbox and reaches no
-		// provider. Should a later host add one, its retry must restore the
-		// original thinking, and this assertion is where to extend the test.
+		// provider.
 		await client.session.prompt({ sessionID: session.id, id: userID, text: prompt });
 		await settle();
 		expect(loop()).toHaveLength(4);
-		expect(target(session.id)).toBe(`latest_thinking_original_armed:${userID}`);
+		expect(state()).toMatchObject({ stage: "armed", rejections: 1 });
 
-		// The host's resume path is a new user-role message, which ends the
-		// rejected turn for the provider too. Recovery disarms without restoring
-		// anything, the accepted omission applies to what is now an older turn,
-		// and the provider accepts the request.
+		// The host's resume path is a new user-role message. The provider still
+		// checks the tool loop before it, so the recovery stays bound to that turn.
+		// The turn's thinking cannot be restored here, so the resumed request goes
+		// out with the turn's thinking removed, which the provider accepts.
 		await client.session.synthetic({ sessionID: session.id, text: "Continue.", resume: true });
 		await settle();
+		const resumed = loop()[4]!.body.messages as unknown[];
+		const last = loop()[5]?.body.messages as unknown[] | undefined;
+		console.log(
+			JSON.stringify({
+				step,
+				afterResume: state(),
+				resumed: thinkingBlocks(resumed),
+				last: last ? thinkingBlocks(last) : null,
+				violations: loop().map((request) => request.thinkingViolation !== undefined),
+			}),
+		);
 		expect(step).toBe(5);
 		expect(loop().filter((request) => request.thinkingViolation)).toHaveLength(1);
-		expect(target(session.id) ?? "").toBe("");
-		const resumed = loop()[4]!.body.messages as unknown[];
 		expect(bytes(resumed)).toContain("Continue.");
-		expect(bytes(thinkingBlocks(resumed))).toBe(bytes([thinking(3)]));
-		// The new turn's own signed thinking then replays unchanged.
-		const last = loop()[5]!.body.messages as unknown[];
-		expect(bytes(thinkingBlocks(last))).toBe(bytes([thinking(3), thinking(4)]));
+		expect(bytes(thinkingBlocks(resumed))).toBe(bytes([]));
+		expect(host.pluginLog()).toContain("removed thinking from the bound turn");
+		// The new turn's own signed thinking then replays unchanged, and its
+		// acceptance unbinds the recovery.
+		expect(bytes(thinkingBlocks(last!))).toBe(bytes([thinking(4)]));
+		expect(target(session.id) ?? "").toBe("");
 		expect(host.pluginLog()).not.toContain("ANTHROPIC_LATEST_TURN_EDIT_UNSAFE");
 		const after = inspectOpenFiles(host.pid!, host.root, host.env).filter((path) =>
 			/\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path),

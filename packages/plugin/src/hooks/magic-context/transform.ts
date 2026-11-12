@@ -154,7 +154,9 @@ import {
 } from "./latest-assistant-turn";
 import {
     captureLatestTurnOriginals,
+    LATEST_TURN_THINKING_REMOVED_REASON,
     prepareLatestThinkingRecovery,
+    restoredTurnMessages,
 } from "./latest-thinking-recovery";
 import { currentLkgRequestIdentity } from "./lkg-measured-request";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
@@ -1389,12 +1391,17 @@ export function createTransform(deps: TransformDeps) {
         // pair was itself rendered with the launch directory.
         const activeThinkingModel =
             findLastAssistantModel(messages) ?? deps.liveModelBySession?.get(sessionId);
+        const thinkingRecoveryModel =
+            findNewestUserModel(messages) ?? deps.liveModelBySession?.get(sessionId);
         const thinkingRecovery = prepareLatestThinkingRecovery({
             db,
             sessionId,
             messages,
             id: (message) => (message as MessageLike)?.info.id,
             parts: (message) => (message as MessageLike)?.parts ?? [],
+            // The model the request goes to, as resolved further below.
+            modelID: thinkingRecoveryModel?.modelID,
+            providerID: thinkingRecoveryModel?.providerID,
         });
         if (thinkingRecovery.ended) deps.pendingMaterializationSessions?.add(sessionId);
         let restoreLatestTurnOriginals: (() => void) | undefined;
@@ -3820,12 +3827,13 @@ export function createTransform(deps: TransformDeps) {
             resolvedProviderID,
             activeThinkingTurn,
             protectedThinkingMessages: thinkingRecovery.restore
-                ? protectedThinkingMessages
+                ? restoredTurnMessages(messages, protectedThinkingMessages)
                 : undefined,
             restoreThinkingMessageIds: thinkingRecovery.restore
                 ? new Set(
-                      [...protectedThinkingMessages].flatMap((message) =>
-                          typeof message.info.id === "string" ? [message.info.id] : [],
+                      [...restoredTurnMessages(messages, protectedThinkingMessages)].flatMap(
+                          (message) =>
+                              typeof message.info.id === "string" ? [message.info.id] : [],
                       ),
                   )
                 : undefined,
@@ -4592,15 +4600,26 @@ export function createTransform(deps: TransformDeps) {
 
         // An idle-expired request makes the provider re-read the whole prefix
         // even when this pass changed no message bytes, so record the expiry on
-        // its own assistant for the cache diagnostics.
-        if (postTransformResult.bustedThisPass || hardCacheExpired) {
+        // its own assistant for the cache diagnostics. A pass that removed the
+        // provider's latest turn's thinking after a rejection changed bytes from
+        // that turn on, without a rebuild of its own, so it records that reason.
+        if (
+            postTransformResult.bustedThisPass ||
+            hardCacheExpired ||
+            thinkingRecovery.removedThisPass
+        ) {
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),
                 decision: schedulerDecision,
                 materialized: postTransformResult.materialized,
                 materializeReason: normalizeMaterializeReason(
                     "opencode",
-                    postTransformResult.materializeReason ?? (hardCacheExpired ? "ttl_idle" : null),
+                    postTransformResult.materializeReason ??
+                        (thinkingRecovery.removedThisPass
+                            ? LATEST_TURN_THINKING_REMOVED_REASON
+                            : hardCacheExpired
+                              ? "ttl_idle"
+                              : null),
                     postTransformResult.materialized,
                 ),
                 systemHashPrev: postTransformResult.systemHashPrev,

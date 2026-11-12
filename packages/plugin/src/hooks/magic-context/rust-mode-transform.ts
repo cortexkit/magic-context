@@ -102,7 +102,9 @@ import {
 import {
     captureLatestTurnOriginals,
     endLatestThinkingRecoveryAfterReset,
+    LATEST_TURN_THINKING_REMOVED_REASON,
     prepareLatestThinkingRecovery,
+    restoredTurnMessages,
 } from "./latest-thinking-recovery";
 import {
     claimLkgRequestIdentity,
@@ -2770,12 +2772,16 @@ export function createRustModeTransform(
         }
         const inputCount = messages.length;
         const inputHasActiveThinking = hasActiveAnthropicThinkingTurn(messages, "anthropic");
+        const rustRecoveryModel =
+            modelFromMessages(messages) ?? deps.liveModelBySession?.get(sessionId);
         const thinkingRecovery = prepareLatestThinkingRecovery({
             db: deps.db,
             sessionId,
             messages,
             id: (message) => (message as MessageLike)?.info.id,
             parts: (message) => (message as MessageLike)?.parts ?? [],
+            modelID: rustRecoveryModel?.modelID,
+            providerID: rustRecoveryModel?.providerID,
         });
         const restoreLatestTurnOriginals = thinkingRecovery.restore
             ? captureLatestTurnOriginals(messages as MessageLike[])
@@ -3116,7 +3122,17 @@ export function createRustModeTransform(
                 writeRustTransformDecision({
                     sessionId,
                     decision,
-                    materializeReason: materializeReason === "none" ? null : materializeReason,
+                    // The module decides its own reason. A pass that removed the
+                    // rejected turn's thinking records that removal when the module
+                    // rebuilt nothing for its own reasons: when it reports none, or
+                    // only that the provider cache had expired from idle time.
+                    materializeReason:
+                        thinkingRecovery.removedThisPass &&
+                        (materializeReason === "none" || materializeReason === "ttl_idle")
+                            ? LATEST_TURN_THINKING_REMOVED_REASON
+                            : materializeReason !== "none"
+                              ? materializeReason
+                              : null,
                     inputTokens: requestInputTokens,
                     tsMs: passObservedAtMs,
                     lkgFrozenReleaseReason:
@@ -4679,7 +4695,10 @@ export function createRustModeTransform(
                     const postprocess = runRustModePostprocess({
                         activeThinkingTurn,
                         protectedThinkingMessages: thinkingRecovery.restore
-                            ? protectedThinkingMessages
+                            ? restoredTurnMessages(
+                                  appliedMessages as MessageLike[],
+                                  protectedThinkingMessages,
+                              )
                             : undefined,
                         restoreLatestTurnOriginals: () =>
                             restoreLatestTurnOriginals?.(appliedMessages as MessageLike[]),
@@ -4974,14 +4993,14 @@ export function createRustModeTransform(
                         captureForCertificate = capturePlan;
                     }
                 }
-                // After a provider rejected edits to the latest turn, reactive recovery restores
-                // that turn's original thinking on each pass. A served signed-thinking reset
-                // removed all of it because bytes before it changed, so there is nothing valid
-                // to restore. End the recovery only after the stripped replacement is saved as
-                // the new last-known-good snapshot, so no surviving state can restore the old
-                // thinking.
+                // After a provider rejected the latest turn's thinking, reactive recovery
+                // restores or removes that turn's thinking. A served signed-thinking reset
+                // removed all of it because bytes before it changed, so neither has anything
+                // left to act on. End the recovery only after the stripped replacement is
+                // saved as the new last-known-good snapshot, so no surviving state can
+                // restore the old thinking.
                 const endRecoveryAfterResetCapture = (): void => {
-                    if (signedThinkingReset && thinkingRecovery.restore) {
+                    if (signedThinkingReset) {
                         endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
                     }
                 };
