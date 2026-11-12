@@ -24,7 +24,8 @@
 // - D1: a warm defer pass serves its predecessor byte for byte (new messages
 //   only at the end);
 // - D2: a pass where head and base serve different bytes is a pass base held
-//   (it logged its active-thinking freeze or a held rewrite permission) and
+//   for recent signed thinking (base's log shows the hold froze the turn's
+//   thinking, or granted a rewrite while the hold was on) and
 //   head busted, and head serves no
 //   signed reasoning block while keeping every other part of the turn's steps;
 // - D3: the warm pass serves what the fresh head transform served on the same
