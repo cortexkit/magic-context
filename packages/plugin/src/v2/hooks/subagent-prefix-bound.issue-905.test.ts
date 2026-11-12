@@ -91,6 +91,11 @@ beforeAll(async () => {
 const strips = (run: Issue905Run) =>
     run.passes.filter((pass) => (pass.proactiveStripFroze ?? 0) > 0);
 const previous = (run: Issue905Run, pass: Issue905Pass) => run.passes[pass.step - 2]!;
+// The reading as a share of the usable window, unrounded. The scheduler line
+// prints one decimal, so a reading of 84.95% logs as 85.0% although the hold
+// (rightly) still treats it as below the force band. Valid for runs without
+// an output limit, whose usable window is the declared context.
+const exactPercent = (pass: Issue905Pass) => pass.usageOfDeclared;
 
 describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
     test("the token threshold is 82.72% of the declared limit and the hold cap is ten points above it", () => {
@@ -116,11 +121,11 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
     });
 
     test("a pass in the force band is never held: it lands the queued drops and strips the turn's kept thinking once", () => {
-        const inForceBand = visible.passes.filter((pass) => (pass.mcPercentage ?? 0) >= FORCE_BAND);
+        const inForceBand = visible.passes.filter((pass) => exactPercent(pass) >= FORCE_BAND);
         // Below the cap, with heavy reasoning in the turn's recent steps: passes
         // the hold's other conditions would have held.
         expect(
-            inForceBand.filter((pass) => (pass.mcPercentage ?? 0) < CAP).length,
+            inForceBand.filter((pass) => exactPercent(pass) < CAP).length,
         ).toBeGreaterThanOrEqual(5);
         for (const pass of inForceBand) {
             expect(pass.thinkingHold).toBe(false);
@@ -147,8 +152,8 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         const heldBelowForceBand = visible.passes.filter(
             (pass) =>
                 pass.thinkingHold === true &&
-                (pass.mcPercentage ?? 0) >= THRESHOLD &&
-                (pass.mcPercentage ?? 0) < FORCE_BAND,
+                exactPercent(pass) >= THRESHOLD &&
+                exactPercent(pass) < FORCE_BAND,
         );
         expect(heldBelowForceBand.length).toBeGreaterThanOrEqual(3);
         for (const pass of heldBelowForceBand) {
@@ -165,7 +170,7 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         for (const pass of stripped) {
             expect(pass.thinkingHold).toBe(false);
             // Unheld in this run means in the force band.
-            expect(pass.mcPercentage ?? 0).toBeGreaterThanOrEqual(FORCE_BAND);
+            expect(exactPercent(pass)).toBeGreaterThanOrEqual(FORCE_BAND);
             // Every block the previous request served, plus the newest step's.
             expect(pass.proactiveStripFroze).toBe(
                 previous(visible, pass).served.thinkingBlocks + 1,
@@ -209,21 +214,28 @@ describe("issue 905, OpenCode 2 subagent, visible signed thinking", () => {
         expect(visible.logs.some((line) => line.includes("already exceeds ceiling"))).toBe(false);
         for (const pass of planned) {
             const before = previous(visible, pass).served;
-            // The floor is the request this pass serves minus its active tags.
-            // Every tool output, tool input and text part the previous request
-            // served was either dropped by this pass's queued drops (and taken
-            // off the reading) or is still an active tag, so none of it is fixed.
-            expect(pass.emergencyFloor!).toBeLessThanOrEqual(
+            // The floor is the previous request (the reading) minus what this
+            // pass's queued drops removed and minus the tags that request
+            // carried and that are still active. Every tool output, tool input
+            // and text part the previous request served is one or the other, so
+            // the floor is exactly what that request held besides them: the
+            // system allowance, the served thinking (the strip comes at the end
+            // of the pass, after the planner, and no tool drop removes it) and
+            // the placeholders of earlier drops. The newest step's output and
+            // text were not in that request and must not lower it.
+            const fixed =
                 before.overhead +
-                    before.thinking +
-                    before.hiddenThinking +
-                    before.placeholders +
-                    before.other,
-            );
-            // The thinking is still on the request when the planner runs (the
-            // strip comes at the end of the pass) and no tool drop removes it,
-            // so it stays in the floor.
-            expect(pass.emergencyFloor!).toBeGreaterThan(before.thinking);
+                before.thinking +
+                before.hiddenThinking +
+                before.placeholders +
+                before.other;
+            // The fixture counts the served request its own way; Magic
+            // Context's measurement of the same tags differs by a fraction of
+            // a percent (a few hundred tokens here, against roughly 9,000 for
+            // the newest step a biased floor would subtract).
+            const tagged =
+                before.assistantText + before.toolInputs + before.toolOutputs + before.task;
+            expect(Math.abs(pass.emergencyFloor! - fixed)).toBeLessThanOrEqual(tagged * 0.005);
             expect(pass.emergencyFloor!).toBeLessThan(ISSUE_905_EXECUTE_TOKENS);
         }
     });

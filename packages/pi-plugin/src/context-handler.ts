@@ -188,6 +188,7 @@ import {
 	type DroppedTokenReduction,
 	estimateDroppedTokensFromTagReductions,
 } from "@magic-context/core/hooks/magic-context/dropped-token-estimate";
+import { tagsSinceReading } from "@magic-context/core/hooks/magic-context/emergency-drop";
 import {
 	contextRefusalError,
 	EmergencyFailClosedError,
@@ -10891,15 +10892,30 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// instead of treating it as fixed. Unlike OpenCode, Pi's targets do not name
 	// the reasoning a drop takes off the request, so that reasoning stays in the
 	// floor: the floor can only be too high, which may skip a pass but never
-	// drops more than needed. Only passes where the planner can run pay for this.
-	const emergencyServedBeforeDrain =
+	// drops more than needed. Only the queued drops' own tags can leave in the
+	// drain, so only they are measured, and only on a pass where the planner can
+	// run and the drain has work. A latched emergency episode is no reason to
+	// skip: the drain applying something is what rearms it.
+	const emergencyPlannerMayRun =
 		shouldRunHeuristics &&
 		args.heuristics !== undefined &&
 		args.forceMaterialization === true &&
 		args.emergencyCeilingTokens !== undefined &&
-		args.emergencyCeilingTokens > 0
+		args.emergencyCeilingTokens > 0;
+	// Tags the previous reading never measured (the newest step's output and
+	// text): they must not lower the planner's fixed floor.
+	const tagsNewerThanReading = emergencyPlannerMayRun
+		? tagsSinceReading(transcript.messages, newTargets)
+		: undefined;
+	const queuedDropTags = new Set(pendingOps.map((op) => op.tagId));
+	const emergencyServedBeforeDrain =
+		emergencyPlannerMayRun && shouldApplyPendingOps && queuedDropTags.size > 0
 			? snapshotPiEmergencyServedMass(
-					getPiActiveTagSnapshotView(args.db, args.sessionId),
+					getPiActiveTagSnapshotView(args.db, args.sessionId).filter(
+						(tag) =>
+							queuedDropTags.has(tag.tagNumber) &&
+							!tagsNewerThanReading?.has(tag.tagNumber),
+					),
 					newTargets,
 					args.providerOverflowRecovery === true
 						? piRecoveryToolImageTokens(workingMessages)
@@ -11289,6 +11305,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 											? piRecoveryFitCalibration(recoveryCalibration)
 											: undefined,
 										servedBeforePass: emergencyServedBeforeDrain,
+										sinceReading: tagsNewerThanReading,
 									}
 								: undefined,
 						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
