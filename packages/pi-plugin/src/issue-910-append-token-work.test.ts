@@ -16,9 +16,9 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-// Issue 910: on a long session whose summaries already cover most of the
-// history, an append pass must not tokenize unchanged history again. Counting
-// tokenizer inputs, not wall time, keeps this deterministic.
+// On a long session whose summaries already cover most of the history, an
+// append pass must not tokenize unchanged history again. Counting tokenizer
+// inputs, not wall time, keeps this deterministic.
 const COUNT = 300;
 const COVERED = 200;
 const marker = (index: number) => `history-marker-${index}-`;

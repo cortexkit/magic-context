@@ -482,8 +482,9 @@ test.skipIf(process.env.MC_PI_PREPARATION_PROFILE !== "1")(
 								}
 								if (shape === "compacted")
 									expect(served.length).toBeLessThan(source.length);
-								// Finish the asynchronous LKG write before starting the next
-								// turn, and report it separately from foreground latency.
+								// Finish the asynchronous write of the last served request
+								// before starting the next turn, and report it separately
+								// from foreground latency.
 								await timeAsync(
 									"deferredDrain",
 									() => new Promise<void>((done) => setImmediate(done)),
