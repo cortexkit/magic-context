@@ -1,12 +1,31 @@
-import { readdirSync } from "node:fs";
+import { type Dirent, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const archivedCrates = resolve(import.meta.dir, "../../../../crates_old");
 
-export function findTestStorageLeaks(directory: string): string[] {
+type ReadDirectory = (path: string) => Dirent[];
+
+const readDirectory: ReadDirectory = (path) => readdirSync(path, { withFileTypes: true });
+
+/** `read` exists so a test can make a folder vanish mid-scan. */
+export function findTestStorageLeaks(
+    directory: string,
+    read: ReadDirectory = readDirectory,
+): string[] {
     const violations: string[] = [];
     const scan = (root: string): void => {
-        for (const entry of readdirSync(root, { withFileTypes: true })) {
+        let entries: Dirent[];
+        try {
+            entries = read(root);
+        } catch (error) {
+            // Test files run in parallel, and another file may remove its own
+            // temp folder between the parent's listing and this read. A folder
+            // that no longer exists can't hold a leak; any other error, or a
+            // missing top-level folder, still fails the scan.
+            if (root !== directory && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+            throw error;
+        }
+        for (const entry of entries) {
             const path = join(root, entry.name);
             if (entry.isDirectory()) {
                 if (entry.name === "node_modules" || entry.name === ".git") continue;
