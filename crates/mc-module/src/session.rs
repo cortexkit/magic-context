@@ -1086,8 +1086,17 @@ impl Session {
         request: &SetupRequest,
         features: Features,
     ) {
+        let statement_epoch = request
+            .statement_epoch
+            .as_deref()
+            .map(|epoch| epoch.chars().take(8).collect::<String>())
+            .unwrap_or_else(|| "none".into());
+        let statement_stamp = request
+            .statement_seq
+            .map(|stamp| stamp.to_string())
+            .unwrap_or_else(|| "none".into());
         tracing::info!(
-            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, window {}, reserve {}, applied view {:?})",
+            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
             self.key.session,
             self.key.harness,
             request.preset,
@@ -1095,7 +1104,9 @@ impl Session {
             request.model.model,
             request.context_window,
             request.output_reserve,
-            request.applied_view.as_ref().map(|view| view.version)
+            request.applied_view.as_ref().map(|view| view.version),
+            statement_epoch,
+            statement_stamp
         );
         self.features = features;
         self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");

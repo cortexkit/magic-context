@@ -20,6 +20,42 @@ const FORCE: u64 = 90_000;
 /// and ck-mc drops a stamped statement without one.
 const EPOCH: &str = "test-epoch";
 
+#[tokio::test]
+async fn setup_log_names_the_epoch_prefix_and_statement_stamp() {
+    for (epoch, stamp, prefix, printed_stamp) in [
+        (None, None, "none", "none"),
+        (Some("short"), Some(0), "short", "0"),
+        (Some("12345678-private-suffix"), Some(42), "12345678", "42"),
+        (
+            Some("é🦀雪123456789"),
+            Some(u64::MAX),
+            "é🦀雪12345",
+            "18446744073709551615",
+        ),
+    ] {
+        let (mut session, client, route, mut request, settings) = fixture();
+        request.statement_epoch = epoch.map(str::to_owned);
+        request.statement_seq = stamp;
+        let features = session.features;
+        let (_, logs) = crate::test_log::logged_async(
+            session.setup(&client, &settings, &route, &request, features),
+        )
+        .await;
+        let setup = logs
+            .lines()
+            .find(|line| line.contains(": setup ("))
+            .expect("Setup INFO line");
+        assert!(
+            setup.contains(&format!(
+                "applied view None, statement epoch {prefix}, stamp {printed_stamp})"
+            )),
+            "{setup}"
+        );
+        assert!(!setup.contains("private-suffix"), "{setup}");
+        assert!(!setup.contains("é🦀雪123456789"), "{setup}");
+    }
+}
+
 /// Give `session` the epoch its Setup would have named.
 fn under_epoch(session: &mut Session) {
     session.statement_epoch = Some(EPOCH.into());
