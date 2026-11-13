@@ -4121,6 +4121,46 @@ impl Session {
                 && (priced || !self.emergency_latched))
     }
 
+    /// Credit only what this pass stops sending: queued drops and, when the
+    /// cut moves, the net saving after replacing the old head and cut. Comparing
+    /// total served costs counts overlapping removals once and charges the new
+    /// head instead of treating summarized text as fixed provider overhead.
+    /// A head-only refresh deliberately gets no credit, keeping the history
+    /// accounting change confined to passes that move the cut. Routine cleanup
+    /// is excluded because the emergency selector plans before it.
+    fn emergency_removed_tokens(&self, history: &[EditOp], queued_ops: &[EditOp]) -> u64 {
+        let previous = || self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op);
+        let old_cut = previous().find_map(|op| match op {
+            EditOp::Cut { through } => Some(through),
+            _ => None,
+        });
+        let new_cut = history.iter().find_map(|op| match op {
+            EditOp::Cut { through } => Some(through),
+            _ => None,
+        });
+        let cut_moves = old_cut != new_cut;
+        if !cut_moves && queued_ops.is_empty() {
+            return 0;
+        }
+        let (before, old_head) = self.served_costs(previous());
+        let (after, new_head) = self.served_costs(
+            previous()
+                .filter(|op| {
+                    !cut_moves || (!head::is_head(op) && !matches!(op, EditOp::Cut { .. }))
+                })
+                .chain(history.iter().filter(|_| cut_moves))
+                .chain(queued_ops.iter()),
+        );
+        if !cut_moves {
+            return before
+                .iter()
+                .map(|(key, old)| old.saturating_sub(after.get(key).copied().unwrap_or(0)))
+                .sum();
+        }
+        (before.values().sum::<u64>() + old_head)
+            .saturating_sub(after.values().sum::<u64>() + new_head)
+    }
+
     /// A pass with permission to rebuild: every lane adds the parts it wants
     /// gone, and one view carries them. `None` when no lane has work.
     ///
@@ -4281,26 +4321,7 @@ impl Session {
                 .cloned()
                 .collect();
             let (queued_ops, queued_covered) = lanes::drop_ops(&context, &queued_for_emergency);
-            // The provider reading still includes queued reductions landing
-            // on this pass. The TypeScript reference plans before routine
-            // reasoning cleanup, so that lane's removals do not get credit.
-            let removed_tokens = if queued_ops.is_empty() {
-                0
-            } else {
-                let (before, _) =
-                    self.served_costs(self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op));
-                let (after, _) = self.served_costs(
-                    self.latest
-                        .iter()
-                        .flat_map(|v| &v.edits)
-                        .map(|e| &e.op)
-                        .chain(queued_ops.iter()),
-                );
-                before
-                    .iter()
-                    .map(|(key, old)| old.saturating_sub(after.get(key).copied().unwrap_or(0)))
-                    .sum()
-            };
+            let removed_tokens = self.emergency_removed_tokens(&history, &queued_ops);
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
                 request_tokens: over_limit,

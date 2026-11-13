@@ -1383,8 +1383,8 @@ pub struct Emergency {
     /// Another lane already rewrites the prompt on this pass, so even a small
     /// reclaim is worth taking.
     pub priced: bool,
-    /// Content the previous request sent that queued reductions already took
-    /// off the view being built, measured after replaying the previous view.
+    /// Content removed from the previous request by queued reductions and a
+    /// changed history cut, net of the replacement head's cost.
     pub removed_tokens: u64,
 }
 
