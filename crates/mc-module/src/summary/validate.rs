@@ -1974,15 +1974,51 @@ mod tests {
         )
     }
 
+    /// A golden the 0.49 TypeScript parser recorded, without its user
+    /// observations. That parser read observations as one flat list; the
+    /// module files each under the user category it was written in (see
+    /// `observations_are_read_by_their_user_category`), so the two no longer
+    /// agree on that one field, and the goldens hold everything else.
+    fn typescript_golden<T: serde::de::DeserializeOwned>(raw: &str, what: &str) -> T {
+        fn clear(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, field) in map.iter_mut() {
+                        if key == "user_observations" {
+                            *field = serde_json::Value::Array(Vec::new());
+                        } else {
+                            clear(field);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(clear),
+                _ => {}
+            }
+        }
+        let mut value: serde_json::Value = serde_json::from_str(raw).expect(what);
+        clear(&mut value);
+        serde_json::from_value(value).expect(what)
+    }
+
+    fn without_observations(mut parsed: ParsedCompartmentOutput) -> ParsedCompartmentOutput {
+        parsed.user_observations.clear();
+        parsed
+    }
+
     #[test]
     fn validate_golden_matches_typescript_oracle() {
         let raw = include_str!("../../testdata/validate-golden.json");
-        let cases: Vec<GoldenCase> = serde_json::from_str(raw).expect("parse validate golden");
+        let cases: Vec<GoldenCase> = typescript_golden(raw, "parse validate golden");
         assert!(!cases.is_empty(), "empty validate golden");
 
         for case in &cases {
             match parse_compartment_output(&case.input.text) {
-                Ok(parsed) => assert_eq!(parsed, case.parsed, "parsed mismatch in {}", case.label),
+                Ok(parsed) => assert_eq!(
+                    without_observations(parsed),
+                    case.parsed,
+                    "parsed mismatch in {}",
+                    case.label
+                ),
                 Err(error) => {
                     assert!(
                         !case.validation.ok && error.message.contains("<output> root document"),
@@ -2020,13 +2056,12 @@ mod tests {
     #[test]
     fn parse_golden_matches_typescript_parser() {
         let raw = include_str!("../../testdata/historian-parse-golden.json");
-        let cases: Vec<ParseGoldenCase> =
-            serde_json::from_str(raw).expect("parse historian parse golden");
+        let cases: Vec<ParseGoldenCase> = typescript_golden(raw, "parse historian parse golden");
         assert!(!cases.is_empty(), "empty historian parse golden");
         // Collect every mismatching case so one run names all diverging labels.
         let mut mismatches = Vec::new();
         for case in &cases {
-            match parse_compartment_output(&case.text) {
+            match parse_compartment_output(&case.text).map(without_observations) {
                 Ok(parsed) if parsed == case.parsed => {}
                 Ok(parsed) => mismatches.push(format!(
                     "{}:\n  rust: {parsed:?}\n  ts:   {:?}",
