@@ -400,6 +400,7 @@ async fn account_wait_review_a_run_the_runner_pauses_for_an_account_is_waited_fo
         continuation: false,
         creates_child: true,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
         send: SendKind::TurnOne,
     };
     let child = crate::client::Child {

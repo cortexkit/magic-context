@@ -16,6 +16,7 @@ async fn send(client: &Client, runner: &str) -> Result<Reply, SummaryError> {
         continuation: false,
         creates_child: true,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
+        plan: None,
         send: SendKind::TurnOne,
     };
     send_and_wait(client, &child, "first", "prompt", &how, &mut None).await

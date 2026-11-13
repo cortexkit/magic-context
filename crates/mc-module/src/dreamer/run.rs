@@ -7,6 +7,12 @@
 //! input under the task's system prompt, no tools, one model step, and one
 //! reply that the task reads.
 //!
+//! A task that reads the project's code gets AFT's read-only tools instead:
+//! its child is created with a fetch plan ([`super::plan`]) on a runner that
+//! takes plans, and its run may take as many steps as the task's kind
+//! allows. A runner without plans can't run such a task, so its model counts
+//! as unusable and the next one is tried.
+//!
 //! The task's input is built after the model is chosen, so it can fit the
 //! model's window. A transient provider error retries twice on the same
 //! model in a new child; a model that still fails, or whose reply the task
@@ -27,7 +33,7 @@ use crate::routing::{self, DreamDemand, Router, DREAM_OUTPUT_TOKENS};
 use crate::summary::account_wait::{AccountWait, SendKind};
 use crate::summary::fit::Window;
 use crate::summary::run::{
-    backoff, now_ms, retryable, send_and_wait, Model, SummaryError, MAX_RETRIES,
+    backoff, now_ms, retryable, send_and_wait, Model, PlanRun, SummaryError, MAX_RETRIES,
 };
 
 /// How long one task run may take, retries and fallbacks included.
@@ -150,6 +156,35 @@ pub async fn run<C: RunnerClient + Router>(
             continue;
         };
         let model = routing::model_of(&answer);
+        let plan = if job.demand.reads_code {
+            let child = Child {
+                session: SessionRef::new(
+                    answer.runner.module.clone(),
+                    harness.clone(),
+                    child_session(job.run_id, attempt, 0),
+                ),
+                project_root: Some(job.project_root.to_owned()),
+            };
+            match reader_plan(client, &child, task.system()).await {
+                Ok(plan) => Some(PlanRun {
+                    plan,
+                    max_steps: job.demand.max_steps,
+                }),
+                Err(ReaderPlan::Runner(problem)) => {
+                    report(Outcome::Cancelled, None).await;
+                    failure = Some(problem);
+                    continue;
+                }
+                // The tools are missing whichever model runs: no other
+                // model would get further.
+                Err(ReaderPlan::Tools(problem)) => {
+                    report(Outcome::Cancelled, None).await;
+                    return Err(TaskError::Failed(problem));
+                }
+            }
+        } else {
+            None
+        };
         let how = Model {
             model: &model,
             decision_id: &answer.decision_id,
@@ -160,6 +195,7 @@ pub async fn run<C: RunnerClient + Router>(
             creates_child: true,
             send: SendKind::Dream,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+            plan: plan.as_ref(),
         };
         let mut usage = None;
         let mut retry = 0;
@@ -225,6 +261,38 @@ pub async fn run<C: RunnerClient + Router>(
         }
     }
     Err(TaskError::Failed(failure.unwrap_or_default()))
+}
+
+/// Why a code-reading child has no plan.
+enum ReaderPlan {
+    /// This model's runner can't take one: try another model.
+    Runner(String),
+    /// The code-reading tools themselves are unavailable.
+    Tools(String),
+}
+
+/// The plan a code-reading child of `child`'s runner is created with: AFT's
+/// reader tools in the project's folder, and `system` as its text.
+async fn reader_plan<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    system: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, ReaderPlan> {
+    if !client.child_plans(child).await {
+        return Err(ReaderPlan::Runner(format!(
+            "{} takes no fetch plan, so it can't give the task tools",
+            child.session.runner
+        )));
+    }
+    let answer = client
+        .reader_catalog(child)
+        .await
+        .map_err(|error| ReaderPlan::Tools(format!("the code-reading tools: {error}")))?;
+    let tools = super::plan::reader_tools(&answer).map_err(ReaderPlan::Tools)?;
+    match super::plan::plan(&tools, crate::MODULE_ID, system).map_err(ReaderPlan::Tools)? {
+        serde_json::Value::Object(plan) => Ok(plan),
+        _ => unreachable!("a plan is an object"),
+    }
 }
 
 /// The child session of a run's `attempt` (one per model) and `retry`.

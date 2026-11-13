@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use cortexkit_role_tool_provider::check_capability_tag;
 
 use serde_json::{json, Value};
+use sha2::Digest;
 
 use super::{self as tool_catalog, CatalogConfig, CatalogError, Surface, TextFlags};
 
@@ -308,16 +309,22 @@ fn every_role_and_compaction_cell_serves_its_exact_tools_and_text() {
 }
 
 #[test]
-fn presetless_catalog_lists_exactly_the_three_served_presets() {
+fn presetless_catalog_lists_exactly_the_served_presets() {
     let config = example_catalog_config();
     let answer = tool_catalog::catalog_answer(&json!({}), &config).unwrap();
-    assert_eq!(answer["presets"], json!(["head", "worker", "reader"]));
+    assert_eq!(
+        answer["presets"],
+        json!(["head", "worker", "reader", "dreamer"])
+    );
     for compacting in [false, true] {
         for surface in ["light", "full"] {
             let mut request = role_request("head", compacting, surface);
             request.as_object_mut().unwrap().remove("preset");
             let answer = tool_catalog::catalog_answer(&request, &config).unwrap();
-            assert_eq!(answer["presets"], json!(["head", "worker", "reader"]));
+            assert_eq!(
+                answer["presets"],
+                json!(["head", "worker", "reader", "dreamer"])
+            );
 
             let mut content = answer.as_object().unwrap().clone();
             let digest = content.remove("catalog_digest").unwrap();
@@ -864,4 +871,66 @@ fn the_module_only_defaults_declare_no_commands_and_no_smart_notes() {
             "{surface}"
         );
     }
+}
+
+/// A dreamer child's plan names Magic Context only as a text item. A runner
+/// fetching it, with the plan's composition and no tool preset, gets the
+/// text the item carries, unchanged, and no tools.
+#[test]
+fn a_dreamer_text_item_serves_its_own_text_and_no_tools() {
+    let tools = vec![crate::dreamer::plan::ReaderTool {
+        name: "read".into(),
+        capabilities: vec!["code.read/v1".into()],
+    }];
+    let system = "You check memories against the code.\nAnswer with one manifest.";
+    let plan = crate::dreamer::plan::plan(&tools, crate::MODULE_ID, system).unwrap();
+    let item = &plan["system_text_items"][0];
+    let request = json!({
+        "params": {},
+        "composition": plan["composition"],
+        "system_text": {"preset": item["preset"], "params": item["params"]},
+    });
+    let answer = tool_catalog::catalog_answer(&request, &example_catalog_config()).unwrap();
+    assert_eq!(answer["tools"], json!([]));
+    assert_eq!(answer["system_text"]["text"], json!(system));
+    assert_eq!(
+        answer["system_text"]["item_digest"],
+        json!(format!("{:x}", sha2::Sha256::digest(system.as_bytes())))
+    );
+    assert_eq!(
+        answer["composition_digest"], plan["composition_digest"],
+        "the answer is resolved against the plan's own composition"
+    );
+}
+
+#[test]
+fn a_dreamer_text_item_without_exactly_one_text_is_refused() {
+    for params in [
+        json!({}),
+        json!({"text": ""}),
+        json!({"text": 7}),
+        json!({"text": "a", "surface": "full"}),
+    ] {
+        let request = json!({
+            "params": {},
+            "system_text": {"preset": "dreamer", "params": params},
+        });
+        let error = tool_catalog::catalog_answer(&request, &example_catalog_config()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("system_text.params.text"),
+            "{params}: {error:?}"
+        );
+    }
+}
+
+/// The text param belongs to the dreamer role alone: another preset's text
+/// item never echoes a caller's text.
+#[test]
+fn only_the_dreamer_preset_takes_a_text_param() {
+    let request = json!({
+        "preset": "worker",
+        "params": {},
+        "system_text": {"preset": "worker", "params": {"text": "anything"}},
+    });
+    assert!(tool_catalog::catalog_answer(&request, &example_catalog_config()).is_err());
 }

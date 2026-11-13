@@ -110,6 +110,24 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn child_temperature(&self, _child: &Child) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// Whether this child runner admits a send with a fetch plan. Older or
+    /// undiscoverable runners get no plan, so a task that needs tools can't
+    /// run there.
+    fn child_plans(&self, _child: &Child) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
+    /// The code-reading tools AFT's `reader` preset serves in the child's
+    /// project folder: its `tool.catalog` answer, fetched under the same
+    /// scope the runner will fetch it under, so the plan's composition lists
+    /// exactly what the runner will get.
+    fn reader_catalog(
+        &self,
+        _child: &Child,
+    ) -> impl Future<
+        Output = Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError>,
+    > + Send {
+        async { Err(ClientError::new("no code-reading tools")) }
+    }
     /// `session.read`.
     fn read(
         &self,

@@ -137,6 +137,7 @@ async fn send_error(client: &Runner, send: SendKind) -> SummaryError {
         continuation: true,
         creates_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
         send,
     };
     match send_and_wait(client, &child(), "send", "prompt", &how, &mut None).await {

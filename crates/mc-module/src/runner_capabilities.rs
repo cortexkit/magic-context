@@ -87,6 +87,20 @@ impl RunnerCapabilities {
             .contains(cortexkit_role_llm_runner::capabilities::TEMPERATURE)
     }
 
+    /// A child created with a fetch plan (tools from providers, system text
+    /// from a provider) needs a runner declaring `plans`.
+    pub async fn plans(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::PLANS)
+    }
+
     /// `run.cancel` is served only by a runner declaring the `run_cancel`
     /// group.
     pub async fn run_cancel(

@@ -9,6 +9,7 @@
 
 pub mod cron;
 pub mod engine;
+pub mod plan;
 pub mod run;
 pub mod store;
 pub mod task;

@@ -35,6 +35,10 @@ pub(crate) struct Client {
     pub(crate) selects: Mutex<Vec<SelectRequest>>,
     pub(crate) reports: Mutex<Vec<String>>,
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
+    /// The runners that take fetch plans.
+    pub(crate) plans: Vec<&'static str>,
+    /// AFT's reader catalog, as (tool, capabilities), or why it isn't there.
+    pub(crate) catalog: Result<Vec<(&'static str, &'static [&'static str])>, &'static str>,
 }
 
 impl Client {
@@ -47,6 +51,8 @@ impl Client {
             selects: Mutex::default(),
             reports: Mutex::default(),
             sends: Mutex::default(),
+            plans: Vec::new(),
+            catalog: Err("no reader in this test"),
         }
     }
 
@@ -60,6 +66,26 @@ impl Client {
 }
 
 impl RunnerClient for Client {
+    async fn child_plans(&self, child: &Child) -> bool {
+        self.plans.contains(&child.session.runner.as_str())
+    }
+    async fn reader_catalog(
+        &self,
+        _: &Child,
+    ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
+        let tools = self.catalog.clone().map_err(ClientError::new)?;
+        let mut answer = cortexkit_role_tool_provider::catalog::CatalogAnswer::default();
+        answer.tools = tools
+            .into_iter()
+            .map(|(name, capabilities)| {
+                let mut tool = cortexkit_role_tool_provider::catalog::CatalogTool::default();
+                tool.name = name.into();
+                tool.capabilities = capabilities.iter().map(|tag| (*tag).to_owned()).collect();
+                tool
+            })
+            .collect();
+        Ok(answer)
+    }
     async fn read(&self, _: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
         unreachable!()
     }
@@ -222,6 +248,8 @@ async fn a_run_sends_the_task_to_a_child_of_its_own_where_routing_chose() {
         json!("You classify memories.")
     );
     assert_eq!(request.runner_params["tools"], json!([]));
+    assert_eq!(request.runner_params["stop_when"], json!({"max_steps": 1}));
+    assert!(request.plan.is_none());
     assert_eq!(request.route_decision_id.as_deref(), Some("decision-a"));
     drop(sends);
     assert_eq!(*client.reports.lock().unwrap(), ["decision-a completed"]);
@@ -319,4 +347,86 @@ async fn a_routing_refusal_with_a_reset_time_is_a_wait_not_a_failure() {
         "{error:?}"
     );
     assert!(client.sends.lock().unwrap().is_empty());
+}
+
+fn verify() -> TaskRun<'static> {
+    TaskRun {
+        demand: DREAM_DEMANDS
+            .iter()
+            .find(|demand| demand.kind == "verify")
+            .unwrap(),
+        run_id: "18",
+        project_root: "/work/project",
+    }
+}
+
+/// A task that reads code gets AFT's reader tools through a fetch plan: no
+/// inline system prompt or tool list, its text as the plan's text item, and
+/// the kind's step bound.
+#[tokio::test(start_paused = true)]
+async fn a_code_reading_task_gets_the_reader_tools_through_a_plan() {
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
+    client.plans = vec!["ra"];
+    client.catalog = Ok(vec![("read", &["code.read/v1"]), ("grep", &[])]);
+    let reply = run(&client, &verify(), &Task { fits: true }).await.unwrap();
+    assert_eq!(reply.text, "ok");
+    let sends = client.sends.lock().unwrap();
+    let (_, request) = &sends[0];
+    let plan = request.plan.as_ref().expect("a plan");
+    assert_eq!(
+        plan["tool_items"],
+        json!([{"params": {}, "preset": "reader", "provider": "aft"}])
+    );
+    assert_eq!(
+        plan["system_text_items"][0]["params"]["text"],
+        json!("You classify memories.")
+    );
+    assert_eq!(
+        plan["composition"]["providers"][0]["tools"],
+        json!([
+            {"capabilities": [], "name": "grep"},
+            {"capabilities": ["code.read/v1"], "name": "read"},
+        ])
+    );
+    assert!(request.runner_params.get("system").is_none());
+    assert!(request.runner_params.get("tools").is_none());
+    assert_eq!(request.runner_params["stop_when"], json!({"max_steps": 60}));
+    assert!(request.cache.is_none());
+}
+
+/// A runner that takes no plan can't give the task tools: its model is
+/// passed over unsent, and the next one runs.
+#[tokio::test(start_paused = true)]
+async fn a_runner_without_plans_is_passed_over() {
+    let mut client = Client::new(&["p/a", "p/b"], &[Ends::Reply("ok")]);
+    client.plans = vec!["rb"];
+    client.catalog = Ok(vec![("read", &[])]);
+    let reply = run(&client, &verify(), &Task { fits: true }).await.unwrap();
+    assert_eq!(reply.runner, "rb");
+    assert_eq!(client.children(), ["mc-dream:18:1.0"]);
+    assert_eq!(
+        *client.reports.lock().unwrap(),
+        ["decision-a cancelled", "decision-b completed"]
+    );
+}
+
+/// A reader catalog that could change the project, or none at all, fails the
+/// run at once: no other model would get safe tools either.
+#[tokio::test(start_paused = true)]
+async fn unsafe_or_missing_reader_tools_fail_the_run_unsent() {
+    for catalog in [
+        Ok(vec![("read", &[][..]), ("bash", &[][..])]),
+        Err("aft is down"),
+    ] {
+        let mut client = Client::new(&["p/a", "p/b"], &[]);
+        client.plans = vec!["ra", "rb"];
+        client.catalog = catalog;
+        let error = run(&client, &verify(), &Task { fits: true })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TaskError::Failed(_)), "{error:?}");
+        assert!(client.sends.lock().unwrap().is_empty());
+        assert_eq!(client.selects.lock().unwrap().len(), 1);
+        assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
+    }
 }

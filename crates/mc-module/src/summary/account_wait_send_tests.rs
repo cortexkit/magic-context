@@ -229,6 +229,7 @@ fn how(model: &ModelRef) -> Model<'_> {
         continuation: true,
         creates_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
         send: SendKind::TurnTwo,
     }
 }

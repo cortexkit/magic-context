@@ -1,10 +1,11 @@
 {
-  "generation": "ed290c4e3cb739067fb613216c5973bba533ea984ce8547e0300de263ecebe89",
-  "catalog_digest": "ed290c4e3cb739067fb613216c5973bba533ea984ce8547e0300de263ecebe89",
+  "generation": "43a2850e01f4a301b9325aa6fca32065980da0eb0dd550c9a55d45602f27eac8",
+  "catalog_digest": "43a2850e01f4a301b9325aa6fca32065980da0eb0dd550c9a55d45602f27eac8",
   "presets": [
     "head",
     "worker",
-    "reader"
+    "reader",
+    "dreamer"
   ],
   "tools": [
     {

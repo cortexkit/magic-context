@@ -231,6 +231,7 @@ impl Carrier {
             // own child, even when reattaching an interrupted check by send id.
             creates_child: child != self.child,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+            plan: None,
             send: if child == self.child {
                 SendKind::TurnTwo
             } else {

@@ -71,6 +71,9 @@ const TOOL_PARAMS: [&str; 6] = [
 ];
 /// The params a system-text item may carry.
 const TEXT_PARAMS: [&str; 3] = ["surface", "model", "compacting"];
+/// The one param a `dreamer` text item carries: the task's whole system
+/// prompt, which the answer serves back unchanged.
+pub(crate) const DREAMER_TEXT_PARAM: &str = "text";
 
 /// One tool as the shared definition declares it.
 #[derive(Debug, Deserialize)]
@@ -179,6 +182,10 @@ pub(crate) enum Preset {
     Head,
     Worker,
     Reader,
+    /// A dreamer task's child session: no tools from Magic Context, and the
+    /// system prompt the task rendered from the memory profile, carried in
+    /// the item's own params. The child's tools come from other providers.
+    Dreamer,
 }
 
 impl Preset {
@@ -187,6 +194,7 @@ impl Preset {
             Self::Head => "head",
             Self::Worker => "worker",
             Self::Reader => "reader",
+            Self::Dreamer => "dreamer",
         }
     }
 
@@ -199,11 +207,17 @@ impl Preset {
             "head" => Some(Self::Head),
             "worker" => Some(Self::Worker),
             "reader" => Some(Self::Reader),
+            "dreamer" => Some(Self::Dreamer),
             _ => None,
         }
     }
 
     fn tools(self, compacting: bool) -> &'static [String] {
+        // The shared definition has no dreamer role: it lists only what the
+        // host plugins serve too.
+        if self == Self::Dreamer {
+            return &[];
+        }
         &definition().preset_tools[if compacting {
             "compacting"
         } else {
@@ -427,7 +441,7 @@ pub(crate) fn catalog_answer(
     let preset = request_preset(&request)?;
     check_tool_params(&request.params)?;
     if let Some(item) = &request.system_text {
-        check_text_params(&item.params)?;
+        check_text_params(preset, &item.params)?;
     }
     let compacting = compacts_session(arguments)?;
     let served = served_tools(preset, compacting, &request.params, config);
@@ -458,7 +472,8 @@ pub(crate) fn catalog_answer(
             json!([
                 Preset::Head.as_str(),
                 Preset::Worker.as_str(),
-                Preset::Reader.as_str()
+                Preset::Reader.as_str(),
+                Preset::Dreamer.as_str()
             ]),
         );
     }
@@ -520,12 +535,22 @@ pub(crate) fn catalog_answer(
 }
 
 fn request_preset(request: &CatalogRequest) -> Result<Preset, CatalogError> {
+    let text_preset = match &request.system_text {
+        Some(item) => {
+            let text_name = item.preset.as_deref().unwrap_or("head");
+            Some(Preset::parse(text_name).ok_or_else(|| CatalogError::unserved_preset(text_name))?)
+        }
+        None => None,
+    };
+    // A dreamer child's plan names Magic Context only as a text item, so a
+    // runner may fetch it with no tool preset of its own.
+    if text_preset == Some(Preset::Dreamer) && request.preset.is_none() {
+        return Ok(Preset::Dreamer);
+    }
     let name = request.preset.as_deref().unwrap_or("head");
     let preset = Preset::parse(name).ok_or_else(|| CatalogError::unserved_preset(name))?;
-    if let Some(item) = &request.system_text {
+    if let (Some(item), Some(text_preset)) = (&request.system_text, text_preset) {
         let text_name = item.preset.as_deref().unwrap_or("head");
-        let text_preset =
-            Preset::parse(text_name).ok_or_else(|| CatalogError::unserved_preset(text_name))?;
         if text_preset != preset {
             return Err(CatalogError::invalid(
                 "system_text.preset",
@@ -571,7 +596,22 @@ fn check_tool_params(params: &Map<String, Value>) -> Result<(), CatalogError> {
     Ok(())
 }
 
-fn check_text_params(params: &Map<String, Value>) -> Result<(), CatalogError> {
+fn check_text_params(preset: Preset, params: &Map<String, Value>) -> Result<(), CatalogError> {
+    if preset == Preset::Dreamer {
+        let field = format!("system_text.params.{DREAMER_TEXT_PARAM}");
+        let valid = params.len() == 1
+            && params
+                .get(DREAMER_TEXT_PARAM)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty());
+        if !valid {
+            return Err(CatalogError::invalid(
+                field,
+                "a dreamer text item carries exactly one non-empty text",
+            ));
+        }
+        return Ok(());
+    }
     for (key, value) in params {
         let field = format!("system_text.params.{key}");
         let valid = match key.as_str() {
@@ -877,6 +917,13 @@ fn guidance_text(
     own: &BTreeSet<String>,
     config: &CatalogConfig,
 ) -> Result<String, CatalogError> {
+    if preset == Preset::Dreamer {
+        // Checked by `check_text_params`: the task's prompt, served as sent.
+        return Ok(item.params[DREAMER_TEXT_PARAM]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned());
+    }
     if !compacting && preset != Preset::Head {
         return Ok(String::new());
     }
@@ -908,6 +955,8 @@ fn guidance_text(
     let name = match preset {
         // A subagent without ctx_reduce has no tagged messages, so it gets no
         // guidance at all; the runner skips an empty text.
+        // Answered before any guidance is chosen.
+        Preset::Dreamer => return Ok(String::new()),
         Preset::Worker | Preset::Reader if !reduce => return Ok(String::new()),
         Preset::Worker | Preset::Reader => format!("worker/{surface}"),
         Preset::Head => match &config.guidance_override {

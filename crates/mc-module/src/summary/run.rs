@@ -643,6 +643,7 @@ async fn call<C: RunnerClient>(
         // The second turn follows within seconds and reuses the cache this
         // send writes.
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
     };
     let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage).await?;
     if reply.length_capped {
@@ -672,6 +673,17 @@ pub(crate) struct Model<'a> {
     pub cache_ttl: cortexkit_role_llm_runner::cache::Ttl,
     /// Which summarizer send this is, named by an account wait it meets.
     pub send: SendKind,
+    /// A child that gets tools: created with this fetch plan instead of an
+    /// inline system prompt and an empty tool list, since a runner takes no
+    /// inline system text next to a plan. `None` for every summarizer call.
+    pub plan: Option<&'a PlanRun>,
+}
+
+/// A fetch plan a child is created with, and how many model steps its run
+/// may take: each tool call needs a step after it.
+pub(crate) struct PlanRun {
+    pub plan: Map<String, Value>,
+    pub max_steps: u64,
 }
 
 /// A completed call's reply.
@@ -736,7 +748,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
     } else {
         None
     };
-    let cache = if !how.continuation && client.child_cache_policy(child).await {
+    // A cache policy is set only for a planless session; a planned one
+    // takes the runner's.
+    let cache = if !how.continuation && how.plan.is_none() && client.child_cache_policy(child).await
+    {
         let mut cache = cortexkit_role_llm_runner::cache::Cache::new();
         cache.ttl = Some(how.cache_ttl);
         cache.keep_warm = Some(cortexkit_role_llm_runner::cache::KeepWarm::Off);
@@ -748,6 +763,9 @@ async fn send_and_wait_inner<C: RunnerClient>(
     request.session_class = session_class;
     request.cache = cache;
     request.runner_params = run_params(how, with_temperature);
+    if !how.continuation {
+        request.plan = how.plan.map(|plan| plan.plan.clone());
+    }
     // The routing decision is a typed send field: the runner fixes it
     // for the run and forwards it when it gets an account from routing.
     request.route_decision_id = Some(how.decision_id.to_owned());
@@ -833,15 +851,17 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
     if temperature {
         generation["temperature"] = json!(TEMPERATURE);
     }
-    let Value::Object(mut params) = json!({
-        "model": model,
-        "system": how.system,
-        "generation": generation,
-        "stop_when": {"max_steps": 1},
-    }) else {
-        unreachable!("an object literal");
-    };
-    if !how.continuation {
+    // Built member by member in the order a planless call always used, so
+    // its bytes don't change.
+    let mut params = Map::new();
+    params.insert("model".into(), model);
+    if how.plan.is_none() {
+        params.insert("system".into(), json!(how.system));
+    }
+    params.insert("generation".into(), generation);
+    let steps = how.plan.map_or(1, |plan| plan.max_steps);
+    params.insert("stop_when".into(), json!({"max_steps": steps}));
+    if how.plan.is_none() && !how.continuation {
         params.insert("tools".into(), json!([]));
     }
     params

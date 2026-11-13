@@ -92,6 +92,13 @@ type ToolId =
 /** Role presets; the request's composition.compaction selects compaction independently. */
 const PRESETS = ["head", "worker", "reader"] as const;
 type Preset = (typeof PRESETS)[number];
+/**
+ * Every preset the module serves, as a preset-less answer lists them. The
+ * module also serves `dreamer`, a dreamer child's text item that carries its
+ * own text and gets no tools; no fixture here requests it, so it is only
+ * listed.
+ */
+const LISTED_PRESETS = [...PRESETS, "dreamer"] as const;
 
 const TOOL_PARAMS = new Set([
 	"scope",
@@ -1065,7 +1072,7 @@ export function answer(
 		checkParams(request.system_text.params, TEXT_PARAMS, "system_text.params");
 	checkCompositionMatches(request, servedToolIds(request, config));
 	const content: JsonObject = {};
-	if (request.preset === undefined) content.presets = [...PRESETS];
+	if (request.preset === undefined) content.presets = [...LISTED_PRESETS];
 	const compositionDigest = request.composition
 		? sha256Hex(jcs(request.composition))
 		: undefined;

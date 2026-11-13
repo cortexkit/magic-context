@@ -548,6 +548,60 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
+    async fn child_plans(&self, child: &Child) -> bool {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .plans(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
+            .await
+    }
+
+    async fn reader_catalog(
+        &self,
+        child: &Child,
+    ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
+        let root = child.project_root.as_deref().ok_or_else(|| {
+            ClientError::new("tool.catalog: the run has no project folder to read in")
+        })?;
+        let scope = self
+            .child_scopes
+            .for_project(root)
+            .await
+            .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
+        // The same provider, preset, params and scope the runner fetches the
+        // plan's tool item with, under the child's own identity.
+        let provider = SessionRef::new(
+            crate::dreamer::plan::READER_PROVIDER.to_owned(),
+            child.session.harness.clone(),
+            child.session.session.clone(),
+        );
+        let request = json!({
+            "preset": crate::dreamer::plan::reader_preset(),
+            "params": {},
+        });
+        let reply = self
+            .call_raw(
+                &provider,
+                (
+                    cortexkit_role_tool_provider::ROLE,
+                    cortexkit_role_tool_provider::VERSION,
+                ),
+                cortexkit_role_tool_provider::ops::TOOL_CATALOG,
+                &request,
+                Some(scope),
+            )
+            .await?;
+        // A tool provider's answer is the bare object, never wrapped.
+        serde_json::from_slice(&reply)
+            .map_err(|error| ClientError::new(format!("tool.catalog answer: {error}")))
+    }
+
     async fn read(
         &self,
         session: &SessionRef,

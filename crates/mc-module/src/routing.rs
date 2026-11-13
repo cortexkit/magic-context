@@ -72,6 +72,11 @@ pub struct DreamDemand {
     pub context_window: u64,
     /// The task reads the project's files through the code-reading tools.
     pub reads_code: bool,
+    /// The most model steps one message of the task may take. A task without
+    /// tools answers in one; a code-reading task needs a step after each
+    /// round of reads. The bounds are the 0.49 dreamer's own: 60 for mapping
+    /// and verifying a batch, 40 for one primer.
+    pub max_steps: u64,
 }
 
 /// The dreamer task kinds the module runs, and the least each needs. A
@@ -85,54 +90,63 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
         iq: 60,
         context_window: 128_000,
         reads_code: false,
+        max_steps: 1,
     },
     DreamDemand {
         kind: "classify-memories",
         iq: 30,
         context_window: 64_000,
         reads_code: false,
+        max_steps: 1,
     },
     DreamDemand {
         kind: "curate",
         iq: 50,
         context_window: 128_000,
         reads_code: false,
+        max_steps: 1,
     },
     DreamDemand {
         kind: "compress-cues",
         iq: 30,
         context_window: 64_000,
         reads_code: false,
+        max_steps: 1,
     },
     DreamDemand {
         kind: "reflect-events",
         iq: 60,
         context_window: 128_000,
         reads_code: false,
+        max_steps: 1,
     },
     DreamDemand {
         kind: "map-memories",
         iq: 40,
         context_window: 128_000,
         reads_code: true,
+        max_steps: 60,
     },
     DreamDemand {
         kind: "verify",
         iq: 60,
         context_window: 200_000,
         reads_code: true,
+        max_steps: 60,
     },
     DreamDemand {
         kind: "verify-broad",
         iq: 60,
         context_window: 200_000,
         reads_code: true,
+        max_steps: 60,
     },
     DreamDemand {
         kind: "refresh-primers",
         iq: 50,
         context_window: 128_000,
         reads_code: true,
+        max_steps: 40,
     },
 ];
 
