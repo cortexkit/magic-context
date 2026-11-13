@@ -163,9 +163,10 @@ fn left_alone(id: i64, why: LeftAlone) -> (String, &'static str, &'static str) {
 /// The most facts a run's answer carries.
 const MAX_FACTS: usize = 16;
 
-/// `dreamer_undo_run {run_id}`: revert every memory change the run made, as
-/// one undo. A memory changed again since the run is left as it is, and the
-/// answer names it with the reason.
+/// `dreamer_undo_run {run_id}`: revert every memory change the run made, and
+/// every mapping of a memory to its files, as one undo. A memory changed
+/// again since the run is left as it is, and the answer names it with the
+/// reason.
 pub(super) fn undo_run<'a>(
     db: &'a ContextDb,
     project: String,
@@ -195,23 +196,43 @@ pub(super) fn undo_run<'a>(
         owner_id: project,
     };
     let plan = read(db, |conn| person::plan_run_undo(conn, &owner, run))?;
-    let version = stamp(json!({
+    let mut stamped = json!({
         "ended": ended.is_some(),
         "restore": plan.restore.iter().map(|(target, _)| [target.id, target.revision]).collect::<Vec<_>>(),
         "left": plan.left.iter().map(|(id, why)| json!([id, left_alone(*id, *why).1])).collect::<Vec<_>>(),
-    }));
+    });
+    // Only a run that wrote mappings names them, so every other run's
+    // version stays what it was.
+    if !plan.mappings.is_empty() {
+        stamped["mappings"] = json!(plan
+            .mappings
+            .iter()
+            .map(|mapping| mapping.id)
+            .collect::<Vec<_>>());
+    }
+    let version = stamp(stamped);
     if ended.is_none() {
         return Ok(Plan::unavailable(version, "run_running"));
     }
-    if plan.restore.is_empty() {
+    if plan.restore.is_empty() && plan.mappings.is_empty() {
         return Ok(Plan::unavailable(version, "nothing_to_undo"));
     }
-    let (restoring, leaving) = (plan.restore.len(), plan.left.len());
+    let (restoring, mapping, leaving) = (plan.restore.len(), plan.mappings.len(), plan.left.len());
     let mut preview = Preview::new(version, true);
-    let changes = if restoring == 1 {
-        "1 memory change".to_owned()
-    } else {
-        format!("{restoring} memory changes")
+    let memories = match restoring {
+        0 => None,
+        1 => Some("1 memory change".to_owned()),
+        _ => Some(format!("{restoring} memory changes")),
+    };
+    let mappings = match mapping {
+        0 => None,
+        1 => Some("1 mapping".to_owned()),
+        _ => Some(format!("{mapping} mappings")),
+    };
+    let changes = match (memories, mappings) {
+        (Some(memories), Some(mappings)) => format!("{memories} and {mappings}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => unreachable!("a plan with nothing to undo is unavailable"),
     };
     preview.effect = Some(match leaving {
         0 => format!("Reverts {changes} of dreamer run {run} as one undo."),
@@ -222,10 +243,17 @@ pub(super) fn undo_run<'a>(
             "Reverts {changes} of dreamer run {run} as one undo; {leaving} changed since stay as they are."
         ),
     });
-    preview.facts = Some(vec![
-        count("Memories restored", restoring, Some("memories")),
-        count("Left alone", leaving, Some("memories")),
-    ]);
+    // The counts: memories and, when the run wrote any, mappings restored,
+    // then the memories left alone.
+    let counts = move || {
+        let mut facts = vec![count("Memories restored", restoring, Some("memories"))];
+        if mapping > 0 {
+            facts.push(count("Mappings restored", mapping, Some("memories")));
+        }
+        facts.push(count("Left alone", leaving, Some("memories")));
+        facts
+    };
+    preview.facts = Some(counts());
     let mut rows: Vec<TableRow> = plan
         .restore
         .iter()
@@ -236,6 +264,12 @@ pub(super) fn undo_run<'a>(
             )
         })
         .collect();
+    rows.extend(plan.mappings.iter().map(|mapping| {
+        TableRow::new(
+            format!("Mapping of memory {}", mapping.id),
+            vec![FactValue::state("ready")],
+        )
+    }));
     rows.extend(plan.left.iter().map(|(id, why)| {
         let (label, _, state) = left_alone(*id, *why);
         TableRow::new(label, vec![FactValue::state(state)])
@@ -245,13 +279,10 @@ pub(super) fn undo_run<'a>(
     Ok(Plan::available(
         preview,
         Box::new(move || {
-            db.with_connection(|conn| person::undo_run(conn, &owner, run, &plan.restore))
+            db.with_connection(|conn| person::undo_run(conn, &owner, run, &plan))
                 .map_err(|error| person_refused("dreamer_undo_run", error))?;
             db.changed(crate::app_read::Change::project_memories(&owner.owner_id));
-            let mut facts = vec![
-                count("Memories restored", restoring, Some("memories")),
-                count("Left alone", leaving, Some("memories")),
-            ];
+            let mut facts = counts();
             // Each memory left alone, with why, while the answer has room;
             // the last fact counts any it had no room to name.
             let room = MAX_FACTS - facts.len();

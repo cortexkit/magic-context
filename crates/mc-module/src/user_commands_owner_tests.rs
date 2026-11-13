@@ -879,6 +879,127 @@ async fn undo_run_reverts_the_run_and_names_a_memory_changed_after_it() {
 }
 
 #[tokio::test]
+async fn undo_run_puts_back_the_mappings_a_map_run_wrote() {
+    use crate::dreamer::tasks::map_memories::{
+        mapping_rows, put_mapping, record_mappings, MappingRow,
+    };
+    let owner = Owner::new();
+    let mut conn = owner.conn();
+    let a = memory(
+        &conn,
+        "project",
+        PROJECT,
+        ARCHITECTURE,
+        "Mapped by the run.",
+    );
+    let b = memory(
+        &conn,
+        "project",
+        PROJECT,
+        ARCHITECTURE,
+        "Mapped before the run too.",
+    );
+    conn.execute(
+        "INSERT INTO memory_verifications(memory_id, file_path, verified_at, mapped_at, mapping_origin)
+         VALUES (?1, 'src/old.rs', 3, 2, 'mapper')",
+        [b],
+    )
+    .unwrap();
+    // A finished map run that mapped both to one file, recorded by the map
+    // task's own journal writer.
+    conn.execute(
+        "INSERT INTO dream_task_runs(task, kind, level, owner_id, profile, started_at, ended_at, outcome, proposed, applied)
+         VALUES ('swe:map-memories', 'map-memories', 'project', ?1, '@cortexkit/memory-swe', 10, 20, 'applied', 2, 2)",
+        [PROJECT],
+    )
+    .unwrap();
+    let run = conn.last_insert_rowid();
+    let tx = conn.transaction().unwrap();
+    let mut changes = Vec::new();
+    for id in [a, b] {
+        let before = mapping_rows(&tx, id).unwrap();
+        let after = vec![MappingRow {
+            file_path: "src/new.rs".into(),
+            mapping_origin: "mapper".into(),
+            verified_at: 0,
+            mapped_at: 20,
+        }];
+        put_mapping(&tx, id, &after).unwrap();
+        changes.push((id, before, after));
+    }
+    record_mappings(
+        &tx,
+        PROJECT,
+        &format!("dream-run:{run}:map-memories:0"),
+        &changes,
+        20,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let args = json!({"run_id": run});
+    let (preview, answer) = owner
+        .apply("dreamer_undo_run", project(), args.clone(), "undo-map-1")
+        .await;
+    assert_eq!(
+        preview["effect"],
+        format!("Reverts 2 mappings of dreamer run {run} as one undo.")
+    );
+    let labels = |facts: &Value| -> Vec<(String, f64)> {
+        facts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fact| {
+                (
+                    fact["label"].as_str().unwrap().to_owned(),
+                    fact["value"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let counts = vec![
+        ("Memories restored".to_owned(), 0.0),
+        ("Mappings restored".to_owned(), 2.0),
+        ("Left alone".to_owned(), 0.0),
+    ];
+    assert_eq!(labels(&preview["facts"]), counts);
+    assert_eq!(
+        preview["table"]["rows"],
+        json!([
+            {"label": format!("Mapping of memory {a}"), "cells": [{"state": "ready"}]},
+            {"label": format!("Mapping of memory {b}"), "cells": [{"state": "ready"}]},
+        ])
+    );
+    assert_eq!(answer["outcome"], "applied");
+    assert_eq!(labels(&answer["facts"]), counts);
+    // a had no mapping before the run; b gets its old file back as it was.
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM memory_verifications WHERE memory_id = ?1",
+            a
+        ),
+        0
+    );
+    let restored: (String, i64, i64) = conn
+        .query_row(
+            "SELECT file_path, verified_at, mapped_at FROM memory_verifications WHERE memory_id = ?1",
+            [b],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(restored, ("src/old.rs".to_owned(), 3, 2));
+    // The memories themselves are untouched.
+    assert_eq!(row(&conn, a).unwrap().4, 1);
+    let again = owner
+        .preview("dreamer_undo_run", project(), args)
+        .await
+        .unwrap();
+    assert_eq!(again["reason"], "nothing_to_undo");
+}
+
+#[tokio::test]
 async fn observations_promote_to_a_global_memory_or_leave_review() {
     let owner = Owner::new();
     let conn = owner.conn();

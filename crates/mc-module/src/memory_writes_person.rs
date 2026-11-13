@@ -14,6 +14,9 @@
 //! that every target still has the revision the preview read.
 
 use super::*;
+use crate::dreamer::tasks::map_memories::{
+    mapping_json, mapping_of_json, mapping_rows, put_mapping, same_mapping, MappingRow,
+};
 
 /// The writer name history and the journal record for the person.
 pub(crate) const WRITER: &str = "person";
@@ -677,11 +680,25 @@ pub(crate) enum LeftAlone {
 }
 
 /// What undoing a run does: the memories it puts back, each at its current
-/// revision with the row it held before the run, and the ones it leaves.
+/// revision with the row it held before the run, the mappings it puts back,
+/// and the memories it leaves.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RunUndo {
     pub restore: Vec<(Target, Option<Value>)>,
+    pub mappings: Vec<MappingUndo>,
     pub left: Vec<(i64, LeftAlone)>,
+}
+
+/// A memory's mapping that undoing a run puts back. A mapping is not part of
+/// the memory's row, so it keeps no history entry of its own: the run's
+/// journal holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MappingUndo {
+    pub id: i64,
+    /// The mapping the run left, which must still be in place.
+    pub from: Vec<MappingRow>,
+    /// The mapping before the run; empty when the memory had none.
+    pub to: Vec<MappingRow>,
 }
 
 /// Plan undoing every memory change dreamer run `run` made. A memory the
@@ -702,12 +719,28 @@ pub(crate) fn plan_run_undo(
             |row| row.get(0),
         )?
         .collect::<rusqlite::Result<_>>()?;
-    // Each memory's row before the run's first change and after its last.
+    // Each memory's row before the run's first change and after its last,
+    // and the same for its mapping.
     let mut changed: std::collections::BTreeMap<i64, (Value, Value)> = Default::default();
+    let mut mapped: std::collections::BTreeMap<i64, (Vec<MappingRow>, Vec<MappingRow>)> =
+        Default::default();
     for decision in decisions.iter().flatten() {
         let Ok(decision) = serde_json::from_str::<Value>(decision) else {
             continue;
         };
+        for mapping in decision["mappings"].as_array().into_iter().flatten() {
+            let (Some(id), Some(before), Some(after)) = (
+                mapping["memoryId"].as_i64(),
+                mapping_of_json(&mapping["before"]),
+                mapping_of_json(&mapping["after"]),
+            ) else {
+                continue;
+            };
+            mapped
+                .entry(id)
+                .and_modify(|(_, last)| *last = after.clone())
+                .or_insert((before, after));
+        }
         for row in decision["rows"].as_array().into_iter().flatten() {
             let (before, after) = (&row["before"], &row["after"]);
             let Some(id) = row["memoryId"].as_i64() else {
@@ -753,18 +786,60 @@ pub(crate) fn plan_run_undo(
             to,
         ));
     }
+    for (id, (first, last)) in mapped {
+        let Some(memory) = get_memory(conn, id)? else {
+            plan.left.push((id, LeftAlone::Deleted));
+            continue;
+        };
+        if memory.level != owner.level || memory.owner_id != owner.owner_id {
+            plan.left.push((id, LeftAlone::Moved));
+            continue;
+        }
+        // Verify checking the files later is not a change; a different
+        // file or origin, or a text edit that cleared the mapping, is.
+        if !same_mapping(&mapping_rows(conn, id)?, &last) {
+            plan.left.push((id, LeftAlone::ChangedAfter));
+            continue;
+        }
+        plan.mappings.push(MappingUndo {
+            id,
+            from: last,
+            to: first,
+        });
+    }
     Ok(plan)
 }
 
-/// Undo a dreamer run's changes to `restore`, as one decision.
+/// Undo a dreamer run's changes as `plan` lists them, as one decision.
 pub(crate) fn undo_run(
     conn: &mut Connection,
     owner: &OwnerRef,
     run: i64,
-    restore: &[(Target, Option<Value>)],
+    plan: &RunUndo,
 ) -> Result<Value, PersonError> {
     let tx = immediate(conn)?;
-    let (before, after, ids) = restore_all(&tx, owner, restore)?;
+    let (before, after, ids) = restore_all(&tx, owner, &plan.restore)?;
+    let mut evidence = json!({"runId": run});
+    if !plan.mappings.is_empty() {
+        let mut restored = Vec::new();
+        for mapping in &plan.mappings {
+            let memory = get_memory(&tx, mapping.id)?.ok_or(PersonError::Stale)?;
+            if memory.level != owner.level
+                || memory.owner_id != owner.owner_id
+                || !same_mapping(&mapping_rows(&tx, mapping.id)?, &mapping.from)
+            {
+                return Err(PersonError::Stale);
+            }
+            let undone = mapping_rows(&tx, mapping.id)?;
+            put_mapping(&tx, mapping.id, &mapping.to)?;
+            restored.push(json!({
+                "memoryId": mapping.id,
+                "before": mapping_json(&undone),
+                "after": mapping_json(&mapping.to),
+            }));
+        }
+        evidence["mappings"] = Value::Array(restored);
+    }
     let decision = record(
         &tx,
         owner,
@@ -773,7 +848,7 @@ pub(crate) fn undo_run(
         &before,
         &after,
         &ids,
-        json!({"runId": run}),
+        evidence,
     )?;
     tx.commit()?;
     Ok(decision)

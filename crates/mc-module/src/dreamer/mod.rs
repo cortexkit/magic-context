@@ -27,5 +27,6 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::classify::Classify),
         Box::new(tasks::compress_cues::CompressCues),
         Box::new(tasks::curate::Curate),
+        Box::new(tasks::map_memories::MapMemories),
     ]
 }

@@ -205,13 +205,13 @@ pub(crate) struct Classification {
     pub safety_critical: Option<bool>,
 }
 
-fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("a fixed classify-manifest pattern")
+pub(super) fn re(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("a fixed manifest pattern")
 }
 
 /// Why a reply holds no entries, in words a model's failure can be
-/// recognised by.
-fn describe_shape(text: &str, root: &str) -> String {
+/// recognised by. The map task's `<mappings>` manifest shares the reading.
+pub(super) fn describe_shape(text: &str, root: &str) -> String {
     let expected = format!("expected <{root}> with <memory> entries");
     let json = |text: &str| {
         if text.starts_with('[') {
@@ -248,7 +248,7 @@ fn describe_shape(text: &str, root: &str) -> String {
 }
 
 /// The text inside a reply's root element.
-fn body(text: &str, root: &str) -> Result<String, String> {
+pub(super) fn body(text: &str, root: &str) -> Result<String, String> {
     if let Some(found) = re(&format!(r"(?is)<{root}\b[^>]*>(.*?)</{root}>")).captures(text) {
         return Ok(found[1].to_owned());
     }
@@ -267,7 +267,12 @@ fn body(text: &str, root: &str) -> Result<String, String> {
 
 /// An attribute's value when it matches `value`. Any other value reads as
 /// absent, so the memory keeps its current value.
-fn attribute(attributes: &str, name: &str, value: &str, any_case: bool) -> Option<String> {
+pub(super) fn attribute(
+    attributes: &str,
+    name: &str,
+    value: &str,
+    any_case: bool,
+) -> Option<String> {
     re(&format!(
         r#"{}\b{name}\s*=\s*"({value})""#,
         if any_case { "(?i)" } else { "" }
