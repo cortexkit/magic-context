@@ -902,30 +902,8 @@ mod tests {
 
     const PROJECT: &str = "pj-upkeep";
 
-    #[derive(Clone, Default)]
-    struct SweepLogs {
-        info: Arc<AtomicUsize>,
-        warn: Arc<AtomicUsize>,
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SweepLogs {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _context: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            match *event.metadata().level() {
-                tracing::Level::INFO => self.info.fetch_add(1, Ordering::SeqCst),
-                tracing::Level::WARN => self.warn.fetch_add(1, Ordering::SeqCst),
-                _ => return,
-            };
-        }
-    }
-
     #[tokio::test]
     async fn missing_root_is_quiet_until_the_folder_returns() {
-        use tracing_subscriber::prelude::*;
-
         let dir = scratch("missing-root");
         let db = database(&dir);
         let root = dir.join("repo");
@@ -937,16 +915,16 @@ mod tests {
             }),
             ..Plan::default()
         };
-        let logs = SweepLogs::default();
-        let _subscriber =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let logs = crate::test_log::capture();
+        let skip = format!("ck-mc: skipping commit sweep for {project}: project root is missing");
         let now = 1_800_000_000_000;
         for _ in 0..3 {
             let report = run_project(&db, &project, &root, &plan, &|| now).await;
             assert_eq!(report, Report::default(), "missing roots must not run git");
         }
-        assert_eq!(logs.info.load(Ordering::SeqCst), 1);
-        assert_eq!(logs.warn.load(Ordering::SeqCst), 0);
+        assert_eq!(logs.count(&skip), 1, "{}", logs.text());
+        assert_eq!(logs.count("INFO"), 1, "{}", logs.text());
+        assert_eq!(logs.count("WARN"), 0, "{}", logs.text());
         assert_eq!(count(&db, "SELECT COUNT(*) FROM git_sweep_coordinator"), 0);
 
         repository(&dir, &["restored"]);
@@ -962,14 +940,13 @@ mod tests {
                 Report::default()
             );
         }
-        assert_eq!(logs.info.load(Ordering::SeqCst), 2);
-        assert_eq!(logs.warn.load(Ordering::SeqCst), 0);
+        assert_eq!(logs.count(&skip), 2, "{}", logs.text());
+        assert_eq!(logs.count("INFO"), 2, "{}", logs.text());
+        assert_eq!(logs.count("WARN"), 0, "{}", logs.text());
     }
 
     #[tokio::test]
     async fn existing_root_with_a_git_error_still_warns() {
-        use tracing_subscriber::prelude::*;
-
         let dir = scratch("git-error");
         let db = database(&dir);
         let root = repository(&dir, &["first"]);
@@ -981,13 +958,17 @@ mod tests {
             }),
             ..Plan::default()
         };
-        let logs = SweepLogs::default();
-        let _subscriber =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let logs = crate::test_log::capture();
         let report = run_project(&db, "pj-git-error", &root, &plan, &|| 1).await;
         assert!(matches!(report.sweep, Some(Sweep::Failed(_))), "{report:?}");
-        assert_eq!(logs.warn.load(Ordering::SeqCst), 1);
-        assert_eq!(logs.info.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            logs.count("ck-mc: commit sweep failed for pj-git-error:"),
+            1,
+            "{}",
+            logs.text()
+        );
+        assert_eq!(logs.count("WARN"), 1, "{}", logs.text());
+        assert_eq!(logs.count("INFO"), 0, "{}", logs.text());
     }
 
     #[tokio::test]
