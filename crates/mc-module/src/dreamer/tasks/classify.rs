@@ -156,6 +156,15 @@ pub(crate) fn plan(live: &[Memory]) -> Plan {
 
 /// The text that fills the task's input frame: the references, when there
 /// are any, then the memories to classify, each in the frame's own shape.
+///
+/// A pool memory shows only its id, category and text. Every memory in the
+/// pool is one no classifier has scored yet, so its importance, scope and
+/// shareability are the writer's defaults (importance 50), not a judgment.
+/// The 0.49 dreamer showed them as "current" values. In a replay of 100 real
+/// memories on DeepSeek Flash, two runs with those values put 78 and 81 of
+/// 100 between 40 and 60 and marked 2 and 3 rules safety-critical; two runs
+/// without them put 69 and 72 there and marked 5 and 3. The model started
+/// from the 50 instead of judging each memory.
 pub(crate) fn input(pool: &[Memory], anchors: &[Memory]) -> String {
     let mut text = String::new();
     if !anchors.is_empty() {
@@ -178,17 +187,7 @@ pub(crate) fn input(pool: &[Memory], anchors: &[Memory]) -> String {
     text.push_str("### Memory pool to classify\n");
     let entries: Vec<String> = pool
         .iter()
-        .map(|memory| {
-            format!(
-                "[{}] {} (current: importance={} scope={} shareable={})\n{}",
-                memory.id,
-                memory.category,
-                memory.importance.unwrap_or(DEFAULT_IMPORTANCE),
-                memory.scope,
-                memory.shareable,
-                memory.content
-            )
-        })
+        .map(|memory| format!("[{}] {}\n{}", memory.id, memory.category, memory.content))
         .collect();
     text.push_str(&entries.join("\n\n"));
     text

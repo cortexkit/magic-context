@@ -9,8 +9,8 @@ Score EVERY memory in the pool below. Emit one <classify> manifest covering ever
 Never push without approval.
 
 ### Memory pool to classify
-[1] PROJECT_FACTS (current: importance=0 scope=project shareable=true)
+[1] PROJECT_FACTS
 Use <tags> & Unicode 日本語.
 
-[2] PROJECT_RULES (current: importance=91 scope=universe shareable=false)
+[2] PROJECT_RULES
 Never push without approval.

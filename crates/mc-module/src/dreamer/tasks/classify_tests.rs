@@ -264,8 +264,10 @@ fn ids(batch: &ClassifyBatch) -> Vec<i64> {
 
 /// The prompt the 0.49.x module in `crates_old/mc-module` pinned for two
 /// memories, the second also a reference (`TS_VECTORS` in
-/// `src/dream_tasks/classify.rs`, recorded from the TypeScript dreamer).
-const ARCHIVED_PROMPT: &str = "## Task: Classify Project Memories\n\n**Project:** /repo\n\nScore EVERY memory in the pool below. Emit one <classify> manifest covering every id.\n\n### Already-classified reference memories (calibrate against these — do NOT re-score them, they are NOT in your output)\n[2] PROJECT_RULES importance=91\nNever push without approval.\n\n### Memory pool to classify\n[1] PROJECT_FACTS (current: importance=0 scope=project shareable=true)\nUse <tags> & Unicode 日本語.\n\n[2] PROJECT_RULES (current: importance=91 scope=universe shareable=false)\nNever push without approval.";
+/// `src/dream_tasks/classify.rs`, recorded from the TypeScript dreamer),
+/// with one deliberate difference: pool entries no longer show the
+/// memory's "current" values (see `classify::input`).
+const ARCHIVED_PROMPT: &str = "## Task: Classify Project Memories\n\n**Project:** /repo\n\nScore EVERY memory in the pool below. Emit one <classify> manifest covering every id.\n\n### Already-classified reference memories (calibrate against these — do NOT re-score them, they are NOT in your output)\n[2] PROJECT_RULES importance=91\nNever push without approval.\n\n### Memory pool to classify\n[1] PROJECT_FACTS\nUse <tags> & Unicode 日本語.\n\n[2] PROJECT_RULES\nNever push without approval.";
 
 /// The pool of the planning vectors in that same file: memory `i + 1` has
 /// importance `i % 101`, was classified unless `i % 3 == 0`, and has an
@@ -469,8 +471,6 @@ fn the_input_follows_its_frame_line_for_line() {
         .replace("⟦anchor.content⟧", "Crates are named mc-*.")
         .replace("⟦memory.id⟧", "1")
         .replace("⟦memory.category⟧", "CONSTRAINTS")
-        .replace("⟦memory.current_importance⟧", "40")
-        .replace("⟦memory.current_scope⟧", "ecosystem")
         .replace("⟦memory.content⟧", "Releases need two reviewers.");
     let filled = filled.trim_end_matches('\n');
     assert_eq!(input(std::slice::from_ref(&memory), &[anchor]), filled);

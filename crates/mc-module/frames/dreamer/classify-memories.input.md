@@ -3,5 +3,5 @@
 ⟦anchor.content⟧
 
 ### Memory pool to classify
-[⟦memory.id⟧] ⟦memory.category⟧ (current: importance=⟦memory.current_importance⟧ scope=⟦memory.current_scope⟧ shareable=false)
+[⟦memory.id⟧] ⟦memory.category⟧
 ⟦memory.content⟧

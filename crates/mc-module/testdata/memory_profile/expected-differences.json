@@ -524,6 +524,18 @@
       "rendered": [
         "   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"for now\", \"for this window\" or until an event is temporary, even when decided. A rule that holds until a calendar date passes this check: give that date as `expires`."
       ]
+    },
+    {
+      "document": "dreamer/swe:classify-memories/user",
+      "class": "ruling",
+      "ruling": "memory-profiles-spec 03-dreamer.md §5.1, MC decision of 2026-11-13 from the classify replay",
+      "why": "A pool memory was never scored, so its \"current\" values are the writer's defaults; showing them made the model start from importance 50 and stop discriminating.",
+      "today": [
+        "[⟦memory.id⟧] ⟦memory.category⟧ (current: importance=⟦memory.current_importance⟧ scope=⟦memory.current_scope⟧ shareable=false)"
+      ],
+      "rendered": [
+        "[⟦memory.id⟧] ⟦memory.category⟧"
+      ]
     }
   ]
 }

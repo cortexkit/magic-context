@@ -5,30 +5,30 @@
 Score EVERY memory in the pool below. Emit one <classify> manifest covering every id.
 
 ### Memory pool to classify
-[1] PROJECT_RULES (current: importance=91 scope=project shareable=false)
+[1] PROJECT_RULES
 Never push without approval.
 
-[2] ARCHITECTURE (current: importance=50 scope=universe shareable=true)
+[2] ARCHITECTURE
 Use <tags> & Unicode 日本語.
 
-[3] CONSTRAINTS (current: importance=30 scope=ecosystem shareable=false)
+[3] CONSTRAINTS
 Line one.
 Line two.
 
-[4] CONFIG_VALUES (current: importance=1 scope=project shareable=false)
+[4] CONFIG_VALUES
 Rule 4.
 
-[5] NAMING (current: importance=100 scope=project shareable=false)
+[5] NAMING
 Rule 5.
 
-[6] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+[6] PROJECT_RULES
 Rule 6.
 
-[7] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+[7] PROJECT_RULES
 Rule 7.
 
-[8] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+[8] PROJECT_RULES
 Rule 8.
 
-[9] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+[9] PROJECT_RULES
 Rule 9.

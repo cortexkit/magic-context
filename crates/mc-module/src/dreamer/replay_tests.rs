@@ -967,7 +967,7 @@ impl Report<'_> {
             String::new(),
             format!(
                 "Before the run, each sampled memory was reset to what a newly written memory holds ({}, unclassified), \
-                 because a real run only classifies memories that were never classified. The model was shown those values as each memory's current ones.",
+                 because a real run only classifies memories that were never classified. The pool shows the model only each memory's id, category and text.",
                 show_fields(&Fields::from_json(&sample["resetTo"]))
             ),
             String::new(),
