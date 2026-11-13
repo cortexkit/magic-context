@@ -1,6 +1,6 @@
 //! The `classify-memories` task: score each live project memory's
-//! importance, scope, shareability and safety-criticality, so the memory
-//! block keeps what matters when it is over budget.
+//! importance and mark the operating rules that are safety-critical, so the
+//! memory block keeps what matters when it is over budget.
 //!
 //! Ported from the 0.49.x Rust module kept for reference in `crates_old/`
 //! (`mc-module/src/dream_tasks/classify.rs`, and the commit in
@@ -14,10 +14,12 @@
 //! sends it again.
 //!
 //! The model proposes and the batch decides. A memory that changed after the
-//! batch read it, or stopped being live, keeps what it has. Shareability
+//! batch read it, or stopped being live, keeps what it has.
+//!
+//! The task never writes a memory's scope or shareability. Shareability
 //! decides what leaves the machine under team sync, and ck-mc has no check
-//! for sensitive memory text, so this task may withdraw shareability but
-//! never grant it.
+//! for sensitive memory text, so both keep what the memory's writer gave it.
+//! A reply's `scope` and `shareable` attributes are ignored.
 
 use std::collections::{HashMap, HashSet};
 
@@ -200,8 +202,6 @@ pub(crate) struct Classification {
     pub id: i64,
     /// Clamped to 1-100.
     pub importance: Option<i64>,
-    pub scope: Option<String>,
-    pub shareable: Option<bool>,
     pub safety_critical: Option<bool>,
 }
 
@@ -281,7 +281,9 @@ fn boolean(attributes: &str, name: &str) -> Option<bool> {
         .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
 }
 
-/// Read a reply's `<classify>` manifest.
+/// Read a reply's `<classify>` manifest. Only `id`, `importance` and
+/// `safety_critical` are read; any other attribute, `scope` and `shareable`
+/// included, is ignored.
 pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Classification>, String> {
     let body = body(text, "classify")?;
     let mut found = Vec::new();
@@ -296,20 +298,8 @@ pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Classification>, String> 
                 .unwrap_or(f64::INFINITY)
                 .clamp(1.0, 100.0) as i64
         });
-        let scope =
-            attribute(attributes, "scope", "[a-z]+", true).map(|value| value.to_ascii_lowercase());
-        if let Some(scope) = &scope {
-            if !matches!(scope.as_str(), "project" | "ecosystem" | "universe") {
-                return Err(format!("classify manifest invalid scope {scope}"));
-            }
-        }
-        let shareable = boolean(attributes, "shareable");
         let safety_critical = boolean(attributes, "safety_critical");
-        if importance.is_none()
-            && scope.is_none()
-            && shareable.is_none()
-            && safety_critical.is_none()
-        {
+        if importance.is_none() && safety_critical.is_none() {
             return Err(format!(
                 "classify manifest entry {id} missing classification fields"
             ));
@@ -317,8 +307,6 @@ pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Classification>, String> 
         found.push(Classification {
             id,
             importance,
-            scope,
-            shareable,
             safety_critical,
         });
     }
@@ -472,12 +460,10 @@ impl Batch for ClassifyBatch {
     }
 }
 
-/// The classification fields of a memory row.
+/// The classification fields of a memory row: the ones this task writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Values {
     importance: Option<i64>,
-    scope: String,
-    shareable: bool,
     safety_critical: Option<bool>,
 }
 
@@ -492,7 +478,7 @@ struct Current {
 fn current(tx: &Transaction<'_>, id: i64, project: &str) -> rusqlite::Result<Option<Current>> {
     tx.query_row(
         "SELECT level = 'project' AND owner_id = ?2 AND status IN ('active', 'permanent'),
-                revision, classified_at IS NOT NULL, importance, scope, shareable, safety_critical
+                revision, classified_at IS NOT NULL, importance, safety_critical
            FROM memories WHERE id = ?1",
         params![id, project],
         |row| {
@@ -502,9 +488,7 @@ fn current(tx: &Transaction<'_>, id: i64, project: &str) -> rusqlite::Result<Opt
                 classified: row.get(2)?,
                 values: Values {
                     importance: row.get(3)?,
-                    scope: row.get(4)?,
-                    shareable: row.get::<_, i64>(5)? != 0,
-                    safety_critical: row.get::<_, Option<i64>>(6)?.map(|flag| flag != 0),
+                    safety_critical: row.get::<_, Option<i64>>(4)?.map(|flag| flag != 0),
                 },
             })
         },
@@ -543,9 +527,6 @@ impl ClassifyBatch {
                 continue;
             };
             let was = &current.values;
-            // Nothing in ck-mc can tell whether a memory's text is safe to
-            // share, so a proposal may only withdraw shareability.
-            let withheld = proposal.shareable == Some(true) && !was.shareable;
             let safety_critical = proposal.safety_critical.or(was.safety_critical);
             let mut importance = proposal.importance.or(was.importance);
             if safety_critical == Some(true) {
@@ -555,8 +536,6 @@ impl ClassifyBatch {
             }
             let next = Values {
                 importance,
-                scope: proposal.scope.clone().unwrap_or_else(|| was.scope.clone()),
-                shareable: was.shareable && proposal.shareable != Some(false),
                 safety_critical,
             };
             let changed = next != *was;
@@ -590,17 +569,10 @@ impl ClassifyBatch {
                 // row per memory and revision, and a writer holding the old
                 // revision must see that its read is stale.
                 tx.execute(
-                    "UPDATE memories SET importance = ?2, scope = ?3, shareable = ?4, safety_critical = ?5,
-                            classified_at = ?6, updated_at = ?6, revision = revision + 1
+                    "UPDATE memories SET importance = ?2, safety_critical = ?3,
+                            classified_at = ?4, updated_at = ?4, revision = revision + 1
                       WHERE id = ?1",
-                    params![
-                        id,
-                        next.importance,
-                        next.scope,
-                        next.shareable,
-                        next.safety_critical,
-                        now
-                    ],
+                    params![id, next.importance, next.safety_critical, now],
                 )?;
                 let written = history_snapshot(tx, id)?.ok_or_else(|| {
                     rusqlite::Error::InvalidParameterName(format!(
@@ -618,11 +590,6 @@ impl ClassifyBatch {
                     "UPDATE memories SET classified_at = ?2, updated_at = ?2 WHERE id = ?1",
                     params![id, now],
                 )?;
-            }
-            if withheld {
-                applied.dropped.push(format!(
-                    "memory {id}: shareable=true is not written; ck-mc has no check for sensitive memory text, so the dreamer never makes a memory shareable"
-                ));
             }
             applied.applied += 1;
         }

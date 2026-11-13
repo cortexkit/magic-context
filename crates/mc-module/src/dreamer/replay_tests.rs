@@ -934,14 +934,13 @@ fn show_fields(fields: &Fields) -> String {
     )
 }
 
-/// What a reply proposes, in the same order; `–` for a field it leaves out.
+/// What a reply proposes for the two fields the task reads, importance and
+/// safety-critical; `–` for a field it leaves out.
 fn show_proposal(proposal: &Classification) -> String {
     let omitted = |value: Option<String>| value.unwrap_or_else(|| "–".to_owned());
     format!(
-        "{} · {} · share {} · crit {}",
+        "{} · crit {}",
         omitted(proposal.importance.map(|score| score.to_string())),
-        omitted(proposal.scope.clone()),
-        omitted(proposal.shareable.map(|value| flag(Some(value)).to_owned())),
         omitted(
             proposal
                 .safety_critical
@@ -971,7 +970,7 @@ impl Report<'_> {
                 show_fields(&Fields::from_json(&sample["resetTo"]))
             ),
             String::new(),
-            "Fields: importance · scope · shareable · safety-critical. `∅`: unset in the store. `–`: the reply leaves the field out, so the memory keeps its value.".into(),
+            "Fields: importance · scope · shareable · safety-critical. The *model* column shows only importance · safety-critical, the two fields the task reads. `∅`: unset in the store. `–`: the reply leaves the field out, so the memory keeps its value.".into(),
             String::new(),
             "## Batches".into(),
             String::new(),
@@ -1090,8 +1089,8 @@ impl Report<'_> {
                 proposed.count(
                     prior,
                     proposal.importance,
-                    proposal.scope.as_deref(),
-                    proposal.shareable,
+                    None,
+                    None,
                     proposal.safety_critical,
                 );
             }
@@ -1111,8 +1110,8 @@ impl Report<'_> {
             format!(
                 "Over the {counted} of {} sampled memories whose batch was applied, against their prior values. \
                  An unset importance counts as {UNSET_IMPORTANCE}, as the task ranks it. \
-                 *Written* can differ from *proposed* by the task's own rules: a safety-critical memory's importance is raised to its floor, \
-                 and shareability is only ever withdrawn, never granted; since a new memory is written unshareable, a sampled memory that was shareable stays unshareable whatever the model proposes.",
+                 *Written* can differ from *proposed* by the task's own rules: a safety-critical memory's importance is raised to its floor. \
+                 The task writes neither scope nor shareability, so a sampled memory keeps the scope and shareability it was reset to.",
                 sampled.len()
             ),
             String::new(),
@@ -1122,8 +1121,8 @@ impl Report<'_> {
                 "| importance moved by more than {BIG_IMPORTANCE_CHANGE} points | {} | {} |",
                 proposed.importance, written.importance
             ),
-            format!("| scope flipped | {} | {} |", proposed.scope, written.scope),
-            format!("| shareable flipped | {} | {} |", proposed.shareable, written.shareable),
+            format!("| scope flipped | – | {} |", written.scope),
+            format!("| shareable flipped | – | {} |", written.shareable),
             format!("| became safety-critical | {} | {} |", proposed.critical, written.critical),
         ]);
 

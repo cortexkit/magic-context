@@ -172,6 +172,38 @@ impl Store {
             .unwrap()
     }
 
+    /// Every column of memory `id` except the ones a classification writes
+    /// (importance, safety-critical, classified, updated, revision), by name.
+    fn untouched(&self, id: i64) -> Vec<(String, rusqlite::types::Value)> {
+        const WRITTEN: [&str; 5] = [
+            "importance",
+            "safety_critical",
+            "classified_at",
+            "updated_at",
+            "revision",
+        ];
+        self.db.with_connection(|conn| {
+            let mut statement = conn
+                .prepare("SELECT * FROM memories WHERE id = ?1")
+                .unwrap();
+            let names: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            statement
+                .query_row([id], |row| {
+                    names
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, name)| !WRITTEN.contains(&name.as_str()))
+                        .map(|(index, name)| Ok((name.clone(), row.get(index)?)))
+                        .collect()
+                })
+                .unwrap()
+        })
+    }
+
     /// Every undo-history row: memory, revision, decision key, and the
     /// snapshots before and after.
     fn history(&self) -> Vec<(i64, i64, String, Value, Value)> {
@@ -605,18 +637,10 @@ fn a_batch_offers_its_message_only_to_a_model_it_fits() {
 }
 
 /// A classification with the given fields.
-fn proposal(
-    id: i64,
-    importance: Option<i64>,
-    scope: Option<&str>,
-    shareable: Option<bool>,
-    safety_critical: Option<bool>,
-) -> Classification {
+fn proposal(id: i64, importance: Option<i64>, safety_critical: Option<bool>) -> Classification {
     Classification {
         id,
         importance,
-        scope: scope.map(str::to_owned),
-        shareable,
         safety_critical,
     }
 }
@@ -631,19 +655,23 @@ type GateCase = (
 #[test]
 fn the_manifest_gate_matches_the_archived_vectors() {
     let zero = "parsed zero entries; expected <classify> with <memory> entries";
+    let missing = "classify manifest entry 1 missing classification fields";
+    // The 0.49 module also read `scope` and `shareable`. They are ignored
+    // now, so the archived replies that carry nothing else are missing
+    // their classification fields, and an unknown scope is no error.
     let cases: Vec<GateCase> = vec![
         (
             r#"<classify><memory id="1" importance="0" scope="UNIVERSE" shareable="1"/><memory id="2" importance="999"/></classify>"#,
             vec![1, 2],
             Ok(vec![
-                proposal(1, Some(1), Some("universe"), Some(true), None),
-                proposal(2, Some(100), None, None, None),
+                proposal(1, Some(1), None),
+                proposal(2, Some(100), None),
             ]),
         ),
         (
             r#"<classify><memory id="1" shareable="FALSE"/></classify>"#,
             vec![1],
-            Ok(vec![proposal(1, None, None, Some(false), None)]),
+            Err(missing),
         ),
         (
             r#"<classify><memory id="1" importance="50"/></classify>"#,
@@ -658,17 +686,27 @@ fn the_manifest_gate_matches_the_archived_vectors() {
         (
             r#"<classify><memory id="1" importance="50"/><memory id="1" scope="project"/></classify>"#,
             vec![1],
+            Err(missing),
+        ),
+        (
+            r#"<classify><memory id="1" importance="50"/><memory id="1" safety_critical="true"/></classify>"#,
+            vec![1],
             Err("classify manifest contains duplicate id 1"),
         ),
         (
             r#"<classify><memory id="1" scope="galaxy"/></classify>"#,
             vec![1],
-            Err("classify manifest invalid scope galaxy"),
+            Err(missing),
+        ),
+        (
+            r#"<classify><memory id="1" importance="40" scope="galaxy"/></classify>"#,
+            vec![1],
+            Ok(vec![proposal(1, Some(40), None)]),
         ),
         (
             r#"<classify><memory id="1"/></classify>"#,
             vec![1],
-            Err("classify manifest entry 1 missing classification fields"),
+            Err(missing),
         ),
         (
             r#"<classify><memory id="1" importance="50"/>"#,
@@ -692,21 +730,21 @@ fn the_manifest_gate_matches_the_archived_vectors() {
             vec![1],
             Err("root <map> unrecognized; expected <classify> with <memory> entries"),
         ),
-        // The safety-critical flag is a classification field of its own,
-        // read like shareability.
+        // The safety-critical flag is a classification field of its own:
+        // true, false, 1 or 0, in any case.
         (
             r#"<classify><memory id="1" safety_critical="TRUE"/><memory id="2" safety_critical="0"/></classify>"#,
             vec![1, 2],
             Ok(vec![
-                proposal(1, None, None, None, Some(true)),
-                proposal(2, None, None, None, Some(false)),
+                proposal(1, None, Some(true)),
+                proposal(2, None, Some(false)),
             ]),
         ),
         // A value outside true|false|1|0 reads as no value.
         (
             r#"<classify><memory id="1" importance="40" safety_critical="maybe"/></classify>"#,
             vec![1],
-            Ok(vec![proposal(1, Some(40), None, None, None)]),
+            Ok(vec![proposal(1, Some(40), None)]),
         ),
     ];
     for (text, expected_ids, expected) in cases {
@@ -717,7 +755,8 @@ fn the_manifest_gate_matches_the_archived_vectors() {
         );
     }
 
-    // The reply the profile's output contract shows, for real ids.
+    // The reply the profile's output contract shows, for real ids: only its
+    // importance and safety_critical are read.
     let (_, contract) = FRAMES
         .iter()
         .find(|(name, _)| *name == "dreamer/classify-memories.output-contract")
@@ -728,8 +767,8 @@ fn the_manifest_gate_matches_the_archived_vectors() {
     assert_eq!(
         validate_manifest(&sample, &[4, 5]),
         Ok(vec![
-            proposal(4, Some(80), Some("project"), Some(true), Some(true)),
-            proposal(5, Some(20), Some("universe"), Some(false), Some(false)),
+            proposal(4, Some(80), Some(true)),
+            proposal(5, Some(20), Some(false)),
         ])
     );
 
@@ -796,9 +835,11 @@ fn applying_writes_each_changed_classification_with_one_history_decision() {
             dropped: vec![],
         }
     );
+    // The reply's scope and shareable are not read: memory 1 stays
+    // shareable and memory 3 keeps its scope.
     assert_eq!(
         store.stored(1),
-        (Some(90), "project".into(), false, Some(true), true, 2)
+        (Some(90), "project".into(), true, Some(true), true, 2)
     );
     assert_eq!(
         store.stored(2),
@@ -806,7 +847,7 @@ fn applying_writes_each_changed_classification_with_one_history_decision() {
     );
     assert_eq!(
         store.stored(3),
-        (Some(20), "universe".into(), false, Some(false), true, 2)
+        (Some(20), "project".into(), false, Some(false), true, 2)
     );
     // The changed memories, and only they, are in one decision named for
     // the run and the batch, each row at the revision it replaced.
@@ -834,7 +875,7 @@ fn applying_writes_each_changed_classification_with_one_history_decision() {
             &after["shareable"],
             &after["revision"]
         ),
-        (&json!(90), &json!(0), &json!(2))
+        (&json!(90), &json!(1), &json!(2))
     );
     let journal = store.journal();
     assert_eq!(journal.len(), 1);
@@ -917,35 +958,57 @@ fn applying_never_overwrites_a_memory_changed_or_retired_since_the_batch_read_it
 }
 
 #[test]
-fn applying_may_withdraw_shareability_but_never_grants_it() {
-    let store = apply_pool();
+fn a_reply_that_still_carries_scope_and_shareable_writes_only_importance_and_safety_critical() {
+    let mut rows: Vec<Row> = (1..=10).map(row).collect();
+    rows[0].shareable = true;
+    rows[1].scope = "ecosystem";
+    let store = store(&rows);
     let batch = &store.batches()[0];
+    let untouched: Vec<_> = (1..=10).map(|id| store.untouched(id)).collect();
+    // Each reply asks for a scope and a shareability the memory doesn't have.
     let mut entries = vec![
-        (1, r#"importance="50" scope="project" shareable="false""#),
+        (
+            1,
+            r#"importance="70" scope="universe" shareable="false" safety_critical="false""#,
+        ),
         (2, r#"importance="50" scope="project" shareable="true""#),
-        (3, r#"importance="80" scope="project" shareable="true""#),
+        (
+            3,
+            r#"importance="85" scope="ecosystem" shareable="true" safety_critical="true""#,
+        ),
     ];
     entries.extend(confirmed(4));
     let applied = store.apply(batch, &manifest(&entries), 7);
-    assert_eq!(applied.applied, 10);
-    assert_eq!(applied.dropped.len(), 2, "{:?}", applied.dropped);
-    assert!(applied.dropped[0].starts_with("memory 2: shareable=true is not written"));
-    assert!(applied.dropped[1].starts_with("memory 3: shareable=true is not written"));
-    // Withdrawn.
+    assert_eq!(
+        applied,
+        Applied {
+            proposed: 10,
+            applied: 10,
+            dropped: vec![],
+        }
+    );
+    // Importance and the safety-critical flag are written.
     assert_eq!(
         store.stored(1),
-        (Some(50), "project".into(), false, None, true, 2)
+        (Some(70), "project".into(), true, Some(false), true, 2)
     );
-    // Not granted: memory 2 is classified with what it held, memory 3 gets
-    // its importance and stays private.
+    // Memory 2 already holds the importance proposed: it only becomes
+    // classified, at the same revision.
     assert_eq!(
         store.stored(2),
-        (Some(50), "project".into(), false, None, true, 1)
+        (Some(50), "ecosystem".into(), false, None, true, 1)
     );
     assert_eq!(
         store.stored(3),
-        (Some(80), "project".into(), false, None, true, 2)
+        (Some(85), "project".into(), false, Some(true), true, 2)
     );
+    // No other column of any memory changed.
+    assert_eq!(
+        (1..=10).map(|id| store.untouched(id)).collect::<Vec<_>>(),
+        untouched
+    );
+    let changed: Vec<i64> = store.history().iter().map(|row| row.0).collect();
+    assert_eq!(changed, [1, 3]);
 }
 
 #[test]
