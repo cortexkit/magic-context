@@ -18,6 +18,8 @@ import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanu
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
     type EmergencyDropTag,
+    type EmergencyServedSnapshot,
+    emergencyServedMassRemovedSince,
     estimateEmergencyDropReclaimTokens,
     measureEmergencyTag,
     planEmergencyDrop,
@@ -25,6 +27,12 @@ import {
 import { stripSystemInjection } from "./system-injection-stripper";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
+
+/** A pass whose drain had nothing to apply removed nothing before planning. */
+const NOTHING_SERVED_BEFORE_PASS: EmergencyServedSnapshot = {
+    tags: new Map(),
+    reasoning: new Map(),
+};
 
 // Read-only tools whose parallel calls with identical arguments return identical output.
 // Hosts hand the transform bare tool names (OpenCode 1.18.30 stores `read`, `grep`,
@@ -79,6 +87,17 @@ export function applyHeuristicCleanup(
             usagePercentage?: number;
             /** Another mutation already rewrites the cached prefix on this pass. */
             passAlreadyPriced?: boolean;
+            /**
+             * The active tags' served content measured before this pass removed
+             * anything. With it, the planner takes what the pass already removed
+             * off `currentTotalInputTokens`, the previous request's reading.
+             */
+            servedBeforePass?: EmergencyServedSnapshot;
+            /**
+             * Tags created after the provider reading (see `tagsSinceReading`):
+             * the reading never measured them, so they do not lower the floor.
+             */
+            sinceReading?: ReadonlySet<number>;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -152,8 +171,8 @@ export function applyHeuristicCleanup(
         const calibration = sessionDecisionCalibration(db, sessionId);
         const activeTags = tags
             .filter((t) => t.status === "active")
-            .map((tag) =>
-                measureEmergencyTag(
+            .map((tag) => {
+                const measured = measureEmergencyTag(
                     tag,
                     targets.get(tag.tagNumber),
                     calibration,
@@ -161,9 +180,18 @@ export function applyHeuristicCleanup(
                         ((emergency.usagePercentage ?? 0) < 95 &&
                             recentTags.has(tag.tagNumber) &&
                             hasSmallToolInput(targets.get(tag.tagNumber))),
-                ),
-            );
+                );
+                return emergency.sinceReading?.has(tag.tagNumber)
+                    ? { ...measured, sinceReading: true }
+                    : measured;
+            });
         const measuredByTag = new Map(activeTags.map((tag) => [tag.tagNumber, tag]));
+        const removedThisPassTokens = emergencyServedMassRemovedSince(
+            emergency.servedBeforePass ?? NOTHING_SERVED_BEFORE_PASS,
+            targets,
+            calibration,
+            measuredByTag,
+        );
         const droppableTags = candidateTags
             .flatMap((tag) => {
                 const measured = measuredByTag.get(tag.tagNumber);
@@ -176,6 +204,7 @@ export function applyHeuristicCleanup(
             maxTag,
             protectedCutoff: config.protectedCutoff,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
+            removedThisPassTokens,
             ceilingTokens: emergency.ceilingTokens,
             usagePercentage: emergency.usagePercentage,
             priorInputSample,

@@ -1,8 +1,8 @@
 /**
  * Tokenizer calibration harness.
  *
- * Measures local tokenizer drift using API-key count_tokens for Anthropic,
- * with small OAuth usage probes as fallback. PROSE uses only free counts and
+ * Measures local tokenizer drift using provider count endpoints. Generation-only
+ * routes require --allow-generation. PROSE uses only free counts and
  * public repository bytes plus synthetic history/memory, never private sessions.
  * Reports baseline-subtracted SYSTEM, TOOLS, PROSE and per-section prose ratios.
  *
@@ -12,7 +12,6 @@
  *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts --providers anthropic,openai
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import Tokenizer, { models as aiTokenizerModels } from "ai-tokenizer";
 import { count as sdkCount } from "ai-tokenizer/sdk";
@@ -24,7 +23,8 @@ import * as p50kEncoding from "ai-tokenizer/encoding/p50k_base";
 import { buildProseProbe } from "./prose";
 import { crossCheck } from "./cross-check";
 import { measureAnthropic } from "./providers/anthropic";
-import { type CountAdapter } from "./providers/counting";
+import { type CountAdapter, CountHttpError } from "./providers/counting";
+import { credentialsFromEnv, type Credentials, PROVIDER_VARIABLES } from "./credentials";
 import { measureDeepseekOffline, OFFLINE_CAVEAT } from "./providers/deepseek";
 import { measureMeta, META_COUNT_CAVEAT } from "./providers/meta";
 import { measureGemini } from "./providers/gemini";
@@ -35,27 +35,27 @@ import { measureOpenAI } from "./providers/openai";
 import { measureOpenAICodex } from "./providers/openai-codex";
 import { measureOpenAICompatible } from "./providers/openai-compatible";
 
-interface AuthFile {
-    [provider: string]:
-        | { type: "oauth"; access: string; refresh?: string; expires?: number }
-        | { type: "api"; key: string };
-}
-
-const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string; env: string; file: string; offline?: boolean }> = {
-    deepseek: { measure: measureDeepseekOffline, method: "offline_hf_tokenizer", env: "", file: "", offline: true },
-    meta: { measure: measureMeta, method: "input_tokens", env: "META_API_KEY", file: "meta.key" },
-    google: { measure: measureGemini, method: "countTokens", env: "GEMINI_API_KEY", file: "gemini.key" },
-    xai: { measure: measureXai, method: "tokenize-text", env: "XAI_API_KEY", file: "xai.key" },
-    zai: { measure: measureZai, method: "paas/v4/tokenizer", env: "ZAI_API_KEY", file: "zai.key" },
-    moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count", env: "MOONSHOT_API_KEY", file: "kimi.key" },
-    openai: { measure: measureOpenAI, method: "responses/input_tokens", env: "OPENAI_API_KEY", file: "openai.key" },
+const FREE_ADAPTERS: Record<string, { measure: CountAdapter; method: string }> = {
+    deepseek: { measure: measureDeepseekOffline, method: "offline_hf_tokenizer" },
+    meta: { measure: measureMeta, method: "input_tokens" },
+    google: { measure: measureGemini, method: "countTokens" },
+    xai: { measure: measureXai, method: "tokenize-text" },
+    zai: { measure: measureZai, method: "paas/v4/tokenizer" },
+    moonshot: { measure: measureKimi, method: "tokenizers/estimate-token-count" },
+    openai: { measure: measureOpenAI, method: "responses/input_tokens" },
 };
 
 function authProvider(test: ModelTest): string {
     return test.label.startsWith("openai-codex/") ? "openai-codex" : test.provider;
 }
 
-interface ModelTest {
+function generationSkip(test: ModelTest): string {
+    return authProvider(test) === "openai-codex"
+        ? "no count endpoint; measuring it sends a real generation request with an uncapped reply read whole, drawing on the ChatGPT sign-in's limit; pass --allow-generation to do that"
+        : "no count endpoint; measuring it sends a 1-token request; pass --allow-generation to do that";
+}
+
+export interface ModelTest {
     label: string;
     provider: string;
     modelId: string;
@@ -195,12 +195,13 @@ function localCounts(
     return { systemRaw, systemSdk, toolsRaw, toolsSdk };
 }
 
-async function measureOne(
+export async function measureOne(
     test: ModelTest,
-    auth: AuthFile,
+    auth: Credentials,
     systemText: string,
     toolsArray: unknown[],
     prose: Record<string, string>,
+    allowGeneration = false,
 ): Promise<MeasurementResult> {
     const start = Date.now();
     const local = localCounts(systemText, toolsArray, test.tokenizerKey);
@@ -209,15 +210,18 @@ async function measureOne(
     let error: string | null = null;
     let caveat: string | undefined = test.provider === "meta" ? META_COUNT_CAVEAT : test.provider === "deepseek" ? OFFLINE_CAVEAT : undefined;
     const adapter = FREE_ADAPTERS[authProvider(test)];
-    let method = adapter?.method ?? (test.provider === "anthropic" && auth.anthropic?.type === "api" ? "count_tokens" : "usage");
+    let method = adapter?.method ?? (test.provider === "anthropic" ? "count_tokens" : "usage");
     // biome-ignore lint/suspicious/noExplicitAny: encoding type varies
     const tokenizer = new Tokenizer(pickEncoding(test.tokenizerKey) as any);
     const proseLocal = tokenizer.count(Object.values(prose).join("\n\n"));
     let proseApi: number | null = null;
     const proseSections: MeasurementResult["proseSections"] = {};
     try {
+        if (!adapter && test.provider !== "anthropic" && !allowGeneration) {
+            throw new Error(generationSkip(test));
+        }
         const authEntry = auth[authProvider(test)];
-        if (!authEntry) throw new Error(`SKIP: no API key for ${test.provider}`);
+        if (!authEntry) throw new Error(`SKIP: set ${PROVIDER_VARIABLES[authProvider(test)] ?? "a provider credential variable"}`);
 
         // Route OpenAI OAuth (ChatGPT Plus subscription) through the Codex backend
         // since `api.openai.com` requires a paid API key, while OAuth tokens work via
@@ -248,13 +252,17 @@ async function measureOne(
                 { type: "oauth", access: authEntry.access, accountId },
                 systemText,
                 toolsArray,
+                allowGeneration,
             );
         } else {
-            measurements = await measureOpenAICompatible(test, authEntry, systemText, toolsArray);
+            measurements = await measureOpenAICompatible(test, authEntry, systemText, toolsArray, allowGeneration);
         }
         systemApi = measurements.systemApi;
         toolsApi = measurements.toolsApi;
     } catch (e) {
+        if (e instanceof CountHttpError && (e.status === 401 || e.status === 403)) {
+            throw new Error(`${authProvider(test)} ${test.modelId} HTTP ${e.status}`);
+        }
         error = e instanceof Error ? e.message : String(e);
     }
 
@@ -292,13 +300,15 @@ async function measureOne(
     };
 }
 
-function parseArgs(): { only: string | null; providers: string[] | null } {
-    const args = process.argv.slice(2);
+export function parseArgs(args = process.argv.slice(2)): { only: string | null; providers: string[] | null; allowGeneration: boolean } {
+    let allowGeneration = false;
     let only: string | null = null;
     let providers: string[] | null = null;
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
-        if (arg === "--only") {
+        if (arg === "--allow-generation") {
+            allowGeneration = true;
+        } else if (arg === "--only") {
             only = args[++i] ?? null;
         } else if (arg === "--providers") {
             const v = args[++i] ?? "";
@@ -308,7 +318,7 @@ function parseArgs(): { only: string | null; providers: string[] | null } {
                 .filter(Boolean);
         }
     }
-    return { only, providers };
+    return { only, providers, allowGeneration };
 }
 
 function writeResults(path: string, results: MeasurementResult[]): void {
@@ -318,7 +328,8 @@ function writeResults(path: string, results: MeasurementResult[]): void {
 }
 
 async function main(): Promise<void> {
-    const { only, providers } = parseArgs();
+    const { only, providers, allowGeneration } = parseArgs();
+    const auth = credentialsFromEnv(process.env);
     const here = new URL(".", import.meta.url).pathname;
     const systemText = readFileSync(join(here, "fixture-system.txt"), "utf-8");
     const toolsArray = JSON.parse(
@@ -327,35 +338,23 @@ async function main(): Promise<void> {
     const testSet = JSON.parse(
         readFileSync(join(here, "models.json"), "utf-8"),
     ) as ModelTestSet;
-    const keyPath = join(homedir(), ".config/anthro.key");
-    const key = process.env.ANTHROPIC_API_KEY?.trim() || (existsSync(keyPath) ? readFileSync(keyPath, "utf8").trim() : "");
-    const oauthAccess = process.env.ANTHROPIC_OAUTH_ACCESS_TOKEN?.trim();
-    const auth: AuthFile = key
-        ? { anthropic: { type: "api", key } }
-        : oauthAccess
-          ? { anthropic: { type: "oauth", access: oauthAccess } }
-          : {};
     const prose = buildProseProbe();
 
     let tests = testSet.tests;
     if (only) tests = tests.filter((t) => only.split(",").includes(t.label) || only.split(",").includes(t.modelId));
     if (providers) tests = tests.filter((t) => providers.includes(t.provider));
-    for (const test of tests) {
+    const missing = new Set<string>();
+    tests = tests.filter((test) => {
         const provider = authProvider(test);
-        const adapter = FREE_ADAPTERS[provider];
-        if (!adapter) continue;
-        if (adapter.offline) {
-            auth[provider] = { type: "api", key: "" };
-            continue;
+        if (!FREE_ADAPTERS[provider] && provider !== "anthropic" && !allowGeneration) {
+            console.log(`${test.label}: ${generationSkip(test)}`);
+            return false;
         }
-        const path = join(homedir(), ".config", adapter.file);
-        const apiKey = process.env[adapter.env]?.trim() || (existsSync(path) ? readFileSync(path, "utf8").trim() : "");
-        if (apiKey) auth[provider] = { type: "api", key: apiKey };
-    }
-    const fallbackTests = tests.filter((test) => !FREE_ADAPTERS[authProvider(test)] && !auth[authProvider(test)]);
-    if (fallbackTests.length > 0) {
-        console.log("Missing credentials: provider fallback credentials must be supplied explicitly. PROSE is never sent through usage.");
-    }
+        if (auth[provider]) return true;
+        if (!missing.has(provider)) console.log(`${provider}: SKIP: set ${PROVIDER_VARIABLES[provider]}`);
+        missing.add(provider);
+        return false;
+    });
 
     console.log(
         `Calibration harness: ${tests.length} models, system=${systemText.length} chars, tools=${toolsArray.length} (${JSON.stringify(toolsArray).length} chars)`,
@@ -365,7 +364,7 @@ async function main(): Promise<void> {
     const results: MeasurementResult[] = [];
     for (const test of tests) {
         process.stdout.write(`  ${test.label.padEnd(45, " ")} ... `);
-        const r = await measureOne(test, auth, systemText, toolsArray, prose);
+        const r = await measureOne(test, auth, systemText, toolsArray, prose, allowGeneration);
         if (r.error) {
             process.stdout.write(`SKIP (${r.durationMs}ms) ${r.error}\n`);
         } else {
@@ -419,7 +418,7 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch((err) => {
-    console.error("Harness failed:", err);
+if (import.meta.main) main().catch((err) => {
+    console.error("Harness failed:", err instanceof Error ? err.message : "unknown error");
     process.exit(1);
 });

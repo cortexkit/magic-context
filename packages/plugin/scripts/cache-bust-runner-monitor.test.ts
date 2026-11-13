@@ -500,7 +500,7 @@ test("unexplained wakes show idle time and the other recently affected heads", a
     const s = scan(
         ids.flatMap((id, index) => {
             const at = NOW - (4 - index) * MINUTE;
-            return [row(id, at - 59 * MINUTE, 100_000, 0), row(id, at)];
+            return [row(id, at - 59 * MINUTE, 100_000, 0), row(id, at, 1)];
         }),
         facts(ids),
     );

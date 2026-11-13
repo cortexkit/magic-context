@@ -204,6 +204,7 @@ import {
 	isAdmissionUser,
 	thinkingAnchor,
 } from "@magic-context/core/hooks/magic-context/edit-admission";
+import { tagsSinceReading } from "@magic-context/core/hooks/magic-context/emergency-drop";
 import {
 	contextRefusalError,
 	EmergencyFailClosedError,
@@ -284,6 +285,11 @@ import {
 	variantChangeBustsProviderCache,
 } from "@magic-context/core/hooks/magic-context/sentinel";
 import {
+	dropServedRecord,
+	noteServedPassPermission,
+	noteServedReplay,
+} from "@magic-context/core/hooks/magic-context/served-check";
+import {
 	prefixRecordProblem,
 	readServedPrefix,
 } from "@magic-context/core/hooks/magic-context/served-prefix";
@@ -291,6 +297,7 @@ import {
 	decideSignedThinkingHold,
 	resolveSignedThinkingHoldPolicy,
 } from "@magic-context/core/hooks/magic-context/signed-thinking-hold";
+
 import { servedPrefixMatches } from "@magic-context/core/hooks/magic-context/strict-thinking-prefix";
 import {
 	buildEditSupersessionReclaim,
@@ -379,6 +386,7 @@ import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
+	snapshotPiEmergencyServedMass,
 } from "./heuristic-cleanup-pi";
 import { readPiHistorianTail } from "./historian-tail-pi";
 import {
@@ -5978,6 +5986,16 @@ export function registerPiContextHandler(
 						),
 						usagePercentage,
 						executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+						// The same inputs the pipeline's emergency gate reads below
+						// (`forceMaterialization` and `contextUsage`). Compaction-off
+						// runs its own pipeline with no force band.
+						forceBandPressure:
+							!options.compactionOff &&
+							piForceBandPressure({
+								forceMaterialization: forceMaterialization || isEmergency,
+								percentage: usagePercentage,
+								forceMaterializationPercentage,
+							}),
 					}),
 				requestToolsChange,
 				contextUsage: {
@@ -6800,11 +6818,25 @@ export function registerPiContextHandler(
 					getHarness() === "pi" && baseWindowGeometry
 						? baseWindowGeometry.derivation.absoluteWall
 						: rawFallbackLimit;
+				// Reuse the counts this pass's token accounting just took for the
+				// same served messages; a message whose token-relevant fields differ
+				// from its cached fingerprint is counted again.
+				const fitTokenCounts = () => {
+					const cache = piMessageTokenCacheBySession.get(sessionId);
+					return cache
+						? {
+								cache,
+								stableId: (message: object) =>
+									result.postCommitEntryIdByRef.get(message),
+							}
+						: undefined;
+				};
 				let estimate = estimatePiOutgoingInputTokens(
 					outputMessages,
 					envelope,
 					measuredPrefix,
 					outgoingFitLimit,
+					fitTokenCounts(),
 				);
 				let fitReclaimedThisPass = false;
 				if (
@@ -6865,6 +6897,7 @@ export function registerPiContextHandler(
 						envelope,
 						undefined,
 						rawFallbackLimit,
+						fitTokenCounts(),
 					);
 				}
 				const opaqueFallbackSteps =
@@ -7060,6 +7093,17 @@ export function registerPiContextHandler(
 								}
 								budget.stage = "outgoing fit reclaim";
 								const freshMeta = getOrCreateSessionMeta(options.db, sessionId);
+								// This rerun forces emergency pressure (forceMaterialization),
+								// which lifts the hold's gate, while it keeps the main pass's
+								// signedThinkingHold. The hold cannot stay on here with the gate
+								// lifted: an unknown-usage recovery needs overflow recovery armed,
+								// so the main pass was at the 95% emergency line and unheld; an
+								// over-window proof sets forceSignedRebuildForFit, which strips the
+								// turn first; and an upper estimate whose main pass kept held
+								// thinking (strictThinkingKept) never gets here (reclaimHeld). What
+								// remains is an upper estimate whose main pass started held but
+								// released the turn; this rerun starts from the same pristine
+								// input and so re-derives that release.
 								result = await budget.waitMandatory(
 									runPipeline({
 										...pipelineArgs,
@@ -7127,6 +7171,7 @@ export function registerPiContextHandler(
 									envelope,
 									undefined,
 									outgoingFitLimit,
+									fitTokenCounts(),
 								);
 							} finally {
 								if (!reclaimCompleted && upperCursor && reservation)
@@ -7613,6 +7658,7 @@ export function registerPiContextHandler(
 				budget.assertOutcome();
 				budget.recovery = err.recovery;
 				recordServedSystemHash();
+				noteServedReplay(sessionIdForError);
 				return { messages: err.messages } as {
 					messages: typeof event.messages;
 				};
@@ -7773,6 +7819,7 @@ export function registerPiContextHandler(
 						budget.assertOutcome();
 						budget.recovery = "fitting LKG replay";
 						recordServedSystemHash();
+						noteServedReplay(sessionIdForError);
 						return { messages: replay.messages } as unknown as {
 							messages: typeof event.messages;
 						};
@@ -9566,6 +9613,24 @@ async function runCompactionOffPipeline(
 const signedThinkingHoldLogKeys = new Map<string, string>();
 
 /**
+ * Pi's force-band pressure: the emergency gate that lets a pass held for signed
+ * thinking rewrite its prefix (runPipeline's ride permission). The bounded hold
+ * ends wherever this holds, so the hold and that permission agree on every
+ * pass. `forceMaterialization` is the caller's flag, which also covers the 95%
+ * emergency line read against the hard window.
+ */
+function piForceBandPressure(args: {
+	forceMaterialization?: boolean;
+	percentage: number;
+	forceMaterializationPercentage: number;
+}): boolean {
+	return (
+		args.forceMaterialization === true ||
+		args.percentage >= args.forceMaterializationPercentage
+	);
+}
+
+/**
  * Pi's bounded signed-thinking hold (decideSignedThinkingHold). Pi records the
  * provider's thinking-token count on `usage.reasoning` when the provider
  * reports one; Oh My Pi declares `usage.reasoningTokens`. Without either the
@@ -9579,6 +9644,8 @@ function resolvePiSignedThinkingHold(args: {
 	prefixBound: boolean;
 	usagePercentage: number;
 	executeThresholdPercentage: number;
+	/** `piForceBandPressure` for the reading the pipeline will read. */
+	forceBandPressure: boolean;
 }): boolean {
 	if (!args.prefixBound) return false;
 	let proseRatio: number | undefined;
@@ -9586,6 +9653,7 @@ function resolvePiSignedThinkingHold(args: {
 		messages: args.messages,
 		usagePercentage: args.usagePercentage,
 		executeThresholdPercentage: args.executeThresholdPercentage,
+		forceBandPressure: args.forceBandPressure,
 		estimateTextTokens: (text) => {
 			proseRatio ??= sessionDecisionCalibration(
 				args.db,
@@ -10635,9 +10703,11 @@ function runSynchronousPipeline(
 				};
 			})()
 		: undefined;
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
+	const emergencyDropEligible = piForceBandPressure({
+		forceMaterialization: args.forceMaterialization,
+		percentage: args.contextUsage.percentage,
+		forceMaterializationPercentage,
+	});
 	// Build the fold state once and reuse it for both the preflight and the wire
 	// injection. Omitting a render-affecting field from only one of those calls can
 	// manufacture a HARD signal that the real injection immediately disproves.
@@ -11163,6 +11233,21 @@ function runSynchronousPipeline(
 		parkedTriggers?.holdMaterialization(heldMaterializationReason);
 	}
 	let publishedWorkDrainAllowed = isCacheBustingPass;
+	// The served check (served-check.ts) compares the request this pass returns
+	// with the one served before it and needs the pass's permission to say
+	// whether a change was allowed. A memory note only; every later write of
+	// the permission below notes it again, so the last value wins.
+	const noteServedPermission = () =>
+		noteServedPassPermission(args.sessionId, {
+			permitted: isCacheBustingPass,
+			rides: reclaimRideLabel(rideSignals),
+			signedThinkingHold: protectedSignedPrefix,
+			firstRender: firstRenderBust,
+			hostCheckpointHead: false,
+			emergency: emergencyDropEligible,
+			schedulerDecision: args.schedulerDecision,
+		});
+	noteServedPermission();
 	stripUnheldSignedTurnOnBust();
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
@@ -11312,6 +11397,7 @@ function runSynchronousPipeline(
 			deferredMaterializationSessions.has(args.sessionId);
 		isCacheBustingPass = prefixMutationAllowed;
 		publishedWorkDrainAllowed = isCacheBustingPass;
+		noteServedPermission();
 		stripUnheldSignedTurnOnBust();
 		shouldRunHeuristics = args.heuristics !== undefined;
 		if (piM0State && prefixMutationAllowed) {
@@ -11624,7 +11710,7 @@ function runSynchronousPipeline(
 					`edit admission: unresolved thinking boundary (${reason}); holding every edit not provably after it`,
 				),
 		});
-	let editAdmission = makeEditAdmission();
+	const editAdmission = makeEditAdmission();
 	// Where each tag's edit lies relative to the last kept thinking block; read
 	// only to decide whether this pass needs a companion strip.
 	const tagEditBeforeThinking = new Map<number, boolean>();
@@ -11732,7 +11818,7 @@ function runSynchronousPipeline(
 			args.sessionId,
 			`edit admission: held lane=materialization coords=prefix boundary=${editAdmission.frame.kind === "boundary" ? editAdmission.frame.messageId : "<unresolved>"} held_edits=1`,
 		);
-	let newTargets = protectToolBatchMutations(
+	const newTargets = protectToolBatchMutations(
 		new Map(
 			protectNewTagMutations(
 				mutationView.map((message) => ({
@@ -11747,32 +11833,6 @@ function runSynchronousPipeline(
 		editAdmission,
 		() => piToolBatchCoordinates(workingMessages, stableIdResolver),
 	);
-	if (
-		!holdEnabled &&
-		protectedSignedPrefix &&
-		args.contextUsage.percentage >= 95 &&
-		!args.upperEstimateOnly
-	) {
-		const candidates = getActiveTagsBySession(args.db, args.sessionId).filter(
-			(tag) => tag.type === "tool" && targets.get(tag.tagNumber)?.canDrop?.(),
-		);
-		if (
-			candidates.length > 0 &&
-			candidates.every(
-				(tag) =>
-					newTargets.get(tag.tagNumber)?.thinkingRewriteProtected === true,
-			)
-		) {
-			stripForPrefixRewrite();
-			newTargets = targets;
-			editAdmission = makeEditAdmission();
-			prefixMutationAllowed = true;
-			isCacheBustingPass = true;
-			publishedWorkDrainAllowed = true;
-			shouldRunHeuristics = args.heuristics !== undefined;
-			hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
-		}
-	}
 	if (args.temporalAwareness && isCacheBustingPass) {
 		const admitted = admitTemporalCandidates({
 			candidates: temporalCandidates,
@@ -12154,6 +12214,7 @@ function runSynchronousPipeline(
 	if (rideSignals.executeReclaim) {
 		isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
 		publishedWorkDrainAllowed = isCacheBustingPass;
+		noteServedPermission();
 		shouldRunHeuristics ||= isCacheBustingPass && args.heuristics !== undefined;
 		stripUnheldSignedTurnOnBust();
 		applyTemporalOnRide();
@@ -12204,6 +12265,43 @@ function runSynchronousPipeline(
 	const deferredHistoryRefresh =
 		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
 	const shouldApplyPendingOps = publishedWorkDrainAllowed;
+	// The emergency planner reads the provider's measure of the previous
+	// request, while the queued drops landing first take content out of the
+	// request this pass serves. Measure the tagged content before anything
+	// lands, so the planner takes exactly that removed mass off the reading
+	// instead of treating it as fixed. Unlike OpenCode, Pi's targets do not name
+	// the reasoning a drop takes off the request, so that reasoning stays in the
+	// floor: the floor can only be too high, which may skip a pass but never
+	// drops more than needed. Only the queued drops' own tags can leave in the
+	// drain, so only they are measured, and only on a pass where the planner can
+	// run and the drain has work. A latched emergency episode is no reason to
+	// skip: the drain applying something is what rearms it.
+	const emergencyPlannerMayRun =
+		shouldRunHeuristics &&
+		args.heuristics !== undefined &&
+		args.forceMaterialization === true &&
+		args.emergencyCeilingTokens !== undefined &&
+		args.emergencyCeilingTokens > 0;
+	// Tags the previous reading never measured (the newest step's output and
+	// text): they must not lower the planner's fixed floor.
+	const tagsNewerThanReading = emergencyPlannerMayRun
+		? tagsSinceReading(transcript.messages, newTargets)
+		: undefined;
+	const queuedDropTags = new Set(pendingOps.map((op) => op.tagId));
+	const emergencyServedBeforeDrain =
+		emergencyPlannerMayRun && shouldApplyPendingOps && queuedDropTags.size > 0
+			? snapshotPiEmergencyServedMass(
+					getPiActiveTagSnapshotView(args.db, args.sessionId).filter(
+						(tag) =>
+							queuedDropTags.has(tag.tagNumber) &&
+							!tagsNewerThanReading?.has(tag.tagNumber),
+					),
+					newTargets,
+					args.providerOverflowRecovery === true
+						? piRecoveryToolImageTokens(workingMessages)
+						: undefined,
+				)
+			: undefined;
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,
@@ -12590,6 +12688,8 @@ function runSynchronousPipeline(
 											ceilingTokens: args.emergencyCeilingTokens,
 											usagePercentage: args.contextUsage.percentage,
 											passAlreadyPriced: independentMutationBeforeHeuristics,
+											servedBeforePass: emergencyServedBeforeDrain,
+											sinceReading: tagsNewerThanReading,
 											serializedImageTokens: providerOverflow
 												? piRecoveryToolImageTokens(workingMessages)
 												: undefined,
@@ -14590,6 +14690,8 @@ export function clearContextHandlerSession(
 	db?: ContextDatabase,
 ): void {
 	if (db) clearHostTokenBreakdownMemo(db, sessionId);
+	// Pi left the session (shutdown, switch, or the tracked-session cap).
+	dropServedRecord(sessionId, "session_cleared");
 	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);

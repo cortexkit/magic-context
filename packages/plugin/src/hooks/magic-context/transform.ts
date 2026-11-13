@@ -249,12 +249,13 @@ import {
 import { releaseRecoveryPrefix, snapshotRecoveryMessages } from "./release-recovery-prefix";
 import { createM0RenderOptions } from "./render-options";
 import { evaluateRequestToolsRelease, type RequestToolsRelease } from "./request-tools-release";
-import { heuristicsAlreadyRanThisTurn } from "./routine-cleanup-decision";
+import { forceBandConfirmed, heuristicsAlreadyRanThisTurn } from "./routine-cleanup-decision";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
 import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
 import {
     decideSignedThinkingHold,
+    readingEndsHold,
     resolveSignedThinkingHoldPolicy,
     type SignedThinkingHoldDecision,
 } from "./signed-thinking-hold";
@@ -1905,6 +1906,8 @@ export function createTransform(deps: TransformDeps) {
                 deps.liveModelBySession?.set(sessionId, recovered);
             }
         }
+        // The served check reads the model this pass serves to after the pass.
+        noteServedModel(sessionId, modelForBudget);
         // Single pass-local provider resolution for every empty-sentinel producer.
         // A cold pass may recover the model from OpenCode's DB above; hot passes hit
         // the live map. Reusing this value keeps cold/hot output identical and keeps
@@ -2088,14 +2091,23 @@ export function createTransform(deps: TransformDeps) {
             effectiveExecuteThresholdPercentage,
         );
         // Prefix-bound thinking models hold prefix changes only right after heavy
-        // reasoning and only below the cap; every other pass busts as on any
-        // other model and strips the turn's signed thinking when it does.
+        // reasoning, only below the cap and never in the force band; every other
+        // pass busts as on any other model and strips the turn's signed thinking
+        // when it does. The force band is read from the reading the postprocess
+        // phase will read unless a priced pass sizes it below (then the cap and
+        // the force band are checked again against the sized reading).
         let holdProseRatio: number | undefined;
         const signedThinkingHold: SignedThinkingHoldDecision | null = signedThinkingPrefixBound
             ? decideSignedThinkingHold({
                   messages,
                   usagePercentage: contextUsageEarly.percentage,
                   executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+                  forceBandPressure: forceBandConfirmed({
+                      percentage: contextUsageEarly.percentage,
+                      fromEstimate: hostOverWindow,
+                      forceMaterializationPercentage,
+                      compactionOff,
+                  }),
                   // The session's frozen calibration, read without adopting a new one.
                   estimateTextTokens: (text) => {
                       holdProseRatio ??= sessionDecisionCalibration(db, sessionId).proseRatio;
@@ -3605,6 +3617,11 @@ export function createTransform(deps: TransformDeps) {
                     schedulerDecision,
                     forceMaterializationPercentage,
                     signedThinkingHold: activeThinkingPrefixHold,
+                    signedThinkingHoldStrict: signedThinkingPolicy.strict,
+                    signedThinkingHoldCapPercentage:
+                        !compactionOff && signedThinkingHold?.held === true
+                            ? signedThinkingHold.capPercentage
+                            : undefined,
                     firstRender:
                         servesHead &&
                         !(sessionMeta.cachedM0Bytes != null && sessionMeta.cachedM1Bytes != null) &&
@@ -3802,6 +3819,38 @@ export function createTransform(deps: TransformDeps) {
                     `transform: unknown provider usage; using ${reading.usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens} pressureTokens=${pressureEstimate.pressureTokens}${reading.grewPastSavedReading ? ` grewPastSavedReading=${savedProviderReading?.percentage.toFixed(1)}` : ""} ${sizedPlan}`,
                 );
             }
+        }
+        // A priced pass with no provider reading is sized just above, after the
+        // hold was decided from the reading it had before (none). The hold is
+        // then judged again on the sized reading, as it would have been had that
+        // reading been known: it ends at or above its cap, and in force-band
+        // pressure (the postprocess phase reads that same predicate from the
+        // same reading when it lifts the hold's gate, so the two cannot
+        // disagree). The history head stays frozen for this pass, since its
+        // refresh and fold were already decided with the hold on, and the pass
+        // was sized without them. Compaction off keeps its blanket hold.
+        const sizedHoldEnd =
+            activeThinkingPrefixHold &&
+            !compactionOff &&
+            !signedThinkingPolicy.strict &&
+            signedThinkingHold?.held === true
+                ? readingEndsHold({
+                      usagePercentage: contextUsage.percentage,
+                      capPercentage: signedThinkingHold.capPercentage,
+                      forceBandPressure: forceBandConfirmed({
+                          percentage: contextUsage.percentage,
+                          fromEstimate: contextUsageFromEstimate,
+                          forceMaterializationPercentage,
+                          compactionOff,
+                      }),
+                  })
+                : null;
+        if (sizedHoldEnd !== null && signedThinkingHold) {
+            activeThinkingPrefixHold = false;
+            sessionLog(
+                sessionId,
+                `signed thinking hold: held=false reason=${sizedHoldEnd} heavyStepsBack=${signedThinkingHold.heavyStepsBack ?? "none"} heavyStepTokens=${signedThinkingHold.heavyStepTokens} usage=${contextUsage.percentage.toFixed(1)}% cap=${signedThinkingHold.capPercentage}% (sized reading${contextUsageFromEstimate ? ", local count" : ""})`,
+            );
         }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
@@ -5247,6 +5296,7 @@ export { resolveHistoryBudgetTokens } from "./render-options";
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";
 import { type HostTokenPass, scheduleHostTokenBreakdown } from "./host-token-breakdown";
+import { noteServedModel } from "./served-check";
 import { type AttributionRoute, buildOpenCodeTokenAttribution } from "./session-token-attribution";
 import {
     beginSystemDateRequest,

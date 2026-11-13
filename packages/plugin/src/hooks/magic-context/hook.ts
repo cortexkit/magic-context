@@ -100,6 +100,7 @@ import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
 import { openCodeRescoreCommand } from "./rescore-opencode";
+import { dropServedRecord } from "./served-check";
 import { createTextCompleteHandler } from "./text-complete";
 import { createTransform, type TransformDeps } from "./transform";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
@@ -799,6 +800,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         },
         onSessionDeleted: async (sessionId: string) => {
             dropSlot(sessionId, "session-deleted");
+            dropServedRecord(sessionId, "session_deleted");
             transform.clearSessionLogState(sessionId);
             systemPromptHash.clearSession(sessionId);
             requestHookOrder.clearSession(sessionId);

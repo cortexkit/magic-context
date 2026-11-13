@@ -166,6 +166,7 @@ function evaluate(id: string, input: Input) {
         const transcript = messages(input);
         const signed = input.prefix_bound && decideSignedThinkingHold({ messages: transcript,
             usagePercentage: input.usage, executeThresholdPercentage: threshold,
+            forceBandPressure: input.usage >= force,
             estimateTextTokens: text => Math.ceil(text.length / 4),
         }).held;
         markProtectedTailPolicyV3Seeded(db, id, 1);

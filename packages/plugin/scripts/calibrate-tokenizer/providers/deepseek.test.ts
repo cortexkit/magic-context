@@ -1,14 +1,14 @@
 import { expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeOfflineCounts } from "./deepseek";
 import { resolveModelCalibration } from "../../../src/hooks/magic-context/tokenizer-calibration";
+import { createTestTempDir } from "../../../src/shared/test-temp-dir";
 
 it("runs the offline Python protocol without remote loading or special tokens", () => {
-    const directory = mkdtempSync(join(tmpdir(), "calibration-python-test-"));
+    const { dir: directory, cleanup } = createTestTempDir("calibration-python-test-");
     try {
         writeFileSync(join(directory, "transformers.py"), `
 class AutoTokenizer:
@@ -23,11 +23,11 @@ class AutoTokenizer:
 `);
         const result = spawnSync("python3", [fileURLToPath(new URL("./deepseek-offline.py", import.meta.url)), directory], {
             input: JSON.stringify({ system: "abcd", tools: "[]", prose: "abc", "section:docs": "hi" }),
-            encoding: "utf8", env: { ...process.env, PYTHONPATH: directory }, timeout: 10_000,
+            encoding: "utf8", env: { ...process.env, PYTHONPATH: directory }, timeout: 10_000, windowsHide: true,
         });
         expect(result.status).toBe(0);
         expect(decodeOfflineCounts(result.stdout)).toEqual({ system: 4, tools: 2, prose: 3, "section:docs": 2 });
-    } finally { rmSync(directory, { recursive: true, force: true }); }
+    } finally { cleanup(); }
 });
 
 it("reports missing offline dependencies and never invents V4 calibration from V3", () => {

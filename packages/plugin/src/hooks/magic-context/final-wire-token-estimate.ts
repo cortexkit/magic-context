@@ -3,6 +3,7 @@ import {
     getSessionToolDefinitionTokens,
     getToolDefinitionMeasurementSignature,
 } from "../../features/magic-context/tool-definition-tokens";
+import { isRecord } from "../../shared/record-type-guard";
 import {
     hasMeasuredDecisionCalibration,
     providerMass,
@@ -26,6 +27,7 @@ import {
 export {
     estimatePartImageTokens,
     type MessageTokenEstimate,
+    openCode2ThinkingPayload,
     wireContentBytes,
 } from "./wire-content";
 

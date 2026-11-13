@@ -35,7 +35,7 @@ export const measureDeepseekOffline: CountAdapter = async (_model, _key, system,
     };
     const processResult = spawnSync(process.env.DEEPSEEK_TOKENIZER_PYTHON || "python3", [fileURLToPath(new URL("./deepseek-offline.py", import.meta.url)), scratch], {
         input: JSON.stringify(probes), encoding: "utf8", timeout: 60_000, maxBuffer: 1024 * 1024,
-        env: { ...process.env, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" },
+        env: { ...process.env, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, windowsHide: true,
     });
     if (processResult.error || processResult.status !== 0) throw new Error("SKIP: offline Python tokenizer subprocess unavailable or failed");
     const counts = decodeOfflineCounts(processResult.stdout);

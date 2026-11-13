@@ -715,6 +715,53 @@ for (const host of HOSTS)
         60_000,
     );
 
+// ── The served check (served-check.ts) sees the failing pass of the open
+// defect above. It only measures: the pass is served exactly as before, and
+// the check logs that it changed the served request without rebuild
+// permission, in front of kept signed thinking that it did not strip.
+const servedCheckEvents = (logs: readonly string[]) =>
+    logs.filter((line) => line.startsWith("served check: "));
+for (const host of HOSTS)
+    it(`${host}: the served check reports the compaction-off pass whose first-render strip cannot be saved`, async () => {
+        const s = session(host, `spe-off-first-render-served-check-${host}`, {
+            compactionOff: true,
+        });
+        s.user("long task");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
+            await s.pass();
+            // An ordinary step only appends to the request served before it.
+            expect(servedCheckEvents(s.logs)).toEqual([]);
+        }
+        s.editDocs("v2");
+        s.clearHead();
+        s.step(4, 200);
+        const restore = failThinkingStripWrites(s.db);
+        try {
+            await s.pass();
+        } finally {
+            restore();
+        }
+        const events = servedCheckEvents(s.logs);
+        expect(
+            events.some(
+                (line) =>
+                    line.startsWith(
+                        "served check: a pass without rebuild permission changed served messages first_index=0 ",
+                    ) && line.includes("permitted=false"),
+            ),
+        ).toBe(true);
+        expect(
+            events.some(
+                (line) =>
+                    line.startsWith(
+                        "served check: a change in front of kept signed thinking on a prefix-bound model first_index=0 ",
+                    ) && line.includes("thinking_stripped=false"),
+            ),
+        ).toBe(true);
+    }, 60_000);
+
 // ── Managed mode: the provider rejected a request for its signed thinking,
 // which arms the binding recovery, and the next pass strips every bound block
 // and captures that request as the last good one. Only then does it clear the

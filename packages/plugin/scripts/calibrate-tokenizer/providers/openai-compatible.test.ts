@@ -35,6 +35,7 @@ async function expectProviderEndpoint(provider: string, expectedUrl: string): Pr
         { type: "api", key: "test-key" },
         "system prompt",
         [{ name: "tool", description: "Tool", input_schema: { type: "object" } }],
+        true,
     );
 
     expect(urls).toEqual([expectedUrl, expectedUrl, expectedUrl]);

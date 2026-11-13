@@ -17,6 +17,40 @@ export function isPiDropPlaceholder(text: string): boolean {
 	return DROP_PLACEHOLDER.test(text);
 }
 
+/**
+ * Whether Oh My Pi's replay of a native output text stands for a prepared
+ * text block: the two are equal once the block's leading `§N§ ` label, which
+ * tagging adds and native replay never carries, is removed.
+ */
+export function nativeTextMatchesBlock(
+	nativeText: string,
+	blockText: string,
+): boolean {
+	return nativeText === blockText.replace(TAG_LABEL, "");
+}
+
+/**
+ * Whether a native output text belongs to an unsigned text block that Oh My
+ * Pi's assistant-message hook produced. Oh My Pi removes a block's
+ * `textSignature` whenever that hook changes its text, and our hook changes
+ * text only to remove tag notation the model copied. The hook's own cleanup of
+ * the native text must then match the block. That covers both ways Oh My Pi
+ * stores the result: up to 18.18 the native item keeps the model's original
+ * bytes, and from 18.19.0 Oh My Pi also copies the cleaned text into the
+ * native item, so native and block hold the same bytes. Any other difference
+ * (another edit, tag notation or surrounding whitespace left in the native
+ * text) fails the relation.
+ */
+export function hookCleanedTextMatchesBlock(
+	nativeText: string,
+	blockText: string,
+): boolean {
+	return nativeTextMatchesBlock(
+		stripPersistedAssistantText(nativeText),
+		blockText,
+	);
+}
+
 type NativeEnvelope = {
 	message: Record<string, unknown>;
 	payload: Record<string, unknown>;
@@ -209,15 +243,17 @@ function nativeTextSlots(
 
 /**
  * The native output that an unsigned text block replays as, when Oh My Pi's
- * assistant-message hook explains the missing signature. The hook removes a
- * block's signature only when it rewrites that block's text, and leaves the
- * native item as the provider returned it. So the native text must differ
- * from its own cleanup, and that cleanup must equal the text the block had
- * before this pass. Every other text block must also fit its positional
- * item, so the pairing cannot shift onto another item: a signed block by its
- * id and phase, an unsigned one by the same hook relation. (The dispatch
- * check also compares a signed block's text, so it can still refuse a turn
- * this pairing accepts.)
+ * assistant-message hook explains the missing signature (see
+ * `hookCleanedTextMatchesBlock`): the hook's cleanup of the native text must
+ * equal the text the block had before this pass. Up to Oh My Pi 18.18 the
+ * native text still holds the model's original bytes there; from 18.19.0 it
+ * holds the cleaned text, the same bytes as the block. Either way Oh My Pi
+ * replays that native item in place of the block, so any edit of the block
+ * (a drop placeholder, compression) has to go into it. Every other text block must also fit its
+ * positional item, so the pairing cannot shift onto another item: a signed
+ * block by its id and phase, an unsigned one by the same hook relation. (The
+ * dispatch check also compares a signed block's text, so it can still refuse
+ * a turn this pairing accepts.)
  */
 function hookRewrittenSlot(
 	previous: readonly unknown[],
@@ -245,11 +281,9 @@ function hookRewrittenSlot(
 				return undefined;
 			continue;
 		}
-		const stripped = stripPersistedAssistantText(slot.text);
-		if (stripped !== block.text.replace(TAG_LABEL, "")) return undefined;
+		if (!hookCleanedTextMatchesBlock(slot.text, block.text)) return undefined;
 		if (index !== partIndex) continue;
-		if (stripped === slot.text || (item.content as unknown[]).length !== 1)
-			return undefined;
+		if ((item.content as unknown[]).length !== 1) return undefined;
 		target = slot;
 	}
 	return target;
@@ -438,17 +472,18 @@ export function piNativeDropWireMismatch(
  * Mirror prepared text edits without converting or discarding opaque native history.
  *
  * A signed block finds its native item by the signature's id and phase. With
- * `unsignedDrops` (Oh My Pi only), a dropped block whose signature the host's
- * assistant-message hook removed also gets its placeholder mirrored, into the
- * native item that hook left behind (see `hookRewrittenSlot`). Without that,
- * the host would replay the dropped text itself, and the dispatch check would
+ * `unsignedEdits` (Oh My Pi only), an edited block whose signature the host's
+ * assistant-message hook removed (a drop placeholder, caveman compression,
+ * stripped inline thinking) also gets its new text mirrored, into the native
+ * item that hook left behind (see `hookRewrittenSlot`). Without that, the host
+ * would replay the text from before the edit, and the dispatch check would
  * refuse every later turn of the session.
  */
 export function rewriteNativeAssistantTexts(
 	message: unknown,
 	previous: unknown,
 	sessionId?: string,
-	options: { unsignedDrops?: boolean } = {},
+	options: { unsignedEdits?: boolean } = {},
 ): void {
 	const envelope = getNativeEnvelope(message);
 	if (
@@ -462,8 +497,8 @@ export function rewriteNativeAssistantTexts(
 	// Pair unsigned blocks against the items as they arrived; the signed
 	// rewrites below replace text only, so positions stay valid.
 	const arrivedItems = envelope.items;
-	const unsignedDrops =
-		options.unsignedDrops === true &&
+	const unsignedEdits =
+		options.unsignedEdits === true &&
 		RESPONSES_APIS.has(String(envelope.message.api)) &&
 		envelope.payload.dt === true;
 	for (let index = 0; index < content.length; index++) {
@@ -486,21 +521,18 @@ export function rewriteNativeAssistantTexts(
 		)
 			continue;
 		const identity = textIdentity(part);
-		if (
-			identity === undefined &&
-			unsignedDrops &&
-			isPiDropPlaceholder(part.text) &&
-			!("textSignature" in part)
-		) {
+		if (identity === undefined && unsignedEdits && !("textSignature" in part)) {
 			const slot = hookRewrittenSlot(previous.content, index, arrivedItems);
 			if (slot) {
 				// Keep the item's id, phase and every other field; only its one
-				// output text becomes the placeholder the typed block now holds.
+				// output text becomes the block's new text. Native replay never
+				// carries the leading "§N§ " label tagging adds, and the dispatch
+				// check pairs the two without it (`nativeTextMatchesBlock`).
 				const item = envelope.items[slot.itemIndex] as Record<string, unknown>;
 				const outputs = (item.content as unknown[]).slice();
 				outputs[slot.outputIndex] = {
 					...(outputs[slot.outputIndex] as Record<string, unknown>),
-					text: part.text,
+					text: part.text.replace(TAG_LABEL, ""),
 				};
 				const items = envelope.items.slice();
 				items[slot.itemIndex] = { ...item, content: outputs };

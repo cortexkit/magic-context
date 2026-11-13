@@ -9,6 +9,12 @@ export interface CountMeasurement {
 
 export type CountAdapter = (model: string, key: string, system: string, tools: unknown[], prose: Record<string, string>) => Promise<CountMeasurement>;
 
+export class CountHttpError extends Error {
+    constructor(public readonly status: number, message: string) {
+        super(message);
+    }
+}
+
 /** Keep response bodies out of logs: providers may echo request data in errors. */
 export async function postCountJson(url: string, headers: Record<string, string>, body: unknown): Promise<Record<string, unknown>> {
     const response = await fetch(url, {
@@ -16,11 +22,14 @@ export async function postCountJson(url: string, headers: Record<string, string>
         body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
     });
     if (!response.ok) {
+        if ([401, 403, 404].includes(response.status)) {
+            throw new CountHttpError(response.status, response.status === 404 ? "model not found for this credential" : `HTTP ${response.status}`);
+        }
         const payload = await response.json().catch(() => null) as { error?: { type?: string; code?: string | number }; code?: string | number } | null;
         // Only known error classes are safe to log; arbitrary messages may echo input.
         const known = [payload?.error?.code, payload?.error?.type, payload?.code].map(String).find((code) => ["exceeded_current_quota_error", "billing_not_configured", "1113"].includes(code));
         const reason = known ?? (response.status === 404 ? "model or endpoint unavailable" : response.status === 401 || response.status === 403 ? "credentials or model access refused" : "request rejected");
-        throw new Error(`${new URL(url).pathname} HTTP ${response.status} (${reason})`);
+        throw new CountHttpError(response.status, `${new URL(url).pathname} HTTP ${response.status} (${reason})`);
     }
     return await response.json() as Record<string, unknown>;
 }

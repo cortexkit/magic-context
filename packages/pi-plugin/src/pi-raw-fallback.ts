@@ -12,7 +12,11 @@ import {
 import { UNKNOWN_FIT_RATIO } from "@magic-context/core/hooks/magic-context/tokenizer-calibration";
 import { isTransientSqliteError } from "@magic-context/core/shared/sqlite";
 import { isTransientPiStorageError } from "./pi-lkg";
-import { piFitMessageBytes, tokenizePiMessages } from "./tokenize-pi-messages";
+import {
+	piFitMessageBytes,
+	type TokenizePiMessagesOptions,
+	tokenizePiMessages,
+} from "./tokenize-pi-messages";
 
 export class PiStorageBusyError extends Error {
 	readonly code = "PI_STORAGE_BUSY";
@@ -109,6 +113,12 @@ export function estimatePiOutgoingInputTokens(
 	observed?: PiFitEnvelope,
 	measuredPrefix?: PiMeasuredPrefixFit,
 	contextLimit?: number,
+	/**
+	 * The pass's per-message token cache. Every cached count is checked against
+	 * the message's exact token-relevant fields, so the estimate is the same
+	 * number it would compute alone, without re-tokenizing unchanged history.
+	 */
+	tokenCounts?: Pick<TokenizePiMessagesOptions, "cache" | "stableId">,
 ): {
 	tokens: number;
 	trusted: boolean;
@@ -290,7 +300,10 @@ export function estimatePiOutgoingInputTokens(
 			refusalGrade: false,
 			refusalBasis: "byte-bound",
 		};
-	const raw = tokenizePiMessages([...messages]);
+	const raw = tokenizePiMessages(
+		[...messages],
+		tokenCounts ? { ...tokenCounts, prune: false } : undefined,
+	);
 	const calibration =
 		observed.calibration ?? calibrationForModelKey(observed.modelKey);
 	// Admission (deciding whether to send) uses the session's saved fit policy.

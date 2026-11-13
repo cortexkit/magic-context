@@ -20,6 +20,7 @@ import {
 import * as formattingModule from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { PI_CTX_REDUCE_KEEP } from "./heuristic-cleanup-pi";
 import {
+	__test,
 	assertPiTailHygieneContentUnchanged,
 	clearPiTailHygieneContentMemo,
 	effectivePiTailHygiene,
@@ -1524,4 +1525,104 @@ it("immutable hygiene tag attribution extends appends and rebuilds rewritten, de
 		]),
 	);
 	compare(Object.freeze([first[0] as TagEntry]));
+});
+
+describe("Pi tail-hygiene content memo across long histories", () => {
+	// Each body is about 128 Ki characters. Keyed by full content, 300 of them
+	// count as about 75 MiB against the memo's 64 MiB bound.
+	const longHistory = () =>
+		Array.from({ length: 300 }, (_, index) => ({
+			role: index % 2 ? "assistant" : "user",
+			content: [
+				{
+					type: "text",
+					text: `${index}:${"synthetic tool output line\n".repeat(5042)}`,
+				},
+			],
+		}));
+	const walk = (messages: readonly unknown[]) =>
+		measurePiTailHygiene({
+			messages,
+			tags: [],
+			protectedTagNumbers: new Set<number>(),
+			stableId: (_message: unknown, index: number) => `history-${index}`,
+		});
+
+	it("re-walks a history larger than the byte bound without re-measuring it", () => {
+		clearPiTailHygieneContentMemo();
+		const tokenizer = spyOn(
+			formattingModule,
+			"estimateTokens",
+		).mockImplementation((content) => Math.ceil(content.length / 4));
+		try {
+			const first = walk(longHistory());
+			expect(tokenizer).toHaveBeenCalledTimes(300);
+			// The host rebuilds every pass from its own store: same content, new objects.
+			tokenizer.mockClear();
+			__test.resetContentMemoCounters();
+			const second = walk(longHistory());
+			expect(__test.contentMemoStats()).toMatchObject({
+				hits: 300,
+				misses: 0,
+				evictions: 0,
+			});
+			expect(tokenizer).not.toHaveBeenCalled();
+			expect(second.contentSignature).toBe(first.contentSignature);
+			expect(second.t).toBe(first.t);
+		} finally {
+			tokenizer.mockRestore();
+			clearPiTailHygieneContentMemo();
+		}
+	});
+
+	it("re-measures an old message edited in place", () => {
+		clearPiTailHygieneContentMemo();
+		const tokenizer = spyOn(
+			formattingModule,
+			"estimateTokens",
+		).mockImplementation((content) => Math.ceil(content.length / 4));
+		try {
+			const messages = longHistory();
+			const before = walk(messages);
+			// Same length and same object, so only the content can tell them apart.
+			const part = messages[3]?.content[0] as { text: string };
+			const edited = `${part.text.slice(0, -2)}!\n`;
+			part.text = edited;
+			tokenizer.mockClear();
+			__test.resetContentMemoCounters();
+			const after = walk(messages);
+			expect(tokenizer.mock.calls).toEqual([[edited]]);
+			expect(__test.contentMemoStats()).toMatchObject({ hits: 299, misses: 1 });
+			expect(after.contentSignature).not.toBe(before.contentSignature);
+			expect(after.parts[3]?.contentHash).not.toBe(
+				before.parts[3]?.contentHash,
+			);
+		} finally {
+			tokenizer.mockRestore();
+			clearPiTailHygieneContentMemo();
+		}
+	});
+
+	it("keeps unpaired surrogates distinct in digest keys", () => {
+		clearPiTailHygieneContentMemo();
+		const tokenizer = spyOn(
+			formattingModule,
+			"estimateTokens",
+		).mockImplementation((content) => content.charCodeAt(content.length - 1));
+		try {
+			const body = "x".repeat(200);
+			// UTF-8 would encode both lone surrogates as the same replacement bytes.
+			const measured = walk([
+				{ role: "user", content: `${body}\ud800` },
+				{ role: "user", content: `${body}\udbff` },
+			]);
+			expect(measured.parts.map((part) => part.tokens)).toEqual([
+				0xd800, 0xdbff,
+			]);
+			expect(tokenizer).toHaveBeenCalledTimes(2);
+		} finally {
+			tokenizer.mockRestore();
+			clearPiTailHygieneContentMemo();
+		}
+	});
 });

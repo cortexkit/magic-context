@@ -207,6 +207,90 @@ test("Pi Anthropic task applies queued drops mid-turn above the hold cap and str
 	}
 });
 
+// With an execute threshold of 80% the hold's cap (90%) lies above the force
+// band (85%). Force-band pressure lets a held pass rewrite its prefix, so the
+// hold must end there too: otherwise the turn's kept thinking protects every
+// queued drop in front of it and nothing lands until the cap.
+test("Pi hold ends at the force band when the threshold puts its cap above it: the queued drop lands and signed thinking is stripped once", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-hold-force-band";
+	getOrCreateSessionMeta(db, sessionId);
+	updateSessionMeta(db, sessionId, {
+		isSubagent: true,
+		lastResponseTime: Date.now(),
+		cacheTtl: "59m",
+	});
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		tagger: createTagger(),
+		protectedTokens: 4000,
+		heuristics: { clearReasoningAge: 1 },
+		scheduler: { executeThresholdPercentage: 80 },
+	});
+	const handler = fake.handlers.get("context") as (
+		event: { messages: never[] },
+		ctx: never,
+	) => Promise<{ messages: unknown[] }>;
+	let tokens = 20_000;
+	const ctx = {
+		...fakeContext(sessionId),
+		model: {
+			provider: "anthropic",
+			id: "claude-opus-5-5",
+			api: "anthropic-messages",
+			contextWindow: 100_000,
+		},
+		getContextUsage: () => ({
+			tokens,
+			percent: tokens / 1000,
+			contextWindow: 100_000,
+		}),
+	};
+	const step = (id: string, n: number) =>
+		assistantMessage(id, n, {
+			provider: "anthropic",
+			model: "claude-opus-5-5",
+			usage: heavyReasoningUsage(),
+			content: [
+				{
+					type: "thinking",
+					thinking: `signed-${id}`,
+					thinkingSignature: `signature-${id}`,
+				},
+				{ type: "text", text: id },
+			],
+		});
+	const messages = [
+		userMessage("task", 1),
+		step("spent", 2),
+		step("newest", 3),
+	];
+	const pass = () =>
+		handler({ messages: structuredClone(messages) as never[] }, ctx as never);
+	try {
+		await pass();
+		await pass();
+		queuePendingOp(db, sessionId, 2, "drop");
+		// Above the threshold, below the force band: still held.
+		tokens = 84_000;
+		const held = JSON.stringify((await pass()).messages);
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+		expect(held).toContain("signature-spent");
+		expect(held).toContain("signature-newest");
+		// In the force band and below the 90% cap: the hold ends.
+		tokens = 86_000;
+		const busted = JSON.stringify((await pass()).messages);
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(busted).not.toContain("signature-spent");
+		expect(busted).not.toContain("signature-newest");
+		expect(busted).toContain("newest");
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
 for (const order of ["start", "end"] as const) {
 	test(`Pi ${order}-order recovery keeps the restored original while the rejected turn is the provider's latest and omits it again after a newer turn`, async () => {
 		const sessionId = `pi-recovery-durable-${order}`;
@@ -1240,9 +1324,14 @@ test("Pi already-cold held pass keeps every signed block when no binding bytes c
 	}
 });
 
-for (const trigger of ["wall", "final fit"] as const)
+// "emergency" reads 96%: above the hold's cap (75%) and in the force band, so
+// the pass is unheld and strips the turn's signed thinking before the lanes,
+// as any unheld bust does. It once stood for a held pass reaching a 95% wall
+// release; no held pass reaches 95% now (see escalation-bands.test.ts), and
+// that release is gone. "final fit" reads 75%.
+for (const trigger of ["emergency", "final fit"] as const)
 	for (const outcome of ["fits", "still too large"] as const) {
-		test(`Pi ${trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
+		test(`Pi ${trigger === "emergency" ? "unheld 96% pass" : trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
 			const db = createTestDb();
 			const sessionId = `pi-signed-fit-${trigger}-${outcome}`;
 			getOrCreateSessionMeta(db, sessionId);
@@ -1418,7 +1507,7 @@ for (const trigger of ["wall", "final fit"] as const)
 				);
 				ids.push("latest-fit-call", "latest-fit-result");
 				queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-				percent = trigger === "wall" ? 96 : 75;
+				percent = trigger === "emergency" ? 96 : 75;
 				if (outcome === "fits") {
 					const output = JSON.stringify(await serve());
 					expect(output).not.toContain("fit-signature");

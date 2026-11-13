@@ -9,6 +9,7 @@ import {
 import type { RunnerFeedRow, RunnerMeterSource } from "./cache-bust-runner-feed";
 import type { RunnerHeads } from "./cache-bust-runner-monitor";
 import { emptyRunnerViewAttribution, type RunnerViewAttributionState } from "./cache-bust-runner-views";
+import { advanceRunnerWave, attributeRunnerWave, emptyRunnerWaveState, observeRunnerWave } from "./cache-bust-runner-wave";
 
 export interface RunnerFeedAnalysisRow {
     row: RunnerFeedRow;
@@ -33,8 +34,8 @@ export async function analyzeRunnerFeed(
             );
         const page = await source.read(after, Math.max(1, Math.min(2000, deadline - clock())));
         for (const row of page.rows)
-            if (row.session === session)
-                latest.set(JSON.stringify([row.harness, row.step_ref]), row);
+            if (row.session === session || heads.has(row.session))
+                latest.set(JSON.stringify([row.session, row.harness, row.step_ref]), row);
         if (page.next === null) break;
         if (page.next === after) throw new Error("usage feed cursor did not advance");
         after = page.next;
@@ -43,6 +44,8 @@ export async function analyzeRunnerFeed(
     const views = new Map<string, RunnerViewAttributionState>();
     const chains = new Map<string, { rewrites: RunnerViewRewrite[]; classes: RunnerClassification[] }>();
     const rows: RunnerFeedAnalysisRow[] = [];
+    const wave = emptyRunnerWaveState();
+    const waveClasses = new Map<string, RunnerClassification>();
     for (const row of [...latest.values()].sort((a, b) => a.occurred_at_ms - b.occurred_at_ms)) {
         if (row.occurred_at_ms > (options.until ?? Infinity)) continue;
         const selected = row.occurred_at_ms > (options.since ?? -Infinity);
@@ -54,7 +57,7 @@ export async function analyzeRunnerFeed(
                 ? "not a metered step (missing counts or model)"
                 : undefined;
         if (note) {
-            if (selected) rows.push({ row, note });
+            if (selected && row.session === session) rows.push({ row, note });
             continue;
         }
         const step = {
@@ -62,23 +65,35 @@ export async function analyzeRunnerFeed(
             model: row.model!,
             read: row.cache_read!,
             write: row.cache_write!,
+            prompt: row.prompt,
         };
-        const prior = previous.get(row.harness);
-        previous.set(row.harness, step);
-        const viewAttribution = views.get(row.harness) ?? emptyRunnerViewAttribution();
-        views.set(row.harness, viewAttribution);
+        const key = JSON.stringify([row.harness, row.session]);
+        const prior = previous.get(key);
+        previous.set(key, step);
+        const viewAttribution = views.get(key) ?? emptyRunnerViewAttribution();
+        views.set(key, viewAttribution);
         const classification: RunnerClassification | undefined = prior
-            ? classifyRunnerStep(prior, step, heads.get(session)?.decisions ?? [], { viewAttribution })
+            ? classifyRunnerStep(prior, step, heads.get(row.session)?.decisions ?? [], { viewAttribution })
             : undefined;
+        if (selected && prior && classification) {
+            advanceRunnerWave(wave, step.at);
+            waveClasses.set(JSON.stringify([row.session, step.at]), classification);
+            const result = observeRunnerWave(wave, row, prior, step, classification);
+            if (result.member) attributeRunnerWave(classification, wave.open!.startedAt);
+            if (result.opened) for (const member of result.opened.members) {
+                const initial = waveClasses.get(JSON.stringify([member.session, member.at]));
+                if (initial) attributeRunnerWave(initial, result.opened.startedAt);
+            }
+        }
         if (classification?.class === "view") {
-            const priorChain = chains.get(row.harness);
+            const priorChain = chains.get(key);
             const rewrites = extendRunnerRebuildChain(priorChain?.rewrites ?? [], step, classification);
             const classes = rewrites.length > 1 ? [...(priorChain?.classes ?? []), classification] : [classification];
-            chains.set(row.harness, { rewrites, classes });
+            chains.set(key, { rewrites, classes });
             if (rewrites.length >= 2)
                 for (const member of classes) member.class = "double_rebuild";
         }
-        if (selected)
+        if (selected && row.session === session)
             rows.push({
                 row,
                 classification,

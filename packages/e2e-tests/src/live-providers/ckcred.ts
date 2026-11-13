@@ -13,8 +13,9 @@
  * secret is kept only until the token arrives, in a 0600 file under $TMPDIR, because the vault
  * needs it to authorize the poll and returns the token exactly once.
  *
- * Secret material from `fetchCredential` must only ever be written into a throwaway host config/login slot
- * that is deleted with its scenario root. Nothing here logs it. A provider rejecting a key is a
+ * Secret material from `fetchCredential` stays in memory or in a throwaway host config/login slot
+ * that is deleted with its scenario root. Calibration passes it only in the child's environment.
+ * Nothing here logs it. A provider rejecting a key is a
  * test result, so this module never reports auth failures back to the vault.
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -131,8 +132,8 @@ export async function coveredIds(): Promise<string[]> {
 }
 
 /**
- * Read one key for one scenario. Callers write the value into the scenario's throwaway host
- * config and nowhere else.
+ * Read one key for one scenario or calibration child. Never log returned material or
+ * persist it outside a scenario's throwaway host config.
  */
 export async function fetchCredential(id: CredentialId): Promise<string> {
     const client = await connect();

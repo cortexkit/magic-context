@@ -102,6 +102,7 @@ import { forgetRawSessionOrdinalWatermark } from "./read-session-raw";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 import { type NotificationParams, sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute } from "./sentinel";
+import { dropServedRecord } from "./served-check";
 import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
@@ -1244,6 +1245,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 });
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
+                // The host removed a message (a revert or an edit): the next
+                // request differs from the last one on purpose.
+                dropServedRecord(info.sessionID, "host_edit");
                 sessionLog(
                     info.sessionID,
                     "event message.removed: cleared session injection cache",
@@ -1261,6 +1265,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             dropSlot(sessionId, "session.compacted");
+            // A native compaction rewrote the history the host sends.
+            dropServedRecord(sessionId, "native_compaction");
             try {
                 deps.compactionHandler.onCompacted(sessionId, deps.db);
             } catch (error) {
@@ -1308,6 +1314,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             clearHostTokenBreakdownMemo(deps.db, sessionId);
             forgetSessionIdentityDecision(sessionId);
             dropSlot(sessionId, "session.deleted");
+            dropServedRecord(sessionId, "session_deleted");
             clearLkgMeasuredRequest(sessionId);
             clearTrackedOpenCodeSession(sessionId);
             try {

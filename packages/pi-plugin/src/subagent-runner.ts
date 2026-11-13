@@ -75,6 +75,7 @@ import {
 	ZEN_FREE_TIER_FAILURE,
 	zenFreeTierMessage,
 } from "./pi-zen-free-tier";
+import { readSubagentStartupError } from "./subagent-startup";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
 import { OMP_CHILD_TOOL_CONFIG } from "./subagent-tool-boundary";
 
@@ -1693,6 +1694,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			// during normal completion race" from "timeout actually decided
 			// the outcome."
 			let settled = false;
+			let startupFailure: string | undefined;
 			let childCreated = false;
 			let exitAcknowledged = false;
 			let pendingSettlement: SubagentRunResult | undefined;
@@ -1704,6 +1706,18 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			};
 			const settle = (result: SubagentRunResult) => {
 				if (settled) return;
+				// A host may report a normal terminal turn or overwrite its exit code
+				// after swallowing a session_start exception. The child's diagnostic
+				// takes precedence over every completion path, including timeouts.
+				if (startupFailure) {
+					result = {
+						ok: false,
+						reason: "spawn_failed",
+						error: startupFailure,
+						durationMs: result.durationMs,
+						meta: result.meta,
+					};
+				}
 				if (zenChild) {
 					const classified = classifyZenFreeTierFailure(
 						result,
@@ -2103,6 +2117,12 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			// channel so historian failure logs see the message immediately.
 			// Zen stderr is buffered below until refusal text can be classified.
 			let stderr = "";
+			const observeStartupFailure = (event: unknown): void => {
+				const error = readSubagentStartupError(event);
+				if (!error) return;
+				startupFailure ??= error;
+				terminateChild(child);
+			};
 			let stderrLine = "";
 			// Pipe chunks split anywhere, including inside a multibyte UTF-8
 			// character; the decoder carries the partial bytes into the next chunk.
@@ -2111,7 +2131,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 				const text = stderrDecoder.write(chunk);
 				if (text.length === 0) return;
 				// Pi 0.87 redirects extension stdout writes to stderr to protect its
-				// protocol. Accept only our content-free diagnostic events there.
+				// protocol. Accept only our private diagnostic events there.
 				stderrLine += text;
 				const lines = stderrLine.split("\n");
 				stderrLine = (lines.pop() ?? "").slice(-4096);
@@ -2120,12 +2140,14 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 						settled ||
 						!(
 							line.startsWith('{"type":"mc_system_prompt"') ||
-							line.startsWith('{"type":"mc_temperature"')
+							line.startsWith('{"type":"mc_temperature"') ||
+							line.startsWith('{"type":"magic_context_startup_error"')
 						)
 					)
 						continue;
 					const parsed = parsePiEventLine(line);
 					if (parsed.ok) {
+						observeStartupFailure(parsed.event);
 						telemetry.observe(parsed.event);
 						observeTemperatureDecision(parsed.event);
 					}
@@ -2332,6 +2354,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 				const event = parsed.event;
 				if (retainedRpc && hasHistorianToolActivity(event))
 					rpcToolActivity = true;
+				observeStartupFailure(event);
 				observeTemperatureDecision(event);
 
 				if (typeof event !== "object" || event === null) return;

@@ -27,6 +27,7 @@ import {
     routinePressureAlreadyApplied,
     safeReasoningCutoff,
 } from "./routine-cleanup-decision";
+import { readingEndsHold } from "./signed-thinking-hold";
 import { stripReasoningFromAssistantIds } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 
@@ -97,7 +98,16 @@ export interface PricedPassPlanInput {
     fullFeatureMode: boolean;
     schedulerDecision: "execute" | "defer";
     forceMaterializationPercentage: number;
+    /** The pass's signed-thinking hold as decided before the pass was sized. */
     signedThinkingHold: boolean;
+    /** An explicit strict hold keeps the signed prefix even under pressure. */
+    signedThinkingHoldStrict?: boolean;
+    /**
+     * The bounded hold's cap (execute threshold plus ten points), when the
+     * hold above is that bounded hold; absent for compaction off's blanket
+     * hold, which no reading ends.
+     */
+    signedThinkingHoldCapPercentage?: number;
     /** The pass renders the session's first history head. */
     firstRender: boolean;
     /** The pass folds m[0]. */
@@ -158,6 +168,20 @@ export function planPricedPass(
     });
     const emergencySample = () => getEmergencyInputSample(input.db, input.sessionId);
     const materializationPermitted = input.materializationTriggerPermitted !== false;
+    // The caller ends a bounded hold after sizing when the sized reading is at
+    // or above the hold's cap or in force-band pressure (readingEndsHold), so
+    // the plan counts the request that pass then serves.
+    const signedThinkingHold =
+        input.signedThinkingHold &&
+        (input.compactionOff ||
+            input.signedThinkingHoldStrict ||
+            (input.signedThinkingHoldCapPercentage === undefined
+                ? !bands.forceBandConfirmed
+                : readingEndsHold({
+                      usagePercentage: usage.percentage,
+                      capPercentage: input.signedThinkingHoldCapPercentage,
+                      forceBandPressure: bands.forceBandConfirmed,
+                  }) === null));
     const rides: ReclaimRideSignals = {
         hardFold: input.folds || input.firstRender,
         force: forceRide({
@@ -176,14 +200,14 @@ export function planPricedPass(
     const drainAllowed =
         !input.compactionOff &&
         reclaimRidePermitted(rides, {
-            signedThinkingHold: input.signedThinkingHold,
+            signedThinkingHold,
             firstRender: input.firstRender,
             emergency: bands.forceBandConfirmed,
         });
     // A held pass drops its flush and published-history requests, and so does a
     // pass whose materialization trigger stays parked.
     const materializationRequested =
-        !input.signedThinkingHold && materializationPermitted && input.materializationRequested;
+        !signedThinkingHold && materializationPermitted && input.materializationRequested;
     const heuristics = heuristicsRunOnPass({
         compactionOff: input.compactionOff,
         drainAllowed,
@@ -212,8 +236,8 @@ export function planPricedPass(
             rewriteAlreadyPriced: input.folds || input.firstRender || input.historyRebuilt,
         });
     return {
-        editsWholePrefix: drainAllowed && !input.signedThinkingHold,
-        clearsReasoning: routine && !input.signedThinkingHold,
+        editsWholePrefix: drainAllowed && !signedThinkingHold,
+        clearsReasoning: routine && !signedThinkingHold,
     };
 }
 

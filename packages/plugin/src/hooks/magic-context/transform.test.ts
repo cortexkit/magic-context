@@ -52,6 +52,7 @@ import {
 import {
     appendAutoSearchHintDecision,
     getEmergencyInputSample,
+    getMergedReasoningStrippedIds,
     getNoteNudgeAnchors,
     type getPersistedCompactionMarkerState,
     setEmergencyDropSample,
@@ -5800,13 +5801,30 @@ it("a flush in a held signed turn is parked through execute and defer passes and
     }
 }, 30_000);
 
-for (const trigger of ["wall", "final fit"] as const)
+// "final fit" runs on a held pass just below the 75% cap: the final-fit retry
+// strips the held turn's signed thinking before the emergency reclaim and
+// refuses when the request is still too large. It is the one path that still
+// releases a held turn for fit. A 95% wall release once did the same for a held
+// pass at 96% under a 90% threshold (cap 100%); it can no longer be reached,
+// because the hold ends where the force band begins (92% at a 90% threshold)
+// and compaction off, which keeps holding, has no tool tags to reclaim.
+// "force-band wall" is that 96% pass now: it is unheld, so it strips and
+// reclaims like any unheld bust, and a request still over the window is sent,
+// as at the default threshold; only a held turn refuses on an estimated
+// overflow (see the signed-fit refusal in transform.ts).
+for (const trigger of ["force-band wall", "final fit"] as const)
     for (const outcome of ["fits", "still too large"] as const) {
-        it(`OpenCode ${trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
+        const name =
+            trigger === "force-band wall"
+                ? `OpenCode force-band wall is unheld: it strips kept thinking, reclaims, and ${outcome === "fits" ? "fits" : "is sent still too large"}`
+                : `OpenCode ${trigger} strips kept thinking before emergency reclaim and ${outcome}`;
+        it(name, async () => {
             const fitModel = "unit-opus-5-5";
+            const wall = trigger !== "final fit";
+            const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
             useTempDataHome("signed-emergency-fit-");
             const db = openDatabase();
-            const sessionId = `signed-fit-${trigger}-${outcome}`;
+            const sessionId = `signed-fit-${trigger.replaceAll(" ", "-")}-${outcome}`;
             getOrCreateSessionMeta(db, sessionId);
             updateSessionMeta(db, sessionId, { cacheTtl: "13h", lastResponseTime: Date.now() });
             const usage = new Map([
@@ -5829,12 +5847,11 @@ for (const trigger of ["wall", "final fit"] as const)
                 db,
                 tagger: createTagger(),
                 directory: makeTempDir("signed-fit-dir-"),
-                // The 95% wall release exists only for a held turn, and the hold
-                // ends at the execute threshold plus 10 points: the wall case
-                // needs a threshold of 90% (cap 100%) to still be held at 96%.
-                ...(trigger === "wall" ? { executeThresholdPercentage: 90 } : {}),
+                // The wall case reads 96% under a 90% threshold: below the
+                // hold's cap (100%), inside the force band (from 92%).
+                ...(wall ? { executeThresholdPercentage: 90 } : {}),
                 scheduler: createScheduler({
-                    executeThresholdPercentage: trigger === "wall" ? 90 : 65,
+                    executeThresholdPercentage: wall ? 90 : 65,
                 }),
                 contextUsageMap: usage,
                 historyRefreshSessions: new Set(),
@@ -5944,15 +5961,14 @@ for (const trigger of ["wall", "final fit"] as const)
                     },
                 );
                 queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-                // Both cases run on a held pass: the final fit just below the 75%
-                // cap, the wall at 96% under a 90% threshold (cap 100%).
-                const percentage = trigger === "wall" ? 96 : 74;
+                const percentage = wall ? 96 : 74;
                 usage.set(sessionId, {
                     usage: { percentage, inputTokens: percentage * 1000 },
                     updatedAt: Date.now(),
                     hasUsageTokens: true,
                 });
-                if (outcome === "fits") {
+                const before = logs.mock.calls.length;
+                if (outcome === "fits" || trigger === "force-band wall") {
                     const output = await serve();
                     expect(JSON.stringify(output)).not.toContain("kept signed thinking");
                     expect(JSON.stringify(output)).not.toContain("RECLAIMABLE");
@@ -5960,12 +5976,28 @@ for (const trigger of ["wall", "final fit"] as const)
                     await expect(serve()).rejects.toMatchObject({
                         name: "EmergencyFailClosedError",
                     });
+                const passLogs = logs.mock.calls.slice(before).map((args) => String(args[1]));
+                if (trigger === "force-band wall") {
+                    expect(
+                        passLogs.some((line) =>
+                            line.startsWith("signed thinking hold: held=false reason=force_band"),
+                        ),
+                    ).toBe(true);
+                    // Sent, not refused: no signed-fit refusal is remembered.
+                    expect(
+                        getMergedReasoningStrippedIds(db, sessionId).has("signed_fit:refused:v1"),
+                    ).toBe(false);
+                } else if (outcome === "still too large")
+                    expect(
+                        getMergedReasoningStrippedIds(db, sessionId).has("signed_fit:refused:v1"),
+                    ).toBe(true);
                 expect(getPendingOps(db, sessionId)).toHaveLength(0);
                 expect(
                     getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag.tagNumber)
                         ?.status,
                 ).toBe("dropped");
             } finally {
+                logs.mockRestore();
                 db.close();
             }
         }, 30_000);

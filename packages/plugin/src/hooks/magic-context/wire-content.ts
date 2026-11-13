@@ -1,3 +1,4 @@
+import { isRecord } from "../../shared/record-type-guard";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -8,6 +9,37 @@ import type { MessageLike } from "./transform-operations";
 export interface MessageTokenEstimate {
     conversation: number;
     toolCall: number;
+}
+
+/**
+ * What OpenCode 2 sends for a reasoning part besides its text. OpenCode 2's
+ * parts carry the signature in `encrypted` or under `providerMetadata` (keyed
+ * by the route, `anthropic` on the Anthropic API), never under `metadata` as
+ * OpenCode 1's do. Its Anthropic Messages encoder (OpenCode v2.2.7,
+ * `packages/ai/src/protocols/anthropic-messages.ts`, the reasoning branch of
+ * the assistant message encoder, with `signatureFromMetadata` and
+ * `redactedDataFromMetadata`) sends a part with a non-blank signature as a
+ * `thinking` block even when its text is empty, and a part with redacted data
+ * and no signature as `redacted_thinking`; a part with neither and no text is
+ * skipped. "signature" or "redacted" names which block the part becomes;
+ * undefined means it adds nothing beyond its text.
+ */
+export function openCode2ThinkingPayload(part: unknown): "signature" | "redacted" | undefined {
+    if (!isRecord(part)) return undefined;
+    const records = isRecord(part.providerMetadata)
+        ? Object.values(part.providerMetadata).filter(isRecord)
+        : [];
+    const signature =
+        typeof part.encrypted === "string"
+            ? part.encrypted
+            : records
+                  .map((record) => record.signature)
+                  .find((value): value is string => typeof value === "string");
+    if (signature === undefined)
+        return records.some((record) => typeof record.redactedData === "string")
+            ? "redacted"
+            : undefined;
+    return signature.trim().length > 0 ? "signature" : undefined;
 }
 
 export function serializedWireText(value: unknown): string {
@@ -90,13 +122,17 @@ export function visitWireContent(
             case "text":
                 text(p.text);
                 break;
-            case "reasoning":
-                if (p.redacted || p.metadata?.anthropic?.redactedData) opaque();
+            case "reasoning": {
+                const opencode2 = openCode2ThinkingPayload(part);
+                if (p.redacted || p.metadata?.anthropic?.redactedData || opencode2 === "redacted")
+                    opaque();
                 else {
                     text(p.text);
-                    if (!p.text && p.metadata?.anthropic?.signature) opaque();
+                    if (!p.text && (p.metadata?.anthropic?.signature || opencode2 === "signature"))
+                        opaque();
                 }
                 break;
+            }
             case "thinking":
                 if (p.redacted) opaque();
                 else {

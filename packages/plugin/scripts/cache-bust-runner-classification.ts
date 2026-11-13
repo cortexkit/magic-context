@@ -15,6 +15,7 @@ export type RunnerBustClass =
     | "plan_changed"
     | "provider_forgot"
     | "expired"
+    | "zero_read_wave"
     | "unexplained";
 
 export interface RunnerMeterStep {
@@ -22,6 +23,7 @@ export interface RunnerMeterStep {
     model: string;
     read: number;
     write: number;
+    prompt?: number;
 }
 
 export interface RunnerClassification {
@@ -35,10 +37,11 @@ export interface RunnerClassification {
     idleGapMs?: number;
     viewVersion?: number;
     viewAcceptedAt?: number;
+    zeroReadWaveStartedAt?: number;
 }
 
 export type RunnerStepClassification = Omit<RunnerClassification, "class"> & {
-    class?: Exclude<RunnerBustClass, "double_rebuild">;
+    class?: Exclude<RunnerBustClass, "double_rebuild" | "zero_read_wave">;
 };
 
 // A runner applies a new view at its next request, so a second view for the

@@ -42,15 +42,58 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-for (const strips of [false, true]) {
-    it(strips
-        ? "a mid-turn bust that strips the open turn's thinking advances the system date"
-        : "an unheld mid-turn bust that keeps the open turn's thinking holds the system date across a rollover", async () => {
+type Shape = "visible" | "opencode2-signature-only" | "opencode1-signature-only";
+/**
+ * A signed reasoning part as each host stores it. With the text omitted
+ * (Anthropic's `display: "omitted"`), OpenCode 2 keeps the signature under
+ * `providerMetadata` and sends the block with empty text; OpenCode 1 keeps it
+ * under `metadata` and its Anthropic adapter drops the empty part.
+ */
+const reasoningPart = (shape: Shape, text: string, signature: string) =>
+    shape === "visible"
+        ? { type: "reasoning", text, metadata: { anthropic: { signature } } }
+        : shape === "opencode2-signature-only"
+          ? { type: "reasoning", text: "", providerMetadata: { anthropic: { signature } } }
+          : { type: "reasoning", text: "", metadata: { anthropic: { signature } } };
+/** True for a part the host sends to the provider as signed thinking. */
+const servedSigned = (shape: Shape, part: Record<string, unknown>) =>
+    part.type === "reasoning" &&
+    (shape === "opencode2-signature-only"
+        ? (part.providerMetadata as { anthropic?: unknown } | undefined)?.anthropic !== undefined
+        : typeof part.text === "string" &&
+          part.text !== "" &&
+          (part.metadata as { anthropic?: unknown } | undefined)?.anthropic !== undefined);
+
+const cases: Array<{ strips: boolean; shape: Shape; name: string }> = [
+    {
+        strips: false,
+        shape: "visible",
+        name: "an unheld mid-turn bust that keeps the open turn's thinking holds the system date across a rollover",
+    },
+    {
+        strips: true,
+        shape: "visible",
+        name: "a mid-turn bust that strips the open turn's thinking advances the system date",
+    },
+    {
+        strips: false,
+        shape: "opencode2-signature-only",
+        name: "OpenCode 2: kept thinking whose text is omitted still holds the system date, since OpenCode 2 sends those blocks",
+    },
+    {
+        strips: false,
+        shape: "opencode1-signature-only",
+        name: "OpenCode 1: kept thinking whose text is omitted does not hold the system date, since OpenCode 1 never sends those blocks",
+    },
+];
+
+for (const { strips, shape, name } of cases) {
+    it(name, async () => {
         const logs: string[] = [];
         const log = spyOn(loggerModule, "sessionLog").mockImplementation((...args) => {
             logs.push(args.slice(1).map(String).join(" "));
         });
-        const sessionId = `system-date-${strips ? "strip" : "kept"}`;
+        const sessionId = `system-date-${strips ? "strip" : "kept"}-${shape}`;
         const dataHome = createTestTempDir("mc-system-date-data-").dir;
         const directory = createTestTempDir("mc-system-date-dir-").dir;
         tempDirs.push(dataHome, directory);
@@ -110,11 +153,7 @@ for (const strips of [false, true]) {
                     ...MODEL,
                 },
                 parts: [
-                    {
-                        type: "reasoning",
-                        text: `light thought ${n}`,
-                        metadata: { anthropic: { signature: `sig-${n}` } },
-                    },
+                    reasoningPart(shape, `light thought ${n}`, `sig-${n}`),
                     {
                         type: "tool",
                         callID: `call-${n}`,
@@ -141,11 +180,7 @@ for (const strips of [false, true]) {
                         ...MODEL,
                     },
                     parts: [
-                        {
-                            type: "reasoning",
-                            text: "earlier reasoning ".repeat(400),
-                            metadata: { anthropic: { signature: "sig-old" } },
-                        },
+                        reasoningPart(shape, "earlier reasoning ".repeat(400), "sig-old"),
                         { type: "text", text: "earlier answer" },
                     ],
                 },
@@ -213,18 +248,16 @@ for (const strips of [false, true]) {
             }
             const signed = rolled.messages
                 .flatMap((m) => m.parts)
-                .filter(
-                    (p) =>
-                        p.type === "reasoning" &&
-                        typeof p.text === "string" &&
-                        p.text !== "" &&
-                        (p.metadata as { anthropic?: unknown } | undefined)?.anthropic,
-                );
+                .filter((p) => servedSigned(shape, p));
             // The pass did bust (the task's execute ride), and only the stripping
             // case stripped.
             expect(logs.some((line) => /pending ops WILL APPLY/.test(line))).toBe(true);
             expect(logs.some((line) => line.includes("proactive thinking strip"))).toBe(strips);
             if (strips) {
+                expect(signed).toHaveLength(0);
+                expect(rolled.prompt).toContain("Date: 2026-10-22");
+            } else if (shape === "opencode1-signature-only") {
+                // Nothing the request sends is bound to the system prompt.
                 expect(signed).toHaveLength(0);
                 expect(rolled.prompt).toContain("Date: 2026-10-22");
             } else {

@@ -4,11 +4,17 @@ import { describe, expect, it } from "bun:test";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import {
     type EmergencyDropTag,
+    emergencyServedMassRemovedSince,
     estimateEmergencyDropReclaimTokens,
     planEmergencyDrop,
     resolveToolTier,
+    snapshotEmergencyServedMass,
     TARGET_FRACTION,
+    tagsSinceReading,
 } from "./emergency-drop";
+import { estimateTokens } from "./read-session-formatting";
+import { neutralizeDroppedReasoningPart } from "./sentinel";
+import type { MessageLike, TagTarget } from "./tag-messages";
 
 // Most tests exercise selection/latch logic where the floor set equals the
 // candidate set; planWithFloor keeps them on the old single-set shape. The
@@ -702,5 +708,296 @@ describe("issue 731 impossible fixed overhead", () => {
         expect(plan.shouldDrop).toBe(true);
         expect(plan.tagNumbers).toEqual([1, 2]);
         expect(plan.reclaimTokens).toBe(16_100);
+    });
+});
+
+describe("planEmergencyDrop — the request this pass serves", () => {
+    // A force-band pass of a subagent on a prefix-bound thinking model: the
+    // previous request read 288,351 provider tokens, and the queued drops that
+    // landed earlier in the same pass took that request down to 63,730. What is
+    // left active is 8 read results (31,874) and their arguments (287).
+    const reads = Array.from({ length: 8 }, (_, n) =>
+        tag(n + 1, "read", 1, { servedTokens: 4_020, reclaimableTokens: 3_900 }),
+    );
+    const base = {
+        tags: reads,
+        floorTags: reads,
+        maxTag: 8,
+        protectedCutoff: null,
+        currentTotalInputTokens: 288_351,
+        ceilingTokens: 250_000,
+        usagePercentage: 95.4,
+        priorInputSample: 0,
+        hasPriorDrop: false,
+        passAlreadyPriced: true,
+    };
+
+    it("does not count what the same pass already dropped as fixed floor", () => {
+        const plan = planEmergencyDrop({ ...base, removedThisPassTokens: 288_351 - 63_730 });
+        expect(plan.reason).not.toContain("already exceeds ceiling");
+        // Floor of the served request: 63,730 − 8 × 4,020.
+        expect(plan.reason).toContain("floor≈31570");
+        expect(plan.reason).toContain("served≈63730");
+        // That request is far below the ceiling: nothing more to drop.
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.reason).toContain("reclaim<=min");
+    });
+
+    it("still skips a pass whose fixed part of the served request exceeds the ceiling", () => {
+        // Only 5,000 tokens left this pass: the served request still holds
+        // ~251,000 tokens no tool drop can remove.
+        const plan = planEmergencyDrop({ ...base, removedThisPassTokens: 5_000 });
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.tagNumbers).toEqual([]);
+        expect(plan.reason).toContain("fixed floor ≈251191 already exceeds ceiling 250000");
+    });
+
+    it("never takes the removed mass out of a reading too small to hold it and the active tags", () => {
+        // The reading (96,000) is below the active tags (100,000) the request
+        // still carries, so it does not describe this request. The planner
+        // works against it as before, and the measured removal changes nothing.
+        const tools = [
+            tag(1, "bash", 1, { servedTokens: 60_000, reclaimableTokens: 60_000 }),
+            tag(2, "read", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 }),
+        ];
+        const input = {
+            tags: tools,
+            floorTags: tools,
+            maxTag: 2,
+            protectedCutoff: null,
+            currentTotalInputTokens: 96_000,
+            ceilingTokens: 65_000,
+            usagePercentage: 96,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const plan = planEmergencyDrop({ ...input, removedThisPassTokens: 372_390 });
+        const today = planEmergencyDrop(input);
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toEqual(today.tagNumbers);
+        expect(plan.reclaimTokens).toBe(today.reclaimTokens);
+        expect(plan.reason).toContain("after ≈0 removed this pass (≈372390 measured)");
+        // Between the two: only what the reading holds beyond the active tags
+        // comes out of it.
+        const partial = planEmergencyDrop({
+            ...input,
+            currentTotalInputTokens: 130_000,
+            removedThisPassTokens: 50_000,
+        });
+        expect(partial.reason).toContain("served≈100000 after ≈30000 removed this pass");
+    });
+
+    it("a tag newer than the reading adds to what the pass serves without lowering the floor", () => {
+        // The reading (100,000) measured 8 reads of 4,020 each; the newest
+        // step's 30,000-token output arrived after it.
+        const reads = Array.from({ length: 8 }, (_, n) =>
+            tag(n + 1, "read", 1, { servedTokens: 4_020, reclaimableTokens: 3_900 }),
+        );
+        const input = {
+            tags: reads,
+            maxTag: 9,
+            protectedCutoff: null,
+            currentTotalInputTokens: 100_000,
+            ceilingTokens: 60_000,
+            usagePercentage: 90,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const newest = tag(9, "bash", 1, { servedTokens: 30_000, reclaimableTokens: 30_000 });
+        const withNewest = planEmergencyDrop({
+            ...input,
+            floorTags: [...reads, { ...newest, sinceReading: true }],
+        });
+        const without = planEmergencyDrop({ ...input, floorTags: reads });
+        // The fixed part the reading holds is 100,000 − 8 × 4,020 either way.
+        expect(withNewest.reason).toContain("fixed floor ≈67840 already exceeds ceiling 60000");
+        expect(without.reason).toContain("fixed floor ≈67840 already exceeds ceiling 60000");
+        // Counted as present at the reading, the same tag would have lowered it.
+        const biased = planEmergencyDrop({ ...input, floorTags: [...reads, newest] });
+        expect(biased.reason).toContain("floor≈37840");
+        // Below the ceiling, the newer tag adds to the gap the drop must close.
+        const room = { ...input, ceilingTokens: 120_000 };
+        const gapWith = planEmergencyDrop({
+            ...room,
+            floorTags: [...reads, { ...newest, sinceReading: true }],
+        });
+        const gapWithout = planEmergencyDrop({ ...room, floorTags: reads });
+        expect(gapWith.reclaimTokens - gapWithout.reclaimTokens).toBe(30_000);
+    });
+
+    it("at 95% a result that arrived after the reading is dropped even when the reading's own fixed part exceeds the ceiling", () => {
+        // The previous request read 15,360 tokens, almost none of it tagged;
+        // then a 325,000-token result arrived. The fixed part of the reading
+        // (15,329) exceeds the 10,400 ceiling, but the request only overflows
+        // the window because of the newer result, which a drop removes.
+        const old = tag(1, "bash", 1, { servedTokens: 31, reclaimableTokens: 31 });
+        const newest = {
+            ...tag(2, "read", 1, { servedTokens: 325_852, reclaimableTokens: 325_841 }),
+            sinceReading: true,
+        };
+        const input = {
+            tags: [old, newest],
+            floorTags: [old, newest],
+            maxTag: 2,
+            protectedCutoff: null,
+            currentTotalInputTokens: 15_360,
+            ceilingTokens: 10_400,
+            usagePercentage: 96,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+            passAlreadyPriced: true,
+        };
+        const plan = planEmergencyDrop(input);
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toContain(2);
+        expect(plan.reason).toContain("newer than the reading (counted in the reading)");
+        // The same plan as when the newer result is counted in the reading.
+        const counted = planEmergencyDrop({
+            ...input,
+            tags: [old, { ...newest, sinceReading: false }],
+            floorTags: [old, { ...newest, sinceReading: false }],
+        });
+        expect(plan.tagNumbers).toEqual(counted.tagNumbers);
+        expect(plan.reclaimTokens).toBe(counted.reclaimTokens);
+        // Below 95% the accurate floor stands and the pass skips.
+        expect(planEmergencyDrop({ ...input, usagePercentage: 90 }).reason).toContain(
+            "fixed floor ≈15329 already exceeds ceiling 10400",
+        );
+        // With nothing newer, a fixed part above the ceiling still skips at 95%.
+        const fixedOnly = planEmergencyDrop({ ...input, tags: [old], floorTags: [old] });
+        expect(fixedOnly.shouldDrop).toBe(false);
+        expect(fixedOnly.reason).toContain("already exceeds ceiling");
+    });
+
+    it("gauges the gap on the served request, so earlier drops count toward the target", () => {
+        const tools = [tag(1, "bash", 1, { servedTokens: 40_000, reclaimableTokens: 40_000 })];
+        const input = {
+            tags: tools,
+            floorTags: tools,
+            maxTag: 1,
+            protectedCutoff: null,
+            currentTotalInputTokens: 200_000,
+            ceilingTokens: 150_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+        };
+        // Without earlier drops: floor 160,000 exceeds the ceiling.
+        expect(planEmergencyDrop(input).reason).toContain("already exceeds ceiling");
+        // 100,000 already left: floor 60,000, target 60,000 + 0.3 × 90,000 =
+        // 87,000, served 100,000, gap 13,000; the one tool reaches it.
+        const plan = planEmergencyDrop({ ...input, removedThisPassTokens: 100_000 });
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.reclaimTokens).toBe(13_000);
+        expect(plan.tagNumbers).toEqual([1]);
+    });
+});
+
+describe("emergency served-mass snapshot", () => {
+    const calibration = { toolsRatio: 1, proseRatio: 1 };
+    // A fake tool target whose content leaves the request when dropped, taking
+    // the thinking beside it off the request too, as the real drop does.
+    function toolTarget(output: string, thinking: Record<string, unknown>) {
+        let dropped = false;
+        const target: TagTarget = {
+            dropReasoningParts: [thinking],
+            measureReclaim: () => ({
+                beforeTools: dropped ? 0 : estimateTokens(output),
+                afterTools: 0,
+                beforeProse: 0,
+                afterProse: 0,
+            }),
+            setContent: () => false,
+        };
+        return {
+            target,
+            drop: () => {
+                dropped = true;
+                neutralizeDroppedReasoningPart(thinking);
+            },
+        };
+    }
+
+    it("counts the dropped tags and the reasoning they took off the request, each shared block once", () => {
+        const shared = { type: "reasoning", text: "thinking ".repeat(200) };
+        const first = toolTarget("first output ".repeat(300), shared);
+        const second = toolTarget("second output ".repeat(300), shared);
+        const kept = toolTarget("kept output ".repeat(300), {
+            type: "reasoning",
+            text: "kept thinking ".repeat(100),
+        });
+        const targets = new Map<number, TagTarget>([
+            [1, first.target],
+            [2, second.target],
+            [3, kept.target],
+        ]);
+        const tags = [1, 2, 3].map((n) => tag(n, "bash", 1));
+        // A block an earlier pass already took off the request.
+        const unserved = { type: "reasoning", text: "old thinking ".repeat(200) };
+        const fourth = toolTarget("fourth output ".repeat(300), unserved);
+        targets.set(4, fourth.target);
+        tags.push(tag(4, "bash", 1));
+        const messages = [
+            {
+                info: { id: "a1", role: "assistant" },
+                parts: [shared, kept.target.dropReasoningParts![0]],
+            },
+        ] as unknown as MessageLike[];
+        const snapshot = snapshotEmergencyServedMass(tags, targets, calibration, messages);
+        expect(emergencyServedMassRemovedSince(snapshot, targets, calibration)).toBe(0);
+
+        first.drop();
+        second.drop();
+        fourth.drop();
+        const expected =
+            estimateTokens("first output ".repeat(300)) +
+            estimateTokens("second output ".repeat(300)) +
+            estimateTokens("fourth output ".repeat(300)) +
+            estimateTokens("thinking ".repeat(200));
+        expect(emergencyServedMassRemovedSince(snapshot, targets, calibration)).toBe(expected);
+        // Measurements already taken on the current request are reused.
+        expect(
+            emergencyServedMassRemovedSince(
+                snapshot,
+                targets,
+                calibration,
+                new Map([[3, { servedTokens: 0 }]]),
+            ),
+        ).toBe(expected + estimateTokens("kept output ".repeat(300)));
+    });
+});
+
+describe("tagsSinceReading", () => {
+    it("marks the tags of the newest assistant with content and everything after it", () => {
+        const message = (role: string, parts: unknown[]) => ({ info: { role }, parts });
+        const oldText = { type: "text", text: "old" };
+        const oldTool = { type: "tool", callID: "a" };
+        const newText = { type: "text", text: "new" };
+        const newTool = { type: "tool", callID: "b" };
+        const followUp = { type: "text", text: "follow-up" };
+        const messages = [
+            message("user", [{ type: "text", text: "task" }]),
+            message("assistant", [oldText, oldTool]),
+            message("assistant", [newText, newTool]),
+            message("user", [followUp]),
+            // A pending shell with no content is not the reply to the reading.
+            message("assistant", []),
+        ];
+        const target = (part: unknown, owner: (typeof messages)[number]): TagTarget => ({
+            mutationParts: [{ message: owner as never, part }],
+            setContent: () => false,
+        });
+        const targets = new Map<number, TagTarget>([
+            [1, target(oldText, messages[1]!)],
+            [2, target(oldTool, messages[1]!)],
+            [3, target(newText, messages[2]!)],
+            [4, target(newTool, messages[2]!)],
+            [5, target(followUp, messages[3]!)],
+            // A target known only by its message.
+            [6, { message: messages[2] as never, setContent: () => false }],
+        ]);
+        expect([...tagsSinceReading(messages, targets)].sort()).toEqual([3, 4, 5, 6]);
+        expect(tagsSinceReading([], targets).size).toBe(0);
     });
 });

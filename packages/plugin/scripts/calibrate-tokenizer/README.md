@@ -6,7 +6,20 @@ Run from the plugin directory:
 bun run scripts/calibrate-tokenizer/index.ts --only claude-opus-4-7,claude-sonnet-4-6,claude-fable-5-1,claude-opus-5
 ```
 
-Anthropic uses `ANTHROPIC_API_KEY` or trimmed `~/.config/anthro.key` at runtime. It sends `x-api-key` and the existing adapter's `oauth-2025-04-20` beta header to `/v1/messages/count_tokens?beta=true`. OAuth cannot use count_tokens (`jwt auth is not yet supported on count_tokens`); without a key the harness retains a minimal, paid usage fallback. PROSE is never measured with paid completions. Errors omit response bodies to avoid leaking credentials/request data.
+Credentials come only from explicit environment variables on the machine. The harness never reads loose key files or a host's auth/config file. A missing variable skips that provider with one line naming the variable. A 401 or 403 stops the entire run immediately, naming only the provider, model and HTTP status; there is no retry or alternate credential. A 404 records "model not found for this credential" for that model and continues. Other failures keep their existing per-model handling. Provider error bodies and headers are not printed.
+
+Anthropic accepts either `ANTHROPIC_API_KEY` (sent as `x-api-key`) or `ANTHROPIC_OAUTH_TOKEN` (sent as a bearer); setting both refuses startup. Both use `POST /v1/messages/count_tokens?beta=true` with `anthropic-beta: oauth-2025-04-20`. Subscription OAuth was verified on 12 Nov 2026: `claude-opus-5-5`, `claude-fable-5-2` and `claude-fable-5-1` returned 200; `claude-mythos-5-2` returned 404 `not_found_error` for that login. Anthropic never generates: there is no paid fallback, including when counting fails or `--allow-generation` is supplied.
+
+For a vault credential, run this wrapper from the repository root (the enrolled `mc-e2e` consumer must have a read grant):
+
+```sh
+bun packages/e2e-tests/src/live-providers/calibrate.ts <credential id> <env var name> -- <calibration args...>
+bun packages/e2e-tests/src/live-providers/calibrate.ts oauth:anthropic ANTHROPIC_OAUTH_TOKEN -- --only claude-fable-5-2,claude-mythos-5-2
+```
+
+The wrapper fetches one credential, extracts the access token from a subscription JSON object or uses bare string material unchanged, and holds it in memory only. It clears inherited provider credential variables and supplies only the selected variable to the child, never argv, disk or printed output. Child output passes through and the wrapper exits with its status. The calibration script itself does not import the vault client.
+
+Generation-only routes are skipped by default. `--allow-generation` deliberately enables the compatible adapter's 1-token requests for GitHub Copilot, Cerebras, OpenRouter, Fireworks, OpenCode Go, Inception and MiniMax (including its regional route); these can spend API credit or draw on a subscription's limit. Their variables are `GITHUB_COPILOT_TOKEN`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`, `OPENCODE_API_KEY`, `INCEPTION_API_KEY`, `MINIMAX_API_KEY` and `MINIMAX_CN_API_KEY`, respectively. The `openai-codex/*` route uses `OPENAI_OAUTH_TOKEN` with the same flag: it sends a real generation request whose reply is **not capped** and is read whole, drawing on the ChatGPT sign-in's limit. The flag never changes a count adapter into generation or enables fallback after a count failure.
 
 SYSTEM is the repository system fixture; TOOLS is the repository's 39-tool fixture. PROSE joins public ARCHITECTURE.md and STRUCTURE.md inside project-docs, 52 synthetic tiered compartments through the real decay renderer inside session-history, and 60 synthetic `#id: fact` memories. Prose is measured as first-user-message text, appended to the baseline `x`. Each probe subtracts the same model's one-token-user-message baseline. Local tools counts use JSON.stringify of the tool array, not SDK-expanded tool counts. Results retain earlier, unselected model rows.
 
@@ -42,7 +55,7 @@ Residual tool calls still exceed the raw local 70K: calibration removes misattri
 
 ## OpenAI API-key measurements
 
-Reference: https://developers.openai.com/api/docs/guides/token-counting?lang=python (read 2026-09-21). The current guidance documents a server-side `POST /v1/responses/input_tokens`, including gpt-6-astra; this is not a tiktoken approximation. Uses OPENAI_API_KEY or ~/.config/openai.key. SYSTEM goes in `instructions`; TOOLS maps the same fixture to Responses function definitions; PROSE is user input. All subtract a minimal-user baseline. The four extra system tokens and one extra prose token are envelope/separator differences retained in the reported ratios.
+Reference: https://developers.openai.com/api/docs/guides/token-counting?lang=python (read 2026-09-21). The current guidance documents a server-side `POST /v1/responses/input_tokens`, including gpt-6-astra; this is not a tiktoken approximation. Uses only `OPENAI_API_KEY`. SYSTEM goes in `instructions`; TOOLS maps the same fixture to Responses function definitions; PROSE is user input. All subtract a minimal-user baseline. The four extra system tokens and one extra prose token are envelope/separator differences retained in the reported ratios.
 
 | Model | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -59,19 +72,19 @@ Attempted `bun run scripts/calibrate-tokenizer/index.ts --only gpt-6-sol,gpt-6.1
 
 ## Kimi / Moonshot
 
-Reference: https://platform.kimi.ai/docs/api/estimate. Adapter sends SYSTEM as a system message, TOOLS as chat function schemas, and PROSE as a user message to `POST https://api.moonshot.ai/v1/tokenizers/estimate-token-count`; reads `data.total_tokens`, baseline-subtracted. Credentials: MOONSHOT_API_KEY or ~/.config/kimi.key. The docs list kimi-k2.6 but do not explicitly list a tools field in the estimate schema; the tools cross-check will stop the harness if a server silently ignores it.
+Reference: https://platform.kimi.ai/docs/api/estimate. Adapter sends SYSTEM as a system message, TOOLS as chat function schemas, and PROSE as a user message to `POST https://api.moonshot.ai/v1/tokenizers/estimate-token-count`; reads `data.total_tokens`, baseline-subtracted. Credentials: only `MOONSHOT_API_KEY`. The docs list kimi-k2.6 but do not explicitly list a tools field in the estimate schema; the tools cross-check will stop the harness if a server silently ignores it.
 
 2026-09-21: both moonshot/kimi-k2.6 and moonshot/kimi-for-coding returned HTTP 429 on the minimal baseline. Method `tokenizers/estimate-token-count`; SYSTEM/TOOLS/PROSE and section ratios unavailable, cross-check not reached. No paid fallback was used and no Kimi table entries were added or changed. Retry with an endpoint-authorized key/quota before calibrating. The existing opencode-go/kimi-k2.6 0.87/0.86 remains the 5% cross-check reference, not a substituted measurement.
 
 ## Z.ai GLM
 
-Reference: https://docs.z.ai/api-reference/tools/tokenizer. Uses ZAI_API_KEY or ~/.config/zai.key and `POST https://api.z.ai/api/paas/v4/tokenizer`, reading usage.prompt_tokens. SYSTEM is a system message, TOOLS chat function definitions, PROSE user text; each subtracts a minimal-user baseline. Although the documentation's model enum is older, glm-5, glm-5.1 and glm-4.7 are attempted explicitly rather than substituted with another generation.
+Reference: https://docs.z.ai/api-reference/tools/tokenizer. Uses only `ZAI_API_KEY` and `POST https://api.z.ai/api/paas/v4/tokenizer`, reading usage.prompt_tokens. SYSTEM is a system message, TOOLS chat function definitions, PROSE user text; each subtracts a minimal-user baseline. Although the documentation's model enum is older, glm-5, glm-5.1 and glm-4.7 are attempted explicitly rather than substituted with another generation.
 
 2026-09-21: all three models returned HTTP 429 on the minimal baseline. Method `paas/v4/tokenizer`; all probe and section ratios unavailable, cross-check not reached. No GLM entries changed or guessed. Configured references are opencode-go/glm-5.1 (1.0/1.06) for 5/5.1 and cerebras/zai-glm-4.7 (1.0/1.09) for 4.7; retry when this key has endpoint access/quota.
 
 ## xAI Grok
 
-Reference: https://docs.x.ai/developers/rest-api-reference/inference/other#tokenize-text. Uses XAI_API_KEY or ~/.config/xai.key. `POST https://api.x.ai/v1/tokenize-text` counts the returned token_ids array. SYSTEM sends the unchanged text content of the chat system message; TOOLS sends JSON.stringify of the chat `[{type:"function",function:{name,description,parameters}}]` array mapped from the canonical fixture. PROSE and sections send exact text bytes. There is no wrapper to subtract. The local tools denominator remains JSON.stringify of the canonical fixture, matching historical calibration.
+Reference: https://docs.x.ai/developers/rest-api-reference/inference/other#tokenize-text. Uses only `XAI_API_KEY`. `POST https://api.x.ai/v1/tokenize-text` counts the returned token_ids array. SYSTEM sends the unchanged text content of the chat system message; TOOLS sends JSON.stringify of the chat `[{type:"function",function:{name,description,parameters}}]` array mapped from the canonical fixture. PROSE and sections send exact text bytes. There is no wrapper to subtract. The local tools denominator remains JSON.stringify of the canonical fixture, matching historical calibration.
 
 | Measured native id | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -82,7 +95,7 @@ Reference: https://docs.x.ai/developers/rest-api-reference/inference/other#token
 
 ## Gemini
 
-References: https://ai.google.dev/gemini-api/docs/generate-content/tokens and https://ai.google.dev/api/tokens. Uses GEMINI_API_KEY or ~/.config/gemini.key in x-goog-api-key; never antigravity OAuth. Calls `/v1beta/models/<id>:countTokens` with generateContentRequest containing systemInstruction, contents, and functionDeclarations with parametersJsonSchema. Baseline-subtracted. Local estimates use the harness's Claude encoding fallback (tokenizerKey null). Missing keys produce a skip rather than trying OAuth.
+References: https://ai.google.dev/gemini-api/docs/generate-content/tokens and https://ai.google.dev/api/tokens. Uses only `GEMINI_API_KEY` in x-goog-api-key; never antigravity OAuth. Calls `/v1beta/models/<id>:countTokens` with generateContentRequest containing systemInstruction, contents, and functionDeclarations with parametersJsonSchema. Baseline-subtracted. Local estimates use the harness's Claude encoding fallback (tokenizerKey null). Missing keys produce a skip rather than trying OAuth.
 
 | Model | Method | SYSTEM | TOOLS | PROSE | Docs | History | Memory |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -95,13 +108,13 @@ References: https://ai.google.dev/gemini-api/docs/generate-content/tokens and ht
 
 ## Meta Muse
 
-Reference: https://dev.meta.ai/docs/token-counting. Base URL https://api.meta.ai, Bearer auth from META_API_KEY or ~/.config/meta.key. Uses Responses-shaped `POST /v1/responses/input_tokens`, method `input_tokens`; Anthropic-compatible count_tokens is also documented but was not used. SYSTEM= instructions, TOOLS=Responses function definitions, PROSE=user input, all baseline-subtracted. Preflight counts include rendered prompt scaffolding; generation usage is cumulative across hosted-tool iterations with injected-token accounting adjustments, so it is not final-context occupancy or directly comparable billing. This caveat is also stored on every Meta result row.
+Reference: https://dev.meta.ai/docs/token-counting. Base URL https://api.meta.ai, Bearer auth only from `META_API_KEY`. Uses Responses-shaped `POST /v1/responses/input_tokens`, method `input_tokens`; Anthropic-compatible count_tokens is also documented but was not used. SYSTEM= instructions, TOOLS=Responses function definitions, PROSE=user input, all baseline-subtracted. Preflight counts include rendered prompt scaffolding; generation usage is cumulative across hosted-tool iterations with injected-token accounting adjustments, so it is not final-context occupancy or directly comparable billing. This caveat is also stored on every Meta result row.
 
 2026-09-21 GET /v1/models returned: sam-3.1, muse-spark-1.3-contributor, muse-voice-transcribe-1.0, muse-spark-1.3, muse-image-1.0, muse-spark-1.2-contributor, muse-spark-1.2, muse-spark-1.1. All five Spark models were selected; no separate code model was listed. Each returned HTTP 402 on the minimal counting baseline. All SYSTEM/TOOLS/PROSE and section ratios are unavailable; no Meta or Zen alias table entries were invented. An account authorized for the free counting endpoint is required to finish these measurements; no payment or completion was attempted.
 
 ## DeepSeek V4 offline Hugging Face tokenizer
 
-Run `--providers deepseek`. Uses ~/Downloads/deepseek_v4_tokenizer (override DEEPSEEK_TOKENIZER_DIR), copying only tokenizer.json and tokenizer_config.json into gitignored packages/plugin/node_modules/.cache/calibrate-tokenizer scratch. A python3 subprocess (override DEEPSEEK_TOKENIZER_PYTHON) loads AutoTokenizer.from_pretrained with trust_remote_code=True and local_files_only=True; HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE prohibit remote downloads. SYSTEM is raw text, TOOLS serialized chat function definitions, and PROSE/sections exact text, encoded with add_special_tokens=False. No chat-template or billed-usage equivalence is claimed. Successful rows include tokenizer-file SHA-256 provenance. Local denominator uses the unknown-model Claude encoding fallback, not a fabricated ai-tokenizer V4 model definition.
+Run `--providers deepseek`. Uses offline tokenizer files on the machine (set `DEEPSEEK_TOKENIZER_DIR` to an explicit path such as `./tokenizer-data`), copying only tokenizer.json and tokenizer_config.json into gitignored packages/plugin/node_modules/.cache/calibrate-tokenizer scratch. A python3 subprocess (override DEEPSEEK_TOKENIZER_PYTHON) loads AutoTokenizer.from_pretrained with trust_remote_code=True and local_files_only=True; HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE prohibit remote downloads. SYSTEM is raw text, TOOLS serialized chat function definitions, and PROSE/sections exact text, encoded with add_special_tokens=False. No chat-template or billed-usage equivalence is claimed. Successful rows include tokenizer-file SHA-256 provenance. Local denominator uses the unknown-model Claude encoding fallback, not a fabricated ai-tokenizer V4 model definition.
 
 2026-09-21: python3 has no transformers module. Both deepseek/deepseek-v4-flash and deepseek/deepseek-v4-pro print a clear skip with an isolated-venv pip command; method `offline_hf_tokenizer`, all ratios unavailable. No global installation was attempted. The tokenizer files are staged only in ignored scratch, not committed. No V4 calibration entries were invented. Existing Fireworks V3.2 and Cerebras Qwen rows are unchanged; V3.2 is a different generation and is not a V4 cross-check reference. The Python protocol test uses an explicitly fake tokenizer module to verify plumbing and flags, not to claim a real HF measurement.
 

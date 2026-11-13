@@ -19,8 +19,9 @@
 
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
 import { TOKENS_PER_BYTE } from "./ctx-reduce-nudge";
+import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
-import type { TagTarget } from "./tag-messages";
+import type { MessageLike, TagTarget } from "./tag-messages";
 
 /** Reclaim target = fixedFloor + TARGET_FRACTION × (ceiling − fixedFloor). */
 export const TARGET_FRACTION = 0.3;
@@ -87,6 +88,12 @@ export interface EmergencyDropTag {
     /** Provider-token observations from the current representation, never persisted raw tag counts. */
     servedTokens?: number;
     reclaimableTokens?: number;
+    /**
+     * Created after the provider reading the planner works from (the newest
+     * step's output and text), so that reading never measured it: it adds to
+     * the request this pass serves but is not subtracted from the reading.
+     */
+    sinceReading?: boolean;
 }
 
 /**
@@ -121,7 +128,10 @@ export function estimateEmergencyDropReclaimTokens(tag: EmergencyDropTag): numbe
  * Plan a tiered target-headroom emergency drop. Pure: returns the ordered set of
  * tool tag numbers to drop, a token target, and a reason; the caller applies them.
  *
- * fixedFloor is estimated as current provider input minus measured active-tail mass.
+ * fixedFloor is estimated as the provider input of the request this pass serves
+ * (the last reading minus what this pass already removed) minus the measured
+ * mass of the active tags that reading measured. Tags created after the reading
+ * add to what this pass serves without lowering the floor.
  * Content with no observable token count remains in that fixed portion. This is
  * conservative reclaim planning, not proof that every remaining token is irreducible.
  *
@@ -165,6 +175,14 @@ export function planEmergencyDrop(input: {
     /** Provider-proven or estimated pressure; at 95% only open arcs and exemplars survive. */
     usagePercentage?: number;
     currentTotalInputTokens: number;
+    /**
+     * Provider tokens that were in the request `currentTotalInputTokens`
+     * measured but that this pass already removed before planning (queued
+     * drops and the reasoning they took with them). The planner works on the
+     * request this pass serves, so this mass is neither fixed floor nor
+     * something left to reclaim. Zero when the caller does not measure it.
+     */
+    removedThisPassTokens?: number;
     /** ceiling = contextLimit × executeThreshold%. */
     ceilingTokens: number;
     /**
@@ -224,27 +242,86 @@ export function planEmergencyDrop(input: {
     // selected tag below actually reclaims its bytes; the floor sum deliberately
     // includes everything else (message text, files, reasoning, non-droppable
     // tools) because those bytes are on the wire and NOT irreducible prefix.
+    //
+    // The provider's reading measured the previous request. Tags created after
+    // it (the newest step's output and text) are not part of that reading, so
+    // only the tags present at the reading are subtracted from it; the newer
+    // ones only add to what this pass serves.
     let tailTokens = 0;
+    let newerTailTokens = 0;
     for (const tag of floorTags) {
         if (tag.status !== "active") continue;
-        tailTokens += tag.servedTokens ?? estimateEmergencyDropReclaimTokens(tag);
+        const tokens = tag.servedTokens ?? estimateEmergencyDropReclaimTokens(tag);
+        if (tag.sinceReading) newerTailTokens += tokens;
+        else tailTokens += tokens;
     }
-    const fixedFloor = Math.max(currentTotalInputTokens - tailTokens, 0);
-    const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
-    const target = fixedFloor + TARGET_FRACTION * workingSpan;
-    const reclaimTokens = Math.round(currentTotalInputTokens - target);
+    // `floorTags` is the active set after this pass's own earlier drops. Take
+    // those drops off the reading first, so the floor and the active mass
+    // subtracted from it describe the same request: the one this pass serves.
+    // Otherwise everything the pass just dropped is counted as fixed overhead,
+    // and a pass that has already shrunk the request far below the ceiling
+    // skips as if tool drops could never reach it.
+    //
+    // The removed mass comes out of the floor only: at most what the reading
+    // holds beyond the active tags it measured. A reading too small to hold
+    // even those tags does not describe this request (a test that sets usage
+    // directly, or a usage sample taken in other units than the local count):
+    // it keeps today's meaning, the size the planner works against, with a
+    // fixed floor of zero.
+    const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
+    // Floor, served size and gap of one accounting. `newerInReading` says
+    // whether the tags newer than the reading are treated as part of it.
+    const account = (newerInReading: boolean) => {
+        const measuredTail = newerInReading ? tailTokens + newerTailTokens : tailTokens;
+        const removed = Math.min(
+            removedMeasured,
+            Math.max(currentTotalInputTokens - measuredTail, 0),
+        );
+        const floor = Math.max(currentTotalInputTokens - removed - measuredTail, 0);
+        const served =
+            currentTotalInputTokens >= measuredTail
+                ? currentTotalInputTokens - removed + (newerInReading ? 0 : newerTailTokens)
+                : currentTotalInputTokens;
+        const target = floor + TARGET_FRACTION * Math.max(ceilingTokens - floor, 0);
+        return { removed, floor, served, reclaim: Math.round(served - target) };
+    };
+    let accounting = account(false);
+    let olderAccounting = false;
+    // Tool drops cannot repair oversized fixed overhead, so a floor above the
+    // ceiling skips the pass (below). Content that arrived after the reading
+    // is not overhead, though: it is what pushed the request past the reading,
+    // and at 95% or more the newest results are candidates and the refusal
+    // path waits if they stay. There a floor that exceeds the ceiling only
+    // because the newer tags are left out of it falls back to the older
+    // accounting, which treats them as part of the reading, so a request
+    // those drops would make fit is never refused for keeping them.
+    if (accounting.floor > ceilingTokens && absoluteEmergency && newerTailTokens > 0) {
+        const older = account(true);
+        if (older.floor <= ceilingTokens) {
+            accounting = older;
+            olderAccounting = true;
+        }
+    }
+    const { removed: removedThisPass, floor: fixedFloor, served: servedInputTokens } = accounting;
+    const reclaimTokens = accounting.reclaim;
+    const servedNote =
+        removedMeasured > 0 || newerTailTokens > 0
+            ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading${olderAccounting ? " (counted in the reading)" : ""}` : ""}`
+            : "";
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass
     // whose cache rewrite is already priced by another mutation.
     if (fixedFloor > ceilingTokens) {
         return noop(
-            `fixed floor ≈${Math.round(fixedFloor)} already exceeds ceiling ${Math.round(ceilingTokens)}: tool drops cannot reach the target`,
+            `fixed floor ≈${Math.round(fixedFloor)} already exceeds ceiling ${Math.round(ceilingTokens)}: tool drops cannot reach the target${servedNote}`,
         );
     }
 
     // Already at/under target, or reclaim too small to justify a cache bust.
     if (reclaimTokens <= EMERGENCY_REARM_MIN_TOKENS) {
-        return noop(`reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS})`);
+        return noop(
+            `reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS}; floor≈${Math.round(fixedFloor)}${servedNote})`,
+        );
     }
 
     // Union projection form: exact tag-number cutoff directly.
@@ -339,7 +416,7 @@ export function planEmergencyDrop(input: {
         shouldDrop: true,
         tagNumbers: selected,
         reclaimTokens,
-        reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})`,
+        reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)}${servedNote})`,
     };
 }
 
@@ -367,4 +444,145 @@ export function measureEmergencyTag<T extends EmergencyDropTag>(
         : 0;
     // No replacement observation means no reclaim credit; original byte_size may describe unserved content.
     return { ...tag, servedTokens: served, reclaimableTokens: 0 };
+}
+
+type EmergencyCalibration = { toolsRatio: number; proseRatio: number };
+
+/**
+ * What the tagged content of a request served, taken before a pass removes
+ * anything, so the emergency planner can later tell how much of the provider's
+ * last reading the same pass has already removed.
+ */
+export interface EmergencyServedSnapshot {
+    /** Served provider tokens of each active tag's content, by tag number. */
+    readonly tags: ReadonlyMap<number, { type: EmergencyDropTag["type"]; tokens: number }>;
+    /**
+     * Served provider tokens of each reasoning part that a drop of one of those
+     * tags takes off the request. Kept per part because several tool calls can
+     * share one thinking block, which must be counted once.
+     */
+    readonly reasoning: ReadonlyMap<unknown, number>;
+}
+
+function servedTagTokens(
+    tag: Pick<EmergencyDropTag, "type">,
+    target: TagTarget | undefined,
+    calibration: EmergencyCalibration,
+): number {
+    const observation = target?.measureReclaim?.(false);
+    if (observation)
+        return (
+            observation.beforeTools * calibration.toolsRatio +
+            observation.beforeProse * calibration.proseRatio
+        );
+    const content = target?.getContent?.();
+    return content
+        ? estimateTokens(content) *
+              (tag.type === "tool" ? calibration.toolsRatio : calibration.proseRatio)
+        : 0;
+}
+
+function servedReasoningTokens(part: unknown, calibration: EmergencyCalibration): number {
+    // A neutralized part is an empty text part by now, so it counts zero.
+    const counted = estimateMessageTokens({
+        info: { id: "emergency-served-mass", role: "assistant" },
+        parts: [part],
+    } as MessageLike);
+    return (
+        counted.conversation * calibration.proseRatio + counted.toolCall * calibration.toolsRatio
+    );
+}
+
+/**
+ * Measure the given tags' served content before this pass's first removal.
+ * `servedMessages` must hold only the parts the request will still carry once
+ * the pass replays its earlier decisions: a reasoning part an earlier pass
+ * already stripped (and that the end of this pass strips again) is not on the
+ * request, so a drop that neutralizes it now removes nothing.
+ */
+export function snapshotEmergencyServedMass(
+    tags: readonly Pick<EmergencyDropTag, "tagNumber" | "type" | "status">[],
+    targets: ReadonlyMap<number, TagTarget>,
+    calibration: EmergencyCalibration,
+    servedMessages: readonly MessageLike[],
+): EmergencyServedSnapshot {
+    const servedParts = new Set<unknown>();
+    for (const message of servedMessages) for (const part of message.parts) servedParts.add(part);
+    const tagTokens = new Map<number, { type: EmergencyDropTag["type"]; tokens: number }>();
+    const reasoning = new Map<unknown, number>();
+    for (const tag of tags) {
+        if (tag.status !== "active") continue;
+        const target = targets.get(tag.tagNumber);
+        tagTokens.set(tag.tagNumber, {
+            type: tag.type,
+            tokens: servedTagTokens(tag, target, calibration),
+        });
+        for (const part of target?.dropReasoningParts ?? []) {
+            if (!servedParts.has(part) || reasoning.has(part)) continue;
+            reasoning.set(part, servedReasoningTokens(part, calibration));
+        }
+    }
+    return { tags: tagTokens, reasoning };
+}
+
+/**
+ * Tag numbers created after the provider reading the emergency planner works
+ * from. The reading measured the request whose reply is the newest assistant
+ * message with content, so that message and everything after it (its tool
+ * results, a new user message) are newer than the reading. A tag counts as
+ * newer when any part it edits lies there. Messages are matched by their
+ * `info` object, which both hosts keep stable for a pass (Pi's transcript
+ * builds a fresh part list on every read, so parts can't be matched by
+ * identity there). Works on OpenCode's messages and on Pi's transcript.
+ */
+export function tagsSinceReading(
+    messages: readonly { info: { role?: string }; parts: readonly unknown[] }[],
+    targets: ReadonlyMap<number, TagTarget>,
+): Set<number> {
+    let boundary = messages.length - 1;
+    while (
+        boundary >= 0 &&
+        !(
+            messages[boundary]?.info.role === "assistant" &&
+            (messages[boundary]?.parts.length ?? 0) > 0
+        )
+    )
+        boundary -= 1;
+    const since = new Set<number>();
+    if (boundary < 0) return since;
+    const newerInfos = new Set<unknown>(messages.slice(boundary).map((message) => message.info));
+    for (const [tagNumber, target] of targets) {
+        const parts = target.mutationParts;
+        const newer =
+            parts && parts.length > 0
+                ? parts.some(({ message }) => newerInfos.has(message.info))
+                : target.message !== undefined && newerInfos.has(target.message.info);
+        if (newer) since.add(tagNumber);
+    }
+    return since;
+}
+
+/**
+ * Provider tokens of snapshot content that is no longer served: tags dropped
+ * (or cut down to a skeleton) since the snapshot, and the reasoning those drops
+ * took off the request. `measuredNow` holds tags already measured on the
+ * current request, which are reused instead of measured again.
+ */
+export function emergencyServedMassRemovedSince(
+    snapshot: EmergencyServedSnapshot,
+    targets: ReadonlyMap<number, TagTarget>,
+    calibration: EmergencyCalibration,
+    measuredNow: ReadonlyMap<number, { servedTokens?: number }> = new Map(),
+): number {
+    let removed = 0;
+    for (const [tagNumber, before] of snapshot.tags) {
+        const now =
+            measuredNow.get(tagNumber)?.servedTokens ??
+            servedTagTokens(before, targets.get(tagNumber), calibration);
+        removed += Math.max(before.tokens - now, 0);
+    }
+    for (const [part, before] of snapshot.reasoning) {
+        removed += Math.max(before - servedReasoningTokens(part, calibration), 0);
+    }
+    return removed;
 }

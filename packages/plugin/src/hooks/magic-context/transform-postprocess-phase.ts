@@ -1,5 +1,9 @@
 import { compareOpenCodeMessagesByCanonicalOrder } from "../../features/magic-context/compaction-marker";
 import {
+    type FrozenReasoningPart,
+    readFrozenMergedReasoningParts,
+} from "../../features/magic-context/merged-reasoning-decisions";
+import {
     mergeProtectedTools,
     normalizeProtectedToolName,
     protectedToolTagNumbers,
@@ -139,6 +143,11 @@ import {
     isAdmissionUser,
     thinkingAnchor,
 } from "./edit-admission";
+import {
+    type EmergencyServedSnapshot,
+    snapshotEmergencyServedMass,
+    tagsSinceReading,
+} from "./emergency-drop";
 import { EmergencyFailClosedError, outgoingContextRefusal } from "./emergency-fail-closed";
 import {
     clearExecuteReclaimState,
@@ -146,6 +155,7 @@ import {
     originateExecuteReclaim,
     readExecuteReclaimState,
 } from "./execute-reclaim";
+import { openCode2ThinkingPayload } from "./final-wire-token-estimate";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
@@ -819,12 +829,77 @@ function proactiveStripStartIndex(args: {
 }
 
 /**
+ * Copies of `owners` as the request will carry them once this pass replays the
+ * thinking strips recorded by earlier passes: a strip of every reasoning part
+ * of a message, recorded after the provider rejected a signature or when an
+ * edit invalidated it, and a strip of chosen reasoning parts of an older
+ * assistant message. Those strips run only when the pass finalizes its
+ * representation, after the emergency planner, so the host's fresh messages
+ * still hold the original reasoning parts. Surviving parts are the original
+ * objects; a stripped one is left out. Only the messages whose reasoning a
+ * queued drop could take are needed, so only they are copied. A legacy merged
+ * entry that names no exact parts is replayed by a layout rule that depends on
+ * the whole array; its message counts as stripped whole, which can only leave
+ * reasoning out of the credit, never add it.
+ */
+function messagesAfterReplayedThinkingStrips(
+    args: Pick<
+        RunPostTransformPhaseArgs,
+        "db" | "sessionId" | "resolvedProviderID" | "restoreThinkingMessageIds"
+    >,
+    owners: Iterable<MessageLike>,
+    compactionOff: boolean,
+    compactionOffFrozenThinking: ReadonlySet<string>,
+): MessageLike[] {
+    const mergedIds = compactionOff
+        ? new Set<string>()
+        : new Set(getMergedReasoningStrippedIds(args.db, args.sessionId));
+    const bindingIds = compactionOff
+        ? new Set(compactionOffFrozenThinking)
+        : new Set(
+              [...mergedIds]
+                  .filter((id) => id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
+                  .map((id) => id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length)),
+          );
+    const mergedReplays = args.resolvedProviderID === "anthropic";
+    const exactParts = mergedReplays
+        ? readFrozenMergedReasoningParts(mergedIds)
+        : new Map<string, FrozenReasoningPart[]>();
+    const reasoningType = (part: unknown) =>
+        isRecord(part) &&
+        ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type));
+    const copies: MessageLike[] = [];
+    for (const message of new Set(owners)) {
+        const id = typeof message.info.id === "string" ? message.info.id : undefined;
+        if (id === undefined || args.restoreThinkingMessageIds?.has(id)) {
+            copies.push(message);
+            continue;
+        }
+        const legacy = mergedReplays && mergedIds.has(id);
+        const whole = bindingIds.has(id) || legacy;
+        const exact = exactParts.get(id);
+        copies.push({
+            ...message,
+            parts: message.parts.filter((part, index) => {
+                if (!reasoningType(part)) return true;
+                if (whole) return false;
+                if (!exact) return true;
+                const partId = isRecord(part) && typeof part.id === "string" ? part.id : undefined;
+                return !exact.includes(index) && !(partId !== undefined && exact.includes(partId));
+            }),
+        });
+    }
+    return copies;
+}
+
+/**
  * True when the array about to be served still carries a thinking part that
  * may be signed (its signature is not inspected). A part counts by the same route rule that finds an open signed turn
  * (`isAnthropicThinkingPart`): on an Anthropic-family route (Anthropic,
  * Bedrock, Vertex, Copilot) every thinking part counts, whichever metadata key
  * holds its signature. Parts that never reach the provider do not count: an
- * ignored part, or an empty one that carries no redacted payload. On a
+ * ignored part, or an empty one that carries no redacted payload (and, in
+ * OpenCode 2's part shape, no signature either). On a
  * prefix-bound model such a block is bound to every byte in front of it, the
  * system prompt included, so this is the fact that decides whether the system
  * date may move. It reads the outcome of every strip the pass made instead of
@@ -846,6 +921,13 @@ export function servesThinkingBlock(
             const records = isRecord(part.metadata) ? Object.values(part.metadata) : [];
             if (records.some((record) => isRecord(record) && record.redactedData !== undefined))
                 return true;
+            // A signature-only part reaches the provider on OpenCode 2, whose
+            // encoder sends it as a thinking block with empty text (see
+            // openCode2ThinkingPayload). OpenCode 1's signature under `metadata`
+            // is left out on purpose: OpenCode 1's Anthropic adapter drops an
+            // empty reasoning part before the request is sent (see
+            // modelAcceptsEmptyContent), so that block never reaches the provider.
+            if (openCode2ThinkingPayload(part) !== undefined) return true;
         }
     }
     return false;
@@ -2734,7 +2816,8 @@ export async function runPostTransformPhase(
         protectedThinkingMessages,
     );
     // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
-    // model it holds only right after heavy reasoning and below the cap. Any
+    // model it holds only right after heavy reasoning, below the cap and outside
+    // the force band (`forceBandConfirmed` below, read from the same reading). Any
     // other pass of a signed turn busts like a pass of any other model, and
     // strips the turn's signed thinking when it does (see below).
     let activeThinkingPrefixHold = args.activeThinkingPrefixHold === true;
@@ -3208,22 +3291,12 @@ export async function runPostTransformPhase(
         `foldExecuted=${foldExecutedThisPass} m1Refreshed=${publishedM1RefreshedThisPass}`,
     );
     const tPassDecisions = performance.now();
-    const frontToolCandidates = args.tags.filter(
-        (tag) =>
-            tag.type === "tool" &&
-            tag.status === "active" &&
-            args.targets.get(tag.tagNumber)?.canDrop?.(),
-    );
-    if (
-        !holdEnabled &&
-        activeThinkingPrefixHold &&
-        (args.forceSignedRebuildForFit ||
-            (args.contextUsage.percentage >= 95 &&
-                frontToolCandidates.length > 0 &&
-                frontToolCandidates.every(
-                    (tag) => newTargets.get(tag.tagNumber)?.thinkingRewriteProtected === true,
-                )))
-    ) {
+    // A fit proof releases a held turn here too. No usage-based release sits
+    // beside it: with compaction on a held pass never reaches 95% (the hold
+    // ends in force-band pressure, which a 95% reading always is; see
+    // escalation-bands.test.ts), and with compaction off the pass has no tool
+    // tags whose reclaim the held thinking could block.
+    if (!holdEnabled && activeThinkingPrefixHold && args.forceSignedRebuildForFit) {
         releaseThinkingForRewrite(true);
     }
     if (activeThinkingPrefixHold) {
@@ -3342,8 +3415,7 @@ export async function runPostTransformPhase(
                 usableWindow: args.usableWindow,
             }),
     );
-    const { rideSignals, publishedWorkDrainAllowed, shouldApplyPendingOps, shouldRunHeuristics } =
-        passDecision;
+    const { rideSignals, shouldApplyPendingOps, shouldRunHeuristics } = passDecision;
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = passDecision.isCacheBustingPass;
@@ -3452,6 +3524,18 @@ export async function runPostTransformPhase(
         args.sessionId,
         `rewrite permission: allowed=${isCacheBustingPass} ${reclaimRideLabel(rideSignals)} served_shape_repair=${servedShapeRepair.needsRebuild} signed_prefix_release=${rewritingSignedPrefix} fold_prefix_loss=${foldBustsServedPrefixThisPass} first_render=${firstRenderBust} cache_expired=${args.m0M1?.hardSignals?.cacheExpired === true} thinking_hold=${activeThinkingPrefixHold} recovery_has_head=${recoveryHasHistoryHead} recovery_head_changed=${recoveryHeadChangedThisPass} recovery_headless_rebuild=${recoveryHeadlessRebuild} proven_external_fold=${recoveryExternalFoldCause ?? "none"} recovered_shape_proof=${recoveredShapeRewriteProof ?? "none"}`,
     );
+    // The served check compares the request this pass returns with the one
+    // served before it; it needs this permission and its inputs to say whether
+    // a change it finds was allowed. A memory note only, read after the pass.
+    noteServedPassPermission(args.sessionId, {
+        permitted: isCacheBustingPass,
+        rides: reclaimRideLabel(rideSignals),
+        signedThinkingHold: activeThinkingPrefixHold,
+        firstRender: firstRenderBust,
+        hostCheckpointHead: hostCheckpointRide,
+        emergency: forceBandConfirmed,
+        schedulerDecision: args.schedulerDecision,
+    });
     let recoveryTailNormalizedThisPass = false;
     if (args.normalizeRecoveryTail && canNormalizeRecoveredShape) {
         args.normalizeRecoveryTail();
@@ -3936,6 +4020,50 @@ export async function runPostTransformPhase(
         }
     }
     let autoReclaimDidMutateThisPass = false;
+    // The emergency planner below reads the provider's measure of the previous
+    // request, while queued drops landing first take content (and the
+    // reasoning beside it) out of the request this pass serves. Measure what
+    // those drops can remove before anything lands, so the planner can take
+    // exactly that mass off the reading instead of treating it as a fixed part
+    // of the request. Only the queued drops' own tags can leave in the drain,
+    // so only they are measured, and only on a pass where the planner can run
+    // and the drain has work. A pass whose emergency episode is latched has
+    // nothing to measure unless the drain applies something, and then the
+    // drain itself rearms the episode, so the latch is no reason to skip.
+    const emergencyPlannerMayRun =
+        shouldRunHeuristics &&
+        forceBandConfirmed &&
+        args.emergencyCeilingTokens !== undefined &&
+        args.emergencyCeilingTokens > 0;
+    // Tags the previous reading never measured (the newest step's output and
+    // text): they must not lower the planner's fixed floor.
+    const tagsNewerThanReading = emergencyPlannerMayRun
+        ? tagsSinceReading(args.messages, newTargets)
+        : undefined;
+    let servedBeforeRemovals: EmergencyServedSnapshot | undefined;
+    if (emergencyPlannerMayRun && shouldApplyPendingOps && pendingOps.length > 0) {
+        const queued = new Set(pendingOps.map((op) => op.tagId));
+        const owners = new Set<MessageLike>();
+        for (const tagNumber of queued) {
+            const target = newTargets.get(tagNumber);
+            if (!target?.dropReasoningParts?.length) continue;
+            for (const { message } of target.mutationParts ?? []) owners.add(message);
+            if (target.message) owners.add(target.message);
+        }
+        servedBeforeRemovals = snapshotEmergencyServedMass(
+            args.tags.filter(
+                (tag) => queued.has(tag.tagNumber) && !tagsNewerThanReading?.has(tag.tagNumber),
+            ),
+            newTargets,
+            sessionDecisionCalibration(args.db, args.sessionId),
+            messagesAfterReplayedThinkingStrips(
+                args,
+                owners,
+                compactionOff,
+                compactionOffFrozenThinking,
+            ),
+        );
+    }
     // Pending-op read, temporal decisions, the background permission observer
     // start and the reasoning-removal read.
     logTransformTiming(
@@ -4106,6 +4234,8 @@ export async function runPostTransformPhase(
                                       ceilingTokens: args.emergencyCeilingTokens,
                                       usagePercentage: args.contextUsage.percentage,
                                       passAlreadyPriced: rewriteAlreadyPriced,
+                                      servedBeforePass: servedBeforeRemovals,
+                                      sinceReading: tagsNewerThanReading,
                                   }
                                 : undefined,
                         routine: routineCleanupApplied,
@@ -6658,3 +6788,4 @@ import {
     requestPendingMaterialization,
     snapshotPendingMaterialization,
 } from "./pending-materialization";
+import { noteServedPassPermission } from "./served-check";

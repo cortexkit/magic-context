@@ -3,6 +3,7 @@
 
 import argparse
 import errno
+import http.client
 import json
 import os
 import socket
@@ -17,7 +18,11 @@ from urllib.request import Request, urlopen
 
 QUEUE_ALLOWANCE_SECONDS = 30 * 60
 ARTIFACT_PROPAGATION_GRACE_SECONDS = 60
-TRANSIENT_RETRY_DELAYS = (1, 2, 4)
+# Pauses between retries of a transient API error; the last one repeats. The
+# script already waits up to its total cap for the producer, so a GitHub API
+# outage of a few minutes (502s for minutes at a time on 2026-11-12) is
+# waited out under that cap instead of failing the consuming job.
+TRANSIENT_RETRY_DELAYS = (1, 2, 4, 8, 16, 30)
 
 
 def _timestamp(value, producer):
@@ -102,6 +107,10 @@ def wait_for_artifact(
 def _is_transient_api_error(error):
     if isinstance(error, HTTPError):
         return 500 <= error.code < 600
+    # The connection dropped while the reply body was being read: GitHub sent
+    # the headers, then closed early. A fresh request usually succeeds.
+    if isinstance(error, http.client.IncompleteRead):
+        return True
     reason = error.reason if isinstance(error, URLError) else error
     if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
         return True
@@ -123,12 +132,13 @@ def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, ope
             with open_url(request, timeout=max(0.001, min(30, remaining))) as response:
                 return json.load(response)
         except Exception as error:
-            if retries >= len(TRANSIENT_RETRY_DELAYS) or not _is_transient_api_error(error):
+            if not _is_transient_api_error(error):
                 raise
             remaining = deadline - clock()
             if remaining <= 0:
                 raise
-            pause(min(TRANSIENT_RETRY_DELAYS[retries], remaining))
+            delay = TRANSIENT_RETRY_DELAYS[min(retries, len(TRANSIENT_RETRY_DELAYS) - 1)]
+            pause(min(delay, remaining))
             retries += 1
 
 
@@ -259,7 +269,12 @@ class WaitTests(unittest.TestCase):
     def test_transient_api_errors_are_retried(self):
         import io
 
-        failures = [HTTPError("https://example.test", 503, "busy", Message(), None), URLError(socket.timeout("timed out")), ConnectionResetError("reset")]
+        failures = [
+            HTTPError("https://example.test", 503, "busy", Message(), None),
+            URLError(socket.timeout("timed out")),
+            ConnectionResetError("reset"),
+            http.client.IncompleteRead(b"", 176166),
+        ]
         for failure in failures:
             with self.subTest(failure=type(failure).__name__):
                 attempts = [0]
@@ -275,6 +290,35 @@ class WaitTests(unittest.TestCase):
                 self.assertEqual(result, {"ok": True})
                 self.assertEqual(attempts[0], 2)
                 self.assertEqual(pauses, [1])
+
+    def test_a_long_transient_outage_is_waited_out_until_the_total_cap(self):
+        import io
+
+        now = [0.0]
+        pauses = []
+        attempts = [0]
+
+        def pause(seconds):
+            pauses.append(seconds)
+            now[0] += seconds
+
+        def open_url(request, timeout):
+            attempts[0] += 1
+            if attempts[0] <= 12:
+                raise HTTPError("https://example.test", 502, "bad gateway", Message(), None)
+            return io.BytesIO(b'{"ok": true}')
+
+        result = _request_json(None, 1000, lambda: now[0], pause, open_url)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(pauses, [1, 2, 4, 8, 16, 30, 30, 30, 30, 30, 30, 30])
+
+        now[0] = 0.0
+        attempts[0] = 0
+        pauses.clear()
+        # The outage outlasts the cap: the request gives up at the cap, not before.
+        with self.assertRaises(TimeoutError):
+            _request_json(None, 20, lambda: now[0], pause, open_url)
+        self.assertEqual(sum(pauses), 20)
 
     def test_failed_only_rerun_reuses_the_successful_producers_attempt(self):
         previous = {"id": 1, "name": "producer", "status": "completed", "conclusion": "success", "run_attempt": 1}

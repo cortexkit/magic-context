@@ -11,6 +11,11 @@ import {
 	type LkgInputSnapshot,
 	lkgContentFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import {
+	beginServedRequest,
+	commitServedRequest,
+	countServedRefusal,
+} from "@magic-context/core/hooks/magic-context/served-check";
 import { log } from "@magic-context/core/shared/logger";
 import {
 	withSqliteTransformPass,
@@ -176,6 +181,42 @@ function operationKey(ctx: ExtensionContext): string | object {
 	);
 }
 
+function servedSessionOf(ctx: ExtensionContext): string | undefined {
+	try {
+		const id = ctx.sessionManager?.getSessionId?.();
+		return typeof id === "string" && id.length > 0 ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Hand the messages this hook returns to Pi to the served check. The Oh My Pi
+ * dispatch fence can still refuse the request after this; that refusal is not
+ * seen here, so the record then holds a request that was prepared but not sent.
+ * Never throws.
+ */
+function finishPiServedRequest(
+	sessionId: string,
+	ctx: ExtensionContext,
+	messages: readonly unknown[],
+	compactionOff: () => boolean,
+): void {
+	try {
+		commitServedRequest({
+			sessionId,
+			host: "pi",
+			messages,
+			providerID: ctx.model?.provider,
+			modelID: ctx.model?.id,
+			// Read inside this guard: resolving the project's settings can throw.
+			compactionOff: compactionOff(),
+		});
+	} catch {
+		// Measurement only; never let it affect the turn.
+	}
+}
+
 function messageKey(message: unknown): string | undefined {
 	if (!message || typeof message !== "object") return undefined;
 	const { role, timestamp } = message as {
@@ -287,11 +328,45 @@ function inputBranch(
 	}
 }
 
-/** Keep a running pass's receipt when a delayed end describes only an earlier transcript. */
+/**
+ * Whether an end's messages are exactly `input` followed by one failed
+ * assistant message that `input` does not hold: the attempt Oh My Pi removes
+ * from the active context before it retries.
+ */
+function endsWithFailedAttempt(
+	input: readonly LkgInputSnapshot[],
+	messages: unknown[],
+	ended: readonly LkgInputSnapshot[],
+): boolean {
+	if (
+		ended.length !== input.length + 1 ||
+		exactReusablePrefix(input, ended) !== input.length
+	)
+		return false;
+	const last = messages.at(-1) as
+		| { role?: unknown; stopReason?: unknown }
+		| undefined;
+	const lastKey = ended.at(-1)?.id;
+	return (
+		last?.role === "assistant" &&
+		(last.stopReason === "error" || last.stopReason === "aborted") &&
+		!!lastKey &&
+		!input.some((message) => message.id === lastKey)
+	);
+}
+
+/**
+ * Keep a dispatched pass's receipt (the record that admits its provider
+ * requests) when a delayed end describes only an earlier transcript, or the
+ * failed attempt that the run this pass prepared is retrying.
+ * The shorter-transcript proof counts only while a start is outstanding
+ * (`startOutstanding`); the failed-attempt proof does not need one.
+ */
 function dispatchedEndBelongsToEarlierRun(
 	operation: Operation,
 	event: unknown,
 	ctx: ExtensionContext,
+	startOutstanding: boolean,
 ): boolean {
 	if (
 		!operation.dispatched ||
@@ -318,20 +393,45 @@ function dispatchedEndBelongsToEarlierRun(
 				prepared.messages.length
 		)
 			return false;
-		const messages = (event as { messages?: unknown })?.messages;
+		const end = event as { messages?: unknown; willContinue?: unknown };
+		const messages = end?.messages;
 		const ended = Array.isArray(messages)
 			? messageSnapshots(messages)
 			: undefined;
+		if (!ended || !Array.isArray(messages)) return false;
+		// The end of a failed attempt that Oh My Pi retries. Since Oh My Pi
+		// 18.18.2 an extension receives agent_start and agent_end in order, but
+		// context and before_provider_request at once. A slow handler can then
+		// hold the failed run's end until the retry's pass was prepared and sent,
+		// with the retry's own agent_start queued behind that end, so no start is
+		// outstanding here. The provider layer may still resend that request.
+		// `willContinue` alone is no proof: it says only that some run follows,
+		// and the run ending may be the one this dispatched pass prepared, having
+		// already sent its reply. The end must hold exactly this pass's input plus
+		// one trailing failed assistant message that the input lacks. Oh My Pi
+		// removes that message before it retries, and the host branch (checked
+		// above) must still equal the input, so the failed message was not kept.
+		// Two runs fit: a late end of the attempt before this pass's retry, or
+		// this pass's own failed attempt ending on time, its retry still to come.
+		// Either way the next request comes from that retry, which runs its own
+		// context pass, or is a provider resend of the request this pass prepared,
+		// which is still checked against this pass's managed messages. A run's real end carries no
+		// `willContinue` and still ends the operation.
+		if (
+			end.willContinue === true &&
+			endsWithFailedAttempt(prepared.messages, messages, ended)
+		)
+			return true;
+		if (!startOutstanding) return false;
 		// Every ended message must equal the corresponding original input message,
 		// with fewer messages in the end than in that input. Ending this pass's own
 		// run either retains the input (not shorter), changes the host's last entry
 		// or content by pruning/compacting, or leaves the session idle.
-		return !!(
-			ended &&
-			// This pass's saved session entry must correspond to a message newer than
-			// agent_end's message prefix. Oh My Pi may persist a goal preface before
-			// its continuation; that preface entry ID proves the newer input stayed
-			// on the same branch while the final continuation entry arrived.
+		// This pass's saved session entry must correspond to a message newer than
+		// agent_end's message prefix. Oh My Pi may persist a goal preface before
+		// its continuation; that preface entry ID proves the newer input stayed
+		// on the same branch while the final continuation entry arrived.
+		return (
 			ended.length <= prepared.anchorIndex &&
 			ended.length < prepared.messages.length &&
 			exactReusablePrefix(prepared.messages, ended) === ended.length
@@ -520,8 +620,12 @@ export function registerPiGuardedContext(
 			if (operation) {
 				if (
 					endBelongsToEarlierRun(operation, event) ||
-					(lifecycleSeen.starts > lifecycleSeen.ends &&
-						dispatchedEndBelongsToEarlierRun(operation, event, ctx))
+					dispatchedEndBelongsToEarlierRun(
+						operation,
+						event,
+						ctx,
+						lifecycleSeen.starts > lifecycleSeen.ends,
+					)
 				) {
 					if (operation.dispatched) operation.retainedAfterEnd = true;
 					// The pass belongs to a run whose own start may still be in flight.
@@ -939,6 +1043,10 @@ export function registerPiGuardedContext(
 		// new work and earns its own receipt; the refused pass stays abandoned.
 		active.refused = false;
 		active.refusalMessage = undefined;
+		// The served check (served-check.ts) records the main conversation's
+		// requests only; a side turn is a separate request beside it.
+		const servedSessionId = budget.sideTurn ? undefined : servedSessionOf(ctx);
+		if (servedSessionId) beginServedRequest(servedSessionId);
 		const { isOwned, isCurrent, assertOwner } = createPiContextOwnershipGuards(
 			operations,
 			key,
@@ -1038,10 +1146,19 @@ export function registerPiGuardedContext(
 				// message entry may not exist when the context hook first enters.
 				if (inputs) active.inputBranch = inputBranch(ctx, inputs);
 			}
+			// Without a result Pi sends its own messages.
+			if (servedSessionId)
+				finishPiServedRequest(
+					servedSessionId,
+					ctx,
+					result?.messages ?? event.messages,
+					() => options.compactionOff?.(ctx) === true,
+				);
 			return result;
 		} catch (error) {
 			// This pass's request is not handed on for sending.
 			budget.dispatchCertificate?.refuse();
+			if (servedSessionId) countServedRefusal(servedSessionId);
 			if (budget.isCancelled(error)) {
 				budget.cancel();
 				if (isOwned()) active.ready = false;

@@ -14,12 +14,21 @@ import { reasoningStepCost } from "./reasoning-budget";
  * hours with its published history never reaching the prompt.
  *
  * The hold is therefore bounded. A pass of an active thinking turn is held only
- * while BOTH are true:
+ * while ALL are true:
  *  1. one of the turn's last HEAVY_REASONING_WINDOW_STEPS assistant steps spent
- *     more than HEAVY_REASONING_TOKENS reasoning tokens, and
- *  2. context usage is below the execute threshold plus HOLD_CAP_POINTS.
+ *     more than HEAVY_REASONING_TOKENS reasoning tokens,
+ *  2. context usage is below the execute threshold plus HOLD_CAP_POINTS, and
+ *  3. the pass is not in force-band pressure (`forceBandConfirmed`).
  * Otherwise the pass busts mid-turn exactly as on any other model, and a bust
  * strips the turn's signed thinking.
+ *
+ * The third condition matters only when the execute threshold sits so high that
+ * the cap lies above the force band. Force-band pressure already lets a held
+ * pass rewrite its prefix, but a held pass still protects everything in front
+ * of the turn's kept thinking. A single-turn session (a subagent) then lands
+ * none of its queued drops and its emergency drop finds nothing to drop, until
+ * usage passes the cap. Ending the hold where that pressure begins keeps the
+ * rewrite permission and the hold in agreement.
  *
  * The decision reads only the messages, the usage the host recorded on them,
  * and the pass's usage reading, so every replay of the same input decides the
@@ -61,7 +70,7 @@ export function resolveSignedThinkingHoldPolicy(
 
 export interface SignedThinkingHoldDecision {
     held: boolean;
-    reason: "heavy_reasoning" | "no_recent_heavy_reasoning" | "above_cap";
+    reason: "heavy_reasoning" | "no_recent_heavy_reasoning" | "above_cap" | "force_band";
     /** 1 for the newest assistant step of the turn; null when no heavy step is in the window. */
     heavyStepsBack: number | null;
     /** Reasoning tokens of the newest heavy step in the window, or 0. */
@@ -144,6 +153,12 @@ export function decideSignedThinkingHold(args: {
     messages: readonly unknown[];
     usagePercentage: number;
     executeThresholdPercentage: number;
+    /**
+     * The pass's reading is force-band pressure, by the same predicate the
+     * rewrite permission uses to lift a hold (`forceBandConfirmed` on OpenCode,
+     * the emergency gate on Pi).
+     */
+    forceBandPressure: boolean;
     estimateTextTokens: (text: string) => number;
 }): SignedThinkingHoldDecision {
     const capPercentage = args.executeThresholdPercentage + HOLD_CAP_POINTS;
@@ -173,8 +188,13 @@ export function decideSignedThinkingHold(args: {
             heavyStepTokens,
             capPercentage,
         };
-    if (!(args.usagePercentage < capPercentage))
-        return { held: false, reason: "above_cap", heavyStepsBack, heavyStepTokens, capPercentage };
+    const ended = readingEndsHold({
+        usagePercentage: args.usagePercentage,
+        capPercentage,
+        forceBandPressure: args.forceBandPressure,
+    });
+    if (ended !== null)
+        return { held: false, reason: ended, heavyStepsBack, heavyStepTokens, capPercentage };
     return {
         held: true,
         reason: "heavy_reasoning",
@@ -182,4 +202,21 @@ export function decideSignedThinkingHold(args: {
         heavyStepTokens,
         capPercentage,
     };
+}
+
+/**
+ * Whether a usage reading ends a hold the turn's heavy reasoning would
+ * otherwise keep, and why: at or above the cap, or in force-band pressure.
+ * The hold decision uses it for the reading a pass starts with; a pass that is
+ * sized later (it started with no provider reading) asks it again with the
+ * sized reading, so the cap and the force band both apply to the reading the
+ * pass is served at.
+ */
+export function readingEndsHold(args: {
+    usagePercentage: number;
+    capPercentage: number;
+    forceBandPressure: boolean;
+}): "above_cap" | "force_band" | null {
+    if (!(args.usagePercentage < args.capPercentage)) return "above_cap";
+    return args.forceBandPressure ? "force_band" : null;
 }

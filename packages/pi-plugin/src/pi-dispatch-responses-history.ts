@@ -1,6 +1,8 @@
-import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
-import { isPiDropPlaceholder } from "./native-replay-pi";
-import { ownsNativeResponseTagStrip } from "./native-replay-tag-provenance-pi";
+import {
+	hookCleanedTextMatchesBlock,
+	isPiDropPlaceholder,
+	nativeTextMatchesBlock,
+} from "./native-replay-pi";
 import { piOmitsTruncatedAssistant } from "./pi-dispatch-assistant-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 import type { PiDispatchHost } from "./pi-dispatch-structure";
@@ -89,7 +91,6 @@ export function piResponsesAssistantTexts(
 	model: PiChatHistoryModel | undefined,
 	host?: PiDispatchHost,
 	alternatives?: PiResponsesUnsignedAlternatives,
-	frozenTagStrips?: unknown,
 ): readonly string[] | undefined {
 	const message = object(value);
 	if (!message || !Array.isArray(message.content)) return undefined;
@@ -230,8 +231,6 @@ export function piResponsesAssistantTexts(
 			"openai-codex-responses",
 		].includes(model?.api ?? "");
 	let unsigned = false;
-	let rewrittenText = false;
-	let allUnsignedFrozen = true;
 	for (const value of payload.items) {
 		const item = object(value);
 		if (item?.type === "reasoning") continue;
@@ -268,14 +267,17 @@ export function piResponsesAssistantTexts(
 				typeof signature.id === "string" &&
 				item.id === signature.id &&
 				item.phase === signature.phase &&
-				part.text === (block.text as string).replace(/^§\d+§ /u, "");
+				nativeTextMatchesBlock(part.text, block.text as string);
 			if (!signed) {
 				// OMP removes the signature when its assistant-message hook rewrites
-				// text, but its native encoder still replays the original payload.
-				// Use the hook's own cleanup, including mid-text notation and trimming.
-				// Remove only our current prepared ordinal from the visible side;
-				// unrelated visible edits must not inherit the native text or phase.
-				const stripped = stripPersistedAssistantText(part.text);
+				// text, yet whenever native replay is warm it still sends the stored
+				// native item with that item's phase; the signature does not decide
+				// that. Accept the block only when the hook's own cleanup of the
+				// native text equals it (see `hookCleanedTextMatchesBlock`), which
+				// holds whether or not the host copied the cleaned text into the
+				// native item. Unrelated visible edits must not inherit the native
+				// text or phase.
+				//
 				// A dropped block is sent as the placeholder itself. When the native
 				// item already carries those exact bytes, OMP replays them with the
 				// item's own phase, so bind the block to that item. The hook's cleanup
@@ -286,29 +288,10 @@ export function piResponsesAssistantTexts(
 					!allowUnsigned ||
 					"textSignature" in block ||
 					(!droppedPlaceholder &&
-						stripped !== (block.text as string).replace(/^§\d+§ /u, ""))
+						!hookCleanedTextMatchesBlock(part.text, block.text as string))
 				)
 					return texts;
 				unsigned = true;
-				// Clean unsigned text cannot normally establish native phase ownership.
-				// Persisted strip evidence preserves that ownership only for the exact
-				// native identity and body, without restoring a removed text signature.
-				// A matching drop placeholder establishes it for that block alone.
-				allUnsignedFrozen &&=
-					droppedPlaceholder ||
-					(part.text === block.text &&
-						ownsNativeResponseTagStrip(
-							frozenTagStrips,
-							item.id,
-							item.phase,
-							part.text,
-						));
-				// Reapplying the echoed ordinal can restore the original bytes, but
-				// the hook still removed the signature. Native replay owns the phase
-				// even when the prepared text now equals the cached output text.
-				// A placeholder is not evidence of that hook rewrite, so it must not
-				// admit clean unsigned siblings in the same message.
-				rewrittenText ||= !droppedPlaceholder && part.text !== stripped;
 			}
 			bound++;
 			itemTexts.push(part.text);
@@ -320,12 +303,19 @@ export function piResponsesAssistantTexts(
 	}
 	// Every prepared text block must own exactly one cached text, in order. With
 	// no replayable output OMP converts the blocks instead, so keep their texts.
-	if (
-		!output ||
-		bound !== blocks.length ||
-		(unsigned && !rewrittenText && !allUnsignedFrozen)
-	)
-		return texts;
+	if (!output || bound !== blocks.length) return texts;
+	// An unsigned turn offers two plans: the native replay (OMP's warm path) and
+	// the block texts (what OMP sends when it converts the blocks instead). Both
+	// are read from the message this pass prepared, its text blocks and the
+	// native items in its providerPayload, so admitting either lets through no
+	// bytes the pass did not prepare. The dispatch check picks one alternative
+	// for the whole request and compares every row against it.
+	//
+	// That rests on one precondition: the pass itself decides the native item's
+	// bytes. An edit it applies to a block (a drop placeholder, compression) or a
+	// historical tag strip is written into the paired native item as well (`rewriteNativeAssistantTexts`,
+	// `applyNativeResponseTagReplayPi`), so both alternatives carry the pass's
+	// choice and a request still holding the stored native bytes is refused.
 	if (unsigned && alternatives) {
 		alternatives.fallback = texts;
 		alternatives.cold = coldReplayable(payload.items) ? replay : texts;

@@ -591,6 +591,48 @@ describe("review witness (second look): a marker moved outside this process chan
     );
 });
 
+describe("served check: the marker another process moved", () => {
+    // The served check (served-check.ts) sees the open defect above. It only
+    // measures: the pass is served exactly as before, and the check logs that
+    // it changed the served request without rebuild permission, in front of
+    // the turn's kept signed thinking, which it did not strip.
+    it("logs a change without rebuild permission in front of kept signed thinking on the pass that serves the moved marker's summary row", async () => {
+        const session = await sessionUnderPressure("concurrent-move-served-check");
+        session.setDecision("execute");
+        session.setMarkerOutcome(busyWriter);
+        await session.serve(4, Number.POSITIVE_INFINITY);
+        session.setDecision("defer");
+        const deferred = await session.serve(5, Number.POSITIVE_INFINITY);
+        // The defer pass only appends to the rebuild served before it.
+        expect(deferred.logs.filter((line) => line.startsWith("served check: "))).toEqual([]);
+
+        setPersistedCompactionMarkerState(session.db(), session.sessionId, MOVED_MARKER);
+        setPendingCompactionMarkerState(session.db(), session.sessionId, null);
+
+        const next = await session.serve(6, Number.POSITIVE_INFINITY);
+        expect(next.logs.find((line) => line.startsWith("rewrite permission:"))).toContain(
+            "allowed=false",
+        );
+        const events = next.logs.filter((line) => line.startsWith("served check: "));
+        expect(
+            events.some(
+                (line) =>
+                    line.startsWith(
+                        "served check: a pass without rebuild permission changed served messages ",
+                    ) && line.includes("permitted=false"),
+            ),
+        ).toBe(true);
+        expect(
+            events.some(
+                (line) =>
+                    line.startsWith(
+                        "served check: a change in front of kept signed thinking on a prefix-bound model ",
+                    ) && line.includes("thinking_stripped=false"),
+            ),
+        ).toBe(true);
+    });
+});
+
 describe("review guard (second look): the rewrite-permission gate of the marker drain", () => {
     it("a pass that consumes a queued history refresh without rewrite permission leaves a pending marker where it is", async () => {
         const session = await sessionUnderPressure("gate");

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { CTX_REDUCE_KEEP } from "@magic-context/core/features/magic-context/reclaim-protection";
 import {
 	getActiveTagsBySession,
@@ -11,15 +11,20 @@ import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
+import { tagsSinceReading } from "@magic-context/core/hooks/magic-context/emergency-drop";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
+import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
 	applyPiHeuristicCleanup,
 	PI_CTX_REDUCE_KEEP,
+	snapshotPiEmergencyServedMass,
 } from "./heuristic-cleanup-pi";
+import { authorizePiToolRemoval } from "./native-replay-state-pi";
 import {
 	assistantMessage,
+	assistantToolCall,
 	createTestDb,
 	textOf,
 	toolResultMessage,
@@ -688,6 +693,203 @@ it("Pi stale removal honors a custom ctx_reduce keep count above three", () => {
 				.filter((tag) => tag.type === "tool")
 				.every((tag) => tag.status === "dropped"),
 		).toBe(true);
+	} finally {
+		closeQuietly(db);
+	}
+});
+
+describe("applyPiHeuristicCleanup emergency planner on the request this pass serves", () => {
+	const OVERHEAD = 5_000;
+	const calibration = { toolsRatio: 1, proseRatio: 1 };
+
+	/** A task, then six completed bash calls with large outputs. */
+	function session(sessionId: string, db: ReturnType<typeof createTestDb>) {
+		const messages: unknown[] = [userMessage("run the checks", 1)];
+		for (let i = 0; i < 6; i++) {
+			messages.push(
+				assistantToolCall(
+					`call-${i}`,
+					"bash",
+					{ command: `check ${i}` },
+					10 + i * 2,
+				),
+				{
+					...toolResultMessage(
+						`call-${i}`,
+						`check ${i} output line\n`.repeat(400),
+						11 + i * 2,
+					),
+					toolName: "bash",
+				},
+			);
+		}
+		return { messages, ...tagMessages(sessionId, db, messages) };
+	}
+
+	const toolTags = (db: ReturnType<typeof createTestDb>, sessionId: string) =>
+		getActiveTagsBySession(db, sessionId)
+			.filter((tag) => tag.type === "tool")
+			.sort((a, b) => a.tagNumber - b.tagNumber);
+
+	it("does not count what the same pass already dropped as fixed floor", () => {
+		const db = createTestDb();
+		const lines: string[] = [];
+		const log = spyOn(logger, "sessionLog").mockImplementation((...args) => {
+			lines.push(args.slice(1).map(String).join(" "));
+		});
+		try {
+			const sessionId = "ses-pi-served-floor";
+			const { messages, targets } = session(sessionId, db);
+			const snapshot = snapshotPiEmergencyServedMass(
+				getActiveTagsBySession(db, sessionId),
+				targets,
+			);
+			let servedBefore = 0;
+			for (const counts of snapshot.values())
+				servedBefore += counts.tools + counts.prose;
+			// The queued drops of four of the six outputs land first.
+			const dropped = toolTags(db, sessionId).slice(0, 4);
+			let droppedMass = 0;
+			for (const [index, tag] of dropped.entries()) {
+				queuePendingOp(db, sessionId, tag.tagNumber, "drop", index + 1);
+				const counts = snapshot.get(tag.tagNumber)!;
+				droppedMass += counts.tools + counts.prose;
+			}
+			applyPendingOperations(sessionId, db, targets, new Set());
+			// The previous request's reading: fixed overhead plus every tag it
+			// served. The ceiling sits between the real fixed part and that
+			// part plus the outputs this pass just dropped.
+			const reading = OVERHEAD + servedBefore;
+			const ceiling = OVERHEAD + Math.round(droppedMass / 2);
+			applyPiHeuristicCleanup(
+				sessionId,
+				db,
+				targets,
+				messages,
+				{
+					protectedTags: 0,
+					staleReduceStripEnabled: false,
+					routine: false,
+					emergency: {
+						currentTotalInputTokens: reading,
+						ceilingTokens: ceiling,
+						usagePercentage: 90,
+						passAlreadyPriced: true,
+						fitCalibration: calibration,
+						servedBeforePass: snapshot,
+					},
+				},
+				getActiveTagsBySession(db, sessionId),
+			);
+			const plan = lines.find((line) => line.includes("emergency tiered drop"));
+			expect(plan).toBeDefined();
+			expect(plan).not.toContain("already exceeds ceiling");
+			expect(plan).toContain("removed this pass");
+			// What stays fixed is the overhead plus the dropped calls' kept
+			// arguments and placeholders, far below the ceiling.
+			const floor = Number(/floor ?≈(\d+)/.exec(plan!)?.[1]);
+			expect(floor).toBeGreaterThanOrEqual(OVERHEAD);
+			expect(floor).toBeLessThan(ceiling);
+		} finally {
+			log.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("taking the snapshot writes no native-removal decision, unlike measuring for reclaim", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-snapshot-read-only";
+			const messages: unknown[] = [
+				userMessage("run the checks", 1),
+				assistantToolCall("call-a", "bash", { command: "check a" }, 2),
+				{
+					...toolResultMessage("call-a", "output ".repeat(300), 3),
+					toolName: "bash",
+				},
+			];
+			const saved = new Map<string, string>();
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			const transcript = createPiTranscript(messages, sessionId, undefined, {
+				authorizeToolRemoval: (callId) =>
+					authorizePiToolRemoval({
+						db,
+						sessionId,
+						callId,
+						saved,
+						canApply: true,
+					}),
+			});
+			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
+			const dump = () =>
+				JSON.stringify(
+					(
+						db
+							.prepare(
+								"SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+							)
+							.all() as Array<{ name: string }>
+					).map(({ name }) => [
+						name,
+						db.prepare(`SELECT * FROM "${name}"`).all(),
+					]),
+				);
+			const before = dump();
+			const snapshot = snapshotPiEmergencyServedMass(
+				getActiveTagsBySession(db, sessionId),
+				targets,
+			);
+			expect(snapshot.size).toBeGreaterThan(0);
+			expect(dump()).toBe(before);
+			expect(saved.size).toBe(0);
+			// Control: the reclaim measurement asks for removal and freezes it.
+			const tool = getActiveTagsBySession(db, sessionId).find(
+				(tag) => tag.type === "tool",
+			)!;
+			targets.get(tool.tagNumber)!.measureReclaim!(false);
+			expect(dump()).not.toBe(before);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("reclaim measurement already counts a call cut to a placeholder this pass at its placeholder size", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-skeleton-measure";
+			const { targets } = session(sessionId, db);
+			const target = targets.get(toolTags(db, sessionId)[0]!.tagNumber)!;
+			const preview = target.measureReclaim!(true);
+			expect(target.skeletonReal!()).toBe("truncated");
+			const after = target.measureReclaim!(false);
+			expect(after.beforeTools).toBe(preview.afterTools);
+			expect(after.beforeTools).toBeLessThan(preview.beforeTools);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+it("Pi: only the newest step's tags are newer than the reading", () => {
+	const db = createTestDb();
+	try {
+		const sessionId = "ses-pi-since-reading";
+		const messages: unknown[] = [
+			userMessage("run the checks", 1),
+			assistantToolCall("call-old", "bash", { command: "old" }, 2),
+			{ ...toolResultMessage("call-old", "old output", 3), toolName: "bash" },
+			assistantToolCall("call-new", "bash", { command: "new" }, 4),
+			{ ...toolResultMessage("call-new", "new output", 5), toolName: "bash" },
+		];
+		const { transcript, targets } = tagMessages(sessionId, db, messages);
+		const tools = getActiveTagsBySession(db, sessionId)
+			.filter((tag) => tag.type === "tool")
+			.sort((a, b) => a.tagNumber - b.tagNumber);
+		expect(tools).toHaveLength(2);
+		const since = tagsSinceReading(transcript.messages, targets);
+		expect(since.has(tools[0]?.tagNumber ?? -1)).toBe(false);
+		expect(since.has(tools[1]?.tagNumber ?? -1)).toBe(true);
 	} finally {
 		closeQuietly(db);
 	}

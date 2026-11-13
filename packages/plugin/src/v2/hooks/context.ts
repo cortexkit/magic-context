@@ -111,6 +111,14 @@ import {
 } from "../../hooks/magic-context/read-session-formatting";
 import { createM0RenderOptions } from "../../hooks/magic-context/render-options";
 import {
+    beginServedRequest,
+    commitServedRequest,
+    countServedRefusal,
+    dropServedRecord,
+    forgetServedRecord,
+    noteServedRefusal,
+} from "../../hooks/magic-context/served-check";
+import {
     STORAGE_BUSY_MESSAGE,
     StorageBusyRefusalError,
 } from "../../hooks/magic-context/storage-busy-refusal";
@@ -628,6 +636,8 @@ function refuseBeforeProvider(
         sessionID,
         `v2 refusal: interrupting the turn before the provider request arm=${arm}${detail ? ` cause=${JSON.stringify(detail.slice(0, 500))}` : ""}`,
     );
+    // The interrupted turn reaches no provider: the served record stays as it is.
+    noteServedRefusal(sessionID);
     return interruptBeforeProvider(session, sessionID);
 }
 
@@ -1851,6 +1861,7 @@ export async function registerContext(context: V2Context) {
                             overflowRecovery.forget(sessionID);
                             hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);
+                            dropServedRecord(sessionID, "session_deleted");
                             deletedSessions.add(sessionID);
                             // A failed store clear (a busy writer lock, say) must not skip
                             // the in-memory cleanup below: the pending-cleanup marker
@@ -3161,6 +3172,9 @@ export async function registerContext(context: V2Context) {
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
+                // This hook changes the request after the wrapper (the
+                // checkpoint head) and records what it returns itself.
+                recordServed: false,
                 replayFits,
                 onLkgReplay: restoreLkgSystem,
             })(
@@ -3297,6 +3311,7 @@ export async function registerContext(context: V2Context) {
                         if (!input) throw new StorageBusyRefusalError(error, "v2-context");
                         const { mapped } = input;
                         await createMessagesTransformHandler({
+                            recordServed: false,
                             replayFits,
                             onLkgReplay: restoreLkgSystem,
                             magicContext: {
@@ -3390,6 +3405,32 @@ export async function registerContext(context: V2Context) {
             }
         }
     };
+    /**
+     * Hand the request this hook returns to the served check (served-check.ts),
+     * or count the refusal when the hook threw. Runs after every statement
+     * that can still refuse the turn; a refusal that interrupts the turn and
+     * returns was noted by refuseBeforeProvider. Hidden maintenance children
+     * are outside the check. Never throws.
+     */
+    const finishServedRequest = (draft: SessionContext, returned: boolean): void => {
+        try {
+            const sessionID = draft.sessionID;
+            if (!returned) countServedRefusal(sessionID);
+            else if (deletedSessions.has(sessionID) || hiddenChildHook.owns(sessionID))
+                forgetServedRecord(sessionID);
+            else
+                commitServedRequest({
+                    sessionId: sessionID,
+                    host: "opencode2",
+                    messages: draft.messages,
+                    providerID: draft.model.providerID,
+                    modelID: draft.model.id,
+                    compactionOff,
+                });
+        } catch (error) {
+            sessionLog(draft.sessionID, "served check skipped:", error);
+        }
+    };
     const refuseOversizedCheckpoint = async (draft: SessionContext) => {
         const hasCheckpoint = draft.messages.some((message) =>
             message.content.some(
@@ -3430,6 +3471,8 @@ export async function registerContext(context: V2Context) {
             if (!deletedSessions.has(draft.sessionID))
                 await prepareSessionIdentity(draft.sessionID);
             const anchor = generateReplayAnchor(draft.messages);
+            beginServedRequest(draft.sessionID);
+            let returned = false;
             try {
                 await runManagedContext(draft);
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
@@ -3460,6 +3503,9 @@ export async function registerContext(context: V2Context) {
                             );
                     }
                 }
+                // Set last: the admission commits above can still throw, and a
+                // throw here refuses the turn, so no request reaches the provider.
+                returned = true;
             } finally {
                 admissionRebuildPasses.delete(draft.sessionID);
                 nativeFoldReplay?.cancelLegacyUpgrade(draft.sessionID);
@@ -3467,6 +3513,7 @@ export async function registerContext(context: V2Context) {
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);
                 foldedInstructionIDs.delete(draft.sessionID);
+                finishServedRequest(draft, returned);
             }
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here

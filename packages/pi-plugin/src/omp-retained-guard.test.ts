@@ -29,7 +29,7 @@ test("OMP retained guard registers no tools before budget finalization", () => {
 			},
 		} as unknown as ExtensionAPI);
 		expect(tools).toEqual([]);
-		expect([...handlers.keys()]).toEqual(["tool_call"]);
+		expect([...handlers.keys()]).toEqual(["context", "tool_call"]);
 		expect(handlers.get("tool_call")!()).toMatchObject({ block: true });
 		writeFileSync(guard, "finalize");
 		expect(handlers.get("tool_call")!()).toEqual({
