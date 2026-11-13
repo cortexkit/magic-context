@@ -120,8 +120,9 @@ struct SourceBlock {
     start: u64,
     end: u64,
     role: String,
-    /// The printed line followed by the blank line that separates it from
-    /// the next one.
+    /// The printed line as the recording keeps it: followed by the newline
+    /// that separates it from the next line or, for the chunk's last line,
+    /// by the blank line before `</new_messages>`.
     printed: String,
     /// The messages the line covers, by ordinal and message id. Synthetic
     /// chunks list none.
@@ -223,26 +224,44 @@ fn source_blocks(value: &Value) -> Result<Vec<SourceBlock>, String> {
         .collect()
 }
 
-/// The header the 0.49 plugin's merged lines carry after the role when an
-/// assistant run made commits: ` commits: 1a2b3c4, 5d6e7f8`.
+/// The commits a printed line's header may name after its role, as the
+/// module's chunk builder and the 0.49 plugin both print them:
+/// ` commits: 1a2b3c4, 5d6e7f8`.
 fn commits_header() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^ commits: [0-9a-f]+(?:, [0-9a-f]+)*").expect("valid regex"))
 }
 
-/// A printed line's own text: the line without its `[A-B] R:` header,
-/// its commits and its separating blank line, as the module keeps a
-/// line's text apart from its header.
-fn line_text(block: &SourceBlock) -> Result<String, String> {
+/// Each block's printed line without what follows it in the recording.
+fn printed_lines(blocks: &[SourceBlock]) -> Result<Vec<&str>, String> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let after = if index + 1 == blocks.len() {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            block.printed.strip_suffix(after).ok_or_else(|| {
+                format!(
+                    "the printed line of [{}-{}] does not end with {after:?}",
+                    block.start, block.end
+                )
+            })
+        })
+        .collect()
+}
+
+/// The text of `block`'s printed `line`: the line without its `[A-B] R:`
+/// header and the commits a header may name, as the module keeps a line's
+/// text apart from its header.
+fn line_text(block: &SourceBlock, line: &str) -> Result<String, String> {
     let range = if block.start == block.end {
         format!("[{}]", block.start)
     } else {
         format!("[{}-{}]", block.start, block.end)
     };
-    let line = block
-        .printed
-        .strip_suffix("\n\n")
-        .ok_or_else(|| format!("{range}: no blank line after the printed line"))?;
     let rest = line
         .strip_prefix(&format!("{range} {}:", block.role))
         .ok_or_else(|| {
@@ -320,18 +339,18 @@ fn split_recorded(prompt: &str) -> Result<(String, String, String), String> {
 }
 
 /// A chunk's printed lines as the module keeps them for anchors. `header`
-/// is the length of the `Messages A-B:` header that precedes the lines and
-/// `separator` the length of what separates two lines.
+/// is the length of the `Messages A-B:` header that precedes the lines,
+/// which are joined by newlines.
 fn printed_blocks(
     blocks: &[SourceBlock],
+    lines: &[&str],
     header: usize,
-    separator: usize,
 ) -> Result<Vec<PrintedBlock>, String> {
     let mut offset = header;
     let mut printed = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        let text = line_text(block)?;
-        offset += block.printed.len() - "\n\n".len();
+    for (block, line) in blocks.iter().zip(lines) {
+        let text = line_text(block, line)?;
+        offset += line.len();
         printed.push(PrintedBlock {
             role: block.role.clone(),
             start: block.start,
@@ -339,7 +358,7 @@ fn printed_blocks(
             parts: vec![text],
             text_end: offset,
         });
-        offset += separator;
+        offset += "\n".len();
     }
     Ok(printed)
 }
@@ -352,17 +371,12 @@ fn recorded_case(dir: &Path, index: u64) -> Result<Case, String> {
     let (seeds, references, transcript) = split_recorded(prompt)?;
     let blocks = source_blocks(&recording["sourceBlocks"])?;
     let chunk = (blocks[0].start, blocks[blocks.len() - 1].end);
-    // The 0.49 plugin left a blank line after every printed line; the last
-    // line's is not part of the block.
     let header = format!("Messages {}-{}:\n\n", chunk.0, chunk.1);
-    let lines: String = blocks.iter().map(|block| block.printed.as_str()).collect();
-    if lines
-        .strip_suffix("\n\n")
-        .is_none_or(|lines| transcript != format!("{header}{lines}"))
-    {
+    let lines = printed_lines(&blocks)?;
+    if transcript != format!("{header}{}", lines.join("\n")) {
         return Err("the recording's source blocks are not the printed lines of the prompt's <new_messages> block, so anchors could not be resolved against them".into());
     }
-    let printed = printed_blocks(&blocks, header.len(), "\n\n".len())?;
+    let printed = printed_blocks(&blocks, &lines, header.len())?;
     // Every message the lines cover, so a reply's summary boundaries can be
     // checked as the module checks them.
     let mut messages: Vec<&(u64, String)> =
@@ -420,16 +434,18 @@ fn synthetic_case(path: &Path) -> Case {
         .unwrap_or_else(|| panic!("{}: no session", path.display()));
     let blocks =
         source_blocks(&file["sourceBlocks"]).unwrap_or_else(|error| panic!("{name}: {error}"));
+    let lines = printed_lines(&blocks).unwrap_or_else(|error| panic!("{name}: {error}"));
     let entries: Vec<Entry> = blocks
         .iter()
-        .map(|block| {
+        .zip(&lines)
+        .map(|(block, line)| {
             assert_eq!(block.start, block.end, "{name}: one message per line");
             let role = match block.role.as_str() {
                 "U" => Role::User,
                 "A" => Role::Assistant,
                 other => panic!("{name}: role {other} is neither U nor A"),
             };
-            let text = line_text(block).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let text = line_text(block, line).unwrap_or_else(|error| panic!("{name}: {error}"));
             Entry::new(
                 block.start,
                 format!("m{}", block.start),
@@ -452,15 +468,6 @@ fn synthetic_case(path: &Path) -> Case {
     assert!(!chunk.has_more, "{name}: the chunk was cut");
     let first = blocks[0].start;
     let last = blocks[blocks.len() - 1].end;
-    let lines: Vec<&str> = blocks
-        .iter()
-        .map(|block| {
-            block
-                .printed
-                .strip_suffix("\n\n")
-                .expect("checked by line_text")
-        })
-        .collect();
     assert_eq!(
         chunk.input,
         format!("Messages {first}-{last}:\n\n{}", lines.join("\n")),
@@ -590,8 +597,10 @@ fn turn_one_requests() {
                 continue;
             }
         };
-        // Each arm's prompt with its own first-turn instruction taken out:
-        // equal when the arms differ in nothing else.
+        // Both arms' prompts as sent, and with each arm's own first-turn
+        // instruction taken out, for the manifest to say whether the arms'
+        // prompts are the same and whether they differ in anything else.
+        let mut prompts_sent = Vec::new();
         let mut rest = Vec::new();
         for (arm, prompts) in &arms {
             let system = two_pass_system(&prompts.system, language.as_deref());
@@ -609,6 +618,7 @@ fn turn_one_requests() {
                     ]),
                 ),
             );
+            prompts_sent.push(prompt);
         }
         println!("{}: turn-one requests written", case.name);
         listed.push(json!({
@@ -617,6 +627,7 @@ fn turn_one_requests() {
             "session": case.session,
             "chunk": [case.chunk.0, case.chunk.1],
             "printedLines": case.printed.len(),
+            "userPromptsIdentical": prompts_sent.windows(2).all(|pair| pair[0] == pair[1]),
             "userPromptsDifferOnlyInTheFirstTurnInstruction": rest.windows(2).all(|pair| pair[0] == pair[1]),
         }));
     }
@@ -848,7 +859,7 @@ mod harness_checks {
     const SEEDS: &str = "<compartment_examples_from_other_projects>\n<compartment start=\"1\" end=\"2\" title=\"Seed\">\nA seed.\n</compartment>\n</compartment_examples_from_other_projects>";
     const REFERENCES: &str = "<session_references>\n<compartment start=\"3\" end=\"9\" title=\"Earlier\">\nEarlier work.\n</compartment>\n</session_references>";
     const TRANSCRIPT: &str =
-        "Messages 10-12:\n\n[10] U: Ship it.\n\n[11-12] A: commits: 1a2b3c4, 5d6e7f8 Shipped.";
+        "Messages 10-12:\n\n[10] U: Ship it.\n[11-12] A: commits: 1a2b3c4, 5d6e7f8 Shipped.";
 
     /// A 0.49 plugin prompt: built with a memory block, observations asked
     /// for and no first-turn instruction, then the memory block cut out.
@@ -904,27 +915,47 @@ mod harness_checks {
     }
 
     #[test]
-    fn a_printed_line_keeps_its_text_without_header_commits_or_separator() {
+    fn a_recording_keeps_a_newline_after_each_line_and_a_blank_line_after_the_last() {
+        let blocks = [
+            block(10, 10, "U", "[10] U: Ship it.\n"),
+            block(11, 12, "A", "[11-12] A: Shipped.\n\n"),
+        ];
         assert_eq!(
-            line_text(&block(10, 10, "U", "[10] U: Ship it.\n\n")).unwrap(),
-            "Ship it."
+            printed_lines(&blocks).unwrap(),
+            ["[10] U: Ship it.", "[11-12] A: Shipped."]
         );
+        let printed = printed_blocks(&blocks, &printed_lines(&blocks).unwrap(), 17).unwrap();
+        // Where each line ends in `Messages 10-12:\n\n[10] U: Ship it.\n[11-12] A: Shipped.`.
         assert_eq!(
-            line_text(&block(
+            printed
+                .iter()
+                .map(|block| block.text_end)
+                .collect::<Vec<_>>(),
+            [33, 53]
+        );
+        assert!(printed_lines(&[block(10, 10, "U", "[10] U: Ship it.\n")]).is_err());
+    }
+
+    #[test]
+    fn a_printed_line_keeps_its_text_without_its_header_or_commits() {
+        let text = |start, end, role, line| line_text(&block(start, end, role, ""), line);
+        assert_eq!(text(10, 10, "U", "[10] U: Ship it.").unwrap(), "Ship it.");
+        assert_eq!(
+            text(
                 11,
                 12,
                 "A",
-                "[11-12] A: commits: 1a2b3c4, 5d6e7f8 Shipped / Tagged.\n\n"
-            ))
+                "[11-12] A: commits: 1a2b3c4, 5d6e7f8 Shipped / Tagged."
+            )
             .unwrap(),
             "Shipped / Tagged."
         );
-        // A text that starts with a hash-like word keeps it.
+        // Only a header names commits: a hash-like first word is text.
         assert_eq!(
-            line_text(&block(13, 13, "A", "[13] A: deadbeef is the build id.\n\n")).unwrap(),
+            text(13, 13, "A", "[13] A: deadbeef is the build id.").unwrap(),
             "deadbeef is the build id."
         );
-        assert!(line_text(&block(14, 14, "U", "[14] A: Wrong role.\n\n")).is_err());
-        assert!(line_text(&block(15, 15, "U", "[15] U: No separator.")).is_err());
+        assert!(text(14, 14, "U", "[14] A: Wrong role.").is_err());
+        assert!(text(15, 16, "U", "[15] U: Wrong range.").is_err());
     }
 }
