@@ -18,3 +18,6 @@ pub mod run;
 pub mod trigger;
 pub mod two_pass;
 pub mod validate;
+
+#[cfg(test)]
+mod replay_tests;
