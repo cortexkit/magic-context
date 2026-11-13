@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
+use cortexkit_persona::{FactsShape, GuidanceSet, RenderLimits};
 use cortexkit_role_compaction::wire::Refusal;
 use cortexkit_role_tool_provider::catalog::{self, CatalogRequest, SystemTextItem};
 use cortexkit_role_tool_provider::{errors, ops, PROVIDES};
@@ -970,103 +971,76 @@ pub(crate) struct TextFlags {
 }
 
 impl TextFlags {
-    fn get(&self, flag: &str) -> Option<bool> {
-        match flag {
-            "memory" => Some(self.memory),
-            "dreamer" => Some(self.dreamer),
-            "temporal" => Some(self.temporal),
-            "caveman" => Some(self.caveman),
-            "language" => Some(self.language),
-            _ => None,
-        }
+    fn facts(&self) -> Value {
+        json!({
+            "memory": self.memory,
+            "dreamer": self.dreamer,
+            "temporal": self.temporal,
+            "caveman": self.caveman,
+            "language": self.language,
+        })
     }
 }
 
-/// Render the definition's text `name`. A template is literal text with four
-/// kinds of tag:
-///
-/// - `{{name}}` includes the definition's text `name`, rendered the same way;
-/// - `{{$name}}` inserts the runtime value `name` verbatim (never rendered, so
-///   a user's override may contain braces);
-/// - `{{#flag}}…{{/flag}}` keeps its body only when `flag` is on, and
-///   `{{^flag}}…{{/flag}}` only when it is off. Sections nest, and a closing
-///   tag names the section it closes.
-///
-/// Anything else between `{{` and `}}`, an unknown name, value or flag, or an
-/// unclosed section is an error. `renderText` in the design's generator
-/// follows the same rules, and the guidance-matrix test holds the two to the
-/// same bytes.
+/// Logical names remain shared with the plugin fixtures; GuidanceSet requires
+/// bare ids rather than paths or underscores.
+fn guidance_id(name: &str) -> String {
+    name.replace(['/', '_'], "-")
+}
+
+fn guidance_set() -> Result<&'static GuidanceSet, String> {
+    static GUIDANCE: OnceLock<Result<GuidanceSet, String>> = OnceLock::new();
+    GUIDANCE
+        .get_or_init(|| {
+            let set = GuidanceSet::new(
+                definition()
+                    .texts
+                    .iter()
+                    .map(|(name, text)| (guidance_id(name), text.clone())),
+            )
+            .map_err(|error| error.to_string())?;
+            let shape = FactsShape::from_json_schema(&json!({
+                "type": "object",
+                "properties": {
+                    "module": {"type": "object", "properties": {
+                        "memory": {"type": "boolean"},
+                        "dreamer": {"type": "boolean"},
+                        "temporal": {"type": "boolean"},
+                        "caveman": {"type": "boolean"},
+                        "language": {"type": "boolean"}
+                    }},
+                    "values": {"type": "object", "properties": {
+                        "language_directive": {"type": "string"},
+                        "override": {"type": "string"}
+                    }}
+                }
+            }))
+            .map_err(|error| error.to_string())?;
+            // Check inactive branches too: a misspelled fact is a build defect,
+            // not guidance that silently vanishes for one configuration.
+            set.check(&shape).map_err(|error| error.to_string())?;
+            Ok(set)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// Render with module-owned facts only. GuidanceSet inserts values verbatim,
+/// including braces and CRLF in a user's override, without escaping or parsing
+/// them as template source.
 pub(crate) fn render_text(
     name: &str,
     flags: &TextFlags,
     values: &BTreeMap<&str, String>,
 ) -> Result<String, String> {
-    let template = definition()
-        .texts
-        .get(name)
-        .ok_or_else(|| format!("no text named {name}"))?;
-    let mut out = String::new();
-    // Each open section: its flag, and whether its body is kept.
-    let mut open: Vec<(&str, bool)> = Vec::new();
-    let mut rest = template.as_str();
-    loop {
-        let keeping = open.iter().all(|(_, keep)| *keep);
-        let Some(start) = rest.find("{{") else {
-            if keeping {
-                out.push_str(rest);
-            }
-            break;
-        };
-        if keeping {
-            out.push_str(&rest[..start]);
-        }
-        let after = &rest[start + 2..];
-        let end = after
-            .find("}}")
-            .ok_or_else(|| format!("{name}: unterminated tag"))?;
-        let tag = &after[..end];
-        rest = &after[end + 2..];
-        let mut chars = tag.chars();
-        match chars.next() {
-            Some(sigil @ ('#' | '^')) => {
-                let flag = chars.as_str();
-                let on = flags
-                    .get(flag)
-                    .ok_or_else(|| format!("{name}: unknown flag {flag}"))?;
-                open.push((flag, if sigil == '#' { on } else { !on }));
-            }
-            Some('/') => {
-                let flag = chars.as_str();
-                match open.pop() {
-                    Some((open_flag, _)) if open_flag == flag => {}
-                    _ => return Err(format!("{name}: {{{{/{flag}}}}} closes nothing open")),
-                }
-            }
-            Some('$') => {
-                let key = chars.as_str();
-                let value = values
-                    .get(key)
-                    .ok_or_else(|| format!("{name}: no value {key}"))?;
-                if keeping {
-                    out.push_str(value);
-                }
-            }
-            _ if !tag.is_empty()
-                && tag
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b == b'_' || b == b'/') =>
-            {
-                if keeping {
-                    out.push_str(&render_text(tag, flags, values)?);
-                }
-            }
-            _ => return Err(format!("{name}: malformed tag {{{{{tag}}}}}")),
-        }
-    }
-    if let Some((flag, _)) = open.first() {
-        return Err(format!("{name}: section {flag} is never closed"));
-    }
-    Ok(out)
+    guidance_set()?
+        .render(
+            &guidance_id(name),
+            &json!({"module": flags.facts(), "values": values}),
+            RenderLimits::default(),
+        )
+        .map(|rendered| rendered.text)
+        .map_err(|error| error.to_string())
 }
 
 // ── Model-key lookup ─────────────────────────────────────────────────────
@@ -1253,4 +1227,5 @@ pub(crate) fn primary_language_directive(language: Option<&str>) -> String {
 }
 
 #[cfg(test)]
+#[path = "catalog/catalog_tests.rs"]
 mod tests;

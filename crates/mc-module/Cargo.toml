@@ -18,6 +18,7 @@ agent-data = []
 
 [dependencies]
 cortexkit-log = { workspace = true }
+cortexkit-persona = "=0.3.0"
 tracing = "0.1"
 cortexkit-role-compaction = { workspace = true }
 cortexkit-role-llm-runner = { workspace = true }

@@ -6,9 +6,9 @@
 //! `testdata/tool-catalog-guidance-matrix.json` the digest of every guidance text
 //! for every combination of config inputs. Both are written by
 //! `crates/mc-module/gen/gen-tool-catalog.ts` from the same shared definition
-//! the module serves from, so these
-//! tests hold the generator's TypeScript renderer and this module's Rust one to
-//! the same bytes.
+//! the module serves from, so these tests hold the generator's TypeScript
+//! evaluator and cortexkit-persona to the same bytes. Frozen pre-migration
+//! templates also keep the byte comparison independent of the current assets.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -636,6 +636,217 @@ fn every_guidance_text_matches_the_generators_matrix() {
 }
 
 #[test]
+fn persona_matches_legacy_bytes_for_every_template_and_switch_combination() {
+    for bits in 0..32 {
+        let flags = all_flags(bits);
+        for override_text in [
+            "My own section.",
+            "<tag>&\"\r\n{{unknown}} {% if module.memory %}§42§",
+        ] {
+            let values = BTreeMap::from([
+                (
+                    "language_directive",
+                    "<language>&\r\n{{verbatim}}".to_string(),
+                ),
+                ("override", override_text.to_string()),
+            ]);
+            for name in legacy_texts().keys() {
+                assert_eq!(
+                    tool_catalog::render_text(name, &flags, &values).unwrap(),
+                    legacy_render(name, &flags, &values),
+                    "{name}, switches={bits}, override={override_text:?}"
+                );
+            }
+        }
+    }
+}
+
+fn all_flags(bits: u8) -> TextFlags {
+    TextFlags {
+        memory: bits & 1 != 0,
+        dreamer: bits & 2 != 0,
+        temporal: bits & 4 != 0,
+        caveman: bits & 8 != 0,
+        language: bits & 16 != 0,
+    }
+}
+
+#[test]
+fn catalog_runner_fields_match_legacy_for_every_role_and_switch_combination() {
+    for smart_notes_enabled in [false, true] {
+        for preset in ["head", "worker", "reader"] {
+            for compacting in [false, true] {
+                for surface in ["full", "light"] {
+                    for bits in 0..32 {
+                        for reduce in [false, true] {
+                            for overridden in [false, true] {
+                                let flags = all_flags(bits);
+                                let mut config = example_catalog_config();
+                                config.smart_notes_enabled = smart_notes_enabled;
+                                config.memory_enabled = flags.memory;
+                                config.dreamer_runnable = flags.dreamer;
+                                config.temporal_awareness = flags.temporal;
+                                config.caveman_text_compression = flags.caveman;
+                                config.language = flags.language.then(|| "tr".to_string());
+                                config.guidance_override =
+                                    overridden.then(|| "<own>&\r\n{{literal}}".to_string());
+                                let mut request = role_request(preset, compacting, surface);
+                                if !reduce {
+                                    request["params"]["exclude"] = json!(["ctx_reduce"]);
+                                }
+                                let tools = request["composition"]["providers"][0]["tools"]
+                                    .as_array_mut()
+                                    .unwrap();
+                                tools.retain(|tool| {
+                                    (reduce || tool["name"] != "ctx_reduce")
+                                        && (flags.memory || tool["name"] != "ctx_memory")
+                                });
+                                let expected_names: std::collections::BTreeSet<_> = tools
+                                    .iter()
+                                    .map(|tool| tool["name"].as_str().unwrap().to_string())
+                                    .collect();
+                                let answer =
+                                    tool_catalog::catalog_answer(&request, &config).unwrap();
+                                let name = if preset != "head" {
+                                    (compacting && reduce).then(|| format!("worker/{surface}"))
+                                } else if overridden {
+                                    Some("override".to_string())
+                                } else if !compacting {
+                                    Some(format!("tools_only/{surface}"))
+                                } else {
+                                    Some(format!(
+                                        "head/{}/{surface}",
+                                        if reduce { "reduce" } else { "no_reduce" }
+                                    ))
+                                };
+                                let values = BTreeMap::from([
+                                    (
+                                        "language_directive",
+                                        tool_catalog::primary_language_directive(
+                                            config.language.as_deref(),
+                                        ),
+                                    ),
+                                    (
+                                        "override",
+                                        config.guidance_override.clone().unwrap_or_default(),
+                                    ),
+                                ]);
+                                let expected = name
+                                    .map(|name| {
+                                        legacy_render(
+                                            &name,
+                                            &TextFlags {
+                                                dreamer: flags.dreamer && smart_notes_enabled,
+                                                ..flags
+                                            },
+                                            &values,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                let text = &answer["system_text"];
+                                assert_eq!(text["text"], expected, "{request}, switches={bits}");
+                                assert_eq!(text["item_digest"], sha256_hex(expected.as_bytes()));
+                                assert_eq!(text["tool_names"], json!(expected_names));
+                                assert_eq!(
+                                    text["composition_digest"],
+                                    json!(sha256_hex(
+                                        &serde_jcs::to_vec(&request["composition"]).unwrap()
+                                    ))
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn frozen_legacy_sources_keep_the_original_text_revision() {
+    let definition = tool_catalog::definition();
+    let before = json!({
+        "texts": legacy_texts(),
+        "descriptions": definition.descriptions,
+        "parameters": definition.parameter_descriptions,
+        "language_names": definition.language_names,
+    });
+    assert_eq!(
+        sha256_hex(&serde_jcs::to_vec(&before).unwrap()),
+        "bf069036fcd1b7f4006c1f119fd9e44797ab777b40bfb10cbb4be5735dcefd90"
+    );
+}
+
+fn legacy_texts() -> &'static BTreeMap<String, String> {
+    static TEXTS: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    TEXTS.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../testdata/tool-catalog-legacy-texts.json"
+        ))
+        .unwrap()
+    })
+}
+
+// Preserve the former renderer against frozen sources, not a conversion of the
+// new templates: a migration error must not change both sides of the comparison.
+fn legacy_render(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>) -> String {
+    let template = &legacy_texts()[name];
+    let mut out = String::new();
+    let mut open: Vec<(&str, bool)> = Vec::new();
+    let mut rest = template.as_str();
+    loop {
+        let keeping = open.iter().all(|(_, keep)| *keep);
+        let Some(start) = rest.find("{{") else {
+            if keeping {
+                out.push_str(rest);
+            }
+            break;
+        };
+        if keeping {
+            out.push_str(&rest[..start]);
+        }
+        let after = &rest[start + 2..];
+        let end = after.find("}}").expect("terminated legacy tag");
+        let tag = &after[..end];
+        rest = &after[end + 2..];
+        let mut chars = tag.chars();
+        match chars.next() {
+            Some(sigil @ ('#' | '^')) => {
+                let flag = chars.as_str();
+                let on = match flag {
+                    "memory" => flags.memory,
+                    "dreamer" => flags.dreamer,
+                    "temporal" => flags.temporal,
+                    "caveman" => flags.caveman,
+                    "language" => flags.language,
+                    _ => panic!("unknown legacy flag {flag}"),
+                };
+                open.push((flag, if sigil == '#' { on } else { !on }));
+            }
+            Some('/') => assert_eq!(open.pop().unwrap().0, chars.as_str()),
+            Some('$') => {
+                let value = &values[chars.as_str()];
+                if keeping {
+                    out.push_str(value);
+                }
+            }
+            _ if !tag.is_empty()
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_' || b == b'/') =>
+            {
+                if keeping {
+                    out.push_str(&legacy_render(tag, flags, values));
+                }
+            }
+            _ => panic!("malformed legacy tag {tag}"),
+        }
+    }
+    assert!(open.is_empty());
+    out
+}
+
+#[test]
 fn every_capability_tag_passes_the_roles_check() {
     let mut tags: Vec<String> = tool_catalog::definition()
         .tools
@@ -711,7 +922,7 @@ fn model_keys_are_searched_in_the_plugins_order() {
         ]
     );
     // A Pi-native provider is searched canonical-first, then as sent, then in
-    // OMP's spelling, which here is the same as Pi's.
+    // Oh My Pi's provider spelling, which here is the same as Pi's.
     assert_eq!(
         tool_catalog::model_key_candidates("openai-codex/gpt-5"),
         [
@@ -818,7 +1029,7 @@ fn a_user_override_replaces_head_text_with_or_without_compaction() {
     // The config-driven clauses (here the temporal-marker line) still follow
     // the user's section.
     assert!(primary.contains("<!-- +Xm -->"), "{primary}");
-    // Primary prose is user-owned with or without compaction; bounded children ignore it.
+    // The user override affects head text with or without compaction; workers ignore it.
     let plain = example_catalog_config();
     assert!(text_for("head", false, &config).starts_with("My own section."));
     assert_eq!(
