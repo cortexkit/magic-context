@@ -48,7 +48,7 @@ subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece
 
 
 # The compaction contract (compaction-provider/v2, compaction-runner/v1).
-cortexkit-role-compaction = "=0.4.2"
+cortexkit-role-compaction = "=0.4.3"
 # Applies views and checks them against the provider rules; runners use the
 # same library, so both sides render a view the same way.
 cortexkit-compaction-view = "=0.4.0"

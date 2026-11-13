@@ -1,0 +1,30 @@
+{
+  "method": "compaction.notice",
+  "params": {
+    "conditions": {
+      "context_window": 32768,
+      "last_prompt_tokens": 1024,
+      "model": {
+        "model": "example-model",
+        "provider": "example-provider",
+        "variant": "standard"
+      },
+      "output_reserve": 4096,
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      }
+    },
+    "events": [
+      {
+        "event": "view_refused",
+        "refusal": {
+          "code": "render_failed",
+          "mid": "message-b"
+        },
+        "version": 7
+      }
+    ],
+    "seq": 5
+  }
+}
