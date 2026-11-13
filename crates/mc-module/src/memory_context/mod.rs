@@ -159,3 +159,39 @@ fn decode_reply<T: ContextReply>(bytes: &[u8]) -> ContextAnswer<T> {
         _ => ContextAnswer::NotAnswering,
     }
 }
+
+#[cfg(test)]
+mod entorhinal_sample_tests {
+    use super::{decode_reply, ContextAnswer, SessionContext};
+
+    /// Entorhinal's own `context.session` replies for an agent pinned to an
+    /// automation flow, copied from its `test-vectors/catalog-packs-v1/`
+    /// (commit `a3238dd`). Entorhinal releases a reply shape only after
+    /// every reader decodes it, so ck-mc's strict reader must take both
+    /// replies whole; the stale one carries `stale_since_ms` on its pin.
+    #[test]
+    fn entorhinal_flow_pin_context_replies_are_answers() {
+        let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../testdata/entorhinal-context-samples/context.json"
+        ))
+        .unwrap();
+        let cases: Vec<&str> = samples
+            .iter()
+            .map(|sample| sample["case"].as_str().unwrap())
+            .collect();
+        assert_eq!(cases, ["fresh-flow-context", "stale-flow-context"]);
+        for sample in &samples {
+            let reply = sample["reply_bytes"].as_str().unwrap();
+            let answer = decode_reply::<SessionContext>(reply.as_bytes());
+            assert!(
+                matches!(answer, ContextAnswer::Answer(_)),
+                "{} was not accepted: {answer:?}",
+                sample["case"]
+            );
+        }
+        assert!(samples[1]["reply_bytes"]
+            .as_str()
+            .unwrap()
+            .contains("stale_since_ms"));
+    }
+}

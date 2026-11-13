@@ -167,9 +167,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-agent-identity"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b8e264072301bd39c01c066b7c2b8c1cffd11981ef20aeb1861b3fb3549417e"
+checksum = "fa1838c7c0e6d3d5a7c68d515f34b2a7efa5c909e8d3514a3600f84412145722"
 dependencies = [
  "cortexkit-project-identity",
  "serde",
