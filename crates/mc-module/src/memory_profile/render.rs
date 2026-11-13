@@ -1,5 +1,6 @@
-//! The prompt renderer: one prompt document of a resolved memory profile,
-//! rendered as the text a model is sent (schema document §4.10).
+//! The prompt renderer: one prompt document of a resolved memory profile
+//! (`prompts` in an `mc/memory-profile@1` body), rendered as the text a model
+//! is sent.
 //!
 //! A document is a list of sections. Each section is a profile file or an MC
 //! frame; a section with `requires` renders only when the resolved profile has
@@ -19,8 +20,9 @@
 //! Files and frames end with one newline that is not part of their text.
 //!
 //! Nothing sends rendered text yet: the summarizer still takes its prompts from
-//! the module's copies of the plugin's texts, and moves onto this renderer with
-//! a recorded replay. The golden test in `render_tests.rs` holds the bundled
+//! the module's copies of the plugin's texts. It moves onto this renderer only
+//! after real summarizer chunks have been run with both texts side by side and
+//! the replies read. The golden test in `render_tests.rs` holds the bundled
 //! coding profile's rendering to today's texts.
 
 use serde_json::Value;

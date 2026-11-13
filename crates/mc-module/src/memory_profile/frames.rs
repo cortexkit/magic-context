@@ -1,5 +1,6 @@
 //! Magic Context's own prompt texts, the MC frames: output contracts, input
-//! renderings and the other texts no profile may supply (schema document §6).
+//! renderings and the other texts the `mc/memory-profile@1` schema keeps out of
+//! profiles, so that no profile can change what the module's parsers read.
 //! A profile places one with a section `{ "mc": name }` or a line that is
 //! exactly `⟦mc:name⟧`. Each text lives in `crates/mc-module/frames/<name>.md`
 //! and ends with one newline that is not part of the text.
