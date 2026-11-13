@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::validate::{ChunkLine, HistorianChunk, MessageRange};
 
-const MAX_COMMITS_PER_BLOCK: usize = 5;
+pub(super) const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
 
 /// What the summarizer is sent, and what its reply is checked against.

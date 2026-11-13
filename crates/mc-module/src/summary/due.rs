@@ -414,7 +414,9 @@ impl Window {
             let block = self.blocks.last_mut().expect("visible block");
             block.high = i + 1;
             for hash in &self.facts[i].commits {
-                if block.commits.len() < 5 && !block.commits.iter().any(|(_, old)| old == hash) {
+                if block.commits.len() < super::chunk::MAX_COMMITS_PER_BLOCK
+                    && !block.commits.iter().any(|(_, old)| old == hash)
+                {
                     block.commits.push((i, hash.clone()));
                 }
             }
@@ -454,7 +456,7 @@ impl Window {
         let mut boundary = entries[i].ordinal;
         let weight = self.prefix(i + 1, |fact| fact.raw) - self.prefix(i, |fact| fact.raw);
         if total - self.prefix(i, |fact| fact.raw) >= tail
-            && weight > (2 * tail).max(64_000)
+            && super::trigger::too_large_to_keep_raw(weight, tail)
             && i + 1 < entries.len()
         {
             boundary += 1;
@@ -468,9 +470,11 @@ impl Window {
             let end = entries.partition_point(|entry| entry.ordinal < boundary);
             let extra = self.prefix(end, |fact| fact.raw) - self.prefix(snap, |fact| fact.raw);
             let huge = self.facts[snap].prompt == Some(snap)
-                && self.prefix(snap + 1, |fact| fact.raw) - self.prefix(snap, |fact| fact.raw)
-                    > (2 * tail).max(64_000);
-            if extra <= ((1.5 * tail as f64).round() as u64).min(48_000) && !huge {
+                && super::trigger::too_large_to_keep_raw(
+                    self.prefix(snap + 1, |fact| fact.raw) - self.prefix(snap, |fact| fact.raw),
+                    tail,
+                );
+            if extra <= super::trigger::snap_allowance(tail) && !huge {
                 boundary = entries[snap].ordinal;
             }
         }
@@ -480,7 +484,9 @@ impl Window {
             }
         }
         let high = entries.partition_point(|entry| entry.ordinal < boundary);
-        if self.prefix(high, |fact| fact.raw) - self.prefix(low, |fact| fact.raw) <= 256 {
+        if self.prefix(high, |fact| fact.raw) - self.prefix(low, |fact| fact.raw)
+            <= super::trigger::HYSTERESIS_TOKENS
+        {
             return from;
         }
         let start = self.prefix(low, |fact| fact.removed);

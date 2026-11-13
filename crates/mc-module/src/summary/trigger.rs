@@ -33,7 +33,7 @@ const RESERVED_HEADROOM_MIN: u64 = 1_000;
 const RESERVED_HEADROOM_RATIO: f64 = 0.02;
 /// A boundary that would leave this few tokens to summarize stays put, so a
 /// one-message change in size never moves it.
-const HYSTERESIS_TOKENS: u64 = 256;
+pub(super) const HYSTERESIS_TOKENS: u64 = 256;
 
 /// The size-based trigger's basis: 5% of the usable window, clamped.
 pub fn trigger_budget(context_window: u64, threshold_percentage: f64) -> u64 {
@@ -124,9 +124,7 @@ pub fn tail_start(
         if total >= tail_tokens {
             // One huge message alone over the tail stays summarizable,
             // or nothing before it could ever be read.
-            if weight(entry) > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS)
-                && entry.ordinal < newest.ordinal
-            {
+            if too_large_to_keep_raw(weight(entry), tail_tokens) && entry.ordinal < newest.ordinal {
                 boundary += 1;
             }
             break;
@@ -186,10 +184,9 @@ fn semantic_snap(
         .filter(|entry| entry.ordinal >= snapped.ordinal && entry.ordinal < boundary)
         .map(weight)
         .sum();
-    let allowed = ((1.5 * tail_tokens as f64).round() as u64).min(SNAP_MAX_EXTRA_TOKENS);
-    let huge_prompt = is_meaningful_user(snapped)
-        && weight(snapped) > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS);
-    if extra > allowed || huge_prompt {
+    let huge_prompt =
+        is_meaningful_user(snapped) && too_large_to_keep_raw(weight(snapped), tail_tokens);
+    if extra > snap_allowance(tail_tokens) || huge_prompt {
         boundary
     } else {
         snapped.ordinal
@@ -200,6 +197,18 @@ fn semantic_snap(
 const SNAP_MAX_EXTRA_TOKENS: u64 = 48_000;
 /// A message larger than `max(2 × tail, this)` is too large to keep raw.
 const HUGE_MESSAGE_MIN_TOKENS: u64 = 64_000;
+
+/// How many extra tokens a semantic snap may keep raw for this tail:
+/// `min(1.5 × tail, 48,000)`. The cached due-check in `due.rs` uses the same
+/// rule, so both stay in step when it is retuned.
+pub(super) fn snap_allowance(tail_tokens: u64) -> u64 {
+    ((1.5 * tail_tokens as f64).round() as u64).min(SNAP_MAX_EXTRA_TOKENS)
+}
+
+/// Whether one message is too large to keep raw for this tail.
+pub(super) fn too_large_to_keep_raw(weight: u64, tail_tokens: u64) -> bool {
+    weight > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS)
+}
 
 /// What decided a run, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
