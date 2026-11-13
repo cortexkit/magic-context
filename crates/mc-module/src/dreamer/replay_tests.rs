@@ -11,11 +11,15 @@
 //! - [`classify_requests`] builds a store from a `sqlite3 -json` export of
 //!   one project's `memories` rows, taken from a store at the plugin's last
 //!   schema: the rows go in unchanged and the module's own migrations bring
-//!   the store to the schema this build reads. It then marks an evenly
-//!   spread sample of the project's classified live memories unclassified,
-//!   so the run has work, and writes `$OUT/store.db`, `$OUT/sample.json`
-//!   (each sampled memory's values before the replay, which the plugin's
-//!   0.49.x dreamer gave it when it last classified the memory),
+//!   the store to the schema this build reads. It then picks an evenly
+//!   spread sample of the project's classified live memories and resets each
+//!   to what a newly written memory holds: unclassified, with the
+//!   importance, scope, shareability and safety-critical mark the module's
+//!   memory writer gives a new memory. A real run only ever classifies
+//!   memories that were never classified, so this is what the model is shown.
+//!   It writes `$OUT/store.db`, `$OUT/sample.json` (each sampled memory's
+//!   values before the reset, which the plugin's 0.49.x dreamer gave it when
+//!   it last classified the memory, and the values it was reset to),
 //!   one `$OUT/batch-<n>/classify.request.json` per batch, and
 //!   `$OUT/manifest.json`.
 //! - [`classify_apply`] copies `$OUT/store.db` to `$OUT/applied.db`, applies
@@ -34,7 +38,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use cortexkit_role_compaction::setup::ModelRef;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -44,9 +48,13 @@ use super::tasks::classify::{
     live_memories, parse_manifest, plan, Classification, Classify, Plan, BATCH_SIZE, KIND,
 };
 use crate::context_db::{live_schema_version, ContextDb};
-use crate::context_migrations::{upgrade, PLUGIN_SCHEMA_VERSION, SCHEMA_VERSION};
+use crate::context_migrations::{
+    frozen_category_id, upgrade, PLUGIN_SCHEMA_VERSION, SCHEMA_VERSION,
+};
 use crate::count::Counter;
+use crate::memory_levels::NewRow;
 use crate::memory_profile::{prompt_profile, Profile};
+use crate::memory_writes::insert_memory;
 use crate::routing::DREAM_OUTPUT_TOKENS;
 use crate::summary::fit::Window;
 
@@ -311,6 +319,38 @@ fn read_fields(db: &ContextDb, ids: &[i64]) -> HashMap<i64, Fields> {
     })
 }
 
+/// The classification fields a newly written project memory holds. A probe
+/// memory is written through the module's own writer, as the summarizer's
+/// publish step writes a new fact (no importance of its own, the historian
+/// as source), its fields are read, and the transaction is rolled back, so
+/// the reset follows the writer and the table's defaults wherever they go.
+fn new_memory_fields(db: &ContextDb, project: &str) -> Fields {
+    db.with_connection(|conn| {
+        let tx = conn.transaction().expect("probe transaction");
+        let tag = "PROJECT_RULES";
+        let row = NewRow {
+            level: "project".into(),
+            owner_id: project.to_owned(),
+            category_id: frozen_category_id(tag).to_owned(),
+            origin_profile: None,
+            source_ordinals_json: None,
+        };
+        let memory = insert_memory(
+            &tx,
+            &row,
+            project,
+            tag,
+            "A probe written only to read what a new memory holds; never committed.",
+            "",
+            "historian",
+            None,
+        )
+        .expect("writing a probe memory");
+        // Dropping the transaction without committing removes the probe.
+        Fields::read(&tx, memory.id)
+    })
+}
+
 /// Run `body` with the context the engine builds for a classify run of
 /// `project`: the bundled profile, its `swe:classify-memories` declaration,
 /// and the project as owner.
@@ -472,27 +512,40 @@ fn classify_requests() {
     let unclassified_ids: Vec<i64> = unclassified.iter().map(|memory| memory.id).collect();
     let prior = read_fields(&db, &sampled_ids);
     let prior_unclassified = read_fields(&db, &unclassified_ids);
+    let reset = new_memory_fields(&db, &project);
+    assert_eq!(
+        reset.classified_at, None,
+        "a newly written memory must be unclassified, or classify would never see it"
+    );
     db.with_connection(|conn| {
         let tx = conn.transaction()?;
         for id in &sampled_ids {
             tx.execute(
-                "UPDATE memories SET classified_at = NULL WHERE id = ?1",
-                [id],
+                "UPDATE memories SET classified_at = NULL, importance = ?2, scope = ?3, shareable = ?4,
+                        safety_critical = ?5
+                  WHERE id = ?1",
+                params![
+                    id,
+                    reset.importance,
+                    reset.scope,
+                    reset.shareable,
+                    reset.safety_critical
+                ],
             )?;
         }
         tx.commit()
     })
-    .expect("marking the sample unclassified");
-    // Only the mark moved: a changed revision would make the task's writes
-    // look stale against what it read.
+    .expect("resetting the sample to new memories");
+    // Only the classification fields moved, the revision included: a changed
+    // revision would make the task's writes look stale against what it read.
     for (id, fields) in read_fields(&db, &sampled_ids) {
         assert_eq!(
             fields,
             Fields {
-                classified_at: None,
-                ..prior[&id].clone()
+                revision: prior[&id].revision,
+                ..reset.clone()
             },
-            "memory {id} changed beyond its classified mark"
+            "memory {id} was not reset to a new memory's values"
         );
     }
 
@@ -543,6 +596,14 @@ fn classify_requests() {
         }));
     }
     let profile = prompt_profile(None).expect("the bundled profile");
+    // What every sampled memory was reset to, and what the model is shown as
+    // its current values.
+    let reset_json = json!({
+        "importance": reset.importance,
+        "scope": reset.scope,
+        "shareable": reset.shareable,
+        "safety_critical": reset.safety_critical,
+    });
     write_file(
         &out.join(MANIFEST),
         &pretty(&json!({
@@ -560,6 +621,7 @@ fn classify_requests() {
             "stage": plan.stage,
             "targets": plan.targets.len(),
             "anchors": plan.anchors,
+            "sampleResetTo": reset_json,
             "batches": listed,
         })),
     );
@@ -576,6 +638,7 @@ fn classify_requests() {
             "requested": wanted,
             "classifiedLive": classified.len(),
             "picked": "the middle of each of `requested` equal slices of the classified live memories in id order",
+            "resetTo": reset_json,
             "sampled": sampled_ids
                 .iter()
                 .map(|id| prior[id].to_json(*id, &category(*id)))
@@ -902,6 +965,12 @@ impl Report<'_> {
                  *Prior* is the memory as the export holds it, which is what the 0.49 dreamer decided; *model* is what the reply proposes; *written* is the row afterwards."
             ),
             String::new(),
+            format!(
+                "Before the run, each sampled memory was reset to what a newly written memory holds ({}, unclassified), \
+                 because a real run only classifies memories that were never classified. The model was shown those values as each memory's current ones.",
+                show_fields(&Fields::from_json(&sample["resetTo"]))
+            ),
+            String::new(),
             "Fields: importance · scope · shareable · safety-critical. `∅`: unset in the store. `–`: the reply leaves the field out, so the memory keeps its value.".into(),
             String::new(),
             "## Batches".into(),
@@ -1043,7 +1112,7 @@ impl Report<'_> {
                 "Over the {counted} of {} sampled memories whose batch was applied, against their prior values. \
                  An unset importance counts as {UNSET_IMPORTANCE}, as the task ranks it. \
                  *Written* can differ from *proposed* by the task's own rules: a safety-critical memory's importance is raised to its floor, \
-                 and shareability is only ever withdrawn.",
+                 and shareability is only ever withdrawn, never granted; since a new memory is written unshareable, a sampled memory that was shareable stays unshareable whatever the model proposes.",
                 sampled.len()
             ),
             String::new(),
@@ -1062,7 +1131,8 @@ impl Report<'_> {
             String::new(),
             format!("## Sampled memories ({})", sampled.len()),
             String::new(),
-            "Classified by the 0.49 dreamer, then marked unclassified for this run.".into(),
+            "Classified by the 0.49 dreamer, then reset to a new memory's values for this run."
+                .into(),
         ]);
         self.memory_table(&mut lines, &sampled, &in_batch);
         lines.extend([
@@ -1116,7 +1186,7 @@ impl Report<'_> {
                     let mut note = if now.revision != was.revision {
                         format!("written, revision {} → {}", was.revision, now.revision)
                     } else if now.classified_at.is_some() {
-                        "values unchanged; marked classified".to_owned()
+                        "kept the values it was sent with; marked classified".to_owned()
                     } else {
                         "not written".to_owned()
                     };
