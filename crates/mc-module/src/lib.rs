@@ -66,6 +66,8 @@ pub mod index;
 pub mod injection;
 pub mod js_text;
 pub mod lanes;
+/// Moving the 0.49 plugin's project rows to Entorhinal's project ids.
+pub(crate) mod legacy_projects;
 pub mod memory;
 pub(crate) mod memory_context;
 pub mod memory_levels;

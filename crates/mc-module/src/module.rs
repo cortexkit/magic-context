@@ -853,6 +853,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .collect()
     }
 
+    /// Move the project rows a 0.49 plugin left under its own keys to the
+    /// project ids Entorhinal assigns, in the background
+    /// ([`crate::legacy_projects`]). Without `context.db` there are none.
+    pub fn spawn_legacy_projects(&self) {
+        let Some(db) = self.inner.db.clone() else {
+            return;
+        };
+        let client = Arc::clone(&self.inner.client);
+        tokio::spawn(async move {
+            crate::legacy_projects::run(client.as_ref(), db).await;
+        });
+    }
+
     /// Append new memories' sync records to Engram in the background.
     /// Without `context.db` nothing is ever queued.
     pub fn spawn_memory_sync(&self) {

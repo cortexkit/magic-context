@@ -246,7 +246,7 @@ const KEPT_COLUMNS: &str = "id, content, normalized_hash, importance, scope, sha
 /// be unique for their owner, category and text: mapping twelve tags onto
 /// five categories makes some archived history rows repeat, and every writer
 /// looks a row up before it adds one.
-const LIVE: &str = "(status IS NULL OR status IN ('active', 'permanent'))";
+pub(crate) const LIVE: &str = "(status IS NULL OR status IN ('active', 'permanent'))";
 
 /// Rows in tables that reference `memories(id)` whose memory doesn't exist.
 /// An old store may already hold some, written while foreign keys were off,
