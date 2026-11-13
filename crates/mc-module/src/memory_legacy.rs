@@ -1,8 +1,10 @@
 //! The 0.49 history head's memory selection: the project block's budget trim
 //! (with its workspace variant) and the user profile's. The head no longer
 //! uses it ([`crate::head_memories`] chooses every level together); the
-//! selection simulation keeps it to report what a head showed before, and a
-//! test keeps the plugin's workspace vectors pinned against it.
+//! selection simulation keeps it to report what a head showed before, and
+//! `workspace.rs` keeps a test that checks it against the selections and
+//! rendered blocks the 0.49 TypeScript plugin produced
+//! (`testdata/workspace-memory-vectors.json`).
 
 use std::cmp::Ordering;
 use std::collections::HashSet;

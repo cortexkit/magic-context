@@ -210,8 +210,8 @@ Samples: `notes-page`, `notes-page-2`, `notes-page-empty`,
 `global: true` beside `sessions`; a watch must name at least one. Its first
 notice is `resync` as before; it lists the owners it follows (`projects`,
 `workspaces`, `global`) when it has any, and a session-only watch's notice is
-unchanged. New notice kinds, each a reload hint (reread this; nothing else
-changed):
+unchanged. New notice kinds, each a reload hint: reread the owner data the
+notice names; nothing else changed:
 
 - `memories {level, owner}`: a memory of that owner was added, changed,
   archived, restored or re-ranked; for `global`, also its pending observations;

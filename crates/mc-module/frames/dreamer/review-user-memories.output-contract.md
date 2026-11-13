@@ -4,10 +4,10 @@ Return valid JSON (no markdown fencing):
 
 {
   "promote": [
-    { "content": "Clean universal observation text", "candidate_ids": [1, 3, 7] }
+    { "content": "Clean universal observation text", "category": "WORKING_STYLE", "candidate_ids": [1, 3, 7] }
   ],
   "update_existing": [
-    { "memory_id": 5, "content": "Updated text incorporating new evidence", "candidate_ids": [2] }
+    { "memory_id": 5, "content": "Updated text incorporating new evidence", "category": "PREFERENCES", "candidate_ids": [2] }
   ],
   "dismiss_existing": [
     { "memory_id": 3, "reason": "No longer supported by recent observations" }
@@ -17,6 +17,7 @@ Return valid JSON (no markdown fencing):
 
 - `promote`: new stable memories to create from candidates
 - `update_existing`: existing stable memories to rewrite with new evidence
+- `category`: the one user category tag, from the list above, that the memory belongs to. For an update, give the memory's current category, unless it is shown as `UNSORTED`: such a memory was kept from an earlier version without a category, so give the category it belongs to.
 - `dismiss_existing`: existing stable memories that are no longer valid
 - `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they will be deleted from the candidate pool
 

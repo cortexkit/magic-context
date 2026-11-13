@@ -875,6 +875,68 @@
       "rendered": [
         "<archive id=\"G\" reason=\"the module this rule is about was removed\" missing=\"src/old/module.rs\"/>"
       ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk 2026-11-13: only MC writes prompts; MC added the category field the user-profile review's rules already asked for (the 0.49 output contract had none), and shows each memory's and candidate's category in the input.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "today": [
+        "- Memory #1: \"⟦stableMemory.content⟧\""
+      ],
+      "rendered": [
+        "- Memory #1 [⟦stableMemory.category⟧]: \"⟦stableMemory.content⟧\""
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk 2026-11-13: only MC writes prompts; MC added the category field the user-profile review's rules already asked for (the 0.49 output contract had none), and shows each memory's and candidate's category in the input.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "today": [
+        "- Candidate #1 [session ⟦sid1⟧]: \"⟦candidate1.content⟧\"",
+        "- Candidate #2 [session ⟦sid2⟧]: \"⟦candidate2.content⟧\"",
+        "- Candidate #3 [session ⟦sid3⟧]: \"⟦candidate3.content⟧\""
+      ],
+      "rendered": [
+        "- Candidate #1 [session ⟦sid1⟧, proposed ⟦candidate1.category⟧]: \"⟦candidate1.content⟧\"",
+        "- Candidate #2 [session ⟦sid2⟧, proposed ⟦candidate2.category⟧]: \"⟦candidate2.content⟧\"",
+        "- Candidate #3 [session ⟦sid3⟧, proposed ⟦candidate3.category⟧]: \"⟦candidate3.content⟧\""
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk 2026-11-13: only MC writes prompts; MC added the category field the user-profile review's rules already asked for (the 0.49 output contract had none), and shows each memory's and candidate's category in the input.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "today": [
+        "    { \"content\": \"Clean universal observation text\", \"candidate_ids\": [1, 3, 7] }"
+      ],
+      "rendered": [
+        "    { \"content\": \"Clean universal observation text\", \"category\": \"WORKING_STYLE\", \"candidate_ids\": [1, 3, 7] }"
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk 2026-11-13: only MC writes prompts; MC added the category field the user-profile review's rules already asked for (the 0.49 output contract had none), and shows each memory's and candidate's category in the input.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "today": [
+        "    { \"memory_id\": 5, \"content\": \"Updated text incorporating new evidence\", \"candidate_ids\": [2] }"
+      ],
+      "rendered": [
+        "    { \"memory_id\": 5, \"content\": \"Updated text incorporating new evidence\", \"category\": \"PREFERENCES\", \"candidate_ids\": [2] }"
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk 2026-11-13: only MC writes prompts; MC added the category field the user-profile review's rules already asked for (the 0.49 output contract had none), and shows each memory's and candidate's category in the input.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "today": [],
+      "rendered": [
+        "- `category`: the one user category tag, from the list above, that the memory belongs to. For an update, give the memory's current category, unless it is shown as `UNSORTED`: such a memory was kept from an earlier version without a category, so give the category it belongs to."
+      ]
     }
   ]
 }
