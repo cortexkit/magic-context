@@ -1,10 +1,11 @@
 //! `context.db`, the store ck-mc shares with every standalone Magic Context
 //! plugin: summaries, memories, notes and the search index live there.
 //!
-//! ck-mc never migrates it. The TypeScript plugin owns the schema, and ck-mc
-//! opens a store only at exactly the version this build was compiled against,
-//! read from the plugin's own source. A store at any other version is refused
-//! by name, so a newer or older plugin can never be misread.
+//! The TypeScript plugin owned the schema up to version 105, its last. From
+//! there the module migrates the store itself ([`crate::context_migrations`]):
+//! the foreground owner brings a store at the plugin's last version up to
+//! [`SCHEMA_VERSION`] when it opens it. A store at any other version is
+//! refused by name, so a newer or older build can never be misread.
 //!
 //! A mode-3 session's rows are keyed by its host (`harness`) and the host's own
 //! session id, the same key a standalone plugin uses for that session. Writes
@@ -25,9 +26,13 @@ const STORAGE_SOURCE: &str =
 const MIGRATION_SOURCE: &str =
     include_str!("../../../packages/plugin/src/features/magic-context/migrations.ts");
 
-/// The schema version this build reads: the plugin's `LATEST_SUPPORTED_VERSION`.
-pub const SCHEMA_VERSION: u32 =
+/// The last schema version the plugin's migrations produced: its
+/// `LATEST_SUPPORTED_VERSION`, read from the plugin's source at build time.
+pub const PLUGIN_SCHEMA_VERSION: u32 =
     declared_number(STORAGE_SOURCE, "export const LATEST_SUPPORTED_VERSION = ");
+
+/// The schema version this build reads and writes.
+pub const SCHEMA_VERSION: u32 = crate::context_migrations::SCHEMA_VERSION;
 
 /// Migration versions at or above this belong to forks of the plugin and do
 /// not count toward the schema version.
@@ -36,8 +41,9 @@ const FORK_VERSION_FLOOR: u32 = declared_number(
     "export const FORK_MIGRATION_VERSION_FLOOR = ",
 );
 
-/// The fresh schema at [`SCHEMA_VERSION`], generated from the plugin's
-/// migration chain. Only stores ck-mc creates for tests use it.
+/// The fresh schema at [`PLUGIN_SCHEMA_VERSION`], generated from the plugin's
+/// migration chain. Only stores ck-mc creates for tests use it; opening one
+/// applies the module's own migrations on top.
 const FRESH_SCHEMA: &str = include_str!("../testdata/context-schema.sql");
 
 /// A numeric literal declared in TypeScript source, read at compile time so
@@ -219,8 +225,8 @@ pub(crate) fn live_schema_version(connection: &Connection) -> rusqlite::Result<i
 }
 
 impl ContextDb {
-    /// Open an existing store. Refuses a missing file (standalone plugins
-    /// create it) and any schema version but [`SCHEMA_VERSION`].
+    /// Open an existing store, bringing one at the plugin's last version up
+    /// to [`SCHEMA_VERSION`]. Refuses a missing file and any other version.
     pub fn open(path: &Path) -> Result<Self, String> {
         Self::open_writable(path, true)
     }
@@ -246,8 +252,15 @@ impl ContextDb {
         connection
             .busy_timeout(CONTEXT_BUSY_TIMEOUT)
             .map_err(|error| error.to_string())?;
-        let found = live_schema_version(&connection)
+        let mut connection = connection;
+        let mut found = live_schema_version(&connection)
             .map_err(|error| format!("context.db {}: {error}", path.display()))?;
+        // Only the foreground owner migrates; the background indexer waits
+        // for it and retries.
+        if establish_wal && found != i64::from(SCHEMA_VERSION) {
+            found = crate::context_migrations::upgrade(&mut connection, found)
+                .map_err(|error| format!("context.db {}: {error}", path.display()))?;
+        }
         if found != i64::from(SCHEMA_VERSION) {
             return Err(format!(
                 "context.db {} is at schema version {found}; this ck-mc reads version {SCHEMA_VERSION}",

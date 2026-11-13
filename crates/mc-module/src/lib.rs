@@ -55,6 +55,7 @@ pub mod client;
 pub mod config;
 pub mod content_language;
 pub mod context_db;
+pub(crate) mod context_migrations;
 pub mod context_read;
 pub mod count;
 pub mod decay;
