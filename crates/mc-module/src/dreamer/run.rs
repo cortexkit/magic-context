@@ -66,6 +66,10 @@ pub struct TaskRun<'a> {
 
 /// A run that got a reply the task accepted.
 #[derive(Clone, Debug)]
+#[expect(
+    dead_code,
+    reason = "the task kinds that read a reply are not registered yet"
+)]
 pub struct TaskReply {
     pub text: String,
     /// The prompt the reply answers, as sent.
@@ -237,4 +241,4 @@ pub fn child_session(run_id: &str, attempt: usize, retry: usize) -> String {
 
 #[cfg(test)]
 #[path = "run_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -108,6 +108,9 @@ struct Inner<C> {
     /// Projects with recent activity: folder and the last Setup or notice
     /// time, keyed by project id. Upkeep runs for these.
     active_projects: Mutex<HashMap<String, (String, i64)>>,
+    /// The dreamer, which runs scheduled memory tasks for the projects this
+    /// process has sessions of. `None` without `context.db`.
+    dreamer: Option<Arc<crate::dreamer::engine::Engine>>,
 }
 
 enum Job {
@@ -224,6 +227,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let search = db
             .as_ref()
             .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
+        let dreamer = db.as_ref().map(|_| {
+            Arc::new(crate::dreamer::engine::Engine::new(
+                format!("ck-mc:{}", std::process::id()),
+                crate::dreamer::tasks(),
+            ))
+        });
         Self {
             inner: Arc::new(Inner {
                 app_read,
@@ -241,6 +250,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 agent_data: crate::agent_data::Service::new(agent_data),
                 session_projects,
                 active_projects: Mutex::new(HashMap::new()),
+                dreamer,
             }),
         }
     }
@@ -768,6 +778,66 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 tokio::time::sleep(crate::upkeep::INTERVAL).await;
             }
         });
+    }
+
+    /// Run the dreamer once a minute, the first time after upkeep's quiet
+    /// period. Each round learns the projects of the sessions set up in this
+    /// process (with the memory profile a session of each resolved, or the
+    /// bundled one) and starts the tasks that are due. The person's
+    /// `dreamer.disable` stops new runs from the next round.
+    pub fn spawn_dreamer(&self) {
+        let (Some(db), Some(engine)) = (self.inner.db.clone(), self.inner.dreamer.clone()) else {
+            return;
+        };
+        engine.start(&db, now_ms());
+        let module = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::upkeep::BOOT_QUIET).await;
+            loop {
+                if let Some(settings) = module.inner.config.dreamer() {
+                    let now = now_ms();
+                    for (project, root, session) in module.projects_with_a_session() {
+                        let context = module
+                            .inner
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.memory_context(&session));
+                        match crate::memory_profile::prompt_profile(context.as_ref()) {
+                            Ok(profile) => engine.see_project(&db, &project, &root, Arc::new(profile), &settings, now),
+                            Err(refusal) => tracing::warn!("ck-mc: dreamer: {project}'s memory profile can't load: {refusal:?}"),
+                        }
+                    }
+                    engine.tick(&db, &module.inner.client, &settings, now);
+                }
+                tokio::time::sleep(crate::dreamer::engine::TICK).await;
+            }
+        });
+    }
+
+    /// Each project with a session set up in this process, with its folder
+    /// and one of its sessions (the first by key, so the choice is stable).
+    fn projects_with_a_session(&self) -> Vec<(String, String, SessionRef)> {
+        let sessions = self
+            .inner
+            .session_projects
+            .lock()
+            .expect("session projects");
+        let mut projects: std::collections::BTreeMap<String, (String, SessionRef)> =
+            std::collections::BTreeMap::new();
+        for (session, project) in sessions.iter() {
+            let entry = projects
+                .entry(project.id.clone())
+                .or_insert_with(|| (project.root.clone(), session.clone()));
+            if (&session.runner, &session.harness, &session.session)
+                < (&entry.1.runner, &entry.1.harness, &entry.1.session)
+            {
+                *entry = (project.root.clone(), session.clone());
+            }
+        }
+        projects
+            .into_iter()
+            .map(|(id, (root, session))| (id, root, session))
+            .collect()
     }
 
     /// Append new memories' sync records to Engram in the background.

@@ -105,6 +105,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
+    module.spawn_dreamer();
     // An install a move started before a crash is finished in every build:
     // its sessions are refused until it is.
     module.spawn_move_recovery();

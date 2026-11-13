@@ -600,7 +600,17 @@ pub const NOT_MOVED: &[NotMoved] = &[
         install: Install::Untouched(NO_MOVED_ROWS),
     },
     NotMoved {
-        name: "dream_runs",
+        name: "dream_locks",
+        reason: "a lock a dreamer run on this machine holds",
+        install: Install::Untouched(NO_MOVED_ROWS),
+    },
+    NotMoved {
+        name: "dream_schedules",
+        reason: "this machine's dreamer schedules; a receiver schedules its own projects",
+        install: Install::Untouched(NO_MOVED_ROWS),
+    },
+    NotMoved {
+        name: "dream_task_runs",
         reason: TELEMETRY,
         install: Install::Untouched(NO_MOVED_ROWS),
     },

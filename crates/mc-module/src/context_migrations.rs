@@ -18,7 +18,7 @@ use crate::memory_writes::normalized_hash;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 106;
+pub const SCHEMA_VERSION: u32 = 107;
 
 struct Migration {
     version: u32,
@@ -31,12 +31,20 @@ struct Migration {
     up: fn(&Transaction) -> rusqlite::Result<()>,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 106,
-    description: "memory levels, owners and profile categories",
-    rebuilds_referenced_table: true,
-    up: memory_levels_106,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 106,
+        description: "memory levels, owners and profile categories",
+        rebuilds_referenced_table: true,
+        up: memory_levels_106,
+    },
+    Migration {
+        version: 107,
+        description: "the module's dreamer schedules, locks and runs",
+        rebuilds_referenced_table: false,
+        up: dreamer_107,
+    },
+];
 
 /// Apply every pending migration to a store at `found`. Returns the version
 /// the store is at afterwards. A store below [`PLUGIN_SCHEMA_VERSION`] or
@@ -505,3 +513,82 @@ fn move_observations(tx: &Transaction) -> rusqlite::Result<()> {
 #[cfg(test)]
 #[path = "context_migrations_tests.rs"]
 mod tests;
+
+/// The module's dreamer state, replacing the 0.49 plugin's.
+///
+/// The plugin kept one queue and one lease per project, and a run record for
+/// a whole dream (`dream_queue`, `dream_state`, `dream_runs`), with each
+/// task's schedule in `task_schedule_state`. The module schedules each task
+/// per owner (a project now; a workspace, the person or an agent later),
+/// locks an owner while one of its tasks writes, and records each task run on
+/// its own. The plugin's run history is dropped, not carried: its rows
+/// describe a different engine and no reader of the new tables can use them.
+/// The plugin's per-task resume points (verify's last checked commit, the
+/// retrospective's watermark) are dropped too, so those tasks start over once.
+/// `retrospective_processed_windows` stays: it records which conversation
+/// windows were already read, which is task data, not engine state.
+fn dreamer_107(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS dream_queue;
+         DROP TABLE IF EXISTS dream_state;
+         DROP TABLE IF EXISTS dream_runs;
+         DROP TABLE IF EXISTS task_schedule_state;
+
+         -- One row per owner and task the module has scheduled. `task` is the
+         -- profile's task id (`swe:verify`); `schedule` is the cron expression
+         -- `next_due_at` was computed from, so a changed setting is noticed.
+         -- `next_due_at` is null while the task has no schedule.
+         CREATE TABLE dream_schedules (
+           level TEXT NOT NULL,
+           owner_id TEXT NOT NULL,
+           task TEXT NOT NULL,
+           schedule TEXT NOT NULL,
+           next_due_at INTEGER,
+           last_run_at INTEGER,
+           last_status TEXT,
+           last_error TEXT,
+           failures INTEGER NOT NULL DEFAULT 0,
+           watermark_json TEXT,
+           PRIMARY KEY (level, owner_id, task)
+         );
+         CREATE INDEX idx_dream_schedules_due ON dream_schedules(next_due_at);
+
+         -- The process writing an owner's memories. A holder renews
+         -- `expires_at` while its run lasts; a lapsed row is free to take.
+         CREATE TABLE dream_locks (
+           level TEXT NOT NULL,
+           owner_id TEXT NOT NULL,
+           holder TEXT NOT NULL,
+           task TEXT NOT NULL,
+           acquired_at INTEGER NOT NULL,
+           expires_at INTEGER NOT NULL,
+           PRIMARY KEY (level, owner_id)
+         );
+
+         -- One row per task run. Memory history rows the run writes name it
+         -- in their decision key (`dream-run:<id>:...`), so a run can be undone
+         -- as one. `batches_json` holds each message's model, runner, child
+         -- session and token counts.
+         CREATE TABLE dream_task_runs (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           task TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           level TEXT NOT NULL,
+           owner_id TEXT NOT NULL,
+           profile TEXT NOT NULL,
+           started_at INTEGER NOT NULL,
+           ended_at INTEGER,
+           outcome TEXT,
+           failure_class TEXT,
+           error TEXT,
+           input_tokens INTEGER NOT NULL DEFAULT 0,
+           output_tokens INTEGER NOT NULL DEFAULT 0,
+           proposed INTEGER NOT NULL DEFAULT 0,
+           applied INTEGER NOT NULL DEFAULT 0,
+           dropped_json TEXT,
+           batches_json TEXT
+         );
+         CREATE INDEX idx_dream_task_runs_owner
+           ON dream_task_runs(level, owner_id, started_at DESC);",
+    )
+}

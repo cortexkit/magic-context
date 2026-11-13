@@ -74,6 +74,59 @@ impl Config {
             Self::Files(loader) => loader.catalog_config(project_root.map(Path::new)),
         }
     }
+
+    /// The dreamer's settings, or `None` when the person switched it off
+    /// (`dreamer.disable`). Fixed settings run it on the defaults.
+    pub fn dreamer(&self) -> Option<crate::dreamer::engine::Settings> {
+        match self {
+            Self::Fixed(_) => Some(crate::dreamer::engine::Settings::default()),
+            Self::Files(loader) => dreamer_settings(
+                loader
+                    .read(&loader.user_path)
+                    .map(|value| expand_user(value, &loader.user_path))
+                    .as_ref(),
+            ),
+        }
+    }
+}
+
+/// The dreamer's settings from the user's file, the same keys the 0.49
+/// dreamer read: `dreamer.disable`, `dreamer.maxTokens` and each task's
+/// `dreamer.tasks.<kind>.schedule`. Only the user's file is read: a
+/// project's file can't make the person's machine spend more.
+fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Settings> {
+    let dreamer = user.and_then(|user| user.get("dreamer"));
+    if dreamer
+        .and_then(|dreamer| dreamer.get("disable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let mut settings = crate::dreamer::engine::Settings::default();
+    if let Some(budget) = dreamer
+        .and_then(|dreamer| dreamer.get("maxTokens"))
+        .and_then(integer)
+        .filter(|budget| *budget > 0)
+    {
+        settings.budget_tokens = budget;
+    }
+    for (kind, task) in dreamer
+        .and_then(|dreamer| dreamer.get("tasks"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(schedule) = task.get("schedule").and_then(Value::as_str) {
+            let schedule = schedule.trim();
+            if schedule.is_empty() || crate::dreamer::cron::Cron::parse(schedule).is_some() {
+                settings.schedules.insert(kind.clone(), schedule.to_owned());
+            } else {
+                tracing::info!("ck-mc: dreamer.tasks.{kind}.schedule {schedule:?} is not a five-field cron expression; the default applies");
+            }
+        }
+    }
+    Some(settings)
 }
 
 #[derive(Default)]

@@ -131,8 +131,26 @@ fn a_plugin_store_migrates_to_the_leveled_memory_schema() {
     assert_eq!(version(&connection), i64::from(PLUGIN_SCHEMA_VERSION));
 
     let found = version(&connection);
-    assert_eq!(upgrade(&mut connection, found).unwrap(), 106);
-    assert_eq!(version(&connection), 106);
+    assert_eq!(
+        upgrade(&mut connection, found).unwrap(),
+        i64::from(SCHEMA_VERSION)
+    );
+    assert_eq!(version(&connection), i64::from(SCHEMA_VERSION));
+    // 107 replaced the plugin's dreamer tables with the module's.
+    let dreamer_tables: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table'
+                AND (name LIKE 'dream%' OR name = 'task_schedule_state') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        dreamer_tables,
+        ["dream_locks", "dream_schedules", "dream_task_runs"]
+    );
 
     let row = |id: i64| -> (String, String, String, String, Option<String>, String) {
         connection

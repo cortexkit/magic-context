@@ -7,8 +7,17 @@
 //! routing picks ([`run`]); its reply proposes changes, and nothing it
 //! proposes is written until it passes the task's own checks.
 
+pub mod cron;
+pub mod engine;
 pub mod run;
-// Nothing schedules task runs until the engine's scheduler lands on this
-// branch; the expectation fails once every item here is in use.
-#[expect(dead_code, reason = "the scheduler that runs tasks is not built yet")]
+pub mod store;
+// What a task kind reads and writes is used by the task kinds, and none is
+// registered on this branch yet; the expectation fails once one is.
+#[expect(dead_code, reason = "no task kind is registered yet")]
 pub mod task;
+
+/// Every task kind the module runs. A profile's task of any other kind is
+/// not scheduled.
+pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
+    Vec::new()
+}

@@ -17,7 +17,7 @@ use crate::routing::DREAM_DEMANDS;
 
 /// How the runner ends one run.
 #[derive(Clone)]
-enum Ends {
+pub(crate) enum Ends {
     Reply(&'static str),
     Capped,
     Error(&'static str),
@@ -27,18 +27,18 @@ enum Ends {
 /// unless `no_harness` names it; an excluded route is skipped. `refuse`
 /// answers every select with that refusal instead. The runner ends each run
 /// with the next of `ends`.
-struct Client {
-    routes: Vec<&'static str>,
-    no_harness: Vec<&'static str>,
-    refuse: Option<routing::RouteError>,
-    ends: Mutex<VecDeque<Ends>>,
-    selects: Mutex<Vec<SelectRequest>>,
-    reports: Mutex<Vec<String>>,
-    sends: Mutex<Vec<(Child, SendRequest)>>,
+pub(crate) struct Client {
+    pub(crate) routes: Vec<&'static str>,
+    pub(crate) no_harness: Vec<&'static str>,
+    pub(crate) refuse: Option<routing::RouteError>,
+    pub(crate) ends: Mutex<VecDeque<Ends>>,
+    pub(crate) selects: Mutex<Vec<SelectRequest>>,
+    pub(crate) reports: Mutex<Vec<String>>,
+    pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
 }
 
 impl Client {
-    fn new(routes: &[&'static str], ends: &[Ends]) -> Self {
+    pub(crate) fn new(routes: &[&'static str], ends: &[Ends]) -> Self {
         Self {
             routes: routes.to_vec(),
             no_harness: Vec::new(),
@@ -50,7 +50,7 @@ impl Client {
         }
     }
 
-    fn children(&self) -> Vec<String> {
+    pub(crate) fn children(&self) -> Vec<String> {
         let sends = self.sends.lock().unwrap();
         sends
             .iter()
