@@ -38,6 +38,9 @@ fn no_command_answers(answers: &Arc<Vec<CommandAnswer>>) -> bool {
 pub struct Durable {
     #[serde(default, skip_serializing_if = "no_command_answers")]
     pub command_answers: Arc<Vec<CommandAnswer>>,
+    /// Anchored manual summary boundary, retained until summaries cover it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapup_target: Option<crate::session::wrapup::Target>,
     #[serde(default)]
     pub app: crate::app_read::SessionState,
     /// Compaction features and conditions, for a tool arriving before Setup

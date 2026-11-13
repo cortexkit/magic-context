@@ -214,6 +214,7 @@ pub(crate) fn job() -> Request {
         memory_enabled: false,
         auto_promote: false,
         emergency: false,
+        force_keep_last_compartment: false,
     }
 }
 

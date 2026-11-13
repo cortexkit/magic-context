@@ -17,6 +17,17 @@ expanded status and a scheduled flush. The flush preview samples cover an
 available rebuild and the unavailable reasons `not_managed`, `nothing_to_land`,
 `queued_in_recent_tail`, `summary_running` and `thinking_hold`.
 
+`describe.json` also declares `wrapup` with the optional `messages_to_keep`
+number (a nonnegative safe integer, default 20). `wrapup-preview-available.json`
+counts four older messages and about 400 tokens to summarize, leaving 20 raw.
+`wrapup-preview-unavailable.json` covers `within_keep`, where the requested
+keep count covers all raw messages. `wrapup-run.json` records a scheduled
+anchored target, not completed summaries. The contract has no `tells_agent`
+field: wrapup tells the agent nothing and sends no session reminder. Large targets
+can take several model runs. Status shows their target and summarized ordinal.
+Summaries land on the next rebuild, or at once at the rebuild threshold;
+`flush` applies published summaries now. `ctx_expand` recovers the raw text.
+
 `queued_in_recent_tail` means every queued part is still in the protected recent
 tail and the rebuild has no other work to land. An explicit flush keeps that
 protection. Status counts only parts outside the tail in `Queued drops` and

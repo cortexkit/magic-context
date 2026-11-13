@@ -1,0 +1,35 @@
+{
+  "facts": [
+    {
+      "label": "To summarize",
+      "noun": "messages",
+      "unit": "count",
+      "value": 4.0
+    },
+    {
+      "approx": true,
+      "label": "Raw history",
+      "unit": "tokens",
+      "value": 400.0
+    },
+    {
+      "label": "Stay raw",
+      "noun": "messages",
+      "unit": "count",
+      "value": 20.0
+    },
+    {
+      "label": "Summary ready; failures pause remaining work",
+      "state": "ready"
+    },
+    {
+      "label": "Uses a model; may take several summary runs",
+      "state": "ready"
+    },
+    {
+      "label": "Raw text recoverable with ctx_expand",
+      "state": "ready"
+    }
+  ],
+  "outcome": "scheduled"
+}

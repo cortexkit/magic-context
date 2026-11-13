@@ -8,22 +8,28 @@ use std::collections::BTreeMap;
 const ANSWER_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 // A person would have to flush more than ten times an hour to fill this in a
 // day. The cap bounds each session document without retiring a live answer.
-const MAX_ANSWERS: usize = 256;
+pub(super) const MAX_ANSWERS: usize = 256;
 
-fn wall_now() -> i64 {
+pub(super) fn wall_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_millis() as i64)
 }
 
-fn outcome_unknown() -> ErrorBody {
+pub(super) fn outcome_unknown() -> ErrorBody {
     ErrorBody::new(
         "unavailable",
         "The command outcome could not be recorded; retry with the same request_id.",
     )
 }
 
-fn number(label: &str, value: u64, unit: &str, noun: Option<&str>, approx: bool) -> Fact {
+pub(super) fn number(
+    label: &str,
+    value: u64,
+    unit: &str,
+    noun: Option<&str>,
+    approx: bool,
+) -> Fact {
     let mut data = FactValue::number(value as f64);
     data.unit = Some(unit.into());
     data.noun = noun.map(str::to_owned);
@@ -46,14 +52,19 @@ struct Plan {
 }
 
 impl Session {
-    fn command_snapshot(&mut self) -> Self {
+    pub(crate) fn command_recorded(&self, request_id: &str) -> bool {
+        self.command_answers_for_save()
+            .iter()
+            .any(|answer| answer.request_id == request_id)
+    }
+    pub(super) fn command_snapshot(&mut self) -> Self {
         let validation = std::mem::take(&mut self.view_validation);
         let snapshot = self.clone();
         self.view_validation = validation;
         snapshot
     }
 
-    fn install_command_snapshot(&mut self, snapshot: Self) {
+    pub(super) fn install_command_snapshot(&mut self, snapshot: Self) {
         let validation = std::mem::take(&mut self.view_validation);
         *self = snapshot;
         self.view_validation = validation;
@@ -96,7 +107,7 @@ impl Session {
                 .collect(),
         )
     }
-    fn command_managed(&self) -> bool {
+    pub(super) fn command_managed(&self) -> bool {
         self.compacting()
             && !self.suspended
             && self.index_ready
@@ -288,6 +299,9 @@ impl Session {
                 "preview_stale"
             }));
         }
+        if request.id == "wrapup" {
+            return self.wrapup_command_run(settings, request, digest);
+        }
         let before = self.command_snapshot();
         let mut plan = self.flush_plan(settings);
         if plan.preview.version != request.preview_version {
@@ -426,6 +440,22 @@ impl Session {
                 false,
             ),
         ];
+        if let Some(target) = &self.wrapup_target {
+            page.push(number(
+                "Wrapup target",
+                target.until.saturating_sub(1),
+                "count",
+                Some("message ordinal"),
+                false,
+            ));
+            page.push(number(
+                "Wrapup through",
+                summarized.unwrap_or(0),
+                "count",
+                Some("message ordinal"),
+                false,
+            ));
+        }
         let wait = self.account_wait.as_ref().filter(|w| w.holds(wall_now));
         let (state, effect) = if self.summarizing {
             ("building", "Summaries are running")

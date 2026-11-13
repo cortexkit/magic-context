@@ -26,7 +26,35 @@ pub(crate) fn describe() -> wire::DescribeReply {
         vec!["read".into()],
         None,
     );
-    wire::DescribeReply::new(vec![flush, status]).expect("static command declarations")
+    let mut keep = wire::Arg::new(
+        "messages_to_keep",
+        wire::ArgKind::Number,
+        "Keep the newest N messages",
+    );
+    keep.default = Some(20.into());
+    let wrapup = Command::new(
+        "wrapup",
+        "Summarize history",
+        "Summarizes older history with a model, keeping the newest N raw messages (default 20). ctx_expand recovers raw text; summaries appear on the next rebuild.",
+        wire::SubjectKind::Session,
+        vec![keep],
+        vec!["reversible".into(), "context_change".into()],
+        Some(wire::Run::new()),
+    );
+    wire::DescribeReply::new(vec![flush, status, wrapup]).expect("static command declarations")
+}
+
+pub(crate) fn messages_to_keep(args: &serde_json::Map<String, Value>) -> Result<u64, ErrorBody> {
+    let n = match args.get("messages_to_keep") {
+        None => 20.0,
+        Some(value) => value
+            .as_f64()
+            .ok_or_else(|| invalid("args.messages_to_keep"))?,
+    };
+    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 9_007_199_254_740_991.0 {
+        return Err(invalid("args.messages_to_keep"));
+    }
+    Ok(n as u64)
 }
 
 pub(crate) fn invalid(field: &str) -> ErrorBody {
@@ -134,12 +162,18 @@ pub(crate) fn decode(body: &[u8]) -> Result<Option<Request>, ErrorBody> {
             let request: ModulePreviewRequest =
                 serde_json::from_value(envelope.params).map_err(|_| invalid("params"))?;
             request.check(command).map_err(|e| e.refusal())?;
+            if request.id == "wrapup" {
+                messages_to_keep(&request.args)?;
+            }
             Ok(Some(Request::Preview(request)))
         }
         "commands.run" => {
             let request: ModuleRunRequest =
                 serde_json::from_value(envelope.params).map_err(|_| invalid("params"))?;
             request.check(command).map_err(|e| e.refusal())?;
+            if request.id == "wrapup" {
+                messages_to_keep(&request.args)?;
+            }
             Ok(Some(Request::Run(request)))
         }
         _ => Err(ErrorBody::new("unknown_method", "Unknown command method.")),
@@ -155,6 +189,9 @@ pub(crate) async fn execute<C: crate::client::RunnerClient>(
     match request {
         Request::Preview(request) => {
             let preview = match session {
+                Some(session) if request.id == "wrapup" => {
+                    session.wrapup_preview(settings, messages_to_keep(&request.args)?)
+                }
                 Some(session) => session.command_preview(settings, &request.id),
                 None => unavailable(),
             };
