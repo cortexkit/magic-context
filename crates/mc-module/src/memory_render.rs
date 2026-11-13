@@ -27,8 +27,8 @@
 //! A pass counts only the rows it adds itself against its slice: a critical
 //! rule shown in the first pass doesn't use up its level's minimum.
 //!
-//! User-profile lines that have no importance score yet (the dreamer scores
-//! them later) all rank the same; among them the oldest goes first, as the
+//! User-profile lines that have no importance score yet (Magic Context's
+//! background maintenance scores them later) all rank the same; among them the oldest goes first, as the
 //! profile showed them before levels existed. The oldest is the lowest id:
 //! the store moved the profile's lines in the order they were learned.
 //!
