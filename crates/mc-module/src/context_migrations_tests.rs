@@ -671,3 +671,201 @@ fn migration_106_is_invisible_on_a_real_store() {
     // Every reference that resolved before still does.
     assert_eq!(dangling(&conn), dangling_before);
 }
+
+/// The 0.49 line's last schema, which a store the released plugin left
+/// behind is at.
+const PLUGIN_95_SCHEMA: &str = include_str!("../testdata/context-schema-95.sql");
+
+/// The projects the removed Rust transform mode still guards in
+/// [`guarded_store`]: one it managed and one it was repairing.
+const GUARDED: [&str; 2] = ["pj-held", "pj-repairing"];
+
+/// The guard tables and triggers the removed Rust transform mode left, as
+/// `type name`.
+fn guard_objects(conn: &Connection) -> Vec<String> {
+    conn.prepare(
+        "SELECT type || ' ' || name FROM sqlite_master
+          WHERE name IN ('authority_managed', 'authority_repair_pending', 'authority_capture_bounds')
+             OR name LIKE '%authority_guard%'
+          ORDER BY name",
+    )
+    .unwrap()
+    .query_map([], |row| row.get(0))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// A store at `schema` in which the removed Rust transform mode still
+/// guards both [`GUARDED`] projects, each of which holds a note and a
+/// memory from before. The guards are checked to be live: neither project
+/// takes a note or a memory write.
+fn guarded_store(path: &std::path::Path, schema: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(&schema.replace(":applied_at", "0"))
+        .unwrap();
+    for project in GUARDED {
+        conn.execute(
+            "INSERT INTO notes(content, project_path, created_at, updated_at)
+             VALUES ('old note', ?1, 1, 1)",
+            [project],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories(project_path, category, content, normalized_hash, importance,
+                                  first_seen_at, created_at, updated_at, last_seen_at)
+             VALUES (?1, 'ARCHITECTURE', 'old memory', ?2, 50, 1, 1, 1, 1)",
+            params![project, normalized_hash("old memory")],
+        )
+        .unwrap();
+    }
+    conn.execute_batch(
+        "INSERT INTO authority_managed(project_path, context_store_uuid, marked_at)
+             VALUES ('pj-held', 'store', 1);
+         INSERT INTO authority_repair_pending(project_path, started_at) VALUES ('pj-repairing', 1);
+         INSERT INTO authority_capture_bounds(project_path, domain, max_rowid, data_version, captured_at)
+             VALUES ('pj-held', 'notes', 1, 1, 1);",
+    )
+    .unwrap();
+    assert_eq!(guard_objects(&conn).len(), 9, "{:?}", guard_objects(&conn));
+    for project in GUARDED {
+        let note = conn
+            .execute(
+                "INSERT INTO notes(content, project_path, created_at, updated_at)
+                 VALUES ('refused', ?1, 2, 2)",
+                [project],
+            )
+            .unwrap_err();
+        assert!(
+            note.to_string().contains("managed by the Rust module"),
+            "{note}"
+        );
+        let memory = conn
+            .execute(
+                "UPDATE memories SET content = 'refused' WHERE project_path = ?1",
+                [project],
+            )
+            .unwrap_err();
+        assert!(
+            memory.to_string().contains("managed by the Rust module"),
+            "{memory}"
+        );
+    }
+}
+
+/// After the upgrade the guards are gone and both projects take note and
+/// memory writes again: a new note, a new memory, and an edit and a delete
+/// of each.
+fn guards_are_gone_and_writes_succeed(path: &std::path::Path) {
+    let db = crate::context_db::ContextDb::open(path).unwrap();
+    for project in GUARDED {
+        let scope = crate::context_db::NoteScope {
+            harness: "pi".into(),
+            session: "ses_1".into(),
+            project: Some(project.into()),
+        };
+        db.add_session_note(&scope, "new note", None, 3).unwrap();
+    }
+    db.with_connection(|conn| {
+        assert_eq!(version(conn), i64::from(SCHEMA_VERSION));
+        assert_eq!(guard_objects(conn), Vec::<String>::new());
+        // The flag table stays: the summary-history triggers still read it.
+        let kept: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE name IN ('context_privilege_state', 'compartment_history_au') ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(kept, ["compartment_history_au", "context_privilege_state"]);
+
+        let tx = conn.transaction().unwrap();
+        for project in GUARDED {
+            let row = crate::memory_levels::NewRow {
+                level: "project".into(),
+                owner_id: project.into(),
+                category_id: "swe:architecture".into(),
+                origin_profile: None,
+                source_ordinals_json: None,
+            };
+            crate::memory_writes::insert_memory(
+                &tx,
+                &row,
+                project,
+                "ARCHITECTURE",
+                "new memory",
+                "ses_1",
+                "agent",
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                tx.execute(
+                    "UPDATE notes SET content = content || ' edited' WHERE project_path = ?1",
+                    [project],
+                )
+                .unwrap(),
+                2,
+                "{project}"
+            );
+            assert_eq!(
+                tx.execute(
+                    "DELETE FROM notes WHERE project_path = ?1 AND content = 'old note edited'",
+                    [project],
+                )
+                .unwrap(),
+                1,
+                "{project}"
+            );
+            assert_eq!(
+                tx.execute(
+                    "UPDATE memories SET content = content || ' edited' WHERE owner_id = ?1",
+                    [project],
+                )
+                .unwrap(),
+                2,
+                "{project}"
+            );
+            assert_eq!(
+                tx.execute(
+                    "DELETE FROM memories WHERE owner_id = ?1 AND content = 'old memory edited'",
+                    [project],
+                )
+                .unwrap(),
+                1,
+                "{project}"
+            );
+        }
+        tx.commit().unwrap();
+    });
+}
+
+/// A store the released 0.49 plugin left at 95, with projects the removed
+/// Rust transform mode still guards, takes their note and memory writes
+/// after the upgrade.
+#[test]
+fn a_0_49_store_with_guarded_projects_takes_their_writes_after_the_upgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("context.db");
+    guarded_store(&path, PLUGIN_95_SCHEMA);
+    guards_are_gone_and_writes_succeed(&path);
+}
+
+/// The same from the plugin's last version, 105.
+#[test]
+fn a_105_store_with_guarded_projects_takes_their_writes_after_the_upgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("context.db");
+    guarded_store(&path, PLUGIN_SCHEMA);
+    guards_are_gone_and_writes_succeed(&path);
+}
+
+#[test]
+fn a_new_store_has_no_write_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::context_db::ContextDb::create(&dir.path().join("context.db")).unwrap();
+    db.with_connection(|conn| assert_eq!(guard_objects(conn), Vec::<String>::new()));
+}

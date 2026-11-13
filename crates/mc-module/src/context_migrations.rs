@@ -270,17 +270,59 @@ fn dangling_memory_references(tx: &Transaction) -> rusqlite::Result<i64> {
     Ok(dangling)
 }
 
-fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
-    let dangling_before = dangling_memory_references(tx)?;
-    // The `memories_authority_guard_*` triggers blocked plugin writes to
-    // projects an older ck-mc build had taken over; nothing takes projects
-    // over any more, so they go. The search triggers and index are rebuilt
-    // for the new table below.
+/// Remove the write guards the 0.49 Rust transform mode left in the store.
+/// That mode recorded each project it took over in `authority_managed` (or
+/// `authority_repair_pending` while it repaired one), and the
+/// `memories_authority_guard_*` and `notes_authority_guard_*` triggers
+/// aborted every memory or note write for such a project unless
+/// `context_privilege_state.enabled` was 1. The mode is gone and nothing
+/// sets that flag, so a project it never released would refuse those writes
+/// for good. The triggers go, then the mode's bookkeeping tables, including
+/// `authority_capture_bounds`. `context_privilege_state` stays: the
+/// `compartment_history_versions` triggers still read it.
+fn drop_write_guards(tx: &Transaction) -> rusqlite::Result<()> {
+    let mut sources = Vec::new();
+    for table in ["authority_managed", "authority_repair_pending"] {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists {
+            sources.push(format!("SELECT project_path FROM {table}"));
+        }
+    }
+    let guarded: i64 = if sources.is_empty() {
+        0
+    } else {
+        tx.query_row(
+            &format!("SELECT COUNT(*) FROM ({})", sources.join(" UNION ")),
+            [],
+            |row| row.get(0),
+        )?
+    };
+    tracing::info!(
+        "ck-mc: context.db migration 106 removes the removed Rust transform mode's write guards; {guarded} projects were still guarded"
+    );
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS memories_authority_guard_insert;
          DROP TRIGGER IF EXISTS memories_authority_guard_update;
          DROP TRIGGER IF EXISTS memories_authority_guard_delete;
-         DROP TRIGGER IF EXISTS memories_ai;
+         DROP TRIGGER IF EXISTS notes_authority_guard_insert;
+         DROP TRIGGER IF EXISTS notes_authority_guard_update;
+         DROP TRIGGER IF EXISTS notes_authority_guard_delete;
+         DROP TABLE IF EXISTS authority_managed;
+         DROP TABLE IF EXISTS authority_repair_pending;
+         DROP TABLE IF EXISTS authority_capture_bounds;",
+    )
+}
+
+fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
+    let dangling_before = dangling_memory_references(tx)?;
+    drop_write_guards(tx)?;
+    // The search triggers and index are rebuilt for the new table below.
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS memories_ai;
          DROP TRIGGER IF EXISTS memories_ad;
          DROP TRIGGER IF EXISTS memories_au;
          DROP TABLE IF EXISTS memories_fts;

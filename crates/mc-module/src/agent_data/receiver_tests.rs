@@ -807,60 +807,6 @@ async fn import_refuses_rows_this_store_cannot_hold_before_staging() {
 
 use crate::agent_data::moved;
 
-/// A store that still guards the session's project against writes, left
-/// by the removed Rust transform mode, refuses the install before anything
-/// is staged: no plan, no staged file and no changed row. Without the
-/// guard row the same store installs the session.
-#[tokio::test]
-async fn an_install_into_a_project_with_write_guards_is_refused_before_staging() {
-    let (a, b) = machines(&["s1"]);
-    seed(&a.conn(), "s1", PROJECT);
-    seed(&b.conn(), "b1", PROJECT);
-    a.send_out(CUT, &["s1"]).await;
-    b.conn()
-        .execute(
-            "INSERT INTO authority_managed(project_path, context_store_uuid, marked_at) VALUES (?1, 'store', 1)",
-            [PROJECT],
-        )
-        .unwrap();
-    let before = count(&b.conn(), "SELECT COUNT(*) FROM notes")
-        + count(&b.conn(), "SELECT COUNT(*) FROM compartments");
-
-    let refused = b.op("import", CUT, &["s1"]).await.unwrap_err();
-    assert_eq!(code(&refused), "participant_failed");
-    assert_eq!(
-        refused.detail.as_ref().unwrap()["reason"],
-        receiver::PROJECT_WRITES_GUARDED
-    );
-    assert!(
-        refused.message.contains("removed Rust transform mode")
-            && refused.message.contains(PROJECT),
-        "{}",
-        refused.message
-    );
-    assert!(!source::cut_folder(&b.db, CUT).exists());
-    assert_eq!(
-        count(
-            &b.conn(),
-            "SELECT COUNT(*) FROM schema_migrations_meta WHERE key LIKE 'agent_data_install:%'"
-        ),
-        0
-    );
-    assert_eq!(
-        count(&b.conn(), "SELECT COUNT(*) FROM notes")
-            + count(&b.conn(), "SELECT COUNT(*) FROM compartments"),
-        before
-    );
-    assert_eq!(b.status(CUT).await, "none");
-
-    b.conn()
-        .execute("DELETE FROM authority_managed", [])
-        .unwrap();
-    b.op("import", CUT, &["s1"]).await.unwrap();
-    b.op("activate", CUT, &["s1"]).await.unwrap();
-    assert_eq!(b.fingerprint("s1"), a.fingerprint("s1"));
-}
-
 /// An abort before `activate` deletes the staged snapshot and lifts the
 /// staged gate, and keeps the cut's record, the tombstone the session had
 /// here and its baseline.

@@ -78,20 +78,6 @@ async fn agent_data_samples_v1_receiver() {
     .await;
     assert_eq!(refusal["code"], "local_advanced");
     let c = Machine::new(&a.shared);
-    c.conn().execute("INSERT INTO authority_managed(project_path, context_store_uuid, marked_at) VALUES (?1, 'sample-store', 1)", [PROJECT]).unwrap();
-    let refusal = capture(
-        &mut samples,
-        &c,
-        "participant-failed",
-        "import",
-        CUT,
-        &["sample-head"],
-    )
-    .await;
-    assert_eq!(refusal["code"], "participant_failed");
-    c.conn()
-        .execute("DELETE FROM authority_managed", [])
-        .unwrap();
     c.conn().execute("INSERT INTO schema_migrations(version, description, applied_at) VALUES (999, 'newer', 0)", []).unwrap();
     let refusal = capture(
         &mut samples,

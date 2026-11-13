@@ -26,10 +26,6 @@ pub(crate) enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Held {
-    /// The key or a project is still guarded for the removed Rust
-    /// transform mode (`authority_managed`, `authority_repair_pending`),
-    /// whose triggers refuse note writes. The 0.49 merge refused these too.
-    RustManaged(String),
     /// The keys and their project belong to different workspaces, and a
     /// project can be in only one. The 0.49 merge refused these too.
     Workspaces(BTreeSet<i64>),
@@ -60,15 +56,12 @@ const FIRST_ONLY: &[&str] = &["git_commits"];
 /// Left under a contested key: one session's state, mappings and caches
 /// (a session ran in one folder, and no row says which project's folder
 /// that was), per-project caches each project builds for itself, workspace
-/// membership (a project is in one workspace, under a unique display name),
-/// and the removed Rust transform mode's bookkeeping. The copy leaves every
+/// membership (a project is in one workspace, under a unique display
+/// name). The copy leaves every
 /// table outside [`COPIED`] and [`FIRST_ONLY`]; this list names the ones
 /// sorted on purpose, and a test fails when a table is in no list.
 #[cfg(test)]
 pub(super) const LEFT: &[&str] = &[
-    "authority_capture_bounds",
-    "authority_managed",
-    "authority_repair_pending",
     "compartment_chunk_embeddings",
     "domain_mutation_epoch",
     "embedding_measurement_corpus",
@@ -107,25 +100,6 @@ fn knowledge_filter(table: &str) -> &'static str {
     } else {
         "1"
     }
-}
-
-fn rust_managed(conn: &Connection, keys: &[&str]) -> rusqlite::Result<Option<String>> {
-    for table in ["authority_managed", "authority_repair_pending"] {
-        if !store::table_exists(conn, table)? {
-            continue;
-        }
-        for key in keys {
-            let found: bool = conn.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE project_path = ?1)"),
-                [key],
-                |row| row.get(0),
-            )?;
-            if found {
-                return Ok(Some((*key).to_owned()));
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn workspaces(conn: &Connection, keys: &BTreeSet<&str>) -> rusqlite::Result<BTreeSet<i64>> {
@@ -270,9 +244,6 @@ pub(crate) fn move_step(
     limit: usize,
 ) -> rusqlite::Result<Outcome> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(key) = rust_managed(&tx, &[from, to])? {
-        return Ok(Outcome::Held(Held::RustManaged(key)));
-    }
     let mut members: BTreeSet<&str> = group.iter().map(String::as_str).collect();
     members.insert(from);
     members.insert(to);
@@ -325,11 +296,6 @@ pub(crate) fn copy_step(
     limit: usize,
 ) -> rusqlite::Result<Outcome> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut keys: Vec<&str> = vec![from];
-    keys.extend(targets.iter().map(String::as_str));
-    if let Some(key) = rust_managed(&tx, &keys)? {
-        return Ok(Outcome::Held(Held::RustManaged(key)));
-    }
     let mut ordered = targets.iter();
     let Some(first) = ordered.next() else {
         return Ok(Outcome::Nothing);

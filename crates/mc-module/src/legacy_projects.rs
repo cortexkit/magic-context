@@ -251,9 +251,6 @@ impl Mover {
             }
             if let Some(why) = &settled.held {
                 let why = match why {
-                    pool::Held::RustManaged(guarded) => {
-                        format!("{guarded} is still guarded for the removed Rust transform mode")
-                    }
                     pool::Held::Workspaces(ids) => format!(
                         "its projects are in different workspaces ({})",
                         ids.iter()

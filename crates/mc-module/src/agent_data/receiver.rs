@@ -39,7 +39,7 @@
 //! Reads and writes of `context.db` run on a blocking thread over a
 //! connection of their own, as on the source.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cortexkit_role_agent_data::diverged::{DivergedEntry, DivergedReply, DivergedState};
@@ -52,7 +52,7 @@ use cortexkit_role_agent_data::refs::{Ref, Refs};
 use cortexkit_role_agent_data::step::Step;
 use cortexkit_role_agent_data::{EmptyReply, Op};
 use cortexkit_role_compaction::read::SessionRef;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use serde_json::{json, Value};
 
 use super::door::{self, CutAnswer, DoorError};
@@ -64,10 +64,6 @@ use super::source::{
 };
 use super::{crash, install, moved, resolve};
 use crate::context_db::SCHEMA_VERSION;
-
-/// The refusal reason for a session whose project `context.db` still
-/// guards against writes.
-pub const PROJECT_WRITES_GUARDED: &str = "project_writes_guarded";
 
 /// The undo image's format name.
 pub const UNDO_FORMAT: &str = "mc-agent-data-undo/1";
@@ -272,7 +268,7 @@ async fn stage_each<H: Host>(
         let incoming = read(host, db, Op::Import, cut, r).await?;
         let contents = host.journal().contents().ok_or_else(journal_unreadable)?;
         let baseline = baseline(&contents, &incoming.session);
-        check_local(db, r, &incoming, baseline, Op::Import).await?;
+        check_local(db, r, &incoming, baseline).await?;
         let file = staged_file(db, cut, &incoming.session_ref);
         crate::private_permissions::write_file_atomic(&file, &incoming.bytes).map_err(|error| {
             unavailable(format!(
@@ -306,47 +302,23 @@ async fn stage_each<H: Host>(
 }
 
 /// The checks `import` and `activate` make against this machine's rows
-/// before anything of the session changes: no project guard refuses the
-/// install's writes, the copy here is at the cut, and this store can hold
-/// every row.
+/// before anything of the session changes: the copy here is at the cut, and
+/// this store can hold every row.
 async fn check_local(
     db: &Path,
     r: &Ref,
     incoming: &Incoming,
     baseline: Option<String>,
-    op: Op,
 ) -> Result<Local, ErrorBody> {
     let snapshot = incoming.snapshot.clone();
-    let (guarded, local, fits) = blocking(db, move |conn| {
+    let (local, fits) = blocking(db, move |conn| {
         let tx = conn.transaction().map_err(|error| error.to_string())?;
-        let guarded = guarded_project(&tx, &snapshot)?;
         let local = snapshot::local_on(&tx, &snapshot)?;
         let fits = install::check_store(&tx, &snapshot);
         tx.finish().map_err(|error| error.to_string())?;
-        Ok((guarded, local, fits))
+        Ok((local, fits))
     })
     .await?;
-    if let Some(project) = guarded {
-        tracing::warn!(
-            "ck-mc: session {} cannot be installed: context.db still guards project {project} against writes (authority_managed or authority_repair_pending) from the removed Rust transform mode",
-            label(&incoming.session)
-        );
-        let message = format!(
-            "context.db still has write guards from the removed Rust transform mode for project {project} (authority_managed or authority_repair_pending), and they refuse the install's note writes; session {} cannot be installed here until they are removed",
-            label(&incoming.session)
-        );
-        return Err(if op == Op::Activate {
-            // An older driver reads participant_failed on activate as an
-            // unknown code and aborts instead of holding the cut; see the
-            // source's door refusals.
-            invalid_state(Step::Imported, message)
-        } else {
-            ErrorBody::with_participant_failed_detail(
-                ParticipantFailedDetail::new(PROJECT_WRITES_GUARDED),
-                message,
-            )
-        });
-    }
     if verdict(&local, baseline.as_deref()) != DivergedState::AtCut {
         return Err(ErrorBody::new(
             RefusalCode::LocalAdvanced,
@@ -370,53 +342,6 @@ async fn check_local(
         ));
     }
     Ok(local)
-}
-
-/// The first project, among those the install's note writes concern, that
-/// `context.db` still guards against writes: the snapshot's project link,
-/// its notes' projects, and this store's own links and notes of the
-/// session. The guards are triggers on `notes` and `memories` that the
-/// removed Rust transform mode left for projects it managed, and they abort
-/// a note write for such a project unless `context_privilege_state.enabled`
-/// is 1, which nothing in this release sets.
-fn guarded_project(conn: &Connection, incoming: &Snapshot) -> Result<Option<String>, String> {
-    let header = &incoming.header;
-    let mut projects: BTreeSet<String> = header.project.iter().cloned().collect();
-    projects.extend(
-        incoming
-            .rows
-            .table("notes")
-            .iter()
-            .filter_map(|row| row.get("project_path").and_then(Value::as_str))
-            .map(str::to_owned),
-    );
-    let mut here = conn
-        .prepare(
-            "SELECT project_path FROM session_projects WHERE session_id = ?1
-             UNION SELECT project_path FROM notes WHERE session_id = ?1 AND harness = ?2",
-        )
-        .map_err(|error| error.to_string())?;
-    let local: Vec<Option<String>> = here
-        .query_map(params![header.session, header.harness], |row| row.get(0))
-        .map_err(|error| error.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())?;
-    projects.extend(local.into_iter().flatten());
-    let mut guarded = conn
-        .prepare(
-            "SELECT EXISTS (SELECT 1 FROM authority_managed WHERE project_path = ?1)
-                 OR EXISTS (SELECT 1 FROM authority_repair_pending WHERE project_path = ?1)",
-        )
-        .map_err(|error| error.to_string())?;
-    for project in projects {
-        let held: bool = guarded
-            .query_row(params![project], |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        if held {
-            return Ok(Some(project));
-        }
-    }
-    Ok(None)
 }
 
 /// Resolve a ref on the receiver by Entorhinal's binding, whatever this
@@ -733,7 +658,7 @@ async fn prepare_install<H: Host>(
             session,
         };
         let baseline = baseline(contents, &incoming.session);
-        locals.push(check_local(db, &r, &incoming, baseline, Op::Activate).await?);
+        locals.push(check_local(db, &r, &incoming, baseline).await?);
     }
     // 3. An undo image of each session with rows here, in either store.
     let mut images = BTreeMap::new();

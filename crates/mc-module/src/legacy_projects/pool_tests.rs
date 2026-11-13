@@ -383,28 +383,6 @@ fn a_copy_that_duplicates_a_live_memory_resolves_only_in_that_project() {
 }
 
 #[test]
-fn a_key_still_guarded_for_the_rust_mode_is_held() {
-    let (_dir, db) = store();
-    db.with_connection(|conn| {
-        legacy_project(conn);
-        conn.execute(
-            "INSERT INTO authority_managed (project_path, context_store_uuid, marked_at) VALUES (?1, 'u', 1)",
-            [KEY],
-        )
-        .unwrap();
-        assert_eq!(
-            move_all(conn, "pj-a", pool::BATCH),
-            Outcome::Held(Held::RustManaged(KEY.into()))
-        );
-        assert_eq!(
-            copy_all(conn, &["pj-a", "pj-b"], pool::BATCH),
-            Outcome::Held(Held::RustManaged(KEY.into()))
-        );
-        assert_eq!(memories_of(conn, KEY), 2);
-    });
-}
-
-#[test]
 fn keys_in_different_workspaces_hold_a_move() {
     let (_dir, db) = store();
     db.with_connection(|conn| {

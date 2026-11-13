@@ -93,8 +93,6 @@ missing detail means the `detail` member is absent, not an empty object.
   returns `cut_not_ready`, without detail.
 - `receiver-local-advanced`: import over local rows with no matching move
   baseline returns `local_advanced`, without detail.
-- `receiver-participant-failed`: import into a write-guarded project returns
-  `participant_failed`; detail carries `reason`.
 - `receiver-incompatible-version`: import into a store at a newer schema
   version returns `incompatible_version`; detail carries `found` and
   `required` format/version strings.
