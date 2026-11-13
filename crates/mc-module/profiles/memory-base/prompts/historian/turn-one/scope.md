@@ -1,0 +1,1 @@
+This is turn one. Turn two compares each fact with project memory, so this turn has no project-memory block. Don't drop a fact because it might already be stored. Every fact must still pass "What becomes a memory".

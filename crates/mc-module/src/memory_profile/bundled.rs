@@ -42,6 +42,8 @@ fn build_packages() -> Vec<Package> {
             ("prompts/historian/system/user-observations.md".into(), include_bytes!("../../profiles/memory-base/prompts/historian/system/user-observations.md").to_vec()),
             ("prompts/historian/system/what-you-produce.md".into(), include_bytes!("../../profiles/memory-base/prompts/historian/system/what-you-produce.md").to_vec()),
             ("prompts/historian/system/world-experience-split.md".into(), include_bytes!("../../profiles/memory-base/prompts/historian/system/world-experience-split.md").to_vec()),
+            ("prompts/historian/turn-one/scope.md".into(), include_bytes!("../../profiles/memory-base/prompts/historian/turn-one/scope.md").to_vec()),
+            ("prompts/historian/turn-two/task.md".into(), include_bytes!("../../profiles/memory-base/prompts/historian/turn-two/task.md").to_vec()),
             ("prompts/main-agent/system.memory-guidance.full.md".into(), include_bytes!("../../profiles/memory-base/prompts/main-agent/system.memory-guidance.full.md").to_vec()),
             ("prompts/main-agent/system.memory-guidance.light.md".into(), include_bytes!("../../profiles/memory-base/prompts/main-agent/system.memory-guidance.light.md").to_vec()),
             ("prompts/main-agent/system.memory-mural-guidance.md".into(), include_bytes!("../../profiles/memory-base/prompts/main-agent/system.memory-mural-guidance.md").to_vec()),

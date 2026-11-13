@@ -7,7 +7,9 @@
 //! (`crates/mc-module/src/memory_profile/` at `75adf757`).
 
 mod bundled;
+mod frames;
 mod load;
+mod render;
 mod resolve;
 mod schema;
 
@@ -48,5 +50,7 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
+#[cfg(test)]
+mod render_tests;
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,445 @@
+{
+  "about": [
+    "Every difference between the bundled coding profile, rendered with the module's MC frames, and the text Magic Context sends today.",
+    "Each entry is one change block of a line diff: the lines of today's text it replaces (today) and the rendered lines (rendered).",
+    "class: ruling (a contract ruling changes the text; it lands when the summarizer and tasks move onto the profile) or mc-interface-pending (the profile assumes an MC interface change that is not built yet).",
+    "ruling cites the contract section; the classification is the one in testdata/memory_profile/resolved-swe/DIFF.md.",
+    "The golden test in src/memory_profile/render_tests.rs fails on a difference missing here and on an entry that no longer matches."
+  ],
+  "differences": [
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.17",
+      "why": "The base's time-and-certainty section: an anchor already dates every fact, a fact whose truth changes carries its validity bound, dates are absolute, and a claim nothing confirmed is written as a claim with its source. Its validity-bound rule contradicts today's rule that a temporary rule is not a fact; the ruling text wins when the profile goes live.",
+      "today": [],
+      "rendered": [
+        "### Time and certainty",
+        "",
+        "These rules apply to facts and to user observations.",
+        "",
+        "- **When something was said is already known.** Every fact keeps its anchor in the history, so do not add \"as of\" dates or the session date to a fact that stays true.",
+        "- **A fact whose truth changes carries its validity.** When a fact holds only until a date or an event, write that bound into the fact: \"Release freeze until 2026-11-02\", \"Staging uses the old signing key until the key migration finishes\". This is the fact's validity, not chronology wording. When the end is unknown, write the fact without one; never guess a date.",
+        "- **Absolute dates only.** Resolve \"tomorrow\", \"next Friday\" or \"end of the month\" to a calendar date (YYYY-MM-DD) from the dates the chunk shows. If the chunk does not show which date it means, keep the event or condition and leave the date out.",
+        "- **Claimed or confirmed.** A statement that only someone asserted (the user, a teammate, a document or another agent) and that nothing in the chunk confirmed is written as a claim with its source: \"Per the user, the vendor API allows 100 requests per minute\". A fact that a tool result, test run, file or other direct evidence in the chunk confirmed is written plainly, and so is a rule or decision the user sets: the user saying it is what makes it true. Never turn a guess, plan or proposal into a confirmed fact."
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "causal_incident regains the optional produced_fact link to the CONSTRAINTS fact it produced, so that constraint carries its evidence from the start.",
+      "today": [],
+      "rendered": [
+        "- `produced_fact` — when this incident also produced a `CONSTRAINTS` fact in this output, that fact's exact text, so the constraint keeps this incident as its evidence"
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "today": [
+        "## User observations (optional, experimental)"
+      ],
+      "rendered": [
+        "## User observations (optional)"
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "today": [
+        "After outputting compartments, facts, and events, also output a `<user_observations>` section IF the chunk contains observable universal behavioral patterns about the human user."
+      ],
+      "rendered": [
+        "After outputting compartments and facts, also output a `<user_observations>` section IF the chunk shows durable patterns about the human user. A separate review promotes patterns that recur across sessions into the user's profile, which this user's agents read in every later session, so precision matters more than recall."
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "today": [
+        "- User observations capture UNIVERSAL behavioral patterns about the human user — not project-specific or technical.",
+        "- Good observations: communication preferences, review focus areas, expertise level, decision-making patterns, frustration triggers, working style.",
+        "- Bad observations (DO NOT emit): project-specific preferences, framework choices, coding language preferences, one-off moods, task-local frustration.",
+        "- Each observation must be a single concise, present-tense statement phrased verb-first without a subject.",
+        "- Only emit observations you have strong evidence for from the conversation. Do not speculate. Zero observations is fine when nothing stands out.",
+        "- The output shape gains an additional section:",
+        "```",
+        "<user_observations>",
+        "* Prefers terse communication and dislikes verbose explanations.",
+        "* Understands cache invalidation, SQLite internals, and prompt engineering.",
+        "</user_observations>",
+        "```",
+        "If no observations, omit the `<user_observations>` section entirely."
+      ],
+      "rendered": [
+        "Each observation belongs to exactly one user category and is written inside that category's tag in the `<user_observations>` block (see Output). The user categories:"
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "today": [],
+      "rendered": [
+        "#### `COMMUNICATION`",
+        "",
+        "**Test**: \"Does this change how an agent should talk to the user — length, tone, format, language, or how much to explain?\"",
+        "",
+        "How the user wants agents to communicate with them, in any kind of work: length and density, tone, structure of answers, how much to explain, the language to reply in, and how and when to ask questions.",
+        "",
+        "**Positive examples**:",
+        "- \"Prefers short answers with the conclusion first.\"",
+        "- \"Wants plain language without jargon in summaries.\"",
+        "- \"Expects one question at a time, not a list of questions.\"",
+        "",
+        "**Negative examples (do NOT extract as COMMUNICATION)**:",
+        "- \"Wants to review diffs rather than whole files\" — only meaningful in one kind of work; it belongs to that domain's user category if the profile has one.",
+        "- \"Was curt in this session\" — one-off mood.",
+        "",
+        "#### `PREFERENCES`",
+        "",
+        "**Test**: \"Is this a like or dislike the user holds everywhere, one that should shape what an agent chooses or proposes?\"",
+        "",
+        "Durable likes and dislikes that hold across every kind of work, including design and visual taste: colour schemes and themes, layout and density, visual style, writing style, units and formats.",
+        "",
+        "**Positive examples**:",
+        "- \"Strongly dislikes dark mode.\"",
+        "- \"Prefers flat, minimal visual design over decorated interfaces.\"",
+        "- \"Prefers metric units and 24-hour times.\"",
+        "",
+        "**Negative examples (do NOT extract as PREFERENCES)**:",
+        "- \"Picked the blue variant for this page\" — a one-off choice inside one task.",
+        "- \"Prefers one package manager over another\" — a tool choice that only matters in one domain; it belongs to that domain's user category if the profile has one.",
+        "",
+        "#### `BOUNDARIES`",
+        "",
+        "**Test**: \"Would acting here without asking first break the user's trust?\"",
+        "",
+        "What the user wants to be asked about before an agent acts, what they never want done, and the limits they set on an agent's autonomy, in any kind of work. A boundary that only exists inside one project is a rule of that project, not a user observation.",
+        "",
+        "**Positive examples**:",
+        "- \"Confirms before anything is sent or published in their name.\"",
+        "- \"Wants to approve every purchase or booking before it is made.\"",
+        "- \"Never wants files deleted without being asked first.\"",
+        "",
+        "**Negative examples (do NOT extract as BOUNDARIES)**:",
+        "- \"Asked to stop the current task\" — a one-off instruction, captured in narrative.",
+        "- \"Never deploy this service on Fridays\" — a rule of one project.",
+        "",
+        "#### `WORKING_STYLE`",
+        "",
+        "**Test**: \"Does this describe how the user likes to work with an agent, whatever the task?\"",
+        "",
+        "How the user organizes work with agents in any domain: pace, planning before acting or diving in, how they review, how they decide, how they give feedback, and how much autonomy they hand over. A habit that only makes sense in one kind of work belongs to that domain's user category.",
+        "",
+        "**Positive examples**:",
+        "- \"Decides quickly once options are laid out side by side.\"",
+        "- \"Reviews the plan before any work starts.\"",
+        "- \"Gives terse feedback and expects it acted on without discussion.\"",
+        "",
+        "**Negative examples (do NOT extract as WORKING_STYLE)**:",
+        "- \"Was in a hurry this afternoon\" — one-off.",
+        "- \"Isolates root causes with control runs before trusting a fix\" — a practice of one domain.",
+        "",
+        "#### `IDENTITY`",
+        "",
+        "**Test**: \"Is this a stable fact about who the user is that any agent needs to address and serve them correctly?\"",
+        "",
+        "Who the user is, as far as they have stated it: name and how they want to be addressed, time zone, the languages they read and write, their profession, and their current main focus. The main focus changes over months; write it as current, and replace it when it changes.",
+        "",
+        "**Positive examples**:",
+        "- \"Prefers to be addressed by first name.\"",
+        "- \"Works in the Europe/Berlin time zone.\"",
+        "- \"Reads and writes English and German.\"",
+        "- \"Works as an independent software developer; current main focus is their own product suite.\"",
+        "",
+        "**Negative examples (do NOT extract as IDENTITY)**:",
+        "- Health, finances, family members or home address — sensitive; never recorded here.",
+        "- \"Is tired today\" — one-off state.",
+        "",
+        "#### `ENGINEERING_PRACTICE`",
+        "",
+        "**Test**: \"Does this describe how the user does or wants software engineering done, in any codebase of theirs?\"",
+        "",
+        "The user's engineering-specific traits that hold across all their coding projects: debugging and testing habits, review focus, quality bar, how changes should be delivered and verified, and how they run agents. Only coding agents see these. A practice tied to one repository is a `PROJECT_RULES` fact of that project.",
+        "",
+        "**Positive examples**:",
+        "- \"Isolates root causes with control runs before trusting a fix.\"",
+        "- \"Prefers reviewing diffs over whole files.\"",
+        "- \"Expects every change to be tested before it is called done.\"",
+        "- \"Runs several agents in parallel on separate worktrees.\"",
+        "",
+        "**Negative examples (do NOT extract as ENGINEERING_PRACTICE)**:",
+        "- \"Prefers short answers\" — holds everywhere (`COMMUNICATION`).",
+        "- \"Use scripts/release.sh VERSION for releases\" — one repository's rule (`PROJECT_RULES`).",
+        "",
+        "#### `DEV_ENVIRONMENT`",
+        "",
+        "**Test**: \"Is this about the user's own development setup, shared by every coding project of theirs?\"",
+        "",
+        "The user's own development environment across projects: preferred languages, runtimes and frameworks, package managers, editor, shell, terminal and operating system. Only coding agents see these. A tool or version one project pins is a `CONFIG_VALUES` or `PROJECT_RULES` fact of that project.",
+        "",
+        "**Positive examples**:",
+        "- \"Prefers Bun over Node for TypeScript tooling.\"",
+        "- \"Uses zsh on macOS.\"",
+        "- \"Prefers Rust for performance-critical components.\"",
+        "",
+        "**Negative examples (do NOT extract as DEV_ENVIRONMENT)**:",
+        "- \"This repo uses pnpm workspaces\" — one project's configuration.",
+        "- \"Dislikes dark mode in every app, editors included\" — holds everywhere (`PREFERENCES`).",
+        "",
+        "Rules:",
+        "- Observe the user, not the work. Facts about the task, its subject or its tools are facts or compartment narrative, not observations.",
+        "- Only emit observations you have strong evidence for from the conversation: something the user said about themselves, or a reaction they showed more than once. Do not speculate. Zero observations is fine when nothing stands out.",
+        "- Do NOT emit: one-off moods, task-local frustration, anything about other people, and sensitive details (health, finances, relationships, beliefs) even when the user mentions them.",
+        "- One observation = one trait. Each must be a single concise, present-tense statement phrased verb-first without a subject (\"Prefers short answers\", not \"The user prefers short answers\").",
+        "- **Split mixed observations at extraction.** When one observation joins a trait that holds in any kind of work with a part that only holds in one kind of work, emit two observations: the domain-neutral part under its general category, and the domain-specific part under the domain category above that fits it. If no listed category fits the domain-specific part, drop that part.",
+        "- A preference that holds for one project only is not a user observation; it is a fact of that project, or narrative.",
+        "- If no observations, omit the `<user_observations>` section entirely.",
+        "",
+        "### Splitting observations in software work",
+        "",
+        "Coding sessions often show a general trait in its engineering form. Split it at extraction:",
+        "",
+        "- \"Wants short answers, and diffs instead of whole files\" → `COMMUNICATION`: \"Prefers short answers\"; `ENGINEERING_PRACTICE`: \"Prefers reviewing diffs over whole files\".",
+        "- \"Distrusts a fix until a control run isolates the cause\" → `ENGINEERING_PRACTICE` only; it says nothing about the user outside software.",
+        "- \"Always asks before anything is pushed or published\" → `BOUNDARIES`: \"Confirms before anything is published in their name\". A push rule of one repository is a `PROJECT_RULES` fact instead.",
+        "- \"Uses Bun and zsh, and hates dark mode in the editor too\" → `DEV_ENVIRONMENT`: \"Prefers Bun and zsh\"; `PREFERENCES`: \"Strongly dislikes dark mode\".",
+        "",
+        "Framework, language and tool preferences that hold across the user's projects go to `DEV_ENVIRONMENT`. Ones that hold for a single project are facts of that project, not observations.",
+        ""
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "mc-interface-pending",
+      "ruling": "§11.11",
+      "why": "The event shape is generated from the event kind's declared fields, which include produced_fact. MC's turn-one parser does not read <produced_fact> yet.",
+      "today": [],
+      "rendered": [
+        "<produced_fact>...</produced_fact>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/system",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The retrospective merges into the SWE reflection task: it reads events across sessions plus friction windows, writes only on recurrence and cites its evidence.",
+      "today": [
+        "You are a retrospective learning agent for Magic Context."
+      ],
+      "rendered": [
+        "You are a pattern reflection agent for the magic-context system, running during a scheduled dream window."
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/system",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The retrospective merges into the SWE reflection task: it reads events across sessions plus friction windows, writes only on recurrence and cites its evidence.",
+      "today": [
+        "You learn only from recurring user-friction moments where the user had to correct, re-explain, or recover from the assistant's repeated behavior. You receive a pre-rendered friction window from the host and may use ctx_search to look for corroborating prior patterns."
+      ],
+      "rendered": [
+        "You read the historian's event record across many sessions of this project — causal incidents (surprises from systems we don't control) and trajectory corrections (strategies that were abandoned) — together with friction windows where the user had to correct, re-explain to, or recover from the assistant. You look for patterns that recur, and write a durable memory only when one does. You may use ctx_search to read the sessions an event came from."
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/system",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The retrospective merges into the SWE reflection task: it reads events across sessions plus friction windows, writes only on recurrence and cites its evidence.",
+      "today": [
+        "1. Pattern, not one-off: extract only recurring behavior that is likely to happen again. Zero learnings is fine.",
+        "2. Distill, do not transcribe: never quote the user, never include dates, and never preserve session-local anger.",
+        "3. Root cause + correction: the learning must tell a future agent what to do differently.",
+        "4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt."
+      ],
+      "rendered": [
+        "1. Recurrence, not one-off: a pattern needs at least 2 supporting events or friction windows from different sessions. One incident, however costly, is not a pattern; it stays in the event record. Zero learnings is the normal outcome.",
+        "2. Cite your evidence: every learning lists the ids of the events and friction windows it rests on, and only ids shown in the input.",
+        "3. Root cause + correction: the learning must tell a future agent what to do differently, or which external limit to plan around.",
+        "4. Distill, do not transcribe: never quote the user, never include dates, and never preserve session-local anger.",
+        "5. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt."
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/user",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "Task title follows the merged reflection task.",
+      "today": [
+        "## Task: Retrospective Learning"
+      ],
+      "rendered": [
+        "## Task: Reflect on recurring patterns"
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/user",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The reflection task's framing and routing guidance: events grouped across sessions, which pattern goes to which category, observations naming a user category. Its input frame still renders today's single friction window; the event-group input and the evidence ids on each learning are a pending MC interface change.",
+      "today": [
+        "The host detected possible user friction in the pre-rendered window below. Use it plus ctx_search (if helpful) to decide whether there is a recurring root cause and recurring assistant behavior worth remembering."
+      ],
+      "rendered": [
+        "The host grouped this project's historian events by affected surface and correction source, across sessions, and attached the friction windows its gate flagged. Decide which groups show a recurring pattern worth one durable memory."
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/user",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The reflection task's framing and routing guidance: events grouped across sessions, which pattern goes to which category, observations naming a user category. Its input frame still renders today's single friction window; the event-group input and the evidence ids on each learning are a pending MC interface change.",
+      "today": [],
+      "rendered": [
+        "### What to write",
+        "- The same external limit hit again (`causal_incident` events on one surface with one cause) → route=\"memory\", category=\"CONSTRAINTS\". If an event already shows a linked memory for that limit, do not write it again; cite the new events only if they change the limit.",
+        "- A strategy abandoned for the same reason more than once (`trajectory_correction`), or the user correcting the same assistant behavior in more than one friction window → route=\"memory\" with the project category it belongs to (one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING), usually PROJECT_RULES.",
+        "- A recurring correction that is about the user rather than this project → route=\"observation\" with the user category it belongs to (one of COMMUNICATION, PREFERENCES, BOUNDARIES, WORKING_STYLE, IDENTITY, ENGINEERING_PRACTICE, DEV_ENVIRONMENT).",
+        "- Corrections that came from the user (correction_source=user, and friction windows) are the strongest evidence. self_review alone rarely justifies a memory.",
+        ""
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/user",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The reflection task's framing and routing guidance: events grouped across sessions, which pattern goes to which category, observations naming a user category. Its input frame still renders today's single friction window; the event-group input and the evidence ids on each learning are a pending MC interface change.",
+      "today": [
+        "- Extract only durable, recurring learnings. A single annoyed/corrective message is noise.",
+        "- Write actionable present-tense corrections for future agents.",
+        "- Do NOT quote the user, include dates, or preserve anger/frustration wording."
+      ],
+      "rendered": [
+        "- Write actionable present-tense statements for future agents."
+      ]
+    },
+    {
+      "document": "dreamer/swe:reflect-patterns/user",
+      "class": "ruling",
+      "ruling": "§11.11",
+      "why": "The reflection task's framing and routing guidance: events grouped across sessions, which pattern goes to which category, observations naming a user category. Its input frame still renders today's single friction window; the event-group input and the evidence ids on each learning are a pending MC interface change.",
+      "today": [
+        "- Use route=\"memory\" for project-specific agent behavior/rules, with category one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.",
+        "- Use route=\"observation\" only for recurring user workflow/preferences that belong in the global user profile."
+      ],
+      "rendered": []
+    },
+    {
+      "document": "dreamer/base:review-user-memories/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.15",
+      "why": "The reviewer also assigns a user category; 'global user profile' becomes 'profile' because SWE's user categories are global but seen only by SWE agents.",
+      "today": [
+        "You are a user-profile reviewer for the magic-context system. You run during a scheduled dream window to decide which recurring behavioral observations about the human user are real, persistent patterns worth keeping in their global user profile."
+      ],
+      "rendered": [
+        "You are a user-profile reviewer for the magic-context system. You run during a scheduled dream window to decide which recurring observations about the human user are real, persistent patterns worth keeping in their profile, and under which user category each one belongs."
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "§11.13; contract §4.3",
+      "why": "The intro names user categories.",
+      "today": [
+        "You are reviewing behavioral observations about a human user to decide which patterns are real and persistent."
+      ],
+      "rendered": [
+        "You are reviewing observations about a human user to decide which patterns are real and persistent, and which user category each belongs to."
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The review's instruction list is split into the rules Magic Context fixes (today's rules 1, 2, 5 and 6) and the profile's category instructions, generated from the resolved user categories; SWE adds its section. The candidate lines and the JSON output stay today's; their category fields are a pending MC interface change.",
+      "today": [
+        "### Instructions"
+      ],
+      "rendered": [
+        "### Review rules (fixed by Magic Context)"
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The review's instruction list is split into the rules Magic Context fixes (today's rules 1, 2, 5 and 6) and the profile's category instructions, generated from the resolved user categories; SWE adds its section. The candidate lines and the JSON output stay today's; their category fields are a pending MC interface change.",
+      "today": [
+        "3. Only promote **truly universal** user traits — communication style, expertise level, review focus, decision-making patterns, working habits.",
+        "4. Do NOT promote: project-specific preferences, framework choices, one-off moods, task-local frustrations.",
+        "5. If a candidate is semantically equivalent to an existing stable memory, mark it as already covered.",
+        "6. If multiple candidates describe the same trait, merge them into one clean statement.",
+        "7. Phrase every promoted or updated memory as a concise, present-tense verb-first statement without a subject (for example, \"Prefers concise explanations\" or \"Expects changes to be tested\").",
+        "8. If an existing stable memory should be updated based on new evidence, include the update and keep the same verb-first, subjectless phrasing."
+      ],
+      "rendered": [
+        "3. If a candidate is semantically equivalent to an existing stable memory, mark it as already covered.",
+        "4. If multiple candidates describe the same trait, merge them into one clean statement."
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The review's instruction list is split into the rules Magic Context fixes (today's rules 1, 2, 5 and 6) and the profile's category instructions, generated from the resolved user categories; SWE adds its section. The candidate lines and the JSON output stay today's; their category fields are a pending MC interface change.",
+      "today": [],
+      "rendered": [
+        "### User categories",
+        "",
+        "- **COMMUNICATION** (global; seen by every profile's agents) — how the user wants agents to talk to them in any work: length, tone, format, reply language, how much to explain.",
+        "- **PREFERENCES** (global; seen by every profile's agents) — likes and dislikes the user holds everywhere, including design and visual taste.",
+        "- **BOUNDARIES** (global; seen by every profile's agents) — what the user wants to confirm before an agent acts, and what they never want done.",
+        "- **WORKING_STYLE** (global; seen by every profile's agents) — how the user works with agents whatever the task: pace, planning, review habits, decision style, feedback.",
+        "- **IDENTITY** (global; seen by every profile's agents) — who the user is: name and form of address, time zone, languages, profession and current main focus.",
+        "- **ENGINEERING_PRACTICE** (global; seen by only agents running @cortexkit/memory-swe) — how the user does and wants software engineering done in every codebase: debugging, testing, review, delivery, agent workflow.",
+        "- **DEV_ENVIRONMENT** (global; seen by only agents running @cortexkit/memory-swe) — the user's own development setup shared by their coding projects: stack, runtimes, package managers, editor, shell, OS.",
+        "",
+        "### Category instructions",
+        "",
+        "1. Only promote traits that hold across the user's work. A preference tied to one project belongs to that project's memory, not here: dismiss it.",
+        "2. Put each promoted trait in the one user category whose test it passes. A candidate that mixes a general trait with a domain-specific one is promoted as two memories, one per category.",
+        "3. Do NOT promote: one-off moods, task-local frustrations, or anything about other people.",
+        "4. Phrase every promoted or updated memory as a concise, present-tense verb-first statement without a subject (for example, \"Prefers concise explanations\" or \"Expects changes to be tested\").",
+        "5. If an existing stable memory should be updated based on new evidence, include the update and keep the same verb-first, subjectless phrasing and its category.",
+        "",
+        "### Software categories",
+        "",
+        "- `ENGINEERING_PRACTICE` and `DEV_ENVIRONMENT` traits follow the same rules. Framework, language and tool preferences qualify when the candidates come from more than one project; when they all come from one project, dismiss them as project-specific.",
+        "- Split a candidate that mixes an engineering practice with a general trait the way the historian does: the general part under its base category, the engineering part under `ENGINEERING_PRACTICE`.",
+        ""
+      ]
+    },
+    {
+      "document": "main-agent/system.memory-guidance.full",
+      "class": "ruling",
+      "ruling": "§11.17",
+      "why": "The categories an agent may use appear in its profile-supplied memory guidance, generated from the fact categories' tags and guidance hints, with the profile's examples.",
+      "today": [],
+      "rendered": [
+        "Categories for `ctx_memory`: PROJECT_RULES (a project rule), ARCHITECTURE (an architectural fact), CONSTRAINTS (a hard-won constraint), CONFIG_VALUES (a config value), NAMING (a naming convention). Examples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\""
+      ]
+    },
+    {
+      "document": "main-agent/system.memory-guidance.light",
+      "class": "ruling",
+      "ruling": "§11.17",
+      "why": "As the full guidance, with the light hints and no examples.",
+      "today": [],
+      "rendered": [
+        "Categories: PROJECT_RULES (a rule), ARCHITECTURE (an architecture fact), CONSTRAINTS (a constraint), CONFIG_VALUES (a config value), NAMING (a naming convention)."
+      ]
+    }
+  ]
+}

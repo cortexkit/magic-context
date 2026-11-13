@@ -11,6 +11,23 @@ const MAIN: &[&str] = &[
     "main-agent/system.memory-guidance.light",
     "main-agent/system.memory-mural-guidance",
 ];
+/// The summarizer's documents every resolved profile must have, each with the
+/// MC frames the module's reply parsers depend on: the system prompt both turns
+/// run under, turn one's fact-anchor instruction and turn two's instruction.
+const HISTORIAN: &[(&str, &[&str])] = &[
+    (
+        "historian/system",
+        &["historian/input-notation", "historian/output-contract"],
+    ),
+    (
+        "historian/turn-one",
+        &[
+            "historian/turn-one.fact-anchors",
+            "historian/turn-one.anchor-format",
+        ],
+    ),
+    ("historian/turn-two", &["historian/turn-two.decisions"]),
+];
 const RESERVED: &[&str] = &[
     "output",
     "compartments",
@@ -490,10 +507,10 @@ fn overlay(base: &mut Value, child: &Value) -> Result<()> {
         .collect();
     for (id, doc) in child["prompts"].as_object().into_iter().flatten() {
         if let Some(target) = base["prompts"].get_mut(id) {
-            if doc.get("variants").is_some() || doc.get("ext").is_some() {
+            if doc.get("ext").is_some() {
                 return Err(refuse(
                     "override_not_allowed",
-                    "document variants belong to declaring layer",
+                    "a document's ext belongs to the layer that declares it",
                 ));
             }
             let sections = target["sections"].as_array_mut().unwrap();
@@ -834,8 +851,8 @@ fn validate_resolved(p: &Profile) -> Result<()> {
     }
     let mut used: BTreeSet<String> = MAIN
         .iter()
+        .chain(HISTORIAN.iter().map(|(doc, _)| doc))
         .map(|s| (*s).into())
-        .chain(["historian/system".into()])
         .collect();
     for task in tasks {
         let kind = text(task, "kind");
@@ -1077,86 +1094,32 @@ fn validate_resolved(p: &Profile) -> Result<()> {
             }
         }
     }
-    for doc in MAIN.iter().copied().chain(["historian/system"]) {
+    for doc in MAIN
+        .iter()
+        .copied()
+        .chain(HISTORIAN.iter().map(|(doc, _)| *doc))
+    {
         if r["prompts"].get(doc).is_none() {
             return Err(refuse("prompt_invalid", format!("missing document {doc}")));
         }
     }
-    let historian = frames(p, "historian/system")?;
-    for frame in ["historian/input-notation", "historian/output-contract"] {
-        if !historian.contains(frame) {
-            return Err(refuse(
-                "prompt_invalid",
-                format!("historian/system must contain the MC frame {frame}"),
-            ));
+    for (doc, required) in HISTORIAN {
+        let found = frames(p, doc)?;
+        for frame in *required {
+            if !found.contains(*frame) {
+                return Err(refuse(
+                    "prompt_invalid",
+                    format!("{doc} must contain the MC frame {frame}"),
+                ));
+            }
         }
     }
     validate_markers(p)?;
     Ok(())
 }
 
-// This registry checks referenced frame names only. The host defines frame contents
-// and rendering, so a package cannot add new frame names here.
-const FRAMES: &[&str] = &[
-    "dreamer/agent-registration.system",
-    "dreamer/classify-memories.input",
-    "dreamer/classify-memories.output-contract",
-    "dreamer/compress-cues.input",
-    "dreamer/compress-cues.output-contract",
-    "dreamer/curate.input",
-    "dreamer/curate.memory-operations",
-    "dreamer/maintain-docs.input",
-    "dreamer/maintain-docs.output-contract",
-    "dreamer/map-memories.input",
-    "dreamer/map-memories.output-contract",
-    "dreamer/reflect-events.gate.input",
-    "dreamer/reflect-events.gate.output-contract",
-    "dreamer/reflect-events.input",
-    "dreamer/reflect-events.output-contract",
-    "dreamer/reflect-patterns.gate.input",
-    "dreamer/reflect-patterns.gate.output-contract",
-    "dreamer/reflect-patterns.input",
-    "dreamer/reflect-patterns.output-contract",
-    "dreamer/refresh-primers.input.closed-book",
-    "dreamer/refresh-primers.input.raw",
-    "dreamer/refresh-primers.output-contract",
-    "dreamer/review-user-memories.input",
-    "dreamer/review-user-memories.output-contract",
-    "dreamer/review-user-memories.safety-rules",
-    "dreamer/verify.input",
-    "dreamer/verify.input.with-diff",
-    "dreamer/verify.output-contract",
-    "historian/input-notation",
-    "historian/output-contract.xml",
-    "historian/output-contract.combined",
-    "historian/turn-one.project-memory-block",
-    "historian/turn-one.reference-blocks",
-    "historian/turn-one.user.production",
-    "historian/turn-one.user.two-pass",
-    "historian/turn-two.check.compatibility.system",
-    "historian/turn-two.check.compatibility.user",
-    "historian/turn-two.check.disproof.system",
-    "historian/turn-two.check.kept-clause.system",
-    "historian/turn-two.check.support.system",
-    "historian/turn-two.check.user",
-    "historian/turn-two.user",
-    "main-agent/ctx_memory.description.full",
-    "main-agent/ctx_memory.description.light",
-    "main-agent/ctx_memory_list.description",
-];
-
-fn validate_frame(name: &str, variant: Option<&str>) -> Result<()> {
-    let exists = if name.contains('/') {
-        FRAMES.contains(&name)
-            || variant.is_some_and(|v| FRAMES.contains(&format!("{name}.{v}").as_str()))
-    } else {
-        FRAMES
-            .iter()
-            .filter(|f| f.rsplit('/').next() == Some(name))
-            .count()
-            == 1
-    };
-    if exists {
+fn validate_frame(name: &str) -> Result<()> {
+    if super::frames::resolve(super::frames::FRAMES, name).is_some() {
         Ok(())
     } else {
         Err(refuse(
@@ -1168,37 +1131,9 @@ fn validate_frame(name: &str, variant: Option<&str>) -> Result<()> {
 
 fn validate_markers(p: &Profile) -> Result<()> {
     let marker = regex::Regex::new(r"⟦(profile:|mc:|if )([^⟧]+)⟧").unwrap();
-    let conditions = [
-        "fact_categories",
-        "user_categories",
-        "event_kinds",
-        "primer_candidates",
-    ];
-    let generators = [
-        "fact-category-count",
-        "fact-category-definitions",
-        "fact-routing-list",
-        "fact-routing-next",
-        "fact-category-taxonomy",
-        "fact-category-tags",
-        "fact-shape-blocks",
-        "project-memory-groups",
-        "user-category-definitions",
-        "user-category-tags",
-        "user-category-list",
-        "user-observation-shape-blocks",
-        "event-definitions",
-        "event-shape-blocks",
-        "episode-types",
-        "decay-class-list",
-        "memory-guidance-categories",
-        "memory-guidance-categories-light",
-        "cue-chars-high",
-        "cue-chars-low",
-        "cue-high-from",
-        "min-proof-count",
-    ];
-    let check_text = |value: &str, variant: Option<&str>| -> Result<()> {
+    let conditions = super::render::CONDITIONS;
+    let generators = super::render::GENERATORS;
+    let check_text = |value: &str| -> Result<()> {
         for line in value.lines() {
             for cap in marker.captures_iter(line) {
                 let name = &cap[2];
@@ -1210,7 +1145,7 @@ fn validate_markers(p: &Profile) -> Result<()> {
                                 "an MC marker must stand on its own line",
                             ));
                         }
-                        validate_frame(name, variant)?;
+                        validate_frame(name)?;
                     }
                     "if " => {
                         if !conditions.contains(&name)
@@ -1265,24 +1200,18 @@ fn validate_markers(p: &Profile) -> Result<()> {
         Ok(())
     };
     for doc in p.body["prompts"].as_object().unwrap().values() {
-        let variants: Vec<Option<&str>> = match doc["variants"].as_array() {
-            Some(v) => v.iter().map(Value::as_str).collect(),
-            None => vec![None],
-        };
-        for variant in variants {
-            for s in list(doc, "sections") {
-                if s["requires"]
-                    .as_str()
-                    .is_some_and(|c| !conditions.contains(&c))
-                {
-                    return Err(refuse("prompt_invalid", "unknown section condition"));
-                }
-                if let Some(frame) = s["mc"].as_str() {
-                    validate_frame(frame, variant)?;
-                }
-                if s.get("file").is_some() {
-                    check_text(p.member(s, "file")?, variant)?;
-                }
+        for s in list(doc, "sections") {
+            if s["requires"]
+                .as_str()
+                .is_some_and(|c| !conditions.contains(&c))
+            {
+                return Err(refuse("prompt_invalid", "unknown section condition"));
+            }
+            if let Some(frame) = s["mc"].as_str() {
+                validate_frame(frame)?;
+            }
+            if s.get("file").is_some() {
+                check_text(p.member(s, "file")?)?;
             }
         }
     }
@@ -1290,7 +1219,7 @@ fn validate_markers(p: &Profile) -> Result<()> {
         .iter()
         .chain(list(&p.body["extraction"], "events"))
     {
-        check_text(p.member(entry, "definition_file")?, None)?;
+        check_text(p.member(entry, "definition_file")?)?;
     }
     Ok(())
 }
