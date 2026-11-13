@@ -35,7 +35,7 @@ pub(crate) fn describe() -> wire::DescribeReply {
     let wrapup = Command::new(
         "wrapup",
         "Summarize history",
-        "Summarizes older history with a model, keeping the newest N raw messages (default 20). ctx_expand recovers raw text; summaries appear on the next rebuild.",
+        "Summarizes older history with a model, keeping the newest N messages as they are (default 20). The original text stays recoverable; summaries appear on the next rebuild.",
         wire::SubjectKind::Session,
         vec![keep],
         vec!["reversible".into(), "context_change".into()],

@@ -38,9 +38,9 @@
       "id": "wrapup",
       "run": {},
       "subject": "session",
-      "summary": "Summarizes older history with a model, keeping the newest N raw messages (default 20). ctx_expand recovers raw text; summaries appear on the next rebuild.",
+      "summary": "Summarizes older history with a model, keeping the newest N messages as they are (default 20). The original text stays recoverable; summaries appear on the next rebuild.",
       "title": "Summarize history"
     }
   ],
-  "digest": "93fa74e1009f455bef43c1570731d747874436794d0d1b593c14c94d3b95f0d8"
+  "digest": "aa1ef59cb1bc392624f5f7c84e37521ca687d45ef5104bb13d4fe0b7d722c892"
 }
