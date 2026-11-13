@@ -1271,6 +1271,7 @@ fn head_counts(
                     total: counter.count(&text),
                     counts: [
                         block_tokens(&text, "project-memory", counter)
+                            + block_tokens(&text, "workspace-memory", counter)
                             + block_tokens(&text, "memory-updates", counter),
                         block_tokens(&text, "project-docs", counter),
                         block_tokens(&text, "user-profile", counter),

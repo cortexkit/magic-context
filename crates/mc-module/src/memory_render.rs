@@ -35,7 +35,7 @@
 //! Rows the session may not see (another profile's private categories,
 //! another agent's memories) are removed by the caller before this runs.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 /// A memory level, in the order the head shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -341,9 +341,13 @@ impl Fill {
 
 /// Count how full each level's minimum ran, for the simulation that sets
 /// the shares: the tokens each level's selected rows use.
-pub fn level_tokens(candidates: &[Candidate], selection: &Selection) -> HashMap<Level, u64> {
+#[cfg(test)]
+pub fn level_tokens(
+    candidates: &[Candidate],
+    selection: &Selection,
+) -> std::collections::HashMap<Level, u64> {
     let shown: HashSet<i64> = selection.ids.iter().copied().collect();
-    let mut tokens = HashMap::new();
+    let mut tokens = std::collections::HashMap::new();
     for candidate in candidates.iter().filter(|c| shown.contains(&c.id)) {
         *tokens.entry(candidate.level).or_insert(0) += candidate.line_tokens;
     }

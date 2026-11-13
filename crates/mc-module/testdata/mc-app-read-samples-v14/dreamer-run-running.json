@@ -1,0 +1,39 @@
+{
+  "name": "dreamer-run-running",
+  "request": {
+    "method": "dreamer.run",
+    "params": {
+      "id": 3
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "dreamer.run",
+      "run": {
+        "applied": 0,
+        "batches": [],
+        "changed_memory_ids": [],
+        "changes": {
+          "archived": 0,
+          "merged": 0,
+          "written": 0
+        },
+        "dropped": [],
+        "id": 3,
+        "kind": "classify-memories",
+        "models": [],
+        "outcome": "running",
+        "project": "pj-sample",
+        "proposed": 0,
+        "started_at": 1700007200000,
+        "task": "swe:classify-memories",
+        "tokens": {
+          "input": 0,
+          "output": 0
+        }
+      },
+      "schema": 1
+    }
+  }
+}

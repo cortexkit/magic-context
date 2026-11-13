@@ -286,6 +286,10 @@ pub struct Session {
     /// record from it.
     memory_context: Option<crate::memory_profile::MemoryContext>,
     authority: Option<crate::memory_levels::Authority>,
+    /// The decay classes of the memory profile `memory_context` resolves,
+    /// which a fold ranks memories by; read once, and again when the
+    /// context is set.
+    head_classes: Option<Arc<std::collections::HashMap<String, String>>>,
     /// Views the runner took but has not yet confirmed it applies, oldest
     /// first, each with the state its acceptance replaced.
     unconfirmed: Vec<Unconfirmed>,
@@ -795,6 +799,7 @@ impl Session {
             image_outputs: std::collections::BTreeMap::new(),
             memory_context: None,
             authority: None,
+            head_classes: None,
             unconfirmed: Vec::new(),
             store: None,
             mural_image: None,
@@ -829,6 +834,7 @@ impl Session {
         if self.memory_context.is_none() {
             self.authority = crate::memory_levels::Authority::from_context(&context);
             self.memory_context = Some(context);
+            self.head_classes = None;
         }
     }
 
@@ -3783,28 +3789,28 @@ impl Session {
         // With memory off, the history head shows no memories and no user
         // profile, as the standalone plugin's does. The user profile is the
         // person's, read whatever the session's project.
-        let mut memories = Vec::new();
+        let mut rows = Vec::new();
         let mut workspace = None;
-        let (mut profile, mut profile_max_id) = (Vec::new(), 0);
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
-            if let Some(project) = &self.project {
-                match db.with_connection(|conn| {
-                    let resolved = crate::workspace::Workspace::resolve(conn, &project.id)?;
-                    let read = resolved.memories(conn, now)?;
-                    Ok::<_, rusqlite::Error>((resolved, read))
-                }) {
-                    Ok((resolved, read)) => {
-                        workspace = Some(resolved);
-                        memories = read;
-                    }
-                    Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
+            let project = self.project.as_ref().map(|project| project.id.as_str());
+            match db.with_connection(|conn| {
+                let resolved = project
+                    .map(|project| crate::workspace::Workspace::resolve(conn, project))
+                    .transpose()?;
+                let read = crate::head_memories::read_rows(conn, project, now)?;
+                Ok::<_, rusqlite::Error>((resolved, read))
+            }) {
+                Ok((resolved, read)) => {
+                    workspace = resolved;
+                    rows = read;
                 }
-            }
-            match db.user_profile() {
-                Ok(read) => (profile, profile_max_id) = read,
-                Err(error) => return self.head_as_shown(&format!("reading the profile: {error}")),
+                Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
             }
         }
+        let classes = self
+            .head_classes
+            .get_or_insert_with(|| crate::head_memories::classes_for(self.memory_context.as_ref()))
+            .clone();
         let model_key = format!(
             "{}/{}",
             self.conditions.model.provider, self.conditions.model.model
@@ -3817,10 +3823,10 @@ impl Session {
             counter: crate::count::Counter::for_model(Some(&model_key)),
             summaries: &self.summaries,
             docs: &docs,
-            profile: &profile,
-            profile_max_id,
-            memories: &memories,
+            rows: &rows,
             workspace: workspace.as_ref(),
+            classes: &classes,
+            now_ms: now,
             gone: &[],
             history_budget_tokens,
             history_local_budget_tokens: crate::summary::render::history_local_budget(
@@ -3830,18 +3836,19 @@ impl Session {
             memory_budget_tokens: settings.memory_budget_tokens,
             profile_budget_tokens: settings.profile_budget_tokens,
         };
-        let active: std::collections::HashSet<i64> =
-            memories.iter().map(|memory| memory.id).collect();
+        let active: std::collections::HashSet<i64> = rows.iter().map(|row| row.id).collect();
         // Shown memories that left the active set get their rows, which say
         // whether they were archived or merged.
-        let gone_from = |base: &Baseline| -> Result<Vec<StoredMemory>, String> {
+        let gone_from = |base: &Baseline| -> Result<Vec<crate::head_memories::Row>, String> {
             let missing: Vec<i64> = base
                 .shown_ids()
                 .into_iter()
                 .filter(|id| !active.contains(id))
                 .collect();
             match &self.db {
-                Some(db) => db.memories_by_ids(&missing),
+                Some(db) => db
+                    .with_connection(|conn| crate::head_memories::rows_by_ids(conn, &missing))
+                    .map_err(|error| error.to_string()),
                 None => Ok(Vec::new()),
             }
         };
@@ -3849,10 +3856,13 @@ impl Session {
         // it was folded with, as in the plugin.
         let mut drawn: Option<Option<crate::mural::Mural>> = None;
         let mut folded = |inputs: &head::Inputs| {
-            let mural =
-                drawn.get_or_insert_with(|| self.draw_mural(settings, shape.memory_enabled, now));
-            let mut base = head::fold(
+            let shown = head::shown_at_fold(inputs);
+            let mural = drawn.get_or_insert_with(|| {
+                self.draw_mural(settings, shape.memory_enabled, inputs.rows, &shown)
+            });
+            let mut base = head::fold_with(
                 inputs,
+                &shown,
                 mural.as_ref().map(|mural| mural.content_hash.as_str()),
             );
             base.shape = Some(shape.clone());
@@ -3939,14 +3949,15 @@ impl Session {
 
     /// The memory mural for a fold, or `None` when it is off, the model
     /// doesn't read images, or there is nothing worth drawing. It shows the
-    /// project's own memories that the head's memory budget leaves out, as
-    /// the plugin's `resolveMuralForM0` does. A failure to draw is logged and
-    /// leaves the mural out of this fold.
+    /// project's own memories among `rows` that the fold leaves out
+    /// (`shown` is what it shows). A failure to draw is logged and leaves the
+    /// mural out of this fold.
     fn draw_mural(
         &self,
         settings: &Settings,
         memory_enabled: bool,
-        now: i64,
+        rows: &[crate::head_memories::Row],
+        shown: &std::collections::HashSet<i64>,
     ) -> Option<crate::mural::Mural> {
         if !settings.mural_enabled
             || !memory_enabled
@@ -3955,22 +3966,17 @@ impl Session {
             return None;
         }
         let (db, project) = (self.db.as_ref()?, self.project.as_ref()?);
+        let memories: Vec<StoredMemory> = rows
+            .iter()
+            .filter(|row| row.level == "project" && row.owner == project.id)
+            .map(crate::head_memories::Row::stored)
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let drawn = db
-            .project_memories(&project.id, now)
-            .map_err(|error| error.to_string())
-            .and_then(|memories| {
-                db.with_connection(|conn| {
-                    crate::mural::ensure(
-                        conn,
-                        &project.id,
-                        &memories,
-                        settings.memory_budget_tokens,
-                        now,
-                        self.counter(),
-                    )
-                })
-                .map_err(|error| error.to_string())
-            });
+            .with_connection(|conn| crate::mural::ensure(conn, &project.id, &memories, shown, now))
+            .map_err(|error| error.to_string());
         drawn.unwrap_or_else(|error| {
             tracing::warn!(
                 "ck-mc: session {}: the memory mural was left out of this fold: {error}",
@@ -4129,16 +4135,22 @@ impl Session {
             history_budget_percentage_bp: Some(
                 (settings.history_budget_percentage * 10_000.0).round() as u64,
             ),
+            memory_format: head::MEMORY_FORMAT,
+            profile_budget_tokens: Some(settings.profile_budget_tokens),
         }
     }
 
-    /// Whether the baseline was rendered under different settings than these. A
-    /// baseline from before the shape was recorded counts as unchanged.
+    /// Whether the baseline was rendered under different settings than these.
+    /// A baseline from before the shape was recorded counts as unchanged
+    /// settings, but its memory blocks are in the format before levels
+    /// ([`head::MEMORY_FORMAT`]), so it folds once like any older format.
     fn head_shape_changed(&self, settings: &Settings) -> bool {
         self.baseline
             .as_ref()
-            .and_then(|baseline| baseline.shape.as_ref())
-            .is_some_and(|shape| shape.requires_fold(&self.head_shape(settings)))
+            .is_some_and(|baseline| match &baseline.shape {
+                Some(shape) => shape.requires_fold(&self.head_shape(settings)),
+                None => true,
+            })
     }
 
     /// The first view of a moved session: the history head and a cut through

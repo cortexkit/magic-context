@@ -281,13 +281,17 @@ mod tests {
             [1, 2]
         );
         assert_eq!(
-            crate::memory::trim_workspace_to_budget(
+            crate::memory_legacy::trim_workspace_to_budget(
                 memories.clone(),
                 30,
                 &workspace,
                 crate::count::Counter::for_model(None)
             ),
-            crate::memory::trim_to_budget(memories, 30, crate::count::Counter::for_model(None))
+            crate::memory_legacy::trim_to_budget(
+                memories,
+                30,
+                crate::count::Counter::for_model(None)
+            )
         );
     }
 
@@ -433,7 +437,7 @@ mod tests {
             fixture["pool"]
         );
         for vector in fixture["vectors"].as_array().unwrap() {
-            let selected = crate::memory::trim_workspace_to_budget(
+            let selected = crate::memory_legacy::trim_workspace_to_budget(
                 memories.clone(),
                 vector["budget"].as_u64().unwrap(),
                 &workspace,
@@ -446,7 +450,7 @@ mod tests {
                 vector["budget"]
             );
             assert_eq!(
-                crate::memory::render_workspace_block(
+                crate::memory_legacy::render_workspace_block(
                     &selected,
                     "project-memory",
                     Some(&workspace)
@@ -548,19 +552,27 @@ mod search_tests {
 
     #[test]
     fn named_delta_attributes_escape_names_and_own_deltas_are_unchanged() {
-        assert_eq!(crate::memory::added_line(1,Some("CONSTRAINTS"),"x < y",Some("Beta & \"Co\"")),
-            "  <added id=\"1\" category=\"CONSTRAINTS\" project=\"Beta &amp; &quot;Co&quot;\">x &lt; y</added>");
+        assert_eq!(crate::memory::added_line(1, "workspace", Some("CONSTRAINTS"),"x < y",Some("Beta & \"Co\"")),
+            "  <added id=\"1\" level=\"workspace\" category=\"CONSTRAINTS\" project=\"Beta &amp; &quot;Co&quot;\">x &lt; y</added>");
         assert_eq!(
-            crate::memory::updated_line(1, Some("CONSTRAINTS"), "x", Some("Beta")),
-            "  <updated id=\"1\" category=\"CONSTRAINTS\" project=\"Beta\">x</updated>"
+            crate::memory::updated_line(1, "workspace", Some("CONSTRAINTS"), "x", Some("Beta")),
+            "  <updated id=\"1\" level=\"workspace\" category=\"CONSTRAINTS\" project=\"Beta\">x</updated>"
         );
         assert_eq!(
-            crate::memory::added_line(1, Some("CONSTRAINTS"), "x", None),
-            "  <added id=\"1\" category=\"CONSTRAINTS\">x</added>"
+            crate::memory::added_line(1, "project", Some("CONSTRAINTS"), "x", None),
+            "  <added id=\"1\" level=\"project\" category=\"CONSTRAINTS\">x</added>"
         );
         assert_eq!(
-            crate::memory::updated_line(1, None, "x", None),
-            "  <updated id=\"1\">x</updated>"
+            crate::memory::updated_line(1, "global", None, "x", None),
+            "  <updated id=\"1\" level=\"global\">x</updated>"
+        );
+        assert_eq!(
+            crate::memory::removed_line(1, "global"),
+            "  <removed id=\"1\" level=\"global\"/>"
+        );
+        assert_eq!(
+            crate::memory::superseded_line(1, "project", 2),
+            "  <superseded id=\"1\" level=\"project\" by=\"2\"/>"
         );
     }
 }

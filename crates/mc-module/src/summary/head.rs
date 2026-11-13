@@ -3,15 +3,15 @@
 //!
 //! - `m[0]`, the baseline: the project docs, the user profile, every summary
 //!   as of the last fold (each at the detail tier its age and importance
-//!   earn under the history budget), and the project memories that fit
-//!   their budget. Its text is kept as rendered and changes only on a fold,
-//!   when the request's prefix is written again anyway.
-//! - `m[1]`, what changed since: memory corrections, newer summaries at full
-//!   detail, newer memories and profile lines, or a short placeholder.
-//!   Changing it rewrites the request from `m[1]` on, not from the start.
-//!
-//! The blocks, wrappers and budgets are the TypeScript plugin's, so a head
-//! reads the same in both.
+//!   earn under the history budget), and the workspace's and project's
+//!   memories. Which memories of every level it shows is chosen once, at the
+//!   fold, by [`crate::head_memories`]. Its text is kept as rendered and
+//!   changes only on a fold, when the request's prefix is written again
+//!   anyway.
+//! - `m[1]`, what changed since: newer summaries at full detail, and every
+//!   memory change at any level (corrections, new memories, new profile
+//!   lines), or a short placeholder. Changing it rewrites the request from
+//!   `m[1]` on, not from the start.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -23,8 +23,10 @@ use serde::{Deserialize, Serialize};
 use super::render::{
     render_compartment_at_tier, render_decayed_with_items, DecayRenderCompartment,
 };
-use crate::context_db::{StoredCompartment, StoredMemory};
+use crate::context_db::StoredCompartment;
+use crate::head_memories::{self, Row};
 use crate::memory;
+use crate::memory_render::Level;
 
 pub(crate) const M0_ID: &str = "magic-context:m0";
 pub(crate) const M1_ID: &str = "magic-context:m1";
@@ -33,44 +35,34 @@ pub(crate) const M1_ID: &str = "magic-context:m1";
 pub(crate) const HISTORY_EMPTY: &str = "<session-history></session-history>";
 pub(crate) const M1_EMPTY: &str =
     "<session-history-since>(no new content since last materialization)</session-history-since>";
-/// Newer memories and profile lines in `m[1]` get this share of their
-/// budgets; the rest waits for the next fold.
-const DELTA_SHARE: f64 = 0.25;
-
 /// What the head shows, read fresh for each pass that builds a view.
 pub struct Inputs<'a> {
     pub counter: crate::count::Counter,
     pub summaries: &'a [StoredCompartment],
     /// The rendered `<project-docs>` block, or empty.
     pub docs: &'a str,
-    /// The active user profile, oldest first, and its highest id.
-    pub profile: &'a [String],
-    pub profile_max_id: i64,
-    /// Every project memory that may be shown.
-    pub memories: &'a [StoredMemory],
+    /// Every memory the head may show, at every level
+    /// ([`head_memories::read_rows`]).
+    pub rows: &'a [Row],
+    /// The workspace that names the project a workspace memory came from.
     pub workspace: Option<&'a crate::workspace::Workspace>,
+    /// Each category id's decay class in the session's memory profile.
+    pub classes: &'a std::collections::HashMap<String, String>,
+    /// When `m[0]` is rendered: drifting memories lose weight with the time
+    /// since they were last met again.
+    pub now_ms: i64,
     /// The current rows of memories the head shows that are no longer in
-    /// `memories` (archived, merged away or expired).
-    pub gone: &'a [StoredMemory],
+    /// `rows` (archived, merged away or expired).
+    pub gone: &'a [Row],
     /// The history budget in the model provider's tokens, which `m[1]`'s
     /// size limits are measured against.
     pub history_budget_tokens: u64,
     /// The same budget in the counter's units; exact vocabularies need no conversion.
     pub history_local_budget_tokens: u64,
+    /// The two budgets a person sets, joined into the one every level fills
+    /// ([`head_memories::budget`]).
     pub memory_budget_tokens: u64,
     pub profile_budget_tokens: u64,
-}
-
-/// A checksum of the user profile's text, so any change to it, by any
-/// writer, shows in `m[1]` (an id high-water mark misses edits and archives).
-fn profile_digest(profile: &[String]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for line in profile {
-        hasher.update(line.as_bytes());
-        hasher.update([0]);
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 /// What the head shows for one memory.
@@ -132,11 +124,6 @@ pub struct Baseline {
     /// What the head shows of each memory: `m[0]`'s text, then each change
     /// `m[1]` showed since.
     pub shown: BTreeMap<i64, Shown>,
-    pub profile_max_id: i64,
-    /// [`profile_digest`] of the profile `m[0]` was rendered from. A baseline
-    /// from before it was recorded compares `profile_max_id` instead.
-    #[serde(default)]
-    pub profile_digest: Option<String>,
     #[serde(serialize_with = "crate::store_text::text")]
     pub m0: String,
     #[serde(default)]
@@ -259,7 +246,22 @@ pub struct Shape {
     /// on baselines saved before it was recorded.
     #[serde(default)]
     pub history_budget_percentage_bp: Option<u64>,
+    /// Which memories `m[0]` shows and how ([`MEMORY_FORMAT`]). Absent, so
+    /// 0, on baselines rendered before memory levels: those fold once.
+    #[serde(default)]
+    pub memory_format: u32,
+    /// The user profile's budget, which joins the memory budget in the one
+    /// selection every level fills. Absent on older baselines.
+    #[serde(default)]
+    pub profile_budget_tokens: Option<u64>,
 }
+
+/// The format of `m[0]`'s memory blocks: 1 since every level is chosen
+/// together ([`crate::head_memories`]) and the user profile's lines are
+/// global memories. A baseline in another format folds at once, because its
+/// `m[0]` and its records of what it shows can't be compared with the new
+/// ones; the change rewrites each session's cached prefix once.
+pub const MEMORY_FORMAT: u32 = 1;
 
 impl Shape {
     /// Whether a baseline rendered under `self` must fold for `now`, as the
@@ -276,6 +278,11 @@ impl Shape {
             > 64.max(self.history_budget_tokens / 100);
         self.memory_enabled != now.memory_enabled
             || self.memory_budget_tokens != now.memory_budget_tokens
+            || self.memory_format != now.memory_format
+            || matches!(
+                (self.profile_budget_tokens, now.profile_budget_tokens),
+                (Some(old), Some(new)) if old != new
+            )
             || matches!(
                 (self.history_budget_percentage_bp, now.history_budget_percentage_bp),
                 (Some(old), Some(new)) if old != new
@@ -323,6 +330,12 @@ fn fit_history(
 /// checksum of the mural image `m[0]` will carry, if any: the text then ends
 /// with the block that introduces it, as the plugin's `renderM0` does.
 pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
+    fold_with(inputs, &shown_at_fold(inputs), mural)
+}
+
+/// [`fold`], given the memories it shows ([`shown_at_fold`] of the same
+/// inputs), which the session also needs to draw the mural.
+pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> Baseline {
     let _timing = crate::notice_cost_timing::span("head.fold");
     let estimate = |text: &str| inputs.counter.count(text) as usize;
     let summaries: Vec<_> = inputs
@@ -340,41 +353,24 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
         },
         estimate,
     );
-    let memories = match inputs.workspace {
-        Some(workspace) => memory::trim_workspace_to_budget(
-            inputs.memories.to_vec(),
-            inputs.memory_budget_tokens,
-            workspace,
-            inputs.counter,
-        ),
-        None => memory::trim_to_budget(
-            inputs.memories.to_vec(),
-            inputs.memory_budget_tokens,
-            inputs.counter,
-        ),
-    };
-    let profile = memory::trim_profile(
-        inputs.profile.to_vec(),
-        inputs.profile_budget_tokens,
-        inputs.counter,
-    );
+    let blocks = head_memories::render(inputs.rows, shown, inputs.workspace);
     let mut sections = Vec::new();
     if !inputs.docs.is_empty() {
         sections.push(inputs.docs.to_owned());
     }
-    let profile_block = memory::render_profile(&profile, "user-profile");
-    if !profile_block.is_empty() {
-        sections.push(profile_block);
+    if !blocks.user_profile.is_empty() {
+        sections.push(blocks.user_profile);
     }
     sections.push(history);
-    let memory_block =
-        memory::render_workspace_block(&memories, "project-memory", inputs.workspace);
-    if !memory_block.is_empty() {
-        sections.push(memory_block);
+    for block in [blocks.workspace, blocks.project] {
+        if !block.is_empty() {
+            sections.push(block);
+        }
     }
     if mural.is_some() {
         sections.push(crate::mural::BLOCK.to_owned());
     }
+    let shown_rows = || inputs.rows.iter().filter(|row| shown.contains(&row.id));
     Baseline {
         summary_items: SummaryItems::new(
             rendered_items
@@ -391,42 +387,49 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
             .summaries
             .last()
             .map_or(-1, |summary| summary.sequence),
-        max_memory_id: inputs
-            .memories
-            .iter()
-            .map(|memory| memory.id)
-            .max()
-            .unwrap_or(0),
+        max_memory_id: inputs.rows.iter().map(|row| row.id).max().unwrap_or(0),
         withheld: Some(
             inputs
-                .memories
+                .rows
                 .iter()
-                .map(|memory| memory.id)
-                .filter(|id| !memories.iter().any(|shown| shown.id == *id))
+                .map(|row| row.id)
+                .filter(|id| !shown.contains(id))
                 .collect(),
         ),
-        shown: memories
-            .iter()
-            .map(|memory| {
+        shown: shown_rows()
+            .map(|row| {
                 (
-                    memory.id,
+                    row.id,
                     Shown::Text {
-                        text: memory.content.clone(),
+                        text: row.content.clone(),
                     },
                 )
             })
             .collect(),
-        profile_max_id: inputs.profile_max_id,
-        profile_digest: Some(profile_digest(inputs.profile)),
         m0: sections.join("\n\n").trim().to_owned(),
         committed: Vec::new(),
-        seen: memories
-            .iter()
-            .map(|memory| (memory.id, memory.content.clone()))
+        seen: shown_rows()
+            .map(|row| (row.id, row.content.clone()))
             .collect(),
         shape: None,
         mural: mural.map(str::to_owned),
     }
+}
+
+/// The memories a fold of `inputs` shows: the rendering function's choice
+/// among every row, at the time the fold renders.
+pub fn shown_at_fold(inputs: &Inputs) -> HashSet<i64> {
+    head_memories::choose(
+        inputs.rows,
+        inputs.workspace,
+        inputs.classes,
+        inputs.counter,
+        &head_memories::budget(inputs.memory_budget_tokens, inputs.profile_budget_tokens),
+        inputs.now_ms,
+    )
+    .ids
+    .into_iter()
+    .collect()
 }
 
 const MEMORY_UPDATES_HEADER: &str =
@@ -477,45 +480,43 @@ struct Change {
 /// then memories newer than the fold that the head does not show yet. In
 /// memory-id order, so the same rows always give the same changes.
 fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
-    let current: BTreeMap<i64, &StoredMemory> = inputs
-        .memories
-        .iter()
-        .map(|memory| (memory.id, memory))
-        .collect();
-    let gone: BTreeMap<i64, &StoredMemory> = inputs
-        .gone
-        .iter()
-        .map(|memory| (memory.id, memory))
-        .collect();
+    let current: BTreeMap<i64, &Row> = inputs.rows.iter().map(|row| (row.id, row)).collect();
+    let gone: BTreeMap<i64, &Row> = inputs.gone.iter().map(|row| (row.id, row)).collect();
+    // The project a workspace memory came from, as the head names it.
+    let source = |row: &Row| -> Option<&str> {
+        (row.level() == Some(Level::Workspace))
+            .then_some(row.source_project.as_deref())
+            .flatten()
+            .and_then(|project| inputs.workspace?.source_name(project))
+    };
     let mut out = Vec::new();
     for (id, shown) in &baseline.shown {
         match (current.get(id), shown) {
-            (Some(memory), Shown::Text { text }) if memory.content == *text => {}
-            (Some(memory), _) => out.push(Change {
+            (Some(row), Shown::Text { text }) if row.content == *text => {}
+            (Some(row), _) => out.push(Change {
                 id: *id,
                 line: memory::updated_line(
                     *id,
-                    Some(&memory.category),
-                    &memory.content,
-                    inputs
-                        .workspace
-                        .and_then(|workspace| workspace.source_name(&memory.project_path)),
+                    &row.level,
+                    Some(&row.tag),
+                    &row.content,
+                    source(row),
                 ),
                 after: Shown::Text {
-                    text: memory.content.clone(),
+                    text: row.content.clone(),
                 },
                 current: Some(*id),
             }),
             (None, Shown::Removed) => {}
             (None, Shown::Text { .. }) => {
-                let by = gone
-                    .get(id)
-                    .and_then(|memory| memory.superseded_by_memory_id);
+                let row = gone.get(id);
+                let level = row.map_or("project", |row| row.level.as_str());
+                let by = row.and_then(|row| row.superseded_by);
                 out.push(Change {
                     id: *id,
                     line: match by {
-                        Some(by) => memory::superseded_line(*id, by),
-                        None => memory::removed_line(*id),
+                        Some(by) => memory::superseded_line(*id, level, by),
+                        None => memory::removed_line(*id, level),
                     },
                     after: Shown::Removed,
                     current: by,
@@ -523,26 +524,25 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
             }
         }
     }
-    for memory in inputs.memories {
+    for row in inputs.rows {
         let withheld = match &baseline.withheld {
-            Some(withheld) => withheld.contains(&memory.id),
-            None => memory.id <= baseline.max_memory_id,
+            Some(withheld) => withheld.contains(&row.id),
+            None => row.id <= baseline.max_memory_id,
         };
-        if !withheld && !baseline.shown.contains_key(&memory.id) {
+        if !withheld && !baseline.shown.contains_key(&row.id) {
             out.push(Change {
-                id: memory.id,
+                id: row.id,
                 line: memory::added_line(
-                    memory.id,
-                    Some(&memory.category),
-                    &memory.content,
-                    inputs
-                        .workspace
-                        .and_then(|workspace| workspace.source_name(&memory.project_path)),
+                    row.id,
+                    &row.level,
+                    Some(&row.tag),
+                    &row.content,
+                    source(row),
                 ),
                 after: Shown::Text {
-                    text: memory.content.clone(),
+                    text: row.content.clone(),
                 },
-                current: Some(memory.id),
+                current: Some(row.id),
             });
         }
     }
@@ -669,9 +669,10 @@ pub fn newer_summaries(
 /// `m[1]`, and the baseline that records what it shows, for a pass that
 /// builds a view.
 ///
-/// Between folds `m[1]` shows newer summaries, a changed user profile, and
-/// every memory change since the fold, whoever made it: an agent in this or
-/// another session, the historian, the dreamer or the dashboard. `m[0]`
+/// Between folds `m[1]` shows newer summaries and every memory change since
+/// the fold, at any level (the user profile's lines are global memories),
+/// whoever made it: an agent in this or another session, the historian,
+/// the dreamer or the person in the apps. `m[0]`
 /// cannot change between folds, so a change to a memory it shows is stated
 /// here. Each change shows in full while it fits a share of the memory
 /// budget, then as a one-line marker, then in one aggregate line; what an
@@ -699,21 +700,6 @@ pub fn delta_with(
     let mut next = baseline.clone();
     next.summary_items = newer.items.clone();
     let mut blocks: Vec<String> = newer.block.iter().cloned().collect();
-    let profile_changed = match &baseline.profile_digest {
-        Some(digest) => *digest != profile_digest(inputs.profile),
-        None => inputs.profile_max_id != baseline.profile_max_id,
-    };
-    if profile_changed {
-        let profile = memory::trim_profile(
-            inputs.profile.to_vec(),
-            ((inputs.profile_budget_tokens as f64 * DELTA_SHARE) as u64).max(1),
-            inputs.counter,
-        );
-        let block = memory::render_profile(&profile, "new-user-profile");
-        if !block.is_empty() {
-            blocks.push(block);
-        }
-    }
     let independent = if blocks.is_empty() {
         0
     } else {
@@ -743,7 +729,10 @@ pub fn delta_with(
         )) + line_tokens(&lines_of(Form::Full, &next.committed));
         let mut used_markers = line_tokens(&lines_of(Form::Marker, &next.committed));
         let mut full_count = lines_of(Form::Full, &next.committed).len();
-        let allowance = (inputs.memory_budget_tokens as f64 * CORRECTION_ALLOWANCE_RATIO) as u64;
+        // Changes at every level share one allowance, from the one budget
+        // every level fills.
+        let allowance = ((inputs.memory_budget_tokens + inputs.profile_budget_tokens) as f64
+            * CORRECTION_ALLOWANCE_RATIO) as u64;
         let marker_reserve = MARKER_RESERVE_TOKENS.min(allowance / 2);
         let mut cap = inputs.history_budget_tokens as f64 * M1_ABSOLUTE_CAP_RATIO;
         let m0_tokens = tokens(&baseline.m0);
@@ -951,27 +940,42 @@ mod tests {
         }
     }
 
-    fn memory(id: i64, content: &str) -> StoredMemory {
-        StoredMemory {
-            id,
-            project_path: "pj".into(),
-            category: "PROJECT_RULES".into(),
-            content: content.into(),
-            importance: Some(70),
-            status: "active".into(),
-            ..StoredMemory::default()
+    fn memory(id: i64, content: &str) -> Row {
+        Row::from_stored(
+            "project",
+            &crate::context_db::StoredMemory {
+                id,
+                project_path: "pj".into(),
+                category: "PROJECT_RULES".into(),
+                content: content.into(),
+                importance: Some(70),
+                status: "active".into(),
+                ..crate::context_db::StoredMemory::default()
+            },
+        )
+    }
+
+    fn profile_line(id: i64, content: &str) -> Row {
+        Row {
+            level: "global".into(),
+            owner: "self".into(),
+            tag: "USER".into(),
+            ..memory(id, content)
         }
     }
 
-    fn inputs<'a>(summaries: &'a [StoredCompartment], memories: &'a [StoredMemory]) -> Inputs<'a> {
+    static NO_CLASSES: std::sync::LazyLock<std::collections::HashMap<String, String>> =
+        std::sync::LazyLock::new(Default::default);
+
+    fn inputs<'a>(summaries: &'a [StoredCompartment], rows: &'a [Row]) -> Inputs<'a> {
         Inputs {
             counter: crate::count::Counter::for_model(None),
             workspace: None,
             summaries,
             docs: "",
-            profile: &[],
-            profile_max_id: 0,
-            memories,
+            rows,
+            classes: &NO_CLASSES,
+            now_ms: 0,
             gone: &[],
             history_budget_tokens: 60_000,
             history_local_budget_tokens: 60_000,
@@ -1023,7 +1027,7 @@ mod tests {
         ];
         let mut merged = memory(2, "old naming rule");
         merged.status = "archived".into();
-        merged.superseded_by_memory_id = Some(3);
+        merged.superseded_by = Some(3);
         let gone = [merged];
         let mut current = inputs(&summaries, &now);
         current.gone = &gone;
@@ -1031,13 +1035,18 @@ mod tests {
         assert!(m1.contains("Part 1"), "{m1}");
         assert!(
             m1.contains(
-                r#"<updated id="1" category="PROJECT_RULES">ask before every push</updated>"#
+                r#"<updated id="1" level="project" category="PROJECT_RULES">ask before every push</updated>"#
             ),
             "{m1}"
         );
-        assert!(m1.contains(r#"<superseded id="2" by="3"/>"#), "{m1}");
         assert!(
-            m1.contains(r#"<added id="3" category="PROJECT_RULES">new naming rule</added>"#),
+            m1.contains(r#"<superseded id="2" level="project" by="3"/>"#),
+            "{m1}"
+        );
+        assert!(
+            m1.contains(
+                r#"<added id="3" level="project" category="PROJECT_RULES">new naming rule</added>"#
+            ),
             "{m1}"
         );
 
@@ -1065,11 +1074,13 @@ mod tests {
         let first = vec![memory(1, &text(1))];
         let mut small = inputs(&[], &first);
         small.memory_budget_tokens = 1_000;
+        small.profile_budget_tokens = 0;
         let (m1, next, _) = delta(&baseline, &small);
         assert!(m1.contains(&text(1)), "{m1}");
-        let many: Vec<StoredMemory> = (1..40).map(|id| memory(id, &text(id))).collect();
+        let many: Vec<Row> = (1..40).map(|id| memory(id, &text(id))).collect();
         let mut later = inputs(&[], &many);
         later.memory_budget_tokens = 1_000;
+        later.profile_budget_tokens = 0;
         let (m1_later, after, _) = delta(&next, &later);
         let shown_before = &m1[..m1.find("\n</memory-updates>").unwrap()];
         assert!(m1_later.starts_with(shown_before), "{m1_later}");
@@ -1126,21 +1137,37 @@ mod tests {
         ));
     }
 
-    /// Editing a profile line in place, with no new row, still shows the
-    /// profile again in `m[1]`.
+    /// A user profile line is a global memory: `m[0]` shows it in the
+    /// profile block, and editing it in place shows in `m[1]` as one
+    /// `updated` line at the global level, like any memory's edit.
     #[test]
-    fn an_edited_profile_line_shows_in_m1() {
-        let mut at_fold = inputs(&[], &[]);
-        let before = ["prefers tea".to_owned(), "works late".to_owned()];
-        at_fold.profile = &before;
-        at_fold.profile_max_id = 2;
+    fn an_edited_profile_line_shows_in_m1_as_a_global_memory() {
+        let before = [
+            profile_line(1, "prefers tea"),
+            profile_line(2, "works late"),
+        ];
+        let at_fold = inputs(&[], &before);
         let baseline = fold(&at_fold, None);
+        assert!(
+            baseline
+                .m0
+                .contains("<user-profile>\n- prefers tea\n- works late\n</user-profile>"),
+            "{}",
+            baseline.m0
+        );
         assert_eq!(delta(&baseline, &at_fold).0, M1_EMPTY);
-        let after = ["prefers coffee".to_owned(), "works late".to_owned()];
-        let mut now = at_fold;
-        now.profile = &after;
-        let (m1, _, _) = delta(&baseline, &now);
-        assert!(m1.contains("prefers coffee"), "{m1}");
+        let after = [
+            profile_line(1, "prefers coffee"),
+            profile_line(2, "works late"),
+        ];
+        let (m1, _, _) = delta(&baseline, &inputs(&[], &after));
+        assert!(
+            m1.contains(
+                r#"<updated id="1" level="global" category="USER">prefers coffee</updated>"#
+            ),
+            "{m1}"
+        );
+        assert!(!m1.contains("works late"), "{m1}");
     }
 
     /// Memory changes alone never fold, however many there are: they have
@@ -1149,7 +1176,7 @@ mod tests {
     #[test]
     fn memory_changes_alone_never_fold() {
         let baseline = fold(&inputs(&[], &[]), None);
-        let edits: Vec<StoredMemory> = (1..=60)
+        let edits: Vec<Row> = (1..=60)
             .map(|id| memory(id, &format!("fact number {id} with some detail")))
             .collect();
         let (m1, _, pressure) = delta(&baseline, &inputs(&[], &edits));
@@ -1184,6 +1211,7 @@ mod tests {
         exact_inputs.history_local_budget_tokens =
             crate::summary::render::history_local_budget(2000.0, Some(model)) as u64;
         exact_inputs.memory_budget_tokens = 500;
+        exact_inputs.profile_budget_tokens = 0;
         let mut old_inputs = Inputs {
             counter: crate::count::Counter::estimated_for_model(Some(model)),
             ..exact_inputs

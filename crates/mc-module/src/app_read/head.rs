@@ -194,6 +194,8 @@ fn split(text: &str, delta: bool) -> Result<Vec<(&'static str, &str)>, Refusal> 
         &[
             ("memory_updates", "memory-updates"),
             ("history", "new-compartments"),
+            // Heads built before the profile's lines became global memories,
+            // still served until the session's next fold.
             ("user_profile", "new-user-profile"),
         ]
     } else {
@@ -201,6 +203,10 @@ fn split(text: &str, delta: bool) -> Result<Vec<(&'static str, &str)>, Refusal> 
             ("project_docs", "project-docs"),
             ("user_profile", "user-profile"),
             ("history", "session-history"),
+            // The workspace's memories, then the project's: both are memory
+            // sections, with the same `#id: fact` and `#id [project]: fact`
+            // lines.
+            ("memory", "workspace-memory"),
             ("memory", "project-memory"),
             ("memory_mural", "memory-mural"),
         ]
@@ -438,7 +444,7 @@ pub(super) use section::{read_section, SectionRequest};
 
 #[cfg(test)]
 #[path = "head_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "head_v12_tests.rs"]

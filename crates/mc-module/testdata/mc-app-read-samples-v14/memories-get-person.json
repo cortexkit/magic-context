@@ -1,0 +1,50 @@
+{
+  "name": "memories-get-person",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 4
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:naming",
+        "content": "Call the long-lived agent the head, never the main agent.",
+        "created_at": 1700000004000,
+        "embedded": false,
+        "first_seen_at": 1700000004000,
+        "history": [
+          {
+            "after": "Call the long-lived agent the head, never the main agent.",
+            "at": 1700000300000,
+            "before": "Call the long-lived agent the head.",
+            "reason": "dashboard_edit",
+            "revision": 2,
+            "writer": "person"
+          }
+        ],
+        "id": 4,
+        "importance": 50,
+        "last_seen_at": 1700000004000,
+        "level": "project",
+        "merged_from": [],
+        "owner": "pj-sample",
+        "retrieval_count": 0,
+        "revision": 2,
+        "seen_count": 1,
+        "sensitive": false,
+        "shareable": false,
+        "source": {
+          "session": "s",
+          "type": "historian"
+        },
+        "status": "active",
+        "updated_at": 1700000300000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

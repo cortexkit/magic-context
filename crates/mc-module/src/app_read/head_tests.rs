@@ -1,5 +1,6 @@
 use super::*;
 use crate::context_db::{StoredCompartment, StoredMemory};
+use crate::head_memories::Row;
 use crate::summary::head::{delta, fold, head_ops, Inputs};
 use cortexkit_role_compaction::view::Edit;
 use std::collections::BTreeMap;
@@ -27,23 +28,37 @@ pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, 
         importance: 90,
         ..Default::default()
     }];
-    let memories = [StoredMemory {
-        id: 1,
-        category: "PROJECT_RULES".into(),
-        content: "Expand §42§ for evidence.\nKeep the original bytes.".into(),
-        importance: Some(90),
-        status: "active".into(),
-        ..Default::default()
-    }];
-    let profile = vec!["Prefer concise explanations.".into()];
+    let memory = |id: i64, level: &str, category: &str, content: &str| {
+        Row::from_stored(
+            level,
+            &StoredMemory {
+                id,
+                category: category.into(),
+                content: content.into(),
+                importance: Some(90),
+                status: "active".into(),
+                ..Default::default()
+            },
+        )
+    };
+    let rows = [
+        memory(
+            1,
+            "project",
+            "PROJECT_RULES",
+            "Expand §42§ for evidence.\nKeep the original bytes.",
+        ),
+        memory(2, "global", "USER", "Prefer concise explanations."),
+    ];
+    let classes = std::collections::HashMap::new();
     let mut inputs = Inputs {
         counter: Counter::for_model(Some("provider/model")),
         summaries: &summaries,
         docs: &docs.rendered_block,
-        profile: &profile,
-        profile_max_id: 1,
-        memories: &memories,
+        rows: &rows,
         workspace: None,
+        classes: &classes,
+        now_ms: 0,
         gone: &[],
         history_budget_tokens: 10000,
         history_local_budget_tokens: 10000,
@@ -62,14 +77,12 @@ pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, 
         importance: 90,
         ..Default::default()
     });
-    let mut changed = memories.to_vec();
+    let mut changed = rows.to_vec();
     changed[0].content = "Expand §43§ for updated evidence.".into();
-    let new_profile = vec!["Prefer concise explanations and concrete evidence.".into()];
+    changed[1].content = "Prefer concise explanations and concrete evidence.".into();
     if !empty {
         inputs.summaries = &newer;
-        inputs.memories = &changed;
-        inputs.profile = &new_profile;
-        inputs.profile_max_id = 2;
+        inputs.rows = &changed;
     }
     let (m1, baseline, _) = delta(&baseline, &inputs);
     // A one-pixel PNG keeps the image contract readable without a large fixture.
@@ -152,7 +165,7 @@ fn shared_block(content: &str, duplicate: bool) -> String {
             ..Default::default()
         },
     ];
-    crate::memory::render_workspace_block(&memories, "project-memory", Some(&workspace))
+    crate::memory_legacy::render_workspace_block(&memories, "project-memory", Some(&workspace))
 }
 
 fn with_memory_block(mut state: ReadState, block: &str) -> ReadState {
@@ -310,9 +323,18 @@ fn split_real_renders_reconstructs_both_messages_and_bare_tags() {
             "1"
         );
         if !empty {
+            // The profile's edit is a memory update like any memory's, so
+            // `m[1]` has the updates and the newer summary, nothing else.
             assert_eq!(
                 result["messages"][1]["sections"].as_array().unwrap().len(),
-                3
+                2
+            );
+            assert_eq!(
+                result["messages"][1]["sections"][0]["items"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
             );
             assert_eq!(
                 result["messages"][1]["sections"][1]["items"][0]["compartment_id"],
@@ -469,18 +491,10 @@ fn unchanged_slots_share_their_text_and_baseline() {
     assert_eq!(read(&snapshot(), Some(&state)).unwrap()["as_of"]["view"], 7);
 }
 
-#[test]
-fn samples_v12() {
-    let mut samples = BTreeMap::<String, Vec<u8>>::new();
-    let v11 =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v11");
-    for line in std::fs::read_to_string(v11.join("SHA256SUMS"))
-        .unwrap()
-        .lines()
-    {
-        let (_, name) = line.split_once("  ").unwrap();
-        samples.insert(name.into(), std::fs::read(v11.join(name)).unwrap());
-    }
+/// The `context.head` and `context.head_section` samples as this build
+/// writes them, by file name. The tagged sets carry them: v12 first, v14
+/// since the memory levels changed the head ([`crate::head_memories`]).
+pub(in crate::app_read) fn head_samples(samples: &mut BTreeMap<String, Vec<u8>>) {
     for name in [
         "head",
         "head-empty-delta",
@@ -523,46 +537,13 @@ fn samples_v12() {
             Ok(result) => json!({"result":result}),
             Err(refusal) => json!({"error":refusal}),
         };
-        super::v12_tests::check_v11_round_trip(name, &state, &response);
         let sample = json!({"name":name,"request":{"method":"context.head","params":{"session":snapshot.key}},"response":response});
         samples.insert(
             format!("{name}.json"),
             format!("{}\n", serde_json::to_string_pretty(&sample).unwrap()).into_bytes(),
         );
     }
-    super::v12_tests::samples(&mut samples);
-    let mut root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v12");
-    let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
-    let regenerate = output.is_some();
-    if let Some(output) = output.filter(|value| value != "1") {
-        root = output.into();
-    }
-    if regenerate {
-        std::fs::create_dir_all(&root).unwrap();
-    }
-    let mut sums = String::new();
-    for (name, bytes) in samples {
-        let decoded: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(decoded["request"]["method"].is_string());
-        sums.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
-        if regenerate {
-            std::fs::write(root.join(&name), &bytes).unwrap();
-        }
-        assert_eq!(
-            std::fs::read(root.join(&name)).unwrap_or_else(|_| panic!("missing sample {name}")),
-            bytes,
-            "stale {name}"
-        );
-        println!("sample {name}: {} bytes", bytes.len());
-    }
-    if regenerate {
-        std::fs::write(root.join("SHA256SUMS"), &sums).unwrap();
-    }
-    assert_eq!(
-        std::fs::read_to_string(root.join("SHA256SUMS")).unwrap(),
-        sums
-    );
+    super::v12_tests::samples(samples);
 }
 
 pub(super) fn large_head(
@@ -582,23 +563,29 @@ pub(super) fn large_head(
         })
         .collect::<Vec<_>>();
     let memories = (1..=memory_count)
-        .map(|id| StoredMemory {
-            id,
-            category: "PROJECT_RULES".into(),
-            content: format!("Verified memory {id}: preserve the cached request prefix."),
-            importance: Some(90),
-            status: "active".into(),
-            ..Default::default()
+        .map(|id| {
+            Row::from_stored(
+                "project",
+                &StoredMemory {
+                    id,
+                    category: "PROJECT_RULES".into(),
+                    content: format!("Verified memory {id}: preserve the cached request prefix."),
+                    importance: Some(90),
+                    status: "active".into(),
+                    ..Default::default()
+                },
+            )
         })
         .collect::<Vec<_>>();
+    let classes = std::collections::HashMap::new();
     let inputs = Inputs {
         counter: Counter::for_model(Some("provider/model")),
         summaries: &summaries,
         docs: "",
-        profile: &[],
-        profile_max_id: 0,
-        memories: &memories,
+        rows: &memories,
         workspace: None,
+        classes: &classes,
+        now_ms: 0,
         gone: &[],
         history_budget_tokens: 1_000_000,
         history_local_budget_tokens: 1_000_000,

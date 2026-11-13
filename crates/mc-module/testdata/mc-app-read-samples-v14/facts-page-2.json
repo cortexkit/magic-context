@@ -1,0 +1,28 @@
+{
+  "name": "facts-page-2",
+  "request": {
+    "method": "facts.page",
+    "params": {
+      "cursor": "mcc1.WyJmYWN0cy5wYWdlIiwiMzQxYWNiMTMzMzk3ZWIzMiIsWzJdXQ",
+      "limit": 2,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "facts": [
+        {
+          "attempts": 2,
+          "category": "ARCHITECTURE",
+          "content": "Moves freeze the session first.",
+          "id": 3,
+          "reason": "needs_review",
+          "state": "decided_pending"
+        }
+      ],
+      "op": "facts.page",
+      "schema": 1
+    }
+  }
+}

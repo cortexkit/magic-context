@@ -1,0 +1,27 @@
+{
+  "name": "observations-page-2",
+  "request": {
+    "method": "observations.page",
+    "params": {
+      "cursor": "mcc1.WyJvYnNlcnZhdGlvbnMucGFnZSIsIjRmNTNjZGExOGMyYmFhMGMiLFsxNzAwMDAwNzAwMDAwLDJdXQ",
+      "limit": 2
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "observations": [
+        {
+          "content": "Asks for one question per message.",
+          "created_at": 1700000600000,
+          "id": 1,
+          "project": "pj-sample",
+          "proposed_category": "base:communication",
+          "session": "s"
+        }
+      ],
+      "op": "observations.page",
+      "schema": 1
+    }
+  }
+}

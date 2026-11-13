@@ -32,86 +32,6 @@ fn piece(state: &ReadState, extra: Value) -> Result<Value, Refusal> {
     read_section(Some(state), SectionRequest::parse(&params)?)
 }
 
-pub(super) fn check_v11_round_trip(name: &str, state: &ReadState, response: &Value) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("testdata/mc-app-read-samples-v11/{name}.json"));
-    let old: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let Some(messages) = response["result"]["messages"].as_array() else {
-        return;
-    };
-    for (message, old) in messages
-        .iter()
-        .zip(old["response"]["result"]["messages"].as_array().unwrap())
-    {
-        let old_sections = old["sections"].as_array().unwrap();
-        let texts = old_sections
-            .iter()
-            .map(|s| s["text"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        let expected = if old["empty"] == true {
-            old["placeholder"].as_str().unwrap().to_owned()
-        } else if old["slot"] == "delta" {
-            format!(
-                "{}\n{}\n{}",
-                old["wrapper"]["open"].as_str().unwrap(),
-                texts.join("\n"),
-                old["wrapper"]["close"].as_str().unwrap()
-            )
-        } else {
-            texts.join("\n\n")
-        };
-        assert_eq!(reconstruct(state, message), expected, "{name}");
-        assert_eq!(message["bytes"], expected.len());
-        for (section, old) in message["sections"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(old_sections)
-        {
-            assert!(section.get("text").is_none());
-            let text = section_text(
-                state,
-                message["slot"].as_str().unwrap(),
-                section["index"].as_u64().unwrap() as usize,
-            );
-            assert_eq!(text, old["text"].as_str().unwrap());
-            assert_eq!(section["bytes"], text.len());
-            if let Some(items) = section["items"].as_array() {
-                for (item, old) in items.iter().zip(old["items"].as_array().unwrap()) {
-                    assert!(item.get("text").is_none());
-                    if let Some(old_text) = old["text"].as_str() {
-                        assert_eq!(item_text(&text, item), old_text);
-                    } else {
-                        assert_eq!(item, old);
-                    }
-                }
-                assert_eq!(items.len(), old["items"].as_array().unwrap().len());
-            }
-            if section.get("image").is_some() {
-                let mut bytes = Vec::new();
-                let mut offset = 0;
-                loop {
-                    let params = json!({"view":state.offered.as_ref().unwrap().version,"slot":message["slot"],"section":section["index"],"part":"image","offset":offset,"max_bytes":1024});
-                    let chunk =
-                        read_section(Some(state), SectionRequest::parse(&params).unwrap()).unwrap();
-                    bytes.extend(STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap());
-                    let Some(next) = chunk["next_offset"].as_u64() else {
-                        break;
-                    };
-                    offset = next;
-                }
-                assert_eq!(STANDARD.encode(&bytes), old["image"]["data"]);
-                assert_eq!(section["image"]["bytes"], bytes.len());
-                assert_eq!(
-                    section["image"]["sha256"],
-                    format!("{:x}", Sha256::digest(bytes))
-                );
-                assert!(section["image"].get("data").is_none());
-            }
-        }
-    }
-}
-
 #[test]
 fn v11_folder_is_frozen() {
     let root =
@@ -272,22 +192,25 @@ fn utf8_state() -> ReadState {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("ARCHITECTURE.md"), "東京と大阪漢").unwrap();
     let docs = crate::project_docs::read_project_docs_canonical(dir.path().to_str().unwrap());
-    let memories = [crate::context_db::StoredMemory {
-        id: 1,
-        category: "PROJECT_RULES".into(),
-        content: "🧠原文を保持🌍".into(),
-        status: "active".into(),
-        ..Default::default()
-    }];
+    let memories = [crate::head_memories::Row::from_stored(
+        "project",
+        &crate::context_db::StoredMemory {
+            id: 1,
+            category: "PROJECT_RULES".into(),
+            content: "🧠原文を保持🌍".into(),
+            status: "active".into(),
+            ..Default::default()
+        },
+    )];
     let baseline = crate::summary::head::fold(
         &crate::summary::head::Inputs {
             counter: Counter::for_model(Some("provider/model")),
             summaries: &[],
             docs: &docs.rendered_block,
-            profile: &[],
-            profile_max_id: 0,
-            memories: &memories,
+            rows: &memories,
             workspace: None,
+            classes: &std::collections::HashMap::new(),
+            now_ms: 0,
             gone: &[],
             history_budget_tokens: 10000,
             history_local_budget_tokens: 10000,

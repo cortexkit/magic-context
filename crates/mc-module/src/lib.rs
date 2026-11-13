@@ -62,6 +62,8 @@ pub mod decay;
 pub(crate) mod dreamer;
 pub mod embedding;
 pub mod expand;
+/// The memories a history head may show, and the one selection that picks them.
+pub mod head_memories;
 pub mod index;
 pub mod injection;
 pub mod js_text;
@@ -70,10 +72,12 @@ pub mod lanes;
 pub(crate) mod legacy_projects;
 pub mod memory;
 pub(crate) mod memory_context;
+/// The 0.49 head's memory selection, which tests compare against.
+#[cfg(test)]
+pub(crate) mod memory_legacy;
 pub mod memory_levels;
 pub mod memory_profile;
-/// The selection a head's memory blocks show; not yet wired into the head.
-#[expect(dead_code)]
+/// The selection a head's memory blocks show.
 pub(crate) mod memory_render;
 /// A simulation of the head's memory selection over a store copy, run only
 /// when asked (`--ignored`), and its tests on synthetic stores.

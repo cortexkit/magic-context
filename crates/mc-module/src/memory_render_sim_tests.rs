@@ -44,10 +44,12 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::context_db::{ContextDb, StoredMemory, FRESH_SCHEMA};
+use crate::context_db::{ContextDb, FRESH_SCHEMA};
 use crate::context_migrations::SCHEMA_VERSION;
 use crate::count::Counter;
+use crate::head_memories::{self, wrapper, Row, LIVE, ROW_COLUMNS};
 use crate::memory;
+use crate::memory_legacy;
 use crate::memory_profile::prompt_profile;
 use crate::memory_render::{level_tokens, select, Budget, Candidate, Decay, Level, Selection};
 use crate::memory_writes::{self, Writer};
@@ -64,13 +66,6 @@ const RESULTS: &str = "results.json";
 /// The levels simulated, in the order a head shows them. Agent memories are
 /// left out: no writer creates them yet, and the head has no agent block.
 const LEVELS: [Level; 3] = [Level::Global, Level::Workspace, Level::Project];
-/// A row the head may show: live, and not past its end. `?1` is the time
-/// the head is rendered at. Today's head reads with the same condition.
-const LIVE: &str = "status IN ('active', 'permanent') AND (expires_at IS NULL OR expires_at > ?1)";
-/// The columns [`Row::read`] reads, in its order.
-const ROW_COLUMNS: &str = "id, level, owner_id, category, origin_category, content, importance,
-    status, authority, safety_critical, decay_class, last_seen_at, verified_at, expires_at,
-    overrides_memory_id, source_project_id";
 /// Why a candidate field is the same for every row: the store keeps nothing
 /// it could be read from.
 const FIELDS_WITHOUT_SOURCE: [(&str, &str); 1] = [(
@@ -227,7 +222,9 @@ fn run(inputs: &Inputs) -> Result<Value, String> {
     let (profile_today, profile_active) = profile_today(&db, budgets.profile, counter)?;
     let context = Context {
         counter,
-        classes: decay_classes()?,
+        classes: head_memories::decay_classes(
+            &prompt_profile(None).map_err(|error| format!("{error:?}"))?,
+        ),
         now: inputs.now_ms,
         budgets,
         profile_today,
@@ -401,90 +398,6 @@ struct Context {
     profile_active: usize,
 }
 
-/// One memory row, as the simulation reads it.
-#[derive(Clone, Debug)]
-struct Row {
-    id: i64,
-    level: String,
-    owner: String,
-    /// The profile category id.
-    category: String,
-    /// The tag the memory was written under, which the head's project block
-    /// groups by.
-    tag: String,
-    content: String,
-    importance: Option<i64>,
-    status: String,
-    policy: bool,
-    critical: bool,
-    decay_class: Option<String>,
-    last_seen_at: Option<i64>,
-    verified_at: Option<i64>,
-    expires_at: Option<i64>,
-    overrides: Option<i64>,
-    source_project: Option<String>,
-}
-
-impl Row {
-    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get(0)?,
-            level: row.get(1)?,
-            owner: row.get(2)?,
-            category: row.get(3)?,
-            tag: row.get(4)?,
-            content: row.get(5)?,
-            importance: row.get(6)?,
-            status: row
-                .get::<_, Option<String>>(7)?
-                .unwrap_or_else(|| "active".into()),
-            policy: row.get::<_, String>(8)? == "policy",
-            critical: row.get::<_, Option<i64>>(9)? == Some(1),
-            decay_class: row.get(10)?,
-            last_seen_at: row.get(11)?,
-            verified_at: row.get(12)?,
-            expires_at: row.get(13)?,
-            overrides: row.get(14)?,
-            source_project: row.get(15)?,
-        })
-    }
-
-    fn permanent(&self) -> bool {
-        self.status == "permanent"
-    }
-
-    /// The last time the memory was genuinely met again: seen again by a
-    /// summary or an agent's save, or confirmed by a verification.
-    fn last_met(&self) -> Option<i64> {
-        self.last_seen_at.into_iter().chain(self.verified_at).max()
-    }
-
-    fn level(&self) -> Option<Level> {
-        match self.level.as_str() {
-            "global" => Some(Level::Global),
-            "workspace" => Some(Level::Workspace),
-            "project" => Some(Level::Project),
-            _ => None,
-        }
-    }
-
-    /// The row as the head's line renderer takes it.
-    fn stored(&self) -> StoredMemory {
-        StoredMemory {
-            id: self.id,
-            project_path: self.owner.clone(),
-            category: self.tag.clone(),
-            content: self.content.clone(),
-            importance: self.importance.map(|value| value as i32),
-            status: self.status.clone(),
-            expires_at: self.expires_at,
-            last_seen_at: self.last_seen_at,
-            verified_at: self.verified_at,
-            ..StoredMemory::default()
-        }
-    }
-}
-
 fn rows_where(
     conn: &Connection,
     condition: &str,
@@ -552,32 +465,6 @@ impl DecayClass {
     }
 }
 
-/// Each category id's decay class in the bundled coding profile.
-fn decay_classes() -> Result<HashMap<String, String>, String> {
-    let profile = prompt_profile(None).map_err(|error| format!("{error:?}"))?;
-    Ok(profile.body["categories"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|category| {
-            Some((
-                category["id"].as_str()?.to_owned(),
-                category["decay_class"].as_str()?.to_owned(),
-            ))
-        })
-        .collect())
-}
-
-/// The block a level's memories are shown in.
-fn wrapper(level: Level) -> &'static str {
-    match level {
-        Level::Global => "user-profile",
-        Level::Workspace => "workspace-memory",
-        Level::Project => "project-memory",
-        Level::Agent => "agent-memory",
-    }
-}
-
 /// The head's escaping of text inside a block.
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -585,9 +472,8 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// A memory's line in a project or workspace block: `#id: fact`, or, for a
-/// memory from a sibling project, `#id [sibling]: fact`, as the head's
-/// workspace lines show it.
+/// A memory's line in the 0.49 head's project block: `#id: fact`, or, for a
+/// memory from a sibling project, `#id [sibling]: fact`.
 fn memory_line(row: &Row, label: Option<&str>) -> String {
     match label {
         Some(name) => format!("#{} [{}]: {}", row.id, escape(name), escape(&row.content)),
@@ -595,12 +481,12 @@ fn memory_line(row: &Row, label: Option<&str>) -> String {
     }
 }
 
-/// What showing a row costs at `level`, counted as the head counts it today:
-/// `trim_to_budget`'s line, category tags and wrapper for a memory block,
-/// `trim_profile`'s line cost for the user profile (a bullet and four
-/// tokens for its share of the block's newlines). The profile has no
-/// category tags; its wrapper is charged like any block's, which today's
-/// profile trim leaves out.
+/// What a row the 0.49 head showed costs, for a row the new head does not
+/// read (a sibling project's memory), so today's usage can be reported: the
+/// 0.49 project block's line, category tags and wrapper, or the 0.49
+/// profile's line cost (a bullet and four tokens for its share of the
+/// block's newlines). Candidates are priced by the head's own builder
+/// ([`head_memories::candidates`]).
 fn priced(row: &Row, level: Level, label: Option<&str>, counter: Counter) -> Candidate {
     let (line_tokens, category_tokens) = match level {
         Level::Global => (counter.count(&format!("- {}", row.content)) + 4, 0),
@@ -661,7 +547,7 @@ fn profile_today(
         return Err("the user profile reads differently here than the head reads it".into());
     }
     let active = profile.len();
-    let mut kept = memory::trim_profile(profile, budget, counter)
+    let mut kept = memory_legacy::trim_profile(profile, budget, counter)
         .into_iter()
         .peekable();
     // The trim keeps lines in their order, so walking both in step names
@@ -747,11 +633,15 @@ fn build_project(db: &ContextDb, owner: &str, context: &Context) -> Result<Proje
         let workspace = Workspace::resolve(conn, owner)?;
         let readable = workspace.memories(conn, now)?;
         let today_readable = readable.len();
-        let today_block: Vec<i64> =
-            memory::trim_workspace_to_budget(readable, context.budgets.memory, &workspace, counter)
-                .iter()
-                .map(|memory| memory.id)
-                .collect();
+        let today_block: Vec<i64> = memory_legacy::trim_workspace_to_budget(
+            readable,
+            context.budgets.memory,
+            &workspace,
+            counter,
+        )
+        .iter()
+        .map(|memory| memory.id)
+        .collect();
 
         let workspaces =
             serde_json::to_string(&workspace_ids(conn, owner)?).expect("a list of ids serializes");
@@ -783,18 +673,18 @@ fn build_project(db: &ContextDb, owner: &str, context: &Context) -> Result<Proje
             today_profile: context.profile_today.len(),
             today_readable,
         };
-        for row in candidate_rows {
-            let Some(level) = row.level() else { continue };
-            let label = row
-                .source_project
-                .as_deref()
-                .filter(|_| level == Level::Workspace)
-                .and_then(|source| workspace.source_name(source));
+        // The head's own builder prices and ranks the candidates, so what the
+        // simulation reports is what a fold would choose.
+        let candidates =
+            head_memories::candidates(&candidate_rows, Some(&workspace), &context.classes, counter);
+        for candidate in candidates {
+            let row = candidate_rows
+                .iter()
+                .find(|row| row.id == candidate.id)
+                .expect("a candidate comes from a row")
+                .clone();
             let decay = DecayClass::of(&row, &context.classes);
-            let candidate = Candidate {
-                decay: decay.decay(),
-                ..priced(&row, level, label, counter)
-            };
+            assert_eq!(decay.decay(), candidate.decay, "memory {}", row.id);
             project.decay.insert(row.id, decay);
             project.priced.insert(row.id, candidate.clone());
             project.candidates.push(candidate);
@@ -1773,7 +1663,7 @@ fn the_harness_runs_end_to_end_and_writes_only_its_output_folder() {
 }
 
 #[test]
-fn today_is_the_selection_the_heads_fold_shows() {
+fn the_shipped_parameters_are_the_selection_the_heads_fold_shows() {
     let dir = scratch("today");
     let store = dir.join("context.db");
     // More profile lines and project memories than today's budgets hold.
@@ -1807,39 +1697,52 @@ fn today_is_the_selection_the_heads_fold_shows() {
     );
     drop(db);
     let now = now_ms();
+    let settings = Settings::default();
+    // The parameter set the head ships with.
+    let shipped = head_memories::budget(
+        settings.memory_budget_tokens,
+        settings.profile_budget_tokens,
+    );
+    let minimum = |level: Level| shipped.level_minimum_tokens[&level];
     let results = run(&Inputs {
         store: store.clone(),
         out: dir.join("out"),
-        grid: grid(),
+        grid: vec![Params {
+            name: "shipped".into(),
+            half_life_days: shipped.half_life_ms as f64 / DAY_MS,
+            protected_tokens: shipped.protected_tokens,
+            minimum: Minimum {
+                global: minimum(Level::Global),
+                workspace: minimum(Level::Workspace),
+                project: minimum(Level::Project),
+            },
+        }],
         model: None,
         now_ms: now,
     })
     .expect("the simulation runs");
-    let today = &results["projects"][0]["today"];
-    let profile_count = today["profile"].as_u64().expect("a count") as usize;
-    let today_ids = ids(&today["ids"]);
-    let (profile_ids, block_ids) = today_ids.split_at(profile_count);
+    let mut simulated = ids(&results["projects"][0]["runs"][0]["ids"]);
+    simulated.sort_unstable();
 
     // The head itself, folded from the same store.
     let db = ContextDb::open(&store).expect("open the store");
-    let settings = Settings::default();
-    let (workspace, memories) = db
+    let (workspace, rows) = db
         .with_connection(|conn| {
             let workspace = Workspace::resolve(conn, "pj-big")?;
-            let memories = workspace.memories(conn, now)?;
-            Ok::<_, rusqlite::Error>((workspace, memories))
+            let rows = head_memories::read_rows(conn, Some("pj-big"), now)?;
+            Ok::<_, rusqlite::Error>((workspace, rows))
         })
         .expect("read the head's memories");
-    let (profile_lines, profile_max_id) = db.user_profile().expect("read the profile");
+    let classes = head_memories::decay_classes(&prompt_profile(None).expect("the bundled profile"));
     let baseline = head::fold(
         &head::Inputs {
             counter: Counter::for_model(None),
             summaries: &[],
             docs: "",
-            profile: &profile_lines,
-            profile_max_id,
-            memories: &memories,
+            rows: &rows,
             workspace: Some(&workspace),
+            classes: &classes,
+            now_ms: now,
             gone: &[],
             history_budget_tokens: 0,
             history_local_budget_tokens: 0,
@@ -1848,30 +1751,19 @@ fn today_is_the_selection_the_heads_fold_shows() {
         },
         None,
     );
-    let mut block: Vec<i64> = block_ids.to_vec();
-    block.sort_unstable();
-    assert_eq!(baseline.shown_ids(), block);
-    assert!(block.contains(&permanent));
-    // The budget left memories out, so the match is a real choice.
+    assert_eq!(baseline.shown_ids(), simulated);
+    assert!(simulated.contains(&permanent));
+    // The budget left memories out at both levels, so the match is a real
+    // choice.
+    let shown_project = saved.iter().filter(|id| simulated.contains(id)).count();
     assert!(
-        !block.is_empty() && block.len() < saved.len(),
-        "{}",
-        block.len()
+        0 < shown_project && shown_project < saved.len(),
+        "{shown_project}"
     );
-
-    let contents: HashMap<i64, String> = db
-        .memories_by_ids(profile_ids)
-        .expect("read the profile rows")
-        .into_iter()
-        .map(|memory| (memory.id, memory.content))
-        .collect();
-    let shown_profile: Vec<String> = profile_ids.iter().map(|id| contents[id].clone()).collect();
-    assert!(!shown_profile.is_empty() && shown_profile.len() < profile.len());
+    let shown_profile = simulated.len() - shown_project;
     assert!(
-        baseline
-            .m0
-            .contains(&memory::render_profile(&shown_profile, "user-profile")),
-        "the head's profile block is not the one the simulation counts as today's"
+        0 < shown_profile && shown_profile < profile.len(),
+        "{shown_profile}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

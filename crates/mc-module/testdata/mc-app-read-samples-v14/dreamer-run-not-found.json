@@ -1,0 +1,15 @@
+{
+  "name": "dreamer-run-not-found",
+  "request": {
+    "method": "dreamer.run",
+    "params": {
+      "id": 99
+    }
+  },
+  "response": {
+    "error": {
+      "code": "run_not_found",
+      "message": "No dreamer run matches the id."
+    }
+  }
+}

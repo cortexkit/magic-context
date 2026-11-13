@@ -2,7 +2,7 @@
 
 use crate::app_read::{error, invalid, object, string};
 use crate::config::Config;
-use crate::context_db::{ContextDb, StoredCompartment, StoredMemory};
+use crate::context_db::{ContextDb, StoredCompartment};
 use crate::count::Counter;
 use crate::route::Project;
 use crate::summary::{head, render};
@@ -167,7 +167,9 @@ struct Snapshot {
     model: Option<String>,
     usable: u64,
     workspace: Option<Workspace>,
-    memories: Vec<StoredMemory>,
+    /// The project's and its workspaces' memories the head may show; the
+    /// user profile is not part of a bias pack.
+    memories: Vec<crate::head_memories::Row>,
     summaries: Vec<StoredCompartment>,
 }
 
@@ -298,7 +300,12 @@ impl Reader {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |time| time.as_millis() as i64);
-                    snapshot.memories = workspace.memories(&tx, now).map_err(|_| unavailable())?;
+                    snapshot.memories =
+                        crate::head_memories::read_rows(&tx, Some(&project.id), now)
+                            .map_err(|_| unavailable())?
+                            .into_iter()
+                            .filter(|row| row.level != "global")
+                            .collect();
                     snapshot.workspace = Some(workspace);
                 }
             }
@@ -313,8 +320,9 @@ impl Reader {
         Ok((snapshot, start.elapsed()))
     }
 
-    /// Memories use the agent's project-memory block costs, including category and source labels;
-    /// raw item token counts can therefore sum to less than the requested budget.
+    /// Memories are the ones the agent's head would choose within `budget`, by the head's
+    /// own selection and block costs, including category tags and source labels; raw item
+    /// token counts can therefore sum to less than the requested budget.
     /// Summaries use the recorded model context window, or age/importance decay without
     /// budget pressure when a plugin has never recorded a context limit.
     /// Plugin-only sessions have no directory, so project-file history percentage
@@ -333,27 +341,31 @@ impl Reader {
             let memories = if purpose == "front" {
                 // A voice front may receive only persona-marked memories. No such mark exists yet.
                 Vec::new()
-            } else if settings.memory_enabled {
-                snapshot
-                    .workspace
-                    .as_ref()
-                    .map(|workspace| {
-                        crate::memory::trim_workspace_to_budget(
-                            snapshot.memories,
-                            budget,
-                            workspace,
-                            counter,
-                        )
-                    })
-                    .unwrap_or_default()
+            } else if settings.memory_enabled && snapshot.workspace.is_some() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |time| time.as_millis() as i64);
+                let chosen = crate::head_memories::choose(
+                    &snapshot.memories,
+                    snapshot.workspace.as_ref(),
+                    &crate::head_memories::classes_for(None),
+                    counter,
+                    &crate::head_memories::budget(budget, 0),
+                    now,
+                );
+                chosen
+                    .ids
+                    .iter()
+                    .filter_map(|id| snapshot.memories.iter().find(|row| row.id == *id))
+                    .collect()
             } else {
                 Vec::new()
             };
-            answer["memories"] = Value::Array(memories.into_iter().map(|memory| {
-                let mut item = json!({"id": memory.id, "category": memory.category, "text": memory.content, "tokens": counter.count(&memory.content)});
-                if let Some(workspace) = &snapshot.workspace {
-                    if let Some(member) = workspace.member(&memory.project_path).filter(|member| *member != workspace.own) {
-                        item["project"] = json!(workspace.source_name(&memory.project_path).unwrap_or(member));
+            answer["memories"] = Value::Array(memories.into_iter().map(|row| {
+                let mut item = json!({"id": row.id, "category": row.tag, "text": row.content, "tokens": counter.count(&row.content)});
+                if let (Some(workspace), Some(source)) = (&snapshot.workspace, &row.source_project) {
+                    if row.level == "workspace" && *source != workspace.own {
+                        item["project"] = json!(workspace.source_name(source).unwrap_or(source));
                     }
                 }
                 item
@@ -366,10 +378,10 @@ impl Reader {
                 counter,
                 summaries: &snapshot.summaries,
                 docs: "",
-                profile: &[],
-                profile_max_id: 0,
-                memories: &[],
+                rows: &[],
                 workspace: None,
+                classes: &HashMap::new(),
+                now_ms: 0,
                 gone: &[],
                 history_budget_tokens: history_budget,
                 history_local_budget_tokens: render::history_local_budget(

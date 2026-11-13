@@ -1,0 +1,25 @@
+{
+  "name": "watch-owners",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "global": true,
+      "projects": [
+        "pj-sample"
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:0",
+      "global": true,
+      "kind": "resync",
+      "op": "context.watch",
+      "projects": [
+        "pj-sample"
+      ],
+      "schema": 1,
+      "sessions": []
+    }
+  }
+}

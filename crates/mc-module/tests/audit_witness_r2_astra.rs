@@ -213,27 +213,33 @@ async fn audit_restart_without_summaries_preserves_the_warm_head() {
     );
 }
 
-fn memory(id: i64, content: &str) -> StoredMemory {
-    StoredMemory {
-        id,
-        project_path: "audit-project".into(),
-        category: "CONSTRAINTS".into(),
-        content: content.into(),
-        status: "active".into(),
-        importance: Some(70),
-        ..StoredMemory::default()
-    }
+fn memory(id: i64, content: &str) -> mc_module::head_memories::Row {
+    mc_module::head_memories::Row::from_stored(
+        "project",
+        &StoredMemory {
+            id,
+            project_path: "audit-project".into(),
+            category: "CONSTRAINTS".into(),
+            content: content.into(),
+            status: "active".into(),
+            importance: Some(70),
+            ..StoredMemory::default()
+        },
+    )
 }
 
-fn inputs(memories: &[StoredMemory]) -> head::Inputs<'_> {
+static NO_CLASSES: std::sync::LazyLock<std::collections::HashMap<String, String>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn inputs(memories: &[mc_module::head_memories::Row]) -> head::Inputs<'_> {
     head::Inputs {
         counter: mc_module::count::Counter::for_model(None),
         summaries: &[],
         docs: "",
-        profile: &[],
-        profile_max_id: 0,
-        memories,
+        rows: memories,
         workspace: None,
+        classes: &NO_CLASSES,
+        now_ms: 0,
         gone: &[],
         history_budget_tokens: 100_000,
         history_local_budget_tokens: 100_000,

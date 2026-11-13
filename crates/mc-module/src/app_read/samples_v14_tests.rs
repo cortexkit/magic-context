@@ -1,11 +1,15 @@
-//! The tagged sample set `mc-app-read-samples-v13`: every v12 sample byte
-//! for byte, and the owner reads (memories, the dreamer, a project's
-//! sessions, notes and candidate facts) with their watch notices, each read
-//! from the fixture store.
+//! The tagged sample set `mc-app-read-samples-v14`: the v13 set with the
+//! `context.head` and `context.head_section` samples written again, because
+//! memory levels changed the head: a user profile line is a global memory,
+//! so its edit is an update line in `m[1]` like any memory's, and every
+//! update line names its level. The owner reads (memories, the dreamer, a
+//! project's sessions, notes and candidate facts) and their watch notices
+//! are read from the fixture store as in v13. The v12 and v13 folders stay
+//! as they were tagged.
 //!
 //! Regenerate deliberately from the workspace root:
 //! `MC_REGENERATE_APP_READ_SAMPLES=1 cargo test --locked -p mc-module --lib
-//! app_read::samples_v13_tests::samples_v13 -- --exact`. Set the variable
+//! app_read::samples_v14_tests::samples_v14 -- --exact`. Set the variable
 //! to an output directory instead of `1` for a read-only checkout.
 
 use super::fixture_tests::{head, Fixture, EMPTY, FORMS, PROJECT};
@@ -33,7 +37,7 @@ fn notice_sample(name: &str, params: &Value, mut notice: Value) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn samples_v13() {
+async fn samples_v14() {
     let mut samples = BTreeMap::<String, Vec<u8>>::new();
     let v12 =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v12");
@@ -45,6 +49,10 @@ async fn samples_v13() {
         samples.insert(name.into(), std::fs::read(v12.join(name)).unwrap());
     }
     let copied = samples.len();
+    let mut rewritten = BTreeMap::new();
+    super::head::tests::head_samples(&mut rewritten);
+    assert!(rewritten.keys().all(|name| samples.contains_key(name)));
+    samples.extend(rewritten.clone());
     let fixture = Fixture::new();
     let mut replica = fixture.replica();
     let mut read = |name: &str, method: &str, params: Value| -> Value {
@@ -269,7 +277,7 @@ async fn samples_v13() {
     }
     assert_eq!(samples.len(), copied + 47);
     let mut root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v13");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v14");
     let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
     let regenerate = output.is_some();
     if let Some(output) = output.filter(|value| value != "1") {
@@ -302,12 +310,15 @@ async fn samples_v13() {
         sums,
         "stale sample checksums"
     );
-    // The v12 examples are copied unchanged.
+    // The v12 examples the head doesn't write are copied unchanged.
     for line in std::fs::read_to_string(v12.join("SHA256SUMS"))
         .unwrap()
         .lines()
     {
         let (_, name) = line.split_once("  ").unwrap();
+        if rewritten.contains_key(name) {
+            continue;
+        }
         assert_eq!(
             std::fs::read(root.join(name)).unwrap(),
             std::fs::read(v12.join(name)).unwrap(),

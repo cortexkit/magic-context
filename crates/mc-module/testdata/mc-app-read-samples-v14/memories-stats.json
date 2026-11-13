@@ -1,0 +1,47 @@
+{
+  "name": "memories-stats",
+  "request": {
+    "method": "memories.stats",
+    "params": {
+      "level": "project",
+      "owner": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "by_category": {
+        "swe:architecture": {
+          "active": 1,
+          "archived": 1,
+          "permanent": 0
+        },
+        "swe:config-values": {
+          "active": 1,
+          "archived": 1,
+          "permanent": 0
+        },
+        "swe:constraints": {
+          "active": 1,
+          "archived": 0,
+          "permanent": 0
+        },
+        "swe:naming": {
+          "active": 1,
+          "archived": 0,
+          "permanent": 0
+        },
+        "swe:project-rules": {
+          "active": 1,
+          "archived": 0,
+          "permanent": 1
+        }
+      },
+      "level": "project",
+      "op": "memories.stats",
+      "owner": "pj-sample",
+      "schema": 1,
+      "total": 8
+    }
+  }
+}

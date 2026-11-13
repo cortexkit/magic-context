@@ -1,0 +1,51 @@
+{
+  "name": "memories-get-summary",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 2
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:architecture",
+        "content": "The head is rebuilt only when the provider cache is already lost.",
+        "created_at": 1700000002000,
+        "embedded": false,
+        "expires_at": 4102444800000,
+        "first_seen_at": 1700000002000,
+        "history": [
+          {
+            "after": "The head is rebuilt only when the provider cache is already lost.",
+            "at": 1700000200000,
+            "before": "The head is rebuilt only when the cache is already lost.",
+            "reason": "edit",
+            "revision": 2,
+            "writer": "summary"
+          }
+        ],
+        "id": 2,
+        "importance": 50,
+        "last_seen_at": 1700000002000,
+        "level": "project",
+        "merged_from": [],
+        "owner": "pj-sample",
+        "retrieval_count": 0,
+        "revision": 2,
+        "seen_count": 1,
+        "sensitive": false,
+        "shareable": true,
+        "source": {
+          "session": "s",
+          "type": "historian"
+        },
+        "status": "active",
+        "updated_at": 1700000200000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

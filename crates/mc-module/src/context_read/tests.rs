@@ -87,6 +87,8 @@ impl Fixture {
             ] {
                 conn.execute("INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,shareable,scope,importance,status,expires_at,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,'project', ?2,CASE ?3 WHEN 'PROJECT_RULES' THEN 'swe:project-rules' WHEN 'ARCHITECTURE' THEN 'swe:architecture' WHEN 'CONSTRAINTS' THEN 'swe:constraints' WHEN 'CONFIG_VALUES' THEN 'swe:config-values' WHEN 'NAMING' THEN 'swe:naming' WHEN 'USER_DIRECTIVES' THEN 'swe:project-rules' WHEN 'USER_PREFERENCES' THEN 'swe:project-rules' WHEN 'CONFIG_DEFAULTS' THEN 'swe:config-values' WHEN 'ARCHITECTURE_DECISIONS' THEN 'swe:architecture' WHEN 'ENVIRONMENT' THEN 'swe:config-values' WHEN 'WORKFLOW_RULES' THEN 'swe:project-rules' WHEN 'KNOWN_ISSUES' THEN 'swe:constraints' ELSE 'mc:unmapped' END, ?3,?4,?5,1,'project',?6,?7,?8,0,0,0,0)", params![id,project,category,content,format!("hash-{id}"),importance,status,if id == 5 {Some(1)} else {None}]).unwrap();
             }
+            // Beta shares one memory with the workspace.
+            conn.execute_batch("UPDATE memories SET level='workspace', owner_id='1', source_project_id='other' WHERE id=3").unwrap();
             for sequence in 0..12 {
                 conn.execute("INSERT INTO compartments(session_id,harness,sequence,start_message,end_message,title,content,p1,p2,p3,p4,importance,created_at) VALUES('plugin','opencode',?1,?2,?3,?4,'flat','verbose fact','short fact','anchor fact','tiny fact',50,0)", params![sequence, sequence*10+1,sequence*10+10,format!("Summary {sequence}")]).unwrap();
             }
@@ -174,14 +176,18 @@ fn context_read_memories_reuse_head_selection_and_priority_with_workspace_labels
         .snapshot("opencode", "plugin", Some("bias"))
         .unwrap();
     let workspace = snapshot.workspace.as_ref().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
     let inputs = head::Inputs {
         counter: Counter::for_model(None),
         summaries: &[],
         docs: "",
-        profile: &[],
-        profile_max_id: 0,
-        memories: &snapshot.memories,
+        rows: &snapshot.memories,
         workspace: Some(workspace),
+        classes: &crate::head_memories::classes_for(None),
+        now_ms: now,
         gone: &[],
         history_budget_tokens: 0,
         history_local_budget_tokens: 0,

@@ -1,0 +1,17 @@
+{
+  "name": "dreamer-runs-bad-cursor",
+  "request": {
+    "method": "dreamer.runs",
+    "params": {
+      "cursor": "mcc1.WyJkcmVhbWVyLnJ1bnMiLCJjNTU0MmU3ZDI3M2Q2Nzk1IixbMTcwMDAwMzYwMDAwMCwyXV0",
+      "project": "pj-sample",
+      "task": "swe:compress-cues"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "bad_cursor",
+      "message": "The cursor is not one this read made with these filters."
+    }
+  }
+}
