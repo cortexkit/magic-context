@@ -172,11 +172,16 @@ impl Workspace {
         ]
     }
 
-    /// Eligibility only; callers add status, expiry, dates and placement policy.
+    /// Eligibility only; callers add status, expiry and dates. Only project
+    /// memories are eligible. A workspace shares by the tag a memory was
+    /// written under (`origin_category`), as its settings name them.
     pub fn predicate(&self, conn: &Connection, alias: &str) -> rusqlite::Result<String> {
-        let path = format!("{alias}.project_path");
+        let path = format!("{alias}.owner_id");
+        let level = format!("{alias}.level = 'project'");
         if self.share_categories.is_none() {
-            return Ok(format!("{path} IN (SELECT value FROM json_each(?1))"));
+            return Ok(format!(
+                "{level} AND {path} IN (SELECT value FROM json_each(?1))"
+            ));
         }
         let classification = if column_exists(conn, "memories", "shareable")?
             && column_exists(conn, "memories", "scope")?
@@ -186,34 +191,24 @@ impl Workspace {
             String::new()
         };
         Ok(format!(
-            "({path} IN (SELECT value FROM json_each(?2)) OR
+            "{level} AND ({path} IN (SELECT value FROM json_each(?2)) OR
             ({path} IN (SELECT value FROM json_each(?1)) AND
-             {alias}.category IN (SELECT value FROM json_each(?3)){classification}))"
+             {alias}.origin_category IN (SELECT value FROM json_each(?3)){classification}))"
         ))
     }
 
-    pub fn memories(
-        &self,
-        conn: &Connection,
-        now: i64,
-        head: bool,
-    ) -> rusqlite::Result<Vec<StoredMemory>> {
-        let placement = if head {
-            " AND NOT EXISTS (SELECT 1 FROM memory_placement p WHERE p.memory_id=m.id AND p.level <> 'project')"
-        } else {
-            ""
-        };
+    pub fn memories(&self, conn: &Connection, now: i64) -> rusqlite::Result<Vec<StoredMemory>> {
         let order = if self.is_workspaced() {
-            "m.category ASC, m.updated_at DESC, m.id ASC"
+            "m.origin_category ASC, m.updated_at DESC, m.id ASC"
         } else {
             "COALESCE(m.importance, 50) DESC, m.id ASC"
         };
         let sql = format!(
-            "SELECT m.id, m.project_path, m.category, m.content, m.importance,
+            "SELECT m.id, m.owner_id, m.origin_category, m.content, m.importance,
                 m.status, m.expires_at, m.superseded_by_memory_id, m.updated_at,
                 m.last_seen_at, m.verified_at FROM memories m
             WHERE {} AND m.status IN ('active','permanent')
-              AND (m.expires_at IS NULL OR m.expires_at > ?4){placement}
+              AND (m.expires_at IS NULL OR m.expires_at > ?4)
             ORDER BY {order}",
             self.predicate(conn, "m")?
         );
@@ -243,11 +238,7 @@ mod tests {
     use super::*;
 
     fn database() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            &include_str!("../testdata/context-schema.sql").replace(":applied_at", "0"),
-        )
-        .unwrap();
+        let conn = crate::context_db::ContextDb::fresh_in_memory();
         conn.execute_batch("INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(1,'Workspace',0,0);
             INSERT INTO workspace_members VALUES(1,'pj-a','Alpha','/a',0),(1,'pj-b','Beta & Co','/b',0),(1,'pj-c','Gamma','/c',0);").unwrap();
         conn
@@ -255,9 +246,9 @@ mod tests {
 
     fn insert(conn: &Connection, id: i64, project: &str, category: &str) {
         conn.execute(
-            "INSERT INTO memories(id,project_path,category,content,normalized_hash,
+            "INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,
             shareable,scope,first_seen_at,created_at,updated_at,last_seen_at)
-            VALUES(?1,?2,?3,'sharedword constraint',?4,1,'project',0,0,0,0)",
+            VALUES(?1,'project', ?2,CASE ?3 WHEN 'PROJECT_RULES' THEN 'swe:project-rules' WHEN 'ARCHITECTURE' THEN 'swe:architecture' WHEN 'CONSTRAINTS' THEN 'swe:constraints' WHEN 'CONFIG_VALUES' THEN 'swe:config-values' WHEN 'NAMING' THEN 'swe:naming' WHEN 'USER_DIRECTIVES' THEN 'swe:project-rules' WHEN 'USER_PREFERENCES' THEN 'swe:project-rules' WHEN 'CONFIG_DEFAULTS' THEN 'swe:config-values' WHEN 'ARCHITECTURE_DECISIONS' THEN 'swe:architecture' WHEN 'ENVIRONMENT' THEN 'swe:config-values' WHEN 'WORKFLOW_RULES' THEN 'swe:project-rules' WHEN 'KNOWN_ISSUES' THEN 'swe:constraints' ELSE 'mc:unmapped' END, ?3,'sharedword constraint',?4,1,'project',0,0,0,0)",
             params![id, project, category, format!("hash-{id}")],
         )
         .unwrap();
@@ -284,7 +275,7 @@ mod tests {
         assert!(!workspace.is_workspaced());
         assert_eq!(workspace.expanded, ["pj-a"]);
         assert_eq!(workspace.share_categories, None);
-        let memories = workspace.memories(&conn, 1, true).unwrap();
+        let memories = workspace.memories(&conn, 1).unwrap();
         assert_eq!(
             memories.iter().map(|memory| memory.id).collect::<Vec<_>>(),
             [1, 2]
@@ -384,31 +375,29 @@ mod tests {
         ] {
             insert(&conn, id, project, category);
         }
-        conn.execute_batch("UPDATE memories SET shareable=0,scope='private' WHERE id=1;
+        conn.execute_batch(
+            "UPDATE memories SET shareable=0,scope='private' WHERE id=1;
             UPDATE memories SET shareable=0 WHERE id=4;
             UPDATE memories SET scope='private' WHERE id=5;
             UPDATE memories SET status='archived' WHERE id=6;
             UPDATE memories SET expires_at=10 WHERE id=7;
             UPDATE memories SET status='permanent',scope='ecosystem' WHERE id=8;
             UPDATE memories SET scope='universe' WHERE id=10;
-            INSERT INTO memory_placement(memory_id,level,owner_kind,owner_id,written_at)
-                VALUES(8,'workspace','workspace','1',0),(9,'global','global','1',0),(11,'project','project','c',0);").unwrap();
+            UPDATE memories SET level='workspace',owner_id='1' WHERE id=8;
+            UPDATE memories SET level='global',owner_id='self' WHERE id=9;",
+        )
+        .unwrap();
         let workspace = Workspace::resolve(&conn, "pj-a").unwrap();
-        assert_eq!(
-            ids(workspace.memories(&conn, 10, true).unwrap()),
-            [1, 2, 10, 11]
-        );
-        assert_eq!(
-            ids(workspace.memories(&conn, 10, false).unwrap()),
-            [1, 2, 8, 9, 10, 11]
-        );
+        // Memories at the workspace (8) or global (9) level are not project
+        // memories, so no project reader sees them.
+        assert_eq!(ids(workspace.memories(&conn, 10).unwrap()), [1, 2, 10, 11]);
         conn.execute_batch(
             "ALTER TABLE memories DROP COLUMN shareable; ALTER TABLE memories DROP COLUMN scope;",
         )
         .unwrap();
         assert_eq!(
-            ids(workspace.memories(&conn, 10, false).unwrap()),
-            [1, 2, 4, 5, 8, 9, 10, 11]
+            ids(workspace.memories(&conn, 10).unwrap()),
+            [1, 2, 4, 5, 10, 11]
         );
     }
 
@@ -438,7 +427,7 @@ mod tests {
             .unwrap();
         }
         let workspace = Workspace::resolve(&conn, "pj-a").unwrap();
-        let memories = workspace.memories(&conn, 1, true).unwrap();
+        let memories = workspace.memories(&conn, 1).unwrap();
         assert_eq!(
             serde_json::json!(memories.iter().map(|memory| memory.id).collect::<Vec<_>>()),
             fixture["pool"]
@@ -478,20 +467,15 @@ mod search_tests {
 
     #[test]
     fn word_and_vector_search_share_eligibility_sources_dates_and_visible_suppression() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            &include_str!("../testdata/context-schema.sql").replace(":applied_at", "0"),
-        )
-        .unwrap();
+        let conn = crate::context_db::ContextDb::fresh_in_memory();
         conn.execute_batch("INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(1,'Example',0,0);
             INSERT INTO workspace_members VALUES(1,'pj-a','Alpha','/a',0),(1,'pj-b','Beta','/b',0);
             INSERT INTO v22_identity_rekey_map VALUES('git:old-b','pj-b',0);
-            INSERT INTO memories(id,project_path,category,content,normalized_hash,shareable,scope,first_seen_at,created_at,updated_at,last_seen_at)
-                VALUES(1,'git:old-b','CONSTRAINTS','zebra constraint','h1',1,'project',0,50,0,0),
-                      (2,'pj-b','NAMING','zebra naming','h2',1,'project',0,50,0,0),
-                      (3,'pj-b','CONSTRAINTS','zebra private','h3',0,'project',0,50,0,0);
-            INSERT INTO memory_placement(memory_id,level,owner_kind,owner_id,written_at)
-                VALUES(1,'workspace','workspace','1',0);").unwrap();
+            INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,shareable,scope,first_seen_at,created_at,updated_at,last_seen_at)
+                VALUES(1,'project', 'git:old-b','swe:constraints', 'CONSTRAINTS','zebra constraint','h1',1,'project',0,50,0,0),
+                      (2,'project', 'pj-b','swe:naming', 'NAMING','zebra naming','h2',1,'project',0,50,0,0),
+                      (3,'project', 'pj-b','swe:constraints', 'CONSTRAINTS','zebra private','h3',0,'project',0,50,0,0);
+            ").unwrap();
         let vector: Vec<u8> = [1.0_f32, 0.0]
             .iter()
             .flat_map(|n| n.to_le_bytes())

@@ -124,6 +124,15 @@ const CATEGORY_IDS: [(&str, &str); 12] = [
     ("KNOWN_ISSUES", "swe:constraints"),
 ];
 
+/// The category id the frozen map gives a tag, for writers with no memory
+/// context of their own.
+pub fn frozen_category_id(tag: &str) -> &'static str {
+    CATEGORY_IDS
+        .iter()
+        .find(|(known, _)| *known == tag)
+        .map_or(UNMAPPED_CATEGORY, |(_, id)| *id)
+}
+
 /// The category of a tag no profile maps. Magic Context's own; no profile
 /// writes an `mc:` id.
 pub const UNMAPPED_CATEGORY: &str = "mc:unmapped";
@@ -302,7 +311,10 @@ fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
              ON memories(owner_id, status, origin_category);
 
          -- Search matches the category text a memory was written under, as it
-         -- did before the migration, so results don't move.
+         -- did before the migration, so results don't move. Global memories
+         -- stay out of the index: before the migration they lived in their own
+         -- table, which search never read, and adding them would shift every
+         -- project's ranking. They are indexed when search shows levels.
          CREATE VIRTUAL TABLE memories_fts USING fts5(
              content,
              origin_category,
@@ -310,20 +322,24 @@ fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
              content_rowid='id',
              tokenize='porter unicode61'
          );
-         INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');
-         CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+         INSERT INTO memories_fts(rowid, content, origin_category)
+             SELECT id, content, origin_category FROM memories WHERE level <> 'global';
+         CREATE TRIGGER memories_ai AFTER INSERT ON memories WHEN new.level <> 'global' BEGIN
              INSERT INTO memories_fts(rowid, content, origin_category)
              VALUES (new.id, new.content, new.origin_category);
          END;
-         CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+         CREATE TRIGGER memories_ad AFTER DELETE ON memories WHEN old.level <> 'global' BEGIN
              INSERT INTO memories_fts(memories_fts, rowid, content, origin_category)
              VALUES ('delete', old.id, old.content, old.origin_category);
          END;
-         CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+         -- Only text the index holds, or a move into or out of the global
+         -- level, re-indexes a row; counters, revisions and metadata change
+         -- often and would rewrite the index for nothing.
+         CREATE TRIGGER memories_au AFTER UPDATE OF content, origin_category, level ON memories BEGIN
              INSERT INTO memories_fts(memories_fts, rowid, content, origin_category)
-             VALUES ('delete', old.id, old.content, old.origin_category);
+             SELECT 'delete', old.id, old.content, old.origin_category WHERE old.level <> 'global';
              INSERT INTO memories_fts(rowid, content, origin_category)
-             VALUES (new.id, new.content, new.origin_category);
+             SELECT new.id, new.content, new.origin_category WHERE new.level <> 'global';
          END;"
     ))?;
 
@@ -453,7 +469,9 @@ fn move_observations(tx: &Transaction) -> rusqlite::Result<()> {
              agent_id TEXT,
              project_id TEXT,
              workspace_id TEXT,
-             anchors_json TEXT,
+             -- The session's message ordinals the observation came from.
+             source_start_ordinal INTEGER,
+             source_end_ordinal INTEGER,
              created_at INTEGER NOT NULL,
              consumed_at INTEGER
          );
@@ -468,12 +486,9 @@ fn move_observations(tx: &Transaction) -> rusqlite::Result<()> {
     )?;
     if exists {
         tx.execute_batch(
-            "INSERT INTO memory_observations (id, content, session_id, anchors_json, created_at)
-             SELECT id, content, session_id,
-                    CASE WHEN source_compartment_start IS NULL AND source_compartment_end IS NULL
-                         THEN NULL
-                         ELSE json_object('summary_start', source_compartment_start,
-                                          'summary_end', source_compartment_end) END,
+            "INSERT INTO memory_observations (id, content, session_id, source_start_ordinal,
+                 source_end_ordinal, created_at)
+             SELECT id, content, session_id, source_compartment_start, source_compartment_end,
                     created_at
                FROM user_memory_candidates;
              DROP TABLE user_memory_candidates;",

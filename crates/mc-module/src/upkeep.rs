@@ -206,7 +206,7 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
         let mut statement = conn.prepare(
             "SELECT m.id, m.content, m.normalized_hash FROM memories m \
              LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ?1 \
-             WHERE m.project_path = ?2 AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?3",
+             WHERE m.level = 'project' AND m.owner_id = ?2 AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?3",
         )?;
         let rows = statement
             .query_map(params![model_id, project, MEMORY_BATCH as i64], |row| {
@@ -886,9 +886,9 @@ mod tests {
     fn add_memory(db: &ContextDb, project: &str, content: &str, status: &str) -> i64 {
         db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO memories (project_path, category, content, normalized_hash, status, \
+                "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, status, \
                  first_seen_at, created_at, updated_at, last_seen_at) \
-                 VALUES (?1, 'ARCHITECTURE', ?2, ?3, ?4, 1, 1, 1, 1)",
+                 VALUES ('project', ?1, 'swe:architecture', 'ARCHITECTURE', ?2, ?3, ?4, 1, 1, 1, 1)",
                 params![project, content, format!("hash:{content}"), status],
             )
             .unwrap();

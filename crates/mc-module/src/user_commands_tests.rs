@@ -600,7 +600,7 @@ async fn user_commands_status_waits_and_project_memory_count_use_contract_units(
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
     db.with_connection(|conn| conn.execute(
-        "INSERT INTO memories(project_path, category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'ARCHITECTURE', 'A memory', 'active', 'hash1', 1, 1, 1, 1)", [],
+        "INSERT INTO memories(level, owner_id, category, origin_category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'project', 'swe:architecture', 'ARCHITECTURE', 'A memory', 'active', 'hash1', 1, 1, 1, 1)", [],
     )).unwrap();
     session.project = Some(Project {
         id: "project".into(),
@@ -674,7 +674,7 @@ async fn user_commands_new_memory_alone_lands_in_m1_without_folding_m0() {
     session.version = 1;
     let baseline = session.baseline.clone().unwrap();
     db.with_connection(|conn| conn.execute(
-        "INSERT INTO memories(project_path, category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'ARCHITECTURE', 'A newly published memory', 'active', 'hash1', 1, 1, 1, 1)", [],
+        "INSERT INTO memories(level, owner_id, category, origin_category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'project', 'swe:architecture', 'ARCHITECTURE', 'A newly published memory', 'active', 'hash1', 1, 1, 1, 1)", [],
     )).unwrap();
     let p = preview(&mut session, &client, &settings, "flush").await;
     assert!(p.available, "{p:?}");
@@ -888,7 +888,7 @@ async fn user_commands_removal_facts_do_not_subtract_new_delta_tokens() {
     ));
     session.version = 1;
     db.with_connection(|conn| conn.execute(
-        "INSERT INTO memories(project_path, category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'ARCHITECTURE', ?1, 'active', 'hash1', 1, 1, 1, 1)",
+        "INSERT INTO memories(level, owner_id, category, origin_category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'project', 'swe:architecture', 'ARCHITECTURE', ?1, 'active', 'hash1', 1, 1, 1, 1)",
         ["A memory detail. ".repeat(500)],
     )).unwrap();
     let p = preview(&mut session, &client, &settings, "flush").await;

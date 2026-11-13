@@ -364,7 +364,15 @@ async fn audit_failed_head_read_must_not_advance_the_cut() {
     // shared-store read, without touching any real store or deleting data.
     db.with_connection(|connection| {
         connection
-            .execute_batch("ALTER TABLE user_memories RENAME TO unavailable_user_memories;")
+            // A global row whose metadata isn't JSON makes the profile
+            // query's json_extract fail; no project memory query reads it.
+            .execute_batch(
+                "INSERT INTO memories(level, owner_id, category, origin_category, content,
+                     normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status,
+                     metadata_json)
+                 VALUES ('global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'Unreadable',
+                     'h-unreadable', 1, 1, 1, 1, 'active', 'not json');",
+            )
             .unwrap()
     });
     let answer = cold_ride(&mut session, &runner, &settings).await;

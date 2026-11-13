@@ -298,9 +298,7 @@ impl Reader {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |time| time.as_millis() as i64);
-                    snapshot.memories = workspace
-                        .memories(&tx, now, true)
-                        .map_err(|_| unavailable())?;
+                    snapshot.memories = workspace.memories(&tx, now).map_err(|_| unavailable())?;
                     snapshot.workspace = Some(workspace);
                 }
             }

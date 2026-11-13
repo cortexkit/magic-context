@@ -94,10 +94,11 @@ fn seed(store: &Store) {
              VALUES ('p1', '{SESSION}', 3, 5, 'user', '[]', 'x'), ('p2', 'ses_other', 3, 5, 'user', '[]', 'x');
          INSERT INTO notes (type, content, session_id, created_at, updated_at, harness, anchor_ordinal)
              VALUES ('session', 'late', '{SESSION}', 1, 1, '{HARNESS}', 6), ('session', 'at the opener', '{SESSION}', 1, 1, '{HARNESS}', 4);
-         INSERT INTO user_memory_candidates (content, session_id, source_compartment_start, source_compartment_end, created_at)
+         INSERT INTO memory_observations (content, session_id, source_start_ordinal, source_end_ordinal, created_at)
              VALUES ('likes tests', '{SESSION}', 5, 6, 1);
-         INSERT INTO user_memories (content, promoted_at, source_candidate_provenance, created_at, updated_at)
-             VALUES ('likes tests', 1, '[{{\"candidate_id\":1,\"session_id\":\"{SESSION}\",\"source_compartment_start\":5,\"source_compartment_end\":6}},{{\"candidate_id\":2,\"session_id\":\"ses_other\",\"source_compartment_start\":5,\"source_compartment_end\":6}}]', 1, 1);
+         INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status, metadata_json)
+             VALUES ('global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'likes tests', 'likes tests', 1, 1, 1, 1, 'active',
+                 json_object('promoted_at', 1, 'source_candidate_provenance', '[{{\"candidate_id\":1,\"session_id\":\"{SESSION}\",\"source_compartment_start\":5,\"source_compartment_end\":6}},{{\"candidate_id\":2,\"session_id\":\"ses_other\",\"source_compartment_start\":5,\"source_compartment_end\":6}}]'));
          INSERT INTO primer_candidates (project_path, harness, session_id, question, normalized_question, source_compartment_start, source_compartment_end, source_start_message_id, source_end_message_id, source_message_time, created_at)
              VALUES ('/p', '{HARNESS}', '{SESSION}', 'q', 'q', 2, 5, 'a2', 'u6', 1, 1);
          INSERT INTO compression_depth (session_id, message_ordinal, depth, harness)
@@ -155,12 +156,15 @@ fn every_stored_number_moves_to_the_runners_numbering() {
     );
     assert_eq!(
         store.query::<String>(
-            "SELECT source_compartment_start || '-' || source_compartment_end FROM user_memory_candidates"
+            "SELECT source_start_ordinal || '-' || source_end_ordinal FROM memory_observations"
         ),
         ["4-5"]
     );
     let provenance: Value = serde_json::from_str(
-        &store.query::<String>("SELECT source_candidate_provenance FROM user_memories")[0],
+        &store.query::<String>(
+            "SELECT json_extract(metadata_json, '$.source_candidate_provenance') FROM memories
+              WHERE level = 'global'",
+        )[0],
     )
     .unwrap();
     assert_eq!(provenance[0]["source_compartment_start"], 4);

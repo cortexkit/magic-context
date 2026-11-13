@@ -184,9 +184,9 @@ fn create(db: &ContextDb, content: &str, kind: CreateKind) -> i64 {
     let mut id = 0;
     transaction(db, &mut |conn| {
         conn.execute(
-            "INSERT INTO memories (project_path, category, content, normalized_hash, first_seen_at,
+            "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, first_seen_at,
                  created_at, updated_at, last_seen_at, status, source_type)
-             VALUES ('pj-a', 'NAMING', ?1, ?1, 1, 1, 1, 1, 'active', 'agent')",
+             VALUES ('project', 'pj-a', 'swe:naming', 'NAMING', ?1, ?1, 1, 1, 1, 1, 'active', 'agent')",
             [content],
         )?;
         id = conn.last_insert_rowid();
@@ -313,9 +313,9 @@ fn a_failed_sync_write_fails_the_memory_write() {
         .unwrap();
     let result = transaction(&db, &mut |conn| {
         conn.execute(
-            "INSERT INTO memories (project_path, category, content, normalized_hash, first_seen_at,
+            "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, first_seen_at,
                  created_at, updated_at, last_seen_at, status, source_type)
-             VALUES ('pj-a', 'NAMING', 'x', 'h', 1, 1, 1, 1, 'active', 'agent')",
+             VALUES ('project', 'pj-a', 'swe:naming', 'NAMING', 'x', 'h', 1, 1, 1, 1, 'active', 'agent')",
             [],
         )?;
         let id = conn.last_insert_rowid();

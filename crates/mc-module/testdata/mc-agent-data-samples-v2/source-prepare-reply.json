@@ -2,9 +2,9 @@
   "external": [],
   "items": [
     {
-      "digest": "69907e6d13d6efa1d05217385d530236f08014909c61f63e062cce1c90143bf4",
+      "digest": "bef9e4b057eabbfe5b5ada1794c692e4d0341f1af4e316bbe93d68739ff81ae3",
       "endOffset": 2286,
-      "format": "mc-agent-data-session/1+context.db/105",
+      "format": "mc-agent-data-session/1+context.db/106",
       "frozen": true,
       "ref": "sample-head",
       "ref_kind": "pi-session",

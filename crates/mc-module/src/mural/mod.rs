@@ -336,9 +336,9 @@ mod tests {
             let content = format!("memory {id} {long}");
             db.with_connection(|conn| {
                 conn.execute(
-                    "INSERT INTO memories (id, project_path, category, content, normalized_hash, status, importance,
+                    "INSERT INTO memories (id, level, owner_id, category, origin_category, content, normalized_hash, status, importance,
                      first_seen_at, created_at, updated_at, last_seen_at, mural_cue, mural_cue_hash)
-                     VALUES (?1, 'pj-mural', 'NAMING', ?2, ?3, 'active', 50, 1, 1, 1, 1, ?4, ?5)",
+                     VALUES (?1, 'project', 'pj-mural', 'swe:naming', 'NAMING', ?2, ?3, 'active', 50, 1, 1, 1, 1, ?4, ?5)",
                     params![id, content, format!("h{id}"), format!("cue {id}"), content_hash(&content)],
                 )
                 .unwrap()

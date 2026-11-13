@@ -260,9 +260,9 @@ fn store_with_a_due_item() -> (tempfile::TempDir, crate::context_db::ContextDb) 
         conn.execute_batch(
             "INSERT INTO memory_publications(publication_id, project_path, source_session_id, commit_order, committed_at)
                  VALUES ('publication', 'project', 'head', 1, 0);
-             INSERT INTO memories(id, project_path, category, content, normalized_hash,
+             INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash,
                                   first_seen_at, created_at, updated_at, last_seen_at)
-                 VALUES (1, 'project', 'CONSTRAINTS', 'Releases need two reviewers.', 'hash', 0, 0, 0, 0);
+                 VALUES (1, 'project', 'project', 'swe:constraints', 'CONSTRAINTS', 'Releases need two reviewers.', 'hash', 0, 0, 0, 0);
              INSERT INTO memory_classification_items(project_path, memory_id, saved_revision,
                      source_session_id, tool_call_part_id, save_ordinal, excerpt)
                  VALUES ('project', 1, 1, 'head', 'call', 1, 'The person said releases need two reviewers.');",

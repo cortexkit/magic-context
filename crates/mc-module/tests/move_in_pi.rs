@@ -83,10 +83,11 @@ impl Fixture {
                     ('pub', 's1', 7, 9, 'user', '[]', 'after');
              INSERT INTO compartment_events (session_id, compartment_id, kind, at_compartment, created_at, harness)
              SELECT 's1', id, 'discovery', sequence, 1, 'pi' FROM compartments;
-             INSERT INTO user_memory_candidates (content, session_id, source_compartment_start, source_compartment_end, created_at)
+             INSERT INTO memory_observations (content, session_id, source_start_ordinal, source_end_ordinal, created_at)
              VALUES ('likes tests', 's1', 3, 4, 1);
-             INSERT INTO user_memories (content, promoted_at, source_candidate_provenance, created_at, updated_at)
-             VALUES ('likes tests', 1, '[{\"session_id\":\"s1\",\"source_compartment_start\":3,\"source_compartment_end\":4}]', 1, 1);
+             INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status, metadata_json)
+             VALUES ('global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'likes tests', 'likes tests', 1, 1, 1, 1, 'active',
+                 json_object('promoted_at', 1, 'source_candidate_provenance', '[{\"session_id\":\"s1\",\"source_compartment_start\":3,\"source_compartment_end\":4}]'));
              INSERT INTO primer_candidates (project_path, harness, session_id, question, normalized_question,
                  source_compartment_start, source_compartment_end, source_start_message_id, source_end_message_id, source_message_time, created_at)
              VALUES ('/p', 'pi', 's1', 'q', 'q', 7, 9, 'a7', 'a9', 1, 1);"
@@ -172,10 +173,14 @@ impl Fixture {
         // references must follow those summaries' newly mapped ranges.
         assert_eq!(self.strings("SELECT e.at_compartment || ':' || c.start_message || '-' || c.end_message FROM compartment_events e JOIN compartments c ON c.id = e.compartment_id ORDER BY e.id"),
             ["1:1-2", "2:3-5", "3:6-8"]);
-        assert_eq!(self.strings("SELECT source_compartment_start || '-' || source_compartment_end FROM user_memory_candidates"),
-            [if exact { "3-3" } else { "3-4" }]);
+        assert_eq!(
+            self.strings(
+                "SELECT source_start_ordinal || '-' || source_end_ordinal FROM memory_observations"
+            ),
+            [if exact { "3-3" } else { "3-4" }]
+        );
         let provenance: Value = serde_json::from_str(
-            &self.strings("SELECT source_candidate_provenance FROM user_memories")[0],
+            &self.strings("SELECT json_extract(metadata_json, '$.source_candidate_provenance') FROM memories WHERE level = 'global'")[0],
         )
         .unwrap();
         assert_eq!(provenance[0]["source_compartment_start"], 3);

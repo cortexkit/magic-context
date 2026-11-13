@@ -14,8 +14,8 @@ async fn ctx_search_returns_keyword_results_within_the_query_embedding_budget() 
     let db = ContextDb::open(&path).unwrap();
     db.with_connection(|conn| {
         conn.execute(
-            "INSERT INTO memories(id,project_path,category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at)
-             VALUES(1,'test-project','ARCHITECTURE','zebra parser survives keyword fallback','h',1,1,1,1)",
+            "INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at)
+             VALUES(1,'project', 'test-project','swe:architecture', 'ARCHITECTURE','zebra parser survives keyword fallback','h',1,1,1,1)",
             [],
         ).unwrap();
     });

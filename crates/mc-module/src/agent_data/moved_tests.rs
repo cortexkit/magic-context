@@ -9,13 +9,9 @@ use rusqlite::{params, Connection};
 use super::moved::{Column, Install, Mark, NotMoved, Reassigned, Required, Scope, Table};
 use super::moved::{MOVED, NOT_MOVED};
 
-const SCHEMA: &str = include_str!("../../testdata/context-schema.sql");
-
 /// The fresh schema in memory, with `extra` statements run after it.
 fn schema(extra: &str) -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(&SCHEMA.replace(":applied_at", "0"))
-        .unwrap();
+    let conn = crate::context_db::ContextDb::fresh_in_memory();
     conn.execute_batch(extra).unwrap();
     conn
 }

@@ -334,6 +334,19 @@ impl ContextDb {
         })
     }
 
+    /// An in-memory store at [`SCHEMA_VERSION`]: the plugin's fresh schema
+    /// with the module's migrations applied, as a migrated store has it.
+    #[cfg(test)]
+    pub(crate) fn fresh_in_memory() -> Connection {
+        let mut connection = Connection::open_in_memory().expect("in-memory store");
+        connection
+            .execute_batch(&FRESH_SCHEMA.replace(":applied_at", "0"))
+            .expect("fresh schema");
+        crate::context_migrations::upgrade(&mut connection, i64::from(PLUGIN_SCHEMA_VERSION))
+            .expect("module migrations");
+        connection
+    }
+
     /// Create a store with the fresh schema, for tests and throwaway runs.
     /// Refuses a path that already exists.
     pub fn create_for_tests(path: &Path) -> Result<Self, String> {
@@ -680,10 +693,10 @@ impl ContextDb {
         let connection = self.lock();
         let mut statement = connection
             .prepare_cached(
-                "SELECT id, project_path, category, content, importance, status, expires_at,
+                "SELECT id, owner_id, origin_category, content, importance, status, expires_at,
                         superseded_by_memory_id, updated_at, last_seen_at, verified_at
                    FROM memories
-                  WHERE project_path = ?1 AND status IN ('active', 'permanent')
+                  WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
                     AND (expires_at IS NULL OR expires_at > ?2)
                   ORDER BY COALESCE(importance, 50) DESC, id ASC",
             )
@@ -711,12 +724,18 @@ impl ContextDb {
             .map_err(|error| error.to_string())
     }
 
-    /// The active user profile, oldest first, and its highest id.
+    /// The active user profile, oldest first, and its highest id: the active
+    /// global memories. A memory moved from the old user-memory table keeps
+    /// its old id and promotion time in `metadata_json`, so a history head
+    /// rendered before the move orders and compares it as it did.
     pub fn user_profile(&self) -> Result<(Vec<String>, i64), String> {
         let connection = self.lock();
         let mut statement = connection
             .prepare_cached(
-                "SELECT id, content FROM user_memories WHERE status = 'active' ORDER BY promoted_at ASC, id ASC",
+                "SELECT COALESCE(json_extract(metadata_json, '$.user_memory_id'), id), content
+                   FROM memories WHERE level = 'global' AND status = 'active'
+                  ORDER BY COALESCE(json_extract(metadata_json, '$.promoted_at'), created_at) ASC,
+                           COALESCE(json_extract(metadata_json, '$.user_memory_id'), id) ASC",
             )
             .map_err(|error| error.to_string())?;
         let rows: Vec<(i64, String)> = statement
@@ -739,7 +758,7 @@ impl ContextDb {
         let connection = self.lock();
         let mut statement = connection
             .prepare_cached(
-                "SELECT id, project_path, category, content, importance, status, expires_at,
+                "SELECT id, owner_id, origin_category, content, importance, status, expires_at,
                         superseded_by_memory_id, updated_at, last_seen_at, verified_at
                    FROM memories WHERE id IN (SELECT value FROM json_each(?1))",
             )

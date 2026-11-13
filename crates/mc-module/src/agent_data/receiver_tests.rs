@@ -1129,9 +1129,9 @@ async fn context_reads_take_the_installed_project_link_right_after_activate() {
         ] {
             b.conn()
                 .execute(
-                    "INSERT INTO memories(id, project_path, category, content, normalized_hash, shareable, scope, importance,
+                    "INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash, shareable, scope, importance,
                         status, expires_at, first_seen_at, created_at, updated_at, last_seen_at)
-                     VALUES (?1, ?2, 'PROJECT_RULES', ?3, ?4, 1, 'project', 80, 'active', NULL, 0, 0, 0, 0)",
+                     VALUES (?1, 'project', ?2, 'swe:project-rules', 'PROJECT_RULES', ?3, ?4, 1, 'project', 80, 'active', NULL, 0, 0, 0, 0)",
                     params![id, project, content, format!("hash-{id}")],
                 )
                 .unwrap();

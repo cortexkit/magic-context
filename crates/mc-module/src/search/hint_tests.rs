@@ -80,16 +80,12 @@ fn memory_hint_relevance_is_independent_of_display_preview_length() {
 
 #[test]
 fn memory_hint_scores_use_full_text_but_search_output_keeps_the_preview() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        &include_str!("../../testdata/context-schema.sql").replace(":applied_at", "0"),
-    )
-    .unwrap();
+    let mut conn = crate::context_db::ContextDb::fresh_in_memory();
     let full_content = format!("{}historian cache wiring", "unrelated ".repeat(40));
     for (id, content) in [(1, full_content.as_str()), (2, "historian cache wiring")] {
         conn.execute(
-            "INSERT INTO memories(id,project_path,category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at)
-             VALUES(?1,'hint-project','WORKFLOW_RULES',?2,?1,0,0,0,0)",
+            "INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at)
+             VALUES(?1,'project', 'hint-project','swe:project-rules', 'WORKFLOW_RULES',?2,?1,0,0,0,0)",
             rusqlite::params![id, content],
         )
         .unwrap();

@@ -344,9 +344,9 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
     let connection = rusqlite::Connection::open(dir.join("context.db")).unwrap();
     connection
         .execute(
-            "INSERT INTO memories (id, project_path, category, content, normalized_hash, importance,
+            "INSERT INTO memories (id, level, owner_id, category, origin_category, content, normalized_hash, importance,
                                    first_seen_at, created_at, updated_at, last_seen_at)
-             VALUES (?1, 'pj-test', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1)",
+             VALUES (?1, 'project', 'pj-test', 'swe:project-rules', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1)",
             rusqlite::params![id, content, format!("hash-{id}")],
         )
         .unwrap();

@@ -145,7 +145,7 @@ pub struct SearchMemory {
 pub fn workspace_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<SearchMemory>> {
     let workspace = crate::workspace::Workspace::resolve(conn, project)?;
     let sql = format!(
-        "SELECT id, category, content, created_at, project_path FROM memories m
+        "SELECT id, origin_category, content, created_at, owner_id FROM memories m
           WHERE {} AND status IN ('active', 'permanent')
             AND (expires_at IS NULL OR expires_at > ?4)",
         workspace.predicate(conn, "m")?
@@ -196,7 +196,7 @@ pub(crate) fn memory_vectors(
         conn,
         "SELECT e.memory_id, e.embedding FROM memory_embeddings e
            JOIN memories m ON m.id = e.memory_id
-          WHERE m.project_path = ?1 AND e.model_id = ?2",
+          WHERE m.level = 'project' AND m.owner_id = ?1 AND e.model_id = ?2",
         project,
         model_id,
     )
@@ -258,7 +258,8 @@ fn memory_fts_ids_limited(
     let read = || -> rusqlite::Result<Vec<i64>> {
         let mut statement = conn.prepare_cached(
             "SELECT memories.id FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid
-              WHERE memories.project_path = ?1 AND memories.status IN ('active', 'permanent')
+              WHERE memories.level = 'project' AND memories.owner_id = ?1
+                AND memories.status IN ('active', 'permanent')
                 AND (memories.expires_at IS NULL OR memories.expires_at > ?2)
                 AND memories.created_at BETWEEN ?3 AND ?4 AND memories_fts MATCH ?5
               ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?6",

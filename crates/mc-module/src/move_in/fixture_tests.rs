@@ -65,12 +65,15 @@ pub(super) fn fixture(path: &std::path::Path, n: usize, others: usize) -> (Conte
                SELECT 'Remember the parser', 'moving', i+1, 1, 1 FROM numbers WHERE i%100=0;
              INSERT INTO compression_depth(session_id, message_ordinal, depth)
                SELECT 'moving', i+1, 1 FROM numbers;
-             INSERT INTO user_memory_candidates(content, session_id, source_compartment_start,
-               source_compartment_end, created_at)
+             INSERT INTO memory_observations(content, session_id, source_start_ordinal,
+               source_end_ordinal, created_at)
                SELECT 'Prefer explicit types', 'moving', i+1, i+1, 1 FROM numbers WHERE i%100=0;
-             INSERT INTO user_memories(content, promoted_at, source_candidate_provenance, created_at, updated_at)
-               SELECT 'Prefer explicit types', 1, json_array(json_object('session_id', 'moving',
-                 'source_compartment_start', i+1, 'source_compartment_end', i+1)), 1, 1
+             INSERT INTO memories(level, owner_id, category, origin_category, content, normalized_hash,
+               first_seen_at, created_at, updated_at, last_seen_at, status, metadata_json)
+               SELECT 'global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'Prefer explicit types', 'h' || i,
+                 1, 1, 1, 1, 'active', json_object('promoted_at', 1, 'source_candidate_provenance',
+                 json_array(json_object('session_id', 'moving', 'source_compartment_start', i+1,
+                 'source_compartment_end', i+1)))
                FROM numbers WHERE i%100=0;
              INSERT INTO primer_candidates(project_path, harness, session_id, question, normalized_question,
                source_compartment_start, source_compartment_end, source_start_message_id,

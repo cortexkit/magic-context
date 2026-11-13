@@ -345,8 +345,8 @@ fn publication_session(conn: &Connection, publication: &str) -> rusqlite::Result
 /// A memory as a neighbour: live, with its revision.
 fn neighbour_of(conn: &Connection, project: &str, id: i64) -> rusqlite::Result<Option<Neighbour>> {
     conn.query_row(
-        "SELECT id, revision, category, content FROM memories
-         WHERE id = ?1 AND project_path = ?2 AND COALESCE(status, 'active') != 'archived'",
+        "SELECT id, revision, origin_category, content FROM memories
+         WHERE id = ?1 AND level = 'project' AND owner_id = ?2 AND COALESCE(status, 'active') != 'archived'",
         params![id, project],
         |row| {
             Ok(Neighbour {
@@ -1036,7 +1036,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
         self.db
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT id, revision FROM memories WHERE id = ?1 AND project_path = ?2
+                    "SELECT id, revision FROM memories WHERE id = ?1 AND level = 'project' AND owner_id = ?2
                        AND COALESCE(status, 'active') != 'archived'",
                     params![id, project],
                     |row| Ok((row.get(0)?, row.get(1)?)),

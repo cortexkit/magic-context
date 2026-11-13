@@ -85,7 +85,7 @@ impl Fixture {
                 (5, "own", "CONSTRAINTS", "EXPIRED FACT".into(), 100, "active"),
                 (6, "own", "CONSTRAINTS", "ARCHIVED FACT".into(), 100, "archived"),
             ] {
-                conn.execute("INSERT INTO memories(id,project_path,category,content,normalized_hash,shareable,scope,importance,status,expires_at,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,?2,?3,?4,?5,1,'project',?6,?7,?8,0,0,0,0)", params![id,project,category,content,format!("hash-{id}"),importance,status,if id == 5 {Some(1)} else {None}]).unwrap();
+                conn.execute("INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,shareable,scope,importance,status,expires_at,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,'project', ?2,CASE ?3 WHEN 'PROJECT_RULES' THEN 'swe:project-rules' WHEN 'ARCHITECTURE' THEN 'swe:architecture' WHEN 'CONSTRAINTS' THEN 'swe:constraints' WHEN 'CONFIG_VALUES' THEN 'swe:config-values' WHEN 'NAMING' THEN 'swe:naming' WHEN 'USER_DIRECTIVES' THEN 'swe:project-rules' WHEN 'USER_PREFERENCES' THEN 'swe:project-rules' WHEN 'CONFIG_DEFAULTS' THEN 'swe:config-values' WHEN 'ARCHITECTURE_DECISIONS' THEN 'swe:architecture' WHEN 'ENVIRONMENT' THEN 'swe:config-values' WHEN 'WORKFLOW_RULES' THEN 'swe:project-rules' WHEN 'KNOWN_ISSUES' THEN 'swe:constraints' ELSE 'mc:unmapped' END, ?3,?4,?5,1,'project',?6,?7,?8,0,0,0,0)", params![id,project,category,content,format!("hash-{id}"),importance,status,if id == 5 {Some(1)} else {None}]).unwrap();
             }
             for sequence in 0..12 {
                 conn.execute("INSERT INTO compartments(session_id,harness,sequence,start_message,end_message,title,content,p1,p2,p3,p4,importance,created_at) VALUES('plugin','opencode',?1,?2,?3,?4,'flat','verbose fact','short fact','anchor fact','tiny fact',50,0)", params![sequence, sequence*10+1,sequence*10+10,format!("Summary {sequence}")]).unwrap();
@@ -408,7 +408,7 @@ fn context_read_werni_sized_read_holds_stay_under_250_ms() {
     tx.execute_batch("DELETE FROM memories; DELETE FROM compartments;")
         .unwrap();
     for id in 1..=1300 {
-        tx.execute("INSERT INTO memories(id,project_path,category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,'own','PROJECT_RULES',?2,?3,80,1,1,1,1)", params![id,format!("Parser rule {id}: validate the versioned input. {}", "Keep diagnostics stable across releases. ".repeat(6)),format!("measurement-{id}")]).unwrap();
+        tx.execute("INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,'project', 'own','swe:project-rules', 'PROJECT_RULES',?2,?3,80,1,1,1,1)", params![id,format!("Parser rule {id}: validate the versioned input. {}", "Keep diagnostics stable across releases. ".repeat(6)),format!("measurement-{id}")]).unwrap();
     }
     for sequence in 0..93 {
         let start = sequence * 9000 / 93 + 1;

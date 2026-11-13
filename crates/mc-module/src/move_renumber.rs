@@ -1024,10 +1024,10 @@ impl Rewrite<'_> {
             "source_session_id = ?1",
         )?;
         self.ranges(
-            "user_memory_candidates",
-            "source_compartment_start",
-            "source_compartment_end",
-            "session_id = ?1 AND source_compartment_start IS NOT NULL AND source_compartment_end IS NOT NULL",
+            "memory_observations",
+            "source_start_ordinal",
+            "source_end_ordinal",
+            "session_id = ?1 AND source_start_ordinal IS NOT NULL AND source_end_ordinal IS NOT NULL",
         )?;
         self.ranges(
             "primer_candidates",
@@ -1035,8 +1035,8 @@ impl Rewrite<'_> {
             "source_compartment_end",
             "session_id = ?1 AND harness = ?2 AND source_compartment_start IS NOT NULL AND source_compartment_end IS NOT NULL",
         )?;
-        self.provenance("user_memories", false)?;
-        self.provenance("primers", true)?;
+        self.provenance(Provenance::UserMemories)?;
+        self.provenance(Provenance::Primers)?;
         self.compression_depth()?;
         self.positions()?;
         self.search_index()
@@ -1163,13 +1163,17 @@ impl Rewrite<'_> {
 
     /// The source ranges inside `table`'s `source_candidate_provenance`
     /// lists that belong to this session (and harness, where recorded).
-    fn provenance(&self, table: &str, has_harness: bool) -> Step {
+    fn provenance(&self, kind: Provenance) -> Step {
+        let (table, has_harness) = (kind.name(), kind.has_harness());
         self.plan.phase(&format!("renumber/{table}"));
         let rows: Vec<(i64, String)> = self
             .conn
             .prepare(&format!(
-                "SELECT id, source_candidate_provenance FROM {table}
-                 WHERE source_candidate_provenance LIKE '%' || ?1 || '%'"
+                "SELECT id, provenance FROM (SELECT id, {} AS provenance FROM {} WHERE {})
+                 WHERE provenance LIKE '%' || ?1 || '%'",
+                kind.column(),
+                kind.from(),
+                kind.filter(),
             ))?
             .query_map(params![self.session], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
@@ -1209,10 +1213,8 @@ impl Rewrite<'_> {
                 }
             }
             if changed {
-                self.plan.execute(
-                    &format!("UPDATE {table} SET source_candidate_provenance = ?1 WHERE id = ?2"),
-                    params![list.to_string(), id],
-                )?;
+                self.plan
+                    .execute(&kind.update(), params![list.to_string(), id])?;
             }
         }
         Ok(())
@@ -1488,6 +1490,64 @@ impl Rewrite<'_> {
 
 fn range_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, i64, i64)> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+/// Rows whose `source_candidate_provenance` cites a session's messages.
+#[derive(Clone, Copy)]
+enum Provenance {
+    /// Global memories moved from the old user-memory table, which keep
+    /// their candidates' provenance in `metadata_json`.
+    UserMemories,
+    Primers,
+}
+
+impl Provenance {
+    /// The name the plan's phases and errors use.
+    fn name(self) -> &'static str {
+        match self {
+            Provenance::UserMemories => "user_memories",
+            Provenance::Primers => "primers",
+        }
+    }
+
+    fn has_harness(self) -> bool {
+        matches!(self, Provenance::Primers)
+    }
+
+    fn from(self) -> &'static str {
+        match self {
+            Provenance::UserMemories => "memories",
+            Provenance::Primers => "primers",
+        }
+    }
+
+    fn filter(self) -> &'static str {
+        match self {
+            Provenance::UserMemories => "level = 'global'",
+            Provenance::Primers => "1",
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            Provenance::UserMemories => {
+                "json_extract(metadata_json, '$.source_candidate_provenance')"
+            }
+            Provenance::Primers => "source_candidate_provenance",
+        }
+    }
+
+    fn update(self) -> String {
+        match self {
+            Provenance::UserMemories => "UPDATE memories
+                SET metadata_json = json_set(metadata_json, '$.source_candidate_provenance', ?1)
+                WHERE id = ?2"
+                .into(),
+            Provenance::Primers => {
+                "UPDATE primers SET source_candidate_provenance = ?1 WHERE id = ?2".into()
+            }
+        }
+    }
 }
 
 #[cfg(test)]

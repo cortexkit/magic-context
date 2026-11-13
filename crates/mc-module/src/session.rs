@@ -3682,7 +3682,7 @@ impl Session {
             if let Some(project) = &self.project {
                 match db.with_connection(|conn| {
                     let resolved = crate::workspace::Workspace::resolve(conn, &project.id)?;
-                    let read = resolved.memories(conn, now, true)?;
+                    let read = resolved.memories(conn, now)?;
                     Ok::<_, rusqlite::Error>((resolved, read))
                 }) {
                     Ok((resolved, read)) => {

@@ -28,9 +28,9 @@ fn seed(dir: &Path, model_id: &str) {
             "Keep diagnostics stable across releases. ".repeat(6)
         );
         tx.execute(
-            "INSERT INTO memories (id, project_path, category, content, normalized_hash, importance,
+            "INSERT INTO memories (id, level, owner_id, category, origin_category, content, normalized_hash, importance,
              first_seen_at, created_at, updated_at, last_seen_at, mural_cue, mural_cue_hash)
-             VALUES (?1, 'pj-test', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1, ?4, ?3)",
+             VALUES (?1, 'project', 'pj-test', 'swe:project-rules', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1, ?4, ?3)",
             params![id, content, format!("{:x}", Sha256::digest(content.as_bytes())), format!("validate input→field {id}")],
         ).unwrap();
         tx.execute(
@@ -441,7 +441,9 @@ async fn werni_sized_writes_stay_within_budget() {
     let conn = Connection::open(dir.join("context.db")).unwrap();
     let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
     assert!(count("SELECT COUNT(*) FROM memory_pending_facts WHERE state='applied'") > 0);
-    assert!(count("SELECT COUNT(*) FROM memory_placement WHERE memory_id > 1300") >= 3);
+    assert!(
+        count("SELECT COUNT(*) FROM memories WHERE id > 1300 AND origin_profile IS NOT NULL") >= 3
+    );
     assert!(count("SELECT COUNT(*) FROM memory_outbox") >= 3);
     measurements.collect(
         "two-pass-summary-and-admission",

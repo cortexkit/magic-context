@@ -1,0 +1,8 @@
+{
+  "code": "incompatible_version",
+  "detail": {
+    "found": "mc-agent-data-session/1+context.db/106",
+    "required": "mc-agent-data-session/1+context.db/999"
+  },
+  "message": "The snapshot of session thalamus-harness/pi/sample-head was read at context.db schema version 106, and context.db here is at version 999; both machines must run the same schema version."
+}

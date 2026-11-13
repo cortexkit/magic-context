@@ -1,4 +1,9 @@
-# mc-agent-data-samples-v1
+# mc-agent-data-samples-v2
+
+Same messages as v1, from a ck-mc whose `context.db` is at schema version
+106 (memories with levels and profile categories). Only the source and
+receiver bodies that name the schema version or digest the snapshot
+changed; the wire format is the same.
 
 These are JSON bodies accepted or produced by ck-mc's `agent-data/v1`
 participant, using `cortexkit-role-agent-data` 0.3.0. Each JSON file is one

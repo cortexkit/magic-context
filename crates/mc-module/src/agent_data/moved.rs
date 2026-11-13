@@ -838,8 +838,8 @@ pub const NOT_MOVED: &[NotMoved] = &[
         install: Install::Untouched(NO_MOVED_ROWS),
     },
     NotMoved {
-        name: "user_memory_candidates",
-        reason: "candidates for the user profile, which is not session data",
+        name: "memory_observations",
+        reason: "observations about the person for the global review, which are not session data",
         install: Install::Untouched(NO_MOVED_ROWS),
     },
 ];

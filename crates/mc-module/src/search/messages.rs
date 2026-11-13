@@ -61,11 +61,7 @@ mod attribution_tests {
             part::{Part, PartBody},
             read::{Entry, HostPart, Role},
         };
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            &include_str!("../../testdata/context-schema.sql").replace(":applied_at", "0"),
-        )
-        .unwrap();
+        let mut conn = crate::context_db::ContextDb::fresh_in_memory();
         let mut entry = Entry::new(
             1,
             "mixed",

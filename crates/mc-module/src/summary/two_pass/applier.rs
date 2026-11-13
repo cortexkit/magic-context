@@ -5,11 +5,11 @@
 //! `replaces`). Every outcome is a receipt keyed by its decision key, so the
 //! same decision never applies twice.
 //!
-//! These are automated writes: they change memories and their undo history
-//! but write no `memory_mutation_log` row, so a session's history head shows
-//! them only after its next fold rebuilds the head's frozen baseline message
-//! (`m[0]`), never in the changes message after it. A changed memory's
-//! embedding is deleted, and the embedding upkeep computes the new one.
+//! These are automated writes: they change memories and their undo history.
+//! When a session sees a change is the history head's business
+//! (`summary/head.rs`), which compares the rows it shows with the store. A
+//! changed memory's embedding is deleted, and the embedding upkeep computes
+//! the new one.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -370,7 +370,9 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
         };
         if conflict
             && target.as_ref().is_none_or(|target| {
-                target.project_path != admission.project || target.status == "archived"
+                target.level != "project"
+                    || target.owner_id != admission.project
+                    || target.status == "archived"
             })
         {
             break 'decide pending(&tx, "conflict_target", None)?;
@@ -383,7 +385,9 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
             )?;
         }
         let hash = normalized_hash(admission.content);
-        let matched = memory_by_hash(&tx, admission.project, admission.category, &hash)?;
+        let category_id =
+            crate::memory_levels::category_id(admission.category, admission.authority);
+        let matched = memory_by_hash(&tx, admission.project, &category_id, &hash)?;
         if let Some(archived) = matched
             .as_ref()
             .filter(|matched| matched.status == "archived")
@@ -393,9 +397,10 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
         if matched.is_none() {
             let cross: Option<i64> = tx
                 .query_row(
-                    "SELECT id FROM memories WHERE project_path = ?1 AND category != ?2 AND normalized_hash = ?3
-                       AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
-                    params![admission.project, admission.category, hash, admission.content],
+                    "SELECT id FROM memories
+                      WHERE level = 'project' AND owner_id = ?1 AND category != ?2 AND normalized_hash = ?3
+                        AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
+                    params![admission.project, category_id, hash, admission.content],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -427,8 +432,24 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                 matched.id
             }
             None => {
+                // Turn two's `new` is the two-pass form of fact promotion, so
+                // it is placed the same way, with the historian as its actor.
+                let ordinals = fact_ordinals(&tx, admission.fact_id)?;
+                let placer = crate::memory_levels::Placer {
+                    authority: admission.authority,
+                    actor: crate::memory_levels::Actor::Historian,
+                    session: Some(admission.source_session),
+                    ordinals: &ordinals,
+                };
+                let new_row = crate::memory_levels::NewRow::decide(
+                    &placer,
+                    admission.project,
+                    None,
+                    admission.category,
+                )?;
                 let memory = insert_memory(
                     &tx,
+                    &new_row,
                     admission.project,
                     admission.category,
                     admission.content,
@@ -442,20 +463,11 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                         params![memory.id, now_ms() + ttl],
                     )?;
                 }
-                // Turn two's `new` is the two-pass form of fact promotion, so
-                // it is placed the same way, with the historian as its actor.
-                let ordinals = fact_ordinals(&tx, admission.fact_id)?;
                 crate::memory_levels::created(
                     &tx,
-                    &crate::memory_levels::Placer {
-                        authority: admission.authority,
-                        actor: crate::memory_levels::Actor::Historian,
-                        session: Some(admission.source_session),
-                        ordinals: &ordinals,
-                    },
+                    &placer,
                     memory.id,
                     crate::memory_levels::CreateKind::Create,
-                    None,
                     now_ms(),
                 )?;
                 memory.id
@@ -527,7 +539,9 @@ pub fn sources(conn: &Connection, expected: &[(i64, i64)]) -> rusqlite::Result<V
     for (id, _) in expected {
         let row = conn
             .query_row(
-                "SELECT id, revision, project_path, COALESCE(status, 'active'), content FROM memories WHERE id = ?1",
+                "SELECT id, revision, CASE level WHEN 'project' THEN owner_id ELSE '' END,
+                        COALESCE(status, 'active'), content
+                   FROM memories WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Source {
@@ -658,7 +672,7 @@ pub fn commit_revision(
     // A replacement's sources must share one owner, which the new row takes.
     let owner = if decision.action == "replaces" {
         let ids: Vec<i64> = current.iter().map(|source| source.id).collect();
-        match crate::memory_levels::merge_owner(&tx, &ids, &decision.project, authority) {
+        match crate::memory_levels::merge_owner(&tx, &ids) {
             Ok(owner) => owner,
             Err(error)
                 if crate::memory_levels::refusal_code(&error).as_deref()
@@ -699,8 +713,23 @@ pub fn commit_revision(
             params![survivor.id],
             |row| row.get(0),
         )?;
+        let placer = crate::memory_levels::Placer {
+            authority,
+            actor: crate::memory_levels::Actor::Historian,
+            session: None,
+            ordinals: &[],
+        };
+        let mut new_row = crate::memory_levels::NewRow::decide(
+            &placer,
+            &decision.project,
+            owner.as_ref(),
+            &survivor.category,
+        )?;
+        // A replacement stays filed where the memory it replaces was.
+        new_row.category_id = survivor.category_id.clone();
         let inserted = insert_memory(
             &tx,
+            &new_row,
             &decision.project,
             &survivor.category,
             &decision.final_text,
@@ -714,15 +743,9 @@ pub fn commit_revision(
         )?;
         crate::memory_levels::created(
             &tx,
-            &crate::memory_levels::Placer {
-                authority,
-                actor: crate::memory_levels::Actor::Historian,
-                session: None,
-                ordinals: &[],
-            },
+            &placer,
             inserted.id,
             crate::memory_levels::CreateKind::MergeSurvivor,
-            owner.as_ref(),
             now_ms(),
         )?;
         inserted.id

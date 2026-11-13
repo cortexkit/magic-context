@@ -275,8 +275,17 @@ fn plan_rekey(
             }
         }
     }
-    for table in ["user_memories", "primers"] {
-        let rows: Vec<String> = conn.prepare(&format!("SELECT source_candidate_provenance FROM {table} WHERE source_candidate_provenance LIKE '%' || ?1 || '%'"))
+    // Global memories moved from the old user-memory table keep their
+    // candidates' provenance in `metadata_json`.
+    for (table, column, from) in [
+        (
+            "user_memories",
+            "json_extract(metadata_json, '$.source_candidate_provenance')",
+            "memories WHERE level = 'global'",
+        ),
+        ("primers", "source_candidate_provenance", "primers"),
+    ] {
+        let rows: Vec<String> = conn.prepare(&format!("SELECT provenance FROM (SELECT {column} AS provenance FROM {from}) WHERE provenance LIKE '%' || ?1 || '%'"))
             .and_then(|mut s|s.query_map(params![target],|r|r.get(0))?.collect()).map_err(|e|e.to_string())?;
         for text in rows {
             let Ok(Value::Array(sources)) = serde_json::from_str::<Value>(&text) else {

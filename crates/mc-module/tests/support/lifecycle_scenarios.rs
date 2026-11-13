@@ -243,7 +243,9 @@ fn lifecycle_move_never_fences_a_failed_state_save() {
 
 #[test]
 fn lifecycle_move_refuses_unrenderable_memories_and_profile_without_writes() {
-    for table in ["memories", "user_memories"] {
+    // The user profile is the global rows of `memories`, so one table covers
+    // both.
+    for table in ["memories"] {
         let dir = scratch(&format!("move-head-{table}"));
         let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
         insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");

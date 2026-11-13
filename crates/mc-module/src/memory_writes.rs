@@ -1,12 +1,17 @@
 //! Agent memory writes on `context.db`: a save, and an update, archive or
-//! merge. This is the TypeScript applier's agent path
-//! (`features/magic-context/memory/lifecycle-applier.ts`), row for row,
-//! because the standalone plugin writes the same tables: each write keeps
-//! the memory's revision, its undo history, the decision receipt and
-//! journal entry, and the memory-mutation-log rows. How a change reaches a
-//! prompt is the history head's business: every session that shows the
-//! memory sees the change in its `m[1]` on its next rebuild. Each runs in one
-//! `BEGIN IMMEDIATE` transaction, so it lands whole or not at all.
+//! merge. They began as the TypeScript applier's agent path
+//! (`features/magic-context/memory/lifecycle-applier.ts`): each write keeps
+//! the memory's revision, its undo history, the decision receipt and the
+//! journal entry. How a change reaches a prompt is the history head's
+//! business: every session that shows the memory sees the change in its
+//! `m[1]` on its next rebuild. Each runs in one `BEGIN IMMEDIATE`
+//! transaction, so it lands whole or not at all.
+//!
+//! A memory row carries its level and owner, the profile category id it is
+//! filed under (`category`), and the tag it was written under
+//! (`origin_category`). Writers name memories by tag, as the tools and the
+//! summarizer do; duplicates are found by category id, so two tags that map
+//! to one category share their texts.
 //!
 //! Embeddings are not computed here: a changed memory's vector is deleted,
 //! and the embedding upkeep computes the new one.
@@ -65,7 +70,11 @@ pub fn normalized_hash(content: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRow {
     pub id: i64,
-    pub project_path: String,
+    pub level: String,
+    pub owner_id: String,
+    /// The profile category id the memory is filed under.
+    pub category_id: String,
+    /// The tag the memory was written under.
     pub category: String,
     pub content: String,
     pub normalized_hash: String,
@@ -82,32 +91,40 @@ pub struct MemoryRow {
 
 impl MemoryRow {
     /// Active or permanent, and not replaced by another memory.
+    /// A project memory of `project`: the only memories a session's tools
+    /// may read by id or change, until other levels are writable.
+    pub fn is_project_owned_by(&self, project: &str) -> bool {
+        self.level == "project" && self.owner_id == project
+    }
+
     pub fn is_mutable(&self) -> bool {
         matches!(self.status.as_str(), "active" | "permanent")
             && self.superseded_by_memory_id.is_none()
     }
 }
 
-const ROW_COLUMNS: &str = "id, project_path, category, content, normalized_hash,
+const ROW_COLUMNS: &str = "id, level, owner_id, category, origin_category, content, normalized_hash,
     COALESCE(status, 'active'), COALESCE(verification_status, 'unverified'), superseded_by_memory_id,
     revision, COALESCE(seen_count, 1), COALESCE(retrieval_count, 0), merged_from, metadata_json, updated_at";
 
 fn row(row: &Row) -> rusqlite::Result<MemoryRow> {
     Ok(MemoryRow {
         id: row.get(0)?,
-        project_path: row.get(1)?,
-        category: row.get(2)?,
-        content: row.get(3)?,
-        normalized_hash: row.get(4)?,
-        status: row.get(5)?,
-        verification_status: row.get(6)?,
-        superseded_by_memory_id: row.get(7)?,
-        revision: row.get(8)?,
-        seen_count: row.get(9)?,
-        retrieval_count: row.get(10)?,
-        merged_from: row.get(11)?,
-        metadata_json: row.get(12)?,
-        updated_at: row.get(13)?,
+        level: row.get(1)?,
+        owner_id: row.get(2)?,
+        category_id: row.get(3)?,
+        category: row.get(4)?,
+        content: row.get(5)?,
+        normalized_hash: row.get(6)?,
+        status: row.get(7)?,
+        verification_status: row.get(8)?,
+        superseded_by_memory_id: row.get(9)?,
+        revision: row.get(10)?,
+        seen_count: row.get(11)?,
+        retrieval_count: row.get(12)?,
+        merged_from: row.get(13)?,
+        metadata_json: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -120,18 +137,40 @@ pub fn get_memory(conn: &Connection, id: i64) -> rusqlite::Result<Option<MemoryR
     .optional()
 }
 
+/// The project memory filed under `category_id` with this text. A live row
+/// comes first: archived history rows may repeat a text, live ones never do.
 pub(crate) fn memory_by_hash(
     conn: &Connection,
     project: &str,
-    category: &str,
+    category_id: &str,
     hash: &str,
 ) -> rusqlite::Result<Option<MemoryRow>> {
     conn.query_row(
         &format!(
-            "SELECT {ROW_COLUMNS} FROM memories WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3"
+            "SELECT {ROW_COLUMNS} FROM memories
+              WHERE level = 'project' AND owner_id = ?1 AND category = ?2 AND normalized_hash = ?3
+              ORDER BY COALESCE(status, 'active') NOT IN ('active', 'permanent'), id LIMIT 1"
         ),
-        params![project, category, hash],
+        params![project, category_id, hash],
         row,
+    )
+    .optional()
+}
+
+/// A live project memory in another category with exactly this text.
+fn cross_category_match(
+    tx: &Transaction,
+    project: &str,
+    category_id: &str,
+    hash: &str,
+    content: &str,
+) -> rusqlite::Result<Option<i64>> {
+    tx.query_row(
+        "SELECT id FROM memories
+          WHERE level = 'project' AND owner_id = ?1 AND category != ?2 AND normalized_hash = ?3
+            AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
+        params![project, category_id, hash, content],
+        |row| row.get(0),
     )
     .optional()
 }
@@ -139,9 +178,11 @@ pub(crate) fn memory_by_hash(
 /// The memory row as undo history stores it: the shared field set, or
 /// nothing when the row holds a value history cannot restore.
 pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<Option<Value>> {
-    const TEXT: [&str; 10] = [
+    const TEXT: [&str; 12] = [
         "projectPath",
+        "level",
         "category",
+        "categoryId",
         "content",
         "normalizedHash",
         "scope",
@@ -162,11 +203,16 @@ pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<O
         "mergedFrom",
         "metadataJson",
     ];
-    const FIELDS: [&str; 25] = [
+    // `projectPath` and `category` keep the names the plugin's history used:
+    // the owner and the tag the memory was written under. `level` and
+    // `categoryId` name the rest of where the row sits.
+    const FIELDS: [&str; 27] = [
         "id",
         "projectPath",
+        "level",
         "revision",
         "category",
+        "categoryId",
         "content",
         "normalizedHash",
         "importance",
@@ -189,8 +235,11 @@ pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<O
         "mergedFrom",
         "metadataJson",
     ];
-    let snake = |field: &str| {
-        field
+    let snake = |field: &str| match field {
+        "projectPath" => "owner_id".to_owned(),
+        "category" => "origin_category".to_owned(),
+        "categoryId" => "category".to_owned(),
+        _ => field
             .chars()
             .flat_map(|ch| {
                 if ch.is_ascii_uppercase() {
@@ -199,7 +248,7 @@ pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<O
                     vec![ch]
                 }
             })
-            .collect::<String>()
+            .collect::<String>(),
     };
     let mut statement = conn.prepare_cached("SELECT * FROM memories WHERE id = ?1")?;
     let names: Vec<String> = statement
@@ -304,26 +353,6 @@ fn record_receipt(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn queue_mutation(
-    tx: &Transaction,
-    project: &str,
-    kind: &str,
-    target: i64,
-    superseded_by: Option<i64>,
-    category: Option<&str>,
-    content: Option<&str>,
-    operation: Option<&str>,
-) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT INTO memory_mutation_log
-            (project_path, mutation_type, target_memory_id, superseded_by_id, category, new_content, queued_at, operation_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![project, kind, target, superseded_by, category, content, now_ms(), operation],
-    )?;
-    Ok(())
-}
-
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -404,9 +433,12 @@ pub(crate) fn archive(
     Ok(())
 }
 
+/// Insert a live memory written under `category` (a tag) in `project`, filed
+/// where `new_row` says.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_memory(
     tx: &Transaction,
+    new_row: &crate::memory_levels::NewRow,
     project: &str,
     category: &str,
     content: &str,
@@ -415,13 +447,33 @@ pub(crate) fn insert_memory(
     importance: Option<i64>,
 ) -> rusqlite::Result<MemoryRow> {
     let now = now_ms();
+    let profile = new_row.origin_profile.as_ref();
     tx.execute(
-        "INSERT INTO memories (project_path, category, content, normalized_hash, importance, source_session_id,
-                               source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at,
-                               last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at,
-                               superseded_by_memory_id, merged_from, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8, ?8, ?8, NULL, 'active', NULL, 'unverified', NULL, NULL, NULL, NULL)",
-        params![project, category, content, normalized_hash(content), importance.unwrap_or(50), session, source_type, now],
+        "INSERT INTO memories (level, owner_id, category, origin_category, origin_profile,
+                               origin_profile_version, origin_profile_digest, source_project_id,
+                               source_ordinals_json, content, normalized_hash, importance,
+                               source_session_id, source_type, seen_count, retrieval_count,
+                               first_seen_at, created_at, updated_at, last_seen_at, status,
+                               verification_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, 0, ?15, ?15, ?15, ?15,
+                 'active', 'unverified')",
+        params![
+            new_row.level,
+            new_row.owner_id,
+            new_row.category_id,
+            category,
+            profile.map(|profile| &profile.name),
+            profile.map(|profile| &profile.version),
+            profile.map(|profile| &profile.digest),
+            project,
+            new_row.source_ordinals_json,
+            content,
+            normalized_hash(content),
+            importance.unwrap_or(50),
+            session,
+            source_type,
+            now
+        ],
     )?;
     let id = tx.last_insert_rowid();
     get_memory(tx, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -496,7 +548,8 @@ pub fn save(
         })
     };
     let hash = normalized_hash(content);
-    let matched = memory_by_hash(&tx, who.project, category, &hash)?;
+    let category_id = crate::memory_levels::category_id(category, who.authority);
+    let matched = memory_by_hash(&tx, who.project, &category_id, &hash)?;
     if matched
         .as_ref()
         .is_some_and(|memory| memory.status == "archived")
@@ -506,15 +559,7 @@ pub fn save(
         return Ok(receipt);
     }
     if matched.is_none() {
-        let cross: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM memories WHERE project_path = ?1 AND category != ?2 AND normalized_hash = ?3
-                    AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
-                params![who.project, category, hash, content],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(cross) = cross {
+        if let Some(cross) = cross_category_match(&tx, who.project, &category_id, &hash, content)? {
             let receipt = pending(&tx, "cross_category_match", Some(cross))?;
             tx.commit()?;
             return Ok(receipt);
@@ -530,8 +575,12 @@ pub fn save(
             get_memory(&tx, memory.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?
         }
         None => {
+            let placer = who.placer();
+            let new_row =
+                crate::memory_levels::NewRow::decide(&placer, who.project, None, category)?;
             let memory = insert_memory(
                 &tx,
+                &new_row,
                 who.project,
                 category,
                 content,
@@ -541,10 +590,9 @@ pub fn save(
             )?;
             crate::memory_levels::created(
                 &tx,
-                &who.placer(),
+                &placer,
                 memory.id,
                 crate::memory_levels::CreateKind::Create,
-                None,
                 now_ms(),
             )?;
             memory
@@ -651,7 +699,7 @@ pub fn mutate(
         let Some(memory) = get_memory(&tx, *id)? else {
             return refuse(tx, "target_not_owned");
         };
-        if memory.project_path != who.project {
+        if !memory.is_project_owned_by(who.project) {
             return refuse(tx, "target_not_owned");
         }
         if memory.revision != *revision || !memory.is_mutable() {
@@ -666,16 +714,22 @@ pub fn mutate(
     if operation == Operation::Merge
         && sources
             .iter()
-            .any(|source| source.category != sources[0].category)
+            .any(|source| source.category_id != sources[0].category_id)
     {
         return refuse(tx, "cross_category_merge");
     }
     let first = sources[0].clone();
     let category = category.unwrap_or(&first.category).to_owned();
+    // A tag the caller names maps through the writer's profile; keeping the
+    // memory's own tag keeps its category id.
+    let category_id = match change.category {
+        Some(tag) => crate::memory_levels::category_id(tag, who.authority),
+        None => first.category_id.clone(),
+    };
     let hash = content.map(normalized_hash);
     let duplicate = match (&hash, operation) {
         (Some(hash), Operation::Update | Operation::Merge) => {
-            memory_by_hash(&tx, who.project, &category, hash)?
+            memory_by_hash(&tx, who.project, &category_id, hash)?
         }
         _ => None,
     };
@@ -688,7 +742,7 @@ pub fn mutate(
     // changes; its survivor takes that owner.
     let merge_owner = if operation == Operation::Merge {
         let ids: Vec<i64> = sources.iter().map(|source| source.id).collect();
-        match crate::memory_levels::merge_owner(&tx, &ids, who.project, who.authority) {
+        match crate::memory_levels::merge_owner(&tx, &ids) {
             Ok(owner) => owner,
             Err(error)
                 if crate::memory_levels::refusal_code(&error).as_deref()
@@ -724,18 +778,8 @@ pub fn mutate(
             let content = content.expect("checked");
             update_content(&tx, first.id, content, hash.as_deref().expect("checked"))?;
             tx.execute(
-                "UPDATE memories SET category = ?2 WHERE id = ?1",
-                params![first.id, category],
-            )?;
-            queue_mutation(
-                &tx,
-                &first.project_path,
-                "update",
-                first.id,
-                None,
-                Some(&category),
-                Some(content),
-                None,
+                "UPDATE memories SET category = ?2, origin_category = ?3 WHERE id = ?1",
+                params![first.id, category_id, category],
             )?;
             canonical = get_memory(&tx, first.id)?;
         }
@@ -743,16 +787,6 @@ pub fn mutate(
             for source in &sources {
                 archive(&tx, source, reason)?;
                 clear_derived(&tx, source.id)?;
-                queue_mutation(
-                    &tx,
-                    &source.project_path,
-                    "archive",
-                    source.id,
-                    None,
-                    None,
-                    None,
-                    Some(&key),
-                )?;
             }
         }
         Operation::Merge => {
@@ -762,8 +796,16 @@ pub fn mutate(
                 Some(duplicate) => duplicate.clone(),
                 None => {
                     before.push(None);
+                    let placer = who.placer();
+                    let new_row = crate::memory_levels::NewRow::decide(
+                        &placer,
+                        who.project,
+                        merge_owner.as_ref(),
+                        &category,
+                    )?;
                     let survivor = insert_memory(
                         &tx,
+                        &new_row,
                         who.project,
                         &category,
                         content,
@@ -773,10 +815,9 @@ pub fn mutate(
                     )?;
                     crate::memory_levels::created(
                         &tx,
-                        &who.placer(),
+                        &placer,
                         survivor.id,
                         crate::memory_levels::CreateKind::MergeSurvivor,
-                        merge_owner.as_ref(),
                         now_ms(),
                     )?;
                     survivor
@@ -784,16 +825,6 @@ pub fn mutate(
             };
             if survivor.content != content || survivor.normalized_hash != hash {
                 update_content(&tx, survivor.id, content, hash)?;
-                queue_mutation(
-                    &tx,
-                    &survivor.project_path,
-                    "update",
-                    survivor.id,
-                    None,
-                    Some(&category),
-                    Some(content),
-                    Some(&key),
-                )?;
             }
             let mut merged_from: std::collections::BTreeSet<i64> =
                 sources.iter().map(|source| source.id).collect();
@@ -814,16 +845,6 @@ pub fn mutate(
                     tx.execute(
                         "INSERT OR IGNORE INTO memory_successor_links(source_id, successor_id, decision_key) VALUES (?1, ?2, ?3)",
                         params![source.id, survivor.id, key],
-                    )?;
-                    queue_mutation(
-                        &tx,
-                        &source.project_path,
-                        "superseded",
-                        source.id,
-                        Some(survivor.id),
-                        None,
-                        None,
-                        Some(&key),
                     )?;
                     superseded_ids.push(source.id);
                 }
@@ -864,7 +885,7 @@ pub fn mutate(
         &tx,
         &History {
             key: &key,
-            project: &first.project_path,
+            project: &first.owner_id,
             writer: "ctx_memory",
             operation: operation.name(),
             reason: &reason_text,

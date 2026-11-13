@@ -181,7 +181,9 @@ pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String,
             let mut parts = Vec::new();
             for id in requested.into_iter().filter(|id| seen.insert(*id)) {
                 parts.push(match memory_writes::get_memory(conn, id).map_err(store)? {
-                    Some(memory) if memory.project_path == who.project => format_list(&[memory]),
+                    Some(memory) if memory.is_project_owned_by(who.project) => {
+                        format_list(&[memory])
+                    }
                     _ => format!("id {id}: not found or not visible from this project"),
                 });
             }
@@ -243,7 +245,7 @@ fn mutate(
     let mut categories = std::collections::BTreeSet::new();
     for id in &ids {
         let memory = memory_writes::get_memory(conn, *id).map_err(store)?;
-        let Some(memory) = memory.filter(|memory| memory.project_path == who.project) else {
+        let Some(memory) = memory.filter(|memory| memory.is_project_owned_by(who.project)) else {
             return Err(if operation == Operation::Merge {
                 "Error: One or more source memories were not found.".into()
             } else {

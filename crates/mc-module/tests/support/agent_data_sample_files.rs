@@ -74,7 +74,7 @@ impl Samples {
 
     pub fn finish(self, prefix: &str) {
         let committed =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-agent-data-samples-v1");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-agent-data-samples-v2");
         let mut root = committed.clone();
         let output = std::env::var_os("MC_REGENERATE_AGENT_DATA_SAMPLES");
         let regenerate = output.is_some();

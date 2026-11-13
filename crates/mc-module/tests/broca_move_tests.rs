@@ -140,9 +140,9 @@ impl Fixture {
         }
         self.conn.execute("INSERT INTO tags(session_id,harness,message_id,type,tag_number) VALUES (?1,?2,'tagged','text',500)",params![SOURCE,host]).unwrap();
         self.conn.execute("INSERT INTO message_history_index(session_id,harness,last_indexed_ordinal,dirty_floor_ordinal,updated_at) VALUES (?1,?2,10,2,1)",params![SOURCE,host]).unwrap();
-        self.conn.execute("INSERT INTO user_memory_candidates(content,session_id,source_compartment_start,source_compartment_end,created_at) VALUES ('Preference',?1,5,6,1)",params![SOURCE]).unwrap();
+        self.conn.execute("INSERT INTO memory_observations(content,session_id,source_start_ordinal,source_end_ordinal,created_at) VALUES ('Preference',?1,5,6,1)",params![SOURCE]).unwrap();
         let provenance = json!([{"session_id":SOURCE,"harness":host,"source_compartment_start":5,"source_compartment_end":6}]).to_string();
-        self.conn.execute("INSERT INTO user_memories(content,promoted_at,source_candidate_provenance,created_at,updated_at) VALUES ('Preference',1,?1,1,1)",params![provenance]).unwrap();
+        self.conn.execute("INSERT INTO memories(level,owner_id,category,origin_category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at,status,metadata_json) VALUES ('global','self','mc:user-unsorted','USER_MEMORY','Preference','Preference',1,1,1,1,'active',json_object('promoted_at',1,'source_candidate_provenance',?1))",params![provenance]).unwrap();
         self.conn.execute("INSERT INTO primer_candidates(project_path,harness,session_id,question,normalized_question,source_compartment_start,source_compartment_end,source_start_message_id,source_end_message_id,source_message_time,created_at) VALUES ('/fixture',?1,?2,'Question','question',5,6,'first','last',1,1)",params![host,SOURCE]).unwrap();
         self.conn.execute("INSERT INTO primers(project_path,question,source_candidate_provenance,created_at,updated_at) VALUES ('/fixture','Question',?1,1,1)",params![provenance]).unwrap();
         self.conn
@@ -337,9 +337,14 @@ fn runner_moves_use_source_entries_for_opencode2_and_pi() {
             .collect();
         expected_depths.sort();
         assert_eq!(depths, expected_depths);
-        for table in ["user_memories", "primers"] {
-            let text: String =
-                fixture.scalar(&format!("SELECT source_candidate_provenance FROM {table}"));
+        for (table, query) in [
+            (
+                "user_memories",
+                "SELECT json_extract(metadata_json, '$.source_candidate_provenance') FROM memories WHERE level = 'global'",
+            ),
+            ("primers", "SELECT source_candidate_provenance FROM primers"),
+        ] {
+            let text: String = fixture.scalar(query);
             let list: Value = serde_json::from_str(&text).unwrap();
             assert_eq!(list[0]["session_id"], TARGET);
             assert_eq!(
@@ -354,17 +359,28 @@ fn runner_moves_use_source_entries_for_opencode2_and_pi() {
                 assert_eq!(list[0]["harness"], "broca");
             }
         }
-        for table in ["user_memory_candidates", "primer_candidates"] {
+        for (table, start, end) in [
+            (
+                "memory_observations",
+                "source_start_ordinal",
+                "source_end_ordinal",
+            ),
+            (
+                "primer_candidates",
+                "source_compartment_start",
+                "source_compartment_end",
+            ),
+        ] {
             assert_eq!(
                 fixture.scalar::<String>(&format!("SELECT session_id FROM {table}")),
                 TARGET
             );
             assert_eq!(
-                fixture.scalar::<u64>(&format!("SELECT source_compartment_start FROM {table}")),
+                fixture.scalar::<u64>(&format!("SELECT {start} FROM {table}")),
                 if host == "opencode2" { 6 } else { 4 }
             );
             assert_eq!(
-                fixture.scalar::<u64>(&format!("SELECT source_compartment_end FROM {table}")),
+                fixture.scalar::<u64>(&format!("SELECT {end} FROM {table}")),
                 if host == "opencode2" { 7 } else { 5 }
             );
         }

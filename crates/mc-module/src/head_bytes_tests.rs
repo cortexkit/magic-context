@@ -70,12 +70,14 @@ pub(super) fn head(dir: &std::path::Path) -> (Session, Settings) {
     });
     execute(
         &session,
-        "INSERT INTO memories(id,project_path,category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at) VALUES
-            (1,'own','PROJECT_RULES','Run the gate before every delivery.','h1',80,1,1,1,1),
-            (2,'own','ARCHITECTURE','The store keeps one row per session.','h2',70,1,1,1,1),
-            (3,'own','NAMING','Files are kebab-case.','h3',60,1,1,1,1);
-         INSERT INTO user_memories(content, promoted_at, source_candidate_provenance, created_at, updated_at)
-            VALUES ('Prefers short answers', 1, '[]', 1, 1);",
+        "INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at) VALUES
+            (1,'project', 'own','swe:project-rules', 'PROJECT_RULES','Run the gate before every delivery.','h1',80,1,1,1,1),
+            (2,'project', 'own','swe:architecture', 'ARCHITECTURE','The store keeps one row per session.','h2',70,1,1,1,1),
+            (3,'project', 'own','swe:naming', 'NAMING','Files are kebab-case.','h3',60,1,1,1,1);
+         INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash,
+            first_seen_at, created_at, updated_at, last_seen_at, status, metadata_json)
+            VALUES (100, 'global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'Prefers short answers',
+            'h-user', 1, 1, 1, 1, 'active', json_object('user_memory_id', 1, 'promoted_at', 1));",
     );
     for sequence in 1..=3 {
         add_summary(
@@ -187,8 +189,8 @@ fn head_bytes_match_the_build_before_summary_attribution_was_shared() {
         &session,
         "UPDATE memories SET content='The store keeps one row per session, and its history text apart.' WHERE id=2;
          UPDATE memories SET status='archived' WHERE id=3;
-         INSERT INTO memories(id,project_path,category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at)
-            VALUES (4,'own','CONSTRAINTS','Never open the live stores.','h4',90,2,2,2,2);",
+         INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,importance,first_seen_at,created_at,updated_at,last_seen_at)
+            VALUES (4,'project', 'own','swe:constraints', 'CONSTRAINTS','Never open the live stores.','h4',90,2,2,2,2);",
     );
     session.head_stale = true;
     states.push(record(
