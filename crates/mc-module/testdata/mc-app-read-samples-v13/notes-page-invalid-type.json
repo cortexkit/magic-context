@@ -1,0 +1,19 @@
+{
+  "name": "notes-page-invalid-type",
+  "request": {
+    "method": "notes.page",
+    "params": {
+      "project": "pj-sample",
+      "type": "memo"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "invalid_params",
+      "detail": {
+        "field": "type"
+      },
+      "message": "Invalid type."
+    }
+  }
+}

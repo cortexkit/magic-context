@@ -203,6 +203,10 @@ pub(crate) const CONTEXT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct ContextDb {
     pub(crate) path: std::path::PathBuf,
     connection: Mutex<Connection>,
+    /// Where writers say what they changed, for the app reads' watches. Set
+    /// once by the module that serves those reads; a store without one (a
+    /// test, a tool) tells no one.
+    notifier: std::sync::OnceLock<crate::app_read::Notifier>,
     #[cfg(feature = "context-db-timing")]
     timing: timing::Timing,
 }
@@ -330,6 +334,7 @@ impl ContextDb {
         Ok(Self {
             path: path.to_owned(),
             connection: Mutex::new(connection),
+            notifier: std::sync::OnceLock::new(),
             #[cfg(feature = "context-db-timing")]
             timing,
         })
@@ -396,6 +401,20 @@ impl ContextDb {
             .map_err(|error| format!("fresh schema: {error}"))?;
         drop(connection);
         Self::open(path)
+    }
+
+    /// Tell `notifier` about every change a writer reports from now on.
+    /// Only the first call takes effect.
+    pub(crate) fn notify(&self, notifier: crate::app_read::Notifier) {
+        let _ = self.notifier.set(notifier);
+    }
+
+    /// Report a committed change to rows the app reads show. Call it after
+    /// the transaction commits, so a reload reads the change.
+    pub(crate) fn changed(&self, change: crate::app_read::Change) {
+        if let Some(notifier) = self.notifier.get() {
+            notifier.changed(change);
+        }
     }
 
     /// A session's summaries, oldest first.
@@ -551,6 +570,15 @@ impl ContextDb {
             None => 0,
         };
         transaction.commit().map_err(|error| error.to_string())?;
+        drop(connection);
+        if let Some(publication) = publication.filter(|_| candidates > 0) {
+            self.changed(crate::app_read::Change::project_memories(
+                &publication.project,
+            ));
+        }
+        if !recall.observations.is_empty() {
+            self.changed(crate::app_read::Change::global_memories());
+        }
         Ok(candidates)
     }
 

@@ -1,0 +1,26 @@
+{
+  "name": "head-invalid-11",
+  "request": {
+    "method": "context.head_section",
+    "params": {
+      "max_bytes": 1024,
+      "section": null,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "slot": "baseline",
+      "view": 7
+    }
+  },
+  "response": {
+    "error": {
+      "code": "invalid_params",
+      "detail": {
+        "field": "section"
+      },
+      "message": "Invalid section."
+    }
+  }
+}

@@ -19,6 +19,8 @@ agent-data = []
 [dependencies]
 # Local midnight for memories that end on a calendar date.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# The machine's IANA time zone name, which dreamer schedules run in.
+iana-time-zone = "0.1.65"
 cortexkit-log = { workspace = true }
 tracing = "0.1"
 cortexkit-role-compaction = { workspace = true }

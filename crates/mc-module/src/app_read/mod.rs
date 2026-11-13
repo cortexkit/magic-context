@@ -16,12 +16,17 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 mod cache;
+mod dreamer;
 pub(crate) mod head;
 pub(crate) mod idle;
+mod memories;
+mod pages;
 pub(crate) mod persistence;
 mod search;
+pub(crate) mod sessions;
 mod states;
 mod watch;
+pub(crate) use watch::Change;
 pub use watch::Subscription;
 
 /// Direct is deliberately admitted while the local operator apps are in
@@ -348,6 +353,22 @@ enum Command {
         Value,
         oneshot::Sender<Result<Subscription, Refusal>>,
     ),
+    /// A session set up in this process: its key, project id, project
+    /// folder and preset.
+    SessionSeen(SessionRef, String, String, String),
+    Changed(Change),
+    Attach(sessions::Attachment),
+}
+
+/// Where the module's writers tell the app reads what they changed, so open
+/// pages reload on a notice instead of a timer.
+#[derive(Clone)]
+pub(crate) struct Notifier(mpsc::Sender<Command>);
+
+impl Notifier {
+    pub(crate) fn changed(&self, change: Change) {
+        let _ = self.0.send(Command::Changed(change));
+    }
 }
 
 type BoundaryIndex = HashMap<String, Vec<(usize, &'static str)>>;
@@ -364,6 +385,7 @@ struct Replica {
     heads: HashMap<SessionRef, head::ReadState>,
     idle_heads: std::cell::RefCell<HashMap<SessionRef, idle::KeptHead>>,
     head_warnings: std::cell::RefCell<HashSet<(SessionRef, u64)>>,
+    apps: sessions::Apps,
 }
 
 impl AppRead {
@@ -397,6 +419,7 @@ impl AppRead {
                     heads: HashMap::new(),
                     idle_heads: Default::default(),
                     head_warnings: Default::default(),
+                    apps: Default::default(),
                 };
                 replica.load();
                 loop {
@@ -435,6 +458,11 @@ impl AppRead {
                             let result = replica.subscribe(caller, &params);
                             let _ = reply.send(result);
                         }
+                        Command::SessionSeen(key, project, root, preset) => {
+                            replica.session_seen(key, project, root, preset)
+                        }
+                        Command::Changed(change) => replica.watches.publish(change),
+                        Command::Attach(attachment) => replica.apps.attached = Some(attachment),
                     }
                 }
             })
@@ -496,6 +524,31 @@ impl AppRead {
             .send(Command::Watch(caller, params, tx))
             .map_err(|_| unavailable())?;
         rx.await.map_err(|_| unavailable())?
+    }
+
+    /// A session set up with a project: the project is known to the app
+    /// reads from now on, with its folder and the session's preset.
+    pub(crate) fn session_seen(
+        &self,
+        key: &SessionRef,
+        project: &crate::route::Project,
+        preset: &str,
+    ) {
+        let _ = self.tx.send(Command::SessionSeen(
+            key.clone(),
+            project.id.clone(),
+            project.root.clone(),
+            preset.to_owned(),
+        ));
+    }
+
+    pub(crate) fn notifier(&self) -> Notifier {
+        Notifier(self.tx.clone())
+    }
+
+    /// Hand the reads the module's settings and dreamer.
+    pub(crate) fn attach(&self, attachment: sessions::Attachment) {
+        let _ = self.tx.send(Command::Attach(attachment));
     }
 }
 
@@ -805,11 +858,42 @@ impl Replica {
             "context.compartment" => &["session", "compartment_id"],
             "context.cache_why" => &["session", "producers"],
             "context.search" => &["query", "scope", "sources", "cursor"],
+            "memories.stats" => &["level", "owner"],
+            "memories.page" => &[
+                "level", "owner", "status", "category", "text", "cursor", "limit",
+            ],
+            "memories.get" | "dreamer.run" => &["id"],
+            "observations.page" => &["cursor", "limit"],
+            "facts.page" => &["project", "cursor", "limit"],
+            "dreamer.status" => &["project"],
+            "dreamer.runs" => &["project", "task", "cursor", "limit"],
+            "sessions.page" => &["project", "harness", "preset", "cursor", "limit"],
+            "notes.page" => &["project", "session", "type", "status", "cursor", "limit"],
             _ => return Err(unavailable()),
         };
         let p = object(params, allowed)?;
         if method == "context.search" {
             return self.search(p);
+        }
+        // Owner reads: memories, the dreamer, a project's sessions and notes.
+        // None names a session to load.
+        let owner_read = match method {
+            "memories.stats" => Some(self.memories_stats(p)),
+            "memories.page" => Some(self.memories_page(p)),
+            "memories.get" => Some(self.memories_get(p)),
+            "observations.page" => Some(self.observations_page(p)),
+            "facts.page" => Some(self.facts_page(p)),
+            "dreamer.status" => Some(self.dreamer_status(p)),
+            "dreamer.runs" => Some(self.dreamer_runs(p)),
+            "dreamer.run" => Some(self.dreamer_run(p)),
+            "sessions.page" => Some(self.sessions_page(p)),
+            "notes.page" => Some(self.notes_page(p)),
+            _ => None,
+        };
+        if let Some(result) = owner_read {
+            let mut fields = result?;
+            envelope(method, &mut fields);
+            return Ok(fields);
         }
         let key = session(p.get("session").unwrap_or(&Value::Null))?;
         if method == "context.head_section" {
@@ -1059,3 +1143,18 @@ mod tests;
 
 #[cfg(test)]
 mod lazy_tests;
+
+#[cfg(test)]
+mod fixture_tests;
+
+#[cfg(test)]
+mod memories_tests;
+
+#[cfg(test)]
+mod dreamer_tests;
+
+#[cfg(test)]
+mod sessions_tests;
+
+#[cfg(test)]
+mod samples_v13_tests;

@@ -1,0 +1,21 @@
+{
+  "name": "watch-dreamer",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "global": true,
+      "projects": [
+        "pj-sample"
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:1",
+      "kind": "dreamer",
+      "op": "context.watch",
+      "project": "pj-sample",
+      "schema": 1
+    }
+  }
+}

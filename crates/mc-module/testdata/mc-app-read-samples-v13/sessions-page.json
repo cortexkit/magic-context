@@ -1,0 +1,38 @@
+{
+  "name": "sessions-page",
+  "request": {
+    "method": "sessions.page",
+    "params": {
+      "limit": 2,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJzZXNzaW9ucy5wYWdlIiwiNTE1MzQyMjRkMTI5NDMxNCIsWzE3MDAwMDgwMDAwMDAsInRoYWxhbXVzLWhhcm5lc3MiLCJvcGVuY29kZTIiLCJzLXdvcmtlciJdXQ",
+      "op": "sessions.page",
+      "schema": 1,
+      "sessions": [
+        {
+          "last_activity_at": 1700009000000,
+          "preset": "head",
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          }
+        },
+        {
+          "last_activity_at": 1700008000000,
+          "preset": "worker",
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s-worker"
+          }
+        }
+      ]
+    }
+  }
+}

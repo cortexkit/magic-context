@@ -3155,7 +3155,12 @@ impl Session {
                     project: &project.id,
                     authority: self.authority.as_ref(),
                 };
-                db.with_connection(|conn| crate::memory_tool::run(conn, &who, input))
+                let answer = db.with_connection(|conn| crate::memory_tool::run(conn, &who, input));
+                // The tool writes only memories of the session's project.
+                if answer.is_ok() && crate::memory_tool::writes(input) {
+                    db.changed(crate::app_read::Change::project_memories(&project.id));
+                }
+                answer
             }
             "ctx_search" => {
                 let db = self
@@ -3208,7 +3213,16 @@ impl Session {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_millis() as i64);
-                crate::notes::run(db, &scope, input, anchor, now)
+                let answer = crate::notes::run(db, &scope, input, anchor, now);
+                if let (Ok(_), Some(project)) = (&answer, scope.project) {
+                    if crate::notes::writes(input) {
+                        db.changed(crate::app_read::Change::Notes {
+                            project,
+                            session: Some(self.key.clone()),
+                        });
+                    }
+                }
+                answer
             }
             "ctx_expand" => {
                 let last_summarized = self

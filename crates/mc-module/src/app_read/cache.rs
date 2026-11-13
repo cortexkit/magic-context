@@ -46,6 +46,7 @@ impl Replica {
                 tracing::warn!("ck-mc: app replica load: {error}");
             }
         }
+        self.load_projects();
     }
 
     pub(super) fn activate(&mut self, key: &SessionRef) {

@@ -1,0 +1,26 @@
+{
+  "name": "watch-notes",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "global": true,
+      "projects": [
+        "pj-sample"
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:1",
+      "kind": "notes",
+      "op": "context.watch",
+      "project": "pj-sample",
+      "schema": 1,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  }
+}

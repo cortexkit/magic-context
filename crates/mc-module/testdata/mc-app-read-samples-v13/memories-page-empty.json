@@ -1,0 +1,20 @@
+{
+  "name": "memories-page-empty",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "level": "project",
+      "owner": "pj-empty"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "level": "project",
+      "memories": [],
+      "op": "memories.page",
+      "owner": "pj-empty",
+      "schema": 1
+    }
+  }
+}

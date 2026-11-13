@@ -1,0 +1,23 @@
+{
+  "name": "head-changed",
+  "request": {
+    "method": "context.head_section",
+    "params": {
+      "max_bytes": 1024,
+      "section": 0,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "slot": "baseline",
+      "view": 8
+    }
+  },
+  "response": {
+    "error": {
+      "code": "head_changed",
+      "message": "The session head changed. Read context.head again."
+    }
+  }
+}

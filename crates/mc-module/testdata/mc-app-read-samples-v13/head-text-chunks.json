@@ -1,0 +1,47 @@
+{
+  "name": "head-text-chunks",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": true,
+      "messages": [
+        {
+          "bytes": 1037,
+          "sections": [
+            {
+              "bytes": 1037,
+              "index": 0,
+              "kind": "other",
+              "tokens": 70
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 70
+        },
+        {
+          "bytes": 90,
+          "empty": true,
+          "placeholder": "<session-history-since>(no new content since last materialization)</session-history-since>",
+          "sections": [],
+          "slot": "delta",
+          "tokens": 21
+        }
+      ]
+    }
+  }
+}

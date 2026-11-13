@@ -1,0 +1,33 @@
+{
+  "name": "notes-page-2",
+  "request": {
+    "method": "notes.page",
+    "params": {
+      "cursor": "mcc1.WyJub3Rlcy5wYWdlIiwiMTk3NWIxNGRmYzAyZDU2MSIsWzE3MDAwMDAxNTAwMDAsMl1d",
+      "limit": 3,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "notes": [
+        {
+          "content": "Check the migration on a copy first.",
+          "created_at": 1700000000000,
+          "id": 1,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "status": "active",
+          "type": "session",
+          "updated_at": 1700000000000
+        }
+      ],
+      "op": "notes.page",
+      "schema": 1
+    }
+  }
+}

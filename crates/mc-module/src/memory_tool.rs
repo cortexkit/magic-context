@@ -140,6 +140,14 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
     lines.join("\n")
 }
 
+/// Whether a `ctx_memory` call asks to change memories, not only read them.
+pub(crate) fn writes(input: &Value) -> bool {
+    matches!(
+        input.get("action").and_then(Value::as_str),
+        Some("write" | "update" | "archive" | "merge")
+    )
+}
+
 /// Run one `ctx_memory` call.
 pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String, String> {
     let store = |error: rusqlite::Error| error.to_string();

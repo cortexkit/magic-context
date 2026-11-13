@@ -44,6 +44,7 @@ pub(super) fn replica(context: Option<Connection>) -> Replica {
         heads: HashMap::new(),
         idle_heads: Default::default(),
         head_warnings: Default::default(),
+        apps: Default::default(),
     }
 }
 pub(super) fn request(extra: Value) -> Value {

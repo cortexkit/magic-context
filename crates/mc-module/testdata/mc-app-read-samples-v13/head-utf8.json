@@ -1,0 +1,77 @@
+{
+  "name": "head-utf8",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": true,
+      "messages": [
+        {
+          "bytes": 221,
+          "sections": [
+            {
+              "bytes": 87,
+              "index": 0,
+              "items": [
+                {
+                  "len": 56,
+                  "name": "ARCHITECTURE.md",
+                  "start": 15,
+                  "tokens": 25
+                }
+              ],
+              "kind": "project_docs",
+              "tokens": 37
+            },
+            {
+              "bytes": 35,
+              "index": 1,
+              "items": [],
+              "kind": "history",
+              "tokens": 9
+            },
+            {
+              "bytes": 95,
+              "index": 2,
+              "items": [
+                {
+                  "category": "PROJECT_RULES",
+                  "id": 1,
+                  "len": 27,
+                  "start": 33,
+                  "tokens": 13
+                }
+              ],
+              "kind": "memory",
+              "tokens": 39
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 89
+        },
+        {
+          "bytes": 90,
+          "empty": true,
+          "placeholder": "<session-history-since>(no new content since last materialization)</session-history-since>",
+          "sections": [],
+          "slot": "delta",
+          "tokens": 21
+        }
+      ]
+    }
+  }
+}

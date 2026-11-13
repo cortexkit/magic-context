@@ -225,6 +225,23 @@ fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 
 /// Run one `ctx_note` call. `anchor` is the number of the newest message, if
 /// any, which a written note records as the conversation tail it came from.
+/// The action a `ctx_note` call asks for.
+fn action(args: &Map<String, Value>) -> String {
+    match args.get("action").and_then(Value::as_str) {
+        Some(action @ ("write" | "read" | "update" | "dismiss")) => action.to_owned(),
+        Some(_) => "read".into(),
+        // Models that fill every field send an empty content on a read.
+        None if text(args, "content").is_some() => "write".into(),
+        None => "read".into(),
+    }
+}
+
+/// Whether a `ctx_note` call asks to change notes, not only read them.
+pub(crate) fn writes(input: &Value) -> bool {
+    let empty = Map::new();
+    action(input.as_object().unwrap_or(&empty)) != "read"
+}
+
 pub fn run(
     db: &ContextDb,
     scope: &NoteScope,
@@ -234,13 +251,7 @@ pub fn run(
 ) -> Result<String, String> {
     let empty = Map::new();
     let args = input.as_object().unwrap_or(&empty);
-    let action = match args.get("action").and_then(Value::as_str) {
-        Some(action @ ("write" | "read" | "update" | "dismiss")) => action.to_owned(),
-        Some(_) => "read".into(),
-        // Models that fill every field send an empty content on a read.
-        None if text(args, "content").is_some() => "write".into(),
-        None => "read".into(),
-    };
+    let action = action(args);
     let listed = args.get("note_ids").and_then(Value::as_array).map(Vec::len);
     let targeted = match action.as_str() {
         "dismiss" | "update" => Some(note_ids(&action, args.get("note_ids"))?),

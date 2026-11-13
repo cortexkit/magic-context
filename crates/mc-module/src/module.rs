@@ -233,6 +233,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 crate::dreamer::tasks(),
             ))
         });
+        // The app reads hear of every change the module's writers make to
+        // the rows they show, and read the settings and the dreamer's task
+        // declarations from the module.
+        if let Some(db) = &db {
+            db.notify(app_read.notifier());
+        }
+        app_read.attach(crate::app_read::sessions::Attachment {
+            config: config.clone(),
+            dreamer: dreamer.clone(),
+        });
         Self {
             inner: Arc::new(Inner {
                 app_read,
@@ -477,6 +487,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .lock()
                 .expect("session projects")
                 .insert(route.session.clone(), project.clone());
+            self.inner
+                .app_read
+                .session_seen(&route.session, project, &request.preset);
             self.touch(&route.session);
         }
         // The epoch is recorded and the Setup queued under one lock, the one
@@ -1619,6 +1632,9 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
     tokio::spawn(async move {
         let outcome =
             crate::summary::two_pass::turn_two::run(inner.client.as_ref(), &db, &job).await;
+        // Turn two reserves and settles the project's candidate facts and
+        // writes its memories; one notice after it covers all of them.
+        db.changed(crate::app_read::Change::project_memories(&job.project));
         tracing::info!(
             "ck-mc: session {}: turn two: {outcome:?}",
             job.owner.session

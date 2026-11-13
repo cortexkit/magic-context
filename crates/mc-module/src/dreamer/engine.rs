@@ -142,6 +142,27 @@ impl Engine {
             .collect()
     }
 
+    /// The kind of `task` and whether the profile enables it, as the
+    /// profile this process last saw `project` with declares it. `None` for
+    /// a project not seen in this process, or a task its profile doesn't
+    /// declare.
+    pub fn declared(&self, project: &str, task: &str) -> Option<(String, bool)> {
+        let projects = self.projects.lock().expect("dreamer projects");
+        let profile = &projects.get(project)?.profile;
+        profile.body["tasks"]
+            .as_array()?
+            .iter()
+            .find(|declaration| {
+                declaration["id"].as_str().or(declaration["kind"].as_str()) == Some(task)
+            })
+            .map(|declaration| {
+                (
+                    declaration["kind"].as_str().unwrap_or_default().to_owned(),
+                    declaration["enabled"].as_bool().unwrap_or(true),
+                )
+            })
+    }
+
     fn task(&self, kind: &str) -> Option<&dyn Task> {
         self.tasks
             .iter()
@@ -185,6 +206,7 @@ impl Engine {
             tracing::warn!("ck-mc: dreamer: scheduling {project} failed: {error}");
             return;
         }
+        tell(db, &owner);
         self.projects.lock().expect("dreamer projects").insert(
             project.to_owned(),
             Project {
@@ -265,6 +287,7 @@ impl Engine {
                     due.owner.owner_id
                 );
             }
+            tell(db, &due.owner);
         };
         let Some(declaration) = self
             .declarations(profile)
@@ -347,6 +370,9 @@ impl Engine {
                 due.owner.owner_id
             );
         }
+        // The schedule moves on before the lock is released, so no other
+        // process starts the same slot again; the page hears of both.
+        tell(db, &due.owner);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -382,6 +408,9 @@ impl Engine {
                 return end;
             }
         };
+        // The lock is held and the run recorded: the project's dreamer page
+        // shows it running.
+        tell(db, &due.owner);
         let batches = {
             let context = TaskContext {
                 db,
@@ -483,6 +512,11 @@ impl Engine {
             record_batch(end, &reply);
             match apply(db, &due.owner, &self.holder, batch.as_ref(), &reply, run_id) {
                 Ok(Some(applied)) => {
+                    if applied.applied > 0 && due.owner.level == "project" {
+                        db.changed(crate::app_read::Change::project_memories(
+                            &due.owner.owner_id,
+                        ));
+                    }
                     end.proposed += applied.proposed;
                     end.applied += applied.applied;
                     end.dropped.extend(applied.dropped);
@@ -550,6 +584,16 @@ fn record_batch(end: &mut RunEnd, reply: &TaskReply) {
         "input_tokens": input,
         "output_tokens": output,
     }));
+}
+
+/// Tell the app reads that `owner`'s schedules, lock or runs changed. Only
+/// projects have a dreamer page.
+fn tell(db: &ContextDb, owner: &OwnerKey) {
+    if owner.level == "project" {
+        db.changed(crate::app_read::Change::Dreamer {
+            project: owner.owner_id.clone(),
+        });
+    }
 }
 
 fn demand(kind: &str) -> Option<&'static crate::routing::DreamDemand> {
