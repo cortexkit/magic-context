@@ -1669,6 +1669,7 @@ const TEMPLATE_DATA = [
 "[magic-context] partial recomp retry session=\x01 code=\x01 reason=\"\x01\"\x020s",
 "[magic-context] resolveIsSubagentFromOpenCode2Db failed for \x01:\x020s",
 "caveman cleanup: compressed \x01 text tags (lite=\x01, full=\x01, ultra=\x01)",
+"ck-mc: skipping commit sweep for \x01: project root is missing (\x01)",
 "[auto-update-checker] Already on latest version for channel: \x01",
 "[dreamer] verify-broad gate: mode=\x01 in_scope=\x01 skipped=\x01 reason=\x01",
 "[magic-context] conflicting project pins for git common dir: \x01",

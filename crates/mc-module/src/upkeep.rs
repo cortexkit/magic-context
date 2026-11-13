@@ -26,9 +26,11 @@
 //! read, the lock released, the slow work done, and the results written in a
 //! fresh transaction that re-checks what it depends on.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -161,7 +163,7 @@ pub(crate) async fn run_project_scoped(
     if let Some(provider) = &plan.embedding {
         report.chunks_embedded = chunks::embed(db, project, provider, clock, owned).await;
     }
-    if let Some(git) = plan.git {
+    if let Some(git) = plan.git.filter(|_| !missing_root(project, root)) {
         report.sweep =
             Some(sweep_commits(db, project, root, git, plan.embedding.as_ref(), clock).await);
     }
@@ -169,6 +171,32 @@ pub(crate) async fn run_project_scoped(
 }
 
 mod chunks;
+
+fn missing_root(project: &str, root: &Path) -> bool {
+    // Removed worktrees can remain active until their last session expires.
+    // Only a missing path is quiet: permission and other filesystem errors
+    // still reach git's ordinary warning path.
+    let missing =
+        matches!(root.metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    static MISSING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut projects = MISSING
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("missing roots");
+    if missing {
+        if projects.insert(project.to_owned()) {
+            tracing::info!(
+                "ck-mc: skipping commit sweep for {project}: project root is missing ({})",
+                root.display()
+            );
+        }
+    } else {
+        // Remember only the current absence: a restored root can be swept
+        // normally, and a later removal gets one new notice.
+        projects.remove(project);
+    }
+    missing
+}
 
 /// Embed one batch of the project's active memories that have no vector for
 /// the provider's model. Returns how many vectors were saved.
@@ -873,6 +901,94 @@ mod tests {
     }
 
     const PROJECT: &str = "pj-upkeep";
+
+    #[derive(Clone, Default)]
+    struct SweepLogs {
+        info: Arc<AtomicUsize>,
+        warn: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SweepLogs {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            match *event.metadata().level() {
+                tracing::Level::INFO => self.info.fetch_add(1, Ordering::SeqCst),
+                tracing::Level::WARN => self.warn.fetch_add(1, Ordering::SeqCst),
+                _ => return,
+            };
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_root_is_quiet_until_the_folder_returns() {
+        use tracing_subscriber::prelude::*;
+
+        let dir = scratch("missing-root");
+        let db = database(&dir);
+        let root = dir.join("repo");
+        let project = format!("pj-missing-{}", dir.display());
+        let plan = Plan {
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits: 2000,
+            }),
+            ..Plan::default()
+        };
+        let logs = SweepLogs::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let now = 1_800_000_000_000;
+        for _ in 0..3 {
+            let report = run_project(&db, &project, &root, &plan, &|| now).await;
+            assert_eq!(report, Report::default(), "missing roots must not run git");
+        }
+        assert_eq!(logs.info.load(Ordering::SeqCst), 1);
+        assert_eq!(logs.warn.load(Ordering::SeqCst), 0);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM git_sweep_coordinator"), 0);
+
+        repository(&dir, &["restored"]);
+        let report = run_project(&db, &project, &root, &plan, &|| now).await;
+        assert!(
+            matches!(report.sweep, Some(Sweep::Indexed { inserted: 1, .. })),
+            "{report:?}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                run_project(&db, &project, &root, &plan, &|| now).await,
+                Report::default()
+            );
+        }
+        assert_eq!(logs.info.load(Ordering::SeqCst), 2);
+        assert_eq!(logs.warn.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn existing_root_with_a_git_error_still_warns() {
+        use tracing_subscriber::prelude::*;
+
+        let dir = scratch("git-error");
+        let db = database(&dir);
+        let root = repository(&dir, &["first"]);
+        std::fs::write(root.join(".git/config"), "[invalid config").unwrap();
+        let plan = Plan {
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits: 2000,
+            }),
+            ..Plan::default()
+        };
+        let logs = SweepLogs::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let report = run_project(&db, "pj-git-error", &root, &plan, &|| 1).await;
+        assert!(matches!(report.sweep, Some(Sweep::Failed(_))), "{report:?}");
+        assert_eq!(logs.warn.load(Ordering::SeqCst), 1);
+        assert_eq!(logs.info.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn active_memories_get_vectors_under_the_plugins_model_id() {
