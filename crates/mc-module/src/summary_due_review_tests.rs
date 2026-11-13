@@ -48,7 +48,10 @@ fn host_parts_backfill_invalidates_the_cached_due_check() {
         );
         assert_eq!(cached.floor_pending_for, legacy.floor_pending_for);
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
-        assert_eq!(a_log, b_log);
+        assert_eq!(
+            crate::test_log::without_timings(&a_log),
+            crate::test_log::without_timings(&b_log)
+        );
     }
 }
 
@@ -232,7 +235,11 @@ async fn sequence(seed: u64) {
                 ))
                 .await;
                 assert_eq!(format!("{a:?}"), format!("{b:?}"), "Setup step {step}");
-                assert_eq!(a_log, b_log, "Setup logs at step {step}");
+                assert_eq!(
+                    crate::test_log::without_timings(&a_log),
+                    crate::test_log::without_timings(&b_log),
+                    "Setup logs at step {step}"
+                );
             }
             9 => {
                 if let Some(entry) = transcript.iter_mut().find(|entry| {
@@ -322,7 +329,11 @@ async fn sequence(seed: u64) {
             format!("{b:?}"),
             "request at step {step} (seed {seed:#x})"
         );
-        assert_eq!(a_log, b_log, "logs at step {step} (seed {seed:#x})");
+        assert_eq!(
+            crate::test_log::without_timings(&a_log),
+            crate::test_log::without_timings(&b_log),
+            "logs at step {step} (seed {seed:#x})"
+        );
         assert_eq!(new.floor_pending_for, old.floor_pending_for);
         assert_eq!(new.floor_lifted_for, old.floor_lifted_for);
         assert_eq!(new.summarizing, old.summarizing);
