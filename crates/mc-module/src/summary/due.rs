@@ -20,6 +20,10 @@ struct Fact {
 }
 
 #[cfg(test)]
+#[path = "due_review_tests.rs"]
+mod review_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use cortexkit_role_compaction::{
