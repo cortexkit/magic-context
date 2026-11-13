@@ -80,7 +80,7 @@ none), `superseded_by?` and `history`, newest first. A history entry has `at`,
 | `writer` | Made by | Extra fields |
 | --- | --- | --- |
 | `summary` | the summarizer's second turn | |
-| `agent` | the agent's `ctx_memory` | |
+| `agent` | the agent, through its memory tool (`ctx_memory`) | |
 | `dreamer` | a dreamer task run | `run_id` (link to `dreamer.run`), `task` (profile task id) |
 | `person` | the person (the 0.49 dashboard's edit or restore) | |
 

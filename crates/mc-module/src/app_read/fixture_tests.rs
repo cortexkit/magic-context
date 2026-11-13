@@ -339,7 +339,8 @@ fn memories(conn: &mut Connection) {
          UPDATE memories SET merged_from = '[5,6]', revision = revision + 1,
              updated_at = 1700000400000 WHERE id = 6",
     );
-    // The 0.49 dreamer's verify archived 8; it recorded no run.
+    // The plugin's dreamer (Magic Context 0.49 and earlier) archived 8 in
+    // its verify task, which recorded no run.
     change(
         conn,
         &[8],

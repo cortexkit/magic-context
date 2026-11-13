@@ -283,7 +283,8 @@ fn get_names_the_writer_of_each_history_entry() {
         (json!("dreamer"), json!(2), json!("swe:classify-memories"))
     );
     assert_eq!(get(&mut replica, 4)["history"][0]["writer"], "person");
-    // The 0.49 dreamer recorded its task but no run.
+    // The plugin's dreamer (Magic Context 0.49 and earlier) recorded its
+    // task but no run.
     let verify = &get(&mut replica, 8)["history"][0];
     assert_eq!(
         (verify["writer"].clone(), verify["task"].clone()),

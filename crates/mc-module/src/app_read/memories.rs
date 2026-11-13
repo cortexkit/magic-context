@@ -540,8 +540,9 @@ fn writer(
         Some("ctx_memory") => vec![("writer", json!("agent"))],
         Some("historian") => vec![("writer", json!("summary"))],
         Some("dashboard_edit" | "dashboard_restore") => vec![("writer", json!("person"))],
-        // The 0.49 dreamer's tasks, before runs were recorded: the task is
-        // the 0.49 task name and there is no run to name.
+        // Rows the plugin's dreamer wrote (Magic Context 0.49 and earlier),
+        // before dreamer runs were recorded: the task is the plugin's task
+        // name and there is no run to name.
         Some(task @ ("curate" | "verify" | "expire")) => {
             vec![("writer", json!("dreamer")), ("task", json!(task))]
         }
