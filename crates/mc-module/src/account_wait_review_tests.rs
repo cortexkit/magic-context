@@ -279,6 +279,7 @@ fn turn_two_job() -> turn_two::Job {
         project_root: Some("/project".into()),
         continuation: run::Continuation {
             prompts: crate::summary::prompts::SummaryPrompts::bundled(),
+            keep_child: false,
             child: crate::client::Child {
                 session: SessionRef::new("runner", "pi", "summary-child"),
                 project_root: Some("/project".into()),
@@ -399,6 +400,7 @@ async fn account_wait_review_a_run_the_runner_pauses_for_an_account_is_waited_fo
         deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(5),
         continuation: false,
         creates_child: true,
+        keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         plan: None,
         send: SendKind::TurnOne,

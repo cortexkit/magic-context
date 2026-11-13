@@ -216,6 +216,7 @@ pub(crate) fn job() -> Request {
         emergency: false,
         force_keep_last_compartment: false,
         memory_context: None,
+        keep_subagents: false,
     }
 }
 
@@ -228,6 +229,7 @@ fn how(model: &ModelRef) -> Model<'_> {
         deadline: tokio::time::Instant::now() + Duration::from_secs(5),
         continuation: true,
         creates_child: false,
+        keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         plan: None,
         send: SendKind::TurnTwo,

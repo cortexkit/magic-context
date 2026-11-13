@@ -562,6 +562,23 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
+    async fn child_session_retention(
+        &self,
+        child: &Child,
+    ) -> Option<crate::runner_capabilities::SessionRetention> {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .session_retention(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
+            .await
+    }
+
     async fn reader_catalog(
         &self,
         child: &Child,
@@ -601,7 +618,6 @@ impl RunnerClient for SubcRunnerClient {
         serde_json::from_slice(&reply)
             .map_err(|error| ClientError::new(format!("tool.catalog answer: {error}")))
     }
-
     async fn read(
         &self,
         session: &SessionRef,

@@ -14,6 +14,7 @@ use serde_json::json;
 use super::*;
 use crate::client::ClientError;
 use crate::routing::DREAM_DEMANDS;
+use crate::runner_capabilities::SessionRetention;
 
 /// How the runner ends one run.
 #[derive(Clone)]
@@ -26,11 +27,13 @@ pub(crate) enum Ends {
 /// Routing offers `routes` in order, each on runner `rx` with harness `hx`
 /// unless `no_harness` names it; an excluded route is skipped. `refuse`
 /// answers every select with that refusal instead. The runner ends each run
-/// with the next of `ends`.
+/// with the next of `ends`, and declares `session_retention` with these
+/// limits when `retention` is set.
 pub(crate) struct Client {
     pub(crate) routes: Vec<&'static str>,
     pub(crate) no_harness: Vec<&'static str>,
     pub(crate) refuse: Option<routing::RouteError>,
+    pub(crate) retention: Option<SessionRetention>,
     pub(crate) ends: Mutex<VecDeque<Ends>>,
     pub(crate) selects: Mutex<Vec<SelectRequest>>,
     pub(crate) reports: Mutex<Vec<String>>,
@@ -47,6 +50,7 @@ impl Client {
             routes: routes.to_vec(),
             no_harness: Vec::new(),
             refuse: None,
+            retention: None,
             ends: Mutex::new(ends.iter().cloned().collect()),
             selects: Mutex::default(),
             reports: Mutex::default(),
@@ -85,6 +89,9 @@ impl RunnerClient for Client {
             })
             .collect();
         Ok(answer)
+    }
+    async fn child_session_retention(&self, _: &Child) -> Option<SessionRetention> {
+        self.retention
     }
     async fn read(&self, _: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
         unreachable!()
@@ -429,4 +436,93 @@ async fn unsafe_or_missing_reader_tools_fail_the_run_unsent() {
         assert_eq!(client.selects.lock().unwrap().len(), 1);
         assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
     }
+}
+
+/// The `retention_policy` a declaring runner is sent to keep a child `days`
+/// days.
+fn kept(days: u32) -> serde_json::Value {
+    json!({"keep": {"days": days}, "archive_after_days": 0, "backup": false, "request_dumps": false})
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_declaring_runner_is_asked_to_keep_every_dreamer_child_seven_days() {
+    let mut client = Client::new(&["p/a"], &[Ends::Error("overloaded"), Ends::Reply("ok")]);
+    client.retention = Some(SessionRetention { max_days: Some(30) });
+    run(&client, &job(), &Task { fits: true }).await.unwrap();
+    let sends = client.sends.lock().unwrap();
+    // A retry runs in a new child, so its send creates that child too.
+    assert_eq!(sends.len(), 2);
+    for (_, request) in sends.iter() {
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["retention_policy"],
+            kept(7)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runner_allowing_three_days_is_asked_to_keep_a_dreamer_child_three() {
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
+    client.retention = Some(SessionRetention { max_days: Some(3) });
+    run(&client, &job(), &Task { fits: true }).await.unwrap();
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(
+        serde_json::to_value(&sends[0].1).unwrap()["retention_policy"],
+        kept(3)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_later_send_in_a_dreamer_child_carries_no_policy() {
+    let mut client = Client::new(&[], &[Ends::Reply("ok"), Ends::Reply("ok")]);
+    client.retention = Some(SessionRetention { max_days: Some(30) });
+    let model = ModelRef::new("p", "a");
+    let child = Child {
+        session: SessionRef::new("ra", "ha", child_session("17", 0, 0)),
+        project_root: Some("/work/project".into()),
+    };
+    let mut how = Model {
+        model: &model,
+        decision_id: "decision-a",
+        output_tokens: 1000,
+        system: "You classify memories.",
+        deadline: tokio::time::Instant::now() + RUN_TIMEOUT,
+        continuation: false,
+        creates_child: true,
+        keep_child: true,
+        send: SendKind::Dream,
+        cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
+    };
+    send_and_wait(&client, &child, "first", "prompt", &how, &mut None)
+        .await
+        .unwrap();
+    how.continuation = true;
+    how.creates_child = false;
+    send_and_wait(&client, &child, "second", "follow-up", &how, &mut None)
+        .await
+        .unwrap();
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(
+        serde_json::to_value(&sends[0].1).unwrap()["retention_policy"],
+        kept(7)
+    );
+    assert_eq!(sends[1].1.retention_policy, None);
+    assert!(!serde_json::to_string(&sends[1].1)
+        .unwrap()
+        .contains("retention"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runner_without_session_retention_gets_the_same_dreamer_send_bytes_as_before() {
+    let client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
+    run(&client, &job(), &Task { fits: true }).await.unwrap();
+    let sends = client.sends.lock().unwrap();
+    // The bytes a dreamer child's creating send had before runners could be
+    // asked to keep it, written out rather than rebuilt by the code under
+    // test.
+    assert_eq!(
+        serde_json::to_string(&sends[0].1).unwrap(),
+        r#"{"prompt":"200000 32000","send_id":"mc-dream:17:0.0","route_decision_id":"decision-a","generation":{"max_output_tokens":32000},"model":{"model":"a","provider":"p"},"stop_when":{"max_steps":1},"system":"You classify memories.","tools":[]}"#
+    );
 }

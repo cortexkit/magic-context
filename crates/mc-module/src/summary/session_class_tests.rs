@@ -1,5 +1,6 @@
 use super::*;
 use crate::client::ClientError;
+use crate::runner_capabilities::SessionRetention;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::send::SendReply;
@@ -10,6 +11,8 @@ pub(crate) struct Client {
     pub declares: bool,
     pub temperature: bool,
     pub refuse_temperature: bool,
+    /// Declares `session_retention` with these limits when set.
+    pub retention: Option<SessionRetention>,
     pub sends: Mutex<Vec<(Child, SendRequest)>>,
     discoveries: AtomicUsize,
 }
@@ -20,6 +23,7 @@ impl Client {
             declares,
             temperature: true,
             refuse_temperature: false,
+            retention: None,
             sends: Mutex::new(vec![]),
             discoveries: AtomicUsize::new(0),
         }
@@ -33,6 +37,9 @@ impl RunnerClient for Client {
     async fn child_session_class(&self, _: &Child) -> bool {
         self.discoveries.fetch_add(1, Ordering::SeqCst);
         self.declares
+    }
+    async fn child_session_retention(&self, _: &Child) -> Option<SessionRetention> {
+        self.retention
     }
     async fn read(&self, _: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
         unreachable!()
@@ -91,6 +98,7 @@ async fn creating_summary_send_is_labelled_only_for_a_declaring_runner() {
             deadline: tokio::time::Instant::now() + Duration::from_secs(1),
             continuation: false,
             creates_child: true,
+            keep_child: false,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
             plan: None,
             send: SendKind::TurnOne,
@@ -126,6 +134,7 @@ async fn later_send_in_the_same_child_has_no_label_or_discovery() {
         deadline: tokio::time::Instant::now() + Duration::from_secs(1),
         continuation: false,
         creates_child: true,
+        keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
         plan: None,
         send: SendKind::TurnOne,
@@ -158,6 +167,7 @@ async fn turn_one_call_sets_creating_send_label() {
     };
     let call_on = Call {
         prompts: &crate::summary::prompts::SummaryPrompts::bundled(),
+        keep_child: false,
         target: &target,
         child_harness: "pi",
         window,

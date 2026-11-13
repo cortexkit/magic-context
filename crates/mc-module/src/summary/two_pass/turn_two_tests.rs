@@ -7,6 +7,7 @@ fn job(child_harness: &str) -> Job {
         project_root: Some("/project".into()),
         continuation: Continuation {
             prompts: crate::summary::prompts::SummaryPrompts::bundled(),
+            keep_child: false,
             child: Child {
                 session: SessionRef::new("runner", child_harness, "summary-child"),
                 project_root: Some("/project".into()),
@@ -41,7 +42,7 @@ fn turn_two_recovery_preserves_the_child_harness() {
     let carrier = Carrier::of(&job("opencode2"));
     let row = stored(&carrier);
     assert_eq!(row.harness, "pi");
-    let recovered = Carrier::from_stage(&row, carrier.project_root.clone()).unwrap();
+    let recovered = Carrier::from_stage(&row, carrier.project_root.clone(), false).unwrap();
     assert_eq!(recovered.harness, "pi");
     assert_eq!(
         recovered.child(&recovered.child).session,
@@ -54,7 +55,7 @@ fn turn_two_recovery_preserves_the_child_harness() {
 fn turn_two_recovery_reads_a_persisted_child_harness() {
     let mut row = stored(&Carrier::of(&job("pi")));
     row.request["model"]["childHarness"] = json!("opencode2");
-    let recovered = Carrier::from_stage(&row, Some("/project".into())).unwrap();
+    let recovered = Carrier::from_stage(&row, Some("/project".into()), false).unwrap();
     assert_eq!(recovered.harness, "pi");
     assert_eq!(
         recovered.child(&recovered.child).session.harness,
@@ -69,7 +70,7 @@ fn turn_two_recovery_defaults_legacy_rows_to_the_owner_harness() {
         .as_object_mut()
         .unwrap()
         .remove("childHarness");
-    let recovered = Carrier::from_stage(&row, Some("/project".into())).unwrap();
+    let recovered = Carrier::from_stage(&row, Some("/project".into()), false).unwrap();
     assert_eq!(recovered.harness, "pi");
     assert_eq!(recovered.child(&recovered.child).session.harness, "pi");
 }
@@ -122,6 +123,7 @@ fn turn_two_child_harness_does_not_change_check_keys_or_reported_profiles() {
 
 #[tokio::test]
 async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks_include_it() {
+    use crate::runner_capabilities::SessionRetention;
     use crate::summary::run::session_class_tests::Client;
     let carrier = Carrier::of(&job("opencode2"));
     let row = stored(&carrier);
@@ -145,12 +147,13 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
     };
     let key_before = gates::check_key("decision", &check, &expected_model);
     for declares in [true, false] {
-        let client = Client::new(declares);
+        let mut client = Client::new(declares);
+        client.retention = declares.then_some(SessionRetention { max_days: Some(30) });
         carrier
             .send(&client, &carrier.child, "turn-two", "prompt", "system")
             .await
             .unwrap();
-        let recovered = Carrier::from_stage(&row, carrier.project_root.clone()).unwrap();
+        let recovered = Carrier::from_stage(&row, carrier.project_root.clone(), false).unwrap();
         recovered
             .send(
                 &client,
@@ -174,6 +177,16 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
             sends[2].1.session_class.as_deref(),
             declares.then_some("summary")
         );
+        // Storage policy follows the class label: only a fresh check's
+        // creating send carries one, here the policy of a child that is
+        // not kept, as the job's first turn chose.
+        assert!(sends[..2]
+            .iter()
+            .all(|(_, request)| request.retention_policy.is_none()));
+        assert_eq!(
+            sends[2].1.retention_policy,
+            declares.then(|| SessionRetention { max_days: Some(30) }.keep_none())
+        );
         assert_eq!(serde_json::to_vec(&row.request).unwrap(), request_before);
         assert_eq!(recovered.model_json(), model_before);
         assert_eq!(
@@ -183,6 +196,59 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
         assert!(!String::from_utf8(request_before.clone())
             .unwrap()
             .contains("session_class"));
+    }
+}
+
+/// Check children, fresh or reattached from a stored stage, are kept the way
+/// the first turn's child was; turn two adds nothing to the child it reuses.
+#[tokio::test]
+async fn check_children_are_kept_as_the_first_turn_chose() {
+    use crate::runner_capabilities::SessionRetention;
+    use crate::summary::run::session_class_tests::Client;
+    for (keep, policy) in [
+        (
+            true,
+            json!({"keep": {"days": 7}, "archive_after_days": 0, "backup": false, "request_dumps": false}),
+        ),
+        (
+            false,
+            json!({"keep": "none", "archive_after_days": 0, "backup": false, "request_dumps": false}),
+        ),
+    ] {
+        let mut job = job("pi");
+        job.continuation.keep_child = keep;
+        let carrier = Carrier::of(&job);
+        let row = stored(&carrier);
+        let recovered = Carrier::from_stage(&row, carrier.project_root.clone(), keep).unwrap();
+        let mut client = Client::new(false);
+        client.retention = Some(SessionRetention { max_days: Some(30) });
+        carrier
+            .send(&client, &carrier.child, "turn-two", "prompt", "system")
+            .await
+            .unwrap();
+        carrier
+            .send(&client, "check-child", "check", "prompt", "system")
+            .await
+            .unwrap();
+        recovered
+            .send(
+                &client,
+                "stored-check-child",
+                "stored-check",
+                "prompt",
+                "system",
+            )
+            .await
+            .unwrap();
+        let sends = client.sends.lock().unwrap();
+        assert_eq!(sends[0].1.retention_policy, None);
+        for (_, request) in &sends[1..] {
+            assert_eq!(
+                serde_json::to_value(request).unwrap()["retention_policy"],
+                policy,
+                "keep {keep}"
+            );
+        }
     }
 }
 

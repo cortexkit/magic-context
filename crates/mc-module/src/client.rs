@@ -128,6 +128,15 @@ pub trait RunnerClient: Send + Sync + 'static {
     > + Send {
         async { Err(ClientError::new("no code-reading tools")) }
     }
+    /// What this child runner allows a `retention_policy` to ask for, when it
+    /// declares the `session_retention` group. Older or undiscoverable
+    /// runners receive no new send member.
+    fn child_session_retention(
+        &self,
+        _child: &Child,
+    ) -> impl Future<Output = Option<crate::runner_capabilities::SessionRetention>> + Send {
+        async { None }
+    }
     /// `session.read`.
     fn read(
         &self,

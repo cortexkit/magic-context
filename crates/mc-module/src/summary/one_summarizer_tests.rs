@@ -12,6 +12,7 @@
 
 use super::*;
 use crate::client::ClientError;
+use crate::runner_capabilities::SessionRetention;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::run::FinalMessage;
@@ -27,9 +28,12 @@ const ROUTE: &str = "test/model";
 /// holds them. Routing offers one model under one decision every time it is
 /// asked, and none once that model is excluded. Each send is answered with
 /// a valid first-turn reply, or with text that is no reply at all.
+/// `session_retention` is declared only when `retention` is set: the
+/// recording predates it.
 struct Client {
     runner: account_wait_send_tests::Client,
     valid: bool,
+    retention: Option<SessionRetention>,
     sends: Mutex<Vec<(Child, SendRequest)>>,
 }
 
@@ -40,6 +44,7 @@ impl Client {
                 account_wait_send_tests::Answer::RefuseSend,
             ),
             valid,
+            retention: None,
             sends: Mutex::new(Vec::new()),
         }
     }
@@ -54,6 +59,9 @@ impl RunnerClient for Client {
     }
     async fn child_temperature(&self, _: &Child) -> bool {
         true
+    }
+    async fn child_session_retention(&self, _: &Child) -> Option<SessionRetention> {
+        self.retention
     }
     async fn read(
         &self,
@@ -221,6 +229,45 @@ async fn a_two_turn_first_turn_sends_the_recorded_bytes() {
             window(&actual),
             window(&expected)
         );
+    }
+}
+
+/// The user's `keep_subagents` reaches the first turn's creating send, and
+/// the second turn inherits it for the check children it creates.
+#[tokio::test]
+async fn keep_subagents_decides_whether_a_declaring_runner_keeps_the_summary_child() {
+    for (keep, policy) in [
+        (
+            true,
+            json!({"keep": {"days": 7}, "archive_after_days": 0, "backup": false, "request_dumps": false}),
+        ),
+        (
+            false,
+            json!({"keep": "none", "archive_after_days": 0, "backup": false, "request_dumps": false}),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let mut client = Client::new(true);
+        client.retention = Some(SessionRetention { max_days: Some(30) });
+        let mut job = project_job();
+        job.memory_enabled = true;
+        job.auto_promote = true;
+        job.keep_subagents = keep;
+        let summarized = run(&client, Some(&db), &job)
+            .await
+            .expect("the run succeeds")
+            .expect("the run has messages to summarize");
+        let sends = client.sends.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(&sends[0].1).unwrap()["retention_policy"],
+            policy,
+            "keep_subagents {keep}"
+        );
+        let continuation = summarized
+            .continuation
+            .expect("memory on with a store calls for a second turn");
+        assert_eq!(continuation.keep_child, keep);
     }
 }
 

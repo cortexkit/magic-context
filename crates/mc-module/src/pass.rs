@@ -87,6 +87,10 @@ pub struct Settings {
     /// history it could read holds this many separate stretches of work that
     /// ended in commits. `None` when turned off.
     pub commit_clusters: Option<u64>,
+    /// The user-level `keep_subagents`: a summary's child sessions are kept
+    /// for inspection on a runner that keeps sessions by policy, rather than
+    /// deleted once their hold ends. Off by default.
+    pub keep_subagents: bool,
 }
 
 /// How the caveman lane compresses.
@@ -145,6 +149,7 @@ impl Default for Settings {
             caveman: None,
             language: None,
             commit_clusters: Some(3),
+            keep_subagents: false,
         }
     }
 }

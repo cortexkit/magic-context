@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::client::ClientError;
+use cortexkit_role_llm_runner::session_retention::{Keep, RetentionPolicy};
 
 type Declaration = (u64, Arc<OnceCell<Features>>);
 
@@ -16,6 +17,36 @@ type Declaration = (u64, Arc<OnceCell<Features>>);
 struct Features {
     capabilities: HashSet<String>,
     delivery_order_modes: HashSet<String>,
+    /// `session_retention.max_days` from the describe, when it is readable.
+    retention_max_days: Option<u32>,
+}
+
+/// What a runner declaring the `session_retention` group lets the send that
+/// creates a child ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionRetention {
+    /// The most days a policy may keep a session, when the runner states a
+    /// usable limit. The contract requires one with the group; a declaration
+    /// without it still gets a policy, unfitted, because a runner declaring
+    /// the group expects one on every send that creates a session.
+    pub max_days: Option<u32>,
+}
+
+impl SessionRetention {
+    /// A policy keeping the session `days` days after its last activity, or
+    /// the runner's maximum when that is shorter: a longer keep is refused.
+    /// Nothing is archived, backed up or dumped; the transcript only has to
+    /// stay readable for that long.
+    pub fn keep_for(self, days: u32) -> RetentionPolicy {
+        let days = self.max_days.map_or(days, |max| days.min(max));
+        RetentionPolicy::new(Keep::days(days), 0, false, false)
+    }
+
+    /// A policy for a session nobody reads after its run: the runner deletes
+    /// it once released, or once its hold for unreleased sessions ends.
+    pub fn keep_none(self) -> RetentionPolicy {
+        RetentionPolicy::new(Keep::none(), 0, false, false)
+    }
 }
 
 /// In-memory declarations, shared by summaries using the same runner and
@@ -115,6 +146,24 @@ impl RunnerCapabilities {
             .contains(cortexkit_role_llm_runner::capabilities::RUN_CANCEL)
     }
 
+    /// `Some` only for a runner declaring the `session_retention` group. Any
+    /// other runner refuses a `retention_policy` member, so it is sent
+    /// nothing new.
+    pub async fn session_retention(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> Option<SessionRetention> {
+        let declared = self.declared(runner, connection_epoch, describe).await;
+        declared
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::SESSION_RETENTION)
+            .then_some(SessionRetention {
+                max_days: declared.retention_max_days,
+            })
+    }
+
     /// Clearing system notes are opt-in, never implied by delivery_order.
     pub async fn turn_system_cleared(
         &self,
@@ -159,6 +208,12 @@ impl RunnerCapabilities {
                         let declared = Features {
                             capabilities: names("capabilities"),
                             delivery_order_modes: names("delivery_order_modes"),
+                            // The contract's limits start at one day, so a
+                            // zero can't be fitted to and counts as unstated.
+                            retention_max_days: value["session_retention"]["max_days"]
+                                .as_u64()
+                                .filter(|days| *days > 0)
+                                .map(|days| u32::try_from(days).unwrap_or(u32::MAX)),
                         };
                         if !declared.capabilities.contains("cache_policy") {
                             tracing::info!(runner, "summarizer cache omitted: runner does not declare cache_policy");

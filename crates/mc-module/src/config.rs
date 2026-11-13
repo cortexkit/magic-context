@@ -415,6 +415,12 @@ fn resolve_tiers(
         .and_then(Value::as_str)
         .map(|language| language.trim().to_ascii_lowercase())
         .filter(|language| !language.is_empty());
+    // Only the user keeps child sessions: keeping widens what is stored, so a
+    // project file must not turn it on.
+    settings.keep_subagents = user
+        .get("keep_subagents")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     settings
 }
 

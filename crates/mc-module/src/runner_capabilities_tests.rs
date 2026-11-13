@@ -228,3 +228,82 @@ async fn session_class_uses_only_the_declared_group_and_shares_discovery() {
             .await
     );
 }
+
+#[tokio::test]
+async fn session_retention_needs_the_declared_group_and_reads_its_maximum() {
+    let cache = RunnerCapabilities::default();
+    assert_eq!(
+        cache
+            .session_retention("runner", 1, async {
+                Ok(json!({
+                    "capabilities": ["session_retention", "cache_policy"],
+                    "session_retention": {"max_days": 30, "max_unreleased_hold_ms": 60000, "required": false},
+                }))
+            })
+            .await,
+        Some(SessionRetention { max_days: Some(30) })
+    );
+    assert!(
+        cache
+            .cache_policy("runner", 1, async { panic!("shared cached declaration") })
+            .await
+    );
+    // Declared without a usable limit: still declared, with nothing to fit to.
+    for (index, limits) in [
+        json!(null),
+        json!({"max_days": 0}),
+        json!({"max_days": "7"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            cache
+                .session_retention("runner", index as u64 + 2, async {
+                    Ok(json!({"capabilities": ["session_retention"], "session_retention": limits}))
+                })
+                .await,
+            Some(SessionRetention { max_days: None })
+        );
+    }
+    // Limits alone, or the legacy `retention` group, are not the group.
+    for (index, value) in [
+        json!({}),
+        json!({"session_retention": {"max_days": 30}}),
+        json!({"capabilities": ["retention"], "retention": {"max_seconds": 600}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            cache
+                .session_retention("runner", index as u64 + 10, async { Ok(value) })
+                .await,
+            None
+        );
+    }
+    assert_eq!(
+        cache
+            .session_retention("unreachable", 1, async { Err(ClientError::new("offline")) })
+            .await,
+        None
+    );
+}
+
+#[test]
+fn a_retention_policy_keeps_the_days_asked_unless_the_runner_allows_fewer() {
+    let wire = |days: u32| json!({"keep": {"days": days}, "archive_after_days": 0, "backup": false, "request_dumps": false});
+    for (max_days, kept) in [(Some(30), 7), (Some(7), 7), (Some(3), 3), (None, 7)] {
+        let policy = SessionRetention { max_days }.keep_for(7);
+        assert_eq!(
+            serde_json::to_value(&policy).unwrap(),
+            wire(kept),
+            "{max_days:?}"
+        );
+        // A child nobody keeps has no days to fit.
+        assert_eq!(
+            serde_json::to_value(SessionRetention { max_days }.keep_none()).unwrap(),
+            json!({"keep": "none", "archive_after_days": 0, "backup": false, "request_dumps": false})
+        );
+    }
+}

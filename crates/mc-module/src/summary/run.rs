@@ -50,6 +50,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// child never continues another attempt's conversation. The second turn is
 /// the one exception: it continues the child its first turn answered in.
 pub const CHILD: &str = "mc-summary";
+/// How many days a runner that keeps sessions by policy keeps a child that
+/// is meant to be kept ([`Model::keep_child`]), counted from its last
+/// activity: long enough to read its transcript when tuning a prompt.
+pub const KEPT_CHILD_DAYS: u32 = 7;
 
 /// What a run reads and writes.
 #[derive(Clone, Debug)]
@@ -88,6 +92,9 @@ pub struct Request {
     /// The session's memory context: the summarizer's texts render from the
     /// profile it chose (see `prompts.rs`).
     pub memory_context: Option<crate::memory_profile::MemoryContext>,
+    /// The user's `keep_subagents`: the run's child sessions are kept for
+    /// inspection (see [`Model::keep_child`]).
+    pub keep_subagents: bool,
 }
 
 /// What a run produced.
@@ -117,6 +124,9 @@ pub struct Continuation {
     pub publication_id: String,
     /// The texts the first turn ran with; the second turn uses the same.
     pub prompts: Arc<SummaryPrompts>,
+    /// Whether the first turn's children were kept (`keep_subagents`); the
+    /// second turn's check children are kept the same way.
+    pub keep_child: bool,
 }
 
 /// The summarizer's system prompt with `language`'s directive.
@@ -238,6 +248,7 @@ pub async fn run<C: RunnerClient + Router>(
             deadline,
             system: &system,
             prompts: &prompts,
+            keep_child: job.keep_subagents,
         };
         let outcome =
             summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
@@ -334,6 +345,8 @@ struct Call<'a> {
     system: &'a str,
     /// The profile texts the system prompt came from.
     prompts: &'a Arc<SummaryPrompts>,
+    /// Keep the children this model is asked in ([`Model::keep_child`]).
+    keep_child: bool,
 }
 
 /// Where a run keeps the plugin's send and publication records.
@@ -529,6 +542,7 @@ async fn summarize_on<C: RunnerClient>(
         language: job.language.clone(),
         publication_id: send.publication_id.clone(),
         prompts: call.prompts.clone(),
+        keep_child: call.keep_child,
     });
     Ok(Some(Summarized {
         validated,
@@ -639,6 +653,7 @@ async fn call<C: RunnerClient>(
         deadline: call_on.deadline,
         continuation: false,
         creates_child: true,
+        keep_child: call_on.keep_child,
         send: SendKind::TurnOne,
         // The second turn follows within seconds and reuses the cache this
         // send writes.
@@ -668,6 +683,12 @@ pub(crate) struct Model<'a> {
     /// This logical send creates its child (including an idempotent retry).
     /// Storage labels are never repeated on a later send in that conversation.
     pub creates_child: bool,
+    /// On a runner that keeps sessions by policy (`session_retention`), the
+    /// child is kept [`KEPT_CHILD_DAYS`] after its last activity so its
+    /// transcript can be read; otherwise it asks to be kept not at all, and
+    /// the runner deletes it once its hold ends. Dreamer children are always
+    /// kept; summary children only with the user's `keep_subagents`.
+    pub keep_child: bool,
     /// A single call cannot reuse a cache write; the second turn follows
     /// within seconds and can reuse the shortest explicit lifetime.
     pub cache_ttl: cortexkit_role_llm_runner::cache::Ttl,
@@ -748,6 +769,20 @@ async fn send_and_wait_inner<C: RunnerClient>(
     } else {
         None
     };
+    // The runner freezes a child's storage policy on the send that creates
+    // it, so only that send carries one. Runners without the
+    // session_retention group refuse the member and are never sent it.
+    let retention_policy = if how.creates_child {
+        client.child_session_retention(child).await.map(|limits| {
+            if how.keep_child {
+                limits.keep_for(KEPT_CHILD_DAYS)
+            } else {
+                limits.keep_none()
+            }
+        })
+    } else {
+        None
+    };
     // A cache policy is set only for a planless session; a planned one
     // takes the runner's.
     let cache = if !how.continuation && how.plan.is_none() && client.child_cache_policy(child).await
@@ -762,6 +797,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     let mut request = SendRequest::new(prompt, send_id.to_owned());
     request.session_class = session_class;
     request.cache = cache;
+    request.retention_policy = retention_policy;
     request.runner_params = run_params(how, with_temperature);
     if !how.continuation {
         request.plan = how.plan.map(|plan| plan.plan.clone());
@@ -831,6 +867,10 @@ mod run_awaits_tests;
 #[cfg(test)]
 #[path = "temperature_tests.rs"]
 mod temperature_tests;
+
+#[cfg(test)]
+#[path = "retention_tests.rs"]
+mod retention_tests;
 
 #[cfg(test)]
 #[path = "one_summarizer_tests.rs"]

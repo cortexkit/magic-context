@@ -724,3 +724,21 @@ fn the_execute_threshold_names_the_setting_that_decided_it() {
         (70.0, "model_tokens")
     );
 }
+
+#[test]
+fn keep_subagents_is_off_by_default_and_only_the_user_turns_it_on() {
+    let keep =
+        |user: Value, project: Value| resolve_for_test(user, project, OPUS, 100_000).keep_subagents;
+    assert!(!keep(json!({}), json!({})));
+    assert!(keep(json!({"keep_subagents": true}), json!({})));
+    assert!(!keep(json!({"keep_subagents": false}), json!({})));
+    // Not a boolean: the default applies, as in the plugin's schema.
+    assert!(!keep(json!({"keep_subagents": "yes"}), json!({})));
+    // Keeping widens what is stored, so a project file can't turn it on, and
+    // it can't turn the user's choice off either.
+    assert!(!keep(json!({}), json!({"keep_subagents": true})));
+    assert!(keep(
+        json!({"keep_subagents": true}),
+        json!({"keep_subagents": false})
+    ));
+}

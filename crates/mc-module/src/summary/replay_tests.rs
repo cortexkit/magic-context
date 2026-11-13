@@ -780,6 +780,7 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
             language: language.map(str::to_owned),
             publication_id: send.publication_id.clone(),
             prompts: arm_prompts(arm),
+            keep_child: false,
         },
         memory_enabled: true,
         auto_promote: true,

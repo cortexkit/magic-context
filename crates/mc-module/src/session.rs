@@ -2056,6 +2056,7 @@ impl Session {
             emergency,
             force_keep_last_compartment,
             memory_context: self.memory_context.clone(),
+            keep_subagents: settings.keep_subagents,
         }
     }
 

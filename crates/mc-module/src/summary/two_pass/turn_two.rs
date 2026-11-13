@@ -134,6 +134,8 @@ struct Carrier {
     decision_id: String,
     output_tokens: u64,
     language: Option<String>,
+    /// Keep the check children this carrier creates ([`Model::keep_child`]).
+    keep_child: bool,
 }
 
 impl Carrier {
@@ -149,6 +151,7 @@ impl Carrier {
             decision_id: job.continuation.decision_id.clone(),
             output_tokens: job.continuation.output_tokens,
             language: job.continuation.language.clone(),
+            keep_child: job.continuation.keep_child,
         }
     }
 
@@ -183,8 +186,10 @@ impl Carrier {
         model
     }
 
-    /// The carrier a stage row and its request name, for recovery.
-    fn from_stage(row: &StageRow, project_root: Option<String>) -> Option<Self> {
+    /// The carrier a stage row and its request name, for recovery. Whether
+    /// its check children are kept is the recovering job's current choice:
+    /// stage rows don't record it.
+    fn from_stage(row: &StageRow, project_root: Option<String>, keep_child: bool) -> Option<Self> {
         let runner = row.carrier.strip_prefix("ck-mc:")?.to_owned();
         let model = &row.request["model"];
         let mut chosen = ModelRef::new(
@@ -207,6 +212,7 @@ impl Carrier {
             decision_id: model["decision"].as_str()?.to_owned(),
             output_tokens: model["outputTokens"].as_u64()?,
             language: model["language"].as_str().map(str::to_owned),
+            keep_child,
         })
     }
 
@@ -230,6 +236,7 @@ impl Carrier {
             // Turn two reuses the first turn's child; memory fact checks use their
             // own child, even when reattaching an interrupted check by send id.
             creates_child: child != self.child,
+            keep_child: self.keep_child,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
             plan: None,
             send: if child == self.child {
@@ -1697,7 +1704,9 @@ async fn recover_one<C: RunnerClient>(
             })
             .map_err(|error| error.to_string())
     };
-    let Some(carrier) = Carrier::from_stage(&row, job.project_root.clone()) else {
+    let Some(carrier) =
+        Carrier::from_stage(&row, job.project_root.clone(), job.continuation.keep_child)
+    else {
         if crate::memory_writes::now_ms() - row.started_at >= UNREACHABLE_MAX_AGE_MS {
             give_up("carrier_unreachable", "expired")?;
         }

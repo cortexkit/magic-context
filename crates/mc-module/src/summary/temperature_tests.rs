@@ -15,6 +15,7 @@ async fn send(client: &Client, runner: &str) -> Result<Reply, SummaryError> {
         deadline: tokio::time::Instant::now() + Duration::from_secs(1),
         continuation: false,
         creates_child: true,
+        keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
         plan: None,
         send: SendKind::TurnOne,

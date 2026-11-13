@@ -193,6 +193,9 @@ pub async fn run<C: RunnerClient + Router>(
             deadline,
             continuation: false,
             creates_child: true,
+            // A dreamer child's transcript is read when tuning the task's
+            // prompt, so it is kept whatever `keep_subagents` says.
+            keep_child: true,
             send: SendKind::Dream,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
             plan: plan.as_ref(),
