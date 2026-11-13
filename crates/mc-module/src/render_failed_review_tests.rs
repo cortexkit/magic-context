@@ -1,15 +1,16 @@
 //! Review tests for ck-mc's handling of the runner's `render_failed` report
 //! (rules W6.5 and W6.6a in cortexkit-role-compaction's CONTRACT.md: the
 //! refusal's shapes, and the runner's fallback after a host rendering
-//! failure). Each test names an input where what
-//! ck-mc believes the runner serves, or what it publishes next, departs from
-//! what the contract and the intended recovery say. They fail until the
+//! failure). Each test names an input where what ck-mc believes the runner
+//! serves, or what it publishes next, departs from what the contract and the
+//! intended recovery say. They fail until the
 //! behaviour they describe is fixed.
 
 use super::*;
 use serde_json::json;
 
-/// A session holding view 1: two replaces of `old`/`p`, under a low reading.
+/// A session holding view 1: one output replace of `old`/`p`, under a low
+/// reading.
 fn fixture_with_view() -> (Session, Client, Settings, View) {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![
