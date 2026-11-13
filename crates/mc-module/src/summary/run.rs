@@ -153,8 +153,7 @@ impl Target {
 /// Run the summarizer: the two-pass historian's first turn ([`turn_one`]).
 /// `Ok(None)` when there was nothing to summarize.
 ///
-/// Routing picks the model, on the session's own runner (compaction contract
-/// SR4). A transient provider error retries twice on the same model, after
+/// Routing picks the model, on the session's own runner. A transient provider error retries twice on the same model, after
 /// 2 to 3 s and then 6 to 8 s. When a model still fails, or gives no valid
 /// turn-one reply, the next one routing picks without it is tried. Every
 /// attempt runs in a child of its own, so the summarizer always sees exactly
