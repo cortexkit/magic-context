@@ -160,7 +160,7 @@ impl Replica {
     }
 
     /// When the session's newest message was written, from the message
-    /// index ck-mc keeps for it, or its in-memory projection.
+    /// index the module keeps for it, or its in-memory projection.
     fn last_activity(&self, key: &SessionRef) -> Option<i64> {
         let stored = self.store.as_ref().and_then(|conn| {
             conn.query_row(

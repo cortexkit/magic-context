@@ -235,7 +235,7 @@ pub(super) fn id(p: &Map<String, Value>, key: &str) -> Result<i64, Refusal> {
         .ok_or_else(|| invalid(key))
 }
 
-/// Insert `value` under `key` only when it is known, so a field ck-mc
+/// Insert `value` under `key` only when it is known, so a field the module
 /// doesn't know is absent rather than null.
 pub(super) fn put(row: &mut Value, key: &str, value: Option<Value>) {
     if let Some(value) = value.filter(|value| !value.is_null()) {

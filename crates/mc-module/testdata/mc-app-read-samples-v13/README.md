@@ -11,7 +11,7 @@ for byte; its reads are described under "Carried from v12" below, unchanged.
 - **Envelope.** Every reply carries `schema: 1`, `op` (the method) and
   `as_of_ms`. The samples fix `as_of_ms` at `1700000000000`.
 - **Owners.** Memory reads name `{level, owner?}`. `level` is `project` (owner:
-  the fleet project id, `pj-…`), `workspace` (owner: the workspace id) or
+  the project's id, `pj-…`), `workspace` (owner: the workspace id) or
   `global` (owner: `self`, which may be left out). A project counts as known
   once a session of it has been set up with Magic Context; any other project
   id answers `project_unknown`. The project reads (`facts.page`,
