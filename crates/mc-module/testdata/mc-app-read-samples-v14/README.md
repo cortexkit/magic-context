@@ -19,13 +19,18 @@ profile's lines are global memories:
   shows as one `memory_updates` line at `level="global"`, like any memory's
   change. The delta no longer has a `user_profile` section; a delta built by
   an older module may still have one until the session's next fold.
+- **Profile lines carry their ids.** In the baseline's `user_profile`
+  section each line reads `#id: text` instead of `- text`, so an update line
+  names the profile line it changes. The section's bytes and tokens grow by
+  the ids.
 - **A workspace block.** The baseline may carry a second `memory` section,
   the workspace's memories, after `history` and before the project's
-  `memory` section. Its lines and items are the same as the project block's;
-  a memory from another project of the workspace has `source`.
-- **Changed samples.** `head.json`, `head-no-items.json`,
-  `head-no-mural.json`, `head-other.json`, `head-pending-view.json` and
-  `head-shared.json`; every other file is v13's.
+  `memory` section. Its lines and items are the same as the project block's,
+  with no project named: a workspace memory holds for every project in its
+  workspace.
+- **Changed samples.** `head.json`, `head-empty-delta.json`,
+  `head-no-items.json`, `head-no-mural.json`, `head-other.json`,
+  `head-pending-view.json` and `head-shared.json`; every other file is v13's.
 
 ## Shared rules for the owner reads
 

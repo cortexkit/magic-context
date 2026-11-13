@@ -55,7 +55,9 @@ fn a_session_follows_its_project_to_another_workspace_and_keeps_it_stored() {
     assert!(!session.follow_workspace(Some("pj-a"), Some("team".into())));
     assert!(!session.follow_workspace(Some("pj-b"), Some("other".into())));
     assert_eq!(
-        store.memory_context(&key).and_then(|context| context.workspace_id),
+        store
+            .memory_context(&key)
+            .and_then(|context| context.workspace_id),
         Some("team".into())
     );
 
@@ -66,13 +68,21 @@ fn a_session_follows_its_project_to_another_workspace_and_keeps_it_stored() {
     assert_eq!(after.workspace_id.as_deref(), Some("other"));
     assert_eq!(after.project_id.as_deref(), Some("pj-a"));
     assert_eq!(
-        session.memory_context.as_ref().and_then(|context| context.workspace_id.as_deref()),
+        session
+            .memory_context
+            .as_ref()
+            .and_then(|context| context.workspace_id.as_deref()),
         Some("other")
     );
 
     // Leaving every workspace is a move too.
     assert!(session.follow_workspace(Some("pj-a"), None));
-    assert_eq!(store.memory_context(&key).and_then(|context| context.workspace_id), None);
+    assert_eq!(
+        store
+            .memory_context(&key)
+            .and_then(|context| context.workspace_id),
+        None
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

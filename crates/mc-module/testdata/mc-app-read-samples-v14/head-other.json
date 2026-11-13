@@ -21,7 +21,7 @@
       "managed": true,
       "messages": [
         {
-          "bytes": 843,
+          "bytes": 845,
           "sections": [
             {
               "bytes": 177,
@@ -44,10 +44,10 @@
               "tokens": 60
             },
             {
-              "bytes": 61,
+              "bytes": 63,
               "index": 1,
               "kind": "user_profile",
-              "tokens": 19
+              "tokens": 21
             },
             {
               "bytes": 80,
@@ -97,7 +97,7 @@
             }
           ],
           "slot": "baseline",
-          "tokens": 254
+          "tokens": 256
         },
         {
           "bytes": 436,

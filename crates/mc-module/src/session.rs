@@ -3883,13 +3883,18 @@ impl Session {
         // it was folded with, as in the plugin.
         let mut drawn: Option<Option<crate::mural::Mural>> = None;
         let mut folded = |inputs: &head::Inputs| {
-            let shown = head::shown_at_fold(inputs);
+            let chosen = head::chosen_at_fold(inputs);
             let mural = drawn.get_or_insert_with(|| {
-                self.draw_mural(settings, shape.memory_enabled, inputs.rows, &shown)
+                self.draw_mural(
+                    settings,
+                    shape.memory_enabled,
+                    inputs.rows,
+                    &chosen.left_out(inputs.rows),
+                )
             });
             let mut base = head::fold_with(
                 inputs,
-                &shown,
+                &chosen.shown,
                 mural.as_ref().map(|mural| mural.content_hash.as_str()),
             );
             base.shape = Some(shape.clone());
@@ -3903,6 +3908,14 @@ impl Session {
             }
             _ => folded(&fold_inputs),
         };
+        // A baseline in the memory format before levels records what its
+        // m[0] shows for the project block only. Building an m[1] on it
+        // would announce profile lines m[0] already shows and drop the
+        // profile block an earlier m[1] showed, so the head stays as shown
+        // until its format fold, which the next permitted notice runs.
+        if !fresh_fold && base.format_fold_due(shape.memory_enabled) {
+            return self.head_as_shown("the head waits for its memory-format fold");
+        }
         let gone = match gone_from(&base) {
             Ok(gone) => gone,
             Err(error) => return self.head_as_shown(&format!("reading memory rows: {error}")),
@@ -3976,15 +3989,15 @@ impl Session {
 
     /// The memory mural for a fold, or `None` when it is off, the model
     /// doesn't read images, or there is nothing worth drawing. It shows the
-    /// project's own memories among `rows` that the fold leaves out
-    /// (`shown` is what it shows). A failure to draw is logged and leaves the
-    /// mural out of this fold.
+    /// project's own memories among `rows` that the fold's text left out for
+    /// room (`left_out`). A failure to draw is logged and leaves the mural
+    /// out of this fold.
     fn draw_mural(
         &self,
         settings: &Settings,
         memory_enabled: bool,
         rows: &[crate::head_memories::Row],
-        shown: &std::collections::HashSet<i64>,
+        left_out: &std::collections::HashSet<i64>,
     ) -> Option<crate::mural::Mural> {
         if !settings.mural_enabled
             || !memory_enabled
@@ -4002,7 +4015,9 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let drawn = db
-            .with_connection(|conn| crate::mural::ensure(conn, &project.id, &memories, shown, now))
+            .with_connection(|conn| {
+                crate::mural::ensure(conn, &project.id, &memories, left_out, now)
+            })
             .map_err(|error| error.to_string());
         drawn.unwrap_or_else(|error| {
             tracing::warn!(
@@ -4162,22 +4177,22 @@ impl Session {
             history_budget_percentage_bp: Some(
                 (settings.history_budget_percentage * 10_000.0).round() as u64,
             ),
-            memory_format: head::MEMORY_FORMAT,
             profile_budget_tokens: Some(settings.profile_budget_tokens),
         }
     }
 
-    /// Whether the baseline was rendered under different settings than these.
-    /// A baseline from before the shape was recorded counts as unchanged
-    /// settings, but its memory blocks are in the format before levels
-    /// ([`head::MEMORY_FORMAT`]), so it folds once like any older format.
+    /// Whether the baseline must be rendered again: under different settings
+    /// than these, with memory blocks in an older format
+    /// ([`head::MEMORY_FORMAT`]), or from before the settings were recorded.
     fn head_shape_changed(&self, settings: &Settings) -> bool {
-        self.baseline
-            .as_ref()
-            .is_some_and(|baseline| match &baseline.shape {
-                Some(shape) => shape.requires_fold(&self.head_shape(settings)),
-                None => true,
-            })
+        self.baseline.as_ref().is_some_and(|baseline| {
+            let now = self.head_shape(settings);
+            baseline.format_fold_due(now.memory_enabled)
+                || baseline
+                    .shape
+                    .as_ref()
+                    .is_none_or(|shape| shape.requires_fold(&now))
+        })
     }
 
     /// The first view of a moved session: the history head and a cut through

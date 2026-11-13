@@ -276,11 +276,13 @@ pub(crate) fn wrapper(level: Level) -> &'static str {
 
 /// What showing `row` costs, counted as the head renders it: a project or
 /// workspace line with its category tags and the block's wrapper, or a
-/// user-profile bullet (plus four tokens for its share of the block's
-/// newlines), which has no category tags.
+/// user-profile line, which has no category tags.
 fn priced(row: &Row, level: Level, counter: Counter) -> Candidate {
     let (line_tokens, category_tokens) = match level {
-        Level::Global => (counter.count(&format!("- {}", row.content)) + 4, 0),
+        Level::Global => (
+            counter.count(&(memory::profile_line(row.id, &row.content) + "\n")),
+            0,
+        ),
         _ => (
             counter.count(&(memory::render_line(&row.stored()) + "\n")),
             counter.count(&format!("<{0}>\n</{0}>\n", row.tag)),
@@ -360,9 +362,9 @@ pub fn render(rows: &[Row], shown: &HashSet<i64>) -> Blocks {
         rows.sort_by_key(|row| (row.learned, row.id));
         rows
     };
-    let profile: Vec<String> = at(Level::Global)
+    let profile: Vec<(i64, &str)> = at(Level::Global)
         .into_iter()
-        .map(|row| row.content.clone())
+        .map(|row| (row.id, row.content.as_str()))
         .collect();
     let block = |level: Level| -> String {
         let rows: Vec<StoredMemory> = at(level).into_iter().map(Row::stored).collect();

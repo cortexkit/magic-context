@@ -123,6 +123,9 @@ pub struct Budget {
 pub struct Selection {
     pub ids: Vec<i64>,
     pub tokens: u64,
+    /// Candidates hidden whatever the budget: past their time, resolved, or
+    /// overridden by a visible row. In id order.
+    pub hidden: Vec<i64>,
 }
 
 const UNSET_IMPORTANCE: f64 = 50.0;
@@ -130,6 +133,13 @@ const UNSET_IMPORTANCE: f64 = 50.0;
 /// Pick the memories a head shows at `now_ms`.
 pub fn select(candidates: &[Candidate], budget: &Budget, now_ms: i64) -> Selection {
     let shown: Vec<&Candidate> = visible(candidates, now_ms);
+    let visible_ids: HashSet<i64> = shown.iter().map(|candidate| candidate.id).collect();
+    let mut hidden: Vec<i64> = candidates
+        .iter()
+        .map(|candidate| candidate.id)
+        .filter(|id| !visible_ids.contains(id))
+        .collect();
+    hidden.sort_unstable();
     let mut order: Vec<(&Candidate, f64)> = shown
         .into_iter()
         .map(|candidate| (candidate, rank(candidate, budget.half_life_ms, now_ms)))
@@ -203,7 +213,10 @@ pub fn select(candidates: &[Candidate], budget: &Budget, now_ms: i64) -> Selecti
     }
     // 3. The free pool, across every level.
     fill.take(&order, u64::MAX);
-    fill.selection(&order)
+    Selection {
+        hidden,
+        ..fill.selection(&order)
+    }
 }
 
 /// The room the user profile needs for its minimum: the global minimum, or
@@ -326,7 +339,7 @@ impl Fill {
         }
     }
 
-    /// The shown ids in rank order.
+    /// The shown ids in rank order; the caller adds the hidden ones.
     fn selection(&self, order: &[&Candidate]) -> Selection {
         Selection {
             ids: order
@@ -335,6 +348,7 @@ impl Fill {
                 .map(|c| c.id)
                 .collect(),
             tokens: self.used,
+            hidden: Vec::new(),
         }
     }
 }

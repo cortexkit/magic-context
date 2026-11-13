@@ -58,7 +58,7 @@ fn a_fold_renders_each_level_in_its_own_block() {
     // Profile lines in the order they were learned, not by id.
     assert_eq!(
         blocks.user_profile,
-        "<user-profile>\n- Reviews &lt;diffs&gt; before merging\n- Prefers short answers\n</user-profile>"
+        "<user-profile>\n#2: Reviews &lt;diffs&gt; before merging\n#1: Prefers short answers\n</user-profile>"
     );
     assert_eq!(
         blocks.workspace,
@@ -212,15 +212,14 @@ fn a_head_reads_its_project_its_workspace_and_the_person() {
 static NO_CLASSES: std::sync::LazyLock<HashMap<String, String>> =
     std::sync::LazyLock::new(Default::default);
 
-/// The head's inputs for `rows` alone: no summaries, no docs, no workspace,
-/// and the default memory and profile budgets.
+/// The head's inputs for `rows` alone: no summaries, no docs, and the
+/// default memory and profile budgets.
 fn head_inputs(rows: &[Row]) -> crate::summary::head::Inputs<'_> {
     crate::summary::head::Inputs {
         counter: Counter::for_model(None),
         summaries: &[],
         docs: "",
         rows,
-        workspace: None,
         classes: &NO_CLASSES,
         now_ms: 0,
         gone: &[],
@@ -247,7 +246,7 @@ fn review_an_archived_profile_line_is_identifiable_in_m1() {
     assert!(
         baseline
             .m0
-            .contains("<user-profile>\n- prefers tea\n- works late\n</user-profile>"),
+            .contains("<user-profile>\n#1: prefers tea\n#2: works late\n</user-profile>"),
         "{}",
         baseline.m0
     );
@@ -287,24 +286,31 @@ fn review_a_deleted_profile_line_is_removed_at_the_global_level() {
 /// memory off before memory levels must not fold for the format alone.
 #[test]
 fn review_the_memory_format_alone_does_not_fold_a_head_with_memory_off() {
-    use crate::summary::head::{Shape, MEMORY_FORMAT};
+    use crate::summary::head::{Baseline, Shape, MEMORY_FORMAT};
     let rendered = Shape {
         memory_enabled: false,
         memory_budget_tokens: 4_000,
         history_budget_tokens: 9_652,
         history_budget_percentage_bp: Some(1_500),
-        memory_format: 0,
         profile_budget_tokens: None,
     };
     let now = Shape {
-        memory_format: MEMORY_FORMAT,
         profile_budget_tokens: Some(4_000),
         ..rendered.clone()
     };
+    // A baseline from before memory levels: format 0.
+    let before = Baseline {
+        shape: Some(rendered.clone()),
+        ..Baseline::default()
+    };
+    assert_eq!(before.memory_format, 0);
     assert!(
-        !rendered.requires_fold(&now),
+        !before.format_fold_due(now.memory_enabled) && !rendered.requires_fold(&now),
         "a memory-off head folds for the memory format alone"
     );
+    // With memory on, the same baseline folds once.
+    assert!(before.format_fold_due(true));
+    assert_ne!(before.memory_format, MEMORY_FORMAT);
 }
 
 /// A baseline saved by the build before memory levels, read back and used
@@ -349,8 +355,8 @@ fn review_the_mural_leaves_out_a_memory_the_head_hides_by_override() {
     let mut replacing = row(2, "project", "NAMING", "kebab case");
     replacing.overrides = Some(1);
     let rows = [replaced, replacing];
-    let shown = crate::summary::head::shown_at_fold(&head_inputs(&rows));
-    assert_eq!(shown, HashSet::from([2]));
+    let chosen = crate::summary::head::chosen_at_fold(&head_inputs(&rows));
+    assert_eq!(chosen.shown, HashSet::from([2]));
     let memories: Vec<StoredMemory> = rows.iter().map(Row::stored).collect();
     let cues: HashMap<i64, crate::mural::Cue> = memories
         .iter()
@@ -364,7 +370,7 @@ fn review_the_mural_leaves_out_a_memory_the_head_hides_by_override() {
             )
         })
         .collect();
-    let drawn: Vec<i64> = crate::mural::entries(&memories, &cues, &shown)
+    let drawn: Vec<i64> = crate::mural::entries(&memories, &cues, &chosen.left_out(&rows))
         .iter()
         .map(|entry| entry.id)
         .collect();

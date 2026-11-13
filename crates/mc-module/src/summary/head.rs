@@ -68,7 +68,13 @@ pub struct Inputs<'a> {
 pub enum Shown {
     /// The text the head shows, or, for a change shown only as a marker or
     /// counted in the aggregate line, the text that change was about.
-    Text { text: String },
+    /// `level` is the memory's level when it isn't `project`, so a removal
+    /// line can still name it after the row is deleted for good.
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+    },
     /// The head says the memory was removed or merged away.
     Removed,
 }
@@ -139,6 +145,11 @@ pub struct Baseline {
     /// kept apart from this record, which is saved often.
     #[serde(default)]
     pub mural: Option<String>,
+    /// The format its memory blocks and records were written in
+    /// ([`MEMORY_FORMAT`]). Absent, so 0, on baselines from before memory
+    /// levels.
+    #[serde(default)]
+    pub memory_format: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,21 +254,18 @@ pub struct Shape {
     /// on baselines saved before it was recorded.
     #[serde(default)]
     pub history_budget_percentage_bp: Option<u64>,
-    /// Which memories `m[0]` shows and how ([`MEMORY_FORMAT`]). Absent, so
-    /// 0, on baselines rendered before memory levels: those fold once.
-    #[serde(default)]
-    pub memory_format: u32,
     /// The user profile's budget, which joins the memory budget in the one
     /// selection every level fills. Absent on older baselines.
     #[serde(default)]
     pub profile_budget_tokens: Option<u64>,
 }
 
-/// The format of `m[0]`'s memory blocks: 1 since every level is chosen
-/// together ([`crate::head_memories`]) and the user profile's lines are
-/// global memories. A baseline in another format folds at once, because its
-/// `m[0]` and its records of what it shows can't be compared with the new
-/// ones; the change rewrites each session's cached prefix once.
+/// The format of `m[0]`'s memory blocks and of a baseline's records of
+/// what they show: 1 since every level is chosen together
+/// ([`crate::head_memories`]) and the user profile's lines are global
+/// memories with ids. A baseline in another format folds at once, because
+/// its records can't be compared with today's rows; the change rewrites each
+/// session's cached prefix once.
 pub const MEMORY_FORMAT: u32 = 1;
 
 impl Shape {
@@ -273,13 +281,16 @@ impl Shape {
             .history_budget_tokens
             .saturating_sub(now.history_budget_tokens)
             > 64.max(self.history_budget_tokens / 100);
-        self.memory_enabled != now.memory_enabled
-            || self.memory_budget_tokens != now.memory_budget_tokens
-            || self.memory_format != now.memory_format
-            || matches!(
+        // With memory off, m[0] has no memory blocks, so the profile's budget
+        // changes none of its bytes.
+        let memory_blocks_changed = now.memory_enabled
+            && matches!(
                 (self.profile_budget_tokens, now.profile_budget_tokens),
                 (Some(old), Some(new)) if old != new
-            )
+            );
+        self.memory_enabled != now.memory_enabled
+            || self.memory_budget_tokens != now.memory_budget_tokens
+            || memory_blocks_changed
             || matches!(
                 (self.history_budget_percentage_bp, now.history_budget_percentage_bp),
                 (Some(old), Some(new)) if old != new
@@ -289,6 +300,13 @@ impl Shape {
 }
 
 impl Baseline {
+    /// Whether the baseline must fold because its memory blocks and records
+    /// are in an older format. With memory off its m[0] has no memory
+    /// blocks, so the format changes none of its bytes.
+    pub fn format_fold_due(&self, memory_enabled: bool) -> bool {
+        memory_enabled && self.memory_format != MEMORY_FORMAT
+    }
+
     /// The memory ids the head says anything about.
     pub fn shown_ids(&self) -> Vec<i64> {
         self.shown.keys().copied().collect()
@@ -399,6 +417,7 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
                     row.id,
                     Shown::Text {
                         text: row.content.clone(),
+                        level: shown_level(row),
                     },
                 )
             })
@@ -410,22 +429,56 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
             .collect(),
         shape: None,
         mural: mural.map(str::to_owned),
+        memory_format: MEMORY_FORMAT,
     }
 }
 
-/// The memories a fold of `inputs` shows: the rendering function's choice
-/// among every row, at the time the fold renders.
-pub fn shown_at_fold(inputs: &Inputs) -> HashSet<i64> {
-    head_memories::choose(
+/// A fold's choice among `inputs`' rows: the ones it shows, and the ones it
+/// hides because they are past their time, resolved or overridden (not left
+/// out for room).
+pub struct Chosen {
+    pub shown: HashSet<i64>,
+    pub hidden: HashSet<i64>,
+}
+
+impl Chosen {
+    /// The project memories the fold's text left out for room, which the
+    /// mural draws instead. Every project row the head reads is the
+    /// session's own project's.
+    pub fn left_out(&self, rows: &[Row]) -> HashSet<i64> {
+        rows.iter()
+            .filter(|row| row.level == "project")
+            .map(|row| row.id)
+            .filter(|id| !self.shown.contains(id) && !self.hidden.contains(id))
+            .collect()
+    }
+}
+
+/// The rendering function's choice for a fold of `inputs`, among every row,
+/// at the time the fold renders.
+pub fn chosen_at_fold(inputs: &Inputs) -> Chosen {
+    let selection = head_memories::choose(
         inputs.rows,
         inputs.classes,
         inputs.counter,
         &head_memories::budget(inputs.memory_budget_tokens, inputs.profile_budget_tokens),
         inputs.now_ms,
-    )
-    .ids
-    .into_iter()
-    .collect()
+    );
+    Chosen {
+        shown: selection.ids.into_iter().collect(),
+        hidden: selection.hidden.into_iter().collect(),
+    }
+}
+
+/// The memories a fold of `inputs` shows.
+pub fn shown_at_fold(inputs: &Inputs) -> HashSet<i64> {
+    chosen_at_fold(inputs).shown
+}
+
+/// The level a baseline records for a memory it shows: none for a project
+/// memory, the common case.
+fn shown_level(row: &Row) -> Option<String> {
+    (row.level != "project").then(|| row.level.clone())
 }
 
 const MEMORY_UPDATES_HEADER: &str =
@@ -476,29 +529,35 @@ struct Change {
 /// then memories newer than the fold that the head does not show yet. In
 /// memory-id order, so the same rows always give the same changes.
 fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
+    // A baseline in an older memory format doesn't record every level its
+    // m[0] shows, so it can't say what changed; its fold comes first.
+    if baseline.memory_format != MEMORY_FORMAT {
+        return Vec::new();
+    }
     let current: BTreeMap<i64, &Row> = inputs.rows.iter().map(|row| (row.id, row)).collect();
     let gone: BTreeMap<i64, &Row> = inputs.gone.iter().map(|row| (row.id, row)).collect();
     let mut out = Vec::new();
     for (id, shown) in &baseline.shown {
         match (current.get(id), shown) {
-            (Some(row), Shown::Text { text }) if row.content == *text => {}
+            (Some(row), Shown::Text { text, .. }) if row.content == *text => {}
             (Some(row), _) => out.push(Change {
                 id: *id,
-                line: memory::updated_line(
-                    *id,
-                    &row.level,
-                    Some(&row.tag),
-                    &row.content,
-                ),
+                line: memory::updated_line(*id, &row.level, Some(&row.tag), &row.content),
                 after: Shown::Text {
                     text: row.content.clone(),
+                    level: shown_level(row),
                 },
                 current: Some(*id),
             }),
             (None, Shown::Removed) => {}
-            (None, Shown::Text { .. }) => {
+            (None, Shown::Text { level: shown, .. }) => {
                 let row = gone.get(id);
-                let level = row.map_or("project", |row| row.level.as_str());
+                // A row deleted for good is gone from the store too; the level
+                // the head showed it at still names its block.
+                let level = row.map_or_else(
+                    || shown.as_deref().unwrap_or("project"),
+                    |row| row.level.as_str(),
+                );
                 let by = row.and_then(|row| row.superseded_by);
                 out.push(Change {
                     id: *id,
@@ -520,14 +579,10 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
         if !withheld && !baseline.shown.contains_key(&row.id) {
             out.push(Change {
                 id: row.id,
-                line: memory::added_line(
-                    row.id,
-                    &row.level,
-                    Some(&row.tag),
-                    &row.content,
-                ),
+                line: memory::added_line(row.id, &row.level, Some(&row.tag), &row.content),
                 after: Shown::Text {
                     text: row.content.clone(),
+                    level: shown_level(row),
                 },
                 current: Some(row.id),
             });
@@ -735,7 +790,7 @@ pub fn delta_with(
                 let line = vec![change.line.clone()];
                 let cost = line_tokens(&line);
                 if used_full + cost <= full_budget && full_count < CORRECTION_RECORD_CAP {
-                    if let Shown::Text { text } = &change.after {
+                    if let Shown::Text { text, .. } = &change.after {
                         next.seen.insert(change.id, text.clone());
                     }
                     next.committed.push(Committed {
@@ -1137,7 +1192,7 @@ mod tests {
         assert!(
             baseline
                 .m0
-                .contains("<user-profile>\n- prefers tea\n- works late\n</user-profile>"),
+                .contains("<user-profile>\n#1: prefers tea\n#2: works late\n</user-profile>"),
             "{}",
             baseline.m0
         );

@@ -4778,7 +4778,10 @@ async fn a_head_shows_its_workspaces_memories_and_follows_a_workspace_move() {
     assert_clean(&runner);
     let (later_m0, m1) = head_texts(runner.host());
     assert_eq!(later_m0, m0, "a workspace move forces no fold");
-    assert!(m1.contains("<removed id=\"2\" level=\"workspace\"/>"), "{m1}");
+    assert!(
+        m1.contains("<removed id=\"2\" level=\"workspace\"/>"),
+        "{m1}"
+    );
     assert!(
         m1.contains(
             "<added id=\"4\" level=\"workspace\" category=\"CONSTRAINTS\">Other team constraint.</added>"

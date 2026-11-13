@@ -85,8 +85,10 @@ fn render_lines(mut lines: Vec<(String, i64, String)>, wrapper: &str) -> String 
     out.join("\n")
 }
 
-/// `User prefers X` reads as `Prefers X` under the profile heading.
-fn profile_line(content: &str) -> String {
+/// A user-profile line, `#id: Prefers X`: `User prefers X` reads as
+/// `Prefers X` under the profile heading. The id lets a memory-update line
+/// in `m[1]` say which profile line changed.
+pub(crate) fn profile_line(id: i64, content: &str) -> String {
     let content = match content.strip_prefix("User ") {
         Some(rest) => {
             let mut chars = rest.chars();
@@ -96,16 +98,21 @@ fn profile_line(content: &str) -> String {
         }
         None => content.to_owned(),
     };
-    format!("- {}", escape_content(&content))
+    format!("#{id}: {}", escape_content(&content))
 }
 
-/// The profile inside `<wrapper>`, or nothing.
-pub fn render_profile(profile: &[String], wrapper: &str) -> String {
+/// The profile's lines (id and text, in order) inside `<wrapper>`, or
+/// nothing.
+pub fn render_profile(profile: &[(i64, &str)], wrapper: &str) -> String {
     if profile.is_empty() {
         return String::new();
     }
     let mut lines = vec![format!("<{wrapper}>")];
-    lines.extend(profile.iter().map(|content| profile_line(content)));
+    lines.extend(
+        profile
+            .iter()
+            .map(|(id, content)| profile_line(*id, content)),
+    );
     lines.push(format!("</{wrapper}>"));
     lines.join("\n")
 }
@@ -149,7 +156,6 @@ pub fn superseded_line(id: i64, level: &str, by: i64) -> String {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,10 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn profile_lines_drop_the_user_prefix() {
+    fn profile_lines_carry_their_id_and_drop_the_user_prefix() {
         assert_eq!(
-            render_profile(&["User prefers short answers".into()], "user-profile"),
-            "<user-profile>\n- Prefers short answers\n</user-profile>"
+            render_profile(&[(7, "User prefers short answers")], "user-profile"),
+            "<user-profile>\n#7: Prefers short answers\n</user-profile>"
         );
     }
 }

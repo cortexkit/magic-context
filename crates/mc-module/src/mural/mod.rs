@@ -105,16 +105,16 @@ pub fn coverage_ok(memories: &[StoredMemory], cues: &HashMap<i64, Cue>) -> bool 
         && (cued >= MIN_CUED || cued as f64 >= MIN_COVERAGE * memories.len() as f64)
 }
 
-/// The mural's entries: the memories the head leaves out (`shown` is what it
-/// shows), with current cues, in mural order.
+/// The mural's entries: the memories the head's text left out for room
+/// (`left_out`), with current cues, in mural order.
 pub fn entries(
     memories: &[StoredMemory],
     cues: &HashMap<i64, Cue>,
-    shown: &HashSet<i64>,
+    left_out: &HashSet<i64>,
 ) -> Vec<Entry> {
     let mut entries: Vec<Entry> = memories
         .iter()
-        .filter(|memory| !shown.contains(&memory.id))
+        .filter(|memory| left_out.contains(&memory.id))
         .filter_map(|memory| {
             let cue = cues.get(&memory.id);
             if !current(cue, &memory.content) {
@@ -165,14 +165,14 @@ pub fn read_cues(conn: &Connection, ids: &[i64]) -> rusqlite::Result<HashMap<i64
 }
 
 /// The project's mural for `memories` (the project's own rows the head
-/// chose from) and what the head shows of them, or `None` when there is
-/// nothing to draw or too few cues. An unchanged layout reuses the stored
+/// chose from) and the ones its text left out for room, or `None` when
+/// there is nothing to draw or too few cues. An unchanged layout reuses the stored
 /// image; a new one is drawn and stored.
 pub fn ensure(
     conn: &Connection,
     project: &str,
     memories: &[StoredMemory],
-    shown: &HashSet<i64>,
+    left_out: &HashSet<i64>,
     now_ms: i64,
 ) -> rusqlite::Result<Option<Mural>> {
     let ids: Vec<i64> = memories.iter().map(|memory| memory.id).collect();
@@ -180,7 +180,7 @@ pub fn ensure(
     if !coverage_ok(memories, &cues) {
         return Ok(None);
     }
-    let entries = entries(memories, &cues, shown);
+    let entries = entries(memories, &cues, left_out);
     if entries.is_empty() {
         return Ok(None);
     }
@@ -289,8 +289,8 @@ mod tests {
                 hash: Some(content_hash("the old text")),
             },
         );
-        // The head shows only the first memory.
-        let entries = entries(&memories, &cues, &HashSet::from([1]));
+        // The head shows only the first memory and leaves the rest out.
+        let entries = entries(&memories, &cues, &HashSet::from([2, 3, 4, 5]));
         let shown: Vec<(i64, &str)> = entries
             .iter()
             .map(|entry| (entry.id, entry.cue.as_str()))
@@ -340,9 +340,13 @@ mod tests {
             memories.push(memory(id, "NAMING", 50, &content));
         }
         // The head shows the first memory and leaves the rest to the mural.
-        let shown = HashSet::from([1]);
+        let left_out: HashSet<i64> = memories
+            .iter()
+            .map(|memory| memory.id)
+            .filter(|id| *id != 1)
+            .collect();
         let first = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &shown, 1))
+            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &left_out, 1))
             .unwrap()
             .expect("a mural");
         // The plugin's stored image for the same layout is served as it is.
@@ -352,7 +356,7 @@ mod tests {
                 .unwrap()
         });
         let again = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &shown, 2))
+            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &left_out, 2))
             .unwrap()
             .unwrap();
         assert_eq!(again.png, marker);
@@ -366,7 +370,7 @@ mod tests {
             .unwrap()
         });
         let redrawn = db
-            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &shown, 3))
+            .with_connection(|conn| ensure(conn, "pj-mural", &memories, &left_out, 3))
             .unwrap()
             .unwrap();
         assert_ne!(redrawn.content_hash, first.content_hash);
