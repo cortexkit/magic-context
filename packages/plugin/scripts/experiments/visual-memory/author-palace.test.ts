@@ -157,8 +157,10 @@ describe("single-page newspaper flow", () => {
     });
 
     test("caps a dominant category at its share plus spill while keeping a small category whole", () => {
+        // Only 716 dominant entries fit beside the small category. Four extra
+        // entries exercise the same overflow trim without rebuilding hundreds of shorter room layouts.
         const rendered = renderPalace([
-            ...Array.from({ length: 1_000 }, (_, index) => ({
+            ...Array.from({ length: 720 }, (_, index) => ({
                 id: index + 1,
                 category: "PROJECT_RULES" as const,
                 room: "Dominant",
@@ -181,7 +183,7 @@ describe("single-page newspaper flow", () => {
             .filter((item) => item.kind === "room" && item.category === "ARCHITECTURE")
             .reduce((total, item) => total + item.endLine - item.startLine + 1, 0);
         expect(rendered.placements.size).toBe(718);
-        expect(rendered.droppedByTrimIds.length).toBe(284);
+        expect(rendered.droppedByTrimIds).toEqual([717, 718, 719, 720]);
         expect(rendered.droppedBySkipIds).toEqual([]);
         expect(smallRoomLines).toBe(2);
         expect(dominantRoomLines + 1).toBe(capacity - 3);
