@@ -114,6 +114,7 @@ pub(crate) struct Projection {
     decisions: Arc<Vec<Value>>,
     decisions_revision: u64,
     view: Option<(u64, cortexkit_role_compaction::Digest)>,
+    render_dirty: bool,
     cut: Option<u64>,
     dropped: BTreeSet<lanes::PartKey>,
     dropped_messages: BTreeSet<String>,
@@ -196,6 +197,7 @@ impl Default for Projection {
             head_items_from: None,
             base: 0,
             initialized: false,
+            render_dirty: false,
             header: None,
             persisted: None,
             snapshot_saved: None,
@@ -219,6 +221,9 @@ impl Default for Projection {
     }
 }
 impl Projection {
+    pub(crate) fn render_changed(&mut self) {
+        self.render_dirty = true;
+    }
     #[cfg(test)]
     pub(crate) fn summary_arc(&self) -> Arc<Vec<Value>> {
         self.compartments.clone()
@@ -494,7 +499,11 @@ impl Session {
             .map_or((self.latest.as_ref(), self.cut), |pending| {
                 (pending.before.latest.as_ref(), pending.before.cut)
             });
+        let cut = if self.serves_no_view(view) { None } else { cut };
+        let rendered = self.rendered_view(view);
+        let view = rendered.as_deref();
         let view_changed = model_changed
+            || std::mem::take(&mut p.render_dirty)
             || reset
             || !p.initialized
             || p.cut != cut

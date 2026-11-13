@@ -64,6 +64,7 @@ pub struct Session {
     features: Features,
     preset: crate::catalog::Preset,
     reminder_counter: u64,
+    render_failed: render_failed::State,
     conditions: Conditions,
     limits: crate::reads::Limits,
     window_over_budget: bool,
@@ -717,6 +718,7 @@ impl Session {
             preset: crate::catalog::Preset::parse(&request.preset)
                 .unwrap_or(crate::catalog::Preset::Head),
             reminder_counter: 0,
+            render_failed: Default::default(),
             conditions: conditions_of(request),
             limits: crate::reads::Limits::from_setup(request.limits.as_ref()),
             window_over_budget: false,
@@ -925,6 +927,7 @@ impl Session {
             pending_keep: self.pending_keep.clone(),
             head_stale: self.head_stale,
             reminder_counter: self.reminder_counter,
+            render_failed: self.render_failed.clone(),
             version: self.version,
             newest_applied: self.newest_applied,
             reading_stale: self.reading_stale,
@@ -973,6 +976,7 @@ impl Session {
         self.pending_keep = durable.pending_keep;
         self.head_stale = durable.head_stale;
         self.reminder_counter = durable.reminder_counter;
+        self.render_failed = durable.render_failed;
         self.version = durable.version;
         self.newest_applied = durable.newest_applied;
         self.reading_stale = durable.reading_stale;
@@ -1326,6 +1330,7 @@ impl Session {
             .events
             .iter()
             .filter_map(|event| match event {
+                Event::ViewRefused { refusal: ViewRefusal::RenderFailed { .. }, .. } => None,
                 Event::ViewRefused { version, refusal } => {
                     // A runner can take a view and refuse it later, at the
                     // step it would first serve it. The reason is the only
@@ -1340,6 +1345,7 @@ impl Session {
             })
             .collect();
         self.settle_stated(stated, &refused);
+        let render_repeat = self.take_render_failures(&notice.events);
         let judged = self.judged_view(stated);
         match standing {
             Standing::Current => self.judge_reading(previous, judged.as_ref()),
@@ -1459,6 +1465,7 @@ impl Session {
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
             self.index_ready = self.sync_from_changeable(client, newest).await;
         }
+        self.log_render_location(&notice.events);
         if !self.index_ready {
             return None;
         }
@@ -1481,6 +1488,9 @@ impl Session {
             }
         }
         self.forget_missing();
+        if render_repeat {
+            return None;
+        }
         // A stale reading changes no pressure state: the emergency latch and
         // the `ctx_keep` request stay as the last current reading left them.
         // Released on a reading that says nothing about usage, the latch would
@@ -1499,6 +1509,9 @@ impl Session {
         // A `ctx_keep` waits while the summaries stop short of the move floor:
         // no view can land it then, and the pass below must still be free to
         // start the summary that reaches the floor again.
+        if self.render_failed.repair_pending {
+            self.fold_due = true;
+        }
         let short_of_move_floor = self.short_of_move_floor();
         if let Some(kept) = self
             .pending_keep
@@ -1512,8 +1525,15 @@ impl Session {
             return None;
         }
         let decision = self.decide_notice(settings);
-        if decision.rebuild {
-            let (view, freed) = self.build_now(client, settings).await;
+        if decision.rebuild || self.render_failed.repair_pending {
+            let (view, freed) = if self.render_failed.repair_pending {
+                // The runner already serves raw history: all queued work may
+                // land in the same rebuild, as on a fold.
+                self.fold_due = true;
+                self.build(settings, None, true, None)
+            } else {
+                self.build_now(client, settings).await
+            };
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -2081,7 +2101,7 @@ impl Session {
     /// sees, applied to the reported usage (`compartment-trigger.ts`,
     /// `estimateProjectedPostDropPercentage`). `None` when nothing would go.
     fn usage_after_drops(&self, settings: &Settings, usage: f64) -> Option<f64> {
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let edited = self.edited(self.cut);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -2816,7 +2836,7 @@ impl Session {
         if self.index.entries().is_empty() {
             return;
         }
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let edited = self.edited(None);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -3291,7 +3311,7 @@ impl Session {
                 .last()
                 .map_or(i64::MAX, |summary| summary.end_message),
             visible_messages: (self.summaries.is_empty() && !self.tools_only).then(|| {
-                let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+                let edited = self.edited(self.cut);
                 self.index
                     .entries()
                     .iter()
@@ -3553,7 +3573,7 @@ impl Session {
             ));
         }
         let first_mid = self.index.entries().first().map(|entry| entry.mid.clone());
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let edited = self.edited(self.cut);
         let stamped = selected.len();
         let mut added = false;
         for (mid, part) in selected {
@@ -4241,7 +4261,7 @@ impl Session {
         .into();
         let (history, cut) = self.history_ops(settings, flush);
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
+        let edited = self.edited(cut);
         let (context, usable, cutoff) = Self::lane_context(
             &self.index,
             &edited,
@@ -4498,9 +4518,10 @@ impl Session {
 
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
-    fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+    fn seal(&mut self, mut ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
+        ops.retain(|op| !self.render_failed.excludes(op));
         let retire = retired_history(self.summaries.is_empty(), &ops);
         let full = self.with_replaced_outputs(&ops);
         let built = view_builder::next_view_cached(
@@ -4521,12 +4542,20 @@ impl Session {
                     ))
                 .then(|| "strip".into()),
                 signed_floor: self.signed_floor.clone(),
+                force: self.serves_no_view(self.latest.as_ref()),
             },
-            retire,
+            |op| retire(op) || self.render_failed.excludes(op),
             &mut self.view_validation,
         );
         match built {
             Ok(Some(view)) => {
+                // Provider-rule companion drops of signed reasoning remain
+                // allowed on an excluded message: without them, edits before
+                // that reasoning would produce a request the provider refuses.
+                if self.repeats_failed_reasoning_drop(&view) {
+                    self.discard_held_view();
+                    return None;
+                }
                 // A moved session's view must cut at or after its move floor
                 // (see `move_floor`). One that doesn't stays here, and the
                 // runner keeps serving the view it has.
@@ -4947,6 +4976,7 @@ impl Session {
         self.spend_reading(view.version);
         self.apply_cut(&view);
         self.latest = Some(view);
+        self.render_failed.accepted(self.version);
     }
 
     /// The runner said it holds the unconfirmed view `version` (see
@@ -5496,7 +5526,7 @@ impl Session {
         if !self.index_ready {
             return (None, 0);
         }
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let edited = self.edited(None);
         let wanted: Vec<lanes::PartKey> = lanes::image_results(&self.index, &edited)
             .into_iter()
             .filter(|key| !self.image_outputs.contains_key(key))
@@ -5909,6 +5939,7 @@ mod signed_floor;
 #[path = "statement_order.rs"]
 mod statement_order;
 
+pub(crate) mod render_failed;
 mod user_commands;
 pub(crate) mod wrapup;
 pub(crate) use statement_order::epoch_admits;

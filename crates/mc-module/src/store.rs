@@ -60,6 +60,13 @@ pub struct Durable {
     /// Reserved reminder ids, independent of the runner's notice numbering.
     #[serde(default)]
     pub reminder_counter: u64,
+    /// Host rendering fallbacks live in the existing session JSON, so older
+    /// stores load with no exclusions and need no schema migration.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::session::render_failed::State::is_empty"
+    )]
+    pub render_failed: crate::session::render_failed::State,
     /// The highest view version ck-mc has built, so none is used twice.
     pub version: u64,
     /// The view version the runner last reported applying, which a

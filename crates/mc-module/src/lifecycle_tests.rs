@@ -99,6 +99,9 @@ mod user_commands_tests;
 #[path = "tool_output_tests.rs"]
 mod tool_output_tests;
 
+#[path = "render_failed_tests.rs"]
+mod render_failed_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,

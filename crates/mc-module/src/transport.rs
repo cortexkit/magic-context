@@ -158,6 +158,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_RENDER_FAILED_PROVIDES.to_owned(),
         // The runner marks Setup, notices and rides with `statement_epoch`
         // and `statement_seq` only for providers declaring this (allowed from
         // contract 0.3.8 on), so ck-mc can drop a statement from a replaced
