@@ -209,7 +209,20 @@ fn status_takes_kinds_and_switches_from_the_profile_the_engine_holds() {
         .read("dreamer.status", &json!({"project":EMPTY}))
         .unwrap();
     let tasks = status["tasks"].as_array().unwrap();
-    assert_eq!(tasks.len(), 4);
+    assert_eq!(
+        tasks
+            .iter()
+            .map(|task| task["kind"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!("classify-memories"),
+            json!("compress-cues"),
+            json!("curate"),
+            json!("map-memories"),
+            json!("verify"),
+            json!("verify-broad")
+        ]
+    );
     assert_eq!(tasks[0]["kind"], "classify-memories");
     assert_eq!(tasks[0]["schedule"]["every"], "day");
     // The person switched compress-cues off: it has no schedule.

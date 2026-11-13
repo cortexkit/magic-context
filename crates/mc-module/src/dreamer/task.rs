@@ -92,6 +92,25 @@ pub(crate) fn task_prompts(
     inputs: &[(&str, &str)],
     values: &[(&str, &str)],
 ) -> Result<(String, String), String> {
+    document_prompts(
+        profile,
+        &format!("dreamer/{task_id}/system"),
+        &format!("dreamer/{task_id}/{user}"),
+        inputs,
+        values,
+    )
+}
+
+/// [`task_prompts`] for documents named in full, for a task whose
+/// declaration names prompt documents of another task (`swe:verify-broad`
+/// runs under `dreamer/swe:verify/system`).
+pub(crate) fn document_prompts(
+    profile: &Profile,
+    system: &str,
+    user: &str,
+    inputs: &[(&str, &str)],
+    values: &[(&str, &str)],
+) -> Result<(String, String), String> {
     // Each frame first holds a placeholder no profile text or frame can
     // contain (a private-use character), replaced by the real input once
     // the markers are checked. A frame's text ends with one newline that is
@@ -111,9 +130,9 @@ pub(crate) fn task_prompts(
             .ok_or_else(|| format!("no frame {name}"))?;
         slot.1 = slot_text;
     }
-    let fill = |document: String| -> Result<String, String> {
+    let fill = |document: &str| -> Result<String, String> {
         let mut text =
-            render(profile, &document, &frames).map_err(|refusal| format!("{refusal:?}"))?;
+            render(profile, document, &frames).map_err(|refusal| format!("{refusal:?}"))?;
         for (name, value) in values {
             text = text.replace(&format!("⟦{name}⟧"), value);
         }
@@ -129,10 +148,7 @@ pub(crate) fn task_prompts(
         }
         Ok(text)
     };
-    Ok((
-        fill(format!("dreamer/{task_id}/system"))?,
-        fill(format!("dreamer/{task_id}/{user}"))?,
-    ))
+    Ok((fill(system)?, fill(user)?))
 }
 
 #[cfg(test)]

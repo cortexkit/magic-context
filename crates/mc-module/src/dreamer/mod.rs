@@ -7,6 +7,7 @@
 //! to a model routing picks ([`run`]); its reply proposes changes, and
 //! nothing it proposes is written until it passes the task's own checks.
 
+pub mod checkout;
 pub mod cron;
 pub mod engine;
 pub mod plan;
@@ -19,6 +20,8 @@ pub mod tasks;
 mod curate_replay_tests;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+mod verify_replay_tests;
 
 /// Every task kind the module runs. A profile's task of any other kind is
 /// not scheduled.
@@ -28,5 +31,7 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::compress_cues::CompressCues),
         Box::new(tasks::curate::Curate),
         Box::new(tasks::map_memories::MapMemories),
+        Box::new(tasks::verify::Verify { broad: false }),
+        Box::new(tasks::verify::Verify { broad: true }),
     ]
 }
