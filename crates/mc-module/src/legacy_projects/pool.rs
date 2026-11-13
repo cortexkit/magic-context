@@ -180,10 +180,10 @@ fn after_rows(
     // Sessions of these projects are not told. Each view a session builds
     // reads its project's memories again, and the history head compares
     // them with what it already shows (`summary::head::delta`): memories it
-    // hasn't shown appear in `m[1]`, the head's second message, on the next
-    // pass that already has permission to rebuild. A change made outside a
-    // session never forces a rebuild of its own, so nothing here marks a
-    // fold or bumps a memory epoch.
+    // hasn't shown appear in the head's second message on the next rebuild
+    // the session is already allowed to make. A change made outside a
+    // session must never cause a prompt rebuild of its own, so nothing here
+    // asks for one.
     Ok(())
 }
 

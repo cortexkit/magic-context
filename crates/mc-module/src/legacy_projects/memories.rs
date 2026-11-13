@@ -94,10 +94,10 @@ impl Own {
         Ok(own)
     }
 
-    /// Whether the 0.49 merge would mark `row` for review: the target had
-    /// no memory with its text, but had memories of that category, as the
-    /// 0.49 merge's dry run (`auditIdentityMerge`) decided before any row
-    /// changed.
+    /// Whether the 0.49 plugin's project-id merge would mark `row` for
+    /// review: the target had no memory with its text, but had memories of
+    /// that category. As in 0.49, this is decided from the target's
+    /// memories before any row of the pool changes.
     fn needs_review(&self, row: &Row) -> bool {
         let (Some(category), Some(hash)) = (row.text("category"), row.text("normalized_hash"))
         else {
