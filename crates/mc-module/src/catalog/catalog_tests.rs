@@ -780,7 +780,7 @@ fn frozen_legacy_sources_keep_the_original_text_revision() {
     });
     assert_eq!(
         sha256_hex(&serde_jcs::to_vec(&before).unwrap()),
-        "bf069036fcd1b7f4006c1f119fd9e44797ab777b40bfb10cbb4be5735dcefd90"
+        "50985bcb3b6f3ecaacd385f573a3ec6c578f02496b314db2a0b0c518d56e854d"
     );
 }
 

@@ -182,6 +182,7 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
 
 /// One `ctx_memory` call's reply, and the owners whose memories or pending
 /// observations it may have changed, for the apps' reload hints.
+#[derive(Debug)]
 pub(crate) struct Reply {
     pub text: String,
     pub changed: Vec<Change>,
@@ -232,8 +233,7 @@ pub(crate) fn call(
                 }
                 Level::Workspace => write_workspace(conn, who, category, content),
                 Level::Global => {
-                    memory_writes::observe(conn, who, category, content, ordinal)
-                        .map_err(store)?;
+                    memory_writes::observe(conn, who, category, content, ordinal).map_err(store)?;
                     // The apps' global page counts the review's pending
                     // observations, so its reload hint covers this one.
                     Ok(Reply {
@@ -308,6 +308,11 @@ fn write_workspace(
     category: &str,
     content: &str,
 ) -> Result<Reply, String> {
+    let Some(workspace) = who.workspace() else {
+        return Err(
+            "Error: This session's project is in no workspace; memory was not saved.".into(),
+        );
+    };
     // The memory context's project is the one whose membership makes the
     // workspace the session's, so a context that names none can't vouch for
     // the workspace either.
@@ -321,11 +326,6 @@ fn write_workspace(
                 .into(),
         );
     }
-    let Some(workspace) = who.workspace() else {
-        return Err(
-            "Error: This session's project is in no workspace; memory was not saved.".into(),
-        );
-    };
     if !workspace_allows(who, category) {
         return Err(not_allowed_at_workspace(category));
     }
@@ -391,7 +391,10 @@ fn mutate(
     let mut changed = Vec::new();
     for id in &ids {
         let memory = memory_writes::get_memory(conn, *id).map_err(store)?;
-        if memory.as_ref().is_some_and(|memory| memory.level == "global") {
+        if memory
+            .as_ref()
+            .is_some_and(|memory| memory.level == "global")
+        {
             return Err(format!(
                 "Error: Memory with ID {id} is a global memory, and {GLOBAL_NOTE}."
             ));
@@ -475,6 +478,10 @@ fn mutate(
         Err(MutationError::Store(error)) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "memory_tool_level_tests.rs"]
+mod level_tests;
 
 #[cfg(test)]
 mod tests {

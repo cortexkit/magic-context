@@ -3221,9 +3221,8 @@ impl Session {
                 // The newest message the session has seen: a fact the agent
                 // passes to the user-profile review names it as its source.
                 let ordinal = self.index.entries().last().map(|entry| entry.ordinal);
-                let answer = db.with_connection(|conn| {
-                    crate::memory_tool::call(conn, &who, input, ordinal)
-                });
+                let answer =
+                    db.with_connection(|conn| crate::memory_tool::call(conn, &who, input, ordinal));
                 // A call may change the project's memories, the workspace's,
                 // or the person's pending observations; each owner's app
                 // pages reload.

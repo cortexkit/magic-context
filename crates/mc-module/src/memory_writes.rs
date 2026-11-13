@@ -674,12 +674,8 @@ pub fn save_at(
         }
         None => {
             let placer = who.placer();
-            let new_row = crate::memory_levels::NewRow::decide(
-                &placer,
-                who.project,
-                Some(&owner),
-                category,
-            )?;
+            let new_row =
+                crate::memory_levels::NewRow::decide(&placer, who.project, Some(&owner), category)?;
             // The row's source project is the session's project, so a
             // workspace memory shows which member project it came from.
             let memory = insert_memory(
@@ -740,7 +736,9 @@ pub fn observe(
     content: &str,
     ordinal: Option<u64>,
 ) -> rusqlite::Result<i64> {
-    let profile = who.authority.and_then(|authority| authority.profile.as_ref());
+    let profile = who
+        .authority
+        .and_then(|authority| authority.profile.as_ref());
     let ordinal = ordinal.map(|ordinal| ordinal as i64);
     conn.execute(
         "INSERT INTO memory_observations (content, proposed_category, origin_profile,
