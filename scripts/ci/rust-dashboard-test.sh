@@ -21,6 +21,9 @@ if [[ "${GATE_DASHBOARD_WRITABLE_COPY:-0}" == 1 ]]; then
   done
   ln -s "$root/node_modules" "$scratch/node_modules"
   ln -s "$root/test-vectors" "$scratch/test-vectors"
+  # The dashboard tests build their context.db from ck-mc's schema and migration
+  # source under crates/mc-module, and check their copy against it.
+  ln -s "$root/crates" "$scratch/crates"
   # Reuse the normal Cargo target instead of recompiling into each scratch copy.
   ln -s "$root/packages/dashboard/src-tauri/target" "$scratch/packages/dashboard/src-tauri/target"
   cd "$scratch"
