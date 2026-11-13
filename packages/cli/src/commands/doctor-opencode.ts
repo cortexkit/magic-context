@@ -88,6 +88,7 @@ import { migrateExperimentalPinKeyFilesForDoctor } from "../lib/migrate-experime
 import { detectOpenCodeInstallations } from "../lib/opencode-detect";
 import {
     describeOpenCodeInstallations,
+    getOpenCodeCommandInvocation,
     type OpenCodeInstallationReport,
     selectOpenCodeStoreHost,
 } from "../lib/opencode-helpers";
@@ -225,19 +226,38 @@ export function checkConfiguredVariantCatalog(
     config: unknown,
     hostGeneration: "v1" | "v2",
     warn: (message: string) => void,
-    run: (
+    run?: (args: string[], cwd: string) => { stdout: string; status: number | null; error?: Error },
+    projectDir = process.cwd(),
+    binary?: string | null,
+): void {
+    const invoke: (
         args: string[],
         cwd: string,
-    ) => { stdout: string; status: number | null; error?: Error } = (args, cwd) =>
-        spawnSync("opencode", args, {
-            windowsHide: true,
-            cwd,
-            encoding: "utf8",
-            timeout: hostGeneration === "v2" ? 90_000 : 45_000,
-            maxBuffer: 16 * 1024 * 1024,
-        }),
-    projectDir = process.cwd(),
-): void {
+    ) => { stdout: string; status: number | null; error?: Error } =
+        run ??
+        ((args, cwd) => {
+            const options = {
+                windowsHide: true,
+                cwd,
+                encoding: "utf8" as const,
+                timeout: hostGeneration === "v2" ? 90_000 : 45_000,
+                maxBuffer: 16 * 1024 * 1024,
+            };
+            if (binary) {
+                // Bare `opencode` cannot be spawned on Windows when it is an
+                // npm `.cmd` shim (ENOENT, no PATHEXT resolution). Use the
+                // detected install's real invocation shape instead.
+                const invocation = getOpenCodeCommandInvocation(binary, args);
+                return spawnSync(invocation.command, invocation.args, {
+                    ...options,
+                    ...(invocation.env ? { env: { ...process.env, ...invocation.env } } : {}),
+                    ...(invocation.windowsVerbatimArguments
+                        ? { windowsVerbatimArguments: true }
+                        : {}),
+                });
+            }
+            return spawnSync("opencode", args, options);
+        });
     const configured: Array<{ agent: string; model: string; variant: string }> = [];
     const models: Array<{ agent: string; model: string; fallback: boolean }> = [];
     const root = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
@@ -271,7 +291,7 @@ export function checkConfiguredVariantCatalog(
                 ? ["api", "model.list", "--param", `directory=${projectDir}`]
                 : ["models", "--verbose"];
         const guidance = `opencode ${command.join(" ")}`;
-        const result = run(command, tempRoot);
+        const result = invoke(command, tempRoot);
         const catalog =
             hostGeneration === "v2"
                 ? parseOpenCodeV2ModelCatalog(result.stdout ?? "")
@@ -1279,8 +1299,9 @@ export async function runDoctor(
         logOpenCodeInstallationTable(installationReports);
     }
     if (activeInstallation.kind === "desktop") {
-        // Desktop ships no invocable CLI; the rest of doctor operates on config
-        // and the plugin cache (both present for a Desktop install), so continue.
+        // No runnable bundled CLI was found; the rest of doctor operates on
+        // config and the plugin cache (both present for a Desktop install), so
+        // continue.
         pass(
             installationReports.length > 1
                 ? "OpenCode Desktop selected for plugin checks (CLI not installed)"
@@ -1536,7 +1557,14 @@ export async function runDoctor(
             const result = loadPluginConfig(process.cwd());
             log.info(rerankConfigSummary(result.rerank));
             autoUpdateEnabled = result.auto_update !== false;
-            checkConfiguredVariantCatalog(result, hostGeneration, warn);
+            checkConfiguredVariantCatalog(
+                result,
+                hostGeneration,
+                warn,
+                undefined,
+                process.cwd(),
+                activeInstallation.kind === "cli" ? activeInstallation.path : null,
+            );
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
                 warn(

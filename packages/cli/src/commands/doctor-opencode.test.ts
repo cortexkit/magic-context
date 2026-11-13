@@ -231,6 +231,28 @@ describe("OpenCode model catalog parsing", () => {
         expect(warnings).toEqual([]);
     });
 
+    it.skipIf(process.platform !== "win32")(
+        "runs the catalog probe through a detected .cmd shim instead of bare opencode",
+        () => {
+            const dir = makeTempDir("mc-doctor-cmd-");
+            const shim = join(dir, "opencode.cmd");
+            writeFileSync(
+                shim,
+                '@echo off\r\necho {"data":[{"id":"model","providerID":"provider","variants":[]}]}\r\n',
+            );
+            const warnings: string[] = [];
+            checkConfiguredVariantCatalog(
+                { historian: { model: "provider/model" } },
+                "v2",
+                (message) => warnings.push(message),
+                undefined,
+                dir,
+                shim,
+            );
+            expect(warnings).toEqual([]);
+        },
+    );
+
     it("retains the v1 verbose catalog check", () => {
         const args: string[][] = [];
         checkConfiguredVariantCatalog(

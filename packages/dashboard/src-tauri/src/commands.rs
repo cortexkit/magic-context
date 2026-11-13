@@ -694,7 +694,7 @@ fn current_desktop_platform() -> DesktopPlatform {
 fn opencode_cli_candidates() -> Vec<String> {
     // GUI apps do not inherit every shell PATH, so keep this list in one place
     // for model discovery and install-state detection.
-    if cfg!(target_os = "windows") {
+    let mut candidates = if cfg!(target_os = "windows") {
         windows_opencode_candidates(
             std::env::var("USERPROFILE").ok().as_deref(),
             std::env::var("APPDATA").ok().as_deref(),
@@ -712,7 +712,66 @@ fn opencode_cli_candidates() -> Vec<String> {
             format!("{}/.asdf/shims/opencode", home),
             format!("{}/.volta/bin/opencode", home),
         ]
+    };
+    // Recent Desktop releases download a runnable `opencode-cli` sidecar. Try it
+    // too: a stale 1.x npm shim earlier in this list can fail against a 2.x
+    // config while the sidecar (the host actually serving the session) works.
+    candidates.extend(desktop_bundled_cli_candidates(
+        current_desktop_platform(),
+        &OpencodeDesktopEnv::from_process(),
+    ));
+    candidates
+}
+
+/// Version directories under Desktop's `cli/` are named `<version>-<arch>`.
+/// Split the leading numeric components so `2.2.10-x64` sorts above `2.2.9-x64`.
+fn desktop_cli_version_rank(name: &str) -> Vec<u64> {
+    name.split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+/// The `opencode-cli` sidecar downloaded by OpenCode Desktop into
+/// `<userData>/<appId>/cli/<version>-<arch>/`, newest first.
+fn desktop_bundled_cli_candidates(
+    platform: DesktopPlatform,
+    env: &OpencodeDesktopEnv,
+) -> Vec<String> {
+    let binary = if platform == DesktopPlatform::Windows {
+        "opencode-cli.exe"
+    } else {
+        "opencode-cli"
+    };
+    let mut candidates = Vec::new();
+    for app_id in OPENCODE_DESKTOP_APP_IDS {
+        let Some(user_data) = opencode_desktop_user_data_dir(platform, env) else {
+            continue;
+        };
+        let cli_root = user_data.join(app_id).join("cli");
+        let Ok(entries) = std::fs::read_dir(&cli_root) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        versions.sort_by(|a, b| {
+            let a_name = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let b_name = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            desktop_cli_version_rank(b_name)
+                .cmp(&desktop_cli_version_rank(a_name))
+                .then_with(|| b_name.cmp(a_name))
+        });
+        for version in versions {
+            let candidate = version.join(binary);
+            if candidate.is_file() {
+                candidates.push(candidate.to_string_lossy().into_owned());
+            }
+        }
     }
+    candidates
 }
 
 /// Windows OpenCode CLI candidates, as absolute paths tried directly (so they
@@ -755,11 +814,11 @@ fn windows_opencode_candidates(
     list
 }
 
-fn opencode_desktop_settings_paths(
+fn opencode_desktop_user_data_dir(
     platform: DesktopPlatform,
     env: &OpencodeDesktopEnv,
-) -> Vec<PathBuf> {
-    let Some(user_data_dir) = (match platform {
+) -> Option<PathBuf> {
+    match platform {
         DesktopPlatform::Macos => env
             .home
             .as_ref()
@@ -769,7 +828,14 @@ fn opencode_desktop_settings_paths(
             .xdg_config_home
             .clone()
             .or_else(|| env.home.as_ref().map(|home| home.join(".config"))),
-    }) else {
+    }
+}
+
+fn opencode_desktop_settings_paths(
+    platform: DesktopPlatform,
+    env: &OpencodeDesktopEnv,
+) -> Vec<PathBuf> {
+    let Some(user_data_dir) = opencode_desktop_user_data_dir(platform, env) else {
         return Vec::new();
     };
 
@@ -1582,10 +1648,11 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 #[cfg(test)]
 mod tests {
     use super::{
-        opencode_desktop_detected_for_env, parse_omp_models_output, parse_opencode_models_output,
-        parse_pi_models_output, pick_first_line, prepare_embedding_probe_options,
-        probe_opencode_models, run_bounded_binary, windows_opencode_candidates, DesktopPlatform,
-        ModelCatalogs, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
+        desktop_bundled_cli_candidates, opencode_desktop_detected_for_env, parse_omp_models_output,
+        parse_opencode_models_output, parse_pi_models_output, pick_first_line,
+        prepare_embedding_probe_options, probe_opencode_models, run_bounded_binary,
+        windows_opencode_candidates, DesktopPlatform, ModelCatalogs, OpencodeDesktopEnv,
+        OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::path::{Path, PathBuf};
@@ -1825,6 +1892,47 @@ mod tests {
             Some("probe-opencode 9.9.9"),
             "run_bounded_binary must launch a .cmd shim directly (got {out:?})"
         );
+    }
+
+    #[test]
+    fn desktop_bundled_cli_candidates_finds_newest_sidecar_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = test_desktop_env(dir.path());
+        let cli_root = env
+            .appdata
+            .as_ref()
+            .expect("appdata")
+            .join(OPENCODE_DESKTOP_APP_IDS[0])
+            .join("cli");
+        let older = cli_root.join("2.2.9-x64").join("opencode-cli.exe");
+        // Lexical order puts 2.2.9 before 2.2.10; numeric ordering must not.
+        let newer = cli_root.join("2.2.10-x64").join("opencode-cli.exe");
+        write_file(older.clone());
+        write_file(newer.clone());
+
+        let list = desktop_bundled_cli_candidates(DesktopPlatform::Windows, &env);
+        assert_eq!(
+            list,
+            vec![
+                newer.to_string_lossy().into_owned(),
+                older.to_string_lossy().into_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_bundled_cli_candidates_skips_versions_without_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = test_desktop_env(dir.path());
+        let cli_root = env
+            .appdata
+            .as_ref()
+            .expect("appdata")
+            .join(OPENCODE_DESKTOP_APP_IDS[0])
+            .join("cli");
+        std::fs::create_dir_all(cli_root.join("3.0.0-x64")).expect("create empty version dir");
+
+        assert!(desktop_bundled_cli_candidates(DesktopPlatform::Windows, &env).is_empty());
     }
 
     #[test]
