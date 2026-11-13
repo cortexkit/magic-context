@@ -82,7 +82,9 @@ pub struct Applied {
 /// Magic Context's frames by name (`dreamer/classify-memories.input`) in
 /// place of their sample shape, and `values` fills the documents' runtime
 /// markers (`projectIdentity`). Text that still holds a marker afterwards is
-/// refused: a model is never sent an unfilled slot.
+/// refused: a model is never sent an unfilled slot. The check runs before
+/// the inputs go in, so a memory whose own text contains `⟦` is sent as
+/// written.
 pub(crate) fn task_prompts(
     profile: &Profile,
     task_id: &str,
@@ -90,18 +92,24 @@ pub(crate) fn task_prompts(
     inputs: &[(&str, &str)],
     values: &[(&str, &str)],
 ) -> Result<(String, String), String> {
-    // A frame's text ends with one newline that is not part of its text.
-    let texts: Vec<String> = inputs
+    // Each frame first holds a placeholder no profile text or frame can
+    // contain (a private-use character), replaced by the real input once
+    // the markers are checked. A frame's text ends with one newline that is
+    // not part of its text.
+    let placeholders: Vec<String> = (0..inputs.len())
+        .map(|index| format!("\u{E000}input {index}\u{E000}"))
+        .collect();
+    let slots: Vec<String> = placeholders
         .iter()
-        .map(|(_, text)| format!("{}\n", text.strip_suffix('\n').unwrap_or(text)))
+        .map(|placeholder| format!("{placeholder}\n"))
         .collect();
     let mut frames: Vec<(&str, &str)> = FRAMES.to_vec();
-    for ((name, _), text) in inputs.iter().zip(&texts) {
+    for ((name, _), slot_text) in inputs.iter().zip(&slots) {
         let slot = frames
             .iter_mut()
             .find(|(frame, _)| frame == name)
             .ok_or_else(|| format!("no frame {name}"))?;
-        slot.1 = text;
+        slot.1 = slot_text;
     }
     let fill = |document: String| -> Result<String, String> {
         let mut text =
@@ -109,13 +117,17 @@ pub(crate) fn task_prompts(
         for (name, value) in values {
             text = text.replace(&format!("⟦{name}⟧"), value);
         }
-        match text.find('⟦') {
-            Some(at) => {
-                let marker: String = text[at..].chars().take_while(|c| *c != '⟧').collect();
-                Err(format!("{document}: {marker}⟧ is not filled"))
-            }
-            None => Ok(text),
+        if let Some(at) = text.find('⟦') {
+            let marker: String = text[at..].chars().take_while(|c| *c != '⟧').collect();
+            return Err(format!("{document}: {marker}⟧ is not filled"));
         }
+        for ((_, input), placeholder) in inputs.iter().zip(&placeholders) {
+            text = text.replace(
+                placeholder.as_str(),
+                input.strip_suffix('\n').unwrap_or(input),
+            );
+        }
+        Ok(text)
     };
     Ok((
         fill(format!("dreamer/{task_id}/system"))?,

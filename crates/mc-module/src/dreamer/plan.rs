@@ -13,10 +13,10 @@
 //! A runner fetches each item of a plan itself, under the child's scope, and
 //! freezes what it fetched. Before that it checks the plan's composition:
 //! every provider the items name, with the tools each serves, in canonical
-//! order, and the composition's digest. Both runners refuse a plan without
-//! them, and refuse one whose provider set differs from the items'.
-//! ck-mc learns AFT's tools by fetching the same catalog first, under the
-//! same scope ([`reader_tools`] checks that answer).
+//! order, and the composition's digest. The Agent Runner and Broca both refuse
+//! a plan without them, and refuse one whose provider set differs from the
+//! items'. This module learns AFT's tools by fetching the same catalog first,
+//! under the same scope ([`reader_tools`] checks that answer).
 
 use cortexkit_role_tool_provider::catalog::{composition_digest, CatalogAnswer};
 use serde_json::{json, Value};
@@ -112,7 +112,7 @@ pub fn plan(tools: &[ReaderTool], module_id: &str, system: &str) -> Result<Value
     }))
 }
 
-/// The composition both runners check: providers sorted by name, each one's
+/// The composition the Agent Runner and Broca check: providers sorted by name, each one's
 /// tools sorted by name with their capabilities sorted, and no repeats.
 /// Magic Context is listed with no tools, since its item is text only.
 fn composition(tools: &[ReaderTool], module_id: &str) -> Result<Value, String> {

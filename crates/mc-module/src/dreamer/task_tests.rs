@@ -64,3 +64,21 @@ fn an_unfilled_marker_or_an_unknown_frame_is_refused() {
     .unwrap_err();
     assert_eq!(error, "no frame dreamer/nope");
 }
+
+/// A memory's own text may contain the marker brackets; it is input, not a
+/// slot, so it goes to the model as written instead of failing every run.
+#[test]
+fn input_text_with_marker_brackets_is_sent_as_written() {
+    let profile = prompt_profile(None).unwrap();
+    let memory = "[9] NAMING (current: importance=50 scope=project shareable=false)\nFrames use ⟦mc:…⟧ markers; ⟦projectIdentity⟧ is filled at render.";
+    let (_, user) = task_prompts(
+        &profile,
+        "swe:classify-memories",
+        "user",
+        &[(INPUT, memory)],
+        &[("projectIdentity", "pj-test")],
+    )
+    .unwrap();
+    assert!(user.contains(memory), "{user}");
+    assert!(!user.contains('\u{E000}'));
+}

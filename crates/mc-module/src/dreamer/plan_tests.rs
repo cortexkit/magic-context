@@ -61,7 +61,8 @@ fn an_empty_catalog_is_refused() {
     assert!(reader_tools(&answer(Vec::new())).is_err());
 }
 
-/// The shape core sends (`worker-plans-1112`) and both runners check: items
+/// The shape Prefrontal core's worker plans use, which the Agent Runner and
+/// Broca check: items
 /// as written, providers and tools in canonical order, and a digest of the
 /// composition exactly as sent.
 #[test]
@@ -101,8 +102,8 @@ fn the_plan_has_the_shape_runners_admit() {
     assert_eq!(plan["step_transform_items"], json!([]));
 }
 
-/// The composition names exactly the providers the items name, which both
-/// runners require.
+/// The composition names exactly the providers the items name, which the
+/// Agent Runner and Broca both require.
 #[test]
 fn the_composition_names_exactly_the_items_providers() {
     let plan = plan(&[reader("read", &[])], "magic-context", "system").unwrap();

@@ -74,7 +74,8 @@ pub struct DreamDemand {
     pub reads_code: bool,
     /// The most model steps one message of the task may take. A task without
     /// tools answers in one; a code-reading task needs a step after each
-    /// round of reads. The bounds are the 0.49 dreamer's own: 60 for mapping
+    /// round of reads. The bounds are the ones the Magic Context plugin's
+    /// dreamer agents ran with, which held a batch of lookups: 60 for mapping
     /// and verifying a batch, 40 for one primer.
     pub max_steps: u64,
 }
