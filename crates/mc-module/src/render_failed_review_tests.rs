@@ -249,6 +249,166 @@ async fn render_failed_review_excluded_part_frees_no_tokens_and_logs_once() {
     assert!(!session.queued.contains(&key));
 }
 
+fn lined_up_output_fixture() -> (Session, Client, Settings) {
+    let (mut session, client, _, _, settings) = fixture();
+    let mut old = output_part("p", 2);
+    if let PartBody::Tool(tool) = &mut old.body {
+        tool.output_bytes = Some(160_000);
+    }
+    let small = |id: &str, tag| {
+        let mut part = output_part(id, tag);
+        if let PartBody::Tool(tool) = &mut part.body {
+            tool.output_bytes = Some(100);
+        }
+        part
+    };
+    let entries = vec![
+        text(1, "task"),
+        Entry::new(2, "old", Role::Assistant, 2, vec![old]),
+        Entry::new(3, "call-one", Role::Assistant, 3, vec![small("q1", 3)]),
+        text(4, "turn-one"),
+        Entry::new(5, "call-two", Role::Assistant, 5, vec![small("q2", 5)]),
+        text(6, "turn-two"),
+        Entry::new(7, "call-three", Role::Assistant, 7, vec![small("q3", 7)]),
+        text(8, "turn-three"),
+    ];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    (session, client, settings)
+}
+
+#[tokio::test]
+async fn render_failed_review_first_crossing_counts_renderable_lined_up_relief() {
+    let (mut session, client, settings) = lined_up_output_fixture();
+    session.conditions.last_prompt_tokens = Some(70_000);
+    assert_eq!(session.reclaim_bookmark, 0);
+    let (candidate, freed) = session.build(&settings, None, false, None);
+    assert!(
+        candidate.is_none(),
+        "the age sweep landed on its first sighting"
+    );
+    assert_eq!(
+        session.reclaim_bookmark, 3,
+        "the old output was not lined up"
+    );
+    assert_eq!(
+        freed, 40_004,
+        "the first crossing lost the prospective output relief"
+    );
+    session
+        .ask_for_keep_if_short(&client, &settings, freed)
+        .await;
+    assert!(
+        !session.keep_requested,
+        "lined-up relief should avoid a premature ctx_keep request"
+    );
+}
+
+#[tokio::test]
+async fn render_failed_review_banned_lined_up_output_counts_no_relief() {
+    let (mut session, client, settings) = lined_up_output_fixture();
+    // A late report still establishes the permanent message ban without
+    // granting a fresh recovery for the session's current, unedited history.
+    let mut request = notice(&session, 1, newest(&client));
+    request.conditions.last_prompt_tokens = Some(60_000);
+    request.events.push(Event::ViewRefused {
+        version: 1,
+        refusal: serde_json::from_value(json!({"code":"render_failed", "mid":"old"})).unwrap(),
+    });
+    session.notice(&client, &settings, request).await;
+    assert_eq!(session.reclaim_bookmark, 0);
+    session.conditions.last_prompt_tokens = Some(70_000);
+    let (candidate, freed) = session.build(&settings, None, false, None);
+    assert!(candidate.is_none());
+    assert_eq!(
+        session.reclaim_bookmark, 3,
+        "the test must actually line up the banned old output"
+    );
+    assert_eq!(
+        freed, 0,
+        "a lined-up drop in a banned message was counted as relief"
+    );
+    session
+        .ask_for_keep_if_short(&client, &settings, freed)
+        .await;
+    assert!(
+        session.keep_requested,
+        "unrenderable work must not suppress a needed ctx_keep request"
+    );
+}
+
+#[tokio::test]
+async fn render_failed_review_unconfirmed_recovery_blocks_a_second_build_and_keeps_its_retry_guard()
+{
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = vec![text(1, "old"), text(2, "queued"), text(3, "tail")];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    session.conditions.last_prompt_tokens = Some(20_000);
+    let view = session.seal_unchecked(vec![EditOp::Replace {
+        mid: "old".into(),
+        part: "p".into(),
+        field: "text".into(),
+        value: json!("trimmed"),
+        expect: session.index.entries()[0].parts[0].digest.clone(),
+    }]);
+    session.accept(view.clone());
+    *client.fail_apply.lock().unwrap() = true;
+    let body = json!({"code":"render_failed", "mid":"old"});
+    let request = failure(&session, &client, 1, &view, body.clone());
+    session.notice(&client, &settings, request).await;
+    *client.fail_apply.lock().unwrap() = false;
+    let recovery = session
+        .build(&settings, None, true, None)
+        .0
+        .expect("retry the unreceived recovery");
+    // Acceptance records the candidate before handover. Deliberately do not
+    // call runner_holds: this is the saved state while its answer is pending.
+    session.accept(recovery.clone());
+    let offers = offered(&client).len();
+    let (second, freed) = session.build(&settings, None, true, None);
+    assert!(
+        second.is_none(),
+        "an unconfirmed recovery allowed another forced view: {second:?}"
+    );
+    assert_eq!(freed, 0);
+    assert!(
+        session.seal(Vec::new(), &[]).is_none(),
+        "sealing bypassed the pending recovery guard"
+    );
+    session.queued.insert(("queued".into(), "p".into()));
+    let mut ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    ride.applied_view = Some(view.applied());
+    ride.request_tokens = Some(100_000);
+    assert!(
+        session.ride(&settings, &ride).is_none(),
+        "a ride bypassed the pending recovery guard"
+    );
+    assert_eq!(session.version, recovery.version);
+    assert_eq!(
+        session.render_failed.recovery(),
+        (true, Some(recovery.version))
+    );
+    assert!(session.queued.contains(&("queued".into(), "p".into())));
+
+    let request = failure(&session, &client, 2, &recovery, body);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        session.latest.as_ref(),
+        Some(&recovery),
+        "the late failure started another immediate recovery"
+    );
+    assert_eq!(offered(&client).len(), offers);
+    assert_eq!(
+        session.render_failed.recovery(),
+        (false, Some(recovery.version))
+    );
+}
+
 /// A runner whose state went back applies an older view than ck-mc's latest
 /// and reports that it cannot render it. `take_render_failures` compares the
 /// report with `latest` before `adopt_runner_view` replaces `latest` with the

@@ -4222,6 +4222,14 @@ impl Session {
         keep: Option<&BTreeSet<lanes::PartKey>>,
         flush: bool,
     ) -> (Option<View>, u64) {
+        // The recovery is saved before handover. Until the runner holds it,
+        // another build must not spend the same immediate attempt again.
+        if self.recovery_in_flight() {
+            if let Some(kept) = keep {
+                self.pending_keep = Some(kept.clone());
+            }
+            return (None, 0);
+        }
         self.next_flush = flush;
         let _timing = crate::notice_cost_timing::span("build.total");
         if !self.index_ready {
@@ -4453,6 +4461,25 @@ impl Session {
         } else {
             0
         };
+        // The age sweep only drops on the pass after the one that sees an
+        // output far behind, so the first pass over the threshold frees
+        // little by design. What it has lined up for the next pass counts as
+        // relief too, or every session would be asked for ctx_keep on its
+        // first crossing.
+        let lined_up: Vec<_> = lanes::age_sweep(
+            &context,
+            bookmark.max(self.reclaim_bookmark),
+            notice_bookmark.max(notice_reclaim_bookmark),
+            cutoff,
+        )
+        .into_iter()
+        .filter(|(key, _)| !covered.contains(key))
+        .collect();
+        let (lined_up_ops, lined_up_covered) = lanes::drop_ops(&context, &lined_up);
+        let renderable_covered = self.renderable_covered(&ops, &covered);
+        let renderable_lined_up = self.renderable_covered(&lined_up_ops, &lined_up_covered);
+        let freed = freed_tokens(&context, &renderable_covered)
+            + freed_tokens(&context, &renderable_lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
         self.next_notice_reclaim_bookmark = self
             .notice_keep
@@ -4478,24 +4505,7 @@ impl Session {
         };
         ops.extend(history);
         drop(lanes_timing);
-        // Credit only reductions the sealed candidate actually carries, not
-        // excluded operations or work merely lined up for a later pass.
-        let rendered = self.rendered_view(self.latest.as_ref());
-        let (before, _) = self.served_costs(
-            rendered
-                .iter()
-                .flat_map(|view| &view.edits)
-                .map(|edit| &edit.op),
-        );
-        let view = self.seal(ops, &covered);
-        let freed = view.as_ref().map_or(0, |view| {
-            let (after, _) = self.served_costs(view.edits.iter().map(|edit| &edit.op));
-            before
-                .iter()
-                .map(|(key, tokens)| tokens.saturating_sub(after.get(key).copied().unwrap_or(0)))
-                .sum()
-        });
-        (view, freed)
+        (self.seal(ops, &covered), freed)
     }
 
     /// Commands and rebuilds use the same tail boundary, so queued work is
@@ -4526,24 +4536,13 @@ impl Session {
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
     fn seal(&mut self, mut ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+        if self.recovery_in_flight() {
+            return None;
+        }
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
         ops.retain(|op| !self.render_failed.excludes(op));
-        let covered: Vec<_> = covered
-            .iter()
-            .filter(|(mid, part)| {
-                ops.iter().any(|op| match op {
-                    EditOp::Drop { mid: m, part: p } => {
-                        m == mid && p.as_ref().is_none_or(|p| p == part)
-                    }
-                    EditOp::Replace {
-                        mid: m, part: p, ..
-                    } => m == mid && p == part,
-                    _ => false,
-                })
-            })
-            .cloned()
-            .collect();
+        let covered = self.renderable_covered(&ops, covered);
         let retire = retired_history(self.summaries.is_empty(), &ops);
         let full = self.with_replaced_outputs(&ops);
         let built = view_builder::next_view_cached(

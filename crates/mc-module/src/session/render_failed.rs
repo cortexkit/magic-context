@@ -43,7 +43,7 @@ impl State {
 
     pub(super) fn recorded(&mut self, view: &View) {
         if self.repair_pending {
-            self.retry_version = Some(view.version);
+            self.retry_version.get_or_insert(view.version);
         } else if !self.same_failed_edits(view) {
             // Only changed edits end the retry chain. A new version alone
             // cannot make a host render the same failed operations.
@@ -74,6 +74,43 @@ fn edit_fingerprint(view: &View) -> String {
 }
 
 impl Session {
+    pub(super) fn recovery_in_flight(&self) -> bool {
+        self.render_failed.repair_pending
+            && self.render_failed.retry_version.is_some_and(|version| {
+                self.unconfirmed
+                    .iter()
+                    .any(|pending| pending.view.version == version)
+            })
+    }
+
+    /// Relief estimates and sealing must agree about which requested or
+    /// prospective operations the runner can render. A banned replacement
+    /// gives no relief, but a whole-part drop may still be allowed.
+    pub(super) fn renderable_covered(
+        &self,
+        ops: &[EditOp],
+        covered: &[lanes::PartKey],
+    ) -> Vec<lanes::PartKey> {
+        covered
+            .iter()
+            .filter(|(mid, part)| {
+                ops.iter().any(|op| {
+                    !self.render_failed.excludes(op)
+                        && match op {
+                            EditOp::Drop { mid: m, part: p } => {
+                                m == mid && p.as_ref().is_none_or(|p| p == part)
+                            }
+                            EditOp::Replace {
+                                mid: m, part: p, ..
+                            } => m == mid && p == part,
+                            _ => false,
+                        }
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Record rendering failures without treating an accepted view as refused.
     pub(super) fn take_render_failures(&mut self, events: &[Event]) {
         // Every report must inspect the same transcript. Resetting the index
