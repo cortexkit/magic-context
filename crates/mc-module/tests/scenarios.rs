@@ -2448,10 +2448,10 @@ async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another()
     runner.play(&steps).await;
     assert_clean(&runner);
     let log = runner.provider().client.routing.lock().unwrap();
-    // Summaries are picked as `mc_summary` on the session's own runner, and
+    // Summaries are picked as `magic-context.summary` on the session's own runner, and
     // the second select leaves the failed model out.
     assert!(log.selects.len() >= 2, "{} selects", log.selects.len());
-    assert_eq!(log.selects[0].consumer, "mc_summary");
+    assert_eq!(log.selects[0].consumer, "magic-context.summary");
     assert_eq!(log.selects[0].runners, Some(vec!["mock-runner".to_owned()]));
     assert_eq!(
         log.selects[1].exclude,

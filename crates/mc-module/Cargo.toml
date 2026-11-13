@@ -45,7 +45,7 @@ cortexkit-role-tool-provider = "=0.15.6"
 cortexkit-role-step-transform-provider = "=0.5.0"
 # Routing picks a summarizer model the session's own runner can run; ck-mc
 # has no model chain of its own and never falls back to the session's model.
-cortexkit-role-routing = "=0.7.16"
+cortexkit-role-routing = "=0.7.21"
 # A session moves between machines through the agent-data/v1 contract.
 cortexkit-role-agent-data = "=0.3.0"
 cortexkit-role-user-commands = "=0.1.0"
