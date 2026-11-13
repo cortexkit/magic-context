@@ -321,7 +321,8 @@ async fn a_full_capacity_refusal_ends_the_run_as_a_wait_with_no_failure_counted(
     let (_dir, db) = store();
     let engine = engine(1);
     let mut client = Client::new(&["p/a"], &[]);
-    // Inside the one-hour cap a routing wait has.
+    // Within the one-hour limit on how long a routing refusal's wait lasts
+    // (`MAX_ROUTING_WAIT_MS`), so the wait ends at routing's reset.
     let reset = now_ms() + 30 * 60_000;
     client.refuse = Some(crate::routing::RouteError {
         code: "no_route".into(),

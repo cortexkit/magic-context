@@ -352,8 +352,9 @@ async fn waits_charging_nothing(
         .until_ms
 }
 
-/// While the wait holds no summary starts and the held drops land; the
-/// first trigger once it has ended starts a run.
+/// While the wait holds, no summary starts, and the queued `ctx_reduce`
+/// drops that were held for the summary land in a rebuild instead; the
+/// first trigger once the wait has ended starts a run.
 fn holds_until(session: &mut Session, settings: &Settings, until: i64) {
     let waiting = session.account_wait.as_ref().unwrap();
     assert!(waiting.holds(until - 1));
