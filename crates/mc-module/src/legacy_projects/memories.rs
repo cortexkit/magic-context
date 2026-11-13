@@ -16,9 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::types::Value;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
-use super::store::{insert_copy, log, shape, Row, Table};
+use super::store::{insert_copy, log, row_key, run, shape, table_exists, Row, Table};
 use crate::context_migrations::LIVE;
 use crate::memory_writes::normalized_hash;
 
@@ -41,14 +41,74 @@ fn memories_table(conn: &Connection) -> rusqlite::Result<Table> {
     shape(conn, "memories", "owner_id", None)
 }
 
-/// The project's memories at a key, by id.
-pub(super) fn of(conn: &Connection, owner: &str) -> rusqlite::Result<Vec<Row>> {
+/// The next `limit` memories of the project at a key, by id.
+pub(super) fn batch(conn: &Connection, owner: &str, limit: usize) -> rusqlite::Result<Vec<Row>> {
     super::store::rows(
         conn,
         &memories_table(conn)?,
-        "level = 'project' AND owner_id = ? ORDER BY id",
-        &[Value::Text(owner.to_owned())],
+        "level = 'project' AND owner_id = ? ORDER BY id LIMIT ?",
+        &[Value::Text(owner.to_owned()), Value::Integer(limit as i64)],
     )
+}
+
+/// What `to` held of its own before this pool reached it, which the 0.49
+/// merge's review mark depends on: its memories that didn't come from
+/// `from`, whatever earlier batches of this pool moved or copied there.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Own {
+    categories: BTreeSet<String>,
+    /// The normalized text of one own memory per category and stored hash.
+    texts: BTreeMap<(String, String), String>,
+}
+
+impl Own {
+    pub(super) fn load(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Self> {
+        let arrived: BTreeSet<i64> = conn
+            .prepare_cached(
+                "SELECT CASE WHEN action = 'copied' THEN CAST(target_row_id AS INTEGER)
+                             ELSE CAST(row_id AS INTEGER) END
+                   FROM identity_merge_log
+                  WHERE from_identity = ?1 AND to_identity = ?2 AND table_name = 'memories'",
+            )?
+            .query_map(params![from, to], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let rows: Vec<(i64, String, String, String)> = conn
+            .prepare_cached(
+                "SELECT id, category, normalized_hash, content FROM memories
+                  WHERE level = 'project' AND owner_id = ?1 ORDER BY id",
+            )?
+            .query_map([to], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut own = Self::default();
+        for (id, category, hash, content) in rows {
+            if arrived.contains(&id) {
+                continue;
+            }
+            own.categories.insert(category.clone());
+            own.texts
+                .entry((category, hash))
+                .or_insert_with(|| normalized_hash(&content));
+        }
+        Ok(own)
+    }
+
+    /// Whether the 0.49 merge would mark `row` for review: the target had
+    /// no memory with its text, but had memories of that category, as the
+    /// 0.49 merge's dry run (`auditIdentityMerge`) decided before any row
+    /// changed.
+    fn needs_review(&self, row: &Row) -> bool {
+        let (Some(category), Some(hash)) = (row.text("category"), row.text("normalized_hash"))
+        else {
+            return false;
+        };
+        if !self.categories.contains(category) {
+            return false;
+        }
+        let text = normalized_hash(row.text("content").unwrap_or_default());
+        self.texts.get(&(category.to_owned(), hash.to_owned())) != Some(&text)
+    }
 }
 
 fn is_live(row: &Row) -> bool {
@@ -86,48 +146,6 @@ fn live_duplicate(
         ],
     )?;
     Ok(found.into_iter().next())
-}
-
-/// The memories the 0.49 merge marked for review: no duplicate in the
-/// target, but the target already has memories of that category. Decided
-/// before any row changes, as the 0.49 merge's dry run
-/// (`auditIdentityMerge`) decided it.
-pub(super) fn review(
-    conn: &Connection,
-    sources: &[Row],
-    to: &str,
-) -> rusqlite::Result<BTreeSet<i64>> {
-    let table = memories_table(conn)?;
-    let mut marked = BTreeSet::new();
-    for row in sources {
-        let duplicate = super::store::rows(
-            conn,
-            &table,
-            "level = 'project' AND owner_id = ? AND category = ? AND normalized_hash = ? LIMIT 1",
-            &[
-                Value::Text(to.to_owned()),
-                row.get("category").clone(),
-                row.get("normalized_hash").clone(),
-            ],
-        )?;
-        if duplicate.first().is_some_and(|found| same_text(found, row)) {
-            continue;
-        }
-        let same_category: bool = conn
-            .query_row(
-                "SELECT 1 FROM memories WHERE level = 'project' AND owner_id = ?1 AND category = ?2 LIMIT 1",
-                params![to, row.text("category")],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if same_category {
-            if let Some(id) = row.int("id") {
-                marked.insert(id);
-            }
-        }
-    }
-    Ok(marked)
 }
 
 /// The 0.49 plugin's `inheritMemorySafety`: one safety-critical source makes
@@ -207,7 +225,8 @@ fn absorb(
             || survivor.int("safety_critical") != safety
             || survivor.text("scope") != source.text("scope")
             || survivor.int("shareable").unwrap_or(0) != source.int("shareable").unwrap_or(0);
-        conn.execute(
+        run(
+            conn,
             "UPDATE memories SET scope = ?1, shareable = ?2, classified_at = ?3,
                     updated_at = CASE WHEN ?4 THEN ?5 ELSE updated_at END
               WHERE id = ?6",
@@ -221,7 +240,8 @@ fn absorb(
             ],
         )?;
     }
-    conn.execute(
+    run(
+        conn,
         "UPDATE memories SET safety_critical = ?1, importance = ?2 WHERE id = ?3",
         params![safety, importance, target],
     )?;
@@ -231,7 +251,8 @@ fn absorb(
             || source.int("mural_cue_at").unwrap_or(0) > survivor.int("mural_cue_at").unwrap_or(0))
     {
         // A mural cue is a render cache of the text, so copying it is no edit.
-        conn.execute(
+        run(
+            conn,
             "UPDATE memories SET mural_cue = ?1, mural_cue_hash = ?2, mural_cue_at = ?3,
                     mural_cue_rejection_count = ?4
               WHERE id = ?5",
@@ -244,7 +265,8 @@ fn absorb(
             ],
         )?;
     }
-    conn.execute(
+    run(
+        conn,
         "INSERT INTO memory_verifications (memory_id, file_path, verified_at, mapped_at, mapping_origin)
          SELECT ?1, file_path, verified_at, mapped_at, mapping_origin
            FROM memory_verifications WHERE memory_id = ?2
@@ -264,7 +286,8 @@ fn absorb(
         // A permanent survivor stays permanent: the 0.49 merge set any
         // survivor of an active source to active, which would undo a
         // person's choice to keep a memory for good.
-        conn.execute(
+        run(
+            conn,
             "UPDATE memories
                 SET seen_count = ?1,
                     status = CASE WHEN status = 'permanent' THEN status
@@ -279,7 +302,8 @@ fn absorb(
             params![merged_seen, source.text("status"), now, target],
         )?;
     }
-    conn.execute(
+    run(
+        conn,
         "UPDATE memories
             SET first_seen_at = MIN(first_seen_at, ?1), last_seen_at = MAX(last_seen_at, ?2),
                 retrieval_count = COALESCE(retrieval_count, 0) + ?3, merged_from = ?4
@@ -305,7 +329,8 @@ fn mark_review(
 ) -> rusqlite::Result<()> {
     let base = "CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END";
     match original_hash {
-        Some(hash) => conn.execute(
+        Some(hash) => run(
+            conn,
             &format!(
                 "UPDATE memories SET metadata_json = json_set({base},
                      '$.identity_merge_original_hash', ?1, '$.identity_merge_review', ?2)
@@ -313,7 +338,8 @@ fn mark_review(
             ),
             params![hash, from, id],
         ),
-        None => conn.execute(
+        None => run(
+            conn,
             &format!(
                 "UPDATE memories SET metadata_json = json_set({base}, '$.identity_merge_review', ?1)
                   WHERE id = ?2"
@@ -333,15 +359,21 @@ fn conflict_hash(row: &Row, id: i64) -> String {
     )
 }
 
-/// Move every memory of `from` to `to`, the 0.49 merge's `mergeMemoryRow`.
-/// Returns how many memories changed.
-pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rusqlite::Result<u64> {
+/// Move `sources`, memories of `from`, to `to`: the 0.49 merge's
+/// `mergeMemoryRow`. `own` is what `to` held before any memory of `from`
+/// reached it, which decides the review mark.
+pub(super) fn move_some(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+    sources: &[Row],
+    own: &Own,
+    now: i64,
+) -> rusqlite::Result<()> {
     let table = memories_table(conn)?;
-    let sources = of(conn, from)?;
-    let marked = review(conn, &sources, to)?;
-    for source in &sources {
+    for source in sources {
         let id = source.int("id").expect("a memory has an id");
-        let mut flagged = marked.contains(&id);
+        let mut flagged = own.needs_review(source);
         let duplicate = if is_live(source) {
             live_duplicate(conn, &table, source, to)?
         } else {
@@ -350,7 +382,8 @@ pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rus
         match duplicate {
             Some(survivor) if same_text(&survivor, source) => {
                 absorb(conn, &survivor, source, id, id, now)?;
-                conn.execute(
+                run(
+                    conn,
                     "DELETE FROM memory_verifications WHERE memory_id = ?1",
                     [id],
                 )?;
@@ -358,7 +391,8 @@ pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rus
                 // Archived and pointing at the survivor, the duplicate is no
                 // longer the live claim: that is an edit. It moves with the
                 // rest, so the project's history keeps it.
-                conn.execute(
+                run(
+                    conn,
                     "UPDATE memories
                         SET status = 'archived', superseded_by_memory_id = ?1, updated_at = ?2,
                             owner_id = ?3,
@@ -380,7 +414,8 @@ pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rus
                 continue;
             }
             Some(_) => {
-                conn.execute(
+                run(
+                    conn,
                     "UPDATE memories SET normalized_hash = ?1 WHERE id = ?2",
                     params![conflict_hash(source, id), id],
                 )?;
@@ -394,7 +429,8 @@ pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rus
         }
         // Moving a memory to its project's new id doesn't change the
         // memory, so `updated_at` stays.
-        conn.execute(
+        run(
+            conn,
             "UPDATE memories
                 SET owner_id = ?1,
                     source_project_id = CASE WHEN source_project_id = ?2 THEN ?1
@@ -413,51 +449,66 @@ pub(super) fn move_all(conn: &Connection, from: &str, to: &str, now: i64) -> rus
             now,
         )?;
     }
-    Ok(sources.len() as u64)
+    Ok(())
 }
 
-/// What copying a legacy key's memories to one more project made.
-#[derive(Debug, Default)]
-pub(super) struct Copied {
-    /// Rows copied, per table.
-    pub rows: BTreeMap<String, u64>,
-    /// Each source memory's copy.
-    pub ids: BTreeMap<i64, i64>,
+/// One memory copied, and the references its copy still carries from its
+/// source: they name the source's memories until those have copies too.
+pub(super) struct Made {
+    source: i64,
+    copy: i64,
+    pointers: Vec<(&'static str, i64)>,
 }
 
-/// Copy every memory of `from` to `to` as new rows, with the rows that hang
-/// off them. Each source gets a copy, so every reference between the
-/// sources can point at the copies: a copy that collides with a live memory
-/// of `to` is made archived and superseded by it, and that memory absorbs
-/// the source's history as on a move.
-pub(super) fn copy_all(
+/// The columns by which one memory points at another.
+const POINTERS: [&str; 2] = ["superseded_by_memory_id", "overrides_memory_id"];
+
+/// Copy `sources`, memories of `from`, to `to` as new rows, with the rows
+/// that hang off them. Every source gets a copy, so references between the
+/// sources can point at the copies ([`Copies::record`]): a copy that
+/// collides with a live memory of `to` is made archived and superseded by
+/// it, and that memory absorbs the source's history as on a move. Returns the
+/// rows copied per table, and each copy.
+pub(super) fn copy_some(
     conn: &Connection,
     from: &str,
     to: &str,
+    sources: &[Row],
+    own: &Own,
     now: i64,
-) -> rusqlite::Result<Copied> {
+) -> rusqlite::Result<(BTreeMap<String, u64>, Vec<Made>)> {
     let table = memories_table(conn)?;
-    let sources = of(conn, from)?;
-    let marked = review(conn, &sources, to)?;
-    let mut copied = Copied::default();
-    let mut kept_live = BTreeSet::new();
-    let moved_source_project = |row: &Row| match row.text("source_project_id") {
-        Some(project) if project == from => Value::Text(to.to_owned()),
-        _ => row.get("source_project_id").clone(),
-    };
-    for source in &sources {
+    let mut rows: BTreeMap<String, u64> = BTreeMap::new();
+    let mut made = Vec::new();
+    let children: Vec<(Table, &str)> = MEMORY_CHILDREN
+        .iter()
+        .copied()
+        .chain([("memory_verifications", "memory_id")])
+        .filter_map(|(name, column)| match table_exists(conn, name) {
+            Ok(true) => Some(shape(conn, name, column, None).map(|child| (child, column))),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<rusqlite::Result<_>>()?;
+    for source in sources {
         let id = source.int("id").expect("a memory has an id");
         let mut overrides = vec![
             ("owner_id", Value::Text(to.to_owned())),
-            ("source_project_id", moved_source_project(source)),
+            (
+                "source_project_id",
+                match source.text("source_project_id") {
+                    Some(project) if project == from => Value::Text(to.to_owned()),
+                    _ => source.get("source_project_id").clone(),
+                },
+            ),
         ];
+        let mut flagged = own.needs_review(source);
         let duplicate = if is_live(source) {
             live_duplicate(conn, &table, source, to)?
         } else {
             None
         };
         let mut review_hash = None;
-        let mut flagged = marked.contains(&id);
         let survivor = match duplicate {
             Some(survivor) if same_text(&survivor, source) => {
                 let survivor_id = survivor.int("id").expect("a memory has an id");
@@ -477,11 +528,8 @@ pub(super) fn copy_all(
         let copy: i64 = insert_copy(conn, &table, source, &overrides)?
             .parse()
             .expect("a memory copy has an integer id");
-        match &survivor {
-            Some(survivor) => absorb(conn, survivor, source, id, copy, now)?,
-            None => {
-                kept_live.insert(id);
-            }
+        if let Some(survivor) = &survivor {
+            absorb(conn, survivor, source, id, copy, now)?;
         }
         if review_hash.is_some() || flagged {
             mark_review(conn, copy, from, review_hash)?;
@@ -496,103 +544,196 @@ pub(super) fn copy_all(
             Some(&copy.to_string()),
             now,
         )?;
-        copied.ids.insert(id, copy);
-    }
-    *copied.rows.entry("memories".into()).or_default() += sources.len() as u64;
-    // A copy points at the copies of the memories its source pointed at.
-    for column in ["superseded_by_memory_id", "overrides_memory_id"] {
-        for (old, new) in &copied.ids {
-            conn.execute(
-                &format!(
-                    "UPDATE memories SET {column} = ?1
-                      WHERE {column} = ?2 AND level = 'project' AND owner_id = ?3
-                        AND id IN (SELECT value FROM json_each(?4))"
-                ),
-                params![
-                    new,
-                    old,
-                    to,
-                    serde_json::to_string(&copied.ids.values().collect::<Vec<_>>())
-                        .expect("ids serialize")
-                ],
-            )?;
-        }
-    }
-    for (name, column) in MEMORY_CHILDREN
-        .iter()
-        .copied()
-        .chain([("memory_verifications", "memory_id")])
-    {
-        if !super::store::table_exists(conn, name)? {
-            continue;
-        }
-        let child = shape(conn, name, column, None)?;
-        for (old, new) in &copied.ids {
+        *rows.entry("memories".into()).or_default() += 1;
+        made.push(Made {
+            source: id,
+            copy,
+            // A copy superseded by the survivor already points where it should.
+            pointers: POINTERS
+                .into_iter()
+                .filter(|column| !(survivor.is_some() && *column == POINTERS[0]))
+                .filter_map(|column| source.int(column).map(|pointer| (column, pointer)))
+                .collect(),
+        });
+        for (child, column) in &children {
             // A copy that collided gave its verifications to the survivor.
-            if name == "memory_verifications" && !kept_live.contains(old) {
+            if child.name == "memory_verifications" && survivor.is_some() {
                 continue;
             }
             for row in super::store::rows(
                 conn,
-                &child,
+                child,
                 &format!("\"{column}\" = ?"),
-                &[Value::Integer(*old)],
+                &[Value::Integer(id)],
             )? {
-                let key = super::store::row_key(&child, &row);
-                let made = insert_copy(
+                let key = row_key(child, &row);
+                let made = insert_copy(conn, child, &row, &[(*column, Value::Integer(copy))])?;
+                log(
                     conn,
-                    &child,
-                    &row,
-                    &[(column_name(column), Value::Integer(*new))],
+                    from,
+                    to,
+                    &child.name,
+                    &key,
+                    "copied",
+                    Some(&made),
+                    now,
                 )?;
-                log(conn, from, to, name, &key, "copied", Some(&made), now)?;
-                *copied.rows.entry(name.to_owned()).or_default() += 1;
+                *rows.entry(child.name.clone()).or_default() += 1;
             }
         }
     }
+    Ok((rows, made))
+}
+
+/// The copies of a key's memories made in one project so far, and the
+/// references among them still waiting for the copy they should name. It
+/// is read from the store once per round and kept up to date batch by
+/// batch, so a batch costs the same however many copies came before it.
+pub(super) struct Copies {
+    /// Each copied source, with its copy.
+    pub(super) map: BTreeMap<i64, i64>,
+    /// A source not copied yet, with the copies (and columns) that point at it.
+    waiting: BTreeMap<i64, Vec<(i64, &'static str)>>,
+}
+
+impl Copies {
+    /// What the log and the copies say: the log records every copy, and
+    /// a copy's reference still names a source until that source is copied.
+    pub(super) fn load(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<Self> {
+        let map: BTreeMap<i64, i64> = conn
+            .prepare_cached(
+                "SELECT CAST(row_id AS INTEGER), CAST(target_row_id AS INTEGER)
+                   FROM identity_merge_log
+                  WHERE from_identity = ?1 AND to_identity = ?2 AND table_name = 'memories'
+                    AND action = 'copied'",
+            )?
+            .query_map(params![from, to], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let made: BTreeSet<i64> = map.values().copied().collect();
+        let pointing: Vec<(i64, Option<i64>, Option<i64>)> = conn
+            .prepare_cached(
+                "SELECT id, superseded_by_memory_id, overrides_memory_id FROM memories
+                  WHERE level = 'project' AND owner_id = ?1
+                    AND (superseded_by_memory_id IS NOT NULL OR overrides_memory_id IS NOT NULL)",
+            )?
+            .query_map([to], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut copies = Self {
+            map,
+            waiting: BTreeMap::new(),
+        };
+        for (id, superseded_by, overrides) in pointing {
+            if !made.contains(&id) {
+                continue;
+            }
+            for (column, pointer) in POINTERS.into_iter().zip([superseded_by, overrides]) {
+                // A copy or a memory of `to` is where the reference should
+                // be; anything else may still be a source to copy.
+                if let Some(pointer) = pointer.filter(|pointer| !made.contains(pointer)) {
+                    copies.point(conn, id, column, pointer)?;
+                }
+            }
+        }
+        Ok(copies)
+    }
+
+    /// Point `copy`'s `column` at the copy of `source`, or wait for it.
+    fn point(
+        &mut self,
+        conn: &Connection,
+        copy: i64,
+        column: &'static str,
+        source: i64,
+    ) -> rusqlite::Result<()> {
+        match self.map.get(&source) {
+            Some(target) => {
+                run(
+                    conn,
+                    &format!("UPDATE memories SET {column} = ?1 WHERE id = ?2"),
+                    params![target, copy],
+                )?;
+            }
+            None => self.waiting.entry(source).or_default().push((copy, column)),
+        }
+        Ok(())
+    }
+
+    /// Take in one batch's copies: each now names the copies of the sources
+    /// its source named, and earlier copies waiting for one of these sources
+    /// name its copy.
+    pub(super) fn record(&mut self, conn: &Connection, made: &[Made]) -> rusqlite::Result<()> {
+        for each in made {
+            self.map.insert(each.source, each.copy);
+        }
+        for each in made {
+            for (column, pointer) in &each.pointers {
+                self.point(conn, each.copy, column, *pointer)?;
+            }
+        }
+        for each in made {
+            for (copy, column) in self.waiting.remove(&each.source).unwrap_or_default() {
+                self.point(conn, copy, column, each.source)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Copy the links between two memories whose ends both have copies in `to`
+/// now, for links that touch `batch`, the sources copied in this
+/// transaction. Returns the links copied.
+pub(super) fn copy_links(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+    batch: &[i64],
+    map: &BTreeMap<i64, i64>,
+    now: i64,
+) -> rusqlite::Result<BTreeMap<String, u64>> {
+    let mut rows: BTreeMap<String, u64> = BTreeMap::new();
+    let ids = serde_json::to_string(batch).expect("ids serialize");
     for (name, left, right) in MEMORY_LINKS {
-        if !super::store::table_exists(conn, name)? {
+        if !table_exists(conn, name)? {
             continue;
         }
         let link = shape(conn, name, left, None)?;
-        for (old, new) in &copied.ids {
-            for row in super::store::rows(
+        let candidates = super::store::rows(
+            conn,
+            &link,
+            &format!(
+                "\"{left}\" IN (SELECT value FROM json_each(?1))
+                 OR \"{right}\" IN (SELECT value FROM json_each(?1))"
+            ),
+            &[Value::Text(ids.clone())],
+        )?;
+        for row in candidates {
+            let (Some(new_left), Some(new_right)) = (
+                row.int(left).and_then(|old| map.get(&old)),
+                row.int(right).and_then(|old| map.get(&old)),
+            ) else {
+                continue;
+            };
+            let exists = conn
+                .prepare_cached(&format!(
+                    "SELECT 1 FROM {name} WHERE \"{left}\" = ?1 AND \"{right}\" = ?2"
+                ))?
+                .exists(params![new_left, new_right])?;
+            if exists {
+                continue;
+            }
+            let key = row_key(&link, &row);
+            let made = insert_copy(
                 conn,
                 &link,
-                &format!("\"{left}\" = ?"),
-                &[Value::Integer(*old)],
-            )? {
-                let Some(other) = row.int(right).and_then(|other| copied.ids.get(&other)) else {
-                    continue;
-                };
-                let key = super::store::row_key(&link, &row);
-                let made = insert_copy(
-                    conn,
-                    &link,
-                    &row,
-                    &[
-                        (column_name(left), Value::Integer(*new)),
-                        (column_name(right), Value::Integer(*other)),
-                    ],
-                )?;
-                log(conn, from, to, name, &key, "copied", Some(&made), now)?;
-                *copied.rows.entry((*name).to_owned()).or_default() += 1;
-            }
+                &row,
+                &[
+                    (*left, Value::Integer(*new_left)),
+                    (*right, Value::Integer(*new_right)),
+                ],
+            )?;
+            log(conn, from, to, name, &key, "copied", Some(&made), now)?;
+            *rows.entry((*name).to_owned()).or_default() += 1;
         }
     }
-    Ok(copied)
-}
-
-/// A child table's memory column as a `'static` override key.
-fn column_name(column: &str) -> &'static str {
-    [
-        "memory_id",
-        "source_id",
-        "successor_id",
-        "left_id",
-        "right_id",
-    ]
-    .into_iter()
-    .find(|known| *known == column)
-    .expect("a memory reference column")
+    Ok(rows)
 }

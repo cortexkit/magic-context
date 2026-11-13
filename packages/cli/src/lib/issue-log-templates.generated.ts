@@ -1067,6 +1067,7 @@ const TEMPLATE_DATA = [
 "ck-mc: summarizer run \x01 in \x01 was waiting without a reader; cancelling it failed: \x01",
 "transform: preserving detected limit \x01 and overflow recovery for outgoing model \x01",
 "v2 context omitted a content part the host would reject: type=\x01 message=\x01 reason=\x01",
+"ck-mc: no legacy project rows are left; no more legacy project rounds this run",
 "historian publish stage: stage=post-publish-drops status=started elapsed=0.0ms",
 "pass permission report failed after the request was decided; serving the pass:",
 "system-prompt-hash skipped (OpenCode internal agent: title/summary/compaction)",

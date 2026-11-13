@@ -1,6 +1,6 @@
 //! One legacy key's pool of project rows, moved to the one project that
-//! claims its folder, or copied to every project that does, in one
-//! transaction.
+//! claims its folder, or copied to every project that does, in bounded
+//! batches ([`BATCH`]), each in its own transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -143,9 +143,11 @@ fn workspaces(conn: &Connection, keys: &BTreeSet<&str>) -> rusqlite::Result<BTre
     .collect()
 }
 
-/// After rows reach a project: the 0.49 merge's alias record for the old key
-/// (`v22_identity_rekey_map`, which workspace reads follow), when the key
-/// went to one project, and a fresh git sweep for each project.
+/// After a batch of rows reaches a project: the 0.49 merge's alias record
+/// for the old key (`v22_identity_rekey_map`, which workspace reads follow)
+/// when the key goes to one project, and a fresh git sweep for each
+/// project. Every batch writes both, so a pool cut short by a restart still
+/// has them; a batch that finds nothing left writes neither.
 fn after_rows(
     conn: &Connection,
     from: &str,
@@ -185,15 +187,87 @@ fn after_rows(
     Ok(())
 }
 
-/// Move every row of `from` to `to`: the key's folders belong to `to` alone.
-/// `group` holds every legacy key moving to `to`; all of them and `to` must
-/// share one workspace, since membership moves too.
-pub(crate) fn move_pool(
+/// How many source rows one transaction handles at most: memories and rows
+/// of other tables alike, each with what hangs off it, for every target. A
+/// pool's transaction holds the shared `context.db` connection, which every
+/// live session's notices and views wait on, so a large pool is settled in
+/// batches of this size, each in its own transaction. On Linux a batch of
+/// copied memories holds the connection for tens of milliseconds, where a
+/// whole pool of 5,000 held it for about 1.4 s (`pool_size_tests`).
+pub(crate) const BATCH: usize = 100;
+
+fn add(done: &mut BTreeMap<String, Rows>, to: &str, table: &str, count: u64) {
+    if count > 0 {
+        *done
+            .entry(to.to_owned())
+            .or_default()
+            .entry(table.to_owned())
+            .or_default() += count;
+    }
+}
+
+/// What one pool's batches carry from one to the next within a round, so a
+/// batch costs the same however far along the pool is: the project-keyed
+/// tables, what each target held of its own, and each extra target's
+/// copies. It is read from the store at the round's first batch and dropped
+/// when the pool is settled, held or fails, so no batch trusts what a failed
+/// (rolled back) batch left in it.
+#[derive(Default)]
+pub(crate) struct Progress {
+    tables: Option<Vec<Table>>,
+    own: BTreeMap<String, std::sync::Arc<memories::Own>>,
+    copies: BTreeMap<String, memories::Copies>,
+}
+
+impl Progress {
+    fn tables(&mut self, conn: &Connection) -> rusqlite::Result<Vec<Table>> {
+        if self.tables.is_none() {
+            self.tables = Some(store::discover(conn)?);
+        }
+        Ok(self.tables.clone().unwrap_or_default())
+    }
+
+    fn own(
+        &mut self,
+        conn: &Connection,
+        from: &str,
+        to: &str,
+    ) -> rusqlite::Result<std::sync::Arc<memories::Own>> {
+        if !self.own.contains_key(to) {
+            let own = memories::Own::load(conn, from, to)?;
+            self.own.insert(to.to_owned(), std::sync::Arc::new(own));
+        }
+        Ok(std::sync::Arc::clone(&self.own[to]))
+    }
+
+    fn copies(
+        &mut self,
+        conn: &Connection,
+        from: &str,
+        to: &str,
+    ) -> rusqlite::Result<&mut memories::Copies> {
+        if !self.copies.contains_key(to) {
+            let loaded = memories::Copies::load(conn, from, to)?;
+            self.copies.insert(to.to_owned(), loaded);
+        }
+        Ok(self.copies.get_mut(to).expect("loaded above"))
+    }
+}
+
+/// One batch of moving the rows of `from` to `to`, whose folders belong to
+/// `to` alone: at most `limit` rows, in one transaction. `group` holds every
+/// legacy key moving to `to`; all of them and `to` must share one workspace,
+/// since membership moves too. `Nothing` means nothing is left. A batch
+/// moves whole rows, so the next one, in this process or after a restart,
+/// starts where it ended.
+pub(crate) fn move_step(
     conn: &mut Connection,
+    progress: &mut Progress,
     from: &str,
     to: &str,
     group: &BTreeSet<String>,
     now: i64,
+    limit: usize,
 ) -> rusqlite::Result<Outcome> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(key) = rust_managed(&tx, &[from, to])? {
@@ -206,36 +280,49 @@ pub(crate) fn move_pool(
     if found.len() > 1 {
         return Ok(Outcome::Held(Held::Workspaces(found)));
     }
-    let mut rows = Rows::new();
-    let moved = memories::move_all(&tx, from, to, now)?;
-    if moved > 0 {
-        rows.insert("memories".into(), moved);
+    let mut done = BTreeMap::new();
+    let mut left = limit;
+    let sources = memories::batch(&tx, from, left)?;
+    if !sources.is_empty() {
+        let own = progress.own(&tx, from, to)?;
+        memories::move_some(&tx, from, to, &sources, &own, now)?;
+        add(&mut done, to, "memories", sources.len() as u64);
+        left -= sources.len();
     }
-    for table in store::discover(&tx)? {
-        let changed = store::move_rows(&tx, &table, "1", from, to, now)?;
-        if changed > 0 {
-            rows.insert(table.name.clone(), changed);
+    for table in &progress.tables(&tx)? {
+        if left == 0 {
+            break;
         }
+        let rows = store::batch(&tx, table, "1", from, left)?;
+        for row in &rows {
+            store::move_row(&tx, table, row, from, to, now)?;
+        }
+        add(&mut done, to, &table.name, rows.len() as u64);
+        left -= rows.len();
     }
-    if rows.is_empty() {
+    if done.is_empty() {
         return Ok(Outcome::Nothing);
     }
     after_rows(&tx, from, Some(to), &[to], now)?;
     tx.commit()?;
-    Ok(Outcome::Done(BTreeMap::from([(to.to_owned(), rows)])))
+    Ok(Outcome::Done(done))
 }
 
-/// Copy the knowledge rows of `from` to every one of `targets`, which all
-/// claim the key's folders. The originals move to the first target by id,
+/// One batch of copying the knowledge rows of `from` to every one of
+/// `targets`, which all claim the key's folders: at most `limit` source
+/// rows, in one transaction. The originals move to the first target by id,
 /// keeping their ids (sync records and the rows left behind name them);
-/// every other target gets its own copies with new ids. Rows of one session
-/// stay under the key. A project registered later gets nothing: the pool is
-/// copied once, to the projects that claim the key when it is.
-pub(crate) fn copy_pool(
+/// every other target gets its own copies with new ids. A source is copied
+/// and moved in the same batch, so it is never copied twice. Rows of one
+/// session stay under the key. A project registered later gets nothing: the
+/// pool is copied once, to the projects that claim the key when it is.
+pub(crate) fn copy_step(
     conn: &mut Connection,
+    progress: &mut Progress,
     from: &str,
     targets: &BTreeSet<String>,
     now: i64,
+    limit: usize,
 ) -> rusqlite::Result<Outcome> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut keys: Vec<&str> = vec![from];
@@ -247,61 +334,74 @@ pub(crate) fn copy_pool(
     let Some(first) = ordered.next() else {
         return Ok(Outcome::Nothing);
     };
-    let tables: Vec<Table> = store::discover(&tx)?;
+    let extras: Vec<&String> = ordered.collect();
+    let mut done: BTreeMap<String, Rows> = BTreeMap::new();
+    let mut left = limit;
+    let sources = memories::batch(&tx, from, left)?;
+    if !sources.is_empty() {
+        let ids: Vec<i64> = sources.iter().filter_map(|row| row.int("id")).collect();
+        for to in &extras {
+            let own = progress.own(&tx, from, to)?;
+            // Read before this batch's copies exist, which `record` adds.
+            let copies = progress.copies(&tx, from, to)?;
+            let (copied, made) = memories::copy_some(&tx, from, to, &sources, &own, now)?;
+            copies.record(&tx, &made)?;
+            let linked = memories::copy_links(&tx, from, to, &ids, &copies.map, now)?;
+            for (table, count) in copied.into_iter().chain(linked) {
+                add(&mut done, to, &table, count);
+            }
+        }
+        let own = progress.own(&tx, from, first)?;
+        memories::move_some(&tx, from, first, &sources, &own, now)?;
+        add(&mut done, first, "memories", sources.len() as u64);
+        left -= sources.len();
+    }
+    let tables = progress.tables(&tx)?;
     let named = |list: &[&str]| -> Vec<&Table> {
         tables
             .iter()
             .filter(|table| list.contains(&table.name.as_str()))
             .collect()
     };
-    let mut done: BTreeMap<String, Rows> = BTreeMap::new();
-    for to in ordered {
-        let copied = memories::copy_all(&tx, from, to, now)?;
-        let mut rows = copied.rows;
-        for table in named(COPIED) {
-            let ids = &copied.ids;
-            let changed = store::copy_rows(
-                &tx,
-                table,
-                knowledge_filter(&table.name),
-                from,
-                to,
-                now,
-                |row: &Row| copy_adjustments(&table.name, row, to, ids),
-            )?;
-            if changed > 0 {
-                *rows.entry(table.name.clone()).or_default() += changed;
+    let knowledge: Vec<&Table> = named(COPIED).into_iter().chain(named(FIRST_ONLY)).collect();
+    for table in &knowledge {
+        if left == 0 {
+            break;
+        }
+        let rows = store::batch(&tx, table, knowledge_filter(&table.name), from, left)?;
+        if rows.is_empty() {
+            continue;
+        }
+        if COPIED.contains(&table.name.as_str()) {
+            for to in &extras {
+                // Memories come first, so a copied watermark can name the
+                // copies every memory batch before it made.
+                let ids = if table.name == "memory_embedding_watermarks" {
+                    progress.copies(&tx, from, to)?.map.clone()
+                } else {
+                    BTreeMap::new()
+                };
+                for row in &rows {
+                    let adjusted = copy_adjustments(&table.name, row, to, &ids);
+                    store::copy_row(&tx, table, row, from, to, now, adjusted)?;
+                }
+                add(&mut done, to, &table.name, rows.len() as u64);
             }
         }
-        rows.retain(|_, count| *count > 0);
-        if !rows.is_empty() {
-            done.insert(to.clone(), rows);
+        for row in &rows {
+            store::move_row(&tx, table, row, from, first, now)?;
         }
-    }
-    let mut rows = Rows::new();
-    let moved = memories::move_all(&tx, from, first, now)?;
-    if moved > 0 {
-        rows.insert("memories".into(), moved);
-    }
-    for table in named(COPIED).into_iter().chain(named(FIRST_ONLY)) {
-        let changed =
-            store::move_rows(&tx, table, knowledge_filter(&table.name), from, first, now)?;
-        if changed > 0 {
-            rows.insert(table.name.clone(), changed);
-        }
-    }
-    if !rows.is_empty() {
-        done.insert(first.clone(), rows);
+        add(&mut done, first, &table.name, rows.len() as u64);
+        left -= rows.len();
     }
     if done.is_empty() {
         return Ok(Outcome::Nothing);
     }
-    let reached: Vec<&str> = done.keys().map(String::as_str).collect();
+    let reached: Vec<&str> = targets.iter().map(String::as_str).collect();
     after_rows(&tx, from, None, &reached, now)?;
     tx.commit()?;
     Ok(Outcome::Done(done))
 }
-
 /// What a copied row changes besides its project, so the copy stays valid
 /// beside the original: a journal entry's decision key is unique, and an
 /// embedding watermark names memory ids, which are the copies' now.

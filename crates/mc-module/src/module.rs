@@ -111,6 +111,9 @@ struct Inner<C> {
     /// The dreamer, which runs scheduled memory tasks for the projects this
     /// process has sessions of. `None` without `context.db`.
     dreamer: Option<Arc<crate::dreamer::engine::Engine>>,
+    /// Wakes the rounds that move a 0.49 store's project rows when a Setup
+    /// names a project id this process hasn't seen.
+    legacy_wake: Arc<crate::legacy_projects::Wake>,
 }
 
 enum Job {
@@ -261,6 +264,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 session_projects,
                 active_projects: Mutex::new(HashMap::new()),
                 dreamer,
+                legacy_wake: Arc::default(),
             }),
         }
     }
@@ -491,6 +495,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .app_read
                 .session_seen(&route.session, project, &request.preset);
             self.touch(&route.session);
+            self.inner.legacy_wake.saw(&project.id);
         }
         // The epoch is recorded and the Setup queued under one lock, the one
         // a notice or ride is checked and queued under. So no statement
@@ -861,9 +866,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             return;
         };
         let client = Arc::clone(&self.inner.client);
+        let wake = Arc::clone(&self.inner.legacy_wake);
         tokio::spawn(async move {
-            crate::legacy_projects::run(client.as_ref(), db).await;
+            crate::legacy_projects::run(client.as_ref(), db, wake).await;
         });
+    }
+
+    /// What wakes the legacy project rounds, for the tests.
+    #[cfg(test)]
+    pub(crate) fn legacy_wake(&self) -> &Arc<crate::legacy_projects::Wake> {
+        &self.inner.legacy_wake
     }
 
     /// Append new memories' sync records to Engram in the background.

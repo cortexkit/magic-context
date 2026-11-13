@@ -224,7 +224,8 @@ fn read_row(row: &rusqlite::Row, names: &[String]) -> rusqlite::Result<Row> {
 }
 
 /// The rows of `table` matching `filter`, a SQL condition over `params`.
-/// A table keyed only by its rowid also gets a `rowid` column.
+/// A table keyed only by its rowid also gets a `rowid` column. Statements
+/// are cached: a pool runs the same few thousands of times.
 pub(super) fn rows(
     conn: &Connection,
     table: &Table,
@@ -232,7 +233,7 @@ pub(super) fn rows(
     params: &[Value],
 ) -> rusqlite::Result<Vec<Row>> {
     let rowid = if table.keys.is_empty() { "rowid, " } else { "" };
-    let mut statement = conn.prepare(&format!(
+    let mut statement = conn.prepare_cached(&format!(
         "SELECT {rowid}* FROM {} WHERE {filter}",
         quoted(&table.name)
     ))?;
@@ -245,6 +246,35 @@ pub(super) fn rows(
         .query_map(params_from_iter(params.iter()), |row| read_row(row, &names))?
         .collect();
     found
+}
+
+/// Run one statement through the connection's statement cache.
+pub(super) fn run(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params)
+}
+
+/// The next `limit` rows of `table` keyed `from` that `filter` selects, in
+/// rowid order.
+pub(super) fn batch(
+    conn: &Connection,
+    table: &Table,
+    filter: &str,
+    from: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<Row>> {
+    rows(
+        conn,
+        table,
+        &format!(
+            "{} = ? AND ({filter}) ORDER BY rowid LIMIT ?",
+            quoted(&table.column)
+        ),
+        &[Value::Text(from.to_owned()), Value::Integer(limit as i64)],
+    )
 }
 
 fn value_text(value: &Value) -> String {
@@ -274,21 +304,6 @@ pub(super) fn row_key(table: &Table, row: &Row) -> String {
         [key] => value_text(row.get(key)),
         keys => serde_json::Value::Array(keys.iter().map(|key| value_json(row.get(key))).collect())
             .to_string(),
-    }
-}
-
-/// The same key, computed by SQL for every row a statement reads.
-fn key_sql(table: &Table) -> String {
-    match table.keys.as_slice() {
-        [] => "CAST(rowid AS TEXT)".to_owned(),
-        [key] => format!("CAST({} AS TEXT)", quoted(key)),
-        keys => format!(
-            "json_array({})",
-            keys.iter()
-                .map(|key| quoted(key))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
     }
 }
 
@@ -322,7 +337,8 @@ pub(super) fn log(
     target_row_id: Option<&str>,
     now: i64,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    run(
+        conn,
         "INSERT INTO identity_merge_log
              (from_identity, to_identity, table_name, row_id, action, target_row_id, merged_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -394,7 +410,8 @@ fn keep_maximums(
         })
         .collect();
     assigned.append(&mut values);
-    conn.execute(
+    run(
+        conn,
         &format!(
             "UPDATE {} SET {} WHERE {filter}",
             quoted(&table.name),
@@ -409,77 +426,50 @@ fn keep_maximums(
     Ok(())
 }
 
-/// Re-key every row of `table` from `from` to `to`, the 0.49 merge's
+/// Re-key one row of `table` from `from` to `to`, the 0.49 merge's
 /// `rekeyGenericRow`: a row that would collide with one `to` already has is
 /// deleted after the target takes its progress values; any other row is
-/// re-keyed. `filter` narrows the rows (`1` for all). Returns how many rows
-/// changed.
-pub(super) fn move_rows(
+/// re-keyed. Either way the row no longer names `from`.
+pub(super) fn move_row(
     conn: &Connection,
     table: &Table,
-    filter: &str,
+    row: &Row,
     from: &str,
     to: &str,
     now: i64,
-) -> rusqlite::Result<u64> {
+) -> rusqlite::Result<()> {
     let name = quoted(&table.name);
     let column = quoted(&table.column);
-    if table.unique.is_empty() {
-        // Nothing can collide, so the whole table moves in two statements.
-        conn.execute(
-            &format!(
-                "INSERT INTO identity_merge_log
-                     (from_identity, to_identity, table_name, row_id, action, target_row_id, merged_at)
-                 SELECT ?1, ?2, ?3, {key}, 'rekeyed', NULL, ?4 FROM {name}
-                  WHERE {column} = ?1 AND ({filter})",
-                key = key_sql(table)
-            ),
-            params![from, to, table.name, now],
+    let key = row_key(table, row);
+    let (selected, values) = predicate(table, row);
+    if let Some(target) = collision(conn, table, row, to)? {
+        keep_maximums(conn, table, row, &target)?;
+        run(
+            conn,
+            &format!("DELETE FROM {name} WHERE {selected}"),
+            params_from_iter(values),
         )?;
-        let changed = conn.execute(
-            &format!("UPDATE {name} SET {column} = ?2 WHERE {column} = ?1 AND ({filter})"),
-            params![from, to],
+        log(
+            conn,
+            from,
+            to,
+            &table.name,
+            &key,
+            "collision_deleted",
+            Some(&row_key(table, &target)),
+            now,
+        )
+    } else {
+        let mut bound = vec![Value::Text(to.to_owned())];
+        bound.extend(values);
+        bound.push(Value::Text(from.to_owned()));
+        run(
+            conn,
+            &format!("UPDATE {name} SET {column} = ? WHERE {selected} AND {column} = ?"),
+            params_from_iter(bound),
         )?;
-        return Ok(changed as u64);
+        log(conn, from, to, &table.name, &key, "rekeyed", None, now)
     }
-    let mut changed = 0;
-    for row in rows(
-        conn,
-        table,
-        &format!("{column} = ? AND ({filter})"),
-        &[Value::Text(from.to_owned())],
-    )? {
-        let key = row_key(table, &row);
-        let (selected, values) = predicate(table, &row);
-        if let Some(target) = collision(conn, table, &row, to)? {
-            keep_maximums(conn, table, &row, &target)?;
-            conn.execute(
-                &format!("DELETE FROM {name} WHERE {selected}"),
-                params_from_iter(values),
-            )?;
-            log(
-                conn,
-                from,
-                to,
-                &table.name,
-                &key,
-                "collision_deleted",
-                Some(&row_key(table, &target)),
-                now,
-            )?;
-        } else {
-            let mut bound = vec![Value::Text(to.to_owned())];
-            bound.extend(values);
-            bound.push(Value::Text(from.to_owned()));
-            conn.execute(
-                &format!("UPDATE {name} SET {column} = ? WHERE {selected} AND {column} = ?"),
-                params_from_iter(bound),
-            )?;
-            log(conn, from, to, &table.name, &key, "rekeyed", None, now)?;
-        }
-        changed += 1;
-    }
-    Ok(changed)
 }
 
 /// Insert a copy of `row` with `overrides` applied, and return the copy's
@@ -499,7 +489,8 @@ pub(super) fn insert_copy(
         .iter()
         .filter(|column| !(table.rowid_key && table.keys.first() == Some(*column)))
         .collect();
-    conn.execute(
+    run(
+        conn,
         &format!(
             "INSERT INTO {} ({}) VALUES ({})",
             quoted(&table.name),
@@ -519,73 +510,50 @@ pub(super) fn insert_copy(
     }
 }
 
-/// Copy every row of `table` keyed `from` that `filter` selects to `to`,
-/// each with the extra column values `adjust` gives it. A copy that would
-/// collide with a row `to` already has is not made; the target row takes the
-/// copy's progress values instead (`copy_merged`). Returns how many rows
-/// were copied or merged.
-pub(super) fn copy_rows(
+/// Copy one row of `table` keyed `from` to `to`, with `overrides` applied
+/// besides its project. A copy that would collide with a row `to` already
+/// has is not made; the target row takes the copy's progress values
+/// instead (`copy_merged`).
+pub(super) fn copy_row<'a>(
     conn: &Connection,
-    table: &Table,
-    filter: &str,
+    table: &'a Table,
+    row: &Row,
     from: &str,
     to: &str,
     now: i64,
-    adjust: impl Fn(&Row) -> Vec<(&'static str, Value)>,
-) -> rusqlite::Result<u64> {
-    let column = quoted(&table.column);
-    let mut changed = 0;
-    for row in rows(
-        conn,
-        table,
-        &format!("{column} = ? AND ({filter})"),
-        &[Value::Text(from.to_owned())],
-    )? {
-        let key = row_key(table, &row);
-        let mut overrides = adjust(&row);
-        overrides.push((leak_column(&table.column), Value::Text(to.to_owned())));
-        let mut planned = row.clone();
-        for (name, value) in &overrides {
-            planned.set(name, value.clone());
-        }
-        if let Some(target) = collision(conn, table, &planned, to)? {
-            keep_maximums(conn, table, &planned, &target)?;
-            log(
-                conn,
-                from,
-                to,
-                &table.name,
-                &key,
-                "copy_merged",
-                Some(&row_key(table, &target)),
-                now,
-            )?;
-        } else {
-            let copied = insert_copy(conn, table, &row, &overrides)?;
-            log(
-                conn,
-                from,
-                to,
-                &table.name,
-                &key,
-                "copied",
-                Some(&copied),
-                now,
-            )?;
-        }
-        changed += 1;
+    mut overrides: Vec<(&'a str, Value)>,
+) -> rusqlite::Result<()> {
+    let key = row_key(table, row);
+    overrides.push((table.column.as_str(), Value::Text(to.to_owned())));
+    let mut planned = row.clone();
+    for (name, value) in &overrides {
+        planned.set(name, value.clone());
     }
-    Ok(changed)
-}
-
-/// The project column's name as a `'static` override key. Every project
-/// column is one of [`PROJECT_COLUMNS`].
-fn leak_column(column: &str) -> &'static str {
-    PROJECT_COLUMNS
-        .iter()
-        .find(|known| **known == column)
-        .copied()
-        .expect("a project column")
+    if let Some(target) = collision(conn, table, &planned, to)? {
+        keep_maximums(conn, table, &planned, &target)?;
+        log(
+            conn,
+            from,
+            to,
+            &table.name,
+            &key,
+            "copy_merged",
+            Some(&row_key(table, &target)),
+            now,
+        )
+    } else {
+        let copied = insert_copy(conn, table, row, &overrides)?;
+        log(
+            conn,
+            from,
+            to,
+            &table.name,
+            &key,
+            "copied",
+            Some(&copied),
+            now,
+        )
+    }
 }
 
 /// Every 0.49 legacy key that still has rows in a table this move handles.

@@ -64,8 +64,10 @@ fn note(conn: &Connection, kind: &str, project: &str, content: &str) -> i64 {
 /// a session note, the session's project mapping and a commit. Returns the
 /// two memories' ids.
 fn legacy_project(conn: &Connection) -> (i64, i64) {
-    let live = memory(conn, KEY, "The head is frozen between folds.", "active");
+    // The archived memory comes first, so a batch can copy it before the
+    // memory it points at.
     let old = memory(conn, KEY, "The head changes every pass.", "archived");
+    let live = memory(conn, KEY, "The head is frozen between folds.", "active");
     conn.execute(
         "UPDATE memories SET superseded_by_memory_id = ?1 WHERE id = ?2",
         [live, old],
@@ -118,12 +120,49 @@ fn targets(ids: &[&str]) -> BTreeSet<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
 
+/// Run batches until the pool is settled, as a round does, and add up what
+/// they did.
+fn settle(conn: &mut Connection, mut step: impl FnMut(&mut Connection) -> Outcome) -> Outcome {
+    let mut done: BTreeMap<String, pool::Rows> = BTreeMap::new();
+    loop {
+        match step(conn) {
+            Outcome::Done(batch) => {
+                for (project, rows) in batch {
+                    let total = done.entry(project).or_default();
+                    for (table, count) in rows {
+                        *total.entry(table).or_default() += count;
+                    }
+                }
+            }
+            Outcome::Nothing if done.is_empty() => return Outcome::Nothing,
+            Outcome::Nothing => return Outcome::Done(done),
+            held => return held,
+        }
+    }
+}
+
+/// Move the pool to `to`, `limit` rows a batch.
+fn move_all(conn: &mut Connection, to: &str, limit: usize) -> Outcome {
+    let mut progress = pool::Progress::default();
+    settle(conn, |conn| {
+        pool::move_step(conn, &mut progress, KEY, to, &targets(&[KEY]), 5, limit).unwrap()
+    })
+}
+
+/// Copy the pool to `to`, `limit` source rows a batch.
+fn copy_all(conn: &mut Connection, to: &[&str], limit: usize) -> Outcome {
+    let mut progress = pool::Progress::default();
+    settle(conn, |conn| {
+        pool::copy_step(conn, &mut progress, KEY, &targets(to), 5, limit).unwrap()
+    })
+}
+
 #[test]
 fn a_key_one_project_claims_moves_whole_and_a_rerun_moves_nothing() {
     let (_dir, db) = store();
     db.with_connection(|conn| {
         let (live, old) = legacy_project(conn);
-        let outcome = pool::move_pool(conn, KEY, "pj-a", &targets(&[KEY]), 5).unwrap();
+        let outcome = move_all(conn, "pj-a", 2);
         let expected: pool::Rows = [
             ("git_commits", 1),
             ("memories", 2),
@@ -149,8 +188,8 @@ fn a_key_one_project_claims_moves_whole_and_a_rerun_moves_nothing() {
         assert_eq!(
             owners,
             vec![
-                (live, "pj-a".into(), Some("pj-a".into())),
-                (old, "pj-a".into(), Some("pj-a".into()))
+                (old, "pj-a".into(), Some("pj-a".into())),
+                (live, "pj-a".into(), Some("pj-a".into()))
             ]
         );
         assert_eq!(
@@ -161,10 +200,7 @@ fn a_key_one_project_claims_moves_whole_and_a_rerun_moves_nothing() {
             count(conn, "SELECT count(*) FROM v22_identity_rekey_map WHERE new_project_path = ?1", "pj-a"),
             1
         );
-        assert_eq!(
-            pool::move_pool(conn, KEY, "pj-a", &targets(&[KEY]), 6).unwrap(),
-            Outcome::Nothing
-        );
+        assert_eq!(move_all(conn, "pj-a", 2), Outcome::Nothing);
         assert_eq!(
             count(conn, "SELECT count(*) FROM identity_merge_log WHERE to_identity = ?1", "pj-a"),
             6
@@ -190,7 +226,7 @@ fn a_moved_memory_that_duplicates_a_live_one_leaves_one_live_memory_with_its_his
         )
         .unwrap();
         verification(conn, duplicate, "src/head.rs");
-        pool::move_pool(conn, KEY, "pj-a", &targets(&[KEY]), 9).unwrap();
+        move_all(conn, "pj-a", pool::BATCH);
 
         assert_eq!(live_with(conn, "pj-a", text), vec![survivor]);
         let (seen, retrieved, first, status, merged): (i64, i64, i64, String, String) = conn
@@ -229,7 +265,8 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
     let (_dir, db) = store();
     db.with_connection(|conn| {
         let (live, old) = legacy_project(conn);
-        let outcome = pool::copy_pool(conn, KEY, &targets(&["pj-b", "pj-a"]), 5).unwrap();
+        // One memory a batch: a copy is made before the copy it points at.
+        let outcome = copy_all(conn, &["pj-b", "pj-a"], 1);
         let Outcome::Done(done) = outcome else {
             panic!("the pool was copied: {outcome:?}");
         };
@@ -243,7 +280,7 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(originals, vec![live, old]);
+        assert_eq!(originals, vec![old, live]);
         // The second gets its own copies, pointing at each other.
         let copies: Vec<(i64, String, Option<i64>)> = conn
             .prepare(
@@ -256,10 +293,10 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(copies.len(), 2);
-        let (live_copy, old_copy) = (copies[0].0, copies[1].0);
-        assert!(live_copy > old, "copies get new ids");
-        assert_eq!(copies[0], (live_copy, "active".into(), None));
-        assert_eq!(copies[1], (old_copy, "archived".into(), Some(live_copy)));
+        let (old_copy, live_copy) = (copies[0].0, copies[1].0);
+        assert!(old_copy > live, "copies get new ids");
+        assert_eq!(copies[0], (old_copy, "archived".into(), Some(live_copy)));
+        assert_eq!(copies[1], (live_copy, "active".into(), None));
         for (memory, table) in [(live, "memory_history"), (live_copy, "memory_history"),
                                 (live, "memory_verifications"), (live_copy, "memory_verifications")] {
             assert_eq!(
@@ -293,10 +330,7 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
 
         // Only session rows are left, so a rerun copies nothing.
         let before = count(conn, "SELECT count(*) FROM identity_merge_log WHERE from_identity = ?1", KEY);
-        assert_eq!(
-            pool::copy_pool(conn, KEY, &targets(&["pj-a", "pj-b"]), 6).unwrap(),
-            Outcome::Nothing
-        );
+        assert_eq!(copy_all(conn, &["pj-a", "pj-b"], 1), Outcome::Nothing);
         assert_eq!(
             count(conn, "SELECT count(*) FROM identity_merge_log WHERE from_identity = ?1", KEY),
             before
@@ -314,7 +348,7 @@ fn a_copy_that_duplicates_a_live_memory_resolves_only_in_that_project() {
         let source = memory(conn, KEY, text, "active");
         conn.execute("UPDATE memories SET seen_count = 4 WHERE id = ?1", [source])
             .unwrap();
-        pool::copy_pool(conn, KEY, &targets(&["pj-a", "pj-b"]), 5).unwrap();
+        copy_all(conn, &["pj-a", "pj-b"], pool::BATCH);
 
         // The first project had no duplicate: the original lives there.
         assert_eq!(live_with(conn, "pj-a", text), vec![source]);
@@ -359,11 +393,11 @@ fn a_key_still_guarded_for_the_rust_mode_is_held() {
         )
         .unwrap();
         assert_eq!(
-            pool::move_pool(conn, KEY, "pj-a", &targets(&[KEY]), 5).unwrap(),
+            move_all(conn, "pj-a", pool::BATCH),
             Outcome::Held(Held::RustManaged(KEY.into()))
         );
         assert_eq!(
-            pool::copy_pool(conn, KEY, &targets(&["pj-a", "pj-b"]), 5).unwrap(),
+            copy_all(conn, &["pj-a", "pj-b"], pool::BATCH),
             Outcome::Held(Held::RustManaged(KEY.into()))
         );
         assert_eq!(memories_of(conn, KEY), 2);
@@ -382,7 +416,7 @@ fn keys_in_different_workspaces_hold_a_move() {
         ))
         .unwrap();
         assert_eq!(
-            pool::move_pool(conn, KEY, "pj-a", &targets(&[KEY]), 5).unwrap(),
+            move_all(conn, "pj-a", pool::BATCH),
             Outcome::Held(Held::Workspaces(BTreeSet::from([1, 2])))
         );
         assert_eq!(memories_of(conn, KEY), 2);
@@ -407,4 +441,40 @@ fn every_project_keyed_table_is_sorted_for_a_contested_key() {
         .map(|name| (*name).to_owned())
         .collect();
     assert_eq!(found, sorted);
+}
+
+#[test]
+fn only_a_category_the_project_had_of_its_own_marks_a_moved_memory_for_review() {
+    let (_dir, db) = store();
+    db.with_connection(|conn| {
+        let own = memory(conn, "pj-a", "An architecture fact pj-a had.", "active");
+        conn.execute(
+            "UPDATE memories SET category = 'swe:architecture' WHERE id = ?1",
+            [own],
+        )
+        .unwrap();
+        let architecture = memory(conn, KEY, "A new architecture fact.", "active");
+        conn.execute(
+            "UPDATE memories SET category = 'swe:architecture' WHERE id = ?1",
+            [architecture],
+        )
+        .unwrap();
+        // Two naming memories, a batch each: the first reaching pj-a doesn't
+        // make naming one of pj-a's own categories for the second.
+        let first = memory(conn, KEY, "The first naming rule.", "active");
+        let second = memory(conn, KEY, "The second naming rule.", "active");
+        move_all(conn, "pj-a", 1);
+        let review = |id: i64| -> Option<String> {
+            conn.query_row(
+                "SELECT json_extract(metadata_json, '$.identity_merge_review') FROM memories WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(review(architecture).as_deref(), Some(KEY));
+        assert_eq!(review(first), None);
+        assert_eq!(review(second), None);
+        assert_eq!(review(own), None);
+    });
 }
