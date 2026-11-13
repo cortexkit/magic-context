@@ -24,6 +24,9 @@ pub enum Owner {
     /// A project's memories; `root` is its folder, where the run's child
     /// session works.
     Project { id: String, root: String },
+    /// The person's own memories, at the global level, and the summarizer's
+    /// observations about them. One owner per machine, not per project.
+    Global,
 }
 
 /// What a task kind reads its work from.
@@ -47,6 +50,13 @@ impl TaskContext<'_> {
 pub(crate) trait Task: Send + Sync {
     /// The kind memory profiles name (`classify-memories`).
     fn kind(&self) -> &'static str;
+    /// Whether the task works on the person's global memories rather than a
+    /// project's. The engine then schedules it once per machine, under
+    /// [`Owner::Global`], instead of once for each project whose profile
+    /// declares it.
+    fn global(&self) -> bool {
+        false
+    }
     /// The batches one run sends for the context's owner, in order. Empty
     /// when there is nothing to do; the run then sends nothing.
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String>;
@@ -114,13 +124,23 @@ pub(crate) fn document_prompts(
     // Each frame first holds a placeholder no profile text or frame can
     // contain (a private-use character), replaced by the real input once
     // the markers are checked. A frame's text ends with one newline that is
-    // not part of its text.
+    // not part of its text; a frame that ends with a blank line keeps it
+    // after the input, so the next section stays apart from it.
     let placeholders: Vec<String> = (0..inputs.len())
         .map(|index| format!("\u{E000}input {index}\u{E000}"))
         .collect();
-    let slots: Vec<String> = placeholders
+    let slots: Vec<String> = inputs
         .iter()
-        .map(|placeholder| format!("{placeholder}\n"))
+        .zip(&placeholders)
+        .map(|((name, _), placeholder)| {
+            let frame = FRAMES
+                .iter()
+                .find(|(frame, _)| frame == name)
+                .map_or("\n", |(_, text)| text);
+            let ending = &frame[frame.trim_end_matches('\n').len()..];
+            let ending = if ending.is_empty() { "\n" } else { ending };
+            format!("{placeholder}{ending}")
+        })
         .collect();
     let mut frames: Vec<(&str, &str)> = FRAMES.to_vec();
     for ((name, _), slot_text) in inputs.iter().zip(&slots) {

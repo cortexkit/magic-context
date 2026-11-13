@@ -365,7 +365,9 @@ impl Classify {
         &self,
         context: &TaskContext<'_>,
     ) -> Result<Vec<ClassifyBatch>, String> {
-        let Owner::Project { id: project, .. } = context.owner;
+        let Owner::Project { id: project, .. } = context.owner else {
+            return Err(format!("{KIND} works on a project's memories only"));
+        };
         let live = context
             .db
             .with_connection(|conn| live_memories(conn, project))

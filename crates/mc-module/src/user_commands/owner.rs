@@ -156,10 +156,13 @@ fn category_options(level: &str) -> Vec<ChoiceOption> {
         .collect()
 }
 
-/// The dreamer task kinds this build runs, in the order it registers them.
+/// The dreamer task kinds this build runs for a project, in the order it
+/// registers them. A task of the person's own memories runs once for the
+/// machine, not for one project, so a project's run-now never offers it.
 pub(super) fn task_kinds() -> Vec<&'static str> {
     crate::dreamer::tasks()
         .iter()
+        .filter(|task| !task.global())
         .map(|task| task.kind())
         .filter(|kind| {
             crate::routing::DREAM_DEMANDS

@@ -389,7 +389,9 @@ impl CompressCues {
         &self,
         context: &TaskContext<'_>,
     ) -> Result<Vec<CompressCuesBatch>, String> {
-        let Owner::Project { id: project, .. } = context.owner;
+        let Owner::Project { id: project, .. } = context.owner else {
+            return Err(format!("{KIND} works on a project's memories only"));
+        };
         let budget = Budget::of(context.declaration)?;
         let needing: Vec<Memory> = context
             .db

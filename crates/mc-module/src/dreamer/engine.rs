@@ -2,12 +2,15 @@
 //!
 //! The engine learns a project when a session of it is set up, with the
 //! memory profile that session resolved. Every task that profile declares,
-//! and that the module implements, gets a schedule for the project. Once a
-//! minute the engine starts every due task whose project it has seen in this
-//! process. There is no cap of the engine's own on how many run at once:
-//! provider limits come back from routing or the runner as waits.
+//! and that the module implements, gets a schedule for the project; a task
+//! of the person's own memories (the global review) gets one schedule for
+//! the whole machine instead, and runs in the folder and with the profile of
+//! a project that declares it. Once a minute the engine starts every due
+//! task whose owner it can run in this process. There is no cap of the
+//! engine's own on how many run at once: provider limits come back from
+//! routing or the runner as waits.
 //!
-//! One run takes the project's lock (one writer per project's memories at a
+//! One run takes its owner's lock (one writer per owner's memories at a
 //! time), asks the task for its batches, and sends each to a model
 //! ([`super::run`]). Each accepted reply is applied in its own transaction,
 //! with the lock checked in that same transaction, so a run that lost its
@@ -86,6 +89,7 @@ impl Settings {
 
 /// A project seen in this process: where its files are, and the profile its
 /// tasks come from.
+#[derive(Clone)]
 struct Project {
     root: String,
     profile: Arc<Profile>,
@@ -100,6 +104,13 @@ pub struct Engine {
     holder: String,
     tasks: Vec<Box<dyn Task>>,
     projects: Mutex<HashMap<String, Project>>,
+    /// Where the person's own tasks run ([`Task::global`]): the first project
+    /// seen in this process whose profile declares one, by id, with its
+    /// folder and profile. Those tasks read no project files, but a runner
+    /// creates a child session only in a folder, and the profile supplies
+    /// the task's prompts and categories. The choice changes only when that
+    /// project is seen again with a profile that declares no such task.
+    global: Mutex<Option<(String, Project)>>,
     /// Owners with a run in progress in this process.
     running: Mutex<HashSet<OwnerKey>>,
 }
@@ -110,6 +121,7 @@ impl Engine {
             holder: holder.into(),
             tasks,
             projects: Mutex::default(),
+            global: Mutex::default(),
             running: Mutex::default(),
         }
     }
@@ -170,7 +182,15 @@ impl Engine {
             .map(Box::as_ref)
     }
 
+    /// Whether `declaration` is a task of the person's own memories.
+    fn is_global(&self, declaration: &Value) -> bool {
+        self.task(declaration["kind"].as_str().unwrap_or_default())
+            .is_some_and(|task| task.global())
+    }
+
     /// Learn `project` from a session set up for it, and schedule its tasks.
+    /// A task of the person's own memories gets one schedule for the whole
+    /// machine, however many projects declare it.
     pub fn see_project(
         &self,
         db: &ContextDb,
@@ -180,25 +200,39 @@ impl Engine {
         settings: &Settings,
         now: i64,
     ) {
+        let seen = Project {
+            root: root.to_owned(),
+            profile,
+            settings: settings.clone(),
+        };
         let unchanged = self
             .projects
             .lock()
             .expect("dreamer projects")
             .get(project)
-            .is_some_and(|seen| {
-                seen.root == root
-                    && seen.profile.digest == profile.digest
-                    && seen.settings == *settings
+            .is_some_and(|known| {
+                known.root == seen.root
+                    && known.profile.digest == seen.profile.digest
+                    && known.settings == seen.settings
             });
         if unchanged {
+            // The person's tasks may have lost the project they ran with
+            // while this one stayed the same.
+            self.offer_global(project, &seen);
             return;
         }
         let owner = OwnerKey::project(project);
+        let global = OwnerKey::global();
         let scheduled = db.with_connection(|conn| {
-            for declaration in self.declarations(&profile) {
+            for declaration in self.declarations(&seen.profile) {
                 let kind = declaration["kind"].as_str().unwrap_or_default();
                 let task = declaration["id"].as_str().unwrap_or(kind);
-                store::ensure_schedule(conn, &owner, task, &settings.schedule(kind), now)?;
+                let owner = if self.is_global(declaration) {
+                    &global
+                } else {
+                    &owner
+                };
+                store::ensure_schedule(conn, owner, task, &settings.schedule(kind), now)?;
             }
             Ok::<_, rusqlite::Error>(())
         });
@@ -207,19 +241,35 @@ impl Engine {
             return;
         }
         tell(db, &owner);
-        self.projects.lock().expect("dreamer projects").insert(
-            project.to_owned(),
-            Project {
-                root: root.to_owned(),
-                profile,
-                settings: settings.clone(),
-            },
-        );
+        self.offer_global(project, &seen);
+        self.projects
+            .lock()
+            .expect("dreamer projects")
+            .insert(project.to_owned(), seen);
     }
 
-    /// Start every due task whose project this process has seen. A due task
-    /// of a project not seen since the process started stays due: it runs
-    /// once one of its sessions is set up again.
+    /// Let `project` carry the person's own tasks when none does yet, or
+    /// update what it carries them with when it already does. A carrier
+    /// whose profile no longer declares such a task gives them up.
+    fn offer_global(&self, project: &str, seen: &Project) {
+        let declares = self
+            .declarations(&seen.profile)
+            .into_iter()
+            .any(|declaration| self.is_global(declaration));
+        let mut carrier = self.global.lock().expect("dreamer global owner");
+        if carrier
+            .as_ref()
+            .is_none_or(|(carries, _)| carries == project)
+        {
+            *carrier = declares.then(|| (project.to_owned(), seen.clone()));
+        }
+    }
+
+    /// Start every due task whose owner this process can run: a project seen
+    /// in this process, or the person's own memories once any project that
+    /// declares their tasks has been seen. A due task of a project not seen
+    /// since the process started stays due: it runs once one of its sessions
+    /// is set up again.
     pub fn tick<C: RunnerClient + Router + Send + Sync + 'static>(
         self: &Arc<Self>,
         db: &Arc<ContextDb>,
@@ -235,16 +285,22 @@ impl Engine {
             }
         };
         for due in due {
-            if due.owner.level != "project" {
-                continue;
-            }
-            let Some((root, profile)) = self
-                .projects
-                .lock()
-                .expect("dreamer projects")
-                .get(&due.owner.owner_id)
-                .map(|project| (project.root.clone(), Arc::clone(&project.profile)))
-            else {
+            let carrier = match due.owner.level.as_str() {
+                "project" => self
+                    .projects
+                    .lock()
+                    .expect("dreamer projects")
+                    .get(&due.owner.owner_id)
+                    .cloned(),
+                "global" => self
+                    .global
+                    .lock()
+                    .expect("dreamer global owner")
+                    .as_ref()
+                    .map(|(_, project)| project.clone()),
+                _ => None,
+            };
+            let Some(Project { root, profile, .. }) = carrier else {
                 continue;
             };
             if !self
@@ -319,7 +375,7 @@ impl Engine {
             Ok(true) => {}
             Ok(false) => {
                 settle(Settled::Skipped {
-                    reason: "another writer holds the project's memories".into(),
+                    reason: format!("another writer holds {} memories", whose(&due.owner)),
                 });
                 return;
             }
@@ -578,9 +634,13 @@ impl Engine {
                 return end;
             }
         };
-        let owner = Owner::Project {
-            id: due.owner.owner_id.clone(),
-            root: root.to_owned(),
+        let owner = if due.owner == OwnerKey::global() {
+            Owner::Global
+        } else {
+            Owner::Project {
+                id: due.owner.owner_id.clone(),
+                root: root.to_owned(),
+            }
         };
         let batches = {
             let context = TaskContext {
@@ -656,7 +716,10 @@ impl Engine {
             });
             if !matches!(renewed, Ok(true)) {
                 end.outcome = "lock_lost".into();
-                end.error = Some("the project's lock passed to another writer".into());
+                end.error = Some(format!(
+                    "{} lock passed to another writer",
+                    whose(&due.owner)
+                ));
                 return;
             }
             let job = TaskRun {
@@ -683,10 +746,16 @@ impl Engine {
             record_batch(end, &reply);
             match apply(db, &due.owner, &self.holder, batch.as_ref(), &reply, run_id) {
                 Ok(Some(applied)) => {
-                    if applied.applied > 0 && due.owner.level == "project" {
-                        db.changed(crate::app_read::Change::project_memories(
-                            &due.owner.owner_id,
-                        ));
+                    if applied.applied > 0 {
+                        use crate::app_read::Change;
+                        let change = match due.owner.level.as_str() {
+                            "project" => Some(Change::project_memories(&due.owner.owner_id)),
+                            "global" => Some(Change::global_memories()),
+                            _ => None,
+                        };
+                        if let Some(change) = change {
+                            db.changed(change);
+                        }
                     }
                     end.proposed += applied.proposed;
                     end.applied += applied.applied;
@@ -697,7 +766,10 @@ impl Engine {
                 }
                 Ok(None) => {
                     end.outcome = "lock_lost".into();
-                    end.error = Some("the project's lock passed to another writer".into());
+                    end.error = Some(format!(
+                        "{} lock passed to another writer",
+                        whose(&due.owner)
+                    ));
                     return;
                 }
                 Err(error) => {
@@ -803,6 +875,15 @@ fn tell(db: &ContextDb, owner: &OwnerKey) {
         db.changed(crate::app_read::Change::Dreamer {
             project: owner.owner_id.clone(),
         });
+    }
+}
+
+/// Whose memories `owner` names, in the messages a run records.
+fn whose(owner: &OwnerKey) -> &'static str {
+    if owner.level == "global" {
+        "the person's"
+    } else {
+        "the project's"
     }
 }
 

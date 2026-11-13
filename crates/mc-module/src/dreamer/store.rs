@@ -25,6 +25,15 @@ impl OwnerKey {
             owner_id: id.into(),
         }
     }
+
+    /// The person's own memories: the global level, owned by `self`, as the
+    /// memories table keeps them.
+    pub fn global() -> Self {
+        Self {
+            level: "global".into(),
+            owner_id: "self".into(),
+        }
+    }
 }
 
 /// A schedule that is due.

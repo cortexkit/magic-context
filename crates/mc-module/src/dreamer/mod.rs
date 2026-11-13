@@ -33,5 +33,6 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::map_memories::MapMemories),
         Box::new(tasks::verify::Verify { broad: false }),
         Box::new(tasks::verify::Verify { broad: true }),
+        Box::new(tasks::review_user_memories::ReviewUserMemories),
     ]
 }
