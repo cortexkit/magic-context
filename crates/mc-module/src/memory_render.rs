@@ -13,7 +13,8 @@
 //!
 //! The budget is filled in three passes, each taking rows in rank order and
 //! skipping a row that doesn't fit while later, smaller rows still may:
-//! 1. a protected slice for safety-critical rules, so they never fall out;
+//! 1. a protected slice for safety-critical rules, so they fall out only
+//!    when they alone exceed it;
 //! 2. a minimum share for each visible level, so a busy level can't crowd out
 //!    the others; inside the workspace share, each member project gets an
 //!    equal part, so one busy sibling can't crowd out the rest;
@@ -200,7 +201,11 @@ fn rank(candidate: &Candidate, half_life_ms: i64, now_ms: i64) -> f64 {
         .importance
         .map_or(UNSET_IMPORTANCE, |value| value.clamp(0, 100) as f64);
     let freshness = match candidate.decay {
-        Decay::Drifting if half_life_ms > 0 => {
+        // A safety-critical rule keeps its full weight however long ago it
+        // was last met: a rule that prevents damage matters as much when it
+        // hasn't come up for months, and losing weight would let it fall out
+        // of the protected slice behind fresher critical rules.
+        Decay::Drifting if half_life_ms > 0 && !candidate.safety_critical => {
             let since = candidate.last_met_ms.map_or(0, |met| (now_ms - met).max(0));
             0.5_f64.powf(since as f64 / half_life_ms as f64)
         }

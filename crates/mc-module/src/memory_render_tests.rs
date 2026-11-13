@@ -67,6 +67,26 @@ fn a_drifting_memory_halves_every_half_life_since_it_was_last_met() {
 }
 
 #[test]
+fn a_safety_critical_rule_does_not_decay() {
+    let stale_critical = |id, importance| {
+        let mut row = row(id, importance);
+        row.decay = Decay::Drifting;
+        row.safety_critical = true;
+        row.last_met_ms = Some(NOW - 360 * DAY);
+        row
+    };
+    let mut budget = budget(10);
+    budget.protected_tokens = 10;
+    // Decayed, the year-old rule (85 -> about 5) would lose to the fresh 80.
+    let mut fresh = row(2, 80);
+    fresh.safety_critical = true;
+    assert_eq!(
+        select(&[stale_critical(1, 85), fresh], &budget, NOW).ids,
+        [1]
+    );
+}
+
+#[test]
 fn a_bounded_memory_is_shown_until_its_end_and_a_resolved_one_not_at_all() {
     let mut bounded = row(1, 50);
     bounded.decay = Decay::Bounded;

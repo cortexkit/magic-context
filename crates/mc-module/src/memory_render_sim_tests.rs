@@ -209,12 +209,18 @@ fn run(inputs: &Inputs) -> Result<Value, String> {
     prepare_out(&inputs.out)?;
     let db = open_copy(&inputs.store, &inputs.out)?;
 
-    // Today's budgets are the defaults: the configuration may change the
-    // project budget (`memory.injection_budget_tokens`), but the simulation
-    // shows what a head with no such setting gets.
+    // Today's budgets are the defaults unless `MEMORY_SIM_MEMORY_BUDGET`
+    // stands in for a configured `memory.injection_budget_tokens`, so a
+    // simulation can also show what a head with that setting gets.
     let settings = Settings::default();
+    let memory_budget = match env_text("MEMORY_SIM_MEMORY_BUDGET") {
+        Some(text) => text
+            .parse::<u64>()
+            .map_err(|error| format!("MEMORY_SIM_MEMORY_BUDGET {text:?}: {error}"))?,
+        None => settings.memory_budget_tokens,
+    };
     let budgets = Budgets {
-        memory: settings.memory_budget_tokens,
+        memory: memory_budget,
         profile: settings.profile_budget_tokens,
     };
     let counter = Counter::for_model(inputs.model.as_deref());
