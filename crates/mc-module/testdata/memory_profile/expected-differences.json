@@ -803,6 +803,78 @@
         "⟦memory2.content⟧",
         "</memories>"
       ]
+    },
+    {
+      "document": "dreamer/swe:verify-broad/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [
+        "Check each memory's claim against its backing files. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
+      ],
+      "rendered": [
+        "Check each memory's claim against its backing files, or, when it has none, by searching the checkout for the paths and names it cites. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip, unless everything they cite is gone), then output ONE <verify> manifest covering every id."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify-broad/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [],
+      "rendered": [
+        "",
+        "[⟦memory2.id⟧] ⟦memory2.category⟧",
+        "Content: ⟦memory2.content⟧",
+        "Backing files: (none mapped)",
+        "Not found by a plain search of the checkout: ⟦notFound1⟧, ⟦notFound2⟧"
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [
+        "Each memory below comes with its backing file(s) — the code it makes a claim about. For EACH memory: use the provided git diff as evidence when present. If no diff is supplied, read its backing files (you may read more if needed) and decide whether the memory is still accurate."
+      ],
+      "rendered": [
+        "Each memory below comes with its backing file(s) — the code it makes a claim about — when it has been mapped to any. A memory with no backing files says so; for it, search the checkout for the paths and names it cites. For EACH memory: use the provided git diff as evidence when present. If no diff is supplied, read its backing files or search for what it cites (you may read more if needed) and decide whether the memory is still accurate. A memory may also list names a plain search of the checkout did not find; check them yourself before you rely on that."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [
+        "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists."
+      ],
+      "rendered": [
+        "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [
+        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
+      ],
+      "rendered": [
+        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED, with one exception: a directive whose subject is gone, because every path and code name it cites no longer exists in the checkout, is archived with `missing`. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "today": [],
+      "rendered": [
+        "<archive id=\"G\" reason=\"the module this rule is about was removed\" missing=\"src/old/module.rs\"/>"
+      ]
     }
   ]
 }
