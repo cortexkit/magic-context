@@ -865,11 +865,18 @@ pub struct Handler {
     answer_routes: Mutex<HashMap<u16, AnswerRoute>>,
 }
 
+/// Who a route's answers go to, recorded at bind so a slow answer can be
+/// logged with its session and calling module.
 struct AnswerRoute {
     session: Option<String>,
     caller: Option<String>,
 }
 
+/// Log an answer that took 500 ms or more, so a runner's "late reply" can be
+/// checked against ck-mc's side. From 1,500 ms, the deadline runners give a
+/// step hook, it is a warning. The time runs from the request's arrival to
+/// the handler's return: a Setup or notice is answered when it is queued,
+/// so this is the wait the runner saw, not the session's later work.
 fn log_slow_answer(elapsed: Duration, body: &[u8], route: Option<&AnswerRoute>) {
     let elapsed_ms = elapsed.as_millis();
     if elapsed_ms < 500 {
