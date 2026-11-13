@@ -8,4 +8,7 @@
 //! proposes is written until it passes the task's own checks.
 
 pub mod run;
+// Nothing schedules task runs until the engine's scheduler lands on this
+// branch; the expectation fails once every item here is in use.
+#[expect(dead_code, reason = "the scheduler that runs tasks is not built yet")]
 pub mod task;
