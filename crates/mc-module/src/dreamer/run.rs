@@ -18,8 +18,9 @@
 //! model in a new child; a model that still fails, or whose reply the task
 //! can't use, is replaced by the next one routing picks without it, at most
 //! twice. Every routing decision's outcome is reported back to routing. An
-//! account wait, from routing or the runner, ends the run as a wait: nothing
-//! is counted against the task.
+//! account wait or routing's full capacity (`concurrency_full`), from
+//! routing or the runner, ends the run as a wait: nothing is counted against
+//! the task, and the engine's schedule tries again when the wait ends.
 
 use std::time::Duration;
 

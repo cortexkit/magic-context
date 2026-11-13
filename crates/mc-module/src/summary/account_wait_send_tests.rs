@@ -59,6 +59,12 @@ pub(crate) enum Answer {
     /// Starts a run the runner keeps paused for an account limit, with the
     /// limit's run error from sample 5 beside the pause.
     PausedForAccount,
+    /// Refuses the send because routing has no free model slot until the
+    /// given time: `concurrency_full`, with routing's reset as `resets_at_ms`.
+    RefuseSendCapacity(i64),
+    /// Starts a run that its own admission ends with `concurrency_full` and
+    /// the given reset, the way an llm-runner 0.8.51 runner ends it.
+    RunEndsCapacity(i64),
 }
 
 impl Answer {
@@ -70,7 +76,18 @@ impl Answer {
             Self::RefuseSendFinal => Some(refused_send(
                 "4_account_selection_final_no_hint.new.plan.json",
             )),
-            Self::RunEndsRefused | Self::RunEndsFinal | Self::PausedForAccount => None,
+            Self::RefuseSendCapacity(reset) => {
+                let mut error = ClientError::refused(
+                    cortexkit_role_llm_runner::errors::CONCURRENCY_FULL,
+                    "every account on the route is at its concurrency cap",
+                );
+                error.detail = Some(serde_json::json!({ "resets_at_ms": reset }));
+                Some(error)
+            }
+            Self::RunEndsRefused
+            | Self::RunEndsFinal
+            | Self::PausedForAccount
+            | Self::RunEndsCapacity(_) => None,
         }
     }
 
@@ -80,6 +97,21 @@ impl Answer {
             paused.reason = Some("account_limit".into());
             paused.error = Self::RunEndsRefused.run_end().error;
             return paused;
+        }
+        if let Self::RunEndsCapacity(reset) = self {
+            let error = cortexkit_role_llm_runner::run::RunError::new(
+                "transient",
+                "every account on the route is at its concurrency cap",
+                cortexkit_role_llm_runner::errors::CONCURRENCY_FULL,
+            )
+            .with_resets_at_ms(reset as u64);
+            let mut ended = RunResult::new("run", states::ERROR);
+            ended.awaits = Some(cortexkit_role_llm_runner::errors::ending_awaits(
+                &error,
+                crate::summary::account_wait::now_ms() as u64,
+            ));
+            ended.error = Some(error);
+            return ended;
         }
         refused_run(if self == Self::RunEndsFinal {
             "5_queued_account_selection_final.new.run_status.json"
@@ -562,3 +594,7 @@ async fn account_pause_0842_older_provider_code_only_body_keeps_its_wait() {
 #[cfg(test)]
 #[path = "routing_wait_tests.rs"]
 mod routing_wait_tests;
+
+#[cfg(test)]
+#[path = "concurrency_wait_tests.rs"]
+mod concurrency_wait_tests;

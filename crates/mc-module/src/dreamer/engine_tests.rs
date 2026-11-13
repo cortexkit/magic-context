@@ -313,6 +313,41 @@ async fn a_failed_model_counts_a_failure_and_releases_the_lock() {
     assert_eq!(locks(&db), 0);
 }
 
+/// Routing's full capacity (`concurrency_full`) ends the run as a wait the
+/// schedule retries when routing's reset comes: no failure is counted and
+/// the project's lock is released.
+#[tokio::test]
+async fn a_full_capacity_refusal_ends_the_run_as_a_wait_with_no_failure_counted() {
+    let (_dir, db) = store();
+    let engine = engine(1);
+    let mut client = Client::new(&["p/a"], &[]);
+    // Inside the one-hour cap a routing wait has.
+    let reset = now_ms() + 30 * 60_000;
+    client.refuse = Some(crate::routing::RouteError {
+        code: "no_route".into(),
+        message: "every account on every adequate route is at its cap".into(),
+        detail: Some(json!({"reason": "concurrency_full", "reset_at_ms": reset})),
+    });
+    let client = Arc::new(client);
+    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    make_due(&db);
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    assert_eq!(runs(&db)[0].1.as_deref(), Some("waiting"));
+    let (_, status, _, due) = schedule(&db);
+    assert_eq!(status.as_deref(), Some("waiting"));
+    let failures: i64 = db
+        .with_connection(|conn| {
+            conn.query_row("SELECT failures FROM dream_schedules", [], |row| row.get(0))
+        })
+        .unwrap();
+    assert_eq!(failures, 0);
+    assert_eq!(locks(&db), 0);
+    // Due when the wait ends, unless the next slot comes first.
+    let slot = cron::next_due(default_schedule("classify-memories"), now_ms()).unwrap();
+    assert_eq!(due, Some(slot.min(reset)));
+}
+
 #[test]
 fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
     let (_dir, db) = store();

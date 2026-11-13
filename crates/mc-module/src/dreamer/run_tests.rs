@@ -22,6 +22,9 @@ pub(crate) enum Ends {
     Reply(&'static str),
     Capped,
     Error(&'static str),
+    /// Ends with routing's full capacity (`concurrency_full`) until this
+    /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
+    Full(u64),
 }
 
 /// Routing offers `routes` in order, each on runner `rx` with harness `hx`
@@ -132,6 +135,21 @@ impl RunnerClient for Client {
             Ends::Error(message) => {
                 let mut result = RunResult::new("run", states::ERROR);
                 result.error = Some(RunError::new("provider", message, "provider_error"));
+                result
+            }
+            Ends::Full(reset) => {
+                let error = RunError::new(
+                    "transient",
+                    "every account on the route is at its concurrency cap",
+                    cortexkit_role_llm_runner::errors::CONCURRENCY_FULL,
+                )
+                .with_resets_at_ms(reset);
+                let mut result = RunResult::new("run", states::ERROR);
+                result.awaits = Some(cortexkit_role_llm_runner::errors::ending_awaits(
+                    &error,
+                    now_ms() as u64,
+                ));
+                result.error = Some(error);
                 result
             }
         })
@@ -354,6 +372,64 @@ async fn a_routing_refusal_with_a_reset_time_is_a_wait_not_a_failure() {
         "{error:?}"
     );
     assert!(client.sends.lock().unwrap().is_empty());
+}
+
+/// Routing's refusal when every model slot is taken, with its reset when
+/// given.
+fn capacity_full(reset: Option<i64>) -> routing::RouteError {
+    let mut detail = json!({"reason": "concurrency_full"});
+    if let Some(reset) = reset {
+        detail["reset_at_ms"] = json!(reset);
+    }
+    routing::RouteError {
+        code: "no_route".into(),
+        message: "every account on every adequate route is at its cap".into(),
+        detail: Some(detail),
+    }
+}
+
+/// Routing's full capacity ends the run as a wait, until routing's reset or
+/// for the default five minutes when the refusal names none: no child
+/// starts, and nothing counts against the task or a route.
+#[tokio::test(start_paused = true)]
+async fn a_full_capacity_refusal_is_a_wait_until_routing_s_reset() {
+    use crate::summary::account_wait::DEFAULT_WAIT_MS;
+    for reset in [Some(now_ms() + 10 * 60_000), None] {
+        let mut client = Client::new(&["p/a"], &[]);
+        client.refuse = Some(capacity_full(reset));
+        let error = run(&client, &job(), &Task { fits: true })
+            .await
+            .unwrap_err();
+        let TaskError::AccountWait(wait) = error else {
+            panic!("full capacity failed the run: {error:?}");
+        };
+        assert_eq!(wait.code, "no_route:concurrency_full");
+        assert_eq!(wait.send, SendKind::Dream);
+        assert_eq!(wait.until_ms, reset.unwrap_or(wait.at_ms + DEFAULT_WAIT_MS));
+        assert_eq!(client.selects.lock().unwrap().len(), 1);
+        assert!(client.sends.lock().unwrap().is_empty());
+        assert!(client.reports.lock().unwrap().is_empty());
+    }
+}
+
+/// A run the runner ends with `concurrency_full` (llm-runner's
+/// `errors::is_wait`) ends the task run as a wait until routing's reset: no
+/// retry or other model, and routing hears the decision cancelled, not
+/// failed.
+#[tokio::test(start_paused = true)]
+async fn a_run_ended_for_full_capacity_is_a_wait_not_a_failed_model() {
+    let reset = now_ms() + 10 * 60_000;
+    let client = Client::new(&["p/a", "p/b"], &[Ends::Full(reset as u64)]);
+    let error = run(&client, &job(), &Task { fits: true })
+        .await
+        .unwrap_err();
+    let TaskError::AccountWait(wait) = error else {
+        panic!("full capacity failed the run: {error:?}");
+    };
+    assert_eq!(wait.code, "concurrency_full");
+    assert_eq!(wait.until_ms, reset);
+    assert_eq!(client.children(), ["mc-dream:17:0.0"]);
+    assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
 }
 
 fn verify() -> TaskRun<'static> {

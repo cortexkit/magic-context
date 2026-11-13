@@ -14,6 +14,13 @@
 //! failed. `account_selection_final` is no wait: waiting cannot change it,
 //! and it fails as any other refusal does.
 //!
+//! Routing's capacity hold, `concurrency_full`, takes the same paths: routing
+//! refuses a select with it when every eligible account is running as many
+//! runs as its cap allows, a runner refuses a send or ends a queued run with
+//! it, and a runner pauses a started run for it (`errors::is_wait` and
+//! `RunReason::ConcurrencyFull`, llm-runner 0.8.51). The contract makes it a
+//! wait, never a failure, so it charges nothing either.
+//!
 //! The wait lasts the runner's named time, at least a minute and at most six
 //! hours after the refusal, so a hint of zero or a stale reset cannot start
 //! a new run on every notice.
@@ -27,7 +34,7 @@
 
 use cortexkit_role_llm_runner::awaits::AwaitParty;
 use cortexkit_role_llm_runner::errors;
-use cortexkit_role_llm_runner::run::{RunError, RunResult};
+use cortexkit_role_llm_runner::run::{RunError, RunReason, RunResult};
 use serde_json::Value;
 
 /// How long summaries wait when the runner names no time. The contract
@@ -101,7 +108,10 @@ pub struct AccountWait {
 
 impl AccountWait {
     /// Routing can refuse before any child starts. A stated recovery time
-    /// wins for any reason; only quota or blocked accounts wait without one.
+    /// wins for any reason; only quota, blocked accounts and full capacity
+    /// wait without one. Routing always states a time for full capacity
+    /// (`concurrency_full`), but a refusal that leaves it out still means
+    /// wait, so it waits [`DEFAULT_WAIT_MS`].
     pub fn of_routing(
         error: &crate::routing::RouteError,
         send: SendKind,
@@ -120,7 +130,11 @@ impl AccountWait {
         if reset.is_none()
             && !matches!(
                 reason,
-                Some(NoRouteReason::QuotaOrCooldown | NoRouteReason::AccountsBlocked)
+                Some(
+                    NoRouteReason::QuotaOrCooldown
+                        | NoRouteReason::AccountsBlocked
+                        | NoRouteReason::ConcurrencyFull
+                )
             )
         {
             return None;
@@ -138,15 +152,16 @@ impl AccountWait {
     }
 
     /// The wait a refused `session.send` names, from the error body's outer
-    /// `code` and its `detail`. Only the outer code decides whether it is an
-    /// account wait; the detail only says how long.
+    /// `code` and its `detail`. Only the outer code decides whether it is a
+    /// wait (an account wait or routing's full capacity); the detail only
+    /// says how long.
     pub fn of_refusal(
         code: &str,
         detail: Option<&Value>,
         send: SendKind,
         now_ms: i64,
     ) -> Option<Self> {
-        if !errors::is_account_wait(code) {
+        if !errors::is_wait(code) {
             return None;
         }
         let detail = detail.unwrap_or(&Value::Null);
@@ -167,9 +182,10 @@ impl AccountWait {
 
     /// The wait the error of a run that ended `error` names: a send the
     /// runner accepted and then refused at the run's own admission, or a run
-    /// whose account ran out on the way.
+    /// whose account ran out, or whose route was at full capacity, on the
+    /// way.
     pub fn of_run_error(error: &RunError, send: SendKind, now_ms: i64) -> Option<Self> {
-        if !errors::is_account_wait(&error.provider_code) {
+        if !errors::is_wait(&error.provider_code) {
             return None;
         }
         Some(Self {
@@ -217,7 +233,9 @@ impl AccountWait {
 
     /// A pause still present at the caller's deadline. The runner's exact
     /// resume floor takes priority over the error's retry hint or reset.
-    /// Older runners name only the provider code, so keep accepting it.
+    /// Older runners name only the provider code, so keep accepting it. A run
+    /// paused for an account limit or for routing's full capacity, with no
+    /// run error beside the pause, waits under that reason's code.
     pub fn of_paused_run(
         paused: &RunResult,
         resume_not_before_ms: Option<u64>,
@@ -232,8 +250,13 @@ impl AccountWait {
             .as_ref()
             .and_then(|error| Self::of_run_error(error, send, now_ms));
         let wait = fallback.or_else(|| {
-            (paused.reason.as_deref() == Some("account_limit")).then(|| Self {
-                code: errors::ACCOUNT_LIMIT_EXHAUSTED.to_owned(),
+            let code = match RunReason::from(paused.reason.clone()?) {
+                RunReason::AccountLimit => errors::ACCOUNT_LIMIT_EXHAUSTED,
+                RunReason::ConcurrencyFull => errors::CONCURRENCY_FULL,
+                _ => return None,
+            };
+            Some(Self {
+                code: code.to_owned(),
                 until_ms: until(
                     now_ms,
                     paused

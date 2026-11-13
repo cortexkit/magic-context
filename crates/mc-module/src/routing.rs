@@ -39,19 +39,33 @@ pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
 /// an output cap, so a declared cap would leave these consumers with no
 /// route there. Each run still asks its runner for at most the chosen
 /// model's own output limit (see `summary::run` and `dreamer::run`).
+///
+/// Each consumer declares its scheduling priority, which decides who gets a
+/// model slot that frees up when routing's per-account concurrency caps are
+/// full. A summary is `blocking`: while it waits, the person's session can't
+/// shrink. Dreamer tasks are `background` maintenance that can run later.
+/// Routing serves the member only under its `consumer_priority` group
+/// (routing 0.7.23 or later); a router without that group rejects the whole
+/// slot by the member's name, which would leave every consumer here
+/// undeclared. The manifest is sent before ck-mc can ask routing what it
+/// serves, so it can't leave the member out for an older router: ck-mc ships
+/// together with a routing that advertises `consumer_priority`.
 pub fn consumer_declarations() -> cortexkit_role_routing::declarations::ConsumerDeclarations {
     use cortexkit_role_routing::declarations::{
-        ConsumerDeclaration, ConsumerDeclarations, DemandDefaults,
+        ConsumerDeclaration, ConsumerDeclarations, ConsumerPriority, DemandDefaults,
     };
     use cortexkit_role_routing::select::ToolsRequirement;
     let mut summary = DemandDefaults::new()
         .with_iq(SUMMARY_IQ)
-        .with_placement(cortexkit_role_routing::placement::Placement::caller_runner());
+        .with_placement(cortexkit_role_routing::placement::Placement::caller_runner())
+        .with_priority(ConsumerPriority::Blocking);
     summary.tools = Some(ToolsRequirement::None);
     summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
     let mut consumers = vec![ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)];
     for demand in DREAM_DEMANDS {
-        let mut defaults = DemandDefaults::new().with_iq(demand.iq);
+        let mut defaults = DemandDefaults::new()
+            .with_iq(demand.iq)
+            .with_priority(ConsumerPriority::Background);
         defaults.tools = Some(if demand.reads_code {
             ToolsRequirement::Required
         } else {

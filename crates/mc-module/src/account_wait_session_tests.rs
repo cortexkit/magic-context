@@ -304,3 +304,115 @@ async fn account_wait_an_older_refusal_after_a_served_run_is_ignored() {
     session.account_refused(refusal(SendKind::TurnTwo));
     assert!(session.account_wait.is_some());
 }
+
+/// Routing's refusal of a summary select when every model slot is taken,
+/// with its reset when given.
+fn capacity_full(reset: Option<i64>) -> crate::routing::RouteError {
+    let mut detail = json!({"reason": "concurrency_full"});
+    if let Some(reset) = reset {
+        detail["reset_at_ms"] = json!(reset);
+    }
+    crate::routing::RouteError {
+        code: "no_route".into(),
+        message: "every account on every adequate route is at its cap".into(),
+        detail: Some(detail),
+    }
+}
+
+/// Runs the due summary on `sender` and hands its result to the session.
+/// The summary must end as a wait that charges nothing; returns until when.
+async fn waits_charging_nothing(
+    session: &mut Session,
+    client: &Client,
+    settings: &Settings,
+    sender: &crate::summary::run::account_wait_send_tests::Client,
+) -> i64 {
+    use crate::summary::run::account_wait_send_tests::job;
+    assert!(session.decide_notice(settings).summary.is_some());
+    assert!(session.drain.spent > 0);
+    let result = run::run(sender, None, &job()).await;
+    assert!(
+        matches!(result, Err(run::SummaryError::AccountWait(_))),
+        "the summary did not end as a wait"
+    );
+    session
+        .summary_finished(client, settings, result, now_ms())
+        .await;
+    assert!(!session.summarizing);
+    assert_eq!(session.app.failures, 0);
+    assert_eq!(session.app.last_error, None);
+    assert_eq!(session.drain.spent, 0, "the reservation went back");
+    assert_eq!(session.drain.failure_at, 0, "no failure backoff");
+    assert_eq!(session.no_progress, None);
+    session
+        .account_wait
+        .as_ref()
+        .expect("the session waits")
+        .refusal
+        .until_ms
+}
+
+/// While the wait holds no summary starts and the held drops land; the
+/// first trigger once it has ended starts a run.
+fn holds_until(session: &mut Session, settings: &Settings, until: i64) {
+    let waiting = session.account_wait.as_ref().unwrap();
+    assert!(waiting.holds(until - 1));
+    assert!(!waiting.holds(until), "the wait outlasts the stated time");
+    let pass = session.decide_notice(settings);
+    assert!(pass.summary.is_none());
+    assert!(pass.rebuild, "the held drops wait");
+    session.account_wait.as_mut().unwrap().refusal.until_ms = now_ms() - 1;
+    assert!(session.decide_notice(settings).summary.is_some());
+    assert_eq!(session.account_wait, None);
+}
+
+/// A summary select routing refuses for full capacity (`concurrency_full`)
+/// waits until routing's reset, or the default five minutes when the
+/// refusal names none, and charges no attempt.
+#[tokio::test]
+async fn concurrency_full_select_holds_summaries_until_its_reset_charging_nothing() {
+    use crate::summary::account_wait::DEFAULT_WAIT_MS;
+    use crate::summary::run::account_wait_send_tests::{Answer, Client as SendClient};
+
+    let reset = now_ms() + 10 * 60_000;
+    let (mut session, client, settings) = ready();
+    let sender = SendClient::new(Answer::RunEndsFinal)
+        .with_route_refusal_after(0, capacity_full(Some(reset)));
+    let until = waits_charging_nothing(&mut session, &client, &settings, &sender).await;
+    assert_eq!(until, reset);
+    assert_eq!(*sender.sends.lock().unwrap(), 0);
+    holds_until(&mut session, &settings, until);
+
+    let (mut session, client, settings) = ready();
+    let sender =
+        SendClient::new(Answer::RunEndsFinal).with_route_refusal_after(0, capacity_full(None));
+    let until = waits_charging_nothing(&mut session, &client, &settings, &sender).await;
+    let refusal = &session.account_wait.as_ref().unwrap().refusal;
+    assert_eq!(until, refusal.at_ms + DEFAULT_WAIT_MS);
+    assert_eq!(refusal.code, "no_route:concurrency_full");
+    holds_until(&mut session, &settings, until);
+}
+
+/// A runner that refuses the summarizer's send, or ends its run, with
+/// `concurrency_full` (llm-runner's `errors::is_wait`) holds the session's
+/// summaries until routing's reset and charges no attempt.
+#[tokio::test]
+async fn concurrency_full_from_the_runner_holds_summaries_charging_nothing() {
+    use crate::summary::run::account_wait_send_tests::{Answer, Client as SendClient};
+
+    let reset = now_ms() + 10 * 60_000;
+    for answer in [
+        Answer::RefuseSendCapacity(reset),
+        Answer::RunEndsCapacity(reset),
+    ] {
+        let (mut session, client, settings) = ready();
+        let sender = SendClient::new(answer);
+        let until = waits_charging_nothing(&mut session, &client, &settings, &sender).await;
+        assert_eq!(until, reset);
+        assert_eq!(
+            session.account_wait.as_ref().unwrap().refusal.code,
+            "concurrency_full"
+        );
+        holds_until(&mut session, &settings, until);
+    }
+}

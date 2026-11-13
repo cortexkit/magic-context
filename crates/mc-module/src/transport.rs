@@ -2304,7 +2304,7 @@ mod manifest_tests {
     /// Routing refuses a consumer the calling module's catalog entry doesn't
     /// declare, so the summary consumer and each dreamer task's consumer
     /// must be in the manifest, valid for a routing that reads declarations,
-    /// with their defaults on the wire.
+    /// with their defaults and scheduling priorities on the wire.
     #[test]
     fn the_manifest_declares_its_consumers_to_routing() {
         let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
@@ -2318,6 +2318,7 @@ mod manifest_tests {
                 "placement": "caller_runner",
                 "tools": "none",
                 "context_window": 64000,
+                "priority": "blocking",
             })
         );
         // One consumer per dreamer task kind, placed wherever routing picks.
@@ -2333,6 +2334,10 @@ mod manifest_tests {
         assert!(consumers[1..]
             .iter()
             .all(|consumer| consumer.get("placement").is_none()));
+        // Dreamer work yields a free model slot to anything more urgent.
+        assert!(consumers[1..]
+            .iter()
+            .all(|consumer| consumer["priority"] == "background"));
         // No consumer states an output cap (see `routing::consumer_declarations`).
         assert!(consumers
             .iter()
@@ -2348,13 +2353,26 @@ mod manifest_tests {
                 "iq": 60,
                 "tools": "required",
                 "context_window": 200000,
+                "priority": "background",
             })
         );
         let parsed: cortexkit_role_routing::declarations::ConsumerDeclarations =
             serde_json::from_value(slot.clone()).unwrap();
+        use cortexkit_role_routing::capabilities::{CONSUMER_DECLARATIONS, CONSUMER_PRIORITY};
         parsed
-            .validate_serving(&[cortexkit_role_routing::capabilities::CONSUMER_DECLARATIONS])
+            .validate_serving(&[CONSUMER_DECLARATIONS, CONSUMER_PRIORITY])
             .unwrap();
+        // A router that doesn't serve priorities rejects the whole slot by
+        // the member's name; this is why ck-mc needs a router advertising
+        // `consumer_priority`.
+        assert_eq!(
+            parsed.validate_serving(&[CONSUMER_DECLARATIONS]),
+            Err(
+                cortexkit_role_routing::declarations::DeclarationError::UnknownMember {
+                    field: "consumers[0].priority".into()
+                }
+            )
+        );
     }
 
     /// Core and runners find ck-mc by these claims in the daemon's module
