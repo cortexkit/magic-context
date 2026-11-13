@@ -182,8 +182,19 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     if DECLARE_COMPACTION_LIMITS {
         claims.push(cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned());
     }
+    let routing = serde_json::to_value(crate::routing::consumer_declarations())
+        .expect("routing declarations are JSON");
+    let serde_json::Value::Object(routing) = routing else {
+        unreachable!("routing declarations serialize as an object")
+    };
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
         .provides(provides)
+        // Routing reads the consumers a module owns from its catalog entry,
+        // so they stay known while the module is stopped.
+        .role_declarations(std::collections::BTreeMap::from([(
+            cortexkit_role_routing::ROLE_DECLARATIONS_KEY.to_owned(),
+            routing,
+        )]))
         // The daemon puts a scope's folder and project on a route's stamp
         // only for a provider that asks; they are where a session's project
         // comes from.
@@ -2157,6 +2168,31 @@ mod user_commands_tests {
 
 #[cfg(test)]
 mod manifest_tests {
+    /// Routing refuses a consumer the calling module's catalog entry doesn't
+    /// declare, so the summary consumer must be in the manifest, valid for
+    /// a routing that reads declarations, with its defaults on the wire.
+    #[test]
+    fn the_manifest_declares_the_summary_consumer_to_routing() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let slot = &manifest["role_declarations"]["routing/v1"];
+        assert_eq!(
+            slot,
+            &serde_json::json!({"consumers": [{
+                "name": "magic-context.summary",
+                "iq": 40,
+                "placement": "caller_runner",
+                "tools": "none",
+                "max_output_tokens": 32000,
+                "context_window": 64000,
+            }]})
+        );
+        let parsed: cortexkit_role_routing::declarations::ConsumerDeclarations =
+            serde_json::from_value(slot.clone()).unwrap();
+        parsed
+            .validate_serving(&[cortexkit_role_routing::capabilities::CONSUMER_DECLARATIONS])
+            .unwrap();
+    }
+
     /// Core and runners find ck-mc by these claims in the daemon's module
     /// catalog. Each one missing makes core leave ck-mc out of every plan's
     /// matching item, silently.

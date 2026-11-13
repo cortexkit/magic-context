@@ -19,9 +19,36 @@ use cortexkit_role_compaction::setup::ModelRef;
 
 /// The routing capability ck-mc requires.
 pub const CAPABILITY: &str = "routing/v1";
-/// The consumer name summaries are selected under. Routing ships a default
-/// entry for it, so no operator configuration is needed.
-pub const SUMMARY_CONSUMER: &str = "mc_summary";
+/// The consumer name summaries are selected under. It is rooted at the
+/// module's id, and the module's manifest declares it with its defaults
+/// ([`consumer_declarations`]), so routing knows it even while ck-mc is
+/// stopped and no operator configuration is needed.
+pub const SUMMARY_CONSUMER: &str = "magic-context.summary";
+
+/// The largest reply a summary run asks for.
+pub const SUMMARY_OUTPUT_TOKENS: u64 = 32_000;
+
+/// The smallest context window a summary run can use: a chunk, the prompt
+/// around it and the reply.
+pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
+
+/// The routing consumers ck-mc owns, for its manifest's
+/// `role_declarations["routing/v1"]` slot: summaries run tool-free on the
+/// session's own runner, at [`SUMMARY_IQ`].
+pub fn consumer_declarations() -> cortexkit_role_routing::declarations::ConsumerDeclarations {
+    use cortexkit_role_routing::declarations::{
+        ConsumerDeclaration, ConsumerDeclarations, DemandDefaults,
+    };
+    let mut summary = DemandDefaults::new()
+        .with_iq(SUMMARY_IQ)
+        .with_placement(cortexkit_role_routing::placement::Placement::caller_runner());
+    summary.tools = Some(cortexkit_role_routing::select::ToolsRequirement::None);
+    summary.max_output_tokens = Some(SUMMARY_OUTPUT_TOKENS);
+    summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
+    ConsumerDeclarations::new().with_consumers(vec![
+        ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)
+    ])
+}
 /// Summaries need a mid-level model (ARCHITECTURE: module-only model
 /// placement). Routing grades models against the best one the consumer may
 /// use, so the demand that lands on a mid-level model moves when grades move:
