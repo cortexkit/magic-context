@@ -2,7 +2,7 @@
 //! migrations start from.
 //!
 //! Every released 0.49 plugin leaves `context.db` at version 95. Versions 96
-//! to 105 were written by the plugin only on the unreleased mode-3 line, so a
+//! to 105 were written only by unreleased development builds of the plugin, so a
 //! user's store never has them, and most of what they add is state for the
 //! plugin's own transform, which the module never reads. So instead of
 //! porting those ten migrations one by one, this step makes a store at 95 to
