@@ -536,6 +536,51 @@
       "rendered": [
         "[⟦memory.id⟧] ⟦memory.category⟧"
       ]
+    },
+    {
+      "document": "dreamer/swe:classify-memories/system",
+      "class": "ruling",
+      "ruling": "dreamer spec §5.2, Ufuk 2026-11-13 (ask_98082d7b15bf06d1): classify asks importance and safety_critical only; scope and shareability stay out until a sensitivity check exists.",
+      "why": "0.50 stores neither value from classify; a replay threw away 108 of 111 shareable answers.",
+      "today": [
+        "### Scope",
+        "- `project` — only meaningful inside this repository/product (default when uncertain).",
+        "- `ecosystem` — useful to sibling projects in the same stack, harness, provider, or company ecosystem.",
+        "- `universe` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.",
+        "",
+        "### Shareability",
+        "Shareability is about EXPOSURE, not scope: **would a teammate working on THIS SAME project benefit from seeing this memory, and is it free of anything personal, local, or sensitive?** If yes, set `shareable=\"true\"`. This is the COMMON case — most project knowledge is exactly what you'd hand a new teammate: architecture, design rules, conventions, constraints, file locations, hard-won gotchas. Mark those shareable even though they are specific to this repo's internals.",
+        "",
+        "Keep `shareable=\"false\"` only for what is tied to the USER or their machine rather than the project: personal/absolute paths, usernames, local or private endpoints (e.g. localhost), credentials/secrets/tokens, customer data, machine-specific config, and personal working-style preferences. A fact's scope does NOT decide shareability. The host also fails closed and forces secret/credential/personal-path text to private regardless.",
+        ""
+      ],
+      "rendered": []
+    },
+    {
+      "document": "dreamer/swe:classify-memories/system",
+      "class": "ruling",
+      "ruling": "dreamer spec §5.2, Ufuk 2026-11-13 (ask_98082d7b15bf06d1): classify asks importance and safety_critical only; scope and shareability stay out until a sensitivity check exists.",
+      "why": "0.50 stores neither value from classify; a replay threw away 108 of 111 shareable answers.",
+      "today": [
+        "<memory id=\"N\" importance=\"80\" scope=\"project\" shareable=\"true\" safety_critical=\"true\"/>",
+        "<memory id=\"M\" importance=\"20\" scope=\"universe\" shareable=\"false\" safety_critical=\"false\"/>"
+      ],
+      "rendered": [
+        "<memory id=\"N\" importance=\"80\" safety_critical=\"true\"/>",
+        "<memory id=\"M\" importance=\"20\" safety_critical=\"false\"/>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:classify-memories/system",
+      "class": "ruling",
+      "ruling": "dreamer spec §5.2, Ufuk 2026-11-13 (ask_98082d7b15bf06d1): classify asks importance and safety_critical only; scope and shareability stay out until a sensitivity check exists.",
+      "why": "0.50 stores neither value from classify; a replay threw away 108 of 111 shareable answers.",
+      "today": [
+        "- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false."
+      ],
+      "rendered": [
+        "- importance is an integer 1-100."
+      ]
     }
   ]
 }

@@ -50,8 +50,8 @@
     },
     {
       "path": "prompts/dreamer/classify-memories/system.md",
-      "sha256": "7427c9331331998326bcee81923528c3aa5feec0a55cab0ac044594c15e11aa5",
-      "bytes": 3488
+      "sha256": "008cff85d23c4785d9935e4e20c62e151cce05956f831d78f47c68430e86cf0b",
+      "bytes": 2238
     },
     {
       "path": "prompts/dreamer/classify-memories/user.md",

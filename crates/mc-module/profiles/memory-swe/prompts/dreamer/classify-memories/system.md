@@ -13,14 +13,4 @@ Rough anchors (not quotas — spread naturally within them): transient/obvious o
 
 One hard floor: an operating rule whose VIOLATION causes a public-facing or irreversible mistake — posting under the wrong identity, committing/pushing without approval, leaking private content, running destructive commands — scores at least 80. These rules only work if they are always in view; a mid-band score silently drops them from context exactly when the pool grows, and the violation happens. Judge by consequence-of-forgetting, not by how mundane the rule text reads.
 
-### Scope
-- `project` — only meaningful inside this repository/product (default when uncertain).
-- `ecosystem` — useful to sibling projects in the same stack, harness, provider, or company ecosystem.
-- `universe` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.
-
-### Shareability
-Shareability is about EXPOSURE, not scope: **would a teammate working on THIS SAME project benefit from seeing this memory, and is it free of anything personal, local, or sensitive?** If yes, set `shareable="true"`. This is the COMMON case — most project knowledge is exactly what you'd hand a new teammate: architecture, design rules, conventions, constraints, file locations, hard-won gotchas. Mark those shareable even though they are specific to this repo's internals.
-
-Keep `shareable="false"` only for what is tied to the USER or their machine rather than the project: personal/absolute paths, usernames, local or private endpoints (e.g. localhost), credentials/secrets/tokens, customer data, machine-specific config, and personal working-style preferences. A fact's scope does NOT decide shareability. The host also fails closed and forces secret/credential/personal-path text to private regardless.
-
 ⟦mc:classify-memories.output-contract⟧
