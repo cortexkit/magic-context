@@ -204,9 +204,10 @@ fn a_head_reads_its_project_its_workspace_and_the_person() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Review witnesses for the head's one-selection memory change. Each test
-// below states what the head should do and fails on the code it was written
-// against; the review report names the code path behind each one.
+// What the head should do once one selection picks the memories of every
+// level (global, workspace, project) for `m[0]` and profile lines become
+// global memories in `m[1]`'s update lines. Each test below states one such
+// expectation that the selection's first version did not meet.
 
 static NO_CLASSES: std::sync::LazyLock<HashMap<String, String>> =
     std::sync::LazyLock::new(Default::default);
