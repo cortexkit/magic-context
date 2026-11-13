@@ -927,6 +927,10 @@ mod run_awaits_tests;
 #[path = "temperature_tests.rs"]
 mod temperature_tests;
 
+#[cfg(test)]
+#[path = "one_summarizer_tests.rs"]
+mod one_summarizer_tests;
+
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system
 /// prompt, one model step and, on the send that creates the child, no tools.

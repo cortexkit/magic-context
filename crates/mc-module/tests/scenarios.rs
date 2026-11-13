@@ -37,6 +37,8 @@ mod agent_surface;
 mod app_read;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
+#[path = "scenarios/one_summarizer.rs"]
+mod one_summarizer;
 #[path = "scenarios/signed_floor.rs"]
 mod signed_floor;
 
