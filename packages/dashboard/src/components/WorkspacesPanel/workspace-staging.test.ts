@@ -64,6 +64,16 @@ describe("workspace staged editor helpers", () => {
     expect(workspaceStageDirty(ws, createWorkspaceStage(ws))).toBe(false);
   });
 
+  it("#given only members changed #then the save does not speak for share categories", () => {
+    const ws = workspace({ share_categories: ["NAMING"] });
+    const stage = createWorkspaceStage(ws);
+    stage.addMembers.push({ project_path: "git:b", display_name: "svc-b", display_path: "/b" });
+
+    const payload = workspaceStageToPayload(ws, stage);
+    expect(workspaceStageDirty(ws, stage)).toBe(true);
+    expect("shareCategories" in payload).toBe(false);
+  });
+
   it("#given the panel source #then member rows use Index rather than For", () => {
     const source = readFileSync(resolve(import.meta.dir, "./WorkspacesPanel.tsx"), "utf-8");
     expect(source).toContain("<Index each={stagedMemberRows");

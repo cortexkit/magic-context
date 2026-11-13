@@ -9,7 +9,7 @@ import {
 import type { ProjectCard, WorkspaceListItem } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import ProjectCardMenu from "./ProjectCardMenu";
-import { workspaceAssignmentPlan } from "./workspace-menu-options";
+import { unassignedMoveMessage, workspaceAssignmentPlan } from "./workspace-menu-options";
 
 interface Props {
   onSelect: (project: ProjectCard) => void;
@@ -42,6 +42,10 @@ export default function ProjectsGrid(props: Props) {
     // One project, one workspace: a move leaves first. Run in order, never together.
     let plan: ReturnType<typeof workspaceAssignmentPlan> | null = null;
     let left = false;
+    let restored = false;
+    // A move that left its old workspace and could not be restored; the message
+    // waits for the refreshed membership so it does not claim "in none" blindly.
+    let lostMove: { targetName: string; reason: string } | null = null;
     try {
       // Plan from the list as it is now, not as the menu saw it: an earlier
       // save or another window may have changed membership since.
@@ -58,23 +62,34 @@ export default function ProjectsGrid(props: Props) {
     } catch (e: unknown) {
       const raw = e instanceof Error ? e.message : String(e);
       const reason = /[.!?]$/.test(raw.trim()) ? raw.trim() : `${raw.trim()}.`;
-      let restored = false;
-      if (left && plan?.restore) {
+      if (!left) {
+        setError(`Could not save: ${reason}`);
+      } else if (plan?.restore) {
+        // Whether the restore failed is all we know here; where the project
+        // actually is can only be read from the refreshed membership below.
         restored = await applyWorkspaceChanges(plan.restore).then(
           () => true,
           () => false,
         );
+        if (restored) {
+          setError(`Could not move to ${picked.name}: ${reason} The project stays where it was.`);
+        } else {
+          lostMove = { targetName: picked.name, reason };
+        }
+      } else {
+        lostMove = { targetName: picked.name, reason };
       }
-      setError(
-        !left
-          ? `Could not save: ${reason}`
-          : restored
-            ? `Could not move to ${picked.name}: ${reason} The project stays where it was.`
-            : `Could not move to ${picked.name}: ${reason} It has left its old workspace and is now in none.`,
-      );
     } finally {
       // Stay busy until the cards show the result, so the next menu plans from it.
-      await refreshAll();
+      const [, freshWorkspaces] = await refreshAll();
+      if (!restored && lostMove) {
+        // It left its old workspace and is in none *as far as the refreshed list
+        // says* -- another window may have assigned it since.
+        const workspaces = freshWorkspaces?.status === "fulfilled" ? freshWorkspaces.value : null;
+        setError(
+          unassignedMoveMessage(lostMove.targetName, lostMove.reason, workspaces, card.identity),
+        );
+      }
       setSaving(false);
       // The refreshed cards are new elements; give focus back to this card's.
       if (document.activeElement === document.body) {

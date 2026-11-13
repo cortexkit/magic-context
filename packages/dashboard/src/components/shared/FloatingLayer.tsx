@@ -71,7 +71,14 @@ export default function FloatingLayer(props: {
     };
     const place = () => (point ? placeAtPoint(point) : placeAtAnchor());
     const outside = (event: PointerEvent) => {
-      if (!props.anchor.contains(event.target as Node) && !layer?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      // A point-mode menu floats over the card that opened it, and that card's
+      // own click would open the project; count only the layer as inside there.
+      // An anchored popover belongs to its anchor, so the anchor stays inside.
+      const inside = point
+        ? Boolean(layer?.contains(target))
+        : props.anchor.contains(target) || Boolean(layer?.contains(target));
+      if (!inside) {
         if (point) swallowDismissClick();
         props.onClose();
       }

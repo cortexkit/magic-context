@@ -9,7 +9,9 @@ export interface WorkspaceChangePayload {
   addMembers: WorkspaceMemberChange[];
   removeMembers: string[];
   setDisplayNames: { project_path: string; display_name: string }[];
-  shareCategories: WorkspaceShareCategory[];
+  /** Absent on purpose: a membership write must not restate the categories it
+   *  read earlier, or a category disabled in the meantime would come back on. */
+  shareCategories?: WorkspaceShareCategory[];
 }
 
 export interface WorkspaceMenuTarget {
@@ -96,9 +98,29 @@ function memberChange(
     addMembers: change.add ? [{ ...change.add }] : [],
     removeMembers: change.remove ? [change.remove] : [],
     setDisplayNames: [],
-    // Saving rewrites the workspace's categories; hand back what it has.
-    shareCategories: [...workspace.share_categories],
+    // shareCategories is left out: this write only moves a membership and must
+    // not restate categories read earlier, which could re-enable sharing that
+    // someone turned off in another window in the meantime.
   };
+}
+
+/** What to tell the user when a move failed, the old membership could not be
+ *  restored, and the refreshed list (null: could not be read) is all we know.
+ *  The claim "now in none" is made only when the refreshed membership agrees:
+ *  another window may have assigned the project between the leave and the join. */
+export function unassignedMoveMessage(
+  targetName: string,
+  reason: string,
+  workspaces: readonly WorkspaceListItem[] | null | undefined,
+  identity: string,
+): string {
+  const head = `Could not move to ${targetName}: ${reason}`;
+  if (!workspaces) {
+    return `${head} Restoring the old workspace failed and the workspace list could not be re-read; the grid shows where the project is now.`;
+  }
+  const current = currentWorkspaceOf(identity, workspaces);
+  if (current) return `${head} Another change has since put the project in ${current.name}.`;
+  return `${head} It has left its old workspace and is now in none.`;
 }
 
 /** The writes that put `card` into `target`, in the order they must run.

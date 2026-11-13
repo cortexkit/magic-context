@@ -615,13 +615,18 @@ pub fn apply_workspace_changes(
     add_members: Vec<WorkspaceMemberChange>,
     remove_members: Vec<String>,
     set_display_names: Vec<WorkspaceDisplayNameChange>,
-    share_categories: Vec<String>,
+    share_categories: Option<Vec<String>>,
 ) -> Result<(), rusqlite::Error> {
     if !workspace_schema_ready(conn)? {
         return Err(workspace_not_ready_error());
     }
 
-    let normalized_share_categories = normalize_share_categories(share_categories)?;
+    // None means "this save does not speak for the categories": a membership
+    // change must not carry a copy read earlier, or a category disabled in
+    // another window in between would be turned back on.
+    let normalized_share_categories = share_categories
+        .map(normalize_share_categories)
+        .transpose()?;
     let rename = rename
         .map(|name| name.trim().to_string())
         .map(|name| {
@@ -740,8 +745,10 @@ pub fn apply_workspace_changes(
             .map(|old| old.display_name != member.display_name)
             .unwrap_or(false)
     });
-    let share_categories_changed =
-        has_share_categories && old_share_categories != normalized_share_categories;
+    let share_categories_changed = match &normalized_share_categories {
+        Some(categories) => has_share_categories && &old_share_categories != categories,
+        None => false,
+    };
 
     if rename.as_deref() != Some(current_name.as_str()) {
         if let Some(name) = &rename {
@@ -812,13 +819,10 @@ pub fn apply_workspace_changes(
         }
     }
 
-    if has_share_categories {
+    if let (true, Some(categories)) = (has_share_categories, &normalized_share_categories) {
         tx.execute(
             "UPDATE workspaces SET share_categories = ?1 WHERE id = ?2",
-            params![
-                share_categories_json(&normalized_share_categories)?,
-                workspace_id
-            ],
+            params![share_categories_json(categories)?, workspace_id],
         )?;
     }
 

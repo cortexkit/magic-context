@@ -4,6 +4,7 @@ import {
   currentWorkspaceOf,
   HOME_PROJECT_REASON,
   projectWorkspaceMenu,
+  unassignedMoveMessage,
   workspaceAssignmentPlan,
 } from "./workspace-menu-options";
 
@@ -113,7 +114,7 @@ describe("projectWorkspaceMenu", () => {
 });
 
 describe("workspaceAssignmentPlan", () => {
-  test("adds only the new member and passes the target's categories through", () => {
+  test("a membership write leaves the target's share categories alone", () => {
     const target = workspace(2, "two", [{ project_path: "git:beta", display_name: "beta" }]);
     target.share_categories = ["ARCHITECTURE", "CONSTRAINTS"];
     const plan = workspaceAssignmentPlan(card(), [target], target);
@@ -127,10 +128,10 @@ describe("workspaceAssignmentPlan", () => {
       ],
       removeMembers: [],
       setDisplayNames: [],
-      shareCategories: ["ARCHITECTURE", "CONSTRAINTS"],
     });
-    // A copy, so a later edit to the list cannot change what was sent.
-    expect(plan.join.shareCategories).not.toBe(target.share_categories);
+    // Carrying the categories the menu read back would undo a change made in
+    // another window between that read and this write, so nothing is sent.
+    expect("shareCategories" in plan.join).toBe(false);
   });
 
   test("a move leaves the current workspace, joins the target, and can restore the old membership", () => {
@@ -149,7 +150,6 @@ describe("workspaceAssignmentPlan", () => {
       addMembers: [],
       removeMembers: ["git:alpha"],
       setDisplayNames: [],
-      shareCategories: ["ARCHITECTURE"],
     });
     expect(plan.join.workspaceId).toBe(2);
     expect(plan.join.addMembers).toEqual([
@@ -168,5 +168,25 @@ describe("workspaceAssignmentPlan", () => {
     const target = workspace(2, "two");
     const plan = workspaceAssignmentPlan(card({ primary_path: "" }), [current, target], target);
     expect(plan.join.addMembers[0].display_path).toBe("/old/alpha");
+  });
+});
+
+describe("unassignedMoveMessage", () => {
+  test("says the project is in none only when the refreshed list agrees", () => {
+    const message = unassignedMoveMessage("two", "Locked.", [workspace(1, "one")], "git:alpha");
+    expect(message).toContain("is now in none");
+  });
+
+  test("names the workspace another window put it in", () => {
+    const other = workspace(3, "three", [{ project_path: "git:alpha", display_name: "alpha" }]);
+    const message = unassignedMoveMessage("two", "Locked.", [other], "git:alpha");
+    expect(message).toContain("put the project in three");
+    expect(message).not.toContain("in none");
+  });
+
+  test("admits it does not know when the list cannot be re-read", () => {
+    const message = unassignedMoveMessage("two", "Locked.", null, "git:alpha");
+    expect(message).toContain("could not be re-read");
+    expect(message).not.toContain("in none");
   });
 });

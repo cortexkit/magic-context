@@ -138,7 +138,9 @@ export async function applyWorkspaceChanges(params: {
   addMembers: WorkspaceMemberChange[];
   removeMembers: string[];
   setDisplayNames: WorkspaceDisplayNameChange[];
-  shareCategories: WorkspaceShareCategory[];
+  /** Omit to leave the stored share categories untouched; send a value only
+   *  when this save actually edits them. */
+  shareCategories?: WorkspaceShareCategory[];
 }): Promise<void> {
   return invoke("apply_workspace_changes", params);
 }

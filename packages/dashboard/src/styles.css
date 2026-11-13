@@ -3747,7 +3747,9 @@ select.config-input {
   border-radius: var(--radius-md);
   padding: 8px 12px;
   font-size: 12px;
-  color: var(--error-text);
+  /* --error-text alone is 4.1:1 on --error-bg in the dark theme; blending it
+     toward the body colour keeps the alarm tone and clears AA. */
+  color: color-mix(in srgb, var(--error-text) 70%, var(--text-primary));
 }
 
 /* ── Context menu (project card right-click) ─────────── */
@@ -3801,7 +3803,10 @@ select.config-input {
 }
 
 .context-menu-item[aria-disabled="true"] {
-  color: var(--text-muted);
+  /* Not --text-muted: the disabled row is focusable so it can be read out, and
+     its label is the only clue to why it is disabled -- at --text-muted it is
+     2.0:1 on --bg-elevated and 1.7:1 on the focus wash in the dark theme. */
+  color: color-mix(in srgb, var(--text-muted) 50%, var(--text-primary));
   cursor: default;
 }
 
@@ -3813,8 +3818,11 @@ select.config-input {
   background: var(--bg-elevated-hover);
 }
 
+/* The current workspace is marked by tone alone; --accent lands at 4.0:1 on
+   --bg-elevated in the dark theme (3.3:1 on the hover wash), so it takes the
+   same tint toward the body colour as the explanation text. */
 .context-menu-item.current {
-  color: var(--accent);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text-primary));
 }
 
 .context-menu-check {
@@ -3844,11 +3852,12 @@ select.config-input {
 }
 
 /* The reason is the only explanation for a disabled target, so it wraps under
-   the name instead of being ellipsized, and uses the readable secondary tone. */
+   the name instead of being ellipsized. --text-secondary is 4.3:1 on the dark
+   --bg-elevated, so this text leans toward the body colour to clear AA. */
 .context-menu-hint {
   font-size: 11px;
   line-height: 1.35;
-  color: var(--text-secondary);
+  color: color-mix(in srgb, var(--text-secondary) 70%, var(--text-primary));
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -3858,8 +3867,9 @@ select.config-input {
   font-size: 11px;
   line-height: 1.4;
   /* Not --text-muted: this line is the only explanation of why the item
-     above is disabled, so it has to stay readable on --bg-elevated. */
-  color: var(--text-secondary);
+     above is disabled, so it has to stay readable -- on --bg-elevated and on
+     the --bg-elevated-hover wash it takes when focused. */
+  color: color-mix(in srgb, var(--text-secondary) 70%, var(--text-primary));
 }
 
 /* A status line in the flyout takes focus so it is read out; show where focus is. */

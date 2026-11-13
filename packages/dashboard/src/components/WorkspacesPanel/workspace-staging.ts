@@ -125,13 +125,21 @@ export function workspaceStageDirty(workspace: WorkspaceListItem, stage: Workspa
 
 export function workspaceStageToPayload(workspace: WorkspaceListItem, stage: WorkspaceStage) {
   const rename = stage.rename.trim();
+  const categoriesDirty =
+    normalizeShareCategories(stage.shareCategories).join("\u0000") !==
+    normalizeShareCategories(workspace.share_categories).join("\u0000");
   return {
     workspaceId: workspace.id,
     rename: rename !== workspace.name ? rename : null,
     addMembers: stage.addMembers.map((member) => ({ ...member })),
     removeMembers: [...stage.removeMembers],
     setDisplayNames: effectiveDisplayNameChanges(workspace, stage),
-    shareCategories: normalizeShareCategories(stage.shareCategories),
+    // Only a save that actually edits the categories speaks for them: sending
+    // the snapshot read when the panel opened would turn a category another
+    // window disabled in the meantime back on.
+    ...(categoriesDirty
+      ? { shareCategories: normalizeShareCategories(stage.shareCategories) }
+      : {}),
   };
 }
 
