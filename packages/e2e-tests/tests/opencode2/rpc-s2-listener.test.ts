@@ -60,8 +60,8 @@ test("v2_rpc_listener_publishes_nonzero_sidebar_snapshot_after_prompt", async ()
 			try {
 				const row = db
 					.prepare<
-						[string],
-						{ last_input_tokens: number; last_context_percentage: number }
+						{ last_input_tokens: number; last_context_percentage: number },
+						[string]
 					>(
 						"SELECT last_input_tokens, last_context_percentage FROM session_meta WHERE session_id = ? AND harness = 'opencode2'",
 					)

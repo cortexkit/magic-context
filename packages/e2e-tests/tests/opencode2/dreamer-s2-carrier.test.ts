@@ -63,7 +63,6 @@ function readContextDb<T>(env: NodeJS.ProcessEnv, read: (db: Database) => T): T 
 
 function writeContextDb(env: NodeJS.ProcessEnv, write: (db: Database) => void): void {
 	const db = new Database(contextDbPath(env), {
-		readwrite: true,
 		fileMustExist: true,
 	});
 	try {

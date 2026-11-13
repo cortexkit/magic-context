@@ -1,16 +1,20 @@
 {
     "compilerOptions": {
         "target": "ES2022",
+        "lib": ["ES2023", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
         "module": "ESNext",
         "moduleResolution": "bundler",
         "strict": true,
         "noEmit": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
+        "resolveJsonModule": true,
         "types": ["bun-types"],
         "paths": {
-            "@magic-context/core/*": ["../plugin/src/*"]
+            "@magic-context/core/*": ["../plugin/src/*"],
+            "@cortexkit/retina-local-fs/*": ["../retina-local-fs/src/*"],
+            "@oh-my-pi/pi-coding-agent": ["./node_modules/@oh-my-pi/pi-coding-agent"]
         }
     },
-    "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]
+    "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "../../scripts/gate.ts", "../../scripts/gate.test.ts", "../../scripts/gate-tools.test.ts"]
 }

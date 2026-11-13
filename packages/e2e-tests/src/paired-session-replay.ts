@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readReplayDocument } from "../../plugin/src/features/magic-context/storage-replay-document";
+import type { Database } from "../../plugin/src/shared/sqlite";
 import type { MockResponse } from "./mock-provider/server";
 import { RustTestHarness } from "./rust-harness";
 
@@ -744,7 +745,7 @@ async function driveTrailingBlankLane(
         // TTL policy shares the trailing_blank_decisions column and can wrap its decisions
         // in a versioned replay document before this assistant's first replay pass.
         return (
-            readReplayDocument(harness.contextDb(), sessionId).trailingBlank[targetMessageId] ?? null
+            readReplayDocument(harness.contextDb() as unknown as Database, sessionId).trailingBlank[targetMessageId] ?? null
         );
     };
     const sourceParts = async (): Promise<string[]> =>

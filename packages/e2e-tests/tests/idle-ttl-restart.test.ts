@@ -745,7 +745,8 @@ export default async (ctx) => {
 		if (RUST_MODE && abortAndChange) {
 			const meta = afterIdleModuleMeta!;
 			expect(meta.expiry_cutoff_ms).toBe((preparedModuleMeta as typeof meta).expiry_cutoff_ms);
-			expect(meta.last_system_prompt_hash).toBe(afterIdleHostSystemHash);
+			expect(afterIdleHostSystemHash).toBeDefined();
+			expect(meta.last_system_prompt_hash).toBe(afterIdleHostSystemHash!);
 		}
 		// The real rebuild: the flush pass may rewrite the prefix, every queued
 		// drop lands on it, and the next warm turn replays what it served. The

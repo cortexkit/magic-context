@@ -9,6 +9,10 @@ mock provider and drives sessions through the appropriate harness.
 
 ## Running
 
+The preflight gate type-checks this package with `tsconfig.ci.json`. It extends
+`tsconfig.json` without overrides, so editors and CI check the same files with
+the same compiler options, including the shared gate scripts.
+
 ```bash
 # From repo root
 bun run test:e2e

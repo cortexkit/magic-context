@@ -44,7 +44,7 @@ function contextDbPath(env: NodeJS.ProcessEnv): string {
 }
 
 function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T): T {
-	const db = new Database(contextDbPath(env), { readwrite: true, fileMustExist: true });
+	const db = new Database(contextDbPath(env), { fileMustExist: true });
 	try {
 		db.exec("PRAGMA busy_timeout = 5000");
 		return use(db);

@@ -116,6 +116,7 @@ export interface SdkClient {
             path: { id: string };
             body: { messageID: string; partID?: string };
         }) => Promise<{ data?: unknown }>;
+        get: (opts: { path: { id: string } }) => Promise<{ data?: unknown }>;
         messages: (opts: {
             path: { id: string };
         }) => Promise<{ data?: unknown }>;

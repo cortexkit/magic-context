@@ -101,7 +101,7 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         // the one the fold reports.
         const pricedFold = /HARD fold decision: reason=(model_change|system_hash) executed=true bustsServedPrefix=true/;
         let pricedLog = "";
-        await until(() => pricedFold.test(pricedLog = readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8")),
+        await until(() => pricedFold.test(pricedLog = readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH!, "utf8")),
             "a HARD fold that busts the served prefix on the priced pass");
         await client.session.prompt({ sessionID: session.id, text: "replay the todo reminder" });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
@@ -118,7 +118,7 @@ test("a real todowrite call projects a synthetic reminder on priced and cached O
         expect(anchorItems[0]).not.toBe("[]");
         expect(new Set(anchorItems).size).toBe(1);
         // The replay pass after the priced pass must be served from cache.
-        await until(() => readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH, "utf8").slice(pricedLog.length)
+        await until(() => readFileSync(fixture.env.MAGIC_CONTEXT_LOG_PATH!, "utf8").slice(pricedLog.length)
             .includes("rematerialized=false, reason=cache_hit"), "a cache-hit replay pass after the priced pass");
         const schemaTrace = readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8");
         expect(schemaTrace.split("\n").filter((line) => line.startsWith(`PASS ${session.id} `)).length).toBeGreaterThanOrEqual(3);

@@ -2,7 +2,7 @@
 // The e2e harness starts a local mock LLM, isolated host roots and a local
 // embeddings endpoint; the lsof check refuses any live-store file descriptor.
 import { execFileSync } from "node:child_process";
-import { Database } from "bun:sqlite";
+import { Database } from "../../plugin/src/shared/sqlite";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

@@ -72,8 +72,9 @@ test("Foundation HTTP-cache exception permits only the exact opted-in file and S
 			join(homedir(), ".local/share/cortexkit/magic-context/context.db"),
 			join(homedir(), ".config/opencode/settings.json"),
 		]) expect(() => assertOpenPaths([path], root)).toThrow("forbidden");
-		process.env.MC_E2E_FOUNDATION_HTTP_CACHE_DB = join(homedir(), ".local/share/opencode/Cache.db");
-		expect(() => assertOpenPaths([process.env.MC_E2E_FOUNDATION_HTTP_CACHE_DB], root)).toThrow("forbidden");
+		const unverifiedCache = join(homedir(), ".local/share/opencode/Cache.db");
+		process.env.MC_E2E_FOUNDATION_HTTP_CACHE_DB = unverifiedCache;
+		expect(() => assertOpenPaths([unverifiedCache], root)).toThrow("forbidden");
 	} finally {
 		if (previous === undefined) delete process.env.MC_E2E_FOUNDATION_HTTP_CACHE_DB;
 		else process.env.MC_E2E_FOUNDATION_HTTP_CACHE_DB = previous;

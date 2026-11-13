@@ -141,7 +141,6 @@ async function twoDirectoryHost(options: { dreamerDisabledAtBoot?: boolean } = {
 	/** Adds unmapped memories to A and makes its map-memories task due now. */
 	const seedDueMapping = (count: number) => {
 		const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), {
-			readwrite: true,
 			fileMustExist: true,
 		});
 		try {

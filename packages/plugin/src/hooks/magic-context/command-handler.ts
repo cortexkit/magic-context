@@ -217,15 +217,19 @@ const ERROR_REPORTER_IGNORE = "~effect/ErrorReporter/ignore";
  *  An official `command.execute.before` handled/cancel/noReply contract remains
  *  the real fix; this is a duck-typed shim until then. */
 function throwSentinel(command: string): never {
-    const sentinel = new Error(`${SENTINEL_PREFIX}${command.toUpperCase()}_HANDLED__`) as Error &
-        Record<string, unknown>;
-    sentinel[HTTP_SERVER_RESPONSE_TYPE_ID] = HTTP_SERVER_RESPONSE_TYPE_ID;
-    sentinel[ERROR_REPORTER_IGNORE] = true;
-    sentinel.status = 204;
-    sentinel.statusText = undefined;
-    sentinel.headers = {};
-    sentinel.cookies = { [HTTP_COOKIES_TYPE_ID]: HTTP_COOKIES_TYPE_ID, cookies: {} };
-    sentinel.body = { [HTTP_BODY_TYPE_ID]: HTTP_BODY_TYPE_ID, _tag: "Empty" };
+    const fields: Record<string, unknown> = {
+        [HTTP_SERVER_RESPONSE_TYPE_ID]: HTTP_SERVER_RESPONSE_TYPE_ID,
+        [ERROR_REPORTER_IGNORE]: true,
+        status: 204,
+        statusText: undefined,
+        headers: {},
+        cookies: { [HTTP_COOKIES_TYPE_ID]: HTTP_COOKIES_TYPE_ID, cookies: {} },
+        body: { [HTTP_BODY_TYPE_ID]: HTTP_BODY_TYPE_ID, _tag: "Empty" },
+    };
+    const sentinel = Object.assign(
+        new Error(`${SENTINEL_PREFIX}${command.toUpperCase()}_HANDLED__`),
+        fields,
+    );
     throw sentinel;
 }
 

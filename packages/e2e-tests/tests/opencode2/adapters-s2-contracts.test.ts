@@ -121,7 +121,7 @@ test("I9b v2 fail-closed notice is TUI-visible and synthetic-visible before inte
 		readPage: () => [],
 		getCount: () => 0,
 	});
-	const seams = createHostSeams(context, read, new Map());
+	const seams = createHostSeams(context, read, readRawSessionMessages, new Map());
 	const notice = "Context full — /ctx-flush or /clear to continue.";
 
 	await seams.hostRefusalNotice(undefined, "ses-emergency", notice, {});

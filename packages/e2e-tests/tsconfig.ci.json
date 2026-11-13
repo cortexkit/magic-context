@@ -1,17 +1,3 @@
 {
-    "extends": "./tsconfig.json",
-    "compilerOptions": { "resolveJsonModule": true },
-    "include": [
-        "scripts/select-*-shard*.ts",
-        "scripts/validate-mode-manifest.ts",
-        "scripts/check-ci-results.ts",
-        "scripts/ci-workflow.test.ts",
-        "scripts/ci-dists.test.ts",
-        "scripts/test-db-guard.test.ts",
-        "../../scripts/gate.ts",
-        "../../scripts/gate.test.ts",
-        "../../scripts/gate-tools.test.ts",
-        "tests/opencode2/pins.test.ts",
-        "tests/pi-context-tool-surface.test.ts"
-    ]
+    "extends": "./tsconfig.json"
 }

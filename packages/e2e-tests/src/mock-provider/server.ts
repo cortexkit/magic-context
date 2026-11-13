@@ -120,6 +120,7 @@ export interface CapturedRequest {
     headers: Record<string, string>;
     body: {
         model?: string;
+        input?: unknown;
         messages?: Array<{ role: string; content: unknown }>;
         system?: unknown;
         tools?: unknown;

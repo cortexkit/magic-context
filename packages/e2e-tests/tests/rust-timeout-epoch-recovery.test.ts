@@ -71,7 +71,9 @@ describe.skipIf(!rustPrereqs.ok)("rust timeout epoch recovery", () => {
         // size-limited last-known-good payload is preferable to raw history;
         // neither option applies a result from the module.
         expect(timeoutPasses.at(-1)?.applied).toBe(false);
-        expect(["raw", "lkg"]).toContain(timeoutPasses.at(-1)?.servedFrom);
+        const servedFrom = timeoutPasses.at(-1)?.servedFrom;
+        expect(servedFrom).toBeDefined();
+        expect(["raw", "lkg"]).toContain(servedFrom!);
         // Let the delayed execution finish before testing recovery.
         await Bun.sleep(7_000);
 

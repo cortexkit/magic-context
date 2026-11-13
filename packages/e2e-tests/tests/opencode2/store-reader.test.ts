@@ -133,7 +133,7 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 			JSON.stringify(reader.window(id).map(({ time_created: _, ...row }) => row)),
 		).toBe(JSON.stringify(rows));
 		expect(() =>
-			(reader as unknown as { db: Database }).db.exec(
+			(reader as unknown as { db: ContextDatabase }).db.exec(
 				"DELETE FROM session_message",
 			),
 		).toThrow();
