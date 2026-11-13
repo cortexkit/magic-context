@@ -1014,6 +1014,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                                 fact_id: fact.id,
                                 reservation: Some(reservation),
                                 authority: self.authority.as_ref(),
+                                expires: decision.expires.as_deref().filter(|_| !conflict),
                             },
                         )
                     })
@@ -1233,6 +1234,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
             final_text: decision.final_text.clone().unwrap_or_default(),
             changes,
             added,
+            expires: decision.expires.clone(),
         };
         let existing = self
             .db
@@ -1518,6 +1520,7 @@ fn reserve(
     }
     let item_views = prompt_items(&tx, &items)?;
     let fitted = envelope::fit(
+        &job.continuation.prompts,
         &available
             .iter()
             .map(|fact| prompt_facts[&fact.id].clone())
@@ -1698,7 +1701,10 @@ async fn recover_one<C: RunnerClient>(
     };
     if row.reply.is_none() {
         let prompt = row.request["prompt"].as_str().unwrap_or("").to_owned();
-        let system = run::two_pass_system(carrier.language.as_deref());
+        let system = run::two_pass_system(
+            &job.continuation.prompts.system,
+            carrier.language.as_deref(),
+        );
         match carrier
             .send(client, &carrier.child, stage, &prompt, &system)
             .await
@@ -1831,7 +1837,10 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         )
     })
     .map_err(|error| error.to_string())?;
-    let system = run::two_pass_system(carrier.language.as_deref());
+    let system = run::two_pass_system(
+        &job.continuation.prompts.system,
+        carrier.language.as_deref(),
+    );
     let reply = match carrier
         .send(
             client,

@@ -6,14 +6,12 @@
 //! one JSON object of the expected shape is an envelope failure, and every
 //! fact of that send is retried.
 
+use crate::summary::prompts::SummaryPrompts;
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
 use super::text::{lifecycle_text_hash, split_memory_clauses};
-
-/// Turn two's instruction, with `{{ALLOWED_FACT_IDS}}` to fill.
-pub const TURN_TWO_PROMPT: &str = include_str!("../../../testdata/two-pass/turn-two.md");
 
 /// Every action the reply may name. `retire` and `promote_rule` are known
 /// only so they can be dropped and logged without failing the whole reply.
@@ -68,6 +66,10 @@ pub struct Decision {
     pub clauses: Option<Vec<i64>>,
     /// `new` only: an accepted decision not built yet, stored as `Decided: …`.
     pub decided: Option<bool>,
+    /// `new`, `edit`, `replaces`, `merge`: the calendar date (`YYYY-MM-DD`)
+    /// the memory's own text says it stops holding. Such a memory is hidden
+    /// after that day.
+    pub expires: Option<String>,
     /// `covered`: an optional quote of the fact's evidence.
     pub excerpt: Option<String>,
     pub removed: Vec<CitedClause>,
@@ -136,6 +138,58 @@ pub fn apply_decided_prefix(content: &str, decided: Option<bool>) -> String {
     } else {
         content.to_owned()
     }
+}
+
+/// The year, month and day of a calendar date written `YYYY-MM-DD`.
+pub fn calendar_date(text: &str) -> Option<(i64, u32, u32)> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let digits = |range: std::ops::Range<usize>| {
+        bytes[range.clone()]
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| text[range].parse::<u32>().ok())
+            .flatten()
+    };
+    let (year, month, day) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (1..=days)
+        .contains(&day)
+        .then_some((i64::from(year), month, day))
+}
+
+fn is_calendar_date(text: &str) -> bool {
+    calendar_date(text).is_some()
+}
+
+/// When the calendar day `date` ends on this machine: local midnight at the
+/// start of the next day, in milliseconds since the epoch. A memory that ends
+/// on `date` holds through that whole local day. The instant is fixed when the
+/// memory is written, so a later change of time zone doesn't move it.
+pub fn end_of_date_ms(date: &str) -> Option<i64> {
+    use chrono::TimeZone;
+    let (year, month, day) = calendar_date(date)?;
+    let next = chrono::NaiveDate::from_ymd_opt(year as i32, month, day)?.succ_opt()?;
+    let midnight = next.and_hms_opt(0, 0, 0)?;
+    // Midnight can be skipped or repeated by a daylight-saving change; the
+    // earliest instant that is that local time ends the day.
+    let instant = match chrono::Local.from_local_datetime(&midnight) {
+        chrono::LocalResult::Single(instant) => instant,
+        chrono::LocalResult::Ambiguous(earliest, _) => earliest,
+        chrono::LocalResult::None => chrono::Local
+            .from_local_datetime(&(midnight + chrono::Duration::hours(1)))
+            .earliest()?,
+    };
+    Some(instant.timestamp_millis())
 }
 
 /// JavaScript's `Number.isSafeInteger` on a JSON value: an integer, or a
@@ -207,11 +261,20 @@ fn parse_decision(raw: &Map<String, Value>, fact_id: i64, ordinal: usize) -> Opt
     if action != "new" && raw.contains_key("decided") {
         return None;
     }
+    // `expires` belongs to the actions that write a memory's text, and must
+    // be a real calendar date.
+    let expires = match raw.get("expires") {
+        None => None,
+        Some(_) if !["new", "edit", "replaces", "merge"].contains(&action) => return None,
+        Some(Value::String(date)) if is_calendar_date(date) => Some(date.clone()),
+        Some(_) => return None,
+    };
     let mut decision = Decision {
         fact_id,
         ordinal,
         action: action.to_owned(),
         check,
+        expires,
         ..Decision::default()
     };
     match action {
@@ -462,17 +525,14 @@ fn render_neighbour(neighbour: &Neighbour) -> String {
 /// stable references; each fact lists the references it may use. Citations
 /// are checked only against the fact's own blocks. Memories are never cut.
 pub fn build_prompt(
+    prompts: &SummaryPrompts,
     facts: &[PromptFact],
     items: &[PromptItem],
     lexical_only: bool,
     deferred: (usize, usize),
 ) -> String {
     let ids: Vec<i64> = facts.iter().map(|fact| fact.fact_id).collect();
-    let mut lines = vec![TURN_TWO_PROMPT.replacen(
-        "{{ALLOWED_FACT_IDS}}",
-        &serde_json::to_string(&ids).expect("ids serialize"),
-        1,
-    )];
+    let mut lines = vec![prompts.turn_two(&ids)];
     if lexical_only {
         lines.push(LEXICAL_ONLY_NOTICE.to_owned());
     }
@@ -590,6 +650,7 @@ fn length(text: &str) -> usize {
 /// never skips an older fact; the oldest backlog fact is kept even when it
 /// alone exceeds its share, since it can't be split and must not starve.
 pub fn fit(
+    prompts: &SummaryPrompts,
     facts: &[PromptFact],
     items: &[PromptItem],
     lexical_only: bool,
@@ -600,7 +661,7 @@ pub fn fit(
     // Measured with the worst-case coverage notice, as the plugin does.
     let worst = (facts.len(), items.len());
     let render = |facts: &[PromptFact], items: &[PromptItem]| {
-        length(&build_prompt(facts, items, lexical_only, worst))
+        length(&build_prompt(prompts, facts, items, lexical_only, worst))
     };
     let backlog_limit = (max_length as f64 * BACKLOG_SHARE).floor() as usize;
     let mut old: Vec<PromptFact> = Vec::new();
@@ -644,7 +705,7 @@ pub fn fit(
         }
     }
     let deferred = (facts.len() - chosen.len(), items.len() - kept_items.len());
-    let prompt = build_prompt(&chosen, &kept_items, lexical_only, deferred);
+    let prompt = build_prompt(prompts, &chosen, &kept_items, lexical_only, deferred);
     Fitted {
         facts: chosen,
         items: kept_items,
@@ -652,3 +713,7 @@ pub fn fit(
         prompt,
     }
 }
+
+#[cfg(test)]
+#[path = "end_date_tests.rs"]
+mod end_date_tests;

@@ -291,9 +291,11 @@ pub struct PrimerCandidate {
     pub origin_compartment_index: Option<u64>,
 }
 
-/// Optional user-memory observation extracted from the chunk.
+/// Something the chunk shows about the person, for the global review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserObservationCandidate {
+    /// The user category tag the summarizer filed it under.
+    pub category: String,
     pub content: String,
     /// Optional forward-compatible anchor. Current TypeScript observations are
     /// unanchored; when the last compartment is discarded during boundary
@@ -525,18 +527,25 @@ pub fn parse_compartment_output(
 
     let unprocessed_from = capture_u64(unprocessed_regex(), &outside);
 
+    // Each observation sits inside the tag of the user category the profile
+    // gave it. The tag is kept as the observation's proposed category; the
+    // global review checks it against the profile. A line outside any
+    // category tag has no category and is dropped.
     let mut user_observations = Vec::new();
     if let Some(caps) = user_observations_regex().captures(&outside) {
         let block = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-        for item_caps in user_obs_item_regex().captures_iter(block) {
-            let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-            let unescaped = unescape_xml(raw.trim());
-            let (origin_compartment_index, content) = split_anchor_prefix(&unescaped);
-            if !content.is_empty() {
-                user_observations.push(UserObservationCandidate {
-                    content,
-                    origin_compartment_index,
-                });
+        for (category, items) in paired_elements(block, category_open_regex()) {
+            for item_caps in user_obs_item_regex().captures_iter(items) {
+                let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+                let unescaped = unescape_xml(raw.trim());
+                let (origin_compartment_index, content) = split_anchor_prefix(&unescaped);
+                if !content.is_empty() {
+                    user_observations.push(UserObservationCandidate {
+                        category: category.to_owned(),
+                        content,
+                        origin_compartment_index,
+                    });
+                }
             }
         }
     }
@@ -2041,7 +2050,7 @@ mod tests {
 <compartment start=\"3\" end=\"4\" title=\"later\"><p1>later</p1><p2>l</p2><p3>l</p3><p4/></compartment>\
 <compartment start=\"1\" end=\"2\" title=\"earlier\"><p1>earlier</p1><p2>e</p2><p3>e</p3><p4/></compartment>\
 </compartments><facts><PROJECT_RULES>\n* [at_compartment=1] Fact from later.\n</PROJECT_RULES></facts>\
-<user_observations>\n* (origin_compartment=2) Observation from earlier.\n</user_observations></output>";
+<user_observations><WORKING_STYLE>\n* (origin_compartment=2) Observation from earlier.\n</WORKING_STYLE></user_observations></output>";
         let parsed = parse_compartment_output(text).expect("parse out-of-order output");
         let titles: Vec<&str> = parsed
             .compartments
@@ -2058,6 +2067,50 @@ mod tests {
         assert_eq!(
             parsed.user_observations[0].origin_compartment_index,
             Some(1)
+        );
+        assert_eq!(parsed.user_observations[0].category, "WORKING_STYLE");
+    }
+
+    /// Each observation keeps the user category tag it was written under; a
+    /// line outside any category tag has no category and is dropped.
+    #[test]
+    fn observations_are_read_by_their_user_category() {
+        let text = "<output><compartments>\
+<compartment start=\"1\" end=\"2\" title=\"t\"><p1>p</p1><p2>p</p2><p3>p</p3><p4/></compartment>\
+</compartments><user_observations>\n* Loose line without a category.\n\
+<COMMUNICATION>\n* Prefers short answers.\n* Asks for tables.\n</COMMUNICATION>\n\
+<WORKING_STYLE>\n* Reviews diffs before merging.\n</WORKING_STYLE>\n</user_observations></output>";
+        let parsed = parse_compartment_output(text).expect("parse grouped observations");
+        let got: Vec<(&str, &str)> = parsed
+            .user_observations
+            .iter()
+            .map(|o| (o.category.as_str(), o.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("COMMUNICATION", "Prefers short answers."),
+                ("COMMUNICATION", "Asks for tables."),
+                ("WORKING_STYLE", "Reviews diffs before merging."),
+            ]
+        );
+    }
+
+    /// A causal incident's `produced_fact` is stored with the event like any
+    /// other field, so the incident can be joined to the fact it produced.
+    #[test]
+    fn a_produced_fact_is_kept_with_its_incident() {
+        let text = "<output><compartments>\
+<compartment start=\"1\" end=\"2\" title=\"t\"><p1>p</p1><p2>p</p2><p3>p</p3><p4/></compartment>\
+</compartments><events><causal_incident at_compartment=\"1\"><summary>Build broke</summary>\
+<produced_fact>Never run two builds at once.</produced_fact></causal_incident></events></output>";
+        let parsed = parse_compartment_output(text).expect("parse event");
+        assert_eq!(
+            parsed.events[0]
+                .fields
+                .get("produced_fact")
+                .map(String::as_str),
+            Some("Never run two builds at once.")
         );
     }
 
@@ -2449,7 +2502,7 @@ full narrative
     #[test]
     fn fully_covered_chunk_validates_with_the_prompt_prescribed_boundary() {
         assert!(
-            crate::summary::two_pass::turn_one::SYSTEM.contains(
+            crate::summary::prompts::SummaryPrompts::bundled().system.contains(
                 "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1."
             ),
             "historian system prompt must define the fully covered <unprocessed_from> value"
@@ -2525,10 +2578,10 @@ full narrative
 <causal_incident at_compartment="0"><summary>zero event</summary></causal_incident>
 <trajectory_correction at_compartment="1"><summary>first event</summary></trajectory_correction>
 </events>
-<user_observations>
+<user_observations><COMMUNICATION>
 * [at_compartment=0] Drop the zero observation.
 * [at_compartment=1] Keep the first observation.
-</user_observations>
+</COMMUNICATION></user_observations>
 <primer_candidates>
 <primer at_compartment="0">Drop the zero primer?</primer>
 <primer at_compartment="1">Keep the first primer?</primer>
@@ -2568,10 +2621,10 @@ full narrative
 <causal_incident at_compartment="1"><summary>kept event</summary></causal_incident>
 <trajectory_correction at_compartment="2"><summary>dropped event</summary></trajectory_correction>
 </events>
-<user_observations>
+<user_observations><COMMUNICATION>
 * [at_compartment=1] Keep the earlier observation.
 * [at_compartment=2] Drop the provisional observation.
-</user_observations>
+</COMMUNICATION></user_observations>
 <primer_candidates>
 <primer at_compartment="1">How does the kept subsystem work?</primer>
 <primer at_compartment="2">How does the dropped subsystem work?</primer>

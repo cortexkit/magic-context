@@ -148,8 +148,8 @@
     },
     {
       "path": "prompts/historian/system/time-and-certainty.md",
-      "sha256": "a3d6023eb73b6fb5c792b9e8432872d7bf4e86c960434fd3c8fc470e63ab8131",
-      "bytes": 1375
+      "sha256": "8aee729ff94574e83111ed2a2c13ffd925bf8f129ec50fbc7e820008f3b493cf",
+      "bytes": 1378
     },
     {
       "path": "prompts/historian/system/u-lines.md",

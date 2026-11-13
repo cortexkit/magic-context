@@ -458,6 +458,7 @@ async fn attempt_on(
         output_tokens: 1000,
     };
     let call_on = Call {
+        prompts: &crate::summary::prompts::SummaryPrompts::bundled(),
         target: &target,
         child_harness: "pi",
         window: fit::Window {

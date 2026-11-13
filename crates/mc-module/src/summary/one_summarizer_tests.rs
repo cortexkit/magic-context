@@ -242,7 +242,10 @@ async fn runs_after_failed_runs_still_send_the_two_turn_first_turn() {
     let sends = client.sends.lock().unwrap();
     // One send per run: the one model fails, and routing has no other.
     assert_eq!(sends.len(), 5);
-    let system = two_pass_system(None);
+    let system = two_pass_system(
+        &crate::summary::prompts::SummaryPrompts::bundled().system,
+        None,
+    );
     for (child, request) in sends.iter() {
         assert!(
             child.session.session.ends_with(":turn-one"),

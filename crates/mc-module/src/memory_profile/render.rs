@@ -19,11 +19,11 @@
 //!
 //! Files and frames end with one newline that is not part of their text.
 //!
-//! Nothing sends rendered text yet: the summarizer still takes its prompts from
-//! the module's copies of the plugin's texts. It moves onto this renderer only
-//! after real summarizer chunks have been run with both texts side by side and
-//! the replies read. The golden test in `render_tests.rs` holds the bundled
-//! coding profile's rendering to today's texts.
+//! The summarizer's texts come from here (`summary/prompts.rs`); the dreamer's
+//! still come from the module's copies of the plugin's texts until the
+//! dreamer moves into the module. The golden test in `render_tests.rs` holds
+//! the bundled coding profile's rendering to those texts, except the
+//! differences its expected-differences file lists.
 
 use serde_json::Value;
 
@@ -70,7 +70,6 @@ const IF_MARKER: &str = "⟦if ";
 
 /// Render `document` of `profile`, splicing MC frames from `frames` (name and
 /// file text, as in [`super::frames::FRAMES`]).
-#[allow(dead_code)] // No prompt is rendered from a profile yet; see the module docs.
 pub(crate) fn render(profile: &Profile, document: &str, frames: &[(&str, &str)]) -> Result<String> {
     let doc = profile.body["prompts"]
         .get(document)

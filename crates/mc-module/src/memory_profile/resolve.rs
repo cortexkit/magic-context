@@ -4,12 +4,6 @@ use serde_json::Value;
 use super::{bundled, list, text, Profile};
 use crate::memory_context::{ContextAnswer, ProjectContext, SessionContext};
 
-/// Profiles change no prompt text yet: the historian and dreamer prompts stay
-/// the OpenCode plugin's.
-pub(crate) fn parity_mode() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfilePin {
     pub name: Option<String>,
@@ -17,7 +11,6 @@ pub struct ProfilePin {
     pub digest: Option<String>,
     pub resolution: Option<String>,
     pub state: String,
-    pub parity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -52,7 +45,6 @@ pub(crate) fn resolve(
             digest: None,
             resolution: None,
             state: "resolved".into(),
-            parity: parity_mode(),
             pin: None,
             candidates: vec![],
         },
@@ -197,6 +189,32 @@ pub(crate) fn resolve(
         }
     }
     context
+}
+
+/// The profile a session's prompts render from: the one its memory context
+/// chose, or the bundled coding profile when it chose none (no context yet, or
+/// a pin that is in conflict, blocked, unavailable or unresolved). The module
+/// installs no profiles of its own yet, so a chosen profile is always one of
+/// the bundled packages.
+pub(crate) fn prompt_profile(context: Option<&MemoryContext>) -> super::Result<Profile> {
+    let chosen = context.and_then(|context| {
+        let pin = &context.profile;
+        let (name, version, digest) = (
+            pin.name.as_ref()?,
+            pin.version.as_ref()?,
+            pin.digest.as_ref()?,
+        );
+        let packages = bundled::packages();
+        let at = packages
+            .iter()
+            .position(|p| p.env["name"] == name.as_str() && p.env["version"] == version.as_str())?;
+        let profile = super::load_chain(&packages[..=at]).ok()?;
+        (&profile.digest == digest).then_some(profile)
+    });
+    match chosen {
+        Some(profile) => Ok(profile),
+        None => bundled::swe(),
+    }
 }
 
 fn select(context: &mut MemoryContext, profile: &Profile, source: &str) {

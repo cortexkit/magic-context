@@ -155,6 +155,7 @@ async fn turn_one_call_sets_creating_send_label() {
         counter: crate::count::Counter::for_model(None),
     };
     let call_on = Call {
+        prompts: &crate::summary::prompts::SummaryPrompts::bundled(),
         target: &target,
         child_harness: "pi",
         window,

@@ -2055,6 +2055,7 @@ impl Session {
             auto_promote: settings.auto_promote,
             emergency,
             force_keep_last_compartment,
+            memory_context: self.memory_context.clone(),
         }
     }
 
@@ -2675,9 +2676,48 @@ impl Session {
                 }
                 _ => None,
             };
+            let observations = validated
+                .user_observations
+                .iter()
+                .map(|observation| {
+                    let source = observation
+                        .origin_compartment_index
+                        .and_then(|at| at.checked_sub(1))
+                        .and_then(|index| validated.compartments.get(index as usize));
+                    let (start, end) = match source {
+                        Some(summary) => (summary.start_message, summary.end_message),
+                        None => (
+                            validated
+                                .compartments
+                                .first()
+                                .map_or(0, |c| c.start_message),
+                            validated.compartments.last().map_or(0, |c| c.end_message),
+                        ),
+                    };
+                    crate::context_db::ObservationSource {
+                        category: observation.category.clone(),
+                        content: observation.content.clone(),
+                        start_ordinal: start,
+                        end_ordinal: end,
+                        profile: self
+                            .authority
+                            .as_ref()
+                            .and_then(|authority| authority.profile.clone()),
+                        project_id: self
+                            .memory_context
+                            .as_ref()
+                            .and_then(|context| context.project_id.clone()),
+                        workspace_id: self
+                            .memory_context
+                            .as_ref()
+                            .and_then(|context| context.workspace_id.clone()),
+                    }
+                })
+                .collect();
             let recall = crate::context_db::Recall {
                 events: validated.events.clone(),
                 primer,
+                observations,
             };
             if let Err(error) = db.publish_summaries(
                 &self.key.harness,

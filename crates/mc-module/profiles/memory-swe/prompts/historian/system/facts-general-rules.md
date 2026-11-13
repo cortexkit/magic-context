@@ -14,7 +14,7 @@ Every fact is a candidate memory. A stored memory is shown to the primary agent 
    - hypotheses, guesses, and anything still being measured;
    - open questions, and proposals nobody accepted;
    - one-off steps: a single test run, one bisect, one audit's checklist, an instruction to one worker for one task, the order work happened in;
-   - temporary rules: anything that holds "until", "for now", "for this window" or "while" something else is true, or only until something ships, gets fixed, gets reviewed or gets answered. This applies even when the user or the agent decided it;
+   - temporary rules: anything that holds "for now", "for this window" or "while" something else is true, or only until something ships, gets fixed, gets reviewed or gets answered. This applies even when the user or the agent decided it. The one exception is a rule that holds until a calendar date: it is a fact, written with that date (see "Time and certainty");
    - values that change on the next build, deploy or run: commit ids, placed builds, counts, sizes, versions, the state at one moment.
 6. **When in doubt, leave it out.**
 

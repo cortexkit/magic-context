@@ -12,6 +12,7 @@ pub mod fit;
 pub mod hashes;
 pub mod head;
 pub mod prompt;
+pub mod prompts;
 pub mod render;
 pub mod run;
 pub mod trigger;

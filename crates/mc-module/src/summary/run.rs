@@ -6,6 +6,7 @@
 //! notices and rides while the model writes, and takes the result as a job
 //! of its own when the run ends.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use cortexkit_role_compaction::read::SessionRef;
@@ -27,6 +28,7 @@ use super::prompt::{
     build_compartment_agent_prompt, with_content_language_directive, CompartmentPromptInputs,
     ContentLanguageDirectiveOptions,
 };
+use super::prompts::SummaryPrompts;
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
@@ -83,6 +85,9 @@ pub struct Request {
     pub emergency: bool,
     /// Keep the final compartment only when this chunk reaches the manual target.
     pub force_keep_last_compartment: bool,
+    /// The session's memory context: the summarizer's texts render from the
+    /// profile it chose (see `prompts.rs`).
+    pub memory_context: Option<crate::memory_profile::MemoryContext>,
 }
 
 /// What a run produced.
@@ -110,16 +115,14 @@ pub struct Continuation {
     pub language: Option<String>,
     /// The publication whose candidates the second turn sends first.
     pub publication_id: String,
+    /// The texts the first turn ran with; the second turn uses the same.
+    pub prompts: Arc<SummaryPrompts>,
 }
 
-/// The two-pass historian's system prompt with `language`'s directive.
-pub(crate) fn two_pass_system(language: Option<&str>) -> String {
-    with_content_language_directive(
-        turn_one::SYSTEM,
-        language,
-        ContentLanguageDirectiveOptions::default(),
-    )
-    .into_owned()
+/// The summarizer's system prompt with `language`'s directive.
+pub(crate) fn two_pass_system(system: &str, language: Option<&str>) -> String {
+    with_content_language_directive(system, language, ContentLanguageDirectiveOptions::default())
+        .into_owned()
 }
 
 /// Transient provider errors retry this many times on the same model.
@@ -174,7 +177,8 @@ pub async fn run<C: RunnerClient + Router>(
     if entries.is_empty() {
         return Ok(None);
     }
-    let system = two_pass_system(job.language.as_deref());
+    let prompts = SummaryPrompts::for_context(job.memory_context.as_ref())?;
+    let system = two_pass_system(&prompts.system, job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
     // A runner may host several harnesses with different model support. Route
     // against the same harness that will receive every attempt's child send.
@@ -233,6 +237,7 @@ pub async fn run<C: RunnerClient + Router>(
             window,
             deadline,
             system: &system,
+            prompts: &prompts,
         };
         let outcome =
             summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
@@ -327,6 +332,8 @@ struct Call<'a> {
     deadline: tokio::time::Instant,
     /// The system prompt, language directive included.
     system: &'a str,
+    /// The profile texts the system prompt came from.
+    prompts: &'a Arc<SummaryPrompts>,
 }
 
 /// Where a run keeps the plugin's send and publication records.
@@ -400,6 +407,7 @@ async fn summarize_on<C: RunnerClient>(
         memory_enabled: job.memory_enabled,
         anchored_facts: anchored,
         system_prompt: system,
+        prompts: call.prompts,
         windows: &[window],
         output_cap: target.output_tokens,
         requested_chunk_tokens: requested,
@@ -426,6 +434,7 @@ async fn summarize_on<C: RunnerClient>(
         user_observations_requested: false,
         extraction_free: false,
         anchored_facts: anchored,
+        turn_one_instruction: &call.prompts.turn_one,
     });
     let prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
     // The model is part of the child's name, so a fallback model never
@@ -519,6 +528,7 @@ async fn summarize_on<C: RunnerClient>(
         output_tokens: target.output_tokens,
         language: job.language.clone(),
         publication_id: send.publication_id.clone(),
+        prompts: call.prompts.clone(),
     });
     Ok(Some(Summarized {
         validated,

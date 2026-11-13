@@ -6,6 +6,7 @@ fn job(child_harness: &str) -> Job {
         project: "project".into(),
         project_root: Some("/project".into()),
         continuation: Continuation {
+            prompts: crate::summary::prompts::SummaryPrompts::bundled(),
             child: Child {
                 session: SessionRef::new("runner", child_harness, "summary-child"),
                 project_root: Some("/project".into()),

@@ -205,8 +205,8 @@
     },
     {
       "path": "prompts/historian/system/facts-general-rules.md",
-      "sha256": "d104e431e26a00f0d837eed24f64686fee8219dda59a0575c466a1c7a6750195",
-      "bytes": 3938
+      "sha256": "14fa9022f1277c5b1ec7d62bf7756383712aa5719ef11c0705dd1b20b163081f",
+      "bytes": 4056
     },
     {
       "path": "prompts/historian/system/how-magic-context-works.md",

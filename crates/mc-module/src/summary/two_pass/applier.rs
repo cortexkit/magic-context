@@ -303,6 +303,21 @@ pub struct Admission<'a> {
     /// The session's writer authority, for a new memory's project-level
     /// placement record, written in the same transaction as the memory.
     pub authority: Option<&'a crate::memory_levels::Authority>,
+    /// The calendar date the fact's text says it stops holding.
+    pub expires: Option<&'a str>,
+}
+
+/// Give a memory the end date its text states: it is hidden after that day.
+/// Its decay class becomes `bounded`, the class of memories that end on a
+/// known date.
+fn set_end_date(tx: &Transaction, id: i64, date: &str) -> rusqlite::Result<()> {
+    let ends = super::envelope::end_of_date_ms(date)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName(format!("end date {date}")))?;
+    tx.execute(
+        "UPDATE memories SET expires_at = ?2, decay_class = 'bounded' WHERE id = ?1",
+        params![id, ends],
+    )?;
+    Ok(())
 }
 
 /// The message ordinals a fact's evidence blocks cover.
@@ -462,6 +477,9 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                         "UPDATE memories SET expires_at = ?2 WHERE id = ?1",
                         params![memory.id, now_ms() + ttl],
                     )?;
+                }
+                if let Some(date) = admission.expires {
+                    set_end_date(&tx, memory.id, date)?;
                 }
                 crate::memory_levels::created(
                     &tx,
@@ -741,6 +759,9 @@ pub fn commit_revision(
             "UPDATE memories SET expires_at = ?2, source_session_id = NULL WHERE id = ?1",
             params![inserted.id, expires],
         )?;
+        if let Some(date) = &decision.expires {
+            set_end_date(&tx, inserted.id, date)?;
+        }
         crate::memory_levels::created(
             &tx,
             &placer,
@@ -790,6 +811,9 @@ pub fn commit_revision(
                 "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
                 params![source.id],
             )?;
+            if let Some(date) = &decision.expires {
+                set_end_date(&tx, source.id, date)?;
+            }
         } else {
             let row = get_memory(&tx, source.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             archive(&tx, &row, Some(&decision.action))?;

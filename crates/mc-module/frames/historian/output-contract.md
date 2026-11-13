@@ -10,6 +10,7 @@ Reply with exactly one JSON object under a `result` wrapper. Its `step` must mat
 One decision per `fact_id`. Actions: `new`, `covered`, `conflict`, `edit`, `merge`, `replaces`, `abstain`. Do not retire memories or promote rules.
 
 - Every decision requires integer `fact_id`, string `check` and string `action`. Write `check` first: one or two short sentences naming the line that states the fact and the line that settles it, by ordinal, and why it passes or fails "What becomes a memory".
+- `new`, `edit`, `replaces` and `merge` take an optional string `expires`: the calendar date (`YYYY-MM-DD`) the memory stops holding, only when its text states that date as its end. Never give one for a rule that ends on an event or holds "for now".
 - `new` and `abstain` need no other fields. `new` takes an optional boolean `decided`: set it to `true` when the fact is an accepted decision that isn't built and its text doesn't start with `Decided:`, and the stored memory gets that prefix. Never use it for anything else.
 - `conflict` requires integer `target_id`.
 - `covered` requires integer `target_id`, integer `revision` and a nonempty `clauses` array of integer clause indices; string `excerpt` is optional.
@@ -48,7 +49,7 @@ Closing tags must match their opening tier tag (e.g. `<p1>...</p1>`, never `<p1>
 ⟦profile:event-shape-blocks⟧
 ⟦if event_kinds⟧</events>
 ⟦if user_categories⟧<user_observations>
-⟦if user_categories⟧* Observation text
+⟦profile:user-observation-shape-blocks⟧
 ⟦if user_categories⟧</user_observations>
 ⟦if primer_candidates⟧<primer_candidates>
 ⟦if primer_candidates⟧<primer at_compartment="1">How does subsystem X work?</primer>

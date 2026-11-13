@@ -10,8 +10,8 @@
     {
       "document": "historian/system",
       "class": "ruling",
-      "ruling": "§11.17",
-      "why": "The base's time-and-certainty section: an anchor already dates every fact, a fact whose truth changes carries its validity bound, dates are absolute, and a claim nothing confirmed is written as a claim with its source. Its validity-bound rule contradicts today's rule that a temporary rule is not a fact; the ruling text wins when the profile goes live.",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-13 (ask_3c8b43cbff11ceb8, ask_51242fd7feb1ab83)",
+      "why": "The base's time-and-certainty section: an anchor already dates every fact, a fact that ends on a calendar date carries that date, dates are absolute, and a claim nothing confirmed is written as a claim with its source. Only a calendar end date makes a time-limited rule a memory; a rule bounded by an event or \"for now\" stays out, as today.",
       "today": [],
       "rendered": [
         "### Time and certainty",
@@ -19,7 +19,7 @@
         "These rules apply to facts and to user observations.",
         "",
         "- **When something was said is already known.** Every fact keeps its anchor in the history, so do not add \"as of\" dates or the session date to a fact that stays true.",
-        "- **A fact whose truth changes carries its validity.** When a fact holds only until a date or an event, write that bound into the fact: \"Release freeze until 2026-11-02\", \"Staging uses the old signing key until the key migration finishes\". This is the fact's validity, not chronology wording. When the end is unknown, write the fact without one; never guess a date.",
+        "- **A fact that ends on a date carries that date.** When a fact holds only until a calendar date, write the date into the fact: \"Release freeze until 2026-11-02\". This is the fact's validity, not chronology wording. A fact that holds until an event (\"until the key migration finishes\") or \"for now\" is not durable and is not written; never guess a date to make it one.",
         "- **Absolute dates only.** Resolve \"tomorrow\", \"next Friday\" or \"end of the month\" to a calendar date (YYYY-MM-DD) from the dates the chunk shows. If the chunk does not show which date it means, keep the event or condition and leave the date out.",
         "- **Claimed or confirmed.** A statement that only someone asserted (the user, a teammate, a document or another agent) and that nothing in the chunk confirmed is written as a claim with its source: \"Per the user, the vendor API allows 100 requests per minute\". A fact that a tool result, test run, file or other direct evidence in the chunk confirmed is written plainly, and so is a rule or decision the user sets: the user saying it is what makes it true. Never turn a guess, plan or proposal into a confirmed fact."
       ]
@@ -38,7 +38,7 @@
       "document": "historian/system",
       "class": "ruling",
       "ruling": "§11.13, §11.14, §11.15",
-      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section shows one tag per user category, and the turn-one parser keeps each observation's category.",
       "today": [
         "## User observations (optional, experimental)"
       ],
@@ -50,7 +50,7 @@
       "document": "historian/system",
       "class": "ruling",
       "ruling": "§11.13, §11.14, §11.15",
-      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section shows one tag per user category, and the turn-one parser keeps each observation's category.",
       "today": [
         "After outputting compartments, facts, and events, also output a `<user_observations>` section IF the chunk contains observable universal behavioral patterns about the human user."
       ],
@@ -62,7 +62,7 @@
       "document": "historian/system",
       "class": "ruling",
       "ruling": "§11.13, §11.14, §11.15",
-      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section shows one tag per user category, and the turn-one parser keeps each observation's category.",
       "today": [
         "- User observations capture UNIVERSAL behavioral patterns about the human user — not project-specific or technical.",
         "- Good observations: communication preferences, review focus areas, expertise level, decision-making patterns, frustration triggers, working style.",
@@ -86,7 +86,7 @@
       "document": "historian/system",
       "class": "ruling",
       "ruling": "§11.13, §11.14, §11.15",
-      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section still shows today's flat <user_observations> list; grouping it by category is a pending MC interface change.",
+      "why": "The user-observation section is the base's: each observation goes under one user category (the base's five and SWE's two, with definitions generated from the categories), mixed traits are split at extraction, and SWE adds its split examples. The output section shows one tag per user category, and the turn-one parser keeps each observation's category.",
       "today": [],
       "rendered": [
         "#### `COMMUNICATION`",
@@ -220,9 +220,9 @@
     },
     {
       "document": "historian/system",
-      "class": "mc-interface-pending",
+      "class": "ruling",
       "ruling": "§11.11",
-      "why": "The event shape is generated from the event kind's declared fields, which include produced_fact. MC's turn-one parser does not read <produced_fact> yet.",
+      "why": "The event shape is generated from the event kind's declared fields, which include produced_fact. The turn-one parser stores every event field with the event, produced_fact included.",
       "today": [],
       "rendered": [
         "<produced_fact>...</produced_fact>"
@@ -439,6 +439,90 @@
       "today": [],
       "rendered": [
         "Categories: PROJECT_RULES (a rule), ARCHITECTURE (an architecture fact), CONSTRAINTS (a constraint), CONFIG_VALUES (a config value), NAMING (a naming convention)."
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-13 (ask_3c8b43cbff11ceb8, ask_51242fd7feb1ab83)",
+      "why": "SWE's temporary-rules line no longer counts a rule that ends on a calendar date as temporary: such a rule is a fact written with its date.",
+      "today": [
+        "   - temporary rules: anything that holds \"until\", \"for now\", \"for this window\" or \"while\" something else is true, or only until something ships, gets fixed, gets reviewed or gets answered. This applies even when the user or the agent decided it;"
+      ],
+      "rendered": [
+        "   - temporary rules: anything that holds \"for now\", \"for this window\" or \"while\" something else is true, or only until something ships, gets fixed, gets reviewed or gets answered. This applies even when the user or the agent decided it. The one exception is a rule that holds until a calendar date: it is a fact, written with that date (see \"Time and certainty\");"
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-13 (ask_3c8b43cbff11ceb8, ask_51242fd7feb1ab83)",
+      "why": "Turn two returns a fact's calendar end date as `expires`; the memory is hidden after that day.",
+      "today": [],
+      "rendered": [
+        "- `new`, `edit`, `replaces` and `merge` take an optional string `expires`: the calendar date (`YYYY-MM-DD`) the memory stops holding, only when its text states that date as its end. Never give one for a rule that ends on an event or holds \"for now\"."
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The output contract shows one tag per user category inside <user_observations>, generated from the profile's user categories.",
+      "today": [],
+      "rendered": [
+        "<COMMUNICATION>"
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
+      "ruling": "§11.13, §11.14, §11.15",
+      "why": "The output contract shows one tag per user category inside <user_observations>, generated from the profile's user categories.",
+      "today": [],
+      "rendered": [
+        "</COMMUNICATION>",
+        "<PREFERENCES>",
+        "* Observation text",
+        "</PREFERENCES>",
+        "<BOUNDARIES>",
+        "* Observation text",
+        "</BOUNDARIES>",
+        "<WORKING_STYLE>",
+        "* Observation text",
+        "</WORKING_STYLE>",
+        "<IDENTITY>",
+        "* Observation text",
+        "</IDENTITY>",
+        "<ENGINEERING_PRACTICE>",
+        "* Observation text",
+        "</ENGINEERING_PRACTICE>",
+        "<DEV_ENVIRONMENT>",
+        "* Observation text",
+        "</DEV_ENVIRONMENT>"
+      ]
+    },
+    {
+      "document": "historian/turn-two",
+      "class": "ruling",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-13 (ask_3c8b43cbff11ceb8, ask_51242fd7feb1ab83)",
+      "why": "Turn two's temporary-rule check lets a rule with a calendar end date pass, and asks for that date as `expires`.",
+      "today": [
+        "   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"until\", \"for now\" or \"for this window\" is temporary, even when decided."
+      ],
+      "rendered": [
+        "   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"for now\", \"for this window\" or until an event is temporary, even when decided. A rule that holds until a calendar date passes this check: give that date as `expires`."
+      ]
+    },
+    {
+      "document": "mc/historian/turn-two.user",
+      "class": "ruling",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-13 (ask_3c8b43cbff11ceb8, ask_51242fd7feb1ab83)",
+      "why": "Turn two's temporary-rule check lets a rule with a calendar end date pass, and asks for that date as `expires`.",
+      "today": [
+        "   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"until\", \"for now\" or \"for this window\" is temporary, even when decided."
+      ],
+      "rendered": [
+        "   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"for now\", \"for this window\" or until an event is temporary, even when decided. A rule that holds until a calendar date passes this check: give that date as `expires`."
       ]
     }
   ]

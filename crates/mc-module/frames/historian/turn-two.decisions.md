@@ -5,7 +5,7 @@ allowed_fact_ids: ⟦allowed_fact_ids⟧
    - Is it stated in this chunk's new messages?
    - What settles it: a `U:` decision, a ruling the agent acted on, the agent's own verification or work that went live, or only a proposal to the user, a plan or another agent's agreement? Delivered, held for review or waiting for a window is not live.
    - Does a later line correct, reverse, measure or replace it, or call it an expectation or send it off to be checked?
-   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds "until", "for now" or "for this window" is temporary, even when decided.
+   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds "for now", "for this window" or until an event is temporary, even when decided. A rule that holds until a calendar date passes this check: give that date as `expires`.
    - Would it still apply to the next, different task? A ruling that only governed this task, this worker or this incident is a one-off step, even when acted on.
    If any check fails, the action is `abstain`.
    If it is an accepted decision that isn't built and its text doesn't start with `Decided:`, it still passes: use `new` with `"decided": true`, or an edit whose `final_text` starts with `Decided:`.

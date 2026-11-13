@@ -868,6 +868,19 @@ mod tests {
                 origin: Some(2),
                 source_time: 42,
             }),
+            observations: vec![ObservationSource {
+                category: "COMMUNICATION".into(),
+                content: "Prefers short answers.".into(),
+                start_ordinal: 5,
+                end_ordinal: 9,
+                profile: Some(crate::memory_levels::OriginProfile {
+                    name: "@cortexkit/memory-swe".into(),
+                    version: "1.0.0".into(),
+                    digest: "sha256:d".into(),
+                }),
+                project_id: Some("pj-1".into()),
+                workspace_id: None,
+            }],
         };
         db.publish_summaries(
             "opencode",
@@ -896,6 +909,37 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(primer, ("how do we ship".into(), "m5".into(), "m9".into(), 42));
+            let observation: (String, String, String, String, i64, i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT proposed_category, content, origin_profile, project_id,
+                            source_start_ordinal, source_end_ordinal, consumed_at
+                       FROM memory_observations WHERE session_id = 's1'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                observation,
+                (
+                    "COMMUNICATION".into(),
+                    "Prefers short answers.".into(),
+                    "@cortexkit/memory-swe".into(),
+                    "pj-1".into(),
+                    5,
+                    9,
+                    None
+                )
+            );
         });
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -938,13 +982,30 @@ mod tests {
 
 /// What a summary run records for recall besides its summaries, as the
 /// plugin's publisher does (`compartment-runner-incremental.ts`): its events
-/// (`compartment_events`), and with a project its first primer candidate
+/// (`compartment_events`), with a project its first primer candidate
 /// (`primer_candidates`, read by the dashboard and `ctx_search`, never shown
-/// in the prompt).
+/// in the prompt), and what it noticed about the person
+/// (`memory_observations`, read only by the global review).
 #[derive(Default)]
 pub struct Recall {
     pub events: Vec<crate::summary::validate::ParsedEvent>,
     pub primer: Option<PrimerSource>,
+    pub observations: Vec<ObservationSource>,
+}
+
+/// One observation about the person and where it came from.
+pub struct ObservationSource {
+    /// The user category tag the summarizer filed it under.
+    pub category: String,
+    pub content: String,
+    /// The message ordinals of the summary it came from; the whole run when
+    /// the summarizer named none.
+    pub start_ordinal: u64,
+    pub end_ordinal: u64,
+    /// The profile whose prompt asked for it.
+    pub profile: Option<crate::memory_levels::OriginProfile>,
+    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 /// A primer candidate and where it came from.
@@ -996,6 +1057,28 @@ fn store_recall(
                 serde_json::to_string(&event.fields).unwrap_or_else(|_| "{}".into()),
                 now_ms,
                 harness,
+            ],
+        )?;
+    }
+    for observation in &recall.observations {
+        let profile = observation.profile.as_ref();
+        tx.execute(
+            "INSERT INTO memory_observations (content, proposed_category, origin_profile,
+                 origin_profile_version, origin_profile_digest, session_id, project_id,
+                 workspace_id, source_start_ordinal, source_end_ordinal, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                observation.content,
+                observation.category,
+                profile.map(|profile| &profile.name),
+                profile.map(|profile| &profile.version),
+                profile.map(|profile| &profile.digest),
+                session,
+                observation.project_id,
+                observation.workspace_id,
+                observation.start_ordinal as i64,
+                observation.end_ordinal as i64,
+                now_ms,
             ],
         )?;
     }

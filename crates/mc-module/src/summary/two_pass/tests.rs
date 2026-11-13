@@ -331,6 +331,7 @@ mod envelope_parity {
                 case["deferred"][1].as_u64().unwrap() as usize,
             );
             let prompt = build_prompt(
+                &crate::summary::prompts::SummaryPrompts::plugin(),
                 &facts,
                 &items,
                 case["lexical_only"].as_bool().unwrap(),
@@ -352,7 +353,13 @@ mod envelope_parity {
             .collect();
         for case in goldens["fits"].as_array().unwrap() {
             let max = case["max_length"].as_u64().unwrap() as usize;
-            let fitted = fit(&facts, &items, false, max);
+            let fitted = fit(
+                &crate::summary::prompts::SummaryPrompts::plugin(),
+                &facts,
+                &items,
+                false,
+                max,
+            );
             let ids: Vec<i64> = fitted.facts.iter().map(|fact| fact.fact_id).collect();
             let item_ids: Vec<i64> = fitted.items.iter().map(|item| item.item).collect();
             assert_eq!(Value::from(ids), case["facts"], "fit {max}");

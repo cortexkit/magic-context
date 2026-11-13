@@ -16,7 +16,7 @@
 use super::prompt::{
     build_compartment_agent_prompt, order_historian_memories, render_historian_memory_block,
     render_seed_examples_block, render_session_references_block_window, select_seeds,
-    select_session_references, CompartmentPromptInputs, ReferenceCompartment, SEED_FLOOR,
+    select_session_references, CompartmentPromptInputs, ReferenceCompartment,
 };
 use crate::calibration::LocalMass;
 use crate::context_db::{StoredCompartment, StoredMemory};
@@ -94,6 +94,9 @@ pub struct Input<'a> {
     pub anchored_facts: bool,
     /// The system prompt the run sends, language directive included.
     pub system_prompt: &'a str,
+    /// The profile texts: the first turn's instruction and the calibration
+    /// examples.
+    pub prompts: &'a super::prompts::SummaryPrompts,
     /// The models the same prompt may be sent to, the first one first.
     pub windows: &'a [Window],
     /// The output each run asks for at most.
@@ -118,7 +121,12 @@ pub struct Fit {
 /// even a minimal chunk fits; the reason stays the same until the model,
 /// its window or the prompt change.
 pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
-    let seeds = select_seeds(input.session_id, input.chunk_start as i64, SEED_FLOOR);
+    let seeds = select_seeds(
+        &input.prompts.seeds,
+        input.session_id,
+        input.chunk_start as i64,
+        input.prompts.seeds_per_call,
+    );
     let references: Vec<ReferenceCompartment> = input
         .summaries
         .iter()
@@ -170,6 +178,7 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
             user_observations_requested: false,
             extraction_free: false,
             anchored_facts: input.anchored_facts,
+            turn_one_instruction: &input.prompts.turn_one,
         })
     };
     let limits: Vec<(crate::count::Counter, u64, f64)> = input
@@ -305,6 +314,13 @@ mod tests {
         }
     }
 
+    fn prompts() -> &'static crate::summary::prompts::SummaryPrompts {
+        static PROMPTS: std::sync::OnceLock<
+            std::sync::Arc<crate::summary::prompts::SummaryPrompts>,
+        > = std::sync::OnceLock::new();
+        PROMPTS.get_or_init(crate::summary::prompts::SummaryPrompts::bundled)
+    }
+
     fn input<'a>(
         summaries: &'a [StoredCompartment],
         memories: &'a [StoredMemory],
@@ -319,6 +335,7 @@ mod tests {
             memory_enabled: true,
             anchored_facts: false,
             system_prompt: "system",
+            prompts: prompts(),
             windows,
             output_cap: 32_000,
             requested_chunk_tokens: 20_000,

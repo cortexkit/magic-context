@@ -10,10 +10,6 @@ use serde_json::{json, Value};
 use crate::summary::chunk::PrintedBlock;
 use crate::summary::validate::{resolve_fact_anchor, FactCandidate};
 
-/// The combined system prompt both turns run under, exactly as the plugin
-/// sends it (`TWO_PASS_SYSTEM`).
-pub const SYSTEM: &str = include_str!("../../../testdata/two-pass/system.md");
-
 /// Appended to the first turn's prompt; the second turn sees it in the
 /// conversation (`HISTORIAN_FORMAT_INSTRUCTION`).
 pub const FORMAT_INSTRUCTION: &str = r#"Reply with exactly one JSON object with a result object. On turn one use {"result":{"step":"turn_one","xml":"the complete compartment XML"}}. On turn two use {"result":{"step":"turn_two","decisions":[],"scores":[]}} with the decisions and scores described in the system contract. Do not call tools."#;

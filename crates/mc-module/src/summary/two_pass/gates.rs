@@ -107,6 +107,8 @@ pub struct Revision {
     pub final_text: String,
     pub changes: Vec<ChangedClause>,
     pub added: Vec<AddedClause>,
+    /// The calendar date the revised text says it stops holding.
+    pub expires: Option<String>,
 }
 
 /// What the gates need beyond the decision.
@@ -593,6 +595,7 @@ mod tests {
             final_text: value["finalText"].as_str().unwrap().to_owned(),
             changes,
             added,
+            expires: None,
         }
     }
 

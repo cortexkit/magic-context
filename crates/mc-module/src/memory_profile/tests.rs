@@ -287,7 +287,6 @@ fn resolved(context: &MemoryContext, source: &str) {
         Some("@cortexkit/memory-swe")
     );
     assert_eq!(context.profile.resolution.as_deref(), Some(source));
-    assert!(context.profile.parity);
 }
 
 #[test]
@@ -416,7 +415,6 @@ fn not_answering_has_null_snapshot_and_legacy_parity() {
         Some("bundled_default")
     );
     assert!(context.snapshot_digest.is_none());
-    assert!(context.profile.parity);
 }
 
 #[test]

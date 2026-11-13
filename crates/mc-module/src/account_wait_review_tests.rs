@@ -278,6 +278,7 @@ fn turn_two_job() -> turn_two::Job {
         project: "project".into(),
         project_root: Some("/project".into()),
         continuation: run::Continuation {
+            prompts: crate::summary::prompts::SummaryPrompts::bundled(),
             child: crate::client::Child {
                 session: SessionRef::new("runner", "pi", "summary-child"),
                 project_root: Some("/project".into()),

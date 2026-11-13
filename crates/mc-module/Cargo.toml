@@ -17,6 +17,8 @@ notice-cost-timing = ["nix/resource", "nix/time"]
 agent-data = []
 
 [dependencies]
+# Local midnight for memories that end on a calendar date.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 cortexkit-log = { workspace = true }
 tracing = "0.1"
 cortexkit-role-compaction = { workspace = true }

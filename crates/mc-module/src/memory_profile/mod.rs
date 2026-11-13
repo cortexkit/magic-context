@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub(crate) use frames::FRAMES;
 pub(crate) use load::{load_chain, Package, Profile};
-pub(crate) use resolve::resolve;
+pub(crate) use render::render;
+pub(crate) use resolve::{prompt_profile, resolve};
 pub use resolve::{MemoryContext, ProfilePin};
 
 /// The bundled software profile: the only one ck-mc installs.
