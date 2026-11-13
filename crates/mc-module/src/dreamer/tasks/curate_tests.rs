@@ -1302,7 +1302,7 @@ fn each_change_is_one_decision_named_after_the_run_and_undoes_alone_or_with_the_
         let plan = person::plan_run_undo(conn, &owner(), RUN).unwrap();
         // Memory 3 changed again after the run: the undo above.
         assert_eq!(plan.left, [(3, person::LeftAlone::ChangedAfter)]);
-        person::undo_run(conn, &owner(), RUN, &plan.restore).unwrap();
+        person::undo_run(conn, &owner(), RUN, &plan).unwrap();
     });
     for (index, original) in originals.iter().enumerate() {
         let now = store.memory(index as i64 + 1);

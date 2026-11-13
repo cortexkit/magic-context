@@ -189,7 +189,6 @@ pub(crate) fn shown_memories(
     let rows = crate::head_memories::read_rows(conn, Some(project), None, now)?;
     let chosen: HashSet<i64> = crate::head_memories::choose(
         &rows,
-        None,
         &crate::head_memories::decay_classes(profile),
         Counter::for_model(None),
         &crate::head_memories::budget(
