@@ -144,3 +144,48 @@ fn providers_stay_sorted_whatever_the_module_id() {
         .collect();
     assert_eq!(providers, vec!["ab-mc", "aft"]);
 }
+
+/// Writes the plan a verify child would be created with, against AFT's
+/// reader tools as core's sidekick sample lists them, so a runner's owner can
+/// run it through admission. `DREAMER_PLAN_SAMPLE` names the output file.
+#[test]
+#[ignore = "writes a sample for runner owners"]
+fn write_plan_sample() {
+    let Some(out) = std::env::var_os("DREAMER_PLAN_SAMPLE") else {
+        return;
+    };
+    let tools = [
+        reader("glob", &[]),
+        reader("grep", &[]),
+        reader("outline", &[]),
+        reader("read", &["code.read/v1"]),
+        reader("search", &[]),
+        reader("zoom", &[]),
+    ];
+    let plan = plan(
+        &tools,
+        crate::MODULE_ID,
+        "You check memories against the project's code. Read the files each memory names, then answer with one manifest.",
+    )
+    .unwrap();
+    let mut runner_params = serde_json::Map::new();
+    runner_params.insert(
+        "model".into(),
+        json!({"provider": "anthropic", "model": "claude-opus-5-5"}),
+    );
+    runner_params.insert("generation".into(), json!({"max_output_tokens": 32000}));
+    runner_params.insert("stop_when".into(), json!({"max_steps": 60}));
+    let mut send = serde_json::Map::new();
+    send.insert(
+        "prompt".into(),
+        json!("### Memories to verify\n[7863] The tool catalog is a pure function of its request."),
+    );
+    send.insert("send_id".into(), json!("mc-dream:42:0.0"));
+    send.insert("plan".into(), plan);
+    send.extend(runner_params);
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&Value::Object(send)).unwrap(),
+    )
+    .unwrap();
+}
