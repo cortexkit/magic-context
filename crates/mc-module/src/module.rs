@@ -170,6 +170,13 @@ enum Job {
     /// A second turn met the runner's account wait: the session's summaries
     /// wait for the time it named, as after a first turn that met it.
     AccountWait(crate::summary::account_wait::AccountWait),
+    /// Entorhinal's answer, read again after a Setup, for the project and
+    /// workspace the session's folder is in now
+    /// ([`Session::follow_workspace`]).
+    Workspace {
+        project: Option<String>,
+        workspace: Option<String>,
+    },
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -1224,7 +1231,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         // A session that so far only called tools starts
                         // afresh below, like any new one.
                         Some(existing) if existing.compacting() => {
-                            ensure_memory_context(&inner, &route, existing).await;
+                            if !ensure_memory_context(&inner, &route, existing).await {
+                                read_workspace_again(&inner, own.clone(), &route);
+                            }
                             existing
                                 .setup(inner.client.as_ref(), settings, &route, &request, features)
                                 .await
@@ -1241,7 +1250,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             {
                                 fresh.restore(durable);
                             }
-                            ensure_memory_context(&inner, &route, &mut fresh).await;
+                            if !ensure_memory_context(&inner, &route, &mut fresh).await {
+                                read_workspace_again(&inner, own.clone(), &route);
+                            }
                             fresh
                                 .setup(inner.client.as_ref(), settings, &route, &request, features)
                                 .await;
@@ -1288,6 +1299,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::AccountWait(wait) => {
                         if let Some(session) = &mut session {
                             session.account_refused(wait);
+                        }
+                    }
+                    Job::Workspace { project, workspace } => {
+                        if let Some(session) = &mut session {
+                            session.follow_workspace(project.as_deref(), workspace);
                         }
                     }
                     Job::Ride(ride, reply) => {
@@ -1580,7 +1596,11 @@ fn hold(
     key: &SessionRef,
 ) -> Option<Job> {
     match job {
-        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) | Job::AccountWait(_) => {
+        Job::Setup(..)
+        | Job::Notice(_)
+        | Job::SummaryFinished(..)
+        | Job::AccountWait(_)
+        | Job::Workspace { .. } => {
             if held.is_empty() {
                 tracing::info!(
                     "ck-mc: session {}/{}/{}: holding its Setup and notices while a move holds it ({}); they run if the move is aborted",
@@ -1628,24 +1648,52 @@ fn view_unconfirmed(session: Option<&Session>) -> bool {
         .is_some_and(|session| !session.durable().unconfirmed.is_empty())
 }
 
+/// Read again, off the Setup's path, which workspace the session's project
+/// is in now, and hand the answer to the session's worker. A head runs for
+/// months while its project may move to another workspace; one Entorhinal
+/// read per Setup is how it notices.
+fn read_workspace_again<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Arc<Inner<C>>,
+    worker: mpsc::WeakUnboundedSender<Job>,
+    route: &Route,
+) {
+    let Some(folder) = route.workdir.clone() else {
+        return;
+    };
+    let inner = Arc::clone(inner);
+    let session = route.session.clone();
+    tokio::spawn(async move {
+        let Some((project, workspace)) =
+            crate::memory_context::read_workspace(inner.client.as_ref(), &session, &folder).await
+        else {
+            return;
+        };
+        if let Some(worker) = worker.upgrade() {
+            let _ = worker.send(Job::Workspace { project, workspace });
+        }
+    });
+}
+
 /// Give `session` its memory context: the one stored for it,
 /// or one read from Entorhinal now and stored for good. A session without a
-/// folder has none, and its new memories stay unplaced.
+/// folder has none, and its new memories stay unplaced. Returns whether it
+/// read Entorhinal just now, so the caller doesn't read the workspace again.
 async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Inner<C>,
     route: &Route,
     session: &mut Session,
-) {
+) -> bool {
     if session.has_memory_context() {
-        return;
+        return false;
     }
     let Some(folder) = route.workdir.as_deref() else {
-        return;
+        return false;
     };
     let stored = inner
         .store
         .as_ref()
         .and_then(|store| store.memory_context(&route.session));
+    let read_now = stored.is_none();
     let context = match stored {
         Some(context) => context,
         None => {
@@ -1663,6 +1711,7 @@ async fn ensure_memory_context<C: RunnerClient + Router + Send + Sync + 'static>
         }
     };
     session.set_memory_context(context);
+    read_now
 }
 
 /// Run the summarizer beside the session's worker, and hand its result back

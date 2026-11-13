@@ -829,7 +829,38 @@ impl Session {
         self.memory_context.is_some()
     }
 
-    /// Take the session's memory context. It never changes afterwards.
+    /// Switch the session to the workspace Entorhinal now places its project
+    /// in (`project` is the project that answer was for; an answer for another
+    /// project changes nothing). A head runs for months, so a move of its
+    /// project to another workspace has to reach it. No fold is forced: the
+    /// old workspace's memories leave the head and the new one's arrive as
+    /// memory-update lines in `m[1]`, like any memory change, and the next
+    /// fold chooses again. The profile pin stays as it was fixed. Returns
+    /// whether the workspace changed.
+    pub fn follow_workspace(&mut self, project: Option<&str>, workspace: Option<String>) -> bool {
+        let Some(context) = self.memory_context.as_mut() else {
+            return false;
+        };
+        if context.project_id.as_deref() != project || context.workspace_id == workspace {
+            return false;
+        }
+        tracing::info!(
+            "ck-mc: session {}: its project {} is now in workspace {}, was {}; the head shows the change at its next memory update",
+            self.key.session,
+            project.unwrap_or("(none)"),
+            workspace.as_deref().unwrap_or("(none)"),
+            context.workspace_id.as_deref().unwrap_or("(none)"),
+        );
+        context.workspace_id = workspace;
+        self.authority = crate::memory_levels::Authority::from_context(context);
+        if let Some(store) = &self.store {
+            store.set_memory_workspace(&self.key, context.workspace_id.as_deref());
+        }
+        true
+    }
+
+    /// Take the session's memory context. Only its workspace changes
+    /// afterwards ([`Self::follow_workspace`]).
     pub fn set_memory_context(&mut self, context: crate::memory_profile::MemoryContext) {
         if self.memory_context.is_none() {
             self.authority = crate::memory_levels::Authority::from_context(&context);
@@ -6024,6 +6055,10 @@ mod retired_history_tests {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "workspace_follow_tests.rs"]
+mod workspace_follow_tests;
 
 #[path = "spent_reading.rs"]
 mod spent_reading;

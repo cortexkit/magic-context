@@ -815,7 +815,7 @@ impl Store {
             .unwrap_or(None)
     }
 
-    /// The memory context fixed once and stored for the session, if any.
+    /// The memory context stored for the session, if any.
     /// It is kept apart from [`Durable`] because a session that only calls
     /// tools has one too.
     pub fn memory_context(&self, key: &SessionRef) -> Option<MemoryContext> {
@@ -838,7 +838,8 @@ impl Store {
     }
 
     /// Store a session's memory context once. If one is already stored, that
-    /// one is kept and returned: a session's context never changes.
+    /// one is kept and returned: a session's context never changes, apart
+    /// from its workspace ([`Self::set_memory_workspace`]).
     pub fn keep_memory_context(&self, key: &SessionRef, context: MemoryContext) -> MemoryContext {
         let text = serde_json::to_string(&context).expect("memory context serializes");
         let result = self.lock().execute(
@@ -854,6 +855,23 @@ impl Store {
             return context;
         }
         self.memory_context(key).unwrap_or(context)
+    }
+
+    /// Record the workspace a session's project is in now. It is the one
+    /// part of a stored memory context that follows Entorhinal
+    /// ([`crate::session::Session::follow_workspace`]).
+    pub fn set_memory_workspace(&self, key: &SessionRef, workspace: Option<&str>) {
+        let result = self.lock().execute(
+            "UPDATE memory_contexts SET context = json_set(context, '$.workspace_id', ?4)
+              WHERE runner = ?1 AND harness = ?2 AND session = ?3",
+            params![key.runner, key.harness, key.session, workspace],
+        );
+        if let Err(error) = result {
+            tracing::warn!(
+                "ck-mc: session {}: saving its new workspace failed: {error}",
+                key.session
+            );
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {

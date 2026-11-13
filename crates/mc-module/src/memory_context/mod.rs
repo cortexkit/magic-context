@@ -1,7 +1,9 @@
 //! A session's memory context: its project, workspace and
 //! domain from Entorhinal, and the memory profile its agent pins. ck-mc reads
 //! it once, at the session's first Setup (or first `ctx_memory` call, for a
-//! session that only calls tools), and keeps it with the session.
+//! session that only calls tools), and keeps it with the session. Only the
+//! workspace is read again, at each later Setup ([`read_workspace`]), because
+//! a head runs for months and its project can move to another workspace.
 //! Ported from the memory-levels card (`crates/mc-module/src/memory_context/`
 //! at `75adf757`).
 
@@ -74,6 +76,28 @@ pub(crate) async fn read<C: RunnerClient>(
         None => ContextAnswer::NotAnswering,
     };
     resolve(&project, &agent, &[])
+}
+
+/// The project and workspace Entorhinal places `folder` in now, or `None`
+/// when it doesn't answer or refuses (the session then keeps what it has).
+pub(crate) async fn read_workspace<C: RunnerClient>(
+    client: &C,
+    session: &SessionRef,
+    folder: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    match read_one::<C, ProjectContext, _>(
+        client,
+        session,
+        Request::new(
+            "context.project",
+            ContextProjectParams::new(folder.to_owned()),
+        ),
+    )
+    .await
+    {
+        ContextAnswer::Answer(project) => Some((project.project_id, project.workspace_id)),
+        _ => None,
+    }
 }
 
 async fn read_one<C: RunnerClient, T: ContextReply, P: Serialize>(
