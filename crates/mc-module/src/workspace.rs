@@ -551,19 +551,13 @@ mod search_tests {
     }
 
     #[test]
-    fn named_delta_attributes_escape_names_and_own_deltas_are_unchanged() {
-        assert_eq!(crate::memory::added_line(1, "workspace", Some("CONSTRAINTS"),"x < y",Some("Beta & \"Co\"")),
-            "  <added id=\"1\" level=\"workspace\" category=\"CONSTRAINTS\" project=\"Beta &amp; &quot;Co&quot;\">x &lt; y</added>");
+    fn memory_update_lines_name_their_level_and_escape_text() {
         assert_eq!(
-            crate::memory::updated_line(1, "workspace", Some("CONSTRAINTS"), "x", Some("Beta")),
-            "  <updated id=\"1\" level=\"workspace\" category=\"CONSTRAINTS\" project=\"Beta\">x</updated>"
+            crate::memory::added_line(1, "workspace", Some("CONSTRAINTS"), "x < y"),
+            "  <added id=\"1\" level=\"workspace\" category=\"CONSTRAINTS\">x &lt; y</added>"
         );
         assert_eq!(
-            crate::memory::added_line(1, "project", Some("CONSTRAINTS"), "x", None),
-            "  <added id=\"1\" level=\"project\" category=\"CONSTRAINTS\">x</added>"
-        );
-        assert_eq!(
-            crate::memory::updated_line(1, "global", None, "x", None),
+            crate::memory::updated_line(1, "global", None, "x"),
             "  <updated id=\"1\" level=\"global\">x</updated>"
         );
         assert_eq!(

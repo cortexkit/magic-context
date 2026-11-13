@@ -6,7 +6,6 @@ use crate::context_db::{ContextDb, StoredCompartment};
 use crate::count::Counter;
 use crate::route::Project;
 use crate::summary::{head, render};
-use crate::workspace::Workspace;
 use cortexkit_role_compaction::wire::Refusal;
 use cortexkit_role_compaction::{notice::Conditions, read::SessionRef};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -166,8 +165,7 @@ struct Snapshot {
     config_root: Option<String>,
     model: Option<String>,
     usable: u64,
-    workspace: Option<Workspace>,
-    /// The project's and its workspaces' memories the head may show; the
+    /// The project's and its workspace's memories the head may show; the
     /// user profile is not part of a bias pack.
     memories: Vec<crate::head_memories::Row>,
     summaries: Vec<StoredCompartment>,
@@ -303,15 +301,12 @@ impl Reader {
             config_root,
             model,
             usable,
-            workspace: None,
             memories: Vec::new(),
             summaries: Vec::new(),
         };
         match purpose {
             Some("bias") => {
                 if let Some(project) = &snapshot.project {
-                    let workspace =
-                        Workspace::resolve(&tx, &project.id).map_err(|_| unavailable())?;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |time| time.as_millis() as i64);
@@ -325,7 +320,6 @@ impl Reader {
                     .into_iter()
                     .filter(|row| row.level != "global")
                     .collect();
-                    snapshot.workspace = Some(workspace);
                 }
             }
             Some("front") => {}
@@ -360,13 +354,12 @@ impl Reader {
             let memories = if purpose == "front" {
                 // A voice front may receive only persona-marked memories. No such mark exists yet.
                 Vec::new()
-            } else if settings.memory_enabled && snapshot.workspace.is_some() {
+            } else if settings.memory_enabled && snapshot.project.is_some() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |time| time.as_millis() as i64);
                 let chosen = crate::head_memories::choose(
                     &snapshot.memories,
-                    snapshot.workspace.as_ref(),
                     &crate::head_memories::classes_for(None),
                     counter,
                     &crate::head_memories::budget(budget, 0),
@@ -381,13 +374,7 @@ impl Reader {
                 Vec::new()
             };
             answer["memories"] = Value::Array(memories.into_iter().map(|row| {
-                let mut item = json!({"id": row.id, "category": row.tag, "text": row.content, "tokens": counter.count(&row.content)});
-                if let (Some(workspace), Some(source)) = (&snapshot.workspace, &row.source_project) {
-                    if row.level == "workspace" && *source != workspace.own {
-                        item["project"] = json!(workspace.source_name(source).unwrap_or(source));
-                    }
-                }
-                item
+                json!({"id": row.id, "category": row.tag, "text": row.content, "tokens": counter.count(&row.content)})
             }).collect());
         } else {
             let history_budget = (snapshot.usable as f64 * settings.execute_threshold_percentage
@@ -398,7 +385,6 @@ impl Reader {
                 summaries: &snapshot.summaries,
                 docs: "",
                 rows: &[],
-                workspace: None,
                 classes: &HashMap::new(),
                 now_ms: 0,
                 gone: &[],

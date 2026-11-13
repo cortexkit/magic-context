@@ -54,7 +54,7 @@ fn a_fold_renders_each_level_in_its_own_block() {
         row(6, "project", "NAMING", "not shown"),
     ];
     let shown: HashSet<i64> = [1, 2, 3, 4, 5].into();
-    let blocks = render(&rows, &shown, None);
+    let blocks = render(&rows, &shown);
     // Profile lines in the order they were learned, not by id.
     assert_eq!(
         blocks.user_profile,
@@ -68,7 +68,7 @@ fn a_fold_renders_each_level_in_its_own_block() {
         blocks.project,
         "<project-memory>\n<PROJECT_RULES>\n#4: never push while CI is red\n</PROJECT_RULES>\n<NAMING>\n#3: snake case\n</NAMING>\n</project-memory>"
     );
-    let none = render(&rows, &HashSet::new(), None);
+    let none = render(&rows, &HashSet::new());
     assert!(none.user_profile.is_empty() && none.workspace.is_empty() && none.project.is_empty());
 }
 
@@ -101,7 +101,7 @@ fn a_critical_rule_is_chosen_before_a_more_important_one() {
     let rows = vec![critical, important];
     // Room for one of the two lines.
     let one = counter.count(&format!("#1: {text}\n")) + 60;
-    let chosen = choose(&rows, None, &HashMap::new(), counter, &budget(one, 0), 0);
+    let chosen = choose(&rows, &HashMap::new(), counter, &budget(one, 0), 0);
     assert_eq!(chosen.ids, vec![1]);
 }
 

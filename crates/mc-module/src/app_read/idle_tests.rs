@@ -324,7 +324,6 @@ impl Fixture {
             rows: &[],
             classes: &std::collections::HashMap::new(),
             now_ms: 0,
-            workspace: None,
             gone: &[],
             history_budget_tokens: 10000,
             history_local_budget_tokens: 10000,

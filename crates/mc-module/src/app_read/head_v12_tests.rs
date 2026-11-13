@@ -208,7 +208,6 @@ fn utf8_state() -> ReadState {
             summaries: &[],
             docs: &docs.rendered_block,
             rows: &memories,
-            workspace: None,
             classes: &std::collections::HashMap::new(),
             now_ms: 0,
             gone: &[],

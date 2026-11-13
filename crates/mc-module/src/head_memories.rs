@@ -19,7 +19,6 @@ use crate::count::Counter;
 use crate::memory;
 use crate::memory_profile::Profile;
 use crate::memory_render::{select, Budget, Candidate, Decay, Level, Selection};
-use crate::workspace::Workspace;
 
 const DAY_MS: i64 = 86_400_000;
 /// A drifting memory loses half its weight in this long since it was last
@@ -275,37 +274,13 @@ pub(crate) fn wrapper(level: Level) -> &'static str {
     }
 }
 
-/// The name of the project a workspace memory came from, as the head shows it.
-fn source_label<'a>(row: &Row, workspace: Option<&'a Workspace>) -> Option<&'a str> {
-    let source = row.source_project.as_deref()?;
-    workspace?.source_name(source)
-}
-
-/// A memory's line in a workspace block: `#id [project]: fact`, or
-/// `#id: fact` when its project has no name in the workspace.
-fn workspace_line(row: &Row, workspace: Option<&Workspace>) -> String {
-    match source_label(row, workspace) {
-        Some(name) => format!(
-            "#{} [{}]: {}",
-            row.id,
-            memory::escape_content(name),
-            memory::escape_content(&row.content)
-        ),
-        None => memory::render_line(&row.stored()),
-    }
-}
-
 /// What showing `row` costs, counted as the head renders it: a project or
 /// workspace line with its category tags and the block's wrapper, or a
 /// user-profile bullet (plus four tokens for its share of the block's
 /// newlines), which has no category tags.
-fn priced(row: &Row, level: Level, workspace: Option<&Workspace>, counter: Counter) -> Candidate {
+fn priced(row: &Row, level: Level, counter: Counter) -> Candidate {
     let (line_tokens, category_tokens) = match level {
         Level::Global => (counter.count(&format!("- {}", row.content)) + 4, 0),
-        Level::Workspace => (
-            counter.count(&(workspace_line(row, workspace) + "\n")),
-            counter.count(&format!("<{0}>\n</{0}>\n", row.tag)),
-        ),
         _ => (
             counter.count(&(memory::render_line(&row.stored()) + "\n")),
             counter.count(&format!("<{0}>\n</{0}>\n", row.tag)),
@@ -339,7 +314,6 @@ fn priced(row: &Row, level: Level, workspace: Option<&Workspace>, counter: Count
 /// head has no block for is left out.
 pub(crate) fn candidates(
     rows: &[Row],
-    workspace: Option<&Workspace>,
     classes: &HashMap<String, String>,
     counter: Counter,
 ) -> Vec<Candidate> {
@@ -348,7 +322,7 @@ pub(crate) fn candidates(
             let level = row.level().filter(|level| *level != Level::Agent)?;
             Some(Candidate {
                 decay: decay(row, classes),
-                ..priced(row, level, workspace, counter)
+                ..priced(row, level, counter)
             })
         })
         .collect()
@@ -357,26 +331,27 @@ pub(crate) fn candidates(
 /// The memories a head shows, chosen from `rows` at `now`.
 pub(crate) fn choose(
     rows: &[Row],
-    workspace: Option<&Workspace>,
     classes: &HashMap<String, String>,
     counter: Counter,
     budget: &Budget,
     now: i64,
 ) -> Selection {
-    select(&candidates(rows, workspace, classes, counter), budget, now)
+    select(&candidates(rows, classes, counter), budget, now)
 }
 
 /// The memory blocks of `m[0]` for the rows `shown`, each empty when it has
 /// nothing: the user profile (in the order its lines were learned, as the
 /// 0.49 profile listed them), the workspace's memories and the project's,
-/// each grouped by category.
+/// each grouped by category. A workspace memory's line names no project:
+/// it holds for every project in the workspace, whichever one it was
+/// learned in.
 pub struct Blocks {
     pub user_profile: String,
     pub workspace: String,
     pub project: String,
 }
 
-pub fn render(rows: &[Row], shown: &HashSet<i64>, workspace: Option<&Workspace>) -> Blocks {
+pub fn render(rows: &[Row], shown: &HashSet<i64>) -> Blocks {
     let at = |level: Level| -> Vec<&Row> {
         let mut rows: Vec<&Row> = rows
             .iter()
@@ -389,15 +364,14 @@ pub fn render(rows: &[Row], shown: &HashSet<i64>, workspace: Option<&Workspace>)
         .into_iter()
         .map(|row| row.content.clone())
         .collect();
-    let workspace_rows: Vec<(String, i64, String)> = at(Level::Workspace)
-        .into_iter()
-        .map(|row| (row.tag.clone(), row.id, workspace_line(row, workspace)))
-        .collect();
-    let project_rows: Vec<StoredMemory> = at(Level::Project).into_iter().map(Row::stored).collect();
+    let block = |level: Level| -> String {
+        let rows: Vec<StoredMemory> = at(level).into_iter().map(Row::stored).collect();
+        memory::render_block(&rows, wrapper(level))
+    };
     Blocks {
         user_profile: memory::render_profile(&profile, wrapper(Level::Global)),
-        workspace: memory::render_lines(workspace_rows, wrapper(Level::Workspace)),
-        project: memory::render_block(&project_rows, wrapper(Level::Project)),
+        workspace: block(Level::Workspace),
+        project: block(Level::Project),
     }
 }
 

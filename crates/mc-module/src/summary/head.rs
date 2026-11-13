@@ -26,7 +26,6 @@ use super::render::{
 use crate::context_db::StoredCompartment;
 use crate::head_memories::{self, Row};
 use crate::memory;
-use crate::memory_render::Level;
 
 pub(crate) const M0_ID: &str = "magic-context:m0";
 pub(crate) const M1_ID: &str = "magic-context:m1";
@@ -44,8 +43,6 @@ pub struct Inputs<'a> {
     /// Every memory the head may show, at every level
     /// ([`head_memories::read_rows`]).
     pub rows: &'a [Row],
-    /// The workspace that names the project a workspace memory came from.
-    pub workspace: Option<&'a crate::workspace::Workspace>,
     /// Each category id's decay class in the session's memory profile.
     pub classes: &'a std::collections::HashMap<String, String>,
     /// When `m[0]` is rendered: drifting memories lose weight with the time
@@ -353,7 +350,7 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
         },
         estimate,
     );
-    let blocks = head_memories::render(inputs.rows, shown, inputs.workspace);
+    let blocks = head_memories::render(inputs.rows, shown);
     let mut sections = Vec::new();
     if !inputs.docs.is_empty() {
         sections.push(inputs.docs.to_owned());
@@ -421,7 +418,6 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
 pub fn shown_at_fold(inputs: &Inputs) -> HashSet<i64> {
     head_memories::choose(
         inputs.rows,
-        inputs.workspace,
         inputs.classes,
         inputs.counter,
         &head_memories::budget(inputs.memory_budget_tokens, inputs.profile_budget_tokens),
@@ -482,13 +478,6 @@ struct Change {
 fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
     let current: BTreeMap<i64, &Row> = inputs.rows.iter().map(|row| (row.id, row)).collect();
     let gone: BTreeMap<i64, &Row> = inputs.gone.iter().map(|row| (row.id, row)).collect();
-    // The project a workspace memory came from, as the head names it.
-    let source = |row: &Row| -> Option<&str> {
-        (row.level() == Some(Level::Workspace))
-            .then_some(row.source_project.as_deref())
-            .flatten()
-            .and_then(|project| inputs.workspace?.source_name(project))
-    };
     let mut out = Vec::new();
     for (id, shown) in &baseline.shown {
         match (current.get(id), shown) {
@@ -500,7 +489,6 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
                     &row.level,
                     Some(&row.tag),
                     &row.content,
-                    source(row),
                 ),
                 after: Shown::Text {
                     text: row.content.clone(),
@@ -537,7 +525,6 @@ fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
                     &row.level,
                     Some(&row.tag),
                     &row.content,
-                    source(row),
                 ),
                 after: Shown::Text {
                     text: row.content.clone(),
@@ -970,7 +957,6 @@ mod tests {
     fn inputs<'a>(summaries: &'a [StoredCompartment], rows: &'a [Row]) -> Inputs<'a> {
         Inputs {
             counter: crate::count::Counter::for_model(None),
-            workspace: None,
             summaries,
             docs: "",
             rows,

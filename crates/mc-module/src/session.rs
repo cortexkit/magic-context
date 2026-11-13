@@ -3821,7 +3821,6 @@ impl Session {
         // profile, as the standalone plugin's does. The user profile is the
         // person's, read whatever the session's project.
         let mut rows = Vec::new();
-        let mut workspace = None;
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
             let project = self.project.as_ref().map(|project| project.id.as_str());
             // The session's workspace is Entorhinal's, from its memory context.
@@ -3830,16 +3829,9 @@ impl Session {
                 .as_ref()
                 .and_then(|context| context.workspace_id.as_deref());
             match db.with_connection(|conn| {
-                let resolved = project
-                    .map(|project| crate::workspace::Workspace::resolve(conn, project))
-                    .transpose()?;
-                let read = crate::head_memories::read_rows(conn, project, workspace_id, now)?;
-                Ok::<_, rusqlite::Error>((resolved, read))
+                crate::head_memories::read_rows(conn, project, workspace_id, now)
             }) {
-                Ok((resolved, read)) => {
-                    workspace = resolved;
-                    rows = read;
-                }
+                Ok(read) => rows = read,
                 Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
             }
         }
@@ -3860,7 +3852,6 @@ impl Session {
             summaries: &self.summaries,
             docs: &docs,
             rows: &rows,
-            workspace: workspace.as_ref(),
             classes: &classes,
             now_ms: now,
             gone: &[],

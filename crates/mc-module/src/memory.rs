@@ -37,10 +37,31 @@ fn tag_order(left: (&str, i64), right: (&str, i64)) -> Ordering {
     }
 }
 
-/// Already rendered lines, each with its category tag and memory id,
-/// grouped by tag inside `<wrapper>` in the order of [`render_block`], or
-/// nothing.
-pub fn render_lines(mut lines: Vec<(String, i64, String)>, wrapper: &str) -> String {
+/// `#id: fact`. Importance decides selection but is left off the line, so
+/// re-scoring a memory never changes the bytes.
+pub fn render_line(memory: &StoredMemory) -> String {
+    let mut end = memory.content.len().min(64 * 1024);
+    while !memory.content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let content = escape_content(&memory.content[..end]).replace('\n', "\n  ");
+    format!("#{}: {content}", memory.id)
+}
+
+/// The memories grouped by category inside `<wrapper>`, or nothing.
+pub fn render_block(memories: &[StoredMemory], wrapper: &str) -> String {
+    render_lines(
+        memories
+            .iter()
+            .map(|memory| (memory.category.clone(), memory.id, render_line(memory)))
+            .collect(),
+        wrapper,
+    )
+}
+
+/// Rendered lines, each with its category tag and memory id, grouped by tag
+/// inside `<wrapper>` in the fixed category order, or nothing.
+fn render_lines(mut lines: Vec<(String, i64, String)>, wrapper: &str) -> String {
     if lines.is_empty() {
         return String::new();
     }
@@ -62,28 +83,6 @@ pub fn render_lines(mut lines: Vec<(String, i64, String)>, wrapper: &str) -> Str
     }
     out.push(format!("</{wrapper}>"));
     out.join("\n")
-}
-
-/// `#id: fact`. Importance decides selection but is left off the line, so
-/// re-scoring a memory never changes the bytes.
-pub fn render_line(memory: &StoredMemory) -> String {
-    let mut end = memory.content.len().min(64 * 1024);
-    while !memory.content.is_char_boundary(end) {
-        end -= 1;
-    }
-    let content = escape_content(&memory.content[..end]).replace('\n', "\n  ");
-    format!("#{}: {content}", memory.id)
-}
-
-/// The memories grouped by category inside `<wrapper>`, or nothing.
-pub fn render_block(memories: &[StoredMemory], wrapper: &str) -> String {
-    render_lines(
-        memories
-            .iter()
-            .map(|memory| (memory.category.clone(), memory.id, render_line(memory)))
-            .collect(),
-        wrapper,
-    )
 }
 
 /// `User prefers X` reads as `Prefers X` under the profile heading.
@@ -120,35 +119,21 @@ fn category_attribute(category: Option<&str>) -> String {
 
 /// The `m[1]` line for a memory whose text was replaced. `level` says which
 /// block of the head the memory belongs to (`global` for the user profile).
-pub fn updated_line(
-    id: i64,
-    level: &str,
-    category: Option<&str>,
-    text: &str,
-    source: Option<&str>,
-) -> String {
+pub fn updated_line(id: i64, level: &str, category: Option<&str>, text: &str) -> String {
     format!(
-        "  <updated id=\"{id}\" level=\"{}\"{}{}>{}</updated>",
+        "  <updated id=\"{id}\" level=\"{}\"{}>{}</updated>",
         escape_attr(level),
         category_attribute(category),
-        project_attribute(source),
         escape_content(text)
     )
 }
 
 /// The `m[1]` line for a new memory, saved or produced by a merge.
-pub fn added_line(
-    id: i64,
-    level: &str,
-    category: Option<&str>,
-    text: &str,
-    source: Option<&str>,
-) -> String {
+pub fn added_line(id: i64, level: &str, category: Option<&str>, text: &str) -> String {
     format!(
-        "  <added id=\"{id}\" level=\"{}\"{}{}>{}</added>",
+        "  <added id=\"{id}\" level=\"{}\"{}>{}</added>",
         escape_attr(level),
         category_attribute(category),
-        project_attribute(source),
         escape_content(text)
     )
 }
@@ -164,11 +149,6 @@ pub fn superseded_line(id: i64, level: &str, by: i64) -> String {
     )
 }
 
-fn project_attribute(source: Option<&str>) -> String {
-    source
-        .map(|name| format!(" project=\"{}\"", escape_attr(name)))
-        .unwrap_or_default()
-}
 
 #[cfg(test)]
 mod tests {

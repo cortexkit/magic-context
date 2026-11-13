@@ -2933,7 +2933,10 @@ fn mural_config(dir: &std::path::Path, accepts_images: Option<bool>) -> SessionC
 fn mural_settings() -> Settings {
     Settings {
         mural_enabled: true,
+        // The head fills one budget from both settings; with no profile
+        // budget, this one shows only a few of the twenty memories.
         memory_budget_tokens: 120,
+        profile_budget_tokens: 0,
         ..Settings::default()
     }
 }
@@ -3085,12 +3088,14 @@ async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_
     let (m0_later, m1) = head_texts(runner.host());
     assert!(
         m1.contains(
-            "<updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>"
+            "<updated id=\"1\" level=\"project\" category=\"PROJECT_RULES\">Ask before every push.</updated>"
         ),
         "{m1}"
     );
     assert!(
-        m1.contains("<added id=\"2\" category=\"PROJECT_RULES\">Never force-push.</added>"),
+        m1.contains(
+            "<added id=\"2\" level=\"project\" category=\"PROJECT_RULES\">Never force-push.</added>"
+        ),
         "{m1}"
     );
     assert!(!m0_later.contains("Never force-push."), "{m0_later}");
@@ -3326,10 +3331,12 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     // then archived before the next view, so it shows as removed.
     let (_, m1) = head_texts(runner.host());
     assert!(
-        m1.contains("<added id=\"2\" category=\"NAMING\">Crates use kebab-case.</added>"),
+        m1.contains(
+            "<added id=\"2\" level=\"project\" category=\"NAMING\">Crates use kebab-case.</added>"
+        ),
         "{m1}"
     );
-    assert!(m1.contains("<removed id=\"1\"/>"), "{m1}");
+    assert!(m1.contains("<removed id=\"1\" level=\"project\"/>"), "{m1}");
     assert!(!m1.contains("<updated id=\"1\""), "{m1}");
 
     // The rows the standalone plugin reads are there.
@@ -3397,13 +3404,22 @@ async fn saved_memories_record_their_project_level_from_a_context_read_once() {
         .play(&[user("Again."), memory("Modules use snake_case."), answer()])
         .await;
     assert_clean(&runner);
+    let reads = client.entorhinal_reads.lock().unwrap().clone();
     assert_eq!(
-        *client.entorhinal_reads.lock().unwrap(),
+        reads[..2],
         [
-            ("context.project".to_owned(), root),
+            ("context.project".to_owned(), root.clone()),
             ("context.session".to_owned(), "agent-1".to_owned()),
         ],
         "one context read, kept across the restart"
+    );
+    // A later Setup reads only the project's workspace again, never the
+    // agent's profile pin.
+    assert!(
+        reads[2..]
+            .iter()
+            .all(|read| *read == ("context.project".to_owned(), root.clone())),
+        "{reads:?}"
     );
     let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
     let placements: Vec<(String, String, String, String, String)> = db
@@ -4687,93 +4703,87 @@ async fn a_prose_search_answers_in_the_rerankers_order() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Workspace memories reach a head through the workspace Entorhinal places
+/// the session's project in: they show in their own block, naming no
+/// project, and a sibling project's own memories never do. A move of the
+/// project to another workspace reaches the running head after its next
+/// Setup, as memory-update lines, without a fold.
 #[tokio::test]
-async fn workspace_shared_memories_have_sources_in_the_head_deltas_and_search() {
-    let dir = scratch("workspace-shares");
+async fn a_head_shows_its_workspaces_memories_and_follows_a_workspace_move() {
+    let dir = scratch("workspace-memories");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Own project rule.");
-    insert_memory(&dir, 2, "Foreign shared constraint.");
-    insert_memory(&dir, 3, "Foreign private naming convention.");
-    insert_memory(&dir, 4, "Workspace placement remains searchable.");
-    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
-    db.execute_batch("INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(1,'Example',0,0);
-        INSERT INTO workspace_members VALUES(1,'pj-test','Current','/current',0),(1,'pj-other','Other Project','/other',0);
-        UPDATE memories SET owner_id='pj-other',category='swe:constraints',origin_category='CONSTRAINTS',shareable=1 WHERE id IN (2,4);
-        UPDATE memories SET owner_id='pj-other',category='swe:naming',origin_category='NAMING',shareable=1 WHERE id=3;
-        UPDATE memories SET level='workspace',owner_id='1' WHERE id=4;").unwrap();
-    let project = mc_mock_runner::runner::Project {
+    insert_memory(&dir, 2, "Shared team constraint.");
+    insert_memory(&dir, 3, "Another project's own rule.");
+    insert_memory(&dir, 4, "Other team constraint.");
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .execute_batch(
+            "UPDATE memories SET level='workspace', owner_id='team', source_project_id='pj-other',
+                    category='swe:constraints', origin_category='CONSTRAINTS' WHERE id=2;
+             UPDATE memories SET owner_id='pj-other' WHERE id=3;
+             UPDATE memories SET level='workspace', owner_id='other-team', source_project_id='pj-third',
+                    category='swe:constraints', origin_category='CONSTRAINTS' WHERE id=4;",
+        )
+        .unwrap();
+    let mut config = config("head", Kind::OpenAi, free());
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
-    };
-    let mut head_config = config("head", Kind::OpenAi, free());
-    head_config.project = Some(project.clone());
-    let mut runner = start_full(head_config, Settings::default(), Some(dir.clone())).await;
+    });
+    let records: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/entorhinal-memory-context-v1/context-project.json"
+    ))
+    .unwrap();
+    let mut result = records[0]["reply"]["result"].clone();
+    result["domain"] = Value::Null;
+    result["project_id"] = json!("pj-test");
+    result["workspace_id"] = json!("team");
+    let client = HostClient::default();
+    *client.entorhinal.lock().unwrap() = Some(result.clone());
+    let mut runner = start_with_client(
+        client.clone(),
+        config,
+        Settings::default(),
+        Some(dir.clone()),
+        false,
+        |_| {},
+    )
+    .await;
     runner.play(&[user("Hello."), answer()]).await;
     assert_clean(&runner);
     let (m0, _) = head_texts(runner.host());
     assert!(m0.contains("#1: Own project rule."), "{m0}");
     assert!(
-        m0.contains("#2 [Other Project]: Foreign shared constraint."),
+        m0.contains(
+            "<workspace-memory>\n<CONSTRAINTS>\n#2: Shared team constraint.\n</CONSTRAINTS>\n</workspace-memory>"
+        ),
         "{m0}"
     );
-    assert!(!m0.contains("Foreign private naming"), "{m0}");
-    assert!(!m0.contains("Workspace placement"), "{m0}");
+    assert!(!m0.contains("Another project's own rule."), "{m0}");
+    assert!(!m0.contains("Other team constraint."), "{m0}");
 
-    db.execute_batch("UPDATE memories SET content='Foreign revised constraint.' WHERE id=2;")
-        .unwrap();
-    insert_memory(&dir, 5, "Foreign new constraint.");
-    db.execute_batch("UPDATE memories SET owner_id='pj-other',category='swe:constraints',origin_category='CONSTRAINTS',shareable=1 WHERE id=5;").unwrap();
+    // The project moves to another workspace while the head runs; the
+    // runner's next Setup comes after a restart.
+    result["workspace_id"] = json!("other-team");
+    *client.entorhinal.lock().unwrap() = Some(result);
+    runner.provider().restart();
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
     steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let (later_m0, m1) = head_texts(runner.host());
-    assert_eq!(later_m0, m0);
-    assert!(m1.contains("<updated id=\"2\" category=\"CONSTRAINTS\" project=\"Other Project\">Foreign revised constraint.</updated>"), "{m1}");
-    assert!(m1.contains("<added id=\"5\" category=\"CONSTRAINTS\" project=\"Other Project\">Foreign new constraint.</added>"), "{m1}");
-
-    // A worker has no history head, so the shared result is not suppressed as visible.
-    let mut worker_config = config("worker", Kind::OpenAi, free());
-    worker_config.session = SessionRef::new("mock-runner", "mock", "workspace-worker");
-    worker_config.project = Some(project);
-    let mut worker = start_full(worker_config, Settings::default(), Some(dir.clone())).await;
-    let search = |query: &str| {
-        Step::Model(Turn {
-            tools: vec![ToolCall::ok(
-                "ctx_search",
-                json!({"query":query,"sources":["memory"]}),
-                "",
-            )],
-            output_tokens: 5,
-            ..Turn::default()
-        })
-    };
-    worker
-        .play(&[
-            user("Find the rules."),
-            search("revised constraint"),
-            search("#2"),
-            search("private naming"),
-            search("placement searchable"),
-            answer(),
-        ])
-        .await;
-    assert_clean(&worker);
-    let outputs = tool_outputs(worker.host(), "ctx_search");
-    assert_eq!(outputs.len(), 4, "{outputs:?}");
-    for output in &outputs[..2] {
-        assert!(
-            output.contains("id=2 category=CONSTRAINTS source=Other Project match=fts"),
-            "{output}"
-        );
-        assert!(output.contains("Foreign revised constraint."), "{output}");
-    }
-    assert!(outputs[2].starts_with("No results found"), "{}", outputs[2]);
-    // A workspace-level memory reaches no project reader, head or search,
-    // until the head renders workspace memories as their own level.
-    assert!(outputs[3].starts_with("No results found"), "{}", outputs[3]);
+    assert_eq!(later_m0, m0, "a workspace move forces no fold");
+    assert!(m1.contains("<removed id=\"2\" level=\"workspace\"/>"), "{m1}");
+    assert!(
+        m1.contains(
+            "<added id=\"4\" level=\"workspace\" category=\"CONSTRAINTS\">Other team constraint.</added>"
+        ),
+        "{m1}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

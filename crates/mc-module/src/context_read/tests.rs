@@ -159,7 +159,7 @@ fn context_read_front_and_projectless_sessions_receive_no_memories() {
 }
 
 #[test]
-fn context_read_memories_reuse_head_selection_and_priority_with_workspace_labels() {
+fn context_read_memories_reuse_head_selection_including_the_sessions_workspace() {
     let fixture = Fixture::new();
     let mut p = params();
     p["budget_tokens"] = json!(100);
@@ -172,8 +172,9 @@ fn context_read_memories_reuse_head_selection_and_priority_with_workspace_labels
             .collect::<Vec<_>>(),
         [3, 2]
     );
-    assert_eq!(items[0]["project"], "Beta");
-    assert!(items[1].get("project").is_none());
+    // No item names a project: a workspace memory holds for every project
+    // in the workspace.
+    assert!(items.iter().all(|item| item.get("project").is_none()));
     assert_eq!(items[0]["text"], "Lin maintains the reader");
     assert_eq!(items[1]["category"], "PROJECT_RULES");
     assert_eq!(
@@ -186,7 +187,6 @@ fn context_read_memories_reuse_head_selection_and_priority_with_workspace_labels
         .reader
         .snapshot("opencode", "plugin", Some("bias"))
         .unwrap();
-    let workspace = snapshot.workspace.as_ref().unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -196,7 +196,6 @@ fn context_read_memories_reuse_head_selection_and_priority_with_workspace_labels
         summaries: &[],
         docs: "",
         rows: &snapshot.memories,
-        workspace: Some(workspace),
         classes: &crate::head_memories::classes_for(None),
         now_ms: now,
         gone: &[],

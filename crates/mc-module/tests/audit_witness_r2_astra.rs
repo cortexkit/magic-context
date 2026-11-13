@@ -237,7 +237,6 @@ fn inputs(memories: &[mc_module::head_memories::Row]) -> head::Inputs<'_> {
         summaries: &[],
         docs: "",
         rows: memories,
-        workspace: None,
         classes: &NO_CLASSES,
         now_ms: 0,
         gone: &[],

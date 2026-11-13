@@ -675,8 +675,7 @@ fn build_project(db: &ContextDb, owner: &str, context: &Context) -> Result<Proje
         };
         // The head's own builder prices and ranks the candidates, so what the
         // simulation reports is what a fold would choose.
-        let candidates =
-            head_memories::candidates(&candidate_rows, Some(&workspace), &context.classes, counter);
+        let candidates = head_memories::candidates(&candidate_rows, &context.classes, counter);
         for candidate in candidates {
             let row = candidate_rows
                 .iter()
@@ -1726,12 +1725,8 @@ fn the_shipped_parameters_are_the_selection_the_heads_fold_shows() {
 
     // The head itself, folded from the same store.
     let db = ContextDb::open(&store).expect("open the store");
-    let (workspace, rows) = db
-        .with_connection(|conn| {
-            let workspace = Workspace::resolve(conn, "pj-big")?;
-            let rows = head_memories::read_rows(conn, Some("pj-big"), None, now)?;
-            Ok::<_, rusqlite::Error>((workspace, rows))
-        })
+    let rows = db
+        .with_connection(|conn| head_memories::read_rows(conn, Some("pj-big"), None, now))
         .expect("read the head's memories");
     let classes = head_memories::decay_classes(&prompt_profile(None).expect("the bundled profile"));
     let baseline = head::fold(
@@ -1740,7 +1735,6 @@ fn the_shipped_parameters_are_the_selection_the_heads_fold_shows() {
             summaries: &[],
             docs: "",
             rows: &rows,
-            workspace: Some(&workspace),
             classes: &classes,
             now_ms: now,
             gone: &[],
