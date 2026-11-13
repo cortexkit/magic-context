@@ -53,15 +53,8 @@ impl SummaryPrompts {
                 profile.name
             ));
         }
-        // A child profile replaces its parent's calibration through
-        // `overrides`.
-        let calibration = [
-            &profile.body["overrides"]["calibration"],
-            &profile.body["calibration"],
-        ]
-        .into_iter()
-        .find(|calibration| calibration["file"].is_string());
-        let (seeds, seeds_per_call) = match calibration {
+        let calibration = &profile.body["calibration"];
+        let (seeds, seeds_per_call) = match calibration["file"].is_string().then_some(calibration) {
             Some(calibration) => {
                 let file = profile
                     .member(calibration, "file")

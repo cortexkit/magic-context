@@ -351,6 +351,15 @@ fn stamp(body: &mut Value, name: &str) {
             }
         }
     }
+    // A calibration corpus is a member of the package that names it, whether
+    // it declares one or replaces its parent's through `overrides`.
+    for pointer in ["/calibration", "/overrides/calibration"] {
+        if let Some(calibration) = body.pointer_mut(pointer) {
+            if calibration["file"].is_string() {
+                calibration["_from"] = name.into();
+            }
+        }
+    }
 }
 
 fn namespaces(pkg: &Package, parent: Option<&Value>) -> Result<()> {

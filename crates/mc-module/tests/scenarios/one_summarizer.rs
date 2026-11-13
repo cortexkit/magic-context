@@ -69,7 +69,10 @@ async fn a_project_less_session_summarizes_on_the_two_turn_prompt_and_sends_no_t
         );
         assert_eq!(
             run.settings.system,
-            mc_module::summary::two_pass::turn_one::SYSTEM
+            mc_module::summary::prompts::SummaryPrompts::for_context(None)
+                .unwrap()
+                .system
+                .as_str()
         );
     }
     assert!(
@@ -147,7 +150,10 @@ async fn an_invalid_first_turn_moves_to_the_next_model_on_the_two_turn_prompt() 
         );
         assert_eq!(
             run.settings.system,
-            mc_module::summary::two_pass::turn_one::SYSTEM
+            mc_module::summary::prompts::SummaryPrompts::for_context(None)
+                .unwrap()
+                .system
+                .as_str()
         );
     }
     assert_summaries_shown(runner.host());

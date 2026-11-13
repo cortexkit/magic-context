@@ -166,7 +166,7 @@ pub struct CompartmentPromptInputs<'a> {
 /// The plugin's calibration corpus, which the TypeScript golden cases use.
 #[cfg(test)]
 pub fn reference_seeds() -> &'static [ReferenceSeed] {
-    static SEEDS: OnceLock<Vec<ReferenceSeed>> = OnceLock::new();
+    static SEEDS: std::sync::OnceLock<Vec<ReferenceSeed>> = std::sync::OnceLock::new();
     SEEDS
         .get_or_init(|| {
             serde_json::from_str(include_str!("../../testdata/reference-seeds.json"))
