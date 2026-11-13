@@ -14,7 +14,10 @@
 //! The budget is filled in three passes, each taking rows in rank order and
 //! skipping a row that doesn't fit while later, smaller rows still may:
 //! 1. a protected slice for safety-critical rules, so they fall out only
-//!    when they alone exceed it;
+//!    when they alone exceed it. The slice never takes the room the user
+//!    profile (the global level) needs for its minimum: when critical rules
+//!    alone would fill the budget, the profile still gets its share and the
+//!    extra rules go to the mural;
 //! 2. a minimum share for each visible level, so a busy level can't crowd out
 //!    the others; inside the workspace share, each member project gets an
 //!    equal part, so one busy sibling can't crowd out the rest;
@@ -23,6 +26,11 @@
 //!
 //! A pass counts only the rows it adds itself against its slice: a critical
 //! rule shown in the first pass doesn't use up its level's minimum.
+//!
+//! User-profile lines that have no importance score yet (the dreamer scores
+//! them later) all rank the same; among them the oldest goes first, as the
+//! profile showed them before levels existed. The oldest is the lowest id:
+//! the store moved the profile's lines in the order they were learned.
 //!
 //! Rows the session may not see (another profile's private categories,
 //! another agent's memories) are removed by the caller before this runs.
@@ -128,22 +136,40 @@ pub fn select(candidates: &[Candidate], budget: &Budget, now_ms: i64) -> Selecti
         .collect();
     order.sort_by(|(left, left_rank), (right, right_rank)| {
         let first = |c: &Candidate| c.permanent || c.policy;
+        // Unscored profile lines tie-break among themselves by age, so they
+        // form their own group after other rows of the same rank; mixing
+        // the two tie-breaks in one comparison would not be a total order.
+        let unscored_profile = |c: &Candidate| c.level == Level::Global && c.importance.is_none();
         first(right)
             .cmp(&first(left))
             .then_with(|| right_rank.total_cmp(left_rank))
-            .then_with(|| right.last_met_ms.cmp(&left.last_met_ms))
+            .then_with(|| unscored_profile(left).cmp(&unscored_profile(right)))
+            .then_with(|| {
+                if unscored_profile(left) {
+                    left.id.cmp(&right.id)
+                } else {
+                    right.last_met_ms.cmp(&left.last_met_ms)
+                }
+            })
             .then_with(|| left.id.cmp(&right.id))
     });
     let order: Vec<&Candidate> = order.into_iter().map(|(candidate, _)| candidate).collect();
 
     let mut fill = Fill::new(budget.total_tokens);
-    // 1. Critical rules first, inside their own slice.
+    // 1. Critical rules first, inside their own slice, minus what the user
+    // profile needs for its minimum.
     let protected: Vec<&Candidate> = order
         .iter()
         .copied()
         .filter(|c| c.safety_critical)
         .collect();
-    fill.take(&protected, budget.protected_tokens);
+    let profile_reserve = profile_need(&order, budget);
+    fill.take(
+        &protected,
+        budget
+            .protected_tokens
+            .min(budget.total_tokens.saturating_sub(profile_reserve)),
+    );
     // 2. Each level's minimum. Inside the workspace share, member projects
     // get equal parts, and a part a project doesn't use is left to the pool.
     for (level, minimum) in &budget.level_minimum_tokens {
@@ -178,6 +204,36 @@ pub fn select(candidates: &[Candidate], budget: &Budget, now_ms: i64) -> Selecti
     // 3. The free pool, across every level.
     fill.take(&order, u64::MAX);
     fill.selection(&order)
+}
+
+/// The room the user profile needs for its minimum: the global minimum, or
+/// less when all of the profile's visible lines cost less, so a short
+/// profile holds back no more room from critical rules than it can use.
+fn profile_need(order: &[&Candidate], budget: &Budget) -> u64 {
+    let minimum = budget
+        .level_minimum_tokens
+        .get(&Level::Global)
+        .copied()
+        .unwrap_or(0);
+    let mut need = 0u64;
+    let mut categories = HashSet::new();
+    for (index, row) in order
+        .iter()
+        .filter(|c| c.level == Level::Global)
+        .enumerate()
+    {
+        if index == 0 {
+            need += row.block_tokens;
+        }
+        if categories.insert(row.category.as_str()) {
+            need += row.category_tokens;
+        }
+        need += row.line_tokens;
+        if need >= minimum {
+            return minimum;
+        }
+    }
+    need
 }
 
 /// Rows not hidden by time, resolution or an override.

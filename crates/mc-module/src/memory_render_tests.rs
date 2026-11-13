@@ -170,3 +170,60 @@ fn a_row_that_does_not_fit_is_skipped_and_category_tags_are_paid_once() {
     assert_eq!(selection.ids, [2, 3]);
     assert_eq!(selection.tokens, 28);
 }
+
+#[test]
+fn critical_rules_never_take_the_user_profile_s_minimum() {
+    let critical = |id| {
+        let mut row = row(id, 90);
+        row.safety_critical = true;
+        row
+    };
+    let profile = |id| {
+        let mut row = row(id, 30);
+        row.level = Level::Global;
+        row
+    };
+    let rows = [
+        critical(1),
+        critical(2),
+        critical(3),
+        profile(10),
+        profile(11),
+    ];
+    let mut budget = budget(30);
+    budget.protected_tokens = 30;
+    budget.level_minimum_tokens = BTreeMap::from([(Level::Global, 20)]);
+    // Critical rules alone would fill all 30; the profile keeps its 20 and the
+    // other two rules go to the mural.
+    assert_eq!(select(&rows, &budget, NOW).ids, [1, 10, 11]);
+    // A profile of one line holds back only its 10, so two rules fit.
+    assert_eq!(select(&rows[..4], &budget, NOW).ids, [1, 2, 10]);
+    // With no profile at all, nothing is held back.
+    assert_eq!(select(&rows[..3], &budget, NOW).ids, [1, 2, 3]);
+}
+
+#[test]
+fn unscored_profile_lines_show_oldest_first() {
+    let profile = |id, met_days_ago| {
+        let mut row = row(id, 0);
+        row.level = Level::Global;
+        row.importance = None;
+        row.last_met_ms = Some(NOW - met_days_ago * DAY);
+        row
+    };
+    // Line 3 was met most recently, but lines 1 and 2 were learned first.
+    let rows = [profile(3, 0), profile(2, 5), profile(1, 9)];
+    assert_eq!(select(&rows, &budget(20), NOW).ids, [1, 2]);
+    // Unscored project memories still go most recently met first.
+    let mut project = rows.clone();
+    for row in &mut project {
+        row.level = Level::Project;
+    }
+    assert_eq!(select(&project, &budget(20), NOW).ids, [3, 2]);
+    // Mixed with a project memory of the same rank met in between, the
+    // profile lines stay a group in age order, and the order is total.
+    let mut between = row(4, 50);
+    between.last_met_ms = Some(NOW - 7 * DAY);
+    let mixed = [profile(3, 0), between, profile(2, 5), profile(1, 9)];
+    assert_eq!(select(&mixed, &budget(40), NOW).ids, [4, 1, 2, 3]);
+}
