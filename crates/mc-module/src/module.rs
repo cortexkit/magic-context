@@ -966,6 +966,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
+                if publish_app && session.is_none() {
+                    // Hydrate before this worker can save a newer checkpoint;
+                    // queued reads and deltas then share the same hydrated state.
+                    inner.app_read.activate(&held_key).await;
+                }
                 match job {
                     Job::Resume => continue,
                     Job::Command { request, reply } => {

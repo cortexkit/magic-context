@@ -1,7 +1,7 @@
 //! Row-oriented checkpoints. Encode outside the transaction so unchanged rows
 //! neither need cloning nor extend the store's write lock.
 use super::{Header, Message, SessionRef, Snapshot};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -151,87 +151,115 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+pub(crate) fn load_session(
+    conn: &Connection,
+    key: &SessionRef,
+) -> rusqlite::Result<Option<Snapshot>> {
+    let tx = conn.unchecked_transaction()?;
+    let snapshot = load_rows(&tx, key)?;
+    tx.commit()?;
+    Ok(snapshot)
+}
+
+#[cfg(test)]
 pub(crate) fn load(conn: &Connection) -> rusqlite::Result<Vec<Snapshot>> {
     let tx = conn.unchecked_transaction()?;
-    let snapshots = load_rows(&tx)?;
+    let mut stmt = tx.prepare("SELECT runner,harness,session FROM app_read_headers")?;
+    let keys = stmt.query_map([], |row| {
+        Ok(SessionRef::new(
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut snapshots = Vec::new();
+    for key in keys {
+        if let Some(snapshot) = load_rows(&tx, &key?)? {
+            snapshots.push(snapshot);
+        }
+    }
+    drop(stmt);
     tx.commit()?;
     Ok(snapshots)
 }
 
-fn load_rows(conn: &Connection) -> rusqlite::Result<Vec<Snapshot>> {
-    let mut headers = conn.prepare("SELECT runner,harness,session,header FROM app_read_headers")?;
-    let rows = headers.query_map([], |row| {
-        Ok((
-            SessionRef::new(
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ),
-            row.get::<_, String>(3)?,
-        ))
-    })?;
+fn load_rows(conn: &Connection, key: &SessionRef) -> rusqlite::Result<Option<Snapshot>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT header FROM app_read_headers WHERE runner=?1 AND harness=?2 AND session=?3",
+            params![key.runner, key.harness, key.session],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(text) = text else { return Ok(None) };
     let mut messages = conn.prepare("SELECT message_id,ordinal,at_ms,row FROM app_read_messages WHERE runner=?1 AND harness=?2 AND session=?3")?;
     let mut summaries = conn.prepare("SELECT row FROM app_read_summaries WHERE runner=?1 AND harness=?2 AND session=?3 ORDER BY position")?;
-    let mut snapshots = Vec::new();
-    for row in rows {
-        let (key, text) = row?;
-        let result = (|| -> Result<Snapshot, String> {
-            let h: Header = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            let mut loaded = BTreeMap::new();
-            for row in messages
-                .query_map(params![key.runner, key.harness, key.session], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, u64>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?
-            {
-                let (mid, ordinal, at_ms, text) = row.map_err(|e| e.to_string())?;
-                loaded.insert(
-                    mid,
-                    Message {
-                        ordinal,
-                        at_ms,
-                        row: serde_json::from_str(&text).map_err(|e| e.to_string())?,
-                    },
-                );
-            }
-            let mut compartments = Vec::new();
-            for row in summaries
-                .query_map(params![key.runner, key.harness, key.session], |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(|e| e.to_string())?
-            {
-                compartments.push(
-                    serde_json::from_str(&row.map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?,
-                );
-            }
-            Ok(Snapshot {
-                key: key.clone(),
-                base: h.base,
-                newest: h.newest,
-                ready: h.ready,
-                meta: h.meta,
-                breakdown: h.breakdown,
-                messages: loaded,
-                compartments,
-                decisions: Vec::new(),
+    let result = (|| -> Result<Snapshot, String> {
+        let h: Header = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let mut loaded = BTreeMap::new();
+        for row in messages
+            .query_map(params![key.runner, key.harness, key.session], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
             })
-        })();
-        match result {
-            Ok(snapshot) => snapshots.push(snapshot),
-            Err(error) => tracing::warn!(
+            .map_err(|e| e.to_string())?
+        {
+            let (mid, ordinal, at_ms, text) = row.map_err(|e| e.to_string())?;
+            loaded.insert(
+                mid,
+                Message {
+                    ordinal,
+                    at_ms,
+                    row: serde_json::from_str(&text).map_err(|e| e.to_string())?,
+                },
+            );
+        }
+        let mut compartments = Vec::new();
+        for row in summaries
+            .query_map(params![key.runner, key.harness, key.session], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())?
+        {
+            compartments.push(
+                serde_json::from_str(&row.map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        let decisions = conn.query_row(
+                "SELECT decisions FROM app_read_decisions WHERE runner=?1 AND harness=?2 AND session=?3",
+                params![key.runner, key.harness, key.session], |row| row.get::<_, String>(0)
+            ).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        Ok(Snapshot {
+            key: key.clone(),
+            base: h.base,
+            newest: h.newest,
+            ready: h.ready,
+            meta: h.meta,
+            breakdown: h.breakdown,
+            messages: loaded,
+            compartments,
+            decisions,
+        })
+    })();
+    match result {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error) => {
+            tracing::warn!(
                 "ck-mc: loading app checkpoint {}/{}/{}: {error}",
                 key.runner,
                 key.harness,
                 key.session
-            ),
+            );
+            Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(error)),
+            ))
         }
     }
-    Ok(snapshots)
 }

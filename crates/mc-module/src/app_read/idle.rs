@@ -94,13 +94,15 @@ impl Replica {
     }
 
     pub(super) fn runner_head(
-        &self,
+        &mut self,
         method: &str,
         params: &Value,
         answer: AppliedViewAnswer,
     ) -> Result<Value, Refusal> {
         let fields = params.as_object().ok_or_else(|| invalid("params"))?;
         let key = session(fields.get("session").unwrap_or(&Value::Null))?;
+        self.identity(&key)?;
+        self.ensure_loaded(&key)?;
         let snapshot = match self.locate(&key) {
             Ok(snapshot) => Some(snapshot),
             Err(refusal) if refusal.code == "store_unavailable" && self.known.contains(&key) => {

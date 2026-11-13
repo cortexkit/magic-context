@@ -111,7 +111,7 @@ fn cold_replica(fixture: &Fixture) -> Replica {
 #[tokio::test]
 async fn idle_keep_expires_refetches_and_changed_runner_version_restarts_the_window() {
     let fixture = Fixture::new(true, false, true, "head").await;
-    let replica = cold_replica(&fixture);
+    let mut replica = cold_replica(&fixture);
     let params = json!({"session":fixture.key,"view":7,"slot":"baseline","section":0});
     let answer = fixture.client.applied_view(&fixture.key).await.unwrap();
     replica

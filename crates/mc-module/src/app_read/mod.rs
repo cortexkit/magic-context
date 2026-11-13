@@ -15,6 +15,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
+mod cache;
 pub(crate) mod head;
 pub(crate) mod idle;
 pub(crate) mod persistence;
@@ -327,6 +328,11 @@ pub struct AppRead {
 
 enum Command {
     #[cfg(test)]
+    CacheStats(oneshot::Sender<(usize, usize)>),
+    #[cfg(test)]
+    LoadGate(mpsc::Sender<()>, mpsc::Receiver<()>),
+    Activate(SessionRef, oneshot::Sender<()>),
+    #[cfg(test)]
     Publish(Box<Snapshot>),
     Update(Update),
     ForgetSession(SessionRef, bool),
@@ -347,6 +353,7 @@ enum Command {
 type BoundaryIndex = HashMap<String, Vec<(usize, &'static str)>>;
 
 struct Replica {
+    cache: cache::Cache,
     snapshots: HashMap<SessionRef, Snapshot>,
     boundaries: HashMap<SessionRef, BoundaryIndex>,
     known: HashSet<SessionRef>,
@@ -379,6 +386,7 @@ impl AppRead {
                     let _ = conn.busy_timeout(std::time::Duration::ZERO);
                 }
                 let mut replica = Replica {
+                    cache: Default::default(),
                     snapshots: HashMap::new(),
                     boundaries: HashMap::new(),
                     known: HashSet::new(),
@@ -391,8 +399,26 @@ impl AppRead {
                     head_warnings: Default::default(),
                 };
                 replica.load();
-                while let Ok(command) = rx.recv() {
+                loop {
+                    replica.evict_idle(std::time::Instant::now());
+                    let command = match rx.recv_timeout(cache::SWEEP_EVERY) {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
                     match command {
+                        #[cfg(test)]
+                        Command::CacheStats(reply) => {
+                            let _ = reply.send((replica.cache.loads, replica.snapshots.len()));
+                        }
+                        #[cfg(test)]
+                        Command::LoadGate(started, resume) => {
+                            replica.cache.load_gate = Some((started, resume));
+                        }
+                        Command::Activate(key, reply) => {
+                            replica.activate(&key);
+                            let _ = reply.send(());
+                        }
                         #[cfg(test)]
                         Command::Publish(snapshot) => replica.publish(*snapshot),
                         Command::Update(update) => replica.update(update),
@@ -423,6 +449,13 @@ impl AppRead {
 
     pub(crate) fn update(&self, update: Update) {
         let _ = self.tx.send(Command::Update(update));
+    }
+
+    pub(crate) async fn activate(&self, key: &SessionRef) {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(Command::Activate(key.clone(), tx)).is_ok() {
+            let _ = rx.await;
+        }
     }
 
     /// Drop everything this projection holds for a session a move took
@@ -492,6 +525,8 @@ impl Replica {
             .known
             .iter()
             .chain(self.snapshots.keys())
+            .chain(self.cache.checkpoints.iter())
+            .chain(self.cache.active.iter())
             .chain(self.boundaries.keys())
             .chain(self.heads.keys())
             .filter(|other| matches(other))
@@ -516,7 +551,11 @@ impl Replica {
             self.forget_head(&session);
             self.boundaries.remove(&session);
             self.known.remove(&session);
-            if self.snapshots.remove(&session).is_some() {
+            let checkpoint = self.cache.checkpoints.remove(&session);
+            self.cache.active.remove(&session);
+            self.cache.used.remove(&session);
+            self.cache.pending.remove(&session);
+            if self.snapshots.remove(&session).is_some() || checkpoint {
                 self.watches.changed(session);
             }
         }
@@ -541,69 +580,7 @@ impl Replica {
             }
         }
     }
-    fn load(&mut self) {
-        let Some(conn) = &self.store else {
-            return;
-        };
-        let keys = (|| -> rusqlite::Result<Vec<SessionRef>> {
-            conn.prepare("SELECT runner,harness,session FROM sessions")?
-                .query_map([], |row| {
-                    Ok(SessionRef::new(
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect()
-        })();
-        match keys {
-            Ok(keys) => self.known.extend(keys),
-            Err(error) => {
-                self.load_failed = true;
-                tracing::warn!("ck-mc: app session lookup: {error}");
-            }
-        }
-        let rows = persistence::load(conn);
-        match rows {
-            Ok(rows) => {
-                for snapshot in rows {
-                    self.publish(snapshot);
-                }
-            }
-            Err(error) => {
-                self.load_failed = true;
-                tracing::warn!("ck-mc: app replica load: {error}");
-            }
-        }
-        let decisions = (|| -> rusqlite::Result<Vec<(SessionRef, String)>> {
-            let Some(conn) = &self.store else {
-                return Ok(Vec::new());
-            };
-            conn.prepare("SELECT runner,harness,session,decisions FROM app_read_decisions")?
-                .query_map([], |row| {
-                    Ok((
-                        SessionRef::new(
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ),
-                        row.get(3)?,
-                    ))
-                })?
-                .collect()
-        })();
-        if let Ok(decisions) = decisions {
-            for (key, text) in decisions {
-                if let Some(snapshot) = self.snapshots.get_mut(&key) {
-                    if let Ok(rows) = serde_json::from_str(&text) {
-                        snapshot.decisions = rows;
-                    }
-                }
-            }
-        }
-    }
-
-    fn publish(&mut self, mut snapshot: Snapshot) {
+    fn upgrade_breakdown(&self, snapshot: &mut Snapshot) {
         if snapshot
             .breakdown
             .without_summaries()
@@ -624,6 +601,11 @@ impl Replica {
             }).collect::<Vec<_>>());
             snapshot.breakdown = Breakdown::from_value(breakdown);
         }
+    }
+
+    #[cfg(test)]
+    fn publish(&mut self, mut snapshot: Snapshot) {
+        self.upgrade_breakdown(&mut snapshot);
         if let Some(previous) = self
             .snapshots
             .get(&snapshot.key)
@@ -670,8 +652,22 @@ impl Replica {
     }
 
     fn update(&mut self, update: Update) {
+        self.activate(&update.key);
+        if self.ensure_loaded(&update.key).is_err() {
+            self.cache
+                .pending
+                .entry(update.key.clone())
+                .or_default()
+                .push(update);
+            return;
+        }
+        self.apply_update(update);
+    }
+
+    fn apply_update(&mut self, update: Update) {
         let _timing = crate::notice_cost_timing::span("app.replica");
         let key = update.key;
+        self.cache.checkpoints.insert(key.clone());
         self.idle_heads.borrow_mut().remove(&key);
         self.heads.insert(key.clone(), update.head);
         let h = update.header;
@@ -742,11 +738,12 @@ impl Replica {
         }
     }
 
-    fn locate(&self, key: &SessionRef) -> Result<&Snapshot, Refusal> {
+    fn identity(&self, key: &SessionRef) -> Result<(), Refusal> {
         let mut candidates = self
             .known
             .iter()
             .chain(self.snapshots.keys())
+            .chain(self.cache.checkpoints.iter())
             .filter(|s| s.harness == key.harness && s.session == key.session)
             .collect::<HashSet<_>>()
             .into_iter();
@@ -775,10 +772,15 @@ impl Replica {
                 Some(json!({"runner": actual.runner})),
             ));
         }
+        Ok(())
+    }
+
+    fn locate(&self, key: &SessionRef) -> Result<&Snapshot, Refusal> {
+        self.identity(key)?;
         // A crash may leave the write-ahead session record before its first
         // projection. The runner identity is still known; missing read state
         // is temporary, not a lasting session_not_found refusal.
-        self.snapshots.get(actual).ok_or_else(|| {
+        self.snapshots.get(key).ok_or_else(|| {
             error(
                 "store_unavailable",
                 "The session read projection is not ready.",
@@ -786,7 +788,7 @@ impl Replica {
         })
     }
 
-    fn read(&self, method: &str, params: &Value) -> Result<Value, Refusal> {
+    fn read(&mut self, method: &str, params: &Value) -> Result<Value, Refusal> {
         let allowed: &[&str] = match method {
             "session_data.read" => &["session", "section", "if_version"],
             "context.states" => &["session", "message_ids", "if_version"],
@@ -813,7 +815,9 @@ impl Replica {
         if method == "context.head_section" {
             head::SectionRequest::parse(params)?;
         }
-        let snapshot = match self.locate(&key) {
+        self.identity(&key)?;
+        let loaded = self.ensure_loaded(&key);
+        let snapshot = match loaded.and_then(|()| self.locate(&key)) {
             Err(refusal)
                 if matches!(method, "context.head" | "context.head_section")
                     && refusal.code == "store_unavailable"
@@ -1052,3 +1056,6 @@ pub(crate) fn strings(value: Option<&Value>, limit: usize) -> Result<Vec<String>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lazy_tests;

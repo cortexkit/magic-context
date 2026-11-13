@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 fn key() -> SessionRef {
     SessionRef::new("thalamus-harness", "opencode2", "s")
 }
-fn fixture() -> Snapshot {
+pub(super) fn fixture() -> Snapshot {
     let mut messages = BTreeMap::new();
     for (i, state) in [(1, "raw"), (2, "raw"), (3, "dropped")] {
         let mid = format!("m{i}");
@@ -33,6 +33,7 @@ fn fixture() -> Snapshot {
 pub(super) fn replica(context: Option<Connection>) -> Replica {
     let s = fixture();
     Replica {
+        cache: Default::default(),
         boundaries: HashMap::new(),
         known: HashSet::new(),
         load_failed: false,
@@ -51,7 +52,11 @@ pub(super) fn request(extra: Value) -> Value {
     p
 }
 
-fn save_fixture(store: &crate::store::Store, snapshot: &Snapshot, reverted: Option<u64>) {
+pub(super) fn save_fixture(
+    store: &crate::store::Store,
+    snapshot: &Snapshot,
+    reverted: Option<u64>,
+) {
     let rows: Vec<_> = snapshot
         .messages
         .iter()
@@ -69,7 +74,7 @@ fn save_fixture(store: &crate::store::Store, snapshot: &Snapshot, reverted: Opti
 
 #[test]
 fn session_data_versions_both_sections_and_preserves_required_fields() {
-    let replica = replica(None);
+    let mut replica = replica(None);
     for section in ["meta", "token_breakdown"] {
         let mut p = request(json!({"section":section}));
         let first = replica.read("session_data.read", &p).unwrap();
@@ -104,7 +109,7 @@ fn session_data_versions_both_sections_and_preserves_required_fields() {
 
 #[test]
 fn states_distinguishes_raw_dropped_summarized_and_outside_and_is_conditional() {
-    let replica = replica(None);
+    let mut replica = replica(None);
     let mut p = request(json!({"message_ids":["m1","m2","m3","absent"]}));
     let value = replica.read("context.states", &p).unwrap();
     assert_eq!(value["state"], "ready");
@@ -143,7 +148,7 @@ fn states_distinguishes_raw_dropped_summarized_and_outside_and_is_conditional() 
 
 #[test]
 fn compartment_returns_stored_tiers_and_boundaries() {
-    let replica = replica(None);
+    let mut replica = replica(None);
     let value = replica
         .read(
             "context.compartment",
@@ -167,7 +172,7 @@ fn compartment_returns_stored_tiers_and_boundaries() {
 
 #[test]
 fn cache_why_refuses_to_invent_a_producer_join_and_bounds_producers() {
-    let replica = replica(None);
+    let mut replica = replica(None);
     let value = replica
         .read(
             "context.cache_why",
@@ -259,7 +264,7 @@ fn search_db() -> (tempfile::TempDir, Connection) {
 #[test]
 fn search_reuses_message_index_paginates_and_returns_utf8_byte_ranges() {
     let (_dir, conn) = search_db();
-    let replica = replica(Some(conn));
+    let mut replica = replica(Some(conn));
     let mut p = json!({"query":"needle","scope":{"session":key()},"sources":["message"]});
     let first = replica.read("context.search", &p).unwrap();
     assert_eq!(first["hits"].as_array().unwrap().len(), 50);

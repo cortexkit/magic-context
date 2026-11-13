@@ -2,10 +2,12 @@ use super::*;
 use crate::search::messages;
 
 impl Replica {
-    pub(super) fn search(&self, p: &Map<String, Value>) -> Result<Value, Refusal> {
+    pub(super) fn search(&mut self, p: &Map<String, Value>) -> Result<Value, Refusal> {
         let query = string(p, "query")?;
         let scope = object(p.get("scope").unwrap_or(&Value::Null), &["session"])?;
         let key = session(scope.get("session").unwrap_or(&Value::Null))?;
+        self.identity(&key)?;
+        self.ensure_loaded(&key)?;
         let snapshot = self.locate(&key)?;
         if let Some(sources) = p.get("sources") {
             if sources != &json!(["message"]) {
@@ -17,6 +19,7 @@ impl Replica {
         if self
             .snapshots
             .keys()
+            .chain(self.cache.checkpoints.iter())
             .any(|other| other.session == key.session && other != &key)
         {
             return Err(error(
