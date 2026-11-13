@@ -4484,10 +4484,10 @@ impl Session {
         self.next_notice_reclaim_bookmark = self
             .notice_keep
             .then_some(self.notice_reclaim_bookmark.max(notice_bookmark));
-        // A pass whose lanes have no new edit publishes nothing (PD12). A
-        // memory another writer saved changes only `m[1]`: it waits for a
-        // pass that rewrites anyway, as the plugin's history refresh rides a
-        // rewrite and never starts one.
+        // A pass whose lanes have no new edit publishes nothing. A memory
+        // another writer saved changes only the history head's second
+        // message: it waits for a pass that rewrites anyway, as the plugin's
+        // history refresh rides a rewrite and never starts one.
         let history = if !flush
             && ops.is_empty()
             && !prefix_changes

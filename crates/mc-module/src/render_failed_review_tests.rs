@@ -10,8 +10,8 @@ use super::*;
 use crate::test_log::capture;
 use serde_json::json;
 
-/// A session holding view 1: one output replace of `old`/`p`, under a low
-/// reading.
+/// A session holding view 1: one output replace of `old`/`p`, with a last
+/// prompt reading (`last_prompt_tokens`) of 20,000, well below any threshold.
 fn fixture_with_view() -> (Session, Client, Settings, View) {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![
