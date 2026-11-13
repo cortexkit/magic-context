@@ -43,7 +43,7 @@ fn vendored_bytes_match_every_checksum() {
             }
         }
     }
-    for dir in ["profiles", "testdata/memory_profile"] {
+    for dir in ["profiles", "frames", "testdata/memory_profile"] {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
         let mut covered = BTreeSet::new();
         for line in std::fs::read_to_string(root.join("SHA256SUMS"))
@@ -75,7 +75,7 @@ fn bundled_packages_load_and_base_cannot_be_an_agent() {
     let profile = load_chain(&packages).unwrap();
     assert_eq!(
         profile.digest,
-        "5750ce5af0712251e4bf8fe599ed3f9edeb6b8477bc49042b74170991cb6fe8d"
+        "8b18080739be5abc6fd858ef7df7924886cfb9a70c218d316f7a1666a3046d16"
     );
     assert_eq!(list(&profile.body, "categories").len(), 12);
     let mut facts: Vec<_> = list(&profile.body, "categories")
@@ -274,7 +274,7 @@ fn session(pins: Vec<Value>) -> ContextAnswer<SessionContext> {
 }
 
 fn swe_pin() -> Value {
-    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"44d954f1d325f7e250064c1d0b256333f392d1b0fc9c797e93c76310942d8a98","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
+    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"8781a08b153e57c5e2b01bab5db8f06886bf659c0c5ae4f3d11bf4d110e674ef","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
 }
 
 fn outcome(domain: Option<&str>, pins: Vec<Value>, installed: &[Profile]) -> MemoryContext {

@@ -2,6 +2,8 @@
 
 Project: ⟦projectIdentity⟧
 
-Read each memory's backing files to check its claims. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id.
+When available in this session, use aft_outline to outline the backing file and aft_zoom on the claimed symbol (or aft_search to locate it), instead of paging through whole files. Read a whole file only when the claim is about the file as a whole. Otherwise use the available read-only tools.
+
+Check each memory's claim against its backing files. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id.
 
 ⟦mc:verify.input⟧

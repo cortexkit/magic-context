@@ -211,10 +211,6 @@
     },
     "prompts": {
       "historian/system": {
-        "variants": [
-          "xml",
-          "combined"
-        ],
         "sections": [
           {
             "id": "persona",
@@ -325,6 +321,34 @@
           {
             "id": "output",
             "mc": "historian/output-contract"
+          }
+        ]
+      },
+      "historian/turn-one": {
+        "sections": [
+          {
+            "id": "fact-anchors",
+            "mc": "historian/turn-one.fact-anchors"
+          },
+          {
+            "id": "scope",
+            "file": "prompts/historian/turn-one/scope.md"
+          },
+          {
+            "id": "anchor-format",
+            "mc": "historian/turn-one.anchor-format"
+          }
+        ]
+      },
+      "historian/turn-two": {
+        "sections": [
+          {
+            "id": "task",
+            "file": "prompts/historian/turn-two/task.md"
+          },
+          {
+            "id": "decisions",
+            "mc": "historian/turn-two.decisions"
           }
         ]
       },

@@ -105,8 +105,8 @@
     },
     {
       "path": "prompts/dreamer/reflect-patterns/gate.user.md",
-      "sha256": "51c541ca5bd380060ed3c1623942d4525b912ccdaf832d1dd1fc372c88e7685f",
-      "bytes": 924
+      "sha256": "ab97b925d913ee365f303799f9842b609a0a7faf0e60cd7be72647ea6308a573",
+      "bytes": 838
     },
     {
       "path": "prompts/dreamer/reflect-patterns/system.md",
@@ -140,18 +140,18 @@
     },
     {
       "path": "prompts/dreamer/verify/system.md",
-      "sha256": "b441ac96030664d723b793f872726fa5d469bb48f8385ac251426008c3d600af",
-      "bytes": 2520
+      "sha256": "e1d1d75552e5febcf19edd8e4e47d570ed90a165737ab4641bb698fd70a4932e",
+      "bytes": 2850
     },
     {
       "path": "prompts/dreamer/verify/user.diff-evidence.md",
-      "sha256": "0c15705651201e0c67cac7d2667639b165f924836ea69e512ebf5fcb5ebc082d",
-      "bytes": 564
+      "sha256": "1e36ea382a89ad224e9afef3e529aacb14d66b960c020bb212a97bc6349910d3",
+      "bytes": 858
     },
     {
       "path": "prompts/dreamer/verify-broad/user.md",
-      "sha256": "4e8a4a810ef2ee4255c5b5745482ec6b28474de8ea83b971bc67b04158bd8766",
-      "bytes": 319
+      "sha256": "aba24a2c681890ee8db83bae022c0a75a41a54b1cee0e0942376694cb3696d87",
+      "bytes": 612
     },
     {
       "path": "prompts/events/causal_incident.historian.md",
@@ -175,8 +175,8 @@
     },
     {
       "path": "prompts/historian/system/boundary-other-rules.md",
-      "sha256": "efc78e06a96fd074af2d28f935f91cf9a04b188f26a90c693baa6760dbb6be68",
-      "bytes": 759
+      "sha256": "64b45a1b59278a2dc23706a1aa8ccfecb76eff56ec30af61a9cadf4f018d8e3a",
+      "bytes": 964
     },
     {
       "path": "prompts/historian/system/compartment-boundaries.md",
@@ -205,8 +205,8 @@
     },
     {
       "path": "prompts/historian/system/facts-general-rules.md",
-      "sha256": "50ece559a1ca778e42448d468e8751b0a6e052d3cf895836f6fec0d577b8c61f",
-      "bytes": 2205
+      "sha256": "d104e431e26a00f0d837eed24f64686fee8219dda59a0575c466a1c7a6750195",
+      "bytes": 3938
     },
     {
       "path": "prompts/historian/system/how-magic-context-works.md",
@@ -255,8 +255,8 @@
     },
     {
       "path": "prompts/historian/system/what-you-produce.md",
-      "sha256": "85fe8ddc03c10f3ec6452384a07e15ab1ed99a3d7e1052e86512bd01ce0d1039",
-      "bytes": 1422
+      "sha256": "d2c5e2bd0ca533f012a1abe735ee99c0ca11e12305298f05c5681c7a3e088d52",
+      "bytes": 1755
     },
     {
       "path": "prompts/historian/system/world-experience-split.md",

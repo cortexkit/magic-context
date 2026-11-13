@@ -123,8 +123,8 @@
     },
     {
       "path": "prompts/historian/system/inputs.md",
-      "sha256": "1ef811199649244733342986244bb14c419fb08df476094ce515a874383882bb",
-      "bytes": 1990
+      "sha256": "5b9288f312c890ab992e1238c699cbf06160e1cf3c082b9e6b30cc1edb356adc",
+      "bytes": 1503
     },
     {
       "path": "prompts/historian/system/p4-shapes.md",
@@ -175,6 +175,16 @@
       "path": "prompts/historian/system/world-experience-split.md",
       "sha256": "fbe192b295f4f7f9737a8fdb78e8ed67053af90464c751059163fa13591fba4a",
       "bytes": 902
+    },
+    {
+      "path": "prompts/historian/turn-one/scope.md",
+      "sha256": "1bb36c369c413b6b5290c091a01dcf652afa39de16e40726317dfd777beccc7f",
+      "bytes": 215
+    },
+    {
+      "path": "prompts/historian/turn-two/task.md",
+      "sha256": "23b1fb61918324bd3a741c26c3aadcc845fbf4773b9501e071599c2cc24cddf9",
+      "bytes": 74
     },
     {
       "path": "prompts/main-agent/system.memory-guidance.full.md",
@@ -393,10 +403,6 @@
     },
     "prompts": {
       "historian/system": {
-        "variants": [
-          "xml",
-          "combined"
-        ],
         "sections": [
           {
             "id": "persona",
@@ -507,6 +513,34 @@
           {
             "id": "output",
             "mc": "historian/output-contract"
+          }
+        ]
+      },
+      "historian/turn-one": {
+        "sections": [
+          {
+            "id": "fact-anchors",
+            "mc": "historian/turn-one.fact-anchors"
+          },
+          {
+            "id": "scope",
+            "file": "prompts/historian/turn-one/scope.md"
+          },
+          {
+            "id": "anchor-format",
+            "mc": "historian/turn-one.anchor-format"
+          }
+        ]
+      },
+      "historian/turn-two": {
+        "sections": [
+          {
+            "id": "task",
+            "file": "prompts/historian/turn-two/task.md"
+          },
+          {
+            "id": "decisions",
+            "mc": "historian/turn-two.decisions"
           }
         ]
       },
