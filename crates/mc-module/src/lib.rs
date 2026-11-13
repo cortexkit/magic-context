@@ -59,6 +59,7 @@ pub(crate) mod context_migrations;
 pub mod context_read;
 pub mod count;
 pub mod decay;
+pub mod dreamer;
 pub mod embedding;
 pub mod expand;
 pub mod index;

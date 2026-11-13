@@ -59,6 +59,8 @@ pub enum SendKind {
     TurnTwo,
     /// A narrow check the second turn runs before revising a memory.
     FactCheck,
+    /// A dreamer task's run (`crate::dreamer`).
+    Dream,
 }
 
 impl SendKind {
@@ -67,6 +69,17 @@ impl SendKind {
             Self::TurnOne => "summary turn one",
             Self::TurnTwo => "summary turn two",
             Self::FactCheck => "memory fact check",
+            Self::Dream => "dreamer task",
+        }
+    }
+
+    /// The `session_class` the send that creates its child asks for, where
+    /// the runner declares classes: runners keep and back up a class's
+    /// sessions by their own policy for it.
+    pub fn session_class(self) -> &'static str {
+        match self {
+            Self::TurnOne | Self::TurnTwo | Self::FactCheck => "summary",
+            Self::Dream => "dream",
         }
     }
 }

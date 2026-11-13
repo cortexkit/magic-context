@@ -126,7 +126,7 @@ pub(crate) fn two_pass_system(system: &str, language: Option<&str>) -> String {
 }
 
 /// Transient provider errors retry this many times on the same model.
-const MAX_RETRIES: usize = 2;
+pub(crate) const MAX_RETRIES: usize = 2;
 /// A run reads at most this share of the summarizer's window of messages,
 /// within these bounds (`HISTORIAN_CHUNK_PERCENTAGE` in the plugin's
 /// `derive-budgets.ts`), before the prompt is fitted to the window.
@@ -546,7 +546,7 @@ fn child_name(job: &Request, label: &str, retry: usize) -> String {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
@@ -732,7 +732,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
 ) -> Result<Reply, CallError> {
     let with_temperature = client.child_temperature(child).await;
     let session_class = if how.creates_child && client.child_session_class(child).await {
-        Some("summary".to_owned())
+        Some(how.send.session_class().to_owned())
     } else {
         None
     };
@@ -911,7 +911,7 @@ fn send_error(error: &crate::client::ClientError) -> String {
 
 /// Whether a failed summarizer call is retried: the runner said so, or the
 /// provider's error text reads as transient.
-fn retryable(error: &str) -> bool {
+pub(crate) fn retryable(error: &str) -> bool {
     error.contains(RUNNER_TRANSIENT) || is_transient(error)
 }
 
@@ -935,7 +935,7 @@ pub fn is_transient(error: &str) -> bool {
 
 /// The wait before retry `retry` (0 or 1): 2 to 3 s, then 6 to 8 s, with
 /// jitter so parallel sessions do not retry together.
-fn backoff(retry: usize) -> Duration {
+pub(crate) fn backoff(retry: usize) -> Duration {
     let jitter = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| u64::from(elapsed.subsec_nanos()));

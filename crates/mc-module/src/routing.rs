@@ -34,20 +34,124 @@ pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
 
 /// The routing consumers ck-mc owns, for its manifest's
 /// `role_declarations["routing/v1"]` slot: summaries run tool-free on the
-/// session's own runner, at [`SUMMARY_IQ`].
+/// session's own runner, at [`SUMMARY_IQ`]; each dreamer task kind has a
+/// consumer of its own ([`DREAM_DEMANDS`]), on whatever runner routing picks.
 pub fn consumer_declarations() -> cortexkit_role_routing::declarations::ConsumerDeclarations {
     use cortexkit_role_routing::declarations::{
         ConsumerDeclaration, ConsumerDeclarations, DemandDefaults,
     };
+    use cortexkit_role_routing::select::ToolsRequirement;
     let mut summary = DemandDefaults::new()
         .with_iq(SUMMARY_IQ)
         .with_placement(cortexkit_role_routing::placement::Placement::caller_runner());
-    summary.tools = Some(cortexkit_role_routing::select::ToolsRequirement::None);
+    summary.tools = Some(ToolsRequirement::None);
     summary.max_output_tokens = Some(SUMMARY_OUTPUT_TOKENS);
     summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
-    ConsumerDeclarations::new().with_consumers(vec![
-        ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)
-    ])
+    let mut consumers = vec![ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)];
+    for demand in DREAM_DEMANDS {
+        let mut defaults = DemandDefaults::new().with_iq(demand.iq);
+        defaults.tools = Some(if demand.reads_code {
+            ToolsRequirement::Required
+        } else {
+            ToolsRequirement::None
+        });
+        defaults.max_output_tokens = Some(DREAM_OUTPUT_TOKENS);
+        defaults.context_window = Some(demand.context_window);
+        consumers
+            .push(ConsumerDeclaration::new(dream_consumer(demand.kind)).with_defaults(defaults));
+    }
+    ConsumerDeclarations::new().with_consumers(consumers)
+}
+
+/// What one kind of dreamer task asks routing for.
+pub struct DreamDemand {
+    /// The task kind, as memory profiles name it (`classify-memories`).
+    pub kind: &'static str,
+    pub iq: u8,
+    /// The smallest window the task's input, prompt and reply fit in.
+    pub context_window: u64,
+    /// The task reads the project's files through the code-reading tools.
+    pub reads_code: bool,
+}
+
+/// The dreamer task kinds the module runs, and the least each needs. A
+/// person can raise any of them in routing's own configuration. Tasks that
+/// only reread memories need less than the summarizer; the ones that judge
+/// memories against code or the person's history need more, and verify needs
+/// room for the files it reads.
+pub const DREAM_DEMANDS: &[DreamDemand] = &[
+    DreamDemand {
+        kind: "review-user-memories",
+        iq: 60,
+        context_window: 128_000,
+        reads_code: false,
+    },
+    DreamDemand {
+        kind: "classify-memories",
+        iq: 30,
+        context_window: 64_000,
+        reads_code: false,
+    },
+    DreamDemand {
+        kind: "curate",
+        iq: 50,
+        context_window: 128_000,
+        reads_code: false,
+    },
+    DreamDemand {
+        kind: "compress-cues",
+        iq: 30,
+        context_window: 64_000,
+        reads_code: false,
+    },
+    DreamDemand {
+        kind: "reflect-events",
+        iq: 60,
+        context_window: 128_000,
+        reads_code: false,
+    },
+    DreamDemand {
+        kind: "map-memories",
+        iq: 40,
+        context_window: 128_000,
+        reads_code: true,
+    },
+    DreamDemand {
+        kind: "verify",
+        iq: 60,
+        context_window: 200_000,
+        reads_code: true,
+    },
+    DreamDemand {
+        kind: "verify-broad",
+        iq: 60,
+        context_window: 200_000,
+        reads_code: true,
+    },
+    DreamDemand {
+        kind: "refresh-primers",
+        iq: 50,
+        context_window: 128_000,
+        reads_code: true,
+    },
+];
+
+/// The largest reply a dreamer task asks for.
+pub const DREAM_OUTPUT_TOKENS: u64 = 32_000;
+
+/// The consumer a dreamer task kind is selected under.
+pub fn dream_consumer(kind: &str) -> String {
+    format!("magic-context.dream.{kind}")
+}
+
+/// A dreamer run's select: its task kind's demand, on any runner routing
+/// picks, leaving out the routes this run already tried.
+pub fn dream_select(demand: &DreamDemand, tried: &[String]) -> SelectRequest {
+    let mut request = SelectRequest::new(dream_consumer(demand.kind), Requirements::iq(demand.iq));
+    if !tried.is_empty() {
+        request.exclude = Some(tried.to_vec());
+    }
+    request
 }
 /// Summaries need a mid-level model (ARCHITECTURE: module-only model
 /// placement). Routing grades models against the best one the consumer may

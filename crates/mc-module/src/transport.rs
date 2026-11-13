@@ -2169,22 +2169,51 @@ mod user_commands_tests {
 #[cfg(test)]
 mod manifest_tests {
     /// Routing refuses a consumer the calling module's catalog entry doesn't
-    /// declare, so the summary consumer must be in the manifest, valid for
-    /// a routing that reads declarations, with its defaults on the wire.
+    /// declare, so the summary consumer and each dreamer task's consumer
+    /// must be in the manifest, valid for a routing that reads declarations,
+    /// with their defaults on the wire.
     #[test]
-    fn the_manifest_declares_the_summary_consumer_to_routing() {
+    fn the_manifest_declares_its_consumers_to_routing() {
         let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
         let slot = &manifest["role_declarations"]["routing/v1"];
+        let consumers = slot["consumers"].as_array().unwrap();
         assert_eq!(
-            slot,
-            &serde_json::json!({"consumers": [{
+            consumers[0],
+            serde_json::json!({
                 "name": "magic-context.summary",
                 "iq": 40,
                 "placement": "caller_runner",
                 "tools": "none",
                 "max_output_tokens": 32000,
                 "context_window": 64000,
-            }]})
+            })
+        );
+        // One consumer per dreamer task kind, placed wherever routing picks.
+        let dream: Vec<&str> = consumers[1..]
+            .iter()
+            .map(|consumer| consumer["name"].as_str().unwrap())
+            .collect();
+        let kinds: Vec<String> = crate::routing::DREAM_DEMANDS
+            .iter()
+            .map(|demand| crate::routing::dream_consumer(demand.kind))
+            .collect();
+        assert_eq!(dream, kinds);
+        assert!(consumers[1..]
+            .iter()
+            .all(|consumer| consumer.get("placement").is_none()));
+        let verify = consumers
+            .iter()
+            .find(|consumer| consumer["name"] == "magic-context.dream.verify")
+            .unwrap();
+        assert_eq!(
+            verify,
+            &serde_json::json!({
+                "name": "magic-context.dream.verify",
+                "iq": 60,
+                "tools": "required",
+                "max_output_tokens": 32000,
+                "context_window": 200000,
+            })
         );
         let parsed: cortexkit_role_routing::declarations::ConsumerDeclarations =
             serde_json::from_value(slot.clone()).unwrap();
