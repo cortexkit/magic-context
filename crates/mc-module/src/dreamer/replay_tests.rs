@@ -180,7 +180,7 @@ fn project_of(rows: &[Map<String, Value>]) -> String {
 
 /// Create `path` as a store at the plugin's last schema holding `rows`
 /// exactly as exported, then bring it to this build's schema with the
-/// module's own migrations, as ck-mc migrates a person's store when it
+/// module's own migrations, as the module migrates a person's store when it
 /// first opens it.
 fn build_store(path: &Path, rows: &[Map<String, Value>]) {
     let mut conn = Connection::open(path).expect("create the replay store");
