@@ -498,13 +498,22 @@ impl Session {
     }
 
     fn command_costs(&self, view: Option<&View>) -> (BTreeMap<lanes::PartKey, u64>, u64) {
+        self.served_costs(view.into_iter().flat_map(|v| &v.edits).map(|e| &e.op))
+    }
+
+    /// Per-part costs after replaying edits, including retained placeholders
+    /// and tool results that remain visible behind a history cut.
+    pub(super) fn served_costs<'a>(
+        &self,
+        ops: impl IntoIterator<Item = &'a EditOp>,
+    ) -> (BTreeMap<lanes::PartKey, u64>, u64) {
         let mut drops = BTreeSet::new();
         let mut messages = BTreeSet::new();
         let mut replacements: BTreeMap<lanes::PartKey, Vec<(&str, &Value)>> = BTreeMap::new();
         let mut cut = None;
         let mut head = 0;
-        for edit in view.into_iter().flat_map(|v| &v.edits) {
-            match &edit.op {
+        for op in ops {
+            match op {
                 EditOp::Drop {
                     mid,
                     part: Some(part),
@@ -552,6 +561,7 @@ impl Session {
                 let key = (entry.mid.clone(), part.id.clone());
                 let mut cost = tokens::part(part);
                 if let Some(edits) = replacements.get(&key) {
+                    let replaces_output = edits.iter().any(|(field, _)| *field == "output");
                     for (field, value) in edits {
                         let text = value.as_str().unwrap_or("");
                         match (*field, &part.body) {
@@ -561,6 +571,26 @@ impl Session {
                             }
                             ("text", _) => cost = self.counter().count(text),
                             _ => {}
+                        }
+                    }
+                    // Replacing the output already removes the entire result,
+                    // attachments included. An attachment-only replay instead
+                    // keeps the output, so subtract only media no longer sent.
+                    if let PartBody::Tool(tool) = &part.body {
+                        if let Some(kept) = edits
+                            .iter()
+                            .rev()
+                            .find(|(field, _)| *field == "attachments" && !replaces_output)
+                            .and_then(|(_, value)| value.as_array())
+                        {
+                            let removed: u64 = tool
+                                .attachments()
+                                .iter()
+                                .filter(|a| !kept.iter().any(|id| id.as_str() == Some(&a.id)))
+                                .map(|a| tokens::attachment(&a.item))
+                                .sum();
+                            cost =
+                                cost.saturating_sub(removed.min(tokens::tool_result(part, tool)));
                         }
                     }
                 }

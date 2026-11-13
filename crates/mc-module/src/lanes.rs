@@ -70,7 +70,7 @@ pub fn input_string_bytes(value: &Value) -> u64 {
 /// injections, a tool result without its answered images). A trimmed part can
 /// still be dropped later, as in the plugin, where such a part stays active;
 /// the drop's edits then replace the trimming ones.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Edited {
     parts: BTreeSet<PartKey>,
     trimmed: BTreeSet<PartKey>,
@@ -78,6 +78,13 @@ pub struct Edited {
 }
 
 impl Edited {
+    /// Earlier lanes have already reduced these parts in the view being built.
+    pub fn including(&self, covered: &[PartKey]) -> Self {
+        let mut edited = self.clone();
+        edited.parts.extend(covered.iter().cloned());
+        edited
+    }
+
     /// What `view` changes, plus every message at or before `cut`, the
     /// ordinal a summary is about to cover.
     pub fn of(view: Option<&View>, index: &Index, cut: Option<u64>) -> Self {
@@ -1369,6 +1376,9 @@ pub struct Emergency {
     /// Another lane already rewrites the prompt on this pass, so even a small
     /// reclaim is worth taking.
     pub priced: bool,
+    /// Content the previous request sent that queued reductions already took
+    /// off the view being built, measured after replaying the previous view.
+    pub removed_tokens: u64,
 }
 
 /// The tiered emergency drop, from the force band on: tool outputs go,
@@ -1395,12 +1405,23 @@ pub fn emergency_drop(
         .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
         .map(|(_, part)| tokens::part(part))
         .sum();
-    let measured_fixed = emergency.prompt_tokens.saturating_sub(transcript) as f64;
+    let account = |reported: u64| {
+        // A reading too small to contain both the remaining transcript and
+        // the measured removals cannot justify crediting all those removals.
+        let removed = emergency
+            .removed_tokens
+            .min(reported.saturating_sub(transcript));
+        let served = reported.saturating_sub(removed);
+        (served as f64, served.saturating_sub(transcript) as f64)
+    };
+    let (served, measured_fixed) = account(emergency.prompt_tokens);
     let mut fixed = emergency.notes.fixed_part(measured_fixed);
-    let mut prompt = emergency.prompt_tokens as f64 + fixed - measured_fixed;
-    if let Some(request) = emergency.request_tokens.filter(|&n| n as f64 > prompt) {
-        prompt = request as f64;
-        fixed = request.saturating_sub(transcript) as f64;
+    let mut prompt = served + fixed - measured_fixed;
+    if let Some(request) = emergency
+        .request_tokens
+        .filter(|&n| n as f64 > emergency.prompt_tokens as f64 + fixed - measured_fixed)
+    {
+        (prompt, fixed) = account(request);
     }
     let ceiling = emergency.ceiling_tokens as f64;
     if fixed > ceiling {

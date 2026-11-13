@@ -100,13 +100,19 @@ fn rides(tool: &ToolPart) -> u64 {
 fn attachments(tool: &ToolPart) -> u64 {
     tool.attachments()
         .iter()
-        .map(|attachment| match &attachment.item {
-            AttachmentItem::File(file) => media(file),
-            AttachmentItem::Opaque(opaque) => bytes(opaque.size.unwrap_or(0)),
-            // An item kind the contract may add later: its size is unknown.
-            _ => 0,
-        })
+        .map(|item| attachment(&item.item))
         .sum()
+}
+
+/// What one tool-result attachment costs, also used when replaying a view
+/// that removed only some attachments and kept the result's text.
+pub fn attachment(item: &AttachmentItem) -> u64 {
+    match item {
+        AttachmentItem::File(file) => media(file),
+        AttachmentItem::Opaque(opaque) => bytes(opaque.size.unwrap_or(0)),
+        // An item kind the contract may add later: its size is unknown.
+        _ => 0,
+    }
 }
 
 /// An image costs a fixed amount, whatever its size; other media cost their

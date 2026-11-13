@@ -4197,6 +4197,32 @@ impl Session {
         let priced = !ops.is_empty() || head_changes || prefix_changes;
         self.next_latch = false;
         if self.emergency_drop_allowed(settings, over_limit.is_some(), priced) {
+            let queued_for_emergency: Vec<_> = wanted
+                .iter()
+                .filter(|(_, shape)| *shape == lanes::Shape::Requested)
+                .cloned()
+                .collect();
+            let (queued_ops, queued_covered) = lanes::drop_ops(&context, &queued_for_emergency);
+            // The provider reading still includes queued reductions landing
+            // on this pass. The TypeScript reference plans before routine
+            // reasoning cleanup, so that lane's removals do not get credit.
+            let removed_tokens = if queued_ops.is_empty() {
+                0
+            } else {
+                let (before, _) =
+                    self.served_costs(self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op));
+                let (after, _) = self.served_costs(
+                    self.latest
+                        .iter()
+                        .flat_map(|v| &v.edits)
+                        .map(|e| &e.op)
+                        .chain(queued_ops.iter()),
+                );
+                before
+                    .iter()
+                    .map(|(key, old)| old.saturating_sub(after.get(key).copied().unwrap_or(0)))
+                    .sum()
+            };
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
                 request_tokens: over_limit,
@@ -4205,8 +4231,14 @@ impl Session {
                     as u64,
                 over_limit: over_limit.is_some(),
                 priced,
+                removed_tokens,
             };
-            let mut selected = lanes::emergency_drop(&context, cutoff, &emergency);
+            let emergency_edited = edited.including(&queued_covered);
+            let emergency_context = lanes::Context {
+                edited: &emergency_edited,
+                ..context
+            };
+            let mut selected = lanes::emergency_drop(&emergency_context, cutoff, &emergency);
             selected.retain(|(key, _)| !kept(key));
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
