@@ -715,8 +715,9 @@ fn plan(
         if let Some(recorded) = recorded {
             target["categoryId"] = json!(recorded);
         } else if target["category"] != current["category"] {
-            target["categoryId"] =
-                json!(frozen_category_id(target["category"].as_str().unwrap_or("")));
+            target["categoryId"] = json!(frozen_category_id(
+                target["category"].as_str().unwrap_or("")
+            ));
         }
         target["normalizedHash"] = json!(hash);
         target["shareable"] = json!(0);

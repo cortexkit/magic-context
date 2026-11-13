@@ -172,7 +172,12 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
         )
         .unwrap();
     assert_eq!(
-        (row.0.as_str(), row.1.as_str(), row.2.as_str(), row.3.as_str()),
+        (
+            row.0.as_str(),
+            row.1.as_str(),
+            row.2.as_str(),
+            row.3.as_str()
+        ),
         ("global", "self", "mc:user-unsorted", "USER_MEMORY")
     );
     assert_eq!(row.4, "Prefers terse answers.");
@@ -208,15 +213,20 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
         )
         .unwrap();
     assert_eq!(content, "Prefers short answers.");
-    assert_eq!(hash, memory_history::normalized_hash("Prefers short answers."));
+    assert_eq!(
+        hash,
+        memory_history::normalized_hash("Prefers short answers.")
+    );
     let memories = db::get_memories(&conn, None, None, None, None, None, 100, 0).unwrap();
     assert_eq!(
         memories.iter().map(|memory| memory.id).collect::<Vec<_>>(),
         [project]
     );
-    assert!(db::get_memories(&conn, None, None, None, None, Some("terse"), 100, 0)
-        .unwrap()
-        .is_empty());
+    assert!(
+        db::get_memories(&conn, None, None, None, None, Some("terse"), 100, 0)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(db::get_memory_stats(&conn, None, None).unwrap().total, 1);
     // A user-memory edit has never moved a project's memory epoch.
     let epochs: i64 = conn
@@ -239,9 +249,17 @@ async fn an_edit_that_changes_the_tag_changes_the_category_too() {
     );
     // The list, its category filter and the category counts use the tag.
     let conn = db::open_readonly(&path).unwrap();
-    let listed =
-        db::get_memories(&conn, Some(PROJECT), None, None, Some("ARCHITECTURE"), None, 10, 0)
-            .unwrap();
+    let listed = db::get_memories(
+        &conn,
+        Some(PROJECT),
+        None,
+        None,
+        Some("ARCHITECTURE"),
+        None,
+        10,
+        0,
+    )
+    .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].category, "ARCHITECTURE");
     let stats = db::get_memory_stats(&conn, Some(PROJECT), None).unwrap();
@@ -317,8 +335,17 @@ async fn two_archived_rows_with_the_same_text_may_share_a_category() {
     let archive = edit(&path, live, "status", "archived", "archive").await;
     assert_eq!(archive["state"], "applied", "{archive}");
     let conn = db::open_readonly(&path).unwrap();
-    let archived =
-        db::get_memories(&conn, Some(PROJECT), None, Some("archived"), None, None, 10, 0).unwrap();
+    let archived = db::get_memories(
+        &conn,
+        Some(PROJECT),
+        None,
+        Some("archived"),
+        None,
+        None,
+        10,
+        0,
+    )
+    .unwrap();
     assert_eq!(archived.len(), 3);
     let shared: i64 = conn
         .query_row(
@@ -365,9 +392,11 @@ async fn a_second_live_copy_is_refused() {
     assert_eq!(rewrite["state"], "conflict", "{rewrite}");
     let content: String = Connection::open(&path)
         .unwrap()
-        .query_row("SELECT content FROM memories WHERE id = ?1", [other], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT content FROM memories WHERE id = ?1",
+            [other],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(content, "Rotate keys yearly.");
 
@@ -398,10 +427,7 @@ async fn a_second_live_copy_is_refused() {
     // Once the live one is dismissed, the other can come back.
     db::dismiss_user_memory(&mut conn, 11).unwrap();
     db::restore_user_memory(&mut conn, 12).unwrap();
-    assert_eq!(
-        prompt_profile(&conn),
-        [(12, "prefers  TABS.".to_owned())]
-    );
+    assert_eq!(prompt_profile(&conn), [(12, "prefers  TABS.".to_owned())]);
 }
 
 #[test]
@@ -503,7 +529,10 @@ fn a_promoted_candidate_is_filed_the_way_ck_mc_moves_user_memories() {
         )
     );
     let promoted_at = row.8;
-    assert_eq!((row.9, row.10, row.11), (promoted_at, promoted_at, promoted_at));
+    assert_eq!(
+        (row.9, row.10, row.11),
+        (promoted_at, promoted_at, promoted_at)
+    );
     let metadata: Value = serde_json::from_str(&row.13).unwrap();
     assert_eq!(
         metadata,
@@ -515,7 +544,10 @@ fn a_promoted_candidate_is_filed_the_way_ck_mc_moves_user_memories() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].promoted_at, Some(promoted_at));
     assert_eq!(listed[0].source_candidate_ids, Some(json!([8])));
-    assert_eq!(prompt_profile(&conn), [(listed[0].id, "Likes tables.".to_owned())]);
+    assert_eq!(
+        prompt_profile(&conn),
+        [(listed[0].id, "Likes tables.".to_owned())]
+    );
     // Global memories stay out of project search.
     let indexed: i64 = conn
         .query_row(

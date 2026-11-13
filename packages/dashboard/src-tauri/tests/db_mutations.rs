@@ -120,12 +120,14 @@ fn memory_epoch(conn: &Connection, project_path: &str) -> i64 {
 }
 
 fn project_state_rows(conn: &Connection) -> Vec<(String, i64)> {
-    conn.prepare("SELECT project_path, project_memory_epoch FROM project_state ORDER BY project_path")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
+    conn.prepare(
+        "SELECT project_path, project_memory_epoch FROM project_state ORDER BY project_path",
+    )
+    .unwrap()
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
 }
 
 fn history_decisions(conn: &Connection) -> i64 {
@@ -355,10 +357,7 @@ fn dismiss_user_memory_leaves_project_memory_epochs_alone() {
 
     // ck-mc reads the profile from the rows, so nothing else is signalled.
     assert!(prompt_profile(&conn).is_empty());
-    assert_eq!(
-        project_state_rows(&conn),
-        [("git:project-a".to_owned(), 4)]
-    );
+    assert_eq!(project_state_rows(&conn), [("git:project-a".to_owned(), 4)]);
 }
 
 #[test]
@@ -396,10 +395,7 @@ fn dismiss_user_memory_again_or_unknown_id_is_a_no_op() {
             .unwrap(),
             revision
         );
-        assert_eq!(
-            project_state_rows(&conn),
-            [("git:project-a".to_owned(), 4)]
-        );
+        assert_eq!(project_state_rows(&conn), [("git:project-a".to_owned(), 4)]);
     }
 }
 
@@ -417,10 +413,7 @@ fn restore_user_memory_returns_row_to_active_set() {
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, id);
     assert_eq!(prompt_profile(&conn), ["remember me"]);
-    assert_eq!(
-        project_state_rows(&conn),
-        [("git:project-a".to_owned(), 4)]
-    );
+    assert_eq!(project_state_rows(&conn), [("git:project-a".to_owned(), 4)]);
 }
 
 #[test]
@@ -616,7 +609,10 @@ fn update_memory_content_has_history_and_epoch() {
         )
         .unwrap();
     assert_eq!(revision, 2);
-    assert_eq!(hash, schema_fixture::normalized_hash("new dashboard content"));
+    assert_eq!(
+        hash,
+        schema_fixture::normalized_hash("new dashboard content")
+    );
 }
 
 #[test]
@@ -755,7 +751,13 @@ fn test_update_memory_category_collision() {
         "same content",
         "active",
     );
-    schema_fixture::insert_project_memory(&conn, "git:project-a", "NAMING", "same content", "active");
+    schema_fixture::insert_project_memory(
+        &conn,
+        "git:project-a",
+        "NAMING",
+        "same content",
+        "active",
+    );
 
     // Moving the first into the second's category would make two live copies.
     let receipt = audited_edit(&mut conn, &[id1], "category", "NAMING").unwrap();

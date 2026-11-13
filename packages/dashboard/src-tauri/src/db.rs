@@ -11,9 +11,9 @@ use crate::project_identity::{basename, normalize_stored_project_path};
 mod compartment_scores;
 #[path = "historian_telemetry.rs"]
 mod historian_telemetry;
-pub use historian_telemetry::{count_historian_runs, get_subagent_invocations, SubagentInvocation};
 #[cfg(test)]
 use crate::schema_fixture;
+pub use historian_telemetry::{count_historian_runs, get_subagent_invocations, SubagentInvocation};
 
 pub fn resolve_db_path() -> Option<PathBuf> {
     // Keep the dashboard on the same harness-side database as the plugin. An
@@ -8760,10 +8760,7 @@ pub fn promote_user_memory_candidate(
             metadata.to_string()
         ],
     )?;
-    tx.execute(
-        "DELETE FROM memory_observations WHERE id = ?1",
-        params![id],
-    )?;
+    tx.execute("DELETE FROM memory_observations WHERE id = ?1", params![id])?;
 
     tx.commit()?;
     Ok(())

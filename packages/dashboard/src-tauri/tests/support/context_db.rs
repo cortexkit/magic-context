@@ -159,7 +159,8 @@ pub const KEPT_COLUMNS: &str = "id, content, normalized_hash, importance, scope,
 
 /// Copies every plugin memory into the leveled table. `{case}` stands for
 /// the `CASE` that maps the tag in `m.category` to its category id.
-pub const COPY_MEMORIES: &str = "INSERT INTO memories_v106 ({KEPT_COLUMNS}, level, owner_id, category, origin_category,
+pub const COPY_MEMORIES: &str =
+    "INSERT INTO memories_v106 ({KEPT_COLUMNS}, level, owner_id, category, origin_category,
              origin_profile, origin_profile_version, origin_profile_digest, source_project_id,
              applies_to_json)
          SELECT m.id, m.content, m.normalized_hash, m.importance, m.scope, m.shareable,
@@ -187,7 +188,8 @@ pub const MOVE_USER_MEMORY: &str = "INSERT INTO memories_v106 (level, owner_id, 
              VALUES ('global', 'self', ?1, ?2, ?3, ?4, 'user-review', 1, 0, ?5, ?6, ?7, ?5, ?8, ?9)";
 
 /// Turns user-memory candidates into observations.
-pub const COPY_OBSERVATIONS: &str = "INSERT INTO memory_observations (id, content, session_id, source_start_ordinal,
+pub const COPY_OBSERVATIONS: &str =
+    "INSERT INTO memory_observations (id, content, session_id, source_start_ordinal,
                  source_end_ordinal, created_at)
              SELECT id, content, session_id, source_compartment_start, source_compartment_end,
                     created_at
@@ -288,8 +290,7 @@ pub fn upgrade_plugin_store(conn: &Connection) {
         [MIGRATION_106_DESCRIPTION],
     )
     .expect("record the migration");
-    conn.execute_batch("COMMIT;")
-        .expect("commit the migration");
+    conn.execute_batch("COMMIT;").expect("commit the migration");
 }
 
 /// User memories become global memories that keep their old id and
@@ -332,8 +333,8 @@ fn move_user_memories(conn: &Connection) {
     {
         let mut metadata = serde_json::json!({ "user_memory_id": id, "promoted_at": promoted_at });
         if let Some(ids) = candidate_ids.as_deref() {
-            metadata["source_candidate_ids"] = serde_json::from_str(ids)
-                .unwrap_or(serde_json::Value::String(ids.to_owned()));
+            metadata["source_candidate_ids"] =
+                serde_json::from_str(ids).unwrap_or(serde_json::Value::String(ids.to_owned()));
         }
         if let Some(provenance) = provenance {
             metadata["source_candidate_provenance"] = serde_json::Value::String(provenance);

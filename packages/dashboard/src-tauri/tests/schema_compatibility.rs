@@ -101,7 +101,10 @@ fn copied_ddl_is_the_module_migration() {
         "\"user_memory_id\": id, \"promoted_at\": promoted_at,".to_owned(),
         "metadata[\"source_candidate_ids\"]".to_owned(),
     ] {
-        assert!(found(&declaration), "ck-mc's migration has no {declaration}");
+        assert!(
+            found(&declaration),
+            "ck-mc's migration has no {declaration}"
+        );
     }
     assert_eq!(schema_fixture::CATEGORY_IDS, memory_history::CATEGORY_IDS);
     for (tag, id) in memory_history::CATEGORY_IDS {
@@ -249,7 +252,9 @@ async fn a_store_ck_mc_has_not_upgraded_refuses_memories_and_still_lists_project
         ("memory.edit", edit(&[1], "content", "x", 1, "edit")),
     ] {
         assert_eq!(
-            db::memory_request(&path, method, request).await.unwrap_err(),
+            db::memory_request(&path, method, request)
+                .await
+                .unwrap_err(),
             refused,
             "{method}"
         );
@@ -483,8 +488,10 @@ async fn missing_safety_column_refuses_writes_and_reads() {
     let conn = db::open_readonly(&path).unwrap();
     assert_eq!(
         conn.query_row("SELECT content FROM memories WHERE id=1", [], |row| row
-            .get::<_, String>(0))
-            .unwrap(),
+            .get::<_, String>(
+            0
+        ))
+        .unwrap(),
         "cache_ttl=5m"
     );
 }

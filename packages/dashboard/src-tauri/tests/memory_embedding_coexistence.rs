@@ -32,8 +32,13 @@ fn get_memories_dedupes_when_multiple_model_embeddings_exist() {
     isolated_home();
     let _g = env_lock();
     let conn = make_db();
-    let memory_id =
-        schema_fixture::insert_project_memory(&conn, "git:p", "CONSTRAINTS", "coexistence probe", "active");
+    let memory_id = schema_fixture::insert_project_memory(
+        &conn,
+        "git:p",
+        "CONSTRAINTS",
+        "coexistence probe",
+        "active",
+    );
     conn.execute(
         "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES (?1, ?2, ?3)",
         params![memory_id, EMBED_BLOB, "model-a"],

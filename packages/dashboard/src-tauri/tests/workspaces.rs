@@ -537,7 +537,13 @@ fn empty_workspace_filter_returns_no_memories_or_stats() {
     // A workspace with ZERO members. Other projects DO have memories, and the
     // person has a user memory, which no project memory list ever shows.
     let ws = workspaces::create_workspace(&mut conn, "empty").unwrap();
-    schema_fixture::insert_project_memory(&conn, "git:somewhere", "CONSTRAINTS", "global", "active");
+    schema_fixture::insert_project_memory(
+        &conn,
+        "git:somewhere",
+        "CONSTRAINTS",
+        "global",
+        "active",
+    );
     schema_fixture::insert_project_memory(&conn, "git:elsewhere", "CONSTRAINTS", "other", "active");
     conn.execute(
         "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,

@@ -12,7 +12,13 @@ mod schema_fixture;
 fn fixture(path: &std::path::Path) -> Connection {
     schema_fixture::create_test_context_db(path);
     let conn = Connection::open(path).unwrap();
-    schema_fixture::insert_project_memory(&conn, "git:idle", "CONFIG_VALUES", "cache_ttl=5m", "active");
+    schema_fixture::insert_project_memory(
+        &conn,
+        "git:idle",
+        "CONFIG_VALUES",
+        "cache_ttl=5m",
+        "active",
+    );
     conn
 }
 fn edit_request() -> Value {
