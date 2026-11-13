@@ -26,15 +26,6 @@ pub enum Owner {
     Project { id: String, root: String },
 }
 
-impl Owner {
-    /// The folder a run's child session works in.
-    pub fn root(&self) -> &str {
-        match self {
-            Self::Project { root, .. } => root,
-        }
-    }
-}
-
 /// What a task kind reads its work from.
 pub(crate) struct TaskContext<'a> {
     pub db: &'a ContextDb,
@@ -49,11 +40,6 @@ impl TaskContext<'_> {
     /// The task's id in the profile (`swe:classify-memories`).
     pub fn task_id(&self) -> &str {
         self.declaration["id"].as_str().unwrap_or_default()
-    }
-
-    /// A setting the profile gives the task, if any.
-    pub fn setting(&self, name: &str) -> Option<&Value> {
-        self.declaration["settings"].get(name)
     }
 }
 

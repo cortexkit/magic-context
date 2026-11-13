@@ -330,7 +330,6 @@ fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
     .unwrap();
     let reply = TaskReply {
         text: "ok".into(),
-        prompt: "batch 0".into(),
         model: cortexkit_role_compaction::setup::ModelRef::new("p", "a"),
         runner: "ra".into(),
         child: "c".into(),

@@ -66,14 +66,8 @@ pub struct TaskRun<'a> {
 
 /// A run that got a reply the task accepted.
 #[derive(Clone, Debug)]
-#[expect(
-    dead_code,
-    reason = "the task kinds that read a reply are not registered yet"
-)]
 pub struct TaskReply {
     pub text: String,
-    /// The prompt the reply answers, as sent.
-    pub prompt: String,
     pub model: ModelRef,
     pub runner: String,
     pub child: String,
@@ -192,7 +186,6 @@ pub async fn run<C: RunnerClient + Router>(
                     Ok(()) => {
                         break Ok(TaskReply {
                             text: reply.text,
-                            prompt,
                             model: model.clone(),
                             runner: answer.runner.module.clone(),
                             child: child.session.session,

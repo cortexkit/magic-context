@@ -27,7 +27,9 @@ use serde_json::json;
 
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
-use crate::memory_writes::{history_json, history_snapshot, now_ms, record_history, History};
+use crate::memory_writes::{
+    history_json, history_snapshot, now_ms, record_history, History, SAFETY_CRITICAL_MIN_IMPORTANCE,
+};
 use crate::summary::fit::Window;
 use crate::summary::two_pass::constants::MAX_STAGE2_ATTEMPTS;
 
@@ -49,12 +51,6 @@ const MAX_ANCHORS: usize = 30;
 pub(crate) const BATCH_SIZE: usize = 100;
 /// The importance a memory without one is shown and ranked at.
 const DEFAULT_IMPORTANCE: i64 = 50;
-/// The lowest importance a safety-critical memory may hold. These are rules
-/// whose violation can't be taken back, and they work only while they stay
-/// in the memory block, which drops low importance first when it is over
-/// budget. Every writer that sets importance keeps a safety-critical memory
-/// at or above this.
-pub(crate) const SAFETY_CRITICAL_MIN_IMPORTANCE: i64 = 80;
 
 /// One live project memory as the task reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]

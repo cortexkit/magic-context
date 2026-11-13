@@ -137,6 +137,13 @@ pub fn get_memory(conn: &Connection, id: i64) -> rusqlite::Result<Option<MemoryR
     .optional()
 }
 
+/// The lowest importance a safety-critical memory may hold. These are rules
+/// whose violation can't be taken back, and they work only while they stay
+/// in the memory block, which drops low importance first when it is over
+/// budget. Every writer that sets importance keeps a safety-critical memory
+/// at or above this.
+pub(crate) const SAFETY_CRITICAL_MIN_IMPORTANCE: i64 = 80;
+
 /// The project memory filed under `category_id` with this text. A live row
 /// comes first: archived history rows may repeat a text, live ones never do.
 pub(crate) fn memory_by_hash(

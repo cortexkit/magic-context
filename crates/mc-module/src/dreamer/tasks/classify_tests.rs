@@ -242,7 +242,6 @@ fn with_context<T>(db: &ContextDb, body: impl FnOnce(&TaskContext<'_>) -> T) -> 
 fn reply(text: &str) -> TaskReply {
     TaskReply {
         text: text.into(),
-        prompt: String::new(),
         model: ModelRef::new("p", "m"),
         runner: "r".into(),
         child: "mc-dream:7:0.0".into(),
