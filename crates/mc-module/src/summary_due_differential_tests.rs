@@ -114,7 +114,11 @@ async fn sequence(randomized: bool) {
             ))
             .await;
             assert_eq!(format!("{a:?}"), format!("{b:?}"), "Setup step {step}");
-            assert_eq!(a_log, b_log, "Setup logs at step {step}");
+            assert_eq!(
+                crate::test_log::without_timings(&a_log),
+                crate::test_log::without_timings(&b_log),
+                "Setup logs at step {step}"
+            );
         }
         for session in [&mut new, &mut old] {
             session.conditions.last_prompt_tokens = Some(match choice {
@@ -139,7 +143,11 @@ async fn sequence(randomized: bool) {
         due += usize::from(a.is_some());
         quiet += usize::from(a.is_none());
         assert_eq!(format!("{a:?}"), format!("{b:?}"), "request at step {step}");
-        assert_eq!(a_log, b_log, "logs at step {step}");
+        assert_eq!(
+            crate::test_log::without_timings(&a_log),
+            crate::test_log::without_timings(&b_log),
+            "logs at step {step}"
+        );
         assert_eq!(
             new.floor_pending_for, old.floor_pending_for,
             "floor mark at step {step}"
