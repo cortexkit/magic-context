@@ -288,6 +288,7 @@ pub fn next_view(
             built_through: None,
             new_signed: None,
             signed_floor: None,
+            force: false,
         },
         retire,
         &mut ValidationCache::default(),
@@ -295,6 +296,9 @@ pub fn next_view(
 }
 
 pub(crate) struct ViewPolicy<'a> {
+    /// A runner serving its no-view fallback needs a fresh version even when
+    /// the repaired edits are identical to the accepted view.
+    pub force: bool,
     pub rules: &'a ProviderRules,
     pub version: u64,
     pub built_through: Option<String>,
@@ -323,6 +327,7 @@ pub(crate) fn next_view_cached(
         built_through,
         new_signed,
         signed_floor,
+        force,
     } = policy;
     let previous_edits = previous
         .map(|view| view.edits.as_slice())
@@ -419,7 +424,7 @@ pub(crate) fn next_view_cached(
         previous.built_through.is_some() != built_through.is_some()
             || previous.new_signed != new_signed
     });
-    if !added && !dropped_some && !replaced_in_place && !policy_changed {
+    if !force && !added && !dropped_some && !replaced_in_place && !policy_changed {
         return Ok(None);
     }
     let floor = signed_floor
@@ -679,6 +684,7 @@ mod tests {
                 built_through: entries.last().map(|e| e.mid.clone()),
                 new_signed: None,
                 signed_floor: None,
+                force: false,
             },
             |_| false,
             &mut cache,
@@ -696,6 +702,7 @@ mod tests {
                 built_through: entries.last().map(|e| e.mid.clone()),
                 new_signed: None,
                 signed_floor: None,
+                force: false,
             },
             |_| false,
             &mut cache,
@@ -773,6 +780,7 @@ mod tests {
                     .flatten(),
                 new_signed: anchored.then(|| "strip".into()),
                 signed_floor: floor.map(str::to_owned),
+                force: false,
             },
             |_| false,
             &mut ValidationCache::default(),

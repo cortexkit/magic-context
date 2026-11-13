@@ -52,6 +52,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { renderCatalogText } from "../../../packages/plugin/scripts/catalog-guidance.fixture";
 import { buildPrimaryLanguageDirective } from "../../../packages/plugin/src/agents/language-directive";
 import { buildMagicContextSection } from "../../../packages/plugin/src/agents/magic-context-prompt";
 import { CTX_EXPAND_DESCRIPTION } from "../../../packages/plugin/src/tools/ctx-expand/constants";
@@ -267,66 +268,14 @@ interface TextFlags {
 	language: boolean;
 }
 
-/**
- * Render the definition's text `name`. A template is literal text with four
- * kinds of tag:
- *
- * - `{{name}}` includes the definition's text `name`, rendered the same way;
- * - `{{$name}}` inserts the runtime value `name` verbatim (never rendered);
- * - `{{#flag}}…{{/flag}}` keeps its body only when `flag` is on, and
- *   `{{^flag}}…{{/flag}}` only when it is off. Sections nest, and a closing tag
- *   names the section it closes.
- *
- * Anything else between `{{` and `}}`, an unknown name or flag, or an unclosed
- * section is an error. The Rust module's renderer follows the same rules.
- */
+/** Render through the same fixture evaluator the plugin parity tests use. */
 export function renderText(
 	name: string,
 	flags: TextFlags,
 	values: Record<string, string>,
 	texts: Record<string, string> = DEFINITION.texts,
 ): string {
-	const template = texts[name];
-	if (template === undefined) throw new Error(`no text named ${name}`);
-	let out = "";
-	// Each open section: its flag, and whether its body is kept.
-	const open: { flag: string; keep: boolean }[] = [];
-	const keeping = () => open.every((section) => section.keep);
-	let at = 0;
-	while (at < template.length) {
-		const start = template.indexOf("{{", at);
-		if (start < 0) {
-			if (keeping()) out += template.slice(at);
-			break;
-		}
-		if (keeping()) out += template.slice(at, start);
-		const end = template.indexOf("}}", start + 2);
-		if (end < 0) throw new Error(`${name}: unterminated tag`);
-		const tag = template.slice(start + 2, end);
-		at = end + 2;
-		const sigil = tag[0];
-		const body = tag.slice(1);
-		if (sigil === "#" || sigil === "^") {
-			if (!(body in flags)) throw new Error(`${name}: unknown flag ${body}`);
-			const on = flags[body as keyof TextFlags];
-			open.push({ flag: body, keep: sigil === "#" ? on : !on });
-		} else if (sigil === "/") {
-			const section = open.pop();
-			if (section?.flag !== body)
-				throw new Error(`${name}: {{/${body}}} closes nothing open`);
-		} else if (sigil === "$") {
-			const value = values[body];
-			if (value === undefined) throw new Error(`${name}: no value ${body}`);
-			if (keeping()) out += value;
-		} else if (/^[a-z_/]+$/.test(tag)) {
-			if (keeping()) out += renderText(tag, flags, values, texts);
-		} else {
-			throw new Error(`${name}: malformed tag {{${tag}}}`);
-		}
-	}
-	if (open.length > 0)
-		throw new Error(`${name}: section ${open[0]?.flag} is never closed`);
-	return out;
+	return renderCatalogText(name, flags, values, texts);
 }
 
 /** The guidance inputs a text varies by, as the catalog resolves them. */

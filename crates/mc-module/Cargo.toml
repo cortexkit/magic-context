@@ -22,6 +22,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # The machine's IANA time zone name, which dreamer schedules run in.
 iana-time-zone = "0.1.65"
 cortexkit-log = { workspace = true }
+cortexkit-persona = "=0.3.0"
 tracing = "0.1"
 cortexkit-role-compaction = { workspace = true }
 cortexkit-role-llm-runner = { workspace = true }

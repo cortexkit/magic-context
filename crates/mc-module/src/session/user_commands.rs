@@ -195,7 +195,7 @@ impl Session {
             if view.is_some() {
                 return None;
             }
-            let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+            let edited = self.edited(self.cut);
             let (context, _, cutoff) = Self::lane_context(
                 &self.index,
                 &edited,
@@ -379,7 +379,7 @@ impl Session {
             .pressure()
             .last_prompt_tokens
             .unwrap_or(costs.values().sum::<u64>() + head);
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let edited = self.edited(self.cut);
         let (context, usable, cutoff) = Self::lane_context(
             &self.index,
             &edited,
@@ -528,11 +528,13 @@ impl Session {
     }
 
     fn command_costs(&self, view: Option<&View>) -> (BTreeMap<lanes::PartKey, u64>, u64) {
-        self.served_costs(view.into_iter().flat_map(|v| &v.edits).map(|e| &e.op))
+        let rendered = self.rendered_view(view);
+        self.served_costs(rendered.iter().flat_map(|v| &v.edits).map(|e| &e.op))
     }
 
-    /// Per-part costs after replaying edits, including retained placeholders
-    /// and tool results that remain visible behind a history cut.
+    /// Per-part costs after replaying edits, including retained placeholders.
+    /// A history cut leaves out every part of each message through its boundary,
+    /// so status, previews and emergency credit all price the request as served.
     pub(super) fn served_costs<'a>(
         &self,
         ops: impl IntoIterator<Item = &'a EditOp>,
@@ -543,6 +545,9 @@ impl Session {
         let mut cut = None;
         let mut head = 0;
         for op in ops {
+            if !self.served_op(op) {
+                continue;
+            }
             match op {
                 EditOp::Drop {
                     mid,
@@ -624,10 +629,8 @@ impl Session {
                         }
                     }
                 }
-                if cut.is_some_and(|cut| entry.ordinal <= cut) {
-                    cost = cost.saturating_sub(tokens::removed_by_summary(part));
-                }
-                if messages.contains(entry.mid.as_str())
+                if cut.is_some_and(|cut| entry.ordinal <= cut)
+                    || messages.contains(entry.mid.as_str())
                     || drops.contains(&key)
                     || (signed_floor.is_some_and(|floor| entry.ordinal <= floor)
                         && matches!(part.body, PartBody::Reasoning { .. }))

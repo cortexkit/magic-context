@@ -1,5 +1,6 @@
 use super::*;
 use cortexkit_role_compaction::tokens::PartTokens;
+use cortexkit_role_compaction::view::{Edit, InsertAt, InsertedMessage};
 
 fn emergency_floor_session(kind: &str) -> (Session, Settings) {
     let (mut session, _, _, _, settings) = fixture();
@@ -180,7 +181,6 @@ fn emergency_floor_does_not_credit_standalone_reasoning_cleanup() {
 }
 
 #[test]
-#[ignore = "open defect: a new history cut inflates the emergency floor in ck-mc and the plugin"]
 fn emergency_floor_a_new_history_cut_does_not_make_removed_text_fixed() {
     let (mut session, settings) = emergency_floor_session("text");
     let dir = tempfile::tempdir().unwrap();
@@ -192,6 +192,133 @@ fn emergency_floor_a_new_history_cut_does_not_make_removed_text_fixed() {
     // The cut removes 52k of text, leaving about 38k including the rendered summary.
     // One 5k output reaches the target; a false floor would take none.
     assert_eq!(emergency_floor_outputs(&view), ["tool-3"]);
+}
+
+fn emergency_floor_history(through: Option<&str>, summary: &str) -> Vec<EditOp> {
+    let mut ops: Vec<_> = [(head::M0_ID, "baseline"), (head::M1_ID, summary)]
+        .into_iter()
+        .map(|(id, text)| EditOp::Insert {
+            at: InsertAt::Start,
+            message: InsertedMessage::new(id, Role::User, vec![text.to_owned()]),
+        })
+        .collect();
+    if let Some(through) = through {
+        ops.push(EditOp::Cut {
+            through: through.into(),
+        });
+    }
+    ops
+}
+
+#[test]
+fn emergency_floor_an_unchanged_cut_and_head_get_no_credit() {
+    let (mut session, _) = emergency_floor_session("text");
+    let old_summary = "previous summary ".repeat(20);
+    session.latest = Some(View::seal(
+        1,
+        emergency_floor_history(None, &old_summary)
+            .into_iter()
+            .map(|op| Edit::new(1, op))
+            .collect(),
+    ));
+    let history = emergency_floor_history(Some("large"), "new summary");
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &[]),
+        52_000 + session.counter().count(&old_summary) - session.counter().count("new summary")
+    );
+    session.latest = Some(View::seal(
+        2,
+        history.iter().cloned().map(|op| Edit::new(2, op)).collect(),
+    ));
+    assert_eq!(session.emergency_removed_tokens(&history, &[]), 0);
+    let smaller_head = emergency_floor_history(Some("large"), "");
+    assert_eq!(session.emergency_removed_tokens(&smaller_head, &[]), 0);
+    let queued = [EditOp::Drop {
+        mid: "tool-3".into(),
+        part: Some("p".into()),
+    }];
+    assert_eq!(
+        session.emergency_removed_tokens(&smaller_head, &queued),
+        5_000
+    );
+}
+
+#[test]
+fn emergency_floor_a_summary_larger_than_its_cut_gets_no_negative_credit() {
+    let (session, _) = emergency_floor_session("text");
+    let history = emergency_floor_history(Some("large"), "summary");
+    let head_tokens = session.counter().count("baseline") + session.counter().count("summary");
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &[]),
+        52_000 - head_tokens
+    );
+    let large_summary = "summary ".repeat(60_000);
+    assert!(session.counter().count(&large_summary) > 52_000);
+    let history = emergency_floor_history(Some("large"), &large_summary);
+    assert_eq!(session.emergency_removed_tokens(&history, &[]), 0);
+}
+
+#[test]
+fn emergency_floor_credits_queued_drops_and_a_new_cut_together() {
+    let (mut session, settings) = emergency_floor_session("text");
+    let history = emergency_floor_history(Some("large"), "summary");
+    let head_tokens = session.counter().count("baseline") + session.counter().count("summary");
+    let queued = [EditOp::Drop {
+        mid: "tool-3".into(),
+        part: Some("p".into()),
+    }];
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &queued),
+        57_000 - head_tokens
+    );
+    let dir = tempfile::tempdir().unwrap();
+    with_summary(&mut session, dir.path(), "large");
+    session.queued.insert(("tool-3".into(), "p".into()));
+    let view = emergency_floor_build(&mut session, &settings);
+    assert_eq!(emergency_floor_outputs(&view), ["tool-3"]);
+    assert!(
+        !session.next_latch,
+        "the queued drop already reaches the target"
+    );
+}
+
+#[test]
+fn emergency_floor_a_cut_and_queued_tool_drop_credit_the_input_once() {
+    let (mut session, _) = emergency_floor_session("tool");
+    let mut entries = session.index.entries().to_vec();
+    entries[1].parts[0].tokens = Some(PartTokens::tool(10_000, 50_000));
+    session.index = Index::default();
+    session.index.extend_counted(entries, Some("family"));
+    let history = emergency_floor_history(Some("large"), "summary");
+    let head_tokens = session.counter().count("baseline") + session.counter().count("summary");
+    // The cut removes the whole task and tool message, including the result.
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &[]),
+        62_000 - head_tokens
+    );
+    let queued = [EditOp::Drop {
+        mid: "large".into(),
+        part: Some("p".into()),
+    }];
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &queued),
+        62_000 - head_tokens
+    );
+}
+
+#[test]
+fn emergency_floor_a_cut_and_queued_text_drop_credit_the_text_once() {
+    let (session, _) = emergency_floor_session("text");
+    let history = emergency_floor_history(Some("large"), "summary");
+    let head_tokens = session.counter().count("baseline") + session.counter().count("summary");
+    let queued = [EditOp::Drop {
+        mid: "large".into(),
+        part: Some("p".into()),
+    }];
+    assert_eq!(
+        session.emergency_removed_tokens(&history, &queued),
+        52_000 - head_tokens
+    );
 }
 
 #[test]

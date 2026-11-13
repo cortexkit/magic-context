@@ -21,6 +21,27 @@ const FORCE: u64 = 90_000;
 const EPOCH: &str = "test-epoch";
 
 #[tokio::test]
+async fn setup_log_names_the_received_child_harness() {
+    for child in [Some("claude-code"), None] {
+        let (mut session, client, route, mut request, settings) = fixture();
+        request.child_harness = child.map(str::to_owned);
+        let features = session.features;
+        let (_, logs) = crate::test_log::logged_async(
+            session.setup(&client, &settings, &route, &request, features),
+        )
+        .await;
+        let setup = logs
+            .lines()
+            .find(|line| line.contains(": setup ("))
+            .unwrap();
+        assert!(
+            setup.contains(&format!("child harness {},", child.unwrap_or("none"))),
+            "{setup}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn setup_log_names_the_epoch_prefix_and_statement_stamp() {
     for (epoch, stamp, prefix, printed_stamp) in [
         (None, None, "none", "none"),

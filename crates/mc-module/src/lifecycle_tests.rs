@@ -15,6 +15,9 @@ mod pass_decision_tests;
 #[path = "pass_safety_tests.rs"]
 mod pass_safety_tests;
 
+#[path = "emergency_credit_review_tests.rs"]
+mod emergency_credit_review_tests;
+
 #[path = "ride_cause_tests.rs"]
 mod ride_cause_tests;
 
@@ -95,6 +98,12 @@ mod user_commands_tests;
 
 #[path = "tool_output_tests.rs"]
 mod tool_output_tests;
+
+#[path = "render_failed_tests.rs"]
+mod render_failed_tests;
+
+#[path = "render_failed_review_tests.rs"]
+mod render_failed_review_tests;
 
 #[derive(Default)]
 struct Client {

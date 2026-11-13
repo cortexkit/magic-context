@@ -64,6 +64,7 @@ pub struct Session {
     features: Features,
     preset: crate::catalog::Preset,
     reminder_counter: u64,
+    render_failed: render_failed::State,
     conditions: Conditions,
     limits: crate::reads::Limits,
     window_over_budget: bool,
@@ -401,6 +402,8 @@ struct Before {
     /// it existed and rows of runners that send no reading don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spent_reading: Option<SpentReading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    render_recovery: Option<(bool, Option<u64>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -717,6 +720,7 @@ impl Session {
             preset: crate::catalog::Preset::parse(&request.preset)
                 .unwrap_or(crate::catalog::Preset::Head),
             reminder_counter: 0,
+            render_failed: Default::default(),
             conditions: conditions_of(request),
             limits: crate::reads::Limits::from_setup(request.limits.as_ref()),
             window_over_budget: false,
@@ -925,6 +929,7 @@ impl Session {
             pending_keep: self.pending_keep.clone(),
             head_stale: self.head_stale,
             reminder_counter: self.reminder_counter,
+            render_failed: self.render_failed.clone(),
             version: self.version,
             newest_applied: self.newest_applied,
             reading_stale: self.reading_stale,
@@ -973,6 +978,7 @@ impl Session {
         self.pending_keep = durable.pending_keep;
         self.head_stale = durable.head_stale;
         self.reminder_counter = durable.reminder_counter;
+        self.render_failed = durable.render_failed;
         self.version = durable.version;
         self.newest_applied = durable.newest_applied;
         self.reading_stale = durable.reading_stale;
@@ -1141,12 +1147,13 @@ impl Session {
             .map(|stamp| stamp.to_string())
             .unwrap_or_else(|| "none".into());
         tracing::info!(
-            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
+            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, child harness {}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
             self.key.session,
             self.key.harness,
             request.preset,
             request.model.provider,
             request.model.model,
+            request.child_harness.as_deref().unwrap_or("none"),
             request.context_window,
             request.output_reserve,
             request.applied_view.as_ref().map(|view| view.version),
@@ -1325,6 +1332,7 @@ impl Session {
             .events
             .iter()
             .filter_map(|event| match event {
+                Event::ViewRefused { refusal: ViewRefusal::RenderFailed { .. }, .. } => None,
                 Event::ViewRefused { version, refusal } => {
                     // A runner can take a view and refuse it later, at the
                     // step it would first serve it. The reason is the only
@@ -1339,6 +1347,7 @@ impl Session {
             })
             .collect();
         self.settle_stated(stated, &refused);
+        self.take_render_failures(&notice.events);
         let judged = self.judged_view(stated);
         match standing {
             Standing::Current => self.judge_reading(previous, judged.as_ref()),
@@ -1459,6 +1468,7 @@ impl Session {
             self.index_ready = self.sync_from_changeable(client, newest).await;
         }
         if !self.index_ready {
+            self.log_render_location(&notice.events);
             return None;
         }
         self.log_window_budget();
@@ -1479,7 +1489,13 @@ impl Session {
                 Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
             }
         }
+        let render_repeat =
+            self.settle_render_failures(&notice.events, self.judged_view(stated).as_ref());
+        self.log_render_location(&notice.events);
         self.forget_missing();
+        if render_repeat {
+            return None;
+        }
         // A stale reading changes no pressure state: the emergency latch and
         // the `ctx_keep` request stay as the last current reading left them.
         // Released on a reading that says nothing about usage, the latch would
@@ -1498,6 +1514,9 @@ impl Session {
         // A `ctx_keep` waits while the summaries stop short of the move floor:
         // no view can land it then, and the pass below must still be free to
         // start the summary that reaches the floor again.
+        if self.render_failed.repair_pending {
+            self.fold_due = true;
+        }
         let short_of_move_floor = self.short_of_move_floor();
         if let Some(kept) = self
             .pending_keep
@@ -1511,8 +1530,15 @@ impl Session {
             return None;
         }
         let decision = self.decide_notice(settings);
-        if decision.rebuild {
-            let (view, freed) = self.build_now(client, settings).await;
+        if decision.rebuild || self.render_failed.repair_pending {
+            let (view, freed) = if self.render_failed.repair_pending {
+                // The runner already serves raw history: all queued work may
+                // land in the same rebuild, as on a fold.
+                self.fold_due = true;
+                self.build(settings, None, true, None)
+            } else {
+                self.build_now(client, settings).await
+            };
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -2082,7 +2108,7 @@ impl Session {
     /// sees, applied to the reported usage (`compartment-trigger.ts`,
     /// `estimateProjectedPostDropPercentage`). `None` when nothing would go.
     fn usage_after_drops(&self, settings: &Settings, usage: f64) -> Option<f64> {
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let edited = self.edited(self.cut);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -2856,7 +2882,7 @@ impl Session {
         if self.index.entries().is_empty() {
             return;
         }
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let edited = self.edited(None);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -3345,7 +3371,7 @@ impl Session {
                 .last()
                 .map_or(i64::MAX, |summary| summary.end_message),
             visible_messages: (self.summaries.is_empty() && !self.tools_only).then(|| {
-                let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+                let edited = self.edited(self.cut);
                 self.index
                     .entries()
                     .iter()
@@ -3607,7 +3633,7 @@ impl Session {
             ));
         }
         let first_mid = self.index.entries().first().map(|entry| entry.mid.clone());
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let edited = self.edited(self.cut);
         let stamped = selected.len();
         let mut added = false;
         for (mid, part) in selected {
@@ -4175,6 +4201,48 @@ impl Session {
                 && (priced || !self.emergency_latched))
     }
 
+    /// Credit only what this pass stops sending: queued drops and, when the
+    /// cut moves, the net saving after replacing the old head and cut. Comparing
+    /// total served costs counts overlapping removals once and charges the new
+    /// head instead of treating summarized text as fixed provider overhead.
+    /// A head-only refresh deliberately gets no credit, keeping the history
+    /// accounting change confined to passes that move the cut. Routine cleanup
+    /// is excluded because the emergency selector plans before it.
+    fn emergency_removed_tokens(&self, history: &[EditOp], queued_ops: &[EditOp]) -> u64 {
+        let previous = || self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op);
+        let old_cut = previous().find_map(|op| match op {
+            EditOp::Cut { through } => Some(through),
+            _ => None,
+        });
+        let new_cut = history.iter().find_map(|op| match op {
+            EditOp::Cut { through } => Some(through),
+            _ => None,
+        });
+        // Without a replacement cut, the builder carries the old one until
+        // the last summary is retired; missing history ops do not undo it.
+        let cut_moves = old_cut != new_cut && (new_cut.is_some() || self.summaries.is_empty());
+        if !cut_moves && queued_ops.is_empty() {
+            return 0;
+        }
+        let (before, old_head) = self.served_costs(previous());
+        let (after, new_head) = self.served_costs(
+            previous()
+                .filter(|op| {
+                    !cut_moves || (!head::is_head(op) && !matches!(op, EditOp::Cut { .. }))
+                })
+                .chain(history.iter().filter(|_| cut_moves))
+                .chain(queued_ops.iter()),
+        );
+        if !cut_moves {
+            return before
+                .iter()
+                .map(|(key, old)| old.saturating_sub(after.get(key).copied().unwrap_or(0)))
+                .sum();
+        }
+        (before.values().sum::<u64>() + old_head)
+            .saturating_sub(after.values().sum::<u64>() + new_head)
+    }
+
     /// A pass with permission to rebuild: every lane adds the parts it wants
     /// gone, and one view carries them. `None` when no lane has work.
     ///
@@ -4209,6 +4277,14 @@ impl Session {
         keep: Option<&BTreeSet<lanes::PartKey>>,
         flush: bool,
     ) -> (Option<View>, u64) {
+        // The recovery is saved before handover. Until the runner holds it,
+        // another build must not spend the same immediate attempt again.
+        if self.recovery_in_flight() {
+            if let Some(kept) = keep {
+                self.pending_keep = Some(kept.clone());
+            }
+            return (None, 0);
+        }
         self.next_flush = flush;
         let _timing = crate::notice_cost_timing::span("build.total");
         if !self.index_ready {
@@ -4233,6 +4309,7 @@ impl Session {
             return (None, 0);
         }
         self.next_keep = keep.cloned();
+        self.retire_banned_queued();
         self.app_cause = if over_limit.is_some() {
             "over_limit"
         } else if prefix_changes {
@@ -4253,7 +4330,7 @@ impl Session {
         .into();
         let (history, cut) = self.history_ops(settings, flush);
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
+        let edited = self.edited(cut);
         let (context, usable, cutoff) = Self::lane_context(
             &self.index,
             &edited,
@@ -4335,26 +4412,7 @@ impl Session {
                 .cloned()
                 .collect();
             let (queued_ops, queued_covered) = lanes::drop_ops(&context, &queued_for_emergency);
-            // The provider reading still includes queued reductions landing
-            // on this pass. The TypeScript reference plans before routine
-            // reasoning cleanup, so that lane's removals do not get credit.
-            let removed_tokens = if queued_ops.is_empty() {
-                0
-            } else {
-                let (before, _) =
-                    self.served_costs(self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op));
-                let (after, _) = self.served_costs(
-                    self.latest
-                        .iter()
-                        .flat_map(|v| &v.edits)
-                        .map(|e| &e.op)
-                        .chain(queued_ops.iter()),
-                );
-                before
-                    .iter()
-                    .map(|(key, old)| old.saturating_sub(after.get(key).copied().unwrap_or(0)))
-                    .sum()
-            };
+            let removed_tokens = self.emergency_removed_tokens(&history, &queued_ops);
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
                 request_tokens: over_limit,
@@ -4463,25 +4521,28 @@ impl Session {
         // little by design. What it has lined up for the next pass counts as
         // relief too, or every session would be asked for ctx_keep on its
         // first crossing.
-        let lined_up: Vec<lanes::PartKey> = lanes::age_sweep(
+        let lined_up: Vec<_> = lanes::age_sweep(
             &context,
             bookmark.max(self.reclaim_bookmark),
             notice_bookmark.max(notice_reclaim_bookmark),
             cutoff,
         )
         .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| !covered.contains(key))
+        .filter(|(key, _)| !covered.contains(key))
         .collect();
-        let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
+        let (lined_up_ops, lined_up_covered) = lanes::drop_ops(&context, &lined_up);
+        let renderable_covered = self.renderable_covered(&ops, &covered);
+        let renderable_lined_up = self.renderable_covered(&lined_up_ops, &lined_up_covered);
+        let freed = freed_tokens(&context, &renderable_covered)
+            + freed_tokens(&context, &renderable_lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
         self.next_notice_reclaim_bookmark = self
             .notice_keep
             .then_some(self.notice_reclaim_bookmark.max(notice_bookmark));
-        // A pass whose lanes have no new edit publishes nothing (PD12). A
-        // memory another writer saved changes only `m[1]`: it waits for a
-        // pass that rewrites anyway, as the plugin's history refresh rides a
-        // rewrite and never starts one.
+        // A pass whose lanes have no new edit publishes nothing. A memory
+        // another writer saved changes only the history head's second
+        // message: it waits for a pass that rewrites anyway, as the plugin's
+        // history refresh rides a rewrite and never starts one.
         let history = if !flush
             && ops.is_empty()
             && !prefix_changes
@@ -4529,9 +4590,14 @@ impl Session {
 
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
-    fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+    fn seal(&mut self, mut ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+        if self.recovery_in_flight() {
+            return None;
+        }
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
+        ops.retain(|op| !self.render_failed.excludes(op));
+        let covered = self.renderable_covered(&ops, covered);
         let retire = retired_history(self.summaries.is_empty(), &ops);
         let full = self.with_replaced_outputs(&ops);
         let built = view_builder::next_view_cached(
@@ -4552,12 +4618,24 @@ impl Session {
                     ))
                 .then(|| "strip".into()),
                 signed_floor: self.signed_floor.clone(),
+                force: self.render_failed.repair_pending,
             },
-            retire,
+            |op| retire(op) || self.render_failed.excludes(op),
             &mut self.view_validation,
         );
         match built {
             Ok(Some(view)) => {
+                if self.repeats_failed_edits(&view) {
+                    self.discard_held_view();
+                    return None;
+                }
+                // Provider-rule companion drops of signed reasoning remain
+                // allowed on an excluded message: without them, edits before
+                // that reasoning would produce a request the provider refuses.
+                if self.repeats_failed_reasoning_drop(&view) {
+                    self.discard_held_view();
+                    return None;
+                }
                 // A moved session's view must cut at or after its move floor
                 // (see `move_floor`). One that doesn't stays here, and the
                 // runner keeps serving the view it has.
@@ -4568,7 +4646,7 @@ impl Session {
                 }
                 self.release_move_floor_hold();
                 self.version = version;
-                self.next_covered = covered.to_vec();
+                self.next_covered = covered;
                 Some(view)
             }
             // Nothing new to land: what the pass covered was covered already.
@@ -4578,7 +4656,7 @@ impl Session {
             Ok(None) => {
                 self.commit_bookmark();
                 let flush = std::mem::take(&mut self.next_flush);
-                self.forget_queued(covered);
+                self.forget_queued(&covered);
                 if let Some(next) = self.next_baseline.take() {
                     self.baseline = Some(next);
                     if !flush {
@@ -4595,7 +4673,7 @@ impl Session {
             // on every pass.
             Err(refusal) => {
                 self.commit_bookmark();
-                self.forget_queued(covered);
+                self.forget_queued(&covered);
                 self.failed_parts.extend(covered.iter().cloned());
                 self.next_latch = false;
                 self.next_rearm = false;
@@ -4947,6 +5025,7 @@ impl Session {
             summary_unshown: self.summary_unshown,
             pending_keep: self.next_keep.take(),
             spent_reading: self.spent_reading,
+            render_recovery: Some(self.render_failed.recovery()),
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -4977,12 +5056,14 @@ impl Session {
         self.version = self.version.max(view.version);
         self.spend_reading(view.version);
         self.apply_cut(&view);
+        self.render_failed.recorded(&view);
         self.latest = Some(view);
     }
 
     /// The runner said it holds the unconfirmed view `version` (see
     /// [`Unconfirmed::accepted`]).
     fn runner_holds(&mut self, version: u64) {
+        self.render_failed.held(version);
         if let Some(pending) = self
             .unconfirmed
             .iter_mut()
@@ -5007,6 +5088,7 @@ impl Session {
         self.newest_applied = applied.map_or(0, |applied| applied.version);
         self.app_confirm_head(self.newest_applied);
         if let Some(applied) = applied {
+            self.render_failed.held(applied.version);
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
             if let Some(at) = self
@@ -5152,6 +5234,9 @@ impl Session {
         let undone = self.unconfirmed.split_off(at);
         let first = &undone[0];
         let before = first.before.clone();
+        if let Some(recovery) = before.render_recovery {
+            self.render_failed.restore_recovery(recovery);
+        }
         self.app_projection.dirty.extend(
             self.queued
                 .iter()
@@ -5527,7 +5612,7 @@ impl Session {
         if !self.index_ready {
             return (None, 0);
         }
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let edited = self.edited(None);
         let wanted: Vec<lanes::PartKey> = lanes::image_results(&self.index, &edited)
             .into_iter()
             .filter(|key| !self.image_outputs.contains_key(key))
@@ -5940,6 +6025,7 @@ mod signed_floor;
 #[path = "statement_order.rs"]
 mod statement_order;
 
+pub(crate) mod render_failed;
 mod user_commands;
 pub(crate) mod wrapup;
 pub(crate) use statement_order::epoch_admits;

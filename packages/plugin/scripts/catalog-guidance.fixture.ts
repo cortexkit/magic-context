@@ -13,7 +13,12 @@ const texts = JSON.parse(
     readFileSync(resolve(import.meta.dir, "../../../crates/mc-module/assets/tool_catalog_v1.json"), "utf8"),
 ).texts as Record<string, string>;
 
-/** Render the shared catalog's includes, runtime values and nested conditional sections. */
+/**
+ * Reference evaluator for the GuidanceSet syntax used by the catalog assets:
+ * literal includes, module-fact conditionals and verbatim values. Sharing this
+ * fixture evaluator with the Rust catalog generator prevents syntax drift;
+ * production rendering remains in cortexkit-persona.
+ */
 export function renderCatalogText(
     name: string,
     flags: TextFlags,
@@ -23,40 +28,45 @@ export function renderCatalogText(
     const template = templates[name];
     if (template === undefined) throw new Error(`no text named ${name}`);
     let out = "";
-    const open: { flag: string; keep: boolean }[] = [];
-    const keeping = () => open.every((section) => section.keep);
+    const open: boolean[] = [];
+    const keeping = () => open.every(Boolean);
+    const tokens = /\{\{([\s\S]*?)\}\}|\{%([\s\S]*?)%\}/g;
     let at = 0;
-    while (at < template.length) {
-        const start = template.indexOf("{{", at);
-        if (start < 0) {
-            if (keeping()) out += template.slice(at);
-            break;
+    for (const match of template.matchAll(tokens)) {
+        if (keeping()) out += template.slice(at, match.index);
+        at = match.index + match[0].length;
+        if (match[1] !== undefined) {
+            const value = /^values\.([a-z_]+)$/.exec(match[1].trim());
+            if (!value?.[1] || values[value[1]] === undefined)
+                throw new Error(`${name}: unknown value ${match[1]}`);
+            if (keeping()) out += values[value[1]];
+            continue;
         }
-        if (keeping()) out += template.slice(at, start);
-        const end = template.indexOf("}}", start + 2);
-        if (end < 0) throw new Error(`${name}: unterminated tag`);
-        const tag = template.slice(start + 2, end);
-        at = end + 2;
-        const sigil = tag[0];
-        const body = tag.slice(1);
-        if (sigil === "#" || sigil === "^") {
-            if (!(body in flags)) throw new Error(`${name}: unknown flag ${body}`);
-            const on = flags[body as keyof TextFlags];
-            open.push({ flag: body, keep: sigil === "#" ? on : !on });
-        } else if (sigil === "/") {
-            const section = open.pop();
-            if (section?.flag !== body) throw new Error(`${name}: {{/${body}}} closes nothing open`);
-        } else if (sigil === "$") {
-            const value = values[body];
-            if (value === undefined) throw new Error(`${name}: no value ${body}`);
-            if (keeping()) out += value;
-        } else if (/^[a-z_/]+$/.test(tag)) {
-            if (keeping()) out += renderCatalogText(tag, flags, values, templates);
+        const tag = match[2]?.trim();
+        const condition = /^if (not )?module\.([a-z_]+)$/.exec(tag ?? "");
+        const include = /^include '([a-z0-9-]+)'$/.exec(tag ?? "");
+        if (condition?.[2]) {
+            const flag = condition[2];
+            if (!Object.hasOwn(flags, flag))
+                throw new Error(`${name}: unknown flag ${flag}`);
+            const on = flags[flag as keyof TextFlags];
+            open.push(condition[1] ? !on : on);
+        } else if (tag === "endif") {
+            if (open.pop() === undefined)
+                throw new Error(`${name}: endif closes nothing open`);
+        } else if (include?.[1]) {
+            const logicalName = Object.keys(templates).find(
+                (key) => key.replace(/[/_]/g, "-") === include[1],
+            );
+            if (!logicalName)
+                throw new Error(`${name}: unknown include ${include[1]}`);
+            if (keeping()) out += renderCatalogText(logicalName, flags, values, templates);
         } else {
-            throw new Error(`${name}: malformed tag {{${tag}}}`);
+            throw new Error(`${name}: malformed tag ${match[0]}`);
         }
     }
-    if (open.length > 0) throw new Error(`${name}: section ${open[0]?.flag} is never closed`);
+    if (open.length) throw new Error(`${name}: unclosed conditional`);
+    if (keeping()) out += template.slice(at);
     return out;
 }
 
