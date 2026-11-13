@@ -1,0 +1,16 @@
+## Task: Classify Project Memories
+
+**Project:** /repo
+
+Score EVERY memory in the pool below. Emit one <classify> manifest covering every id.
+
+### Already-classified reference memories (calibrate against these — do NOT re-score them, they are NOT in your output)
+[2] PROJECT_RULES importance=91
+Never push without approval.
+
+### Memory pool to classify
+[1] PROJECT_FACTS (current: importance=0 scope=project shareable=true)
+Use <tags> & Unicode 日本語.
+
+[2] PROJECT_RULES (current: importance=91 scope=universe shareable=false)
+Never push without approval.

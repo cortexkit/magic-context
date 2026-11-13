@@ -1,0 +1,34 @@
+## Task: Classify Project Memories
+
+**Project:** pj-classify
+
+Score EVERY memory in the pool below. Emit one <classify> manifest covering every id.
+
+### Memory pool to classify
+[1] PROJECT_RULES (current: importance=91 scope=project shareable=false)
+Never push without approval.
+
+[2] ARCHITECTURE (current: importance=50 scope=universe shareable=true)
+Use <tags> & Unicode 日本語.
+
+[3] CONSTRAINTS (current: importance=30 scope=ecosystem shareable=false)
+Line one.
+Line two.
+
+[4] CONFIG_VALUES (current: importance=1 scope=project shareable=false)
+Rule 4.
+
+[5] NAMING (current: importance=100 scope=project shareable=false)
+Rule 5.
+
+[6] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+Rule 6.
+
+[7] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+Rule 7.
+
+[8] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+Rule 8.
+
+[9] PROJECT_RULES (current: importance=50 scope=project shareable=false)
+Rule 9.
