@@ -1501,7 +1501,7 @@ impl CurateBatch {
             .map(|id| snapshot(tx, *id))
             .collect::<rusqlite::Result<Vec<_>>>()?;
         // The survivor keeps the highest importance among what it replaces
-        // until classify scores its new text.
+        // until the classify-memories task scores its new text.
         let importance: Option<i64> = tx.query_row(
             "SELECT MAX(importance) FROM memories WHERE id IN (SELECT value FROM json_each(?1))",
             [serde_json::to_string(&ids).expect("ids serialize")],

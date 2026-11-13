@@ -410,9 +410,9 @@ pub fn plan(decision: &Revision, context: &Context<'_>) -> Result<Plan, &'static
 
 /// The first concrete token (a path, a code name, a number with its unit,
 /// a date) that one of `sources` states and `kept` no longer does. A
-/// rewrite that returns `None` keeps every concrete detail of its sources;
-/// the historian's merges and the dreamer's curate changes both refuse one
-/// that doesn't.
+/// rewrite that returns `None` keeps every concrete detail of its sources.
+/// The summarizer's second-turn merges and the dreamer's curate changes
+/// both refuse a rewrite that drops one.
 pub fn dropped_token<'a>(sources: impl IntoIterator<Item = &'a str>, kept: &str) -> Option<String> {
     let kept = scan_concrete_tokens(kept);
     sources
