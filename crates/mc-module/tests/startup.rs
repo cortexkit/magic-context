@@ -53,21 +53,41 @@ fn probes_need_no_connection_and_create_no_files() {
 }
 
 #[test]
-fn startup_and_move_in_refuse_a_missing_context_db() {
+fn move_in_refuses_a_missing_context_db() {
     let root = tempfile::tempdir().unwrap();
-    for args in [vec!["--subc", "missing-connection.json"], vec!["move-in"]] {
-        let output = command(root.path()).args(args).output().unwrap();
-        assert!(!output.status.success());
-        assert!(stderr(&output).contains("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc."), "{}", stderr(&output));
-        assert!(!root
-            .path()
-            .join("data/cortexkit/magic-context/context.db")
-            .exists());
-        assert!(!root
-            .path()
-            .join("data/cortexkit/magic-context/mode3.db")
-            .exists());
-    }
+    let output = command(root.path()).arg("move-in").output().unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc."), "{}", stderr(&output));
+    assert!(!root
+        .path()
+        .join("data/cortexkit/magic-context/context.db")
+        .exists());
+}
+
+/// From 0.50 the module owns the store: a machine without one gets a new one
+/// at the module's schema version when ck-mc starts.
+#[test]
+fn startup_creates_a_missing_context_db() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data/cortexkit/magic-context");
+    // The missing connection ends startup after the stores are ready.
+    let output = command(root.path())
+        .args(["--subc", "missing-connection.json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let store = rusqlite::Connection::open(data.join("context.db")).unwrap();
+    let version: i64 = store
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        version,
+        i64::from(mc_module::context_db::SCHEMA_VERSION),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

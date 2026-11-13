@@ -125,6 +125,11 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
     let context_path = context_db_path();
+    // A move installs a head into the store its summaries already live in;
+    // a machine without one has nothing to move into.
+    if !context_path.exists() {
+        return Err(MISSING_STORE.into());
+    }
     let db = open_context_db(&context_path)?;
     let store = Store::open(&store_path(&context_path))?;
     let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
@@ -209,7 +214,7 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
     let session = session.unwrap_or_else(|| usage());
     let path = context_db_path();
     if !path.try_exists()? {
-        return Err("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.".into());
+        return Err(MISSING_STORE.into());
     }
     // ContextDb startup writes to the shared store. Move preparation needs
     // this read without module startup or opening mode3.db.
@@ -223,6 +228,9 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     Ok(())
 }
+
+/// The refusal of a command that needs an existing store.
+const MISSING_STORE: &str = "Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.";
 
 fn open_context_db(path: &std::path::Path) -> Result<ContextDb, Box<dyn Error + Send + Sync>> {
     // From 0.50 the module owns the store: a machine without one gets a new
