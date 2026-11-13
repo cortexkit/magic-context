@@ -49,6 +49,12 @@ const MAX_ANCHORS: usize = 30;
 pub(crate) const BATCH_SIZE: usize = 100;
 /// The importance a memory without one is shown and ranked at.
 const DEFAULT_IMPORTANCE: i64 = 50;
+/// The lowest importance a safety-critical memory may hold. These are rules
+/// whose violation can't be taken back, and they work only while they stay
+/// in the memory block, which drops low importance first when it is over
+/// budget. Every writer that sets importance keeps a safety-critical memory
+/// at or above this.
+pub(crate) const SAFETY_CRITICAL_MIN_IMPORTANCE: i64 = 80;
 
 /// One live project memory as the task reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -545,11 +551,18 @@ impl ClassifyBatch {
             // Nothing in ck-mc can tell whether a memory's text is safe to
             // share, so a proposal may only withdraw shareability.
             let withheld = proposal.shareable == Some(true) && !was.shareable;
+            let safety_critical = proposal.safety_critical.or(was.safety_critical);
+            let mut importance = proposal.importance.or(was.importance);
+            if safety_critical == Some(true) {
+                importance = Some(importance.map_or(SAFETY_CRITICAL_MIN_IMPORTANCE, |score| {
+                    score.max(SAFETY_CRITICAL_MIN_IMPORTANCE)
+                }));
+            }
             let next = Values {
-                importance: proposal.importance.or(was.importance),
+                importance,
                 scope: proposal.scope.clone().unwrap_or_else(|| was.scope.clone()),
                 shareable: was.shareable && proposal.shareable != Some(false),
-                safety_critical: proposal.safety_critical.or(was.safety_critical),
+                safety_critical,
             };
             let changed = next != *was;
             if current.classified && !changed {
@@ -636,22 +649,25 @@ impl ClassifyBatch {
                     evidence: json!([]),
                 },
             )?;
-            // The journal keeps the whole decision, writer included, the way
-            // the other history writers leave it for the undo view.
-            let decision = history_json(&decision);
+            // The journal row is written the way the other history writers
+            // write theirs: the receipt first, then the whole decision,
+            // writer included, in both snapshot columns, where the undo view
+            // reads it.
             tx.execute(
-                "INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at,
-                                            before_json, after_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                "INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     self.project,
                     key,
                     OPERATION,
                     json!({"state": "applied", "reason": OPERATION, "memoryIds": changed_ids})
                         .to_string(),
-                    now,
-                    decision
+                    now
                 ],
+            )?;
+            tx.execute(
+                "UPDATE memory_journal SET before_json = ?2, after_json = ?2 WHERE decision_key = ?1",
+                params![key, history_json(&decision)],
             )?;
         }
         Ok(applied)

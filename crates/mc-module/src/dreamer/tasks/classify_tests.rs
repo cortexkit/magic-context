@@ -9,6 +9,7 @@ use crate::context_migrations::frozen_category_id;
 use crate::count::Counter;
 use crate::memory_profile::{prompt_profile, FRAMES};
 use crate::memory_writes::normalized_hash;
+use crate::summary::two_pass::{applier, gates};
 
 const PROJECT: &str = "pj-classify";
 
@@ -967,4 +968,119 @@ fn applying_leaves_a_row_the_undo_history_cannot_record_unchanged() {
         (Some(50), "project".into(), false, None, false, 1)
     );
     assert!(store.history().is_empty());
+}
+
+#[test]
+fn applying_keeps_a_safety_critical_memory_at_the_importance_floor() {
+    let mut rows: Vec<Row> = (1..=10).map(row).collect();
+    rows[1].importance = None;
+    rows[2].importance = Some(30);
+    rows[2].safety_critical = Some(true);
+    let store = store(&rows);
+    let batch = &store.batches()[0];
+    let mut entries = vec![
+        // Flagged with a score below the floor.
+        (
+            1,
+            r#"importance="40" scope="project" shareable="false" safety_critical="true""#,
+        ),
+        // Flagged with no score, on a row that has none.
+        (2, r#"scope="project" safety_critical="true""#),
+        // Already flagged, and the reply confirms its low score.
+        (3, r#"importance="30" scope="project" shareable="false""#),
+        // Flagged above the floor.
+        (4, r#"importance="95" safety_critical="true""#),
+        // Not safety-critical: no floor.
+        (5, r#"importance="20" safety_critical="false""#),
+    ];
+    entries.extend(confirmed(6));
+    let applied = store.apply(batch, &manifest(&entries), 7);
+    assert_eq!(applied.applied, 10);
+    assert_eq!(
+        store.stored(1),
+        (Some(80), "project".into(), false, Some(true), true, 2)
+    );
+    assert_eq!(
+        store.stored(2),
+        (Some(80), "project".into(), false, Some(true), true, 2)
+    );
+    assert_eq!(
+        store.stored(3),
+        (Some(80), "project".into(), false, Some(true), true, 2)
+    );
+    assert_eq!(
+        store.stored(4),
+        (Some(95), "project".into(), false, Some(true), true, 2)
+    );
+    assert_eq!(
+        store.stored(5),
+        (Some(20), "project".into(), false, Some(false), true, 2)
+    );
+}
+
+#[test]
+fn a_classification_makes_a_second_turn_edit_read_before_it_stale() {
+    let store = apply_pool();
+    store.execute(
+        "INSERT INTO memory_publications(publication_id, project_path, source_session_id, commit_order, committed_at)
+             VALUES ('publication', 'pj-classify', 'session', 1, 0);
+         INSERT INTO memory_pending_facts(id, project_path, publication_id, fact_index, category, content)
+             VALUES (1, 'pj-classify', 'publication', 0, 'PROJECT_RULES', 'Rule 1, revised.');",
+    );
+    // The summarizer's second turn decides to rewrite memory 1, having read
+    // it at revision `read`.
+    let edit = |key: &str, read: i64| gates::Revision {
+        key: key.into(),
+        action: "edit".into(),
+        project: PROJECT.into(),
+        expected: vec![(1, read)],
+        survivor: 1,
+        final_text: "Rule 1, revised.".into(),
+        changes: Vec::new(),
+        added: Vec::new(),
+        expires: None,
+    };
+    let plan = gates::Plan {
+        checks: Vec::new(),
+        kept: Vec::new(),
+        spans: Vec::new(),
+    };
+    let commit = |key: &str, read: i64| {
+        store
+            .db
+            .with_connection(|conn| {
+                applier::commit_revision(conn, &edit(key, read), &plan, 1, None, None)
+            })
+            .unwrap()
+    };
+    let content = || -> String {
+        store
+            .db
+            .with_connection(|conn| {
+                conn.query_row("SELECT content FROM memories WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap()
+    };
+    // A classification lands between the read and the commit.
+    let batch = &store.batches()[0];
+    let mut entries = vec![(1, r#"importance="90""#)];
+    entries.extend(confirmed(2));
+    store.apply(batch, &manifest(&entries), 7);
+
+    let stale = commit("turn-two:stale", 1);
+    assert_eq!(
+        (stale.state.as_str(), stale.reason.as_str()),
+        ("retryable", "cas_loss")
+    );
+    assert_eq!(content(), "Rule 1.");
+    assert_eq!(
+        store.stored(1),
+        (Some(90), "project".into(), true, None, true, 2)
+    );
+    // Read at the revision the classification left, the same edit applies.
+    let fresh = commit("turn-two:fresh", 2);
+    assert_eq!(fresh.state, "applied");
+    assert_eq!(content(), "Rule 1, revised.");
 }

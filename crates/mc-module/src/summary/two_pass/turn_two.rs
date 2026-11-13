@@ -519,9 +519,12 @@ fn record_scores(conn: &Connection, sent: &[i64], scores: &[Score]) -> rusqlite:
             continue;
         }
         let importance = if safety {
-            "CASE WHEN safety_critical = 1 THEN MAX(80, ?1) ELSE ?1 END"
+            format!(
+                "CASE WHEN safety_critical = 1 THEN MAX({}, ?1) ELSE ?1 END",
+                crate::dreamer::tasks::classify::SAFETY_CRITICAL_MIN_IMPORTANCE
+            )
         } else {
-            "?1"
+            "?1".to_owned()
         };
         conn.execute(
             &format!(
