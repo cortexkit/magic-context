@@ -1,4 +1,4 @@
-Output ONE XML manifest and NOTHING else — no narration or reasoning. Open <verify> before investigating and emit each complete verdict immediately before investigating the next memory, so interruption preserves finished work. Close </verify> when done:
+Investigate with the tools first. Then make your final message ONE complete XML manifest with a verdict for every memory, and NOTHING else — no narration or reasoning. Only the final message is read, so a manifest started in an earlier message is lost:
 <verify>
 <verified id="N" files="path/a.ts,path/b.ts"/>
 <update id="M" files="path/c.ts">corrected present-tense content</update>

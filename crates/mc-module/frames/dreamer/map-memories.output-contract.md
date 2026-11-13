@@ -1,4 +1,4 @@
-Output ONE XML manifest and NOTHING else — no narration, no per-memory commentary, no reasoning. Open <mappings> before investigating. Emit each <memory> element as soon as you decide its mapping, before investigating the next memory, so an interruption cannot lose completed work. Close </mappings> when finished:
+Investigate with the tools first. Then make your final message ONE complete XML manifest covering every memory you decided, and NOTHING else — no narration, no per-memory commentary, no reasoning. Only the final message is read, so a manifest started in an earlier message is lost:
 <mappings>
 <memory id="N" files="path/a.ts,path/b.ts"/>
 <memory id="M" independent="true"/>

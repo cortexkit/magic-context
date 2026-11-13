@@ -937,6 +937,30 @@
       "rendered": [
         "- `category`: the one user category tag, from the list above, that the memory belongs to. For an update, give the memory's current category, unless it is shown as `UNSORTED`: such a memory was kept from an earlier version without a category, so give the category it belongs to."
       ]
+    },
+    {
+      "document": "dreamer/swe:map-memories/system",
+      "class": "ruling",
+      "ruling": "Dreamer task rule (Ufuk, ask_eb52c10882a5e248) and cleanup design §2 (03b-cleanup-tasks.md): a task hands back one list in its final reply, and the runner returns only the final message's text.",
+      "why": "0.49 told code-reading tasks to stream their manifest across messages because the plugin read the whole transcript; in 0.50 only the final message reaches the task, so a streamed manifest would be lost.",
+      "today": [
+        "Output ONE XML manifest and NOTHING else — no narration, no per-memory commentary, no reasoning. Open <mappings> before investigating. Emit each <memory> element as soon as you decide its mapping, before investigating the next memory, so an interruption cannot lose completed work. Close </mappings> when finished:"
+      ],
+      "rendered": [
+        "Investigate with the tools first. Then make your final message ONE complete XML manifest covering every memory you decided, and NOTHING else — no narration, no per-memory commentary, no reasoning. Only the final message is read, so a manifest started in an earlier message is lost:"
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "Dreamer task rule (Ufuk, ask_eb52c10882a5e248) and cleanup design §2 (03b-cleanup-tasks.md): a task hands back one list in its final reply, and the runner returns only the final message's text.",
+      "why": "0.49 told code-reading tasks to stream their manifest across messages because the plugin read the whole transcript; in 0.50 only the final message reaches the task, so a streamed manifest would be lost.",
+      "today": [
+        "Output ONE XML manifest and NOTHING else — no narration or reasoning. Open <verify> before investigating and emit each complete verdict immediately before investigating the next memory, so interruption preserves finished work. Close </verify> when done:"
+      ],
+      "rendered": [
+        "Investigate with the tools first. Then make your final message ONE complete XML manifest with a verdict for every memory, and NOTHING else — no narration or reasoning. Only the final message is read, so a manifest started in an earlier message is lost:"
+      ]
     }
   ]
 }
