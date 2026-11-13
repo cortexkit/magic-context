@@ -2,9 +2,9 @@
   "external": [],
   "items": [
     {
-      "digest": "934febcb846bfd44e57448611f843faa33123a9d95f2448d2efae217edee86f6",
+      "digest": "b4888b1e45e348ee18aff6a288d537225282d3e4d12c0b6ff422ace3ab6266f5",
       "endOffset": 2412292,
-      "format": "mc-agent-data-session/1+context.db/106",
+      "format": "mc-agent-data-session/1+context.db/107",
       "frozen": true,
       "ref": "wire-moved",
       "ref_kind": "broca-session",
@@ -12,9 +12,9 @@
       "stream": "reserved:magic-context"
     },
     {
-      "digest": "7940bd136a2ed174fd7abba97db91ae682f0e097d1b485dce9595463bd1a6a4c",
+      "digest": "2562d07db9035c0f8dda06523bdb84ccd4a1b5a9c86458378bbdd5920f3dd470",
       "endOffset": 1028,
-      "format": "mc-agent-data-session/1+context.db/106",
+      "format": "mc-agent-data-session/1+context.db/107",
       "frozen": true,
       "ref": "wire-empty",
       "ref_kind": "broca-session",
