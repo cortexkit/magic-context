@@ -961,6 +961,31 @@
       "rendered": [
         "Investigate with the tools first. Then make your final message ONE complete XML manifest with a verdict for every memory, and NOTHING else — no narration or reasoning. Only the final message is read, so a manifest started in an earlier message is lost:"
       ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk's memory-profiles approval (ask_4407e8a9759e5d29): the existing user memories become global memories through the global review's one-time reclassification into base or coding categories (memory-profiles-final-shape.md §11).",
+      "why": "Lines moved from 0.49 have no category (shown as UNSORTED); refile lets the review file each one without rewriting its text. Consumed candidates are marked consumed, not deleted, so the contract no longer says deleted.",
+      "today": [],
+      "rendered": [
+        "  \"refile\": [",
+        "    { \"memory_id\": 9, \"category\": \"DEV_ENVIRONMENT\" }",
+        "  ],"
+      ]
+    },
+    {
+      "document": "dreamer/base:review-user-memories/user",
+      "class": "ruling",
+      "ruling": "Ufuk's memory-profiles approval (ask_4407e8a9759e5d29): the existing user memories become global memories through the global review's one-time reclassification into base or coding categories (memory-profiles-final-shape.md §11).",
+      "why": "Lines moved from 0.49 have no category (shown as UNSORTED); refile lets the review file each one without rewriting its text. Consumed candidates are marked consumed, not deleted, so the contract no longer says deleted.",
+      "today": [
+        "- `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they will be deleted from the candidate pool"
+      ],
+      "rendered": [
+        "- `refile`: every memory shown as `UNSORTED` that you neither update nor dismiss, each with the one user category it belongs to. Its text stays as it is. Name each `UNSORTED` memory exactly once, in `update_existing`, `dismiss_existing` or `refile`.",
+        "- `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they leave the candidate pool"
+      ]
     }
   ]
 }
