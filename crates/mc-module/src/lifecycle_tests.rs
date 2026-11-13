@@ -102,6 +102,9 @@ mod tool_output_tests;
 #[path = "render_failed_tests.rs"]
 mod render_failed_tests;
 
+#[path = "render_failed_review_tests.rs"]
+mod render_failed_review_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
