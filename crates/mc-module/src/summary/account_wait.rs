@@ -1,4 +1,4 @@
-//! A runner's "wait for an account" answer to a summarizer send.
+//! A runner's account or person-owned wait during a summarizer send.
 //!
 //! A runner that picks the provider account when a send arrives refuses the
 //! send with `account_limit_exhausted` or `account_selection_refused` when no
@@ -17,12 +17,15 @@
 //! The wait lasts the runner's named time, at least a minute and at most six
 //! hours after the refusal, so a hint of zero or a stale reset cannot start
 //! a new run on every notice.
+//! A typed person-owned wait also uses this machinery, but always with the
+//! default duration: a sign-in or approval has no known completion time.
 //!
 //! A wait never sends the same prompt into a child whose run began, which
 //! would put it in that child's transcript twice: the summary's first turn
 //! starts again later in a new child, and a second turn or fact check gives
 //! its facts back to a later second turn in that run's own child.
 
+use cortexkit_role_llm_runner::awaits::AwaitParty;
 use cortexkit_role_llm_runner::errors;
 use cortexkit_role_llm_runner::run::{RunError, RunResult};
 use serde_json::Value;
@@ -164,6 +167,41 @@ impl AccountWait {
         })
     }
 
+    /// A person cannot be given a retry deadline. Reuse the bounded default
+    /// account wait so a sign-in never spends a summary attempt.
+    pub fn of_person(run: &RunResult, send: SendKind, now_ms: i64) -> Option<Self> {
+        (run.awaits.as_ref()?.party == AwaitParty::Person).then(|| Self {
+            code: run
+                .error
+                .as_ref()
+                .map_or_else(|| "person".to_owned(), |error| error.provider_code.clone()),
+            until_ms: until(now_ms, None, None),
+            at_ms: now_ms,
+            send,
+        })
+    }
+
+    /// A caller-owned transient that cannot be retried in this call still
+    /// names a floor for the next summary, rather than a failed attempt.
+    pub fn retry_at(next_ms: u64, send: SendKind, now_ms: i64) -> Self {
+        Self {
+            code: errors::TRANSIENT.to_owned(),
+            until_ms: until(now_ms, None, Some(next_ms)),
+            at_ms: now_ms,
+            send,
+        }
+    }
+
+    pub fn of_ended_run(run: &RunResult, send: SendKind, now_ms: i64) -> Option<Self> {
+        Self::of_person(run, send, now_ms).or_else(|| {
+            let mut wait = Self::of_run_error(run.error.as_ref()?, send, now_ms)?;
+            if let Some(next) = caller_next_ms(run) {
+                wait.until_ms = until(now_ms, None, Some(next));
+            }
+            Some(wait)
+        })
+    }
+
     /// A pause still present at the caller's deadline. The runner's exact
     /// resume floor takes priority over the error's retry hint or reset.
     /// Older runners name only the provider code, so keep accepting it.
@@ -173,6 +211,9 @@ impl AccountWait {
         send: SendKind,
         now_ms: i64,
     ) -> Option<Self> {
+        if let Some(wait) = Self::of_person(paused, send, now_ms) {
+            return Some(wait);
+        }
         let fallback = paused
             .error
             .as_ref()
@@ -193,12 +234,21 @@ impl AccountWait {
             })
         });
         wait.map(|mut wait| {
-            if let Some(resume) = resume_not_before_ms {
+            if let Some(resume) = caller_next_ms(paused).or(resume_not_before_ms) {
                 wait.until_ms = until(now_ms, None, Some(resume));
             }
             wait
         })
     }
+}
+
+/// Only a caller-owned wait changes the caller's retry floor. Runner-owned
+/// times describe work the runner will do, not permission to send again.
+pub fn caller_next_ms(run: &RunResult) -> Option<u64> {
+    run.awaits
+        .as_ref()
+        .filter(|wait| wait.party == AwaitParty::Caller)
+        .and_then(|wait| wait.next_ms)
 }
 
 /// When summaries may be sent again after a refusal received at `now_ms`.

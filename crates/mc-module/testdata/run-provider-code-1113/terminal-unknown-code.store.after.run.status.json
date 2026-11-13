@@ -1,0 +1,1 @@
+{"state":"error","awaits":{"party":"nobody","since_ms":1794531209012},"undelivered_steers":[],"usage":{"steps":0,"unreported_steps":0,"by_model":[]},"retries_used":0,"error":{"class":"permanent","message":"synthetic codeless provider refusal","status":400,"provider_code":"provider_error","provider_subcode":"upstream_detail","provider_details":{}}}

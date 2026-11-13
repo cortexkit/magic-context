@@ -1,0 +1,1 @@
+{"auth_selection":"oauth:stub:synthetic","usage":{"steps":0,"unreported_steps":0,"by_model":[]},"run_id":"r1","state":"paused","reason":"auth_required","error":{"class":"auth_required","message":"Sign in to the synthetic account again","provider_code":"needs_reauth","credential_id":"oauth:stub:synthetic"}}

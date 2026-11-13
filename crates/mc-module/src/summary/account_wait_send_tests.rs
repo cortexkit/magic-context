@@ -427,7 +427,7 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
         );
         let expected: Vec<String> = if cancels { vec!["run".into()] } else { vec![] };
         assert_eq!(*client.cancelled.lock().unwrap(), expected);
-        assert!(client.status_reads.lock().unwrap().is_empty());
+        assert_eq!(*client.status_reads.lock().unwrap(), vec!["run"]);
     }
 }
 
