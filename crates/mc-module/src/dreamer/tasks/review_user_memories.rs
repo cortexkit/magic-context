@@ -58,8 +58,9 @@ pub(crate) const PROMOTION_THRESHOLD: usize = 3;
 pub(crate) const UNSORTED: &str = "UNSORTED";
 /// How much of a session id an observation shows, as the 0.49 review did.
 const SESSION_CHARS: usize = 12;
-/// What a promoted memory records as its source, as the lines the 0.50
-/// migration moved from the 0.49 review do.
+/// What a promoted memory records as its source: the same value the
+/// user-profile lines moved from the 0.49 plugin carry, since this task is
+/// the 0.49 review's successor.
 const SOURCE_TYPE: &str = "user-review";
 
 /// A user category the review may file a global memory under.
@@ -813,9 +814,9 @@ impl ReviewBatch {
             None,
         )?;
         // The writer's default importance is no judgment of the memory: it
-        // stays unscored until the classifier scores it. The observations
-        // behind it are kept the way the 0.50 migration kept them for the
-        // 0.49 review's lines.
+        // stays unscored until the classifier scores it. The ids of the
+        // observations behind it go in its metadata under the key the
+        // user-profile lines moved from 0.49 use for theirs.
         tx.execute(
             "UPDATE memories SET importance = NULL, metadata_json = ?2 WHERE id = ?1",
             params![
