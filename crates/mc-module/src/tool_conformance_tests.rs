@@ -243,6 +243,9 @@ async fn check(preset: &'static str, compacting: bool) {
         "catalog_listed_presets_served",
         "system_text_digests_match_text",
         "system_text_preflight_digest_stable",
+        // Added in tool-provider-conformance 0.15.8: ck-mc doesn't declare
+        // system-text facts, so the requests it is sent carry none.
+        "system_text_facts_legacy_omitted",
         "terminal_frame_on_success",
         "terminal_frame_on_refusal",
         "call_key_malformed_refused",
