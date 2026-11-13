@@ -12,6 +12,9 @@ mod compartment_scores;
 #[path = "historian_telemetry.rs"]
 mod historian_telemetry;
 pub use historian_telemetry::{count_historian_runs, get_subagent_invocations, SubagentInvocation};
+#[cfg(test)]
+#[path = "../tests/support/context_db.rs"]
+mod schema_fixture;
 
 pub fn resolve_db_path() -> Option<PathBuf> {
     // Keep the dashboard on the same harness-side database as the plugin. An
@@ -4729,22 +4732,32 @@ fn get_project_identities(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlit
     // UNION only the project-path sources that exist. The dashboard opens the
     // DB read-only and never migrates, so a DB older than the Dreamer V2 schema
     // lacks task_schedule_state / dream_runs; an unconditional UNION would throw
-    // "no such table" and break the Projects page instead of degrading.
-    let mut sources = vec!["SELECT project_path FROM memories".to_string()];
+    // "no such table" and break the Projects page instead of degrading. On a
+    // store whose memories this dashboard doesn't read, projects come from the
+    // other sources alone.
+    let mut sources = Vec::new();
+    if crate::db_capabilities::memory_store_ready(conn) {
+        sources.push(
+            "SELECT owner_id AS project_path FROM memories WHERE level = 'project'".to_string(),
+        );
+    }
     if table_exists(conn, "task_schedule_state") {
         sources.push("SELECT project_path FROM task_schedule_state".to_string());
     }
     if table_exists(conn, "dream_runs") {
         sources.push("SELECT project_path FROM dream_runs".to_string());
     }
-    let union_sql = format!(
-        "{} ORDER BY project_path",
-        sources.join("\n         UNION\n         ")
-    );
-    let mut stmt = conn.prepare(&union_sql)?;
-    let stored_values: Vec<String> = stmt
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let stored_values: Vec<String> = if sources.is_empty() {
+        Vec::new()
+    } else {
+        let union_sql = format!(
+            "{} ORDER BY project_path",
+            sources.join("\n         UNION\n         ")
+        );
+        let mut stmt = conn.prepare(&union_sql)?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
     let mut identity_set: HashSet<String> = stored_values
         .into_iter()
         .map(|value| normalize_stored_project_path(&value))
@@ -4819,11 +4832,12 @@ fn enumerate_memory_projects_with_names(
     conn: &Connection,
     names: &crate::project_names::ProjectNames,
 ) -> Result<Vec<ProjectRow>, rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT project_path
+        "SELECT DISTINCT owner_id
          FROM memories
-         WHERE status = 'active'
-         ORDER BY project_path",
+         WHERE level = 'project' AND status = 'active'
+         ORDER BY owner_id",
     )?;
     let memory_project_values: HashSet<String> = stmt
         .query_map([], |row| row.get(0))?
@@ -5257,17 +5271,24 @@ fn workspace_name_by_identity(conn: &Connection) -> HashMap<String, String> {
     map
 }
 
-// ── Query implementations ─────────────────────────────────────
+// ── Query implementations ─────────────────────────────────────────
 
-/// Presence flag for list queries: at least one row in `memory_embeddings` for this
-/// memory. Uses EXISTS instead of LEFT JOIN so a memory with multiple model-specific
-/// embedding rows still appears once in the result set.
-const HAS_EMBEDDING_SELECT: &str =
-    "(EXISTS (SELECT 1 FROM memory_embeddings me WHERE me.memory_id = m.id)) AS has_embedding";
+/// The columns `map_memory_row` reads, in its order. A memory's owner is the
+/// project it shows under, and the tag it was written under is its category.
+/// `has_embedding` uses EXISTS instead of LEFT JOIN so a memory with multiple
+/// model-specific embedding rows still appears once in the result set.
+const MEMORY_SELECT: &str = "m.id, m.owner_id, m.origin_category, m.content, m.normalized_hash,
+    m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
+    m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
+    m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
+    m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+    m.importance, m.scope, m.shareable,
+    (EXISTS (SELECT 1 FROM memory_embeddings me WHERE me.memory_id = m.id)) AS has_embedding,
+    m.revision";
 
 /// Resolve a project filter value (an identity like `git:<hash>` / `dir:<sha>`,
-/// or a legacy raw filesystem path) into the set of `memories.project_path`
-/// values that should be matched against.
+/// or a legacy raw filesystem path) into the set of project-memory owners
+/// (`memories.owner_id`) that should be matched against.
 ///
 /// When a project identity is stored directly, which is the common case, it
 /// matches exactly. Older rows that still contain raw filesystem paths are
@@ -5281,10 +5302,14 @@ pub(crate) fn resolve_paths_for_memory_filter(
     conn: &Connection,
     project_filter: &str,
 ) -> Result<Vec<String>, rusqlite::Error> {
-    resolve_paths_for_table_filter(conn, "memories", project_filter)
+    resolve_stored_paths(
+        conn,
+        "SELECT DISTINCT owner_id FROM memories WHERE level = 'project'",
+        project_filter,
+    )
 }
 
-/// Count the ACTIVE (active + permanent) memories whose stored `project_path`
+/// Count the ACTIVE (active + permanent) project memories whose owner
 /// normalizes to `member_identity`. Archived/superseded rows are excluded — the
 /// project card and workspace member count both want the live, injectable pool
 /// (matching the Memories tab's "N active" headline), not the full historical
@@ -5293,6 +5318,7 @@ pub fn count_memories_matching_identity(
     conn: &Connection,
     member_identity: &str,
 ) -> Result<i64, rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let paths = resolve_paths_for_memory_filter(conn, member_identity)?;
     if paths.is_empty() {
         return Ok(0);
@@ -5300,7 +5326,7 @@ pub fn count_memories_matching_identity(
     let placeholders = build_in_placeholders(paths.len(), 1);
     let sql = format!(
         "SELECT COUNT(*) FROM memories
-         WHERE status IN ('active', 'permanent') AND project_path IN ({})",
+         WHERE level = 'project' AND status IN ('active', 'permanent') AND owner_id IN ({})",
         placeholders
     );
     conn.query_row(&sql, rusqlite::params_from_iter(paths.iter()), |r| r.get(0))
@@ -5324,7 +5350,21 @@ fn resolve_paths_for_table_filter(
     // `table` is a fixed internal literal (never user input), so interpolating
     // it into the DISTINCT query is safe. The set is small (one row per project
     // that ever wrote to the table), bounded by project count, not row count.
-    let mut stmt = conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
+    resolve_stored_paths(
+        conn,
+        &format!("SELECT DISTINCT project_path FROM {table}"),
+        project_filter,
+    )
+}
+
+/// The stored project values `distinct_sql` returns that normalize to the same
+/// identity as `project_filter`, or the raw filter when none does.
+fn resolve_stored_paths(
+    conn: &Connection,
+    distinct_sql: &str,
+    project_filter: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(distinct_sql)?;
     // Read as Option<String>: some tables (smart_notes, project_key_files) can
     // hold legacy rows with a NULL project_path. A non-Option get() throws
     // "Invalid column type Null" and crashes the whole session-detail view. A
@@ -5525,30 +5565,7 @@ fn query_memories(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Memory>, rusqlite::Error> {
-    // The dashboard opens the DB read-only and never migrates it (the plugin owns
-    // the schema lifecycle). A new dashboard against a pre-v44 plugin DB lacks the
-    // classify columns — select literal defaults instead so the viewer degrades
-    // rather than erroring. Mapper indices 21/22/23 stay stable either way.
-    let revision_select = if crate::db_capabilities::get(conn)?.memory_revision {
-        "m.revision"
-    } else {
-        "1 AS revision"
-    };
-    let classify_cols = if memories_has_classify_columns(conn) {
-        "m.importance, m.scope, m.shareable,"
-    } else {
-        "50 AS importance, 'project' AS scope, 0 AS shareable,"
-    };
-
-    // Degrade gracefully on a pre-vN / never-initialized DB that has no
-    // `memory_embeddings` table: the EXISTS subquery would error the whole query
-    // (the dashboard opens DBs read-only and never creates tables). Mirror the
-    // classify-column degradation and report no embeddings instead of crashing.
-    let has_embedding_select = if table_exists(conn, "memory_embeddings") {
-        HAS_EMBEDDING_SELECT
-    } else {
-        "0 AS has_embedding"
-    };
+    crate::db_capabilities::require_memory_store_sql(conn)?;
 
     let raw_search = search_query.unwrap_or("").trim().to_string();
     let has_search = !raw_search.is_empty();
@@ -5576,8 +5593,9 @@ fn query_memories(
     let use_like_fallback = has_search && (!use_fts || raw_search.len() < 3);
     let like_pattern = like_contains_pattern(&raw_search);
 
-    // Build WHERE clauses and params dynamically
-    let mut conditions = Vec::new();
+    // Build WHERE clauses and params dynamically. Only project memories are
+    // listed: a global memory is a user memory, which has its own screen.
+    let mut conditions = vec!["m.level = 'project'".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if use_fts && !use_like_fallback {
@@ -5602,7 +5620,7 @@ fn query_memories(
             params.push(Box::new(path.clone()));
         }
         let placeholders = build_in_placeholders(resolved_paths.len(), start_idx);
-        conditions.push(format!("m.project_path IN ({})", placeholders));
+        conditions.push(format!("m.owner_id IN ({})", placeholders));
     } else if workspace_filter.is_some() || project_filter.is_some() {
         // A filter WAS requested but resolved to zero paths (e.g. a workspace
         // with no members). Force an empty result — falling through to "no
@@ -5620,7 +5638,7 @@ fn query_memories(
     }
     if let Some(c) = category_filter {
         params.push(Box::new(c.to_string()));
-        conditions.push(format!("m.category = ?{}", params.len()));
+        conditions.push(format!("m.origin_category = ?{}", params.len()));
     }
     // Position in `params` of an excluded ID. The FTS fallback check below
     // binds NULL there instead: `m.id IS NOT NULL` keeps every row, so that
@@ -5654,62 +5672,35 @@ fn query_memories(
     let sql = if use_fts && !use_like_fallback {
         // FTS5 search with sanitized query
         format!(
-            "SELECT m.id, m.project_path, m.category, m.content, m.normalized_hash,
-                    m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
-                    m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
-                    m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
-                    m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
-                    {classify_cols}
-                    {has_embedding}, {revision_select}
+            "SELECT {MEMORY_SELECT}
              FROM memories m
              INNER JOIN memories_fts ON memories_fts.rowid = m.id
              WHERE memories_fts MATCH ?1
              {}
              ORDER BY rank
              LIMIT ?{} OFFSET ?{}",
-            where_extra,
-            limit_idx,
-            offset_idx,
-            has_embedding = has_embedding_select,
+            where_extra, limit_idx, offset_idx,
         )
     } else if has_search {
         // LIKE fallback for short queries or special-character-heavy input
         format!(
-            "SELECT m.id, m.project_path, m.category, m.content, m.normalized_hash,
-                    m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
-                    m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
-                    m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
-                    m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
-                    {classify_cols}
-                    {has_embedding}, {revision_select}
+            "SELECT {MEMORY_SELECT}
              FROM memories m
-             WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
+             WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.origin_category LIKE ?1 ESCAPE '\\')
              {}
              ORDER BY m.updated_at DESC
               LIMIT ?{} OFFSET ?{}",
-            where_extra,
-            limit_idx,
-            offset_idx,
-            has_embedding = has_embedding_select,
+            where_extra, limit_idx, offset_idx,
         )
     } else {
         format!(
-            "SELECT m.id, m.project_path, m.category, m.content, m.normalized_hash,
-                    m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
-                    m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
-                    m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
-                    m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
-                    {classify_cols}
-                    {has_embedding}, {revision_select}
+            "SELECT {MEMORY_SELECT}
              FROM memories m
              WHERE 1=1
              {}
              ORDER BY m.updated_at DESC
               LIMIT ?{} OFFSET ?{}",
-            where_extra,
-            limit_idx,
-            offset_idx,
-            has_embedding = has_embedding_select,
+            where_extra, limit_idx, offset_idx,
         )
     };
 
@@ -5759,22 +5750,13 @@ fn query_memories(
         Ok(_empty) if use_fts && !use_like_fallback => {
             // FTS returned nothing — retry with LIKE for better partial matching
             let like_sql = format!(
-                "SELECT m.id, m.project_path, m.category, m.content, m.normalized_hash,
-                        m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
-                        m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
-                        m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
-                        m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
-                        {classify_cols}
-                        {has_embedding}, {revision_select}
+                "SELECT {MEMORY_SELECT}
                  FROM memories m
-                 WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
+                 WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.origin_category LIKE ?1 ESCAPE '\\')
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
-                where_extra,
-                limit_idx,
-                offset_idx,
-                has_embedding = has_embedding_select,
+                where_extra, limit_idx, offset_idx,
             );
             // Rebuild params with LIKE pattern instead of FTS query.
             // Project filter uses the same resolved_paths set computed at the
@@ -5811,22 +5793,13 @@ fn query_memories(
             // FTS query failed — fall back to LIKE
             eprintln!("FTS search failed, falling back to LIKE: {}", e);
             let like_sql = format!(
-                "SELECT m.id, m.project_path, m.category, m.content, m.normalized_hash,
-                        m.source_session_id, m.source_type, m.seen_count, m.retrieval_count,
-                        m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
-                        m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
-                        m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
-                        {classify_cols}
-                        {has_embedding}, {revision_select}
+                "SELECT {MEMORY_SELECT}
                  FROM memories m
-                 WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
+                 WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.origin_category LIKE ?1 ESCAPE '\\')
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
-                where_extra,
-                limit_idx,
-                offset_idx,
-                has_embedding = has_embedding_select,
+                where_extra, limit_idx, offset_idx,
             );
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             like_params.push(Box::new(like_pattern));
@@ -6008,18 +5981,6 @@ fn table_has_columns(conn: &Connection, table: &str, columns: &[&str]) -> bool {
         .all(|column| table_has_column(conn, table, column))
 }
 
-/// True when the `memories` table carries the v44 classify columns. The
-/// dashboard never migrates, so a new dashboard can face a pre-v44 plugin DB.
-fn memories_has_classify_columns(conn: &Connection) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name IN ('importance','scope','shareable')",
-        [],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|n| n == 3)
-    .unwrap_or(false)
-}
-
 fn map_memory_row(row: &rusqlite::Row<'_>) -> Result<Memory, rusqlite::Error> {
     Ok(Memory {
         revision: row.get(25)?,
@@ -6075,6 +6036,7 @@ pub fn get_memory_stats_scoped(
     conn: &Connection,
     scope: MemoryStatsScope<'_>,
 ) -> Result<MemoryStats, rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let project_filter = scope.project;
     let workspace_filter = scope.workspace_id;
     let resolved_paths: Vec<String> = if let Some(ws_id) = workspace_filter {
@@ -6090,7 +6052,7 @@ pub fn get_memory_stats_scoped(
     // memory's counts under an empty workspace.
     let filter_requested = workspace_filter.is_some() || project_filter.is_some();
 
-    // Build a `project_path IN (?, ?, ...)` fragment and the param refs that
+    // Build an `owner_id IN (?, ?, ...)` fragment and the param refs that
     // back it. Both are empty when no project filter is active.
     let (path_in_clause, path_params): (String, Vec<&dyn rusqlite::types::ToSql>) =
         if resolved_paths.is_empty() {
@@ -6102,7 +6064,7 @@ pub fn get_memory_stats_scoped(
         } else {
             let placeholders = build_in_placeholders(resolved_paths.len(), 1);
             (
-                format!("project_path IN ({})", placeholders),
+                format!("owner_id IN ({})", placeholders),
                 resolved_paths
                     .iter()
                     .map(|p| p as &dyn rusqlite::types::ToSql)
@@ -6126,10 +6088,12 @@ pub fn get_memory_stats_scoped(
     // resolved_paths) to honor the zero-stats contract above.
     let has_filter = !path_in_clause.is_empty();
 
+    // Only project memories count: a global memory is a user memory, which
+    // the user-memory screen counts.
     let total: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memories {}",
-            where_with_extra("", has_filter)
+            where_with_extra("level = 'project'", has_filter)
         ),
         path_params.as_slice(),
         |r| r.get(0),
@@ -6137,7 +6101,7 @@ pub fn get_memory_stats_scoped(
     let active: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memories {}",
-            where_with_extra("status = 'active'", has_filter)
+            where_with_extra("level = 'project' AND status = 'active'", has_filter)
         ),
         path_params.as_slice(),
         |r| r.get(0),
@@ -6145,7 +6109,7 @@ pub fn get_memory_stats_scoped(
     let permanent: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memories {}",
-            where_with_extra("status = 'permanent'", has_filter)
+            where_with_extra("level = 'project' AND status = 'permanent'", has_filter)
         ),
         path_params.as_slice(),
         |r| r.get(0),
@@ -6153,19 +6117,15 @@ pub fn get_memory_stats_scoped(
     let archived: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM memories {}",
-            where_with_extra("status = 'archived'", has_filter)
+            where_with_extra("level = 'project' AND status = 'archived'", has_filter)
         ),
         path_params.as_slice(),
         |r| r.get(0),
     )?;
 
     // Count distinct memories that have at least one embedding row. Multiple rows per
-    // memory (one per model_id) must not inflate this stat. Guard against a
-    // pre-vN/never-initialized DB with no memory_embeddings table (read-only
-    // dashboard never creates it) — report 0 rather than crashing the stats query.
-    let with_embeddings: i64 = if !table_exists(conn, "memory_embeddings") {
-        0
-    } else if has_filter {
+    // memory (one per model_id) must not inflate this stat.
+    let with_embeddings: i64 = if has_filter {
         if resolved_paths.is_empty() {
             // Empty filter resolves to zero rows — honor the same zero-stats
             // contract the other counts get from the `0 = 1` sentinel. Rebuilding
@@ -6174,7 +6134,7 @@ pub fn get_memory_stats_scoped(
             0
         } else {
             let qualified_in = format!(
-                "m.project_path IN ({})",
+                "m.level = 'project' AND m.owner_id IN ({})",
                 build_in_placeholders(resolved_paths.len(), 1)
             );
             conn.query_row(
@@ -6187,8 +6147,11 @@ pub fn get_memory_stats_scoped(
             )?
         }
     } else {
+        // Every embedding row except those of memories at another level, so
+        // rows whose memory is gone still count, as they always did.
         conn.query_row(
-            "SELECT COUNT(DISTINCT memory_id) FROM memory_embeddings",
+            "SELECT COUNT(DISTINCT memory_id) FROM memory_embeddings
+              WHERE memory_id NOT IN (SELECT id FROM memories WHERE level <> 'project')",
             [],
             |r| r.get(0),
         )?
@@ -6303,7 +6266,8 @@ fn aggregate_categories(
     let use_like_fallback = has_search && (!use_fts || raw_search.len() < 3);
     let like_pattern = like_contains_pattern(&raw_search);
 
-    let mut conditions = Vec::new();
+    // Only project memories, as the memory list shows them.
+    let mut conditions = vec!["m.level = 'project'".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if use_fts && !use_like_fallback {
         params.push(Box::new(sanitized_fts));
@@ -6324,7 +6288,7 @@ fn aggregate_categories(
             params.push(Box::new(path.clone()));
         }
         conditions.push(format!(
-            "m.project_path IN ({})",
+            "m.owner_id IN ({})",
             build_in_placeholders(resolved_paths.len(), start_idx)
         ));
     } else if workspace_filter.is_some() || project_filter.is_some() {
@@ -6370,7 +6334,7 @@ fn aggregate_categories(
 
     let grouped = |from_where: &str| {
         format!(
-            "SELECT m.category, COUNT(*) AS cnt {from_where} {where_extra} GROUP BY m.category ORDER BY cnt DESC, m.category ASC"
+            "SELECT m.origin_category, COUNT(*) AS cnt {from_where} {where_extra} GROUP BY m.origin_category ORDER BY cnt DESC, m.origin_category ASC"
         )
     };
 
@@ -6415,7 +6379,7 @@ fn aggregate_categories(
     }
 
     let like_sql = grouped(
-        "FROM memories m WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')",
+        "FROM memories m WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.origin_category LIKE ?1 ESCAPE '\\')",
     );
     let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     like_params.push(Box::new(like_pattern));
@@ -6448,24 +6412,12 @@ fn bump_project_memory_epoch_for_identity(
     }
 
     tx.execute(
-        "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
-         VALUES (?1, 1, 0, ?2)
+        "INSERT INTO project_state (project_path, project_memory_epoch, updated_at)
+         VALUES (?1, 1, ?2)
          ON CONFLICT(project_path) DO UPDATE SET
            project_memory_epoch = project_memory_epoch + 1,
            updated_at = excluded.updated_at",
         params![identity, now_millis()],
-    )?;
-    Ok(())
-}
-
-fn bump_project_user_profile_version(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
-    tx.execute(
-        "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
-         VALUES ('__global__', 0, 1, ?1)
-         ON CONFLICT(project_path) DO UPDATE SET
-           project_user_profile_version = project_user_profile_version + 1,
-           updated_at = excluded.updated_at",
-        params![now_millis()],
     )?;
     Ok(())
 }
@@ -8274,8 +8226,10 @@ fn fetch_dream_memory_changes(
         return Ok(Vec::new());
     }
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let sql =
-        format!("SELECT id, category, content, status FROM memories WHERE id IN ({placeholders})");
+    let sql = format!(
+        "SELECT id, origin_category, content, status FROM memories
+          WHERE level = 'project' AND id IN ({placeholders})"
+    );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let params: Vec<&dyn rusqlite::ToSql> =
         ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
@@ -8350,6 +8304,7 @@ pub fn get_dream_run_memory_changes(
     conn: &Connection,
     run_id: i64,
 ) -> Result<DreamRunMemoryDetail, String> {
+    crate::db_capabilities::require_memory_store(conn)?;
     if !table_exists(conn, "dream_runs") {
         return Ok(DreamRunMemoryDetail::default());
     }
@@ -8391,9 +8346,9 @@ pub fn get_dream_run_memory_changes(
     // One query covers all three buckets; classify per row in Rust so the
     // window/path predicates are written once.
     let sql = format!(
-        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id
+        "SELECT id, origin_category, content, status, created_at, updated_at, superseded_by_memory_id
            FROM memories
-          WHERE project_path IN ({placeholders})
+          WHERE level = 'project' AND owner_id IN ({placeholders})
             AND (
                   (created_at >= ?{c1} AND created_at <= ?{c2})
                OR (updated_at >= ?{c1} AND updated_at <= ?{c2})
@@ -8533,12 +8488,88 @@ pub struct UserMemoryCandidate {
 }
 
 // ── User Memory queries ──────────────────────────────────────
+//
+// Since ck-mc's migration 106 a user memory is a global memory: a `memories`
+// row at the `global` level, owned by the person, in a reserved category and
+// written under the `USER_MEMORY` tag. A candidate is a pending observation.
+// The screens write these rows the way that migration shapes them. Sessions
+// pick up a changed profile on their own: ck-mc compares the profile lines it
+// last put in a prompt with the store.
+
+/// The owner of every user memory: the person.
+const USER_MEMORY_OWNER: &str = "self";
+/// The reserved category the migration files user memories under.
+const USER_MEMORY_CATEGORY: &str = "mc:user-unsorted";
+/// The tag a user memory keeps as the category it was written under.
+const USER_MEMORY_TAG: &str = "USER_MEMORY";
+/// The id the user-memory screens show and act on. A user memory the
+/// migration moved keeps its old id in `metadata_json`, and so does the
+/// profile ck-mc puts in a session's prompt; a newer one has only its row id.
+const USER_MEMORY_ID: &str = "COALESCE(json_extract(metadata_json, '$.user_memory_id'), id)";
+/// When a user memory joined the profile: the time the migration kept for a
+/// moved one, otherwise when the row was written, as ck-mc orders the profile.
+const USER_MEMORY_PROMOTED_AT: &str =
+    "COALESCE(json_extract(metadata_json, '$.promoted_at'), created_at)";
+
+fn user_memory_refusal(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(message),
+    )
+}
+
+/// The row behind the user-memory id the screens show, or `None` when no user
+/// memory has it.
+fn user_memory_row(conn: &Connection, shown_id: i64) -> Result<Option<i64>, rusqlite::Error> {
+    let rows: Vec<i64> = conn
+        .prepare(&format!(
+            "SELECT id FROM memories WHERE level = 'global' AND {USER_MEMORY_ID} = ?1"
+        ))?
+        .query_map([shown_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    match rows.as_slice() {
+        [] => Ok(None),
+        [row] => Ok(Some(*row)),
+        _ => Err(user_memory_refusal(format!(
+            "More than one user memory has id #{shown_id}, so the dashboard can't tell which one to change."
+        ))),
+    }
+}
+
+/// Refuse a change that would make `content` a second live user memory: the
+/// store keeps one live memory per owner, category and text.
+fn refuse_second_live_user_memory(
+    conn: &Connection,
+    hash: &str,
+    except_row: Option<i64>,
+) -> Result<(), rusqlite::Error> {
+    let existing: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT {USER_MEMORY_ID} FROM memories
+                  WHERE level = 'global' AND owner_id = ?1 AND category = ?2
+                    AND normalized_hash = ?3 AND id IS NOT ?4
+                    AND (status IS NULL OR status IN ('active', 'permanent'))
+                  LIMIT 1"
+            ),
+            params![USER_MEMORY_OWNER, USER_MEMORY_CATEGORY, hash, except_row],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(existing) => Err(user_memory_refusal(format!(
+            "User memory #{existing} already says this; dismiss or delete it first."
+        ))),
+        None => Ok(()),
+    }
+}
 
 pub fn get_user_memories(
     conn: &Connection,
     status_filter: Option<&str>,
 ) -> Result<Vec<UserMemory>, rusqlite::Error> {
-    let mut conditions = Vec::new();
+    crate::db_capabilities::require_memory_store_sql(conn)?;
+    let mut conditions = vec!["level = 'global'".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(s) = status_filter {
@@ -8546,23 +8577,22 @@ pub fn get_user_memories(
         conditions.push(format!("status = ?{}", params.len()));
     }
 
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
+    // Newest first; user memories written in the same millisecond keep the
+    // order of their ids, as the old table's scan returned them.
     let sql = format!(
-        "SELECT id, content, status, promoted_at, source_candidate_ids, created_at, updated_at
-         FROM user_memories
-         {}
-         ORDER BY created_at DESC",
-        where_clause
+        "SELECT {USER_MEMORY_ID}, content, status, {USER_MEMORY_PROMOTED_AT},
+                json_extract(metadata_json, '$.source_candidate_ids'), created_at, updated_at
+         FROM memories
+         WHERE {}
+         ORDER BY created_at DESC, {USER_MEMORY_ID} ASC",
+        conditions.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        // The migration keeps parsed candidate ids as JSON and an unparsable
+        // value as text, which the screen showed as no candidates.
         let source_candidate_ids: Option<String> = row.get(4)?;
         Ok(UserMemory {
             id: row.get(0)?,
@@ -8579,12 +8609,16 @@ pub fn get_user_memories(
     rows.collect()
 }
 
+/// Pending observations about the person: the candidates the screen can
+/// promote to user memories or delete.
 pub fn get_user_memory_candidates(
     conn: &Connection,
 ) -> Result<Vec<UserMemoryCandidate>, rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT id, content, session_id, source_compartment_start, source_compartment_end, created_at
-         FROM user_memory_candidates
+        "SELECT id, content, session_id, source_start_ordinal, source_end_ordinal, created_at
+         FROM memory_observations
+         WHERE consumed_at IS NULL
          ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -8601,43 +8635,51 @@ pub fn get_user_memory_candidates(
 }
 
 pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    // A repeat dismiss must not rewrite the timestamp or tell sessions the profile changed.
-    let affected = tx.execute(
-        "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2 AND status = 'active'",
-        params![now_millis(), id],
-    )?;
-    if affected > 0 {
-        bump_project_user_profile_version(&tx)?;
+    // A repeat dismiss must not rewrite the timestamp or the revision.
+    if let Some(row) = user_memory_row(&tx, id)? {
+        tx.execute(
+            "UPDATE memories SET status = 'dismissed', updated_at = ?1, revision = revision + 1
+              WHERE id = ?2 AND status = 'active'",
+            params![now_millis(), row],
+        )?;
     }
     tx.commit()?;
     Ok(())
 }
 
 pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    let affected = tx.execute(
-        "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
-        params![now_millis(), id],
-    )?;
-    // Same invariant as dismiss/delete: user_memories render into the cached
-    // m[0] <user-profile> block, so a restore must bump the global
-    // user-profile version or running sessions keep serving the profile
-    // without the restored entry. The status predicate keeps affected at 0
-    // for a row that is already active, so a no-op restore cannot
-    // invalidate every running session's cached profile.
-    if affected > 0 {
-        bump_project_user_profile_version(&tx)?;
+    // The status predicate makes restoring an active memory a no-op.
+    let dismissed: Option<(i64, String)> = match user_memory_row(&tx, id)? {
+        Some(row) => tx
+            .query_row(
+                "SELECT id, normalized_hash FROM memories WHERE id = ?1 AND status = 'dismissed'",
+                params![row],
+                |found| Ok((found.get(0)?, found.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    if let Some((row, hash)) = dismissed {
+        refuse_second_live_user_memory(&tx, &hash, Some(row))?;
+        tx.execute(
+            "UPDATE memories SET status = 'active', updated_at = ?1, revision = revision + 1
+              WHERE id = ?2",
+            params![now_millis(), row],
+        )?;
     }
     tx.commit()?;
     Ok(())
 }
 
 pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    let affected = tx.execute("DELETE FROM user_memories WHERE id = ?1", params![id])?;
-    if affected > 0 {
-        bump_project_user_profile_version(&tx)?;
+    if let Some(row) = user_memory_row(&tx, id)? {
+        tx.execute("DELETE FROM memories WHERE id = ?1", params![row])?;
     }
     tx.commit()?;
     Ok(())
@@ -8648,55 +8690,81 @@ pub fn update_user_memory_content(
     id: i64,
     content: &str,
 ) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    let affected = tx.execute(
-        "UPDATE user_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
-        params![content, now_millis(), id],
-    )?;
-    // user_memories render into the cached m[0] <user-profile> block, so an
-    // edit must bump the global user-profile version or running sessions keep
-    // serving stale content (same invariant dismiss/delete rely on).
-    if affected > 0 {
-        bump_project_user_profile_version(&tx)?;
+    if let Some(row) = user_memory_row(&tx, id)? {
+        let live: bool = tx.query_row(
+            "SELECT status IS NULL OR status IN ('active', 'permanent') FROM memories WHERE id = ?1",
+            params![row],
+            |found| found.get(0),
+        )?;
+        // The text is the row's unique key, so its hash changes with it.
+        let hash = crate::memory_history::normalized_hash(content);
+        if live {
+            refuse_second_live_user_memory(&tx, &hash, Some(row))?;
+        }
+        tx.execute(
+            "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3,
+                    revision = revision + 1
+              WHERE id = ?4",
+            params![content, hash, now_millis(), row],
+        )?;
+        // A vector computed for the old text no longer describes the row.
+        tx.execute(
+            "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+            params![row],
+        )?;
     }
     tx.commit()?;
     Ok(())
 }
 
 pub fn delete_user_memory_candidate(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     crate::writer_diagnostics::statement("delete_user_memory_candidate", || {
-        conn.execute(
-            "DELETE FROM user_memory_candidates WHERE id = ?1",
-            params![id],
-        )
+        conn.execute("DELETE FROM memory_observations WHERE id = ?1", params![id])
     })?;
     Ok(())
 }
 
+/// Promote a candidate to an active user memory, filed the way ck-mc's
+/// migration 106 files the user memories it moves.
 pub fn promote_user_memory_candidate(
     conn: &mut Connection,
     id: i64,
 ) -> Result<(), rusqlite::Error> {
+    crate::db_capabilities::require_memory_store_sql(conn)?;
     let now = now_millis();
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
 
     let content: String = tx.query_row(
-        "SELECT content FROM user_memory_candidates WHERE id = ?1",
+        "SELECT content FROM memory_observations WHERE id = ?1",
         params![id],
         |row| row.get(0),
     )?;
+    let hash = crate::memory_history::normalized_hash(&content);
+    refuse_second_live_user_memory(&tx, &hash, None)?;
 
+    let metadata = serde_json::json!({ "promoted_at": now, "source_candidate_ids": [id] });
     tx.execute(
-        "INSERT INTO user_memories
-           (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
-         VALUES (?1, 'active', ?2, ?3, ?2, ?2)",
-        params![content, now, format!("[{id}]")],
+        "INSERT INTO memories (level, owner_id, category, origin_category, content,
+             normalized_hash, source_type, seen_count, retrieval_count, first_seen_at,
+             created_at, updated_at, last_seen_at, status, metadata_json)
+         VALUES ('global', ?1, ?2, ?3, ?4, ?5, 'user-review', 1, 0, ?6, ?6, ?6, ?6, 'active', ?7)",
+        params![
+            USER_MEMORY_OWNER,
+            USER_MEMORY_CATEGORY,
+            USER_MEMORY_TAG,
+            content,
+            hash,
+            now,
+            metadata.to_string()
+        ],
     )?;
     tx.execute(
-        "DELETE FROM user_memory_candidates WHERE id = ?1",
+        "DELETE FROM memory_observations WHERE id = ?1",
         params![id],
     )?;
-    bump_project_user_profile_version(&tx)?;
 
     tx.commit()?;
     Ok(())
@@ -9553,25 +9621,11 @@ mod session_identity_map_tests {
     fn create_context_db(data_home: &Path, with_session_projects: bool) -> Connection {
         let path = context_db_path(data_home);
         std::fs::create_dir_all(path.parent().expect("context parent")).expect("context dirs");
+        super::schema_fixture::create_test_context_db(&path);
         let conn = Connection::open(&path).expect("open context db");
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                project_path TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
-            );",
-        )
-        .expect("create memories");
-        if with_session_projects {
-            conn.execute_batch(
-                "CREATE TABLE session_projects (
-                    session_id TEXT NOT NULL,
-                    harness TEXT NOT NULL,
-                    project_path TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    PRIMARY KEY (session_id, harness)
-                );",
-            )
-            .expect("create session_projects");
+        if !with_session_projects {
+            conn.execute_batch("DROP TABLE session_projects;")
+                .expect("drop session_projects");
         }
         conn
     }
@@ -9786,12 +9840,13 @@ mod session_identity_map_tests {
             let context = create_context_db(data_home, true);
             insert_session_project(&context, "main-session", "opencode", "git:shared-root");
             insert_session_project(&context, "worktree-session", "opencode", "git:shared-root");
-            context
-                .execute(
-                    "INSERT INTO memories (project_path, status) VALUES ('git:shared-root', 'active')",
-                    [],
-                )
-                .expect("insert memory");
+            super::schema_fixture::insert_project_memory(
+                &context,
+                "git:shared-root",
+                "CONSTRAINTS",
+                "A remembered rule.",
+                "active",
+            );
 
             let oc = create_opencode_db(data_home);
             oc.execute(
@@ -9861,12 +9916,13 @@ mod session_identity_map_tests {
                 let directory = data_home.join(&id);
                 std::fs::create_dir_all(&directory).unwrap();
                 insert_session_project(&context, &id, "opencode", identity);
-                context
-                    .execute(
-                        "INSERT INTO memories (project_path, status) VALUES (?1, 'active')",
-                        [identity],
-                    )
-                    .unwrap();
+                super::schema_fixture::insert_project_memory(
+                    &context,
+                    identity,
+                    "CONSTRAINTS",
+                    "A remembered rule.",
+                    "active",
+                );
                 oc.execute(
                     "INSERT INTO project (id, name, worktree) VALUES (?1, 'Directory label', ?2)",
                     (&id, directory.to_string_lossy().as_ref()),
@@ -9944,12 +10000,13 @@ mod session_identity_map_tests {
 
             let context = create_context_db(data_home, true);
             insert_session_project(&context, "ses_v2", "opencode2", "dir:6fb76e42d6dd");
-            context
-                .execute(
-                    "INSERT INTO memories (project_path, status) VALUES ('dir:6fb76e42d6dd', 'active')",
-                    [],
-                )
-                .expect("insert memory");
+            super::schema_fixture::insert_project_memory(
+                &context,
+                "dir:6fb76e42d6dd",
+                "CONSTRAINTS",
+                "A remembered rule.",
+                "active",
+            );
 
             let oc = create_opencode2_db(data_home);
             oc.execute(
@@ -12473,48 +12530,15 @@ mod memory_project_filter_tests {
     use super::*;
     use rusqlite::Connection;
 
-    /// Build a minimal in-memory Magic Context-shaped DB with just enough of
-    /// the `memories` + `memory_embeddings` + `memories_fts` surface that
-    /// `get_memories` and `get_memory_stats` can run end-to-end.
+    /// An in-memory store at the schema version the dashboard reads, where
+    /// `get_memories` and `get_memory_stats` run end-to-end. The store's own
+    /// triggers keep `memories_fts` in step with `memories`.
     fn make_memory_db() -> Connection {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_path TEXT NOT NULL,
-                category TEXT NOT NULL,
-                content TEXT NOT NULL,
-                normalized_hash TEXT,
-                source_session_id TEXT,
-                source_type TEXT,
-                seen_count INTEGER DEFAULT 1,
-                retrieval_count INTEGER DEFAULT 0,
-                first_seen_at INTEGER,
-                created_at INTEGER,
-                updated_at INTEGER,
-                last_seen_at INTEGER,
-                last_retrieved_at INTEGER,
-                status TEXT NOT NULL DEFAULT 'active',
-                expires_at INTEGER,
-                verification_status TEXT,
-                verified_at INTEGER,
-                superseded_by_memory_id INTEGER,
-                merged_from TEXT,
-                metadata_json TEXT
-            );
-            CREATE TABLE memory_embeddings (
-                memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-                vector BLOB NOT NULL,
-                model_id TEXT
-            );
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                content, category, content='memories', content_rowid='id'
-            );",
-        )
-        .expect("create memory schema");
-        conn
+        super::schema_fixture::context_db_in_memory()
     }
 
+    /// Insert a project memory owned by `project_path`, written under the tag
+    /// `category` and filed under the category ck-mc maps that tag to.
     fn insert_memory(conn: &Connection, project_path: &str, category: &str, status: &str) -> i64 {
         // `map_memory_row` expects every non-Option Memory field to be
         // present and well-typed, so the test inserts must populate them:
@@ -12529,15 +12553,22 @@ mod memory_project_filter_tests {
         );
         conn.execute(
             "INSERT INTO memories
-                (project_path, category, content, normalized_hash,
+                (level, owner_id, category, origin_category, content, normalized_hash,
                  source_type, seen_count, retrieval_count,
                  first_seen_at, last_seen_at, verification_status,
                  status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4,
+             VALUES ('project', ?1, ?2, ?3, ?4, ?5,
                      'historian', 1, 0,
                      1000, 1000, 'unverified',
-                     ?5, 1000, 1000)",
-            (project_path, category, content, normalized_hash, status),
+                     ?6, 1000, 1000)",
+            (
+                project_path,
+                super::schema_fixture::category_id(category),
+                category,
+                content,
+                normalized_hash,
+                status,
+            ),
         )
         .expect("insert memory");
         conn.last_insert_rowid()
@@ -12638,68 +12669,32 @@ mod memory_project_filter_tests {
     }
 
     #[test]
-    fn get_memories_degrades_on_pre_v44_schema_without_classify_columns() {
-        // make_memory_db() is a PRE-v44 schema (no importance/scope/shareable).
-        // The dashboard never migrates, so get_memories must still work and
-        // return literal defaults rather than erroring on the missing columns.
+    fn get_memories_reads_classify_columns_and_embedding_presence() {
         let conn = make_memory_db();
-        assert!(!memories_has_classify_columns(&conn));
-        insert_memory(&conn, "/tmp/pre-v44", "CONSTRAINTS", "active");
-
-        let rows = get_memories(&conn, None, None, None, None, None, 100, 0)
-            .expect("get_memories must not error on a pre-v44 schema");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].importance, 50);
-        assert_eq!(rows[0].scope, "project");
-        assert!(!rows[0].shareable);
-    }
-
-    #[test]
-    fn get_memories_degrades_without_memory_embeddings_table() {
-        // A pre-vN / never-initialized DB may have `memories` but no
-        // `memory_embeddings` table (the read-only dashboard never creates it).
-        // get_memories and the stats path must report no embeddings rather than
-        // erroring on the missing table.
-        let conn = make_memory_db();
-        conn.execute_batch("DROP TABLE memory_embeddings;")
-            .expect("drop memory_embeddings");
-        assert!(!table_exists(&conn, "memory_embeddings"));
-        insert_memory(&conn, "/tmp/no-emb", "CONSTRAINTS", "active");
-
-        let rows = get_memories(&conn, None, None, None, None, None, 100, 0)
-            .expect("get_memories must not error when memory_embeddings is absent");
-        assert_eq!(rows.len(), 1);
-        assert!(
-            !rows[0].has_embedding,
-            "no embeddings table → has_embedding=false"
-        );
-
-        let stats = get_memory_stats(&conn, None, None).expect("stats must not error");
-        assert_eq!(stats.with_embeddings, 0);
-    }
-
-    #[test]
-    fn get_memories_reads_classify_columns_on_v44_schema() {
-        let conn = make_memory_db();
-        conn.execute_batch(
-            "ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 50;
-             ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';
-             ALTER TABLE memories ADD COLUMN shareable INTEGER NOT NULL DEFAULT 0;",
-        )
-        .expect("add v44 columns");
-        assert!(memories_has_classify_columns(&conn));
         let id = insert_memory(&conn, "/tmp/v44", "ARCHITECTURE", "active");
         conn.execute(
             "UPDATE memories SET importance = 88, scope = 'ecosystem', shareable = 1 WHERE id = ?1",
             [id],
         )
         .expect("set classify values");
+        // One memory with an embedding per model still lists once.
+        conn.execute_batch(&format!(
+            "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES ({id}, X'00', 'a'), ({id}, X'00', 'b');"
+        ))
+        .expect("insert embeddings");
 
         let rows = get_memories(&conn, None, None, None, None, None, 100, 0).expect("get_memories");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].importance, 88);
         assert_eq!(rows[0].scope, "ecosystem");
         assert!(rows[0].shareable);
+        assert!(rows[0].has_embedding);
+        assert_eq!(
+            get_memory_stats(&conn, None, None)
+                .expect("stats")
+                .with_embeddings,
+            1
+        );
     }
 
     #[test]
@@ -12770,14 +12765,14 @@ mod memory_project_filter_tests {
     fn get_memory_stats_filter_resolving_to_zero_paths_does_not_crash() {
         // A requested filter that resolves to NO paths (e.g. an empty workspace,
         // or an identity with no memories) must report zero stats — not emit
-        // `m.project_path IN ()` and crash the whole stats query. The
+        // `m.owner_id IN ()` and crash the whole stats query. The
         // with_embeddings branch previously rebuilt the IN-list from an empty
         // resolved_paths instead of honoring the `0 = 1` empty-filter sentinel.
         let conn = make_memory_db();
         insert_memory(&conn, "/tmp/has-mem", "X", "active");
         // An embedding row exists so the with_embeddings branch actually runs.
         conn.execute(
-            "INSERT INTO memory_embeddings (memory_id, vector, model_id) VALUES (1, X'00', 'm')",
+            "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES (1, X'00', 'm')",
             [],
         )
         .expect("insert embedding");
@@ -12797,18 +12792,20 @@ mod memory_project_filter_tests {
         content: &str,
         updated_at: i64,
     ) -> i64 {
+        // The store's insert trigger indexes the row for full-text search.
         conn.execute(
             "INSERT INTO memories
-                (project_path, category, content, normalized_hash,
+                (level, owner_id, category, origin_category, content, normalized_hash,
                  source_type, seen_count, retrieval_count,
                  first_seen_at, last_seen_at, verification_status,
                  status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4,
+             VALUES ('project', ?1, ?2, ?3, ?4, ?5,
                      'historian', 1, 0,
                      1000, 1000, 'unverified',
-                     ?5, ?6, ?6)",
+                     ?6, ?7, ?7)",
             (
                 project_path,
+                super::schema_fixture::category_id(category),
                 category,
                 content,
                 format!("{:x}", md5::compute(content)),
@@ -12817,13 +12814,7 @@ mod memory_project_filter_tests {
             ),
         )
         .expect("insert paged memory");
-        let id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, ?3)",
-            (id, content, category),
-        )
-        .expect("index paged memory");
-        id
+        conn.last_insert_rowid()
     }
 
     #[test]
@@ -12965,6 +12956,8 @@ mod memory_project_filter_tests {
         // get_projects must still return memory-derived projects, not throw
         // "no such table".
         let conn = make_memory_db();
+        conn.execute_batch("DROP TABLE task_schedule_state; DROP TABLE dream_runs;")
+            .expect("drop the Dreamer V2 tables");
         insert_memory(&conn, "/tmp/proj-a", "X", "active");
 
         let projects = get_projects(&conn).expect("get_projects must degrade, not throw");
@@ -12979,6 +12972,8 @@ mod memory_project_filter_tests {
     #[test]
     fn get_dream_state_degrades_on_pre_dreamer_v2_schema() {
         let conn = make_memory_db();
+        conn.execute_batch("DROP TABLE dream_state;")
+            .expect("drop dream_state");
         let state = get_dream_state(&conn).expect("get_dream_state must degrade, not throw");
         assert!(state.is_empty());
     }
@@ -13037,26 +13032,21 @@ mod memory_project_filter_tests {
     }
 
     fn insert_memory_with_content(conn: &Connection, content: &str, updated_at: i64) -> i64 {
+        // The store's insert trigger indexes the row for full-text search.
         conn.execute(
             "INSERT INTO memories
-                (project_path, category, content, normalized_hash,
+                (level, owner_id, category, origin_category, content, normalized_hash,
                  source_type, seen_count, retrieval_count,
                  first_seen_at, last_seen_at, verification_status,
                  status, created_at, updated_at)
-             VALUES ('/tmp/search', 'CONSTRAINTS', ?1, ?2,
+             VALUES ('project', '/tmp/search', 'swe:constraints', 'CONSTRAINTS', ?1, ?2,
                      'historian', 1, 0,
                      1000, 1000, 'unverified',
                      'active', 1000, ?3)",
             (content, format!("{:x}", md5::compute(content)), updated_at),
         )
         .expect("insert memory");
-        let id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, 'CONSTRAINTS')",
-            (id, content),
-        )
-        .expect("index memory");
-        id
+        conn.last_insert_rowid()
     }
 
     #[test]
@@ -13113,7 +13103,8 @@ mod memory_project_filter_tests {
         assert_eq!((like_page(0), like_page(2), like_page(4)), (2, 1, 0));
     }
 
-    /// Insert a memory with an explicit ID, indexed in FTS like the plugin does.
+    /// Insert a memory with an explicit ID; the store's insert trigger indexes
+    /// it for full-text search as ck-mc's writes are indexed.
     fn insert_memory_row(
         conn: &Connection,
         id: i64,
@@ -13124,17 +13115,18 @@ mod memory_project_filter_tests {
     ) {
         conn.execute(
             "INSERT INTO memories
-                (id, project_path, category, content, normalized_hash,
+                (id, level, owner_id, category, origin_category, content, normalized_hash,
                  source_type, seen_count, retrieval_count,
                  first_seen_at, last_seen_at, verification_status,
                  status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5,
+             VALUES (?1, 'project', ?2, ?3, ?4, ?5, ?6,
                      'historian', 1, 0,
                      1000, 1000, 'unverified',
-                     ?6, 1000, ?7)",
+                     ?7, 1000, ?8)",
             (
                 id,
                 project_path,
+                super::schema_fixture::category_id(category),
                 category,
                 content,
                 format!("{:x}", md5::compute(content)),
@@ -13143,11 +13135,6 @@ mod memory_project_filter_tests {
             ),
         )
         .expect("insert memory");
-        conn.execute(
-            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, ?3)",
-            (id, content, category),
-        )
-        .expect("index memory");
     }
 
     fn search_ids(
@@ -13578,41 +13565,15 @@ mod dream_run_memory_changes_tests {
     use rusqlite::Connection;
 
     fn make_db() -> Connection {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_path TEXT NOT NULL,
-                category TEXT NOT NULL,
-                content TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at INTEGER,
-                updated_at INTEGER,
-                superseded_by_memory_id INTEGER
-            );
-            CREATE TABLE dream_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_path TEXT NOT NULL,
-                started_at INTEGER NOT NULL,
-                finished_at INTEGER NOT NULL,
-                holder_id TEXT,
-                tasks_json TEXT,
-                tasks_succeeded INTEGER,
-                tasks_failed INTEGER,
-                smart_notes_surfaced INTEGER,
-                smart_notes_pending INTEGER,
-                memory_changes_json TEXT,
-                parent_session_id TEXT
-            );",
-        )
-        .expect("schema");
-        conn
+        super::schema_fixture::context_db_in_memory()
     }
 
     fn insert_memory(conn: &Connection, id: i64, status: &str, created: i64, updated: i64) {
         conn.execute(
-            "INSERT INTO memories (id, project_path, category, content, status, created_at, updated_at)
-             VALUES (?1, 'dir:proj', 'PROJECT_RULES', ?2, ?3, ?4, ?5)",
+            "INSERT INTO memories (id, level, owner_id, category, origin_category, content,
+                 normalized_hash, status, first_seen_at, created_at, updated_at, last_seen_at)
+             VALUES (?1, 'project', 'dir:proj', 'swe:project-rules', 'PROJECT_RULES', ?2, ?2, ?3,
+                 ?4, ?4, ?5, ?5)",
             (id, format!("memory {id}"), status, created, updated),
         )
         .expect("insert memory");
@@ -13645,6 +13606,8 @@ mod dream_run_memory_changes_tests {
         let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
         assert_eq!(detail.written.len(), 1);
         assert_eq!(detail.written[0].id, 10);
+        // The change shows the tag the memory was written under.
+        assert_eq!(detail.written[0].category, "PROJECT_RULES");
         assert_eq!(detail.archived.len(), 1);
         assert_eq!(detail.archived[0].id, 11);
         assert!(detail.merged.is_empty());

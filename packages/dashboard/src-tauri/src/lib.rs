@@ -5,7 +5,6 @@ pub mod db_capabilities;
 pub mod embedding_probe;
 pub mod external_cache_sessions;
 pub mod jsonc;
-mod legacy_memory;
 pub mod log_parser;
 pub mod memory_bridge;
 pub mod memory_history;

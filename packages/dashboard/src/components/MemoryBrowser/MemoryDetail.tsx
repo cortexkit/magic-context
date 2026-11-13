@@ -3,7 +3,6 @@ import { formatTimestamp, getMemoryHistory } from "../../lib/api";
 import type { Memory, MemoryHistoryDecision } from "../../lib/types";
 import FilterSelect from "../shared/FilterSelect";
 import { SHARE_CATEGORY_OPTIONS } from "../WorkspacesPanel/workspace-staging";
-import { MEMORY_HISTORY_REQUIREMENT } from "./database-features";
 import EditNotice from "./EditNotice";
 import MemoryHistoryTimeline from "./MemoryHistoryTimeline";
 import { decisionView, type EditOutcome, HISTORY_PAGE_SIZE } from "./memory-history";
@@ -139,9 +138,6 @@ export default function MemoryDetail(props: Props) {
             </button>
           </Show>
         </div>
-        <Show when={!props.historyAvailable}>
-          <p class="history-intro">{MEMORY_HISTORY_REQUIREMENT}</p>
-        </Show>
 
         <Show when={tab() === "history" && props.historyAvailable}>
           <MemoryHistoryTimeline

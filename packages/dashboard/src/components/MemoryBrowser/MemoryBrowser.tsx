@@ -28,11 +28,7 @@ import type {
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
-import {
-  archiveConfirmation,
-  MEMORY_HISTORY_REQUIREMENT,
-  memoryHistoryAvailable,
-} from "./database-features";
+import { archiveConfirmation, memoryHistoryAvailable } from "./database-features";
 import EditNotice from "./EditNotice";
 import MemoryDetail from "./MemoryDetail";
 import MemoryHistoryTimeline from "./MemoryHistoryTimeline";
@@ -663,11 +659,6 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
         )}
       </Show>
 
-      <Show when={capabilities() && !historyAvailable()}>
-        <p class="history-intro">
-          {MEMORY_HISTORY_REQUIREMENT}. Edits remain available without revision checks or undo.
-        </p>
-      </Show>
       <Show when={embedded() && historyAvailable()}>
         <div class="tab-pills memory-view-tabs">
           <button

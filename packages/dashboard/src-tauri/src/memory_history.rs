@@ -17,11 +17,18 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "../tests/support/context_db.rs"]
 mod schema_fixture;
 
+// `projectPath` and `category` keep the names the plugin's history used: the
+// memory's owner and the tag it was written under. `level` and `categoryId`
+// (the profile category the memory is filed under) are the columns ck-mc's
+// migration 106 added; ck-mc's own history snapshots carry both, and history
+// recorded before that migration has neither.
 const FIELDS: &[&str] = &[
     "id",
     "projectPath",
+    "level",
     "revision",
     "category",
+    "categoryId",
     "content",
     "normalizedHash",
     "importance",
@@ -46,6 +53,8 @@ const FIELDS: &[&str] = &[
     "metadataJson",
 ];
 const NULLABLE: &[&str] = &[
+    "level",
+    "categoryId",
     "safetyCritical",
     "importance",
     "sourceSessionId",
@@ -88,6 +97,33 @@ const CATEGORIES: &[&str] = &[
     "WORKFLOW_RULES",
     "KNOWN_ISSUES",
 ];
+/// The profile category each tag maps to, frozen in ck-mc's migration 106
+/// (`CATEGORY_IDS` in `crates/mc-module/src/context_migrations.rs`). ck-mc
+/// files a memory written by a writer with no profile of its own, as the
+/// dashboard is, under this map.
+pub const CATEGORY_IDS: [(&str, &str); 12] = [
+    ("PROJECT_RULES", "swe:project-rules"),
+    ("ARCHITECTURE", "swe:architecture"),
+    ("CONSTRAINTS", "swe:constraints"),
+    ("CONFIG_VALUES", "swe:config-values"),
+    ("NAMING", "swe:naming"),
+    ("USER_DIRECTIVES", "swe:project-rules"),
+    ("USER_PREFERENCES", "swe:project-rules"),
+    ("CONFIG_DEFAULTS", "swe:config-values"),
+    ("ARCHITECTURE_DECISIONS", "swe:architecture"),
+    ("ENVIRONMENT", "swe:config-values"),
+    ("WORKFLOW_RULES", "swe:project-rules"),
+    ("KNOWN_ISSUES", "swe:constraints"),
+];
+/// The category of a tag the frozen map doesn't know.
+pub const UNMAPPED_CATEGORY: &str = "mc:unmapped";
+/// The profile category id the frozen map gives `tag`.
+pub fn frozen_category_id(tag: &str) -> &'static str {
+    CATEGORY_IDS
+        .iter()
+        .find(|(known, _)| *known == tag)
+        .map_or(UNMAPPED_CATEGORY, |(_, id)| *id)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevisionExpectation {
@@ -214,6 +250,10 @@ pub fn normalize_snapshot(input: &Value, revision: Option<i64>) -> Option<Value>
     }
     Some(out)
 }
+/// The memory row `id` as history records it, or nothing when the row isn't a
+/// project memory or holds a value history cannot restore. Only project
+/// memories have history; a global memory is a user memory, which the
+/// user-memory screens edit.
 pub fn snapshot(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
     let mut statement = conn
         .prepare("SELECT * FROM memories WHERE id=?1")
@@ -221,7 +261,12 @@ pub fn snapshot(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
     let names = statement
         .column_names()
         .iter()
-        .map(|name| name.to_string())
+        .map(|name| match *name {
+            "owner_id" => "projectPath".to_owned(),
+            "origin_category" => "category".to_owned(),
+            "category" => "categoryId".to_owned(),
+            other => other.to_owned(),
+        })
         .collect::<Vec<_>>();
     let raw = statement
         .query_row([id], |row| {
@@ -243,6 +288,7 @@ pub fn snapshot(conn: &Connection, id: i64) -> Result<Option<Value>, String> {
         .map_err(storage)?;
     Ok(raw
         .as_ref()
+        .filter(|value| value["level"] == "project")
         .and_then(|value| normalize_snapshot(value, None)))
 }
 fn exists(conn: &Connection, table: &str) -> Result<bool, String> {
@@ -300,7 +346,7 @@ pub fn record_decision(conn: &Connection, decision: &Value) -> Result<(), String
 }
 pub fn read_decision(conn: &Connection, project: &str, key: &str) -> Result<Option<Value>, String> {
     let journal: Option<(Option<String>, Option<String>, String)> = conn.query_row("SELECT before_json,after_json,operation FROM memory_journal WHERE project_path=?1 AND decision_key=?2", params![project, key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(storage)?;
-    let mut statement = conn.prepare("SELECT h.memory_id,h.revision,h.before_json,h.after_json,h.applied_at,h.reason,h.evidence_json FROM memory_history h JOIN memories m ON m.id=h.memory_id WHERE m.project_path=?1 AND h.decision_key=?2 ORDER BY h.id").map_err(storage)?;
+    let mut statement = conn.prepare("SELECT h.memory_id,h.revision,h.before_json,h.after_json,h.applied_at,h.reason,h.evidence_json FROM memory_history h JOIN memories m ON m.id=h.memory_id WHERE m.level='project' AND m.owner_id=?1 AND h.decision_key=?2 ORDER BY h.id").map_err(storage)?;
     let records = statement
         .query_map(params![project, key], |row| {
             Ok((
@@ -427,6 +473,11 @@ pub fn read_decision(conn: &Connection, project: &str, key: &str) -> Result<Opti
     ))
 }
 
+/// A memory is live while it is active or permanent; only live memories go
+/// into sessions, and only they must be unique.
+fn is_live(snapshot: &Value) -> bool {
+    matches!(snapshot["status"].as_str(), Some("active" | "permanent"))
+}
 struct Plan {
     state: &'static str,
     reason: Option<&'static str>,
@@ -652,6 +703,21 @@ fn plan(
         {
             return Ok(Plan::failed("refused", "invalid_request", vec![]));
         }
+        // The profile category follows the tag. A restore puts back the
+        // category its history recorded; an edit that keeps the tag keeps the
+        // row's category; a new tag maps through the frozen map, as ck-mc
+        // files memories written without a profile of their own.
+        let recorded = if restoring {
+            row["before"]["categoryId"].as_str()
+        } else {
+            None
+        };
+        if let Some(recorded) = recorded {
+            target["categoryId"] = json!(recorded);
+        } else if target["category"] != current["category"] {
+            target["categoryId"] =
+                json!(frozen_category_id(target["category"].as_str().unwrap_or("")));
+        }
         target["normalizedHash"] = json!(normalized_hash(content));
         target["shareable"] = json!(0);
         target["verificationStatus"] = json!("unverified");
@@ -672,19 +738,31 @@ fn plan(
     }
     for target in &after {
         let id = target["id"].as_i64().unwrap();
-        if after.iter().any(|other| {
-            other["id"] != id
-                && other["category"] == target["category"]
-                && other["normalizedHash"] == target["normalizedHash"]
-        }) {
+        // Only live memories must be unique for their owner, profile category
+        // and text; archived rows may repeat a text, as the store's unique
+        // index allows.
+        let live = is_live(target);
+        if live
+            && after.iter().any(|other| {
+                other["id"] != id
+                    && is_live(other)
+                    && other["categoryId"] == target["categoryId"]
+                    && other["normalizedHash"] == target["normalizedHash"]
+            })
+        {
             return Ok(Plan::failed("conflict", "duplicate_content", vec![]));
         }
-        let mut statement=conn.prepare("SELECT id FROM memories WHERE project_path=?1 AND category=?2 AND normalized_hash=?3 AND id!=?4").map_err(storage)?;
-        let collisions = statement
+        let collisions = if live {
+            conn.prepare(
+                "SELECT id FROM memories WHERE level='project' AND owner_id=?1 AND category=?2
+                    AND normalized_hash=?3 AND id!=?4
+                    AND (status IS NULL OR status IN ('active','permanent'))",
+            )
+            .map_err(storage)?
             .query_map(
                 params![
                     project,
-                    target["category"].as_str(),
+                    target["categoryId"].as_str(),
                     target["normalizedHash"].as_str(),
                     id
                 ],
@@ -692,7 +770,10 @@ fn plan(
             )
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
+            .map_err(storage)?
+        } else {
+            vec![]
+        };
         if let Some(duplicate) = collisions.iter().find(|id| !ids.contains(id)) {
             let rev = target["revision"].as_i64().unwrap() - 1;
             return Ok(Plan::failed(
@@ -759,7 +840,7 @@ fn apply_plan(
     }
     for (index, target) in plan.after.iter().enumerate() {
         let source = &plan.before[index];
-        let changed=conn.execute("UPDATE memories SET content=?1,category=?2,normalized_hash=?3,importance=?4,scope=?5,status=?6,expires_at=?7,superseded_by_memory_id=?8,merged_from=?9,metadata_json=?10,shareable=0,classified_at=NULL,verification_status='unverified',verified_at=NULL,updated_at=?11 WHERE id=?12 AND revision=?13",params![target["content"].as_str(),target["category"].as_str(),target["normalizedHash"].as_str(),target["importance"].as_i64(),target["scope"].as_str(),target["status"].as_str(),target["expiresAt"].as_i64(),target["supersededByMemoryId"].as_i64(),target["mergedFrom"].as_str(),target["metadataJson"].as_str(),now,target["id"].as_i64(),source["revision"].as_i64().map(|revision| revision + 1)]).map_err(storage)?;
+        let changed=conn.execute("UPDATE memories SET content=?1,origin_category=?2,category=?3,normalized_hash=?4,importance=?5,scope=?6,status=?7,expires_at=?8,superseded_by_memory_id=?9,merged_from=?10,metadata_json=?11,shareable=0,classified_at=NULL,verification_status='unverified',verified_at=NULL,updated_at=?12 WHERE id=?13 AND revision=?14",params![target["content"].as_str(),target["category"].as_str(),target["categoryId"].as_str(),target["normalizedHash"].as_str(),target["importance"].as_i64(),target["scope"].as_str(),target["status"].as_str(),target["expiresAt"].as_i64(),target["supersededByMemoryId"].as_i64(),target["mergedFrom"].as_str(),target["metadataJson"].as_str(),now,target["id"].as_i64(),source["revision"].as_i64().map(|revision| revision + 1)]).map_err(storage)?;
         if changed != 1 {
             return Err("Memory revision changed during apply".into());
         }
@@ -866,19 +947,9 @@ fn apply_plan(
         evidence,
     );
     record_decision(conn, &decision)?;
-    // packages/plugin/src/hooks/magic-context/transform.ts decides when a request's
-    // frozen leading messages may be rebuilt. These writes record memory changes
-    // and notify search caches, so editing a memory does not force that rebuild.
-    for target in &plan.after {
-        let kind = if !target["supersededByMemoryId"].is_null() {
-            "superseded"
-        } else if target["status"] == "archived" {
-            "archive"
-        } else {
-            "update"
-        };
-        conn.execute("INSERT INTO memory_mutation_log(project_path,mutation_type,target_memory_id,superseded_by_id,category,new_content,queued_at,operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![project,kind,target["id"].as_i64(),target["supersededByMemoryId"].as_i64(),target["category"].as_str(),target["content"].as_str(),now,format!("dashboard:{key}")]).map_err(storage)?;
-    }
+    // Running sessions pick the changed rows up on their next prompt rebuild;
+    // ck-mc notices them in the store itself. The epoch bump below tells
+    // embedding and search caches that the project's memories changed.
     let epoch_project = epoch_identity(project);
     let mut identities = BTreeSet::from([epoch_project.clone()]);
     if exists(conn, "workspace_members")? {
@@ -891,7 +962,7 @@ fn apply_plan(
         }
     }
     for identity in identities {
-        conn.execute("INSERT INTO project_state(project_path,project_memory_epoch,project_user_profile_version,updated_at) VALUES(?1,1,0,?2) ON CONFLICT(project_path) DO UPDATE SET project_memory_epoch=project_memory_epoch+1,updated_at=excluded.updated_at",params![identity,now]).map_err(storage)?;
+        conn.execute("INSERT INTO project_state(project_path,project_memory_epoch,updated_at) VALUES(?1,1,?2) ON CONFLICT(project_path) DO UPDATE SET project_memory_epoch=project_memory_epoch+1,updated_at=excluded.updated_at",params![identity,now]).map_err(storage)?;
     }
     Ok(decision)
 }
@@ -1035,11 +1106,10 @@ impl HistoryTransaction<'_> {
     }
 }
 /// Recheck project ownership and return saved results for retried operation ids
-/// while holding SQLite's writer lock. Only existing memory ids are updated:
-/// memory_placement rows stay unchanged, and no new-memory operation is queued
-/// for cross-device synchronization.
+/// while holding SQLite's writer lock. Only existing memory ids are updated, so
+/// no new-memory operation is queued for cross-device synchronization.
 pub fn local_write(conn: &mut Connection, request: &Value, now: i64) -> Result<Value, String> {
-    crate::db_capabilities::require_history(conn, true)?;
+    crate::db_capabilities::require_memory_store(conn)?;
     let request = validate_write_request(
         if request.get("decisionKey").is_some() {
             "memory.restore"
@@ -1064,7 +1134,7 @@ pub fn preview(
     writer: MemoryWriter,
 ) -> Result<Value, String> {
     let request = json!({"projectPath":project,"decisionKey":key,"operationId":"preview","expectedRevisions":[]});
-    crate::db_capabilities::require_history(conn, true)?;
+    crate::db_capabilities::require_memory_store(conn)?;
     let plan = plan(conn, &request, now, writer, false)?;
     let decision = match plan.decision {
         Some(decision) => Some(decision),
@@ -1091,7 +1161,7 @@ pub fn preview(
 }
 
 pub fn history(conn: &Connection, request: &HistoryRequest) -> Result<Value, String> {
-    crate::db_capabilities::require_history(conn, false)?;
+    crate::db_capabilities::require_memory_store(conn)?;
     if request.project_path.is_empty()
         || request.memory_id.is_some_and(|id| {
             snapshot(conn, id)
@@ -1127,7 +1197,7 @@ pub fn history(conn: &Connection, request: &HistoryRequest) -> Result<Value, Str
             .map_err(storage)?,
     };
     let limit = request.limit.unwrap_or(25).clamp(1, 100);
-    let mut statement=conn.prepare("SELECT h.decision_key,MAX(h.applied_at) time FROM memory_history h JOIN memories m ON m.id=h.memory_id WHERE m.project_path=?1 AND h.id<=?2 AND (?3 IS NULL OR h.decision_key IN (SELECT decision_key FROM memory_history WHERE memory_id=?3)) GROUP BY h.decision_key HAVING (?4 IS NULL OR MAX(h.applied_at)<?4 OR (MAX(h.applied_at)=?4 AND h.decision_key<?5)) ORDER BY time DESC,h.decision_key DESC LIMIT ?6").map_err(storage)?;
+    let mut statement=conn.prepare("SELECT h.decision_key,MAX(h.applied_at) time FROM memory_history h JOIN memories m ON m.id=h.memory_id WHERE m.level='project' AND m.owner_id=?1 AND h.id<=?2 AND (?3 IS NULL OR h.decision_key IN (SELECT decision_key FROM memory_history WHERE memory_id=?3)) GROUP BY h.decision_key HAVING (?4 IS NULL OR MAX(h.applied_at)<?4 OR (MAX(h.applied_at)=?4 AND h.decision_key<?5)) ORDER BY time DESC,h.decision_key DESC LIMIT ?6").map_err(storage)?;
     let selected = statement
         .query_map(
             params![
@@ -1356,10 +1426,13 @@ mod resolved_project_tests {
         let path = directory.path().join("context.db");
         schema_fixture::create_test_context_db(&path);
         let mut conn = Connection::open(path).unwrap();
-        conn.execute(
-            "INSERT INTO memories(project_path,category,content,normalized_hash,source_type,importance,scope,shareable,status,first_seen_at,created_at,updated_at,last_seen_at) VALUES('pj-history','CONFIG_VALUES',?1,?2,'agent',50,'project',0,'active',1,1,1,1)",
-            rusqlite::params!["cache_ttl=5m", normalized_hash("cache_ttl=5m")],
-        ).unwrap();
+        schema_fixture::insert_project_memory(
+            &conn,
+            "pj-history",
+            "CONFIG_VALUES",
+            "cache_ttl=5m",
+            "active",
+        );
         let request = json!({
             "projectPath": "pj-history", "operationId": "edit-pj",
             "expectedRevisions": [{"memoryId": 1, "revision": 1}],

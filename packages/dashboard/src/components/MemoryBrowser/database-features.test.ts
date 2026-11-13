@@ -3,21 +3,20 @@ import type { DatabaseCapabilities } from "../../lib/api";
 import { archiveConfirmation, memoryHistoryAvailable } from "./database-features";
 
 const modern: DatabaseCapabilities = {
-  schemaVersion: 105,
+  schemaVersion: 106,
   memoryRevision: true,
   memoryHistory: true,
   memoryUndo: true,
   compartmentScores: true,
-  legacyMemoryEdits: false,
 };
 
 describe("database feature presentation", () => {
-  test("history and undo stay hidden on 95 and while capabilities load", () => {
+  test("history and undo stay hidden on a store ck-mc hasn't upgraded and while capabilities load", () => {
     expect(memoryHistoryAvailable(undefined)).toBe(false);
     expect(
       memoryHistoryAvailable({
         ...modern,
-        schemaVersion: 95,
+        schemaVersion: 105,
         memoryHistory: false,
         memoryUndo: false,
       }),

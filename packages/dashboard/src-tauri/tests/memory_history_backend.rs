@@ -12,7 +12,7 @@ mod schema_fixture;
 fn fixture(path: &std::path::Path) -> Connection {
     schema_fixture::create_test_context_db(path);
     let conn = Connection::open(path).unwrap();
-    conn.execute("INSERT INTO memories(project_path,category,content,normalized_hash,source_type,importance,scope,shareable,status,first_seen_at,created_at,updated_at,last_seen_at) VALUES('git:idle','CONFIG_VALUES',?1,?2,'agent',50,'project',0,'active',1,1,1,1)", params!["cache_ttl=5m", magic_context_dashboard_lib::memory_history::normalized_hash("cache_ttl=5m")]).unwrap();
+    schema_fixture::insert_project_memory(&conn, "git:idle", "CONFIG_VALUES", "cache_ttl=5m", "active");
     conn
 }
 fn edit_request() -> Value {
@@ -138,8 +138,9 @@ async fn review_module_bridge_authenticates_and_never_falls_back_after_http_refu
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-// Build the store and the decisions with the shipping TypeScript writers, then
-// exercise the dashboard's local Rust reader/writer against those exact bytes.
+// Build the store and the decisions with the TypeScript writers that shipped
+// before ck-mc owned the schema, upgrade the store as ck-mc does, then exercise
+// the dashboard's local Rust reader/writer against those decisions.
 fn typescript_operation(path: &std::path::Path, operation: &str) -> Value {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let script = r#"
@@ -224,6 +225,9 @@ console.log(JSON.stringify({ before, survivorId }));
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // The decisions were recorded before ck-mc's migration 106; the dashboard
+    // undoes them on the store that migration leaves.
+    schema_fixture::upgrade_plugin_store(&Connection::open(path).unwrap());
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -236,7 +240,6 @@ fn canonical_state(conn: &Connection) -> Value {
         "memory_successor_links",
         "memory_conflict_links",
         "memory_clause_evidence",
-        "memory_mutation_log",
         "project_state",
         "session_meta",
         "session_render_cache",

@@ -511,6 +511,10 @@ fn collect_opencode_db_projects(
 }
 
 #[cfg(test)]
+#[path = "../tests/support/context_db.rs"]
+mod schema_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -887,21 +891,15 @@ mod tests {
             .join("magic-context")
             .join("context.db");
         std::fs::create_dir_all(ctx_path.parent().unwrap()).unwrap();
+        super::schema_fixture::create_test_context_db(&ctx_path);
         let ctx_conn = rusqlite::Connection::open(&ctx_path).unwrap();
-        ctx_conn
-            .execute_batch(
-                "CREATE TABLE memories (
-                    project_path TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'active'
-                );",
-            )
-            .unwrap();
-        ctx_conn
-            .execute(
-                "INSERT INTO memories (project_path, status) VALUES (?1, 'active')",
-                rusqlite::params![proj_str],
-            )
-            .unwrap();
+        super::schema_fixture::insert_project_memory(
+            &ctx_conn,
+            &proj_str,
+            "CONSTRAINTS",
+            "A remembered rule.",
+            "active",
+        );
         drop(ctx_conn);
 
         // Pass context.db — this should discover the project

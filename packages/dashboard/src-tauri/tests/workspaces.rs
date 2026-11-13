@@ -20,6 +20,8 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// A store with only the workspace tables, at a given plugin schema version,
+/// for the checks that decide whether workspaces are available at all.
 fn make_db_with_workspace_schema(version: i64, include_share_categories: bool) -> Connection {
     let conn = Connection::open_in_memory().expect("open");
     let share_column = if include_share_categories {
@@ -30,35 +32,6 @@ fn make_db_with_workspace_schema(version: i64, include_share_categories: bool) -
     let sql = format!(
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
          INSERT INTO schema_migrations (version) VALUES ({version});
-         CREATE TABLE memories (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             project_path TEXT NOT NULL,
-             category TEXT NOT NULL DEFAULT 'CONSTRAINTS',
-             content TEXT NOT NULL,
-             normalized_hash TEXT NOT NULL DEFAULT '',
-             status TEXT DEFAULT 'active',
-             created_at INTEGER DEFAULT 0,
-             updated_at INTEGER DEFAULT 0,
-             first_seen_at INTEGER DEFAULT 0,
-             last_seen_at INTEGER DEFAULT 0,
-             source_session_id TEXT,
-             source_type TEXT DEFAULT 'test',
-             seen_count INTEGER DEFAULT 1,
-             retrieval_count INTEGER DEFAULT 0,
-             last_retrieved_at INTEGER,
-             expires_at INTEGER,
-             verification_status TEXT DEFAULT 'unverified',
-             verified_at INTEGER,
-             superseded_by_memory_id INTEGER,
-             merged_from TEXT,
-             metadata_json TEXT
-         );
-         CREATE TABLE project_state (
-             project_path TEXT PRIMARY KEY,
-             project_memory_epoch INTEGER NOT NULL DEFAULT 0,
-             project_user_profile_version INTEGER NOT NULL DEFAULT 0,
-             updated_at INTEGER NOT NULL DEFAULT 0
-         );
          CREATE TABLE workspaces (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              name TEXT NOT NULL UNIQUE,
@@ -74,14 +47,17 @@ fn make_db_with_workspace_schema(version: i64, include_share_categories: bool) -
              PRIMARY KEY (workspace_id, project_path)
          );
          CREATE UNIQUE INDEX idx_workspace_member_unique ON workspace_members(project_path);
-         CREATE UNIQUE INDEX idx_workspace_member_name ON workspace_members(workspace_id, display_name);
-         CREATE TABLE memory_embeddings (
-             memory_id INTEGER PRIMARY KEY,
-             embedding BLOB NOT NULL,
-             model_id TEXT
-         );"
+         CREATE UNIQUE INDEX idx_workspace_member_name ON workspace_members(workspace_id, display_name);"
     );
     conn.execute_batch(&sql).expect("schema");
+    workspaces::clear_workspace_schema_ready_cache_for_tests();
+    conn
+}
+
+/// A store at the schema version the dashboard reads, where workspaces and
+/// memories both work.
+fn make_db() -> Connection {
+    let conn = schema_fixture::context_db_in_memory();
     workspaces::clear_workspace_schema_ready_cache_for_tests();
     conn
 }
@@ -106,36 +82,7 @@ fn make_db_pre_v34() -> Connection {
     let conn = Connection::open_in_memory().expect("open");
     conn.execute_batch(
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-         INSERT INTO schema_migrations (version) VALUES (33);
-         CREATE TABLE memories (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             project_path TEXT NOT NULL,
-             category TEXT NOT NULL,
-             content TEXT NOT NULL,
-             normalized_hash TEXT NOT NULL,
-             status TEXT DEFAULT 'active',
-             created_at INTEGER DEFAULT 0,
-             updated_at INTEGER DEFAULT 0,
-             first_seen_at INTEGER DEFAULT 0,
-             last_seen_at INTEGER DEFAULT 0,
-             source_session_id TEXT,
-             source_type TEXT DEFAULT 'test',
-             seen_count INTEGER DEFAULT 1,
-             retrieval_count INTEGER DEFAULT 0,
-             last_retrieved_at INTEGER,
-             expires_at INTEGER,
-             verification_status TEXT DEFAULT 'unverified',
-             verified_at INTEGER,
-             superseded_by_memory_id INTEGER,
-             merged_from TEXT,
-             metadata_json TEXT
-         );
-         CREATE TABLE project_state (
-             project_path TEXT PRIMARY KEY,
-             project_memory_epoch INTEGER NOT NULL DEFAULT 0,
-             project_user_profile_version INTEGER NOT NULL DEFAULT 0,
-             updated_at INTEGER NOT NULL DEFAULT 0
-         );",
+         INSERT INTO schema_migrations (version) VALUES (33);",
     )
     .expect("schema");
     workspaces::clear_workspace_schema_ready_cache_for_tests();
@@ -144,8 +91,8 @@ fn make_db_pre_v34() -> Connection {
 
 fn seed_epoch(conn: &Connection, project: &str, epoch: i64) {
     conn.execute(
-        "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
-         VALUES (?1, ?2, 0, 0)",
+        "INSERT INTO project_state (project_path, project_memory_epoch, updated_at)
+         VALUES (?1, ?2, 0)",
         params![project, epoch],
     )
     .expect("seed");
@@ -280,7 +227,7 @@ fn workspace_schema_ready_ignores_fork_rows_until_upstream_migration_arrives() {
 fn workspace_crud_round_trip() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let id = workspaces::create_workspace(&mut conn, "  team-alpha  ").expect("create");
     let list = workspaces::list_workspaces(&conn).expect("list");
     assert_eq!(list.len(), 1);
@@ -300,7 +247,7 @@ fn workspace_crud_round_trip() {
 fn workspace_refuses_the_user_home_directory() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = seed_workspace(&conn, "pool");
     let home = std::fs::canonicalize(dirs::home_dir().expect("user home")).expect("canonical home");
     let digest = format!("{:x}", md5::compute(home.to_string_lossy().as_bytes()));
@@ -330,7 +277,7 @@ fn workspace_refuses_the_user_home_directory() {
 fn list_workspaces_returns_normalized_share_categories() {
     isolated_home();
     let _g = env_lock();
-    let conn = make_db_v35();
+    let conn = make_db();
     let ws = seed_workspace(&conn, "w");
     conn.execute(
         "UPDATE workspaces SET share_categories = ?1 WHERE id = ?2",
@@ -349,7 +296,7 @@ fn list_workspaces_returns_normalized_share_categories() {
 fn apply_workspace_changes_multiple_add_remove_single_epoch_fanout() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     seed_epoch(&conn, "git:a", 10);
     seed_epoch(&conn, "git:b", 20);
     seed_epoch(&conn, "git:c", 30);
@@ -381,7 +328,7 @@ fn apply_workspace_changes_multiple_add_remove_single_epoch_fanout() {
 fn apply_workspace_changes_rename_only_does_not_bump_member_epochs() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     seed_epoch(&conn, "git:m", 5);
     let ws = seed_workspace(&conn, "before");
     seed_workspace_member(&conn, ws, "git:m", "m", "/m");
@@ -405,7 +352,7 @@ fn apply_workspace_changes_rename_only_does_not_bump_member_epochs() {
 fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_json() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     seed_epoch(&conn, "git:a", 1);
     seed_epoch(&conn, "git:b", 2);
     let ws = seed_workspace(&conn, "w");
@@ -443,7 +390,7 @@ fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_js
 fn apply_workspace_changes_validates_against_final_staged_members() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = seed_workspace(&conn, "w");
     seed_workspace_member(&conn, ws, "git:a", "shared-name", "/a");
 
@@ -470,7 +417,7 @@ fn apply_workspace_changes_validates_against_final_staged_members() {
 fn apply_workspace_changes_rejects_identity_in_both_add_and_remove() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = seed_workspace(&conn, "w");
     seed_workspace_member(&conn, ws, "git:a", "a", "/a");
 
@@ -491,7 +438,7 @@ fn apply_workspace_changes_rejects_identity_in_both_add_and_remove() {
 fn apply_workspace_changes_rejects_unknown_share_categories() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = seed_workspace(&conn, "w");
 
     let err = workspaces::apply_workspace_changes(
@@ -511,7 +458,7 @@ fn apply_workspace_changes_rejects_unknown_share_categories() {
 fn display_name_unique_within_workspace() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
     apply_add_member(&mut conn, ws, "git:a", "dup", "/a");
     let err = workspaces::apply_workspace_changes(
@@ -542,13 +489,7 @@ fn memory_status_restore_widens_epoch_fan_out() {
     apply_add_member(&mut conn, ws, "git:a", "a", "/a");
     apply_add_member(&mut conn, ws, "git:b", "b", "/b");
 
-    conn.execute(
-        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
-         VALUES ('git:a', 'CONSTRAINTS', 'x', 'h1', 'archived', 1, 1, 1, 1)",
-        [],
-    )
-    .unwrap();
-    let mid = conn.last_insert_rowid();
+    let mid = schema_fixture::insert_project_memory(&conn, "git:a", "CONSTRAINTS", "x", "archived");
 
     let request = serde_json::json!({ "projectPath":"git:a", "operationId":"workspace-unarchive", "expectedRevisions":[{"memoryId":mid,"revision":1}], "changes":[{"memoryId":mid,"status":"active"}] });
     let receipt = db::update_memory_status(&mut conn, &request).expect("restore");
@@ -561,7 +502,7 @@ fn memory_status_restore_widens_epoch_fan_out() {
 fn enumerate_memory_projects_includes_workspace_only_member() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
     apply_add_member(&mut conn, ws, "git:zero-mem", "zero", "/zero");
 
@@ -573,17 +514,12 @@ fn enumerate_memory_projects_includes_workspace_only_member() {
 fn workspace_filter_paths_union_members() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = workspaces::create_workspace(&mut conn, "w").unwrap();
     apply_add_member(&mut conn, ws, "git:x", "x", "/x");
     apply_add_member(&mut conn, ws, "git:y", "y", "/y");
-    conn.execute(
-        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
-         VALUES ('git:x', 'C', 'one', 'h1', 'active', 1, 1, 1, 1),
-                ('git:y', 'C', 'two', 'h2', 'active', 1, 1, 1, 1)",
-        [],
-    )
-    .unwrap();
+    schema_fixture::insert_project_memory(&conn, "git:x", "CONSTRAINTS", "one", "active");
+    schema_fixture::insert_project_memory(&conn, "git:y", "CONSTRAINTS", "two", "active");
 
     let paths = workspaces::resolve_workspace_filter_paths(&conn, ws).unwrap();
     assert!(paths.contains(&"git:x".to_string()));
@@ -597,23 +533,26 @@ fn workspace_filter_paths_union_members() {
 fn empty_workspace_filter_returns_no_memories_or_stats() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
-    // A workspace with ZERO members. There ARE global memories in the DB.
+    let mut conn = make_db();
+    // A workspace with ZERO members. Other projects DO have memories, and the
+    // person has a user memory, which no project memory list ever shows.
     let ws = workspaces::create_workspace(&mut conn, "empty").unwrap();
+    schema_fixture::insert_project_memory(&conn, "git:somewhere", "CONSTRAINTS", "global", "active");
+    schema_fixture::insert_project_memory(&conn, "git:elsewhere", "CONSTRAINTS", "other", "active");
     conn.execute(
-        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
-         VALUES ('git:somewhere', 'C', 'global', 'h1', 'active', 1, 1, 1, 1),
-                ('git:elsewhere', 'C', 'other', 'h2', 'active', 1, 1, 1, 1)",
+        "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
+             first_seen_at, created_at, updated_at, last_seen_at)
+         VALUES ('global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'Prefers tabs.', 'h', 1, 1, 1, 1)",
         [],
     )
     .unwrap();
 
-    // Filtering by the empty workspace must NOT leak global memories/stats.
+    // Filtering by the empty workspace must NOT leak other projects' memories/stats.
     let mems = db::get_memories(&conn, None, Some(ws), None, None, None, 50, 0).unwrap();
     assert_eq!(
         mems.len(),
         0,
-        "empty workspace must not surface global memories"
+        "empty workspace must not surface other projects' memories"
     );
 
     let stats = db::get_memory_stats(&conn, None, Some(ws)).unwrap();
@@ -621,7 +560,8 @@ fn empty_workspace_filter_returns_no_memories_or_stats() {
     assert_eq!(stats.archived, 0);
     assert_eq!(stats.permanent, 0);
 
-    // Sanity: no filter still sees the globals (the gate is filter-specific).
+    // Sanity: no filter still sees every project's memories (the gate is
+    // filter-specific), and never the user memory.
     let all = db::get_memories(&conn, None, None, None, None, None, 50, 0).unwrap();
     assert_eq!(all.len(), 2);
 }
@@ -630,7 +570,7 @@ fn empty_workspace_filter_returns_no_memories_or_stats() {
 fn rename_workspace_does_not_bump_member_epochs() {
     isolated_home();
     let _g = env_lock();
-    let mut conn = make_db_v35();
+    let mut conn = make_db();
     let ws = workspaces::create_workspace(&mut conn, "before").unwrap();
     apply_add_member(&mut conn, ws, "git:m", "m", "/m");
     let epoch_before = epoch(&conn, "git:m");
@@ -648,13 +588,14 @@ fn rename_workspace_does_not_bump_member_epochs() {
 fn enumerate_memory_projects_includes_non_git_dir_project() {
     isolated_home();
     let _g = env_lock();
-    let conn = make_db_v35();
-    conn.execute(
-        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
-         VALUES ('dir:1234567890ab', 'CONSTRAINTS', 'some memory', 'h1', 'active', 1, 1, 1, 1)",
-        [],
-    )
-    .unwrap();
+    let conn = make_db();
+    schema_fixture::insert_project_memory(
+        &conn,
+        "dir:1234567890ab",
+        "CONSTRAINTS",
+        "some memory",
+        "active",
+    );
 
     let rows = db::enumerate_memory_projects(&conn).expect("enum");
     let matched = rows.iter().find(|r| r.identity == "dir:1234567890ab");

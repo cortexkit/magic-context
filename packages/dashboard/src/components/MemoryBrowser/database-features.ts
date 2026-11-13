@@ -1,7 +1,5 @@
 import type { DatabaseCapabilities } from "../../lib/api";
 
-export const MEMORY_HISTORY_REQUIREMENT = "Memory history needs Magic Context 0.50 or later";
-
 // Hide the history/undo surface until both reads and restores are safe. An
 // unresolved capability request must not briefly expose a non-working action.
 export function memoryHistoryAvailable(capabilities: DatabaseCapabilities | undefined): boolean {

@@ -19,14 +19,7 @@ pub async fn request(path: &Path, method: &str, params: Value) -> Result<Value, 
     }
     let mut conn =
         crate::db::open_readonly(&path.to_path_buf()).map_err(|error| error.to_string())?;
-    let capabilities = crate::db_capabilities::get(&conn).map_err(|error| error.to_string())?;
-    if method == "memory.edit" && capabilities.legacy_memory_edits {
-        drop(conn);
-        let mut conn =
-            crate::db::open_readwrite(&path.to_path_buf()).map_err(|error| error.to_string())?;
-        return local_request(&mut conn, method, &params);
-    }
-    crate::db_capabilities::require_history(&conn, method != "memory.history")?;
+    crate::db_capabilities::require_memory_store(&conn)?;
     if matches!(method, "memory.history" | "memory.restore.preview") {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -134,14 +127,7 @@ pub fn local_request(conn: &mut Connection, method: &str, params: &Value) -> Res
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis() as i64;
-    if method == "memory.edit"
-        && crate::db_capabilities::get(conn)
-            .map_err(|error| error.to_string())?
-            .legacy_memory_edits
-    {
-        return crate::legacy_memory::edit(conn, params, now);
-    }
-    crate::db_capabilities::require_history(conn, method != "memory.history")?;
+    crate::db_capabilities::require_memory_store(conn)?;
     match method {
         "memory.edit" => {
             let parsed: crate::memory_history::EditRequest =

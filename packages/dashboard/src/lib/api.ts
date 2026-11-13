@@ -226,7 +226,6 @@ export interface DatabaseCapabilities {
   memoryHistory: boolean;
   memoryUndo: boolean;
   compartmentScores: boolean;
-  legacyMemoryEdits: boolean;
 }
 
 export async function getDatabaseCapabilities(): Promise<DatabaseCapabilities> {

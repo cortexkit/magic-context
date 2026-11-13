@@ -55,7 +55,7 @@ fn directory_fallback(path: &Path) -> String {
     format!("dir:{}", &hex[..12])
 }
 
-/// Normalize a value read from `memories.project_path` / related stored identity columns.
+/// Normalize a value read from a project memory's `memories.owner_id` / related stored identity columns.
 ///
 /// Stored DB values may already be identities (`git:*`, `dir:*`, `pj-*`). Those must be returned
 /// unchanged; hashing the identity text as a filesystem path would produce a wrong project
