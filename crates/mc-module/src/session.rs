@@ -4138,7 +4138,9 @@ impl Session {
             EditOp::Cut { through } => Some(through),
             _ => None,
         });
-        let cut_moves = old_cut != new_cut;
+        // Without a replacement cut, the builder carries the old one until
+        // the last summary is retired; missing history ops do not undo it.
+        let cut_moves = old_cut != new_cut && (new_cut.is_some() || self.summaries.is_empty());
         if !cut_moves && queued_ops.is_empty() {
             return 0;
         }

@@ -6,9 +6,6 @@
 //! messages out too (`lanes::Edited::of`), so the credit must count all of
 //! what they cost in the previous request. Otherwise the remainder is
 //! counted as fixed overhead and the lane drops more than the request needs.
-//!
-//! Tests marked `ignore` are open defects: each asserts the right credit and
-//! fails against the current code. Run them with `--include-ignored`.
 
 use super::*;
 use cortexkit_role_compaction::part::FileMedia;
@@ -121,7 +118,6 @@ fn tools_touched(view: &View) -> BTreeSet<&str> {
 }
 
 #[test]
-#[ignore = "open defect: a new cut credits only the text and call input of the messages it removes"]
 fn emergency_credit_review_an_over_limit_request_with_a_new_cut_still_drops_outputs() {
     // The runner says the next request, 144k, will not fit the 100k window:
     // a 2k task, a 40k tool result in "large", tool outputs of 23k, 23k,
@@ -148,7 +144,6 @@ fn emergency_credit_review_an_over_limit_request_with_a_new_cut_still_drops_outp
 }
 
 #[test]
-#[ignore = "open defect: a new cut credits only the text and call input of the messages it removes"]
 fn emergency_credit_review_a_new_cut_credits_the_tool_result_it_removes() {
     let (session, _) = session_with("tool");
     // The cut leaves out the 2k task and the whole 50k tool result.
@@ -159,7 +154,6 @@ fn emergency_credit_review_a_new_cut_credits_the_tool_result_it_removes() {
 }
 
 #[test]
-#[ignore = "open defect: a new cut credits only the text and call input of the messages it removes"]
 fn emergency_credit_review_a_new_cut_over_a_tool_result_takes_no_extra_outputs() {
     // 90k: a 2k task, a 50k tool result in "large", tool outputs of 10k,
     // 10k, 10k, 1k, 1k and 1k, and 5k of fixed overhead.
@@ -182,7 +176,6 @@ fn emergency_credit_review_a_new_cut_over_a_tool_result_takes_no_extra_outputs()
 }
 
 #[test]
-#[ignore = "open defect: a new cut credits only the text and call input of the messages it removes"]
 fn emergency_credit_review_a_new_cut_credits_the_reasoning_it_removes() {
     let (session, _) = session_with("reasoning");
     assert_eq!(
@@ -192,7 +185,6 @@ fn emergency_credit_review_a_new_cut_credits_the_reasoning_it_removes() {
 }
 
 #[test]
-#[ignore = "open defect: a new cut credits only the text and call input of the messages it removes"]
 fn emergency_credit_review_a_new_cut_credits_the_images_it_removes() {
     let (mut session, _) = session_with("text");
     let mut entries = session.index.entries().to_vec();
@@ -212,7 +204,6 @@ fn emergency_credit_review_a_new_cut_credits_the_images_it_removes() {
 }
 
 #[test]
-#[ignore = "open defect: a pass whose history has no cut is treated as removing the view's cut"]
 fn emergency_credit_review_a_summarizer_turned_off_keeps_the_cut_and_its_credit() {
     let (mut session, settings) = session_with("text");
     let dir = tempfile::tempdir().unwrap();

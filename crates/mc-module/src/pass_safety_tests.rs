@@ -291,10 +291,10 @@ fn emergency_floor_a_cut_and_queued_tool_drop_credit_the_input_once() {
     session.index.extend_counted(entries, Some("family"));
     let history = emergency_floor_history(Some("large"), "summary");
     let head_tokens = session.counter().count("baseline") + session.counter().count("summary");
-    // The cut removes the task and call input, but still sends the 50k result.
+    // The cut removes the whole task and tool message, including the result.
     assert_eq!(
         session.emergency_removed_tokens(&history, &[]),
-        12_000 - head_tokens
+        62_000 - head_tokens
     );
     let queued = [EditOp::Drop {
         mid: "large".into(),

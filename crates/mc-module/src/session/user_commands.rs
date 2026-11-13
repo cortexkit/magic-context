@@ -531,8 +531,9 @@ impl Session {
         self.served_costs(view.into_iter().flat_map(|v| &v.edits).map(|e| &e.op))
     }
 
-    /// Per-part costs after replaying edits, including retained placeholders
-    /// and tool results that remain visible behind a history cut.
+    /// Per-part costs after replaying edits, including retained placeholders.
+    /// A history cut leaves out every part of each message through its boundary,
+    /// so status, previews and emergency credit all price the request as served.
     pub(super) fn served_costs<'a>(
         &self,
         ops: impl IntoIterator<Item = &'a EditOp>,
@@ -624,10 +625,8 @@ impl Session {
                         }
                     }
                 }
-                if cut.is_some_and(|cut| entry.ordinal <= cut) {
-                    cost = cost.saturating_sub(tokens::removed_by_summary(part));
-                }
-                if messages.contains(entry.mid.as_str())
+                if cut.is_some_and(|cut| entry.ordinal <= cut)
+                    || messages.contains(entry.mid.as_str())
                     || drops.contains(&key)
                     || (signed_floor.is_some_and(|floor| entry.ordinal <= floor)
                         && matches!(part.body, PartBody::Reasoning { .. }))
