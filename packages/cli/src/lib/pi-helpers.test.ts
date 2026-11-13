@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
+import {
+    cleanupTestTempDir,
+    createTestTempDirFromPath,
+} from "@magic-context/core/shared/test-temp-dir";
 import {
     getAvailableModels,
     getPiCommandInvocation,
@@ -102,4 +108,26 @@ describe("getAvailableModels", () => {
         const piPath = process.platform === "win32" ? "where" : "true";
         expect(getAvailableModels(piPath)).toEqual([]);
     });
+
+    // Any other words reach Pi as a prompt and start a billed session.
+    it.skipIf(process.platform === "win32")(
+        "runs only `pi --list-models`, once, even when it lists nothing",
+        () => {
+            const dir = createTestTempDirFromPath(join(tmpdir(), "pi-model-list-args"));
+            const log = join(dir, "args.log");
+            const pi = writeTestExecutable(
+                "fake-pi-recording-args",
+                `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PI_ARGS_LOG"\n`,
+            );
+            process.env.PI_ARGS_LOG = log;
+            try {
+                expect(getAvailableModels(pi)).toEqual([]);
+                expect(readFileSync(log, "utf-8")).toBe("--list-models\n");
+            } finally {
+                delete process.env.PI_ARGS_LOG;
+                cleanupTestTempDir(dir);
+            }
+        },
+        30_000,
+    );
 });

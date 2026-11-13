@@ -144,20 +144,12 @@ export function parseModelListOutput(output: string): string[] {
 }
 
 export function getAvailableModels(piPath: string): string[] {
-    // `pi --list-models` is the canonical command (prints the provider/model
-    // table). Try it first, then the older `models list` subcommand for
-    // forward/backward compat.
-    const outputs = [
-        runPiCommand(piPath, ["--list-models"]),
-        runPiCommand(piPath, ["models", "list"]),
-    ];
-    for (const output of outputs) {
-        if (!output) continue;
-        const models = parseModelListOutput(output);
-        if (models.length > 0) return models;
-    }
+    // `--list-models` is Pi's only model-listing command. Never pass Pi words it
+    // doesn't know as a subcommand: Pi reads them as a prompt, opens a session
+    // and sends a real model request on the user's default model.
+    const output = runPiCommand(piPath, ["--list-models"]);
     // Empty/failed discovery must not fall back to a static catalog — that reintroduces
     // issue #144 (users pick models they do not have). Callers pass [] to pickModel(),
     // which offers free-text provider/model entry instead.
-    return [];
+    return output ? parseModelListOutput(output) : [];
 }
