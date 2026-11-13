@@ -1,7 +1,8 @@
 //! Review witnesses for the cached summary due-check at the session level.
 //! Two sessions take the same notices; one evaluates with the cached window,
-//! the other with the unindexed evaluator. Beyond the original differential
-//! sequence, these notices carry runner counts under a token family that
+//! the other with the unindexed evaluator. Unlike the plain appends,
+//! truncations and settings changes in `summary_due_differential_tests.rs`,
+//! these notices also carry runner counts under a token family that
 //! switches, tool results that reach older messages, attribution backfilled
 //! on older messages, summaries that move the start of unsummarized history
 //! forward and back, and runs that stay outstanding over several notices.

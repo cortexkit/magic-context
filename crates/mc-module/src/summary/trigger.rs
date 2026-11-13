@@ -198,9 +198,10 @@ const SNAP_MAX_EXTRA_TOKENS: u64 = 48_000;
 /// A message larger than `max(2 × tail, this)` is too large to keep raw.
 const HUGE_MESSAGE_MIN_TOKENS: u64 = 64_000;
 
-/// How many extra tokens a semantic snap may keep raw for this tail:
-/// `min(1.5 × tail, 48,000)`. The cached due-check in `due.rs` uses the same
-/// rule, so both stay in step when it is retuned.
+/// How many extra tokens may be kept raw for this tail when the tail start
+/// moves back to the message that opens a stretch of work (see
+/// `semantic_snap`): `min(1.5 × tail, 48,000)`. The cached due-check in
+/// `due.rs` uses the same rule, so both stay in step when it is retuned.
 pub(super) fn snap_allowance(tail_tokens: u64) -> u64 {
     ((1.5 * tail_tokens as f64).round() as u64).min(SNAP_MAX_EXTRA_TOKENS)
 }
