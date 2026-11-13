@@ -7,6 +7,7 @@
 pub mod account_wait;
 pub mod chunk;
 pub mod drain;
+pub(crate) mod due;
 pub mod fit;
 pub mod hashes;
 pub mod head;

@@ -33,6 +33,9 @@ mod spent_reading_tests;
 #[path = "session_count_tests.rs"]
 mod count_tests;
 
+#[path = "summary_due_differential_tests.rs"]
+mod summary_due_differential_tests;
+
 #[path = "notes_tokens_tests.rs"]
 mod notes_tokens_tests;
 

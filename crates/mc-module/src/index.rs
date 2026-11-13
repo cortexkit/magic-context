@@ -53,6 +53,7 @@ pub struct Index {
     app_truncated: Option<u64>,
     app_pruned: Option<u64>,
     positions: std::collections::HashMap<String, u64>,
+    summary_changed: Option<u64>,
 }
 
 /// An empty index that holds the whole transcript, from its first entry.
@@ -136,6 +137,7 @@ impl Index {
             app_truncated: None,
             app_pruned: None,
             positions: Default::default(),
+            summary_changed: Some(base),
         }
     }
 
@@ -146,6 +148,13 @@ impl Index {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// The trigger cache has its own change cursor. Readers of application
+    /// data consume a separate cursor, so neither can hide an invalidation
+    /// from the other.
+    pub(crate) fn summary_changes(&mut self) -> (u64, Option<u64>) {
+        (self.app_identity, self.summary_changed.take())
     }
 
     /// The ordinal of the held entry `mid`, if the index holds it.
@@ -189,6 +198,7 @@ impl Index {
         family: Option<&str>,
     ) -> Extend {
         if let Some(family) = family.filter(|family| self.family.as_deref() != Some(*family)) {
+            self.summary_changed = Some(self.base);
             Arc::make_mut(&mut self.entries)
                 .iter_mut()
                 .for_each(clear_counts);
@@ -207,6 +217,10 @@ impl Index {
                 continue;
             }
             if entry.ordinal == next {
+                self.summary_changed = Some(
+                    self.summary_changed
+                        .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                );
                 self.app_changed.insert(entry.ordinal);
                 self.positions.insert(entry.mid.clone(), entry.ordinal);
                 Arc::make_mut(&mut self.entries).push(entry);
@@ -227,10 +241,18 @@ impl Index {
                 // Attribution may be backfilled without changing a digest. Once
                 // stored, its write-time identity and display name stay frozen.
                 if held.speaks_for.is_none() && entry.speaks_for.is_some() {
+                    self.summary_changed = Some(
+                        self.summary_changed
+                            .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                    );
                     held.speaks_for = entry.speaks_for.clone();
                     self.app_changed.insert(entry.ordinal);
                 }
                 if refresh_counts(held, &entry) {
+                    self.summary_changed = Some(
+                        self.summary_changed
+                            .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                    );
                     self.app_changed.insert(entry.ordinal);
                 }
                 continue;
@@ -241,6 +263,10 @@ impl Index {
             // host stored the result in a later message.
             let newest = entry.ordinal + 1 == next;
             if held.mid == entry.mid && (newest || only_tool_results_changed(held, &entry)) {
+                self.summary_changed = Some(
+                    self.summary_changed
+                        .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                );
                 self.app_changed.insert(entry.ordinal);
                 *held = entry;
                 continue;
@@ -253,6 +279,7 @@ impl Index {
     /// Forget every entry from `ordinal` on. An ordinal before the base
     /// empties the index; the caller decides where it starts again.
     pub fn truncate(&mut self, ordinal: u64) {
+        self.summary_changed = Some(self.summary_changed.map_or(ordinal, |old| old.min(ordinal)));
         for entry in self
             .entries
             .iter()
@@ -270,6 +297,7 @@ impl Index {
         let count = (ordinal.saturating_sub(self.base) as usize).min(self.entries.len());
         self.base += count as u64;
         if count > 0 {
+            self.summary_changed = Some(self.base);
             self.app_pruned = Some(self.base);
         }
         let gone: Vec<_> = Arc::make_mut(&mut self.entries).drain(..count).collect();

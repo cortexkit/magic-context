@@ -88,6 +88,9 @@ pub struct Session {
     search_dirty_from: Option<u64>,
     search_reconcile_from: Option<u64>,
     scan_counts: crate::summary::chunk::CountCache,
+    due_window: crate::summary::due::Window,
+    #[cfg(any(test, feature = "notice-cost-timing"))]
+    legacy_summary_scan: bool,
     /// No view may use an index left partial by an unsuccessful catch-up.
     index_ready: bool,
     /// Set while the session is held because its transcript does not hold
@@ -728,6 +731,9 @@ impl Session {
             search_dirty_from: None,
             search_reconcile_from: None,
             scan_counts: crate::summary::chunk::CountCache::default(),
+            due_window: crate::summary::due::Window::default(),
+            #[cfg(any(test, feature = "notice-cost-timing"))]
+            legacy_summary_scan: false,
             index_ready: true,
             transcript_behind: None,
             suspended: false,
@@ -1238,6 +1244,7 @@ impl Session {
         settings: &Settings,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
+        let _timing = crate::notice_cost_timing::span("session.notice");
         // Whether the notice belongs to the session as ck-mc holds it comes
         // first, before anything in it is taken, the notice number included.
         let Some(standing) = self.standing(&notice.conditions) else {
@@ -1279,6 +1286,7 @@ impl Session {
         notice: NoticeRequest,
         standing: Standing,
     ) -> Option<run::Request> {
+        let _timing = crate::notice_cost_timing::span("session.handle_notice");
         self.seq = notice.seq;
         let previous = reading_of(&self.conditions);
         let previous_notes = self.notes.measured;
@@ -1723,19 +1731,58 @@ impl Session {
         std::borrow::Cow::Owned(conditions)
     }
 
+    /// Retain the unindexed evaluator as an oracle for differential and cost
+    /// tests. Ordinary builds have no runtime switch for trigger evaluation.
+    #[cfg(any(test, feature = "notice-cost-timing"))]
+    pub fn use_legacy_summary_scan(&mut self, legacy: bool) {
+        self.legacy_summary_scan = legacy;
+    }
+
+    fn legacy_summary_scan(&self) -> bool {
+        #[cfg(any(test, feature = "notice-cost-timing"))]
+        {
+            self.legacy_summary_scan
+        }
+        #[cfg(not(any(test, feature = "notice-cost-timing")))]
+        {
+            false
+        }
+    }
+
     /// A summarizer run to start now, if one is due: the session has a
     /// summarizer, none is running, and the history it may read is worth a
     /// run at this usage.
     fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
+        let _timing = crate::notice_cost_timing::span("trigger.summary_due");
         let threshold = settings.execute_threshold_percentage;
         let usage = pass::usage(&self.pressure()).unwrap_or(0.0) * 100.0;
-        let prompt = self
-            .index
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| trigger::is_meaningful_user(entry))
-            .map(|entry| (entry.ordinal, entry.mid.clone()));
+        let legacy = self.legacy_summary_scan();
+        let cached = !legacy && self.features.summarizer && !self.summarizing;
+        let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
+        let model = &self.conditions.model;
+        let counter =
+            crate::count::Counter::for_model(Some(&format!("{}/{}", model.provider, model.model)));
+        if cached {
+            let (identity, changed) = self.index.summary_changes();
+            self.due_window.sync(
+                self.index.entries(),
+                identity,
+                changed,
+                from,
+                counter,
+                &mut self.scan_counts,
+            );
+        }
+        let prompt = if !cached {
+            self.index
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| trigger::is_meaningful_user(entry))
+        } else {
+            self.due_window.prompt(self.index.entries())
+        }
+        .map(|entry| (entry.ordinal, entry.mid.clone()));
         // A stale reading says nothing about usage, so it doesn't clear the
         // mark: the mark waits for a reading under the current view. A late
         // statement brought no reading, so its pass leaves the mark too.
@@ -1754,7 +1801,6 @@ impl Session {
         let memory_enabled = self.memory_admissions(settings) && self.project.is_some();
         let window = pass::usable_window(&self.conditions);
         let force = pass::in_force_band(&self.pressure(), settings);
-        let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
         let tail = trigger::protected_tail_tokens(window, threshold, usage);
         let entries = self.index.entries();
         let budget = trigger::trigger_budget(window, threshold);
@@ -1788,16 +1834,30 @@ impl Session {
         }
         // The trigger uses the session model; a routed summarizer gets its own
         // counter when the run starts. Only estimated counts need scaling.
-        let model = &self.conditions.model;
-        let counter =
-            crate::count::Counter::for_model(Some(&format!("{}/{}", model.provider, model.model)));
         let calibration = counter.calibration();
         let ratio = calibration
             .prose_ratio
             .max(calibration.tools_ratio)
             .max(1.0);
         let scan_lines = (trigger::scan_budget(budget) as f64 / ratio).floor() as u64;
+        let scaled_tail = (tail as f64 * if usage >= 95.0 { 0.25 } else { 0.5 }) as u64;
+        let cached_bounds = (!legacy).then(|| {
+            [(tail, false), (tail, true), (scaled_tail, true)].map(|(tokens, lift)| {
+                (
+                    tokens,
+                    lift,
+                    self.due_window.bounded(entries, from, tokens, lift, cap),
+                )
+            })
+        });
         let bounded = |tail_tokens: u64, lift: bool| {
+            if let Some(bounds) = &cached_bounds {
+                return bounds
+                    .iter()
+                    .find(|(tokens, lifted, _)| *tokens == tail_tokens && *lifted == lift)
+                    .expect("a protected-tail variant")
+                    .2;
+            }
             let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
             trigger::cap_run(entries, entry_removed_tokens, from, until, cap)
         };
@@ -1805,6 +1865,18 @@ impl Session {
             .then(|| self.usage_after_drops(settings, usage))
             .flatten();
         let mut scan_at = |until: u64| -> Option<trigger::Scan> {
+            if !legacy {
+                let mut scan = self.due_window.scan(
+                    entries,
+                    from,
+                    until,
+                    scan_lines,
+                    counter,
+                    &mut self.scan_counts,
+                )?;
+                scan.tokens = (scan.tokens as f64 * ratio).ceil() as u64;
+                return Some(scan);
+            }
             let low = entries.partition_point(|entry| entry.ordinal < from);
             let high = entries.partition_point(|entry| entry.ordinal < until);
             let readable = &entries[low..high.max(low)];
@@ -2735,6 +2807,7 @@ impl Session {
         rebuilt: bool,
         cut_moved: bool,
     ) {
+        let _timing = crate::notice_cost_timing::span("session.remind");
         if self.index.entries().is_empty() {
             return;
         }

@@ -67,6 +67,7 @@ pub fn protected_tail_tokens(
 /// Whether a user message carries the person's own words: not a notice or relay, and
 /// with text left once injected regions (reminders, directives) are stripped.
 pub fn is_meaningful_user(entry: &Entry) -> bool {
+    let _timing = crate::notice_cost_timing::span("trigger.meaningful_user");
     entry.role == Role::User
         && entry.notice.is_none()
         && entry.speaks_for.is_none()
@@ -220,6 +221,7 @@ const POST_DROP_TARGET_RATIO: f64 = 0.75;
 
 /// What the history the summarizer could read looks like, measured on the
 /// lines it would be sent (`U:`, `A:`, `TC:`), as the plugin measures it.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Scan {
     /// The lines' tokens, scaled to the model's tokens.
     pub tokens: u64,

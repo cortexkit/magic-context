@@ -5,13 +5,13 @@ mod enabled {
     use std::cell::RefCell;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     };
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static SAMPLES: Mutex<Vec<Sample>> = Mutex::new(Vec::new());
     thread_local! {
-        static STACK: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+        static STACK: RefCell<Vec<(u64, u64, (u64, u64), (u64, u64))>> = const { RefCell::new(Vec::new()) };
     }
 
     #[derive(Debug, serde::Serialize)]
@@ -20,6 +20,22 @@ mod enabled {
         pub cpu_us: u64,
         pub exclusive_us: u64,
         pub observed: Option<u64>,
+        pub allocations: u64,
+        pub bytes: u64,
+        pub exclusive_allocations: u64,
+        pub exclusive_bytes: u64,
+    }
+
+    static ALLOCATIONS: OnceLock<fn() -> (u64, u64)> = OnceLock::new();
+
+    /// The measurement executable owns its allocator. Reading its counters
+    /// here attributes exact calls to the same nested stages as CPU samples.
+    pub fn allocation_reader(reader: fn() -> (u64, u64)) {
+        let _ = ALLOCATIONS.set(reader);
+    }
+
+    fn allocations() -> (u64, u64) {
+        ALLOCATIONS.get().map_or((0, 0), |reader| reader())
     }
 
     fn cpu() -> u64 {
@@ -33,6 +49,8 @@ mod enabled {
 
     pub fn begin() {
         SAMPLES.lock().unwrap().clear();
+        SAMPLES.lock().unwrap().reserve(100_000);
+        STACK.with(|stack| stack.borrow_mut().reserve(32));
         ACTIVE.store(true, Ordering::SeqCst);
     }
 
@@ -48,6 +66,10 @@ mod enabled {
                 cpu_us: 0,
                 exclusive_us: 0,
                 observed: Some(value),
+                allocations: 0,
+                bytes: 0,
+                exclusive_allocations: 0,
+                exclusive_bytes: 0,
             });
         }
     }
@@ -56,7 +78,7 @@ mod enabled {
 
     pub fn span(stage: &'static str) -> Span {
         if ACTIVE.load(Ordering::Relaxed) {
-            STACK.with(|s| s.borrow_mut().push((cpu(), 0)));
+            STACK.with(|s| s.borrow_mut().push((cpu(), 0, allocations(), (0, 0))));
             Span(Some(stage))
         } else {
             Span(None)
@@ -67,20 +89,40 @@ mod enabled {
         fn drop(&mut self) {
             let Some(stage) = self.0 else { return };
             let end = cpu();
-            let (total, exclusive) = STACK.with(|s| {
+            let allocation_end = allocations();
+            let (total, exclusive, allocated, own) = STACK.with(|s| {
                 let mut s = s.borrow_mut();
-                let (start, children) = s.pop().expect("balanced timing stages");
+                let (start, children, allocation_start, child_allocations) =
+                    s.pop().expect("balanced timing stages");
                 let total = end.saturating_sub(start);
+                let allocated = (
+                    allocation_end.0 - allocation_start.0,
+                    allocation_end.1 - allocation_start.1,
+                );
                 if let Some(parent) = s.last_mut() {
                     parent.1 += total;
+                    parent.3 .0 += allocated.0;
+                    parent.3 .1 += allocated.1;
                 }
-                (total, total.saturating_sub(children))
+                (
+                    total,
+                    total.saturating_sub(children),
+                    allocated,
+                    (
+                        allocated.0 - child_allocations.0,
+                        allocated.1 - child_allocations.1,
+                    ),
+                )
             });
             SAMPLES.lock().unwrap().push(Sample {
                 stage,
                 cpu_us: total / 1_000,
                 exclusive_us: exclusive / 1_000,
                 observed: None,
+                allocations: allocated.0,
+                bytes: allocated.1,
+                exclusive_allocations: own.0,
+                exclusive_bytes: own.1,
             });
         }
     }

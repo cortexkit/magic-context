@@ -145,6 +145,7 @@ pub struct CountCache {
     entry_counts: std::collections::HashMap<(u64, String), Option<u64>>,
     headers: std::collections::HashMap<String, u64>,
     separator: Option<u64>,
+    recent_headers: std::collections::VecDeque<(String, u64)>,
     #[cfg(test)]
     pub misses: usize,
     #[cfg(test)]
@@ -152,12 +153,26 @@ pub struct CountCache {
 }
 
 impl CountCache {
+    pub(super) fn set_family(&mut self, counter: crate::count::Counter) {
+        if self.family != Some(counter.family()) {
+            self.counts.clear();
+            self.entry_counts.clear();
+            self.headers.clear();
+            self.separator = None;
+            self.recent_headers.clear();
+            self.family = Some(counter.family());
+        }
+    }
+    pub(super) fn separator(&mut self, counter: crate::count::Counter) -> u64 {
+        *self.separator.get_or_insert_with(|| counter.count(" / "))
+    }
     pub fn build(
         &mut self,
         entries: &[Entry],
         budget: u64,
         counter: crate::count::Counter,
     ) -> Option<Chunk> {
+        let _timing = crate::notice_cost_timing::span("trigger.count_cache");
         if self.family != Some(counter.family()) {
             self.counts.clear();
             self.entry_counts.clear();
@@ -228,6 +243,43 @@ impl CountCache {
     }
 }
 
+pub(super) fn count_header(
+    role: char,
+    start: u64,
+    end: u64,
+    hashes: &[&str],
+    counter: crate::count::Counter,
+    counts: &mut CountCache,
+) -> u64 {
+    let block = Block {
+        role,
+        start,
+        end,
+        parts: Vec::new(),
+        lines: Vec::new(),
+        commit_hashes: hashes.iter().map(|hash| (*hash).to_owned()).collect(),
+        tool_only: false,
+    };
+    let header = block.header();
+    if let Some((_, count)) = counts
+        .recent_headers
+        .iter()
+        .find(|(held, _)| held == &header)
+    {
+        return *count;
+    }
+    #[cfg(test)]
+    {
+        counts.header_misses += 1;
+    }
+    let count = counter.count(&header);
+    if counts.recent_headers.len() == 8 {
+        counts.recent_headers.pop_front();
+    }
+    counts.recent_headers.push_back((header, count));
+    count
+}
+
 /// Attribution changes summary labels but is deliberately outside the wire
 /// digest. Include it only in the local token-count cache's identity.
 fn count_identity(entry: &Entry) -> String {
@@ -244,6 +296,7 @@ fn build_counted(
     mode: Lines,
     mut count: impl FnMut(&Block, &str) -> u64,
 ) -> Option<Chunk> {
+    let _timing = crate::notice_cost_timing::span("trigger.build_chunk");
     let per_message = mode == Lines::PerMessage;
     let mut lines: Vec<String> = Vec::new();
     let mut printed: Vec<(char, u64, u64, Vec<String>)> = Vec::new();
@@ -477,7 +530,11 @@ pub fn blocks_sent<'a>(chunk: &'a Chunk, sent: &str) -> Vec<&'a PrintedBlock> {
 
 /// One message's role letter, line parts, commit hashes and whether it
 /// carries narrative (text rather than only tool calls). `None` for noise.
-fn render_entry(entry: &Entry, verbatim: bool) -> Option<(char, Vec<String>, Vec<String>, bool)> {
+pub(super) fn render_entry(
+    entry: &Entry,
+    verbatim: bool,
+) -> Option<(char, Vec<String>, Vec<String>, bool)> {
+    let _timing = crate::notice_cost_timing::span("trigger.render_entry");
     let raw_texts: Vec<&str> = entry
         .parts
         .iter()

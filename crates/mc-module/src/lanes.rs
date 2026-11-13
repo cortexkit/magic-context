@@ -144,6 +144,7 @@ impl Edited {
 
     /// The part is reduced for good, so no lane changes it again.
     pub fn covers(&self, mid: &str, part: &str) -> bool {
+        let _timing = crate::notice_cost_timing::span("lanes.edited_covers");
         self.messages.contains(mid) || self.parts.contains(&(mid.to_owned(), part.to_owned()))
     }
 
@@ -513,6 +514,7 @@ pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
 
 /// The newest results of each protected tool, by part.
 pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BTreeSet<PartKey> {
+    let _timing = crate::notice_cost_timing::span("lanes.protected_tool_parts");
     let mut left: BTreeMap<String, u64> = counts.clone();
     let mut protected = BTreeSet::new();
     for entry in index.entries().iter().rev() {
@@ -856,6 +858,7 @@ pub fn default_protected_tokens(usable_window: u64) -> u64 {
 /// alone by the routine heuristics. `None` when the session has no tool
 /// calls, which protects nothing.
 pub fn protected_cutoff(context: &Context, floor: u64) -> Option<u64> {
+    let _timing = crate::notice_cost_timing::span("lanes.protected_cutoff");
     let tools: Vec<(u64, u64)> = context
         .index
         .entries()

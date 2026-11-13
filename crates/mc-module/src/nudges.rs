@@ -278,6 +278,7 @@ pub fn measure(
     protected_from: Option<u64>,
     queued: &BTreeSet<PartKey>,
 ) -> Measurement {
+    let _timing = crate::notice_cost_timing::span("nudges.measure");
     let protected_tools = lanes::protected_tool_parts(context.index, context.protected_tools);
     let first = context
         .keep_first_message
@@ -307,7 +308,10 @@ pub fn measure(
                 _ => continue,
             };
             measurement.t += weight;
-            let key = (entry.mid.clone(), part.id.clone());
+            let key = {
+                let _timing = crate::notice_cost_timing::span("nudges.part_key");
+                (entry.mid.clone(), part.id.clone())
+            };
             let protected = match (part.tag, protected_from) {
                 (Some(tag), Some(from)) => tag >= from,
                 _ => false,

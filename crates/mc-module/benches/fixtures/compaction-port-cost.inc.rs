@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
 struct Allocator;
 static LIVE: AtomicI64 = AtomicI64::new(0);
 static COUNT: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static SENDS: AtomicU64 = AtomicU64::new(0);
 
@@ -19,6 +20,7 @@ unsafe impl GlobalAlloc for Allocator {
             LIVE.fetch_add(layout.size() as i64, Relaxed);
             if ACTIVE.load(Relaxed) {
                 COUNT.fetch_add(1, Relaxed);
+                BYTES.fetch_add(layout.size() as u64, Relaxed);
             }
         }
         ptr
@@ -29,6 +31,7 @@ unsafe impl GlobalAlloc for Allocator {
             LIVE.fetch_add(layout.size() as i64, Relaxed);
             if ACTIVE.load(Relaxed) {
                 COUNT.fetch_add(1, Relaxed);
+                BYTES.fetch_add(layout.size() as u64, Relaxed);
             }
         }
         ptr
@@ -43,6 +46,7 @@ unsafe impl GlobalAlloc for Allocator {
             LIVE.fetch_add(size as i64 - layout.size() as i64, Relaxed);
             if ACTIVE.load(Relaxed) {
                 COUNT.fetch_add(1, Relaxed);
+                BYTES.fetch_add(size as u64, Relaxed);
             }
         }
         next
@@ -51,6 +55,9 @@ unsafe impl GlobalAlloc for Allocator {
 
 #[global_allocator]
 static ALLOCATOR: Allocator = Allocator;
+
+#[cfg(feature = "notice-cost-timing")]
+include!("summary-due-cost.inc.rs");
 
 // A wire round-trip gives the session its own payload buffers, as a real
 // runner read does. Otherwise shared Text would also belong to the fixture,
