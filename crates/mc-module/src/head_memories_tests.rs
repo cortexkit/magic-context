@@ -328,7 +328,10 @@ fn review_an_old_baseline_used_before_its_fold_adds_no_profile_line_m0_shows() {
     .expect("a baseline the previous build saved");
     let mut profile = row(100, "global", "USER_MEMORY", "User prefers short answers");
     profile.learned = (Some(1), 1);
-    let rows = [row(3, "project", "NAMING", "Files are kebab-case."), profile];
+    let rows = [
+        row(3, "project", "NAMING", "Files are kebab-case."),
+        profile,
+    ];
     let (m1, _, _) = delta(&old, &head_inputs(&rows));
     assert!(
         !m1.contains(r#"<added id="100" level="global""#),
