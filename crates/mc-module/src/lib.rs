@@ -73,6 +73,10 @@ pub mod memory_profile;
 /// The selection a head's memory blocks show; not yet wired into the head.
 #[expect(dead_code)]
 pub(crate) mod memory_render;
+/// A simulation of the head's memory selection over a store copy, run only
+/// when asked (`--ignored`), and its tests on synthetic stores.
+#[cfg(test)]
+mod memory_render_sim_tests;
 pub(crate) mod memory_sync;
 pub mod memory_tool;
 pub mod memory_writes;
