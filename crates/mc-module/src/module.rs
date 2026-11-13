@@ -942,7 +942,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             return serde_json::to_value(commands::describe())
                 .map_err(|_| commands::invalid("reply"));
         };
-        let key = request.key();
+        let Some(key) = request.key() else {
+            return self.owner_command(request).await;
+        };
         let worker = self
             .inner
             .workers
@@ -983,6 +985,52 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .send(Job::Command { request, reply })
             .map_err(|_| commands::invalid("subject"))?;
         answer.await.map_err(|_| commands::invalid("subject"))?
+    }
+
+    /// The module's dreamer, for tests that show it a project.
+    #[cfg(test)]
+    pub(crate) fn dreamer_engine(&self) -> Option<&Arc<crate::dreamer::engine::Engine>> {
+        self.inner.dreamer.as_ref()
+    }
+
+    /// A command on memories, observations, the dreamer or notes. It runs on
+    /// the calling task: each is a few short transactions on `context.db`,
+    /// and its answer is kept in `mode3.db`, not in a session.
+    async fn owner_command(
+        &self,
+        request: crate::user_commands::Request,
+    ) -> Result<Value, subc_protocol::ErrorBody> {
+        use crate::user_commands::{self as commands, owner, Request};
+        let subject = match &request {
+            Request::Preview(request) => &request.subject,
+            Request::Run(request) => &request.subject,
+        };
+        let project_known = match subject {
+            cortexkit_role_user_commands::Subject::Project { project_id } => {
+                self.inner.app_read.knows_project(project_id).await
+            }
+            _ => true,
+        };
+        let context = owner::Context {
+            db: self.inner.db.as_ref(),
+            store: self.inner.store.as_deref(),
+            dreamer: self.inner.dreamer.as_ref(),
+            dreamer_settings: self.inner.config.dreamer(),
+            client: &self.inner.client,
+            project_known,
+        };
+        match request {
+            Request::Preview(request) => {
+                let preview = owner::preview(&context, &request)?;
+                preview.check().map_err(|e| e.refusal())?;
+                serde_json::to_value(preview).map_err(|_| commands::invalid("reply"))
+            }
+            Request::Run(request) => {
+                let reply = owner::run(&context, &request)?;
+                reply.check().map_err(|e| e.refusal())?;
+                serde_json::to_value(reply).map_err(|_| commands::invalid("reply"))
+            }
+        }
     }
 
     fn spawn_worker(&self, key: SessionRef) -> mpsc::UnboundedSender<Job> {

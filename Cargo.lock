@@ -387,9 +387,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-user-commands"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10208a08b7ad82e82e182e68e33336e8915104647847eb345a3192393dffedc1"
+checksum = "82506fb5ba742ea2e7c523aa2f817e83889589f6c0e525020e2163863e6ecb4d"
 dependencies = [
  "serde",
  "serde_jcs",

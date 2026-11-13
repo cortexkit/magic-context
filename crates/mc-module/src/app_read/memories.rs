@@ -539,7 +539,11 @@ fn writer(
     Ok(match recorded.as_deref() {
         Some("ctx_memory") => vec![("writer", json!("agent"))],
         Some("historian") => vec![("writer", json!("summary"))],
-        Some("dashboard_edit" | "dashboard_restore") => vec![("writer", json!("person"))],
+        // The person's commands from the apps record `person`; the
+        // dashboard's edits and restores (0.49) recorded these two.
+        Some("person" | "dashboard_edit" | "dashboard_restore") => {
+            vec![("writer", json!("person"))]
+        }
         // Rows the plugin's dreamer wrote (Magic Context 0.49 and earlier),
         // before dreamer runs were recorded: the task is the plugin's task
         // name and there is no run to name.

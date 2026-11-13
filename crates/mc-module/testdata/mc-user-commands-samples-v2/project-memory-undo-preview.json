@@ -1,0 +1,62 @@
+{
+  "available": true,
+  "effect": "Restores this project memory as it was before revision 2. Undo can take that back too.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Now",
+      "After"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 44.0
+          },
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 36.0
+          }
+        ],
+        "label": "Text length"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 50.0
+          },
+          {
+            "unit": "count",
+            "value": 50.0
+          }
+        ],
+        "label": "Importance"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 2.0
+          },
+          {
+            "unit": "count",
+            "value": 3.0
+          }
+        ],
+        "label": "Revision"
+      }
+    ]
+  },
+  "version": "3d62dca2b0f2788e1a93111b1629f743d296ad8159ca5b7181616fefa7068baf"
+}

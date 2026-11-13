@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Dismisses 1 note of this project; agents stop seeing it.",
+  "facts": [
+    {
+      "label": "Notes",
+      "noun": "notes",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Already dismissed",
+      "noun": "notes",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "51d483a91819fcf2d4f18154997f52b8eb21975fb13716e89b50835589ff02e0"
+}

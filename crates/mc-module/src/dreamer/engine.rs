@@ -330,18 +330,33 @@ impl Engine {
                 return;
             }
         }
-        let end = self
-            .run_task(
-                db,
-                client,
-                settings,
-                &due,
-                &kind,
-                &declaration,
-                root,
-                profile,
-            )
-            .await;
+        let end = match begin_run(db, &due, &kind, profile) {
+            Ok(run_id) => {
+                self.run_task(
+                    db,
+                    client,
+                    settings,
+                    &due,
+                    &kind,
+                    &declaration,
+                    root,
+                    profile,
+                    run_id,
+                )
+                .await
+            }
+            Err(error) => RunEnd {
+                outcome: "failed".into(),
+                error: Some(error),
+                ..RunEnd::default()
+            },
+        };
+        self.finish_due(db, &due, &end);
+    }
+
+    /// Settle a finished run's schedule as its outcome says, then release
+    /// the owner's lock.
+    fn finish_due(&self, db: &ContextDb, due: &store::Due, end: &RunEnd) {
         let settled = match end.outcome.as_str() {
             "failed" | "lock_lost" => Settled::Failed {
                 error: end.error.clone().unwrap_or_default(),
@@ -362,7 +377,15 @@ impl Engine {
                 status: "nothing_to_do",
             },
         };
-        settle(settled);
+        if let Err(error) = db.with_connection(|conn| {
+            store::settle(conn, &due.owner, &due.task, &settled, None, now_ms())
+        }) {
+            tracing::warn!(
+                "ck-mc: dreamer: settling {} for {} failed: {error}",
+                due.task,
+                due.owner.owner_id
+            );
+        }
         if let Err(error) = db.with_connection(|conn| store::unlock(conn, &due.owner, &self.holder))
         {
             tracing::warn!(
@@ -373,6 +396,159 @@ impl Engine {
         // The schedule moves on before the lock is released, so no other
         // process starts the same slot again; the page hears of both.
         tell(db, &due.owner);
+    }
+
+    /// Why the person can't start `kind` for `project` now, or the profile's
+    /// task id it would run with the project's schedule row. Reads only: the
+    /// preview of a run-now asks this, and the run asks it again.
+    pub fn run_now_check(
+        &self,
+        db: &ContextDb,
+        project: &str,
+        kind: &str,
+        now: i64,
+    ) -> Result<store::Due, RunNowRefused> {
+        let (root, profile) = self
+            .projects
+            .lock()
+            .expect("dreamer projects")
+            .get(project)
+            .map(|seen| (seen.root.clone(), Arc::clone(&seen.profile)))
+            .ok_or(RunNowRefused::NotSeen)?;
+        let declaration = profile.body["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|task| task["kind"].as_str() == Some(kind))
+            .ok_or(RunNowRefused::NotDeclared)?;
+        if !declaration["enabled"].as_bool().unwrap_or(true) {
+            return Err(RunNowRefused::Disabled);
+        }
+        let task = declaration["id"].as_str().unwrap_or(kind);
+        let owner = OwnerKey::project(project);
+        let due = db
+            .with_connection(|conn| store::schedule_of(conn, &owner, task))
+            .map_err(|error| RunNowRefused::Store(error.to_string()))?
+            .filter(|due| !due.schedule.trim().is_empty())
+            .ok_or(RunNowRefused::NotScheduled)?;
+        if let Some(missing) = missing_evidence(declaration, &root) {
+            return Err(RunNowRefused::Evidence(missing));
+        }
+        let held = db
+            .with_connection(|conn| store::lock_holder(conn, &owner, now))
+            .map_err(|error| RunNowRefused::Store(error.to_string()))?;
+        if held.is_some() || self.running.lock().expect("dreamer runs").contains(&owner) {
+            return Err(RunNowRefused::Locked);
+        }
+        Ok(due)
+    }
+
+    /// Start `kind` for `project` now, for the person. It runs as a
+    /// scheduled run does, takes the project's lock first, and settles the
+    /// task's schedule when it ends, so it counts as the task's run. Returns
+    /// the profile's task id and the run's id once the run is recorded; the
+    /// rest of the run continues in the background.
+    pub fn run_now<C: RunnerClient + Router + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        db: &Arc<ContextDb>,
+        client: &Arc<C>,
+        settings: &Settings,
+        project: &str,
+        kind: &str,
+    ) -> Result<(String, i64), RunNowRefused> {
+        let now = now_ms();
+        let due = self.run_now_check(db, project, kind, now)?;
+        let (root, profile) = self
+            .projects
+            .lock()
+            .expect("dreamer projects")
+            .get(project)
+            .map(|seen| (seen.root.clone(), Arc::clone(&seen.profile)))
+            .ok_or(RunNowRefused::NotSeen)?;
+        let declaration = self
+            .declarations(&profile)
+            .into_iter()
+            .find(|declaration| declaration["id"].as_str() == Some(due.task.as_str()))
+            .cloned()
+            .ok_or(RunNowRefused::NotDeclared)?;
+        if !self
+            .running
+            .lock()
+            .expect("dreamer runs")
+            .insert(due.owner.clone())
+        {
+            return Err(RunNowRefused::Locked);
+        }
+        let release = |engine: &Self| {
+            engine
+                .running
+                .lock()
+                .expect("dreamer runs")
+                .remove(&due.owner);
+        };
+        match db.with_connection(|conn| {
+            store::lock(
+                conn,
+                &due.owner,
+                &self.holder,
+                &due.task,
+                now,
+                now + LOCK_MS,
+            )
+        }) {
+            Ok(true) => {}
+            Ok(false) => {
+                release(self);
+                return Err(RunNowRefused::Locked);
+            }
+            Err(error) => {
+                release(self);
+                return Err(RunNowRefused::Store(error.to_string()));
+            }
+        }
+        let run_id = match begin_run(db, &due, kind, &profile) {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                let _ = db.with_connection(|conn| store::unlock(conn, &due.owner, &self.holder));
+                release(self);
+                tell(db, &due.owner);
+                return Err(RunNowRefused::Store(error));
+            }
+        };
+        tracing::info!(
+            "ck-mc: dreamer: run {run_id} {} for {project} started by the person",
+            due.task
+        );
+        let task = due.task.clone();
+        let engine = Arc::clone(self);
+        let (db, client, settings, kind) = (
+            Arc::clone(db),
+            Arc::clone(client),
+            settings.clone(),
+            kind.to_owned(),
+        );
+        tokio::spawn(async move {
+            let end = engine
+                .run_task(
+                    &db,
+                    &*client,
+                    &settings,
+                    &due,
+                    &kind,
+                    &declaration,
+                    &root,
+                    &profile,
+                    run_id,
+                )
+                .await;
+            engine.finish_due(&db, &due, &end);
+            engine
+                .running
+                .lock()
+                .expect("dreamer runs")
+                .remove(&due.owner);
+        });
+        Ok((task, run_id))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -386,31 +562,26 @@ impl Engine {
         declaration: &Value,
         root: &str,
         profile: &Profile,
+        run_id: i64,
     ) -> RunEnd {
         let mut end = RunEnd::default();
-        let Some(task) = self.task(kind) else {
-            end.outcome = "failed".into();
-            end.error = Some(format!("no task kind {kind}"));
-            return end;
+        let (task, demand) = match (self.task(kind), demand(kind)) {
+            (Some(task), Some(demand)) => (task, demand),
+            _ => {
+                end.outcome = "failed".into();
+                end.error = Some(format!("no task kind {kind}"));
+                if let Err(error) =
+                    db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms()))
+                {
+                    tracing::warn!("ck-mc: dreamer: recording run {run_id}'s end failed: {error}");
+                }
+                return end;
+            }
         };
-        let demand = demand(kind).expect("declarations name only kinds with a demand");
         let owner = Owner::Project {
             id: due.owner.owner_id.clone(),
             root: root.to_owned(),
         };
-        let run_id = match db.with_connection(|conn| {
-            store::start_run(conn, &due.owner, &due.task, kind, &profile.name, now_ms())
-        }) {
-            Ok(id) => id,
-            Err(error) => {
-                end.outcome = "failed".into();
-                end.error = Some(format!("recording the run failed: {error}"));
-                return end;
-            }
-        };
-        // The lock is held and the run recorded: the project's dreamer page
-        // shows it running.
-        tell(db, &due.owner);
         let batches = {
             let context = TaskContext {
                 db,
@@ -564,6 +735,45 @@ fn apply(
         tx.commit().map_err(|error| error.to_string())?;
         Ok(Some(applied))
     })
+}
+
+/// Why a person's run-now can't start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunNowRefused {
+    /// No session of the project has been set up in this process, so the
+    /// engine doesn't know its folder or profile.
+    NotSeen,
+    /// The project's profile declares no task of this kind.
+    NotDeclared,
+    /// The profile switches the task off.
+    Disabled,
+    /// The task has no schedule for the project, or the settings switch it
+    /// off.
+    NotScheduled,
+    /// A writer holds the project's lock, or a run of it is in progress.
+    Locked,
+    /// The task reads files this machine doesn't have for the project.
+    Evidence(String),
+    Store(String),
+}
+
+/// Record the start of a run that holds its owner's lock, and tell the
+/// project's dreamer page it is running. Why recording failed otherwise.
+fn begin_run(
+    db: &ContextDb,
+    due: &store::Due,
+    kind: &str,
+    profile: &Profile,
+) -> Result<i64, String> {
+    match db.with_connection(|conn| {
+        store::start_run(conn, &due.owner, &due.task, kind, &profile.name, now_ms())
+    }) {
+        Ok(id) => {
+            tell(db, &due.owner);
+            Ok(id)
+        }
+        Err(error) => Err(format!("recording the run failed: {error}")),
+    }
 }
 
 fn record_batch(end: &mut RunEnd, reply: &TaskReply) {

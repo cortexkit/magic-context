@@ -356,6 +356,9 @@ enum Command {
     /// A session set up in this process: its key, project id, project
     /// folder and preset.
     SessionSeen(SessionRef, String, String, String),
+    /// Whether a session of the project has been set up with the module,
+    /// as the project reads decide it.
+    KnowsProject(String, oneshot::Sender<bool>),
     Changed(Change),
     Attach(sessions::Attachment),
 }
@@ -461,6 +464,9 @@ impl AppRead {
                         Command::SessionSeen(key, project, root, preset) => {
                             replica.session_seen(key, project, root, preset)
                         }
+                        Command::KnowsProject(project, reply) => {
+                            let _ = reply.send(replica.apps.knows(&project));
+                        }
                         Command::Changed(change) => replica.watches.publish(change),
                         Command::Attach(attachment) => replica.apps.attached = Some(attachment),
                     }
@@ -544,6 +550,22 @@ impl AppRead {
 
     pub(crate) fn notifier(&self) -> Notifier {
         Notifier(self.tx.clone())
+    }
+
+    /// Whether the project is one the app reads know: a session of it was
+    /// set up with the module. The person's commands on a project use the
+    /// same rule, so a project the reads answer `project_unknown` for is an
+    /// unknown subject to them.
+    pub(crate) async fn knows_project(&self, project: &str) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(Command::KnowsProject(project.to_owned(), tx))
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Hand the reads the module's settings and dreamer.

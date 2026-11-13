@@ -1,0 +1,12 @@
+{
+  "available": true,
+  "effect": "Runs Classify memories for this project now; it counts as the task's scheduled run.",
+  "facts": [
+    {
+      "label": "Failures in a row",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "0dffecb75f56f0c06ddec9a247c4cd841e5f7d3e3635d6198cd606514358d8c7"
+}

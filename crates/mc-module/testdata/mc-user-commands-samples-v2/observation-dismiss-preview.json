@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Takes 1 observation out of review; no memory is written.",
+  "facts": [
+    {
+      "label": "Observations",
+      "noun": "observations",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Already reviewed",
+      "noun": "observations",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "57223f4dea522bf950c8c65b0bacf65d49ac36427ea0ea314c497ee2bed968ad"
+}

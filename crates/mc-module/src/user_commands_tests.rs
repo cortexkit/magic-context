@@ -24,6 +24,9 @@ mod wrapup;
 #[path = "user_commands_wrapup_runner_tests.rs"]
 mod wrapup_runner;
 
+#[path = "user_commands_owner_tests.rs"]
+mod owner;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
@@ -424,9 +427,13 @@ async fn user_commands_record_real_handler_samples() {
     use sha2::{Digest, Sha256};
     let (mut session, client, settings) = ready();
     let mut samples = std::collections::BTreeMap::new();
+    // This set is the 0.1.0 description: the session commands alone. The
+    // full description, with the commands on memories, observations, the
+    // dreamer and notes, is in `mc-user-commands-samples-v2`.
     samples.insert(
         "describe.json",
-        serde_json::to_value(commands::describe()).unwrap(),
+        serde_json::to_value(wire::DescribeReply::new(commands::session_commands()).unwrap())
+            .unwrap(),
     );
     {
         let (mut session, client, settings) = wrapup::ready();

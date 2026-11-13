@@ -1,0 +1,775 @@
+{
+  "commands": [
+    {
+      "args": [],
+      "effects": [
+        "reversible",
+        "context_change"
+      ],
+      "id": "flush",
+      "run": {},
+      "subject": "session",
+      "summary": "Lands queued drops, routine cleanup and new context in one rebuild at the next request.",
+      "title": "Flush context"
+    },
+    {
+      "args": [],
+      "effects": [
+        "read"
+      ],
+      "id": "status",
+      "subject": "session",
+      "summary": "Shows context usage, queued drops and summary progress.",
+      "title": "Context status"
+    },
+    {
+      "args": [
+        {
+          "default": 20,
+          "key": "messages_to_keep",
+          "kind": "number",
+          "label": "Keep the newest N messages"
+        }
+      ],
+      "effects": [
+        "reversible",
+        "context_change"
+      ],
+      "id": "wrapup",
+      "run": {},
+      "subject": "session",
+      "summary": "Summarizes older history with a model, keeping the newest N raw messages (default 20). ctx_expand recovers raw text; summaries appear on the next rebuild.",
+      "title": "Summarize history"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "default": "",
+          "key": "content",
+          "kind": "text",
+          "label": "New text (empty keeps it)"
+        },
+        {
+          "default": "keep",
+          "key": "category",
+          "kind": "choice",
+          "label": "Category",
+          "options": [
+            {
+              "label": "Keep current",
+              "value": "keep"
+            },
+            {
+              "label": "Communication",
+              "value": "base:communication"
+            },
+            {
+              "label": "Preferences",
+              "value": "base:preferences"
+            },
+            {
+              "label": "Boundaries",
+              "value": "base:boundaries"
+            },
+            {
+              "label": "Working style",
+              "value": "base:working-style"
+            },
+            {
+              "label": "Identity",
+              "value": "base:identity"
+            },
+            {
+              "label": "Engineering practice",
+              "value": "swe:engineering-practice"
+            },
+            {
+              "label": "Dev environment",
+              "value": "swe:dev-environment"
+            }
+          ]
+        },
+        {
+          "default": -1,
+          "key": "importance",
+          "kind": "number",
+          "label": "Importance 0-100 (-1 keeps it)"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "global_memory_edit",
+      "run": {},
+      "subject": "computer",
+      "summary": "Changes a global memory's text, category or importance. History keeps the old row, and undo restores it.",
+      "title": "Edit global memory"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "global_memory_archive",
+      "run": {},
+      "subject": "computer",
+      "summary": "Archives global memories, so agents no longer see them. Restore brings them back.",
+      "title": "Archive global memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "global_memory_restore",
+      "run": {},
+      "subject": "computer",
+      "summary": "Brings archived global memories back, so agents see them again.",
+      "title": "Restore global memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "destroys"
+      ],
+      "id": "global_memory_delete",
+      "run": {},
+      "subject": "computer",
+      "summary": "Deletes global memories for good, with their history, embeddings and search entries. There is no undo.",
+      "title": "Delete global memories"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "key": "revision",
+          "kind": "number",
+          "label": "Revision to undo"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "global_memory_undo",
+      "run": {},
+      "subject": "computer",
+      "summary": "Restores a global memory as it was before one revision in its history.",
+      "title": "Undo a global memory change"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "default": "",
+          "key": "content",
+          "kind": "text",
+          "label": "New text (empty keeps it)"
+        },
+        {
+          "default": "keep",
+          "key": "category",
+          "kind": "choice",
+          "label": "Category",
+          "options": [
+            {
+              "label": "Keep current",
+              "value": "keep"
+            },
+            {
+              "label": "Preferences",
+              "value": "base:preferences"
+            },
+            {
+              "label": "Boundaries",
+              "value": "base:boundaries"
+            },
+            {
+              "label": "Project rules",
+              "value": "swe:project-rules"
+            },
+            {
+              "label": "Architecture",
+              "value": "swe:architecture"
+            },
+            {
+              "label": "Constraints",
+              "value": "swe:constraints"
+            },
+            {
+              "label": "Config values",
+              "value": "swe:config-values"
+            },
+            {
+              "label": "Naming",
+              "value": "swe:naming"
+            },
+            {
+              "label": "Engineering practice",
+              "value": "swe:engineering-practice"
+            },
+            {
+              "label": "Dev environment",
+              "value": "swe:dev-environment"
+            }
+          ]
+        },
+        {
+          "default": -1,
+          "key": "importance",
+          "kind": "number",
+          "label": "Importance 0-100 (-1 keeps it)"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "workspace_memory_edit",
+      "run": {},
+      "subject": "workspace",
+      "summary": "Changes a workspace memory's text, category or importance. History keeps the old row, and undo restores it.",
+      "title": "Edit workspace memory"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "workspace_memory_archive",
+      "run": {},
+      "subject": "workspace",
+      "summary": "Archives workspace memories, so agents no longer see them. Restore brings them back.",
+      "title": "Archive workspace memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "workspace_memory_restore",
+      "run": {},
+      "subject": "workspace",
+      "summary": "Brings archived workspace memories back, so agents see them again.",
+      "title": "Restore workspace memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "destroys"
+      ],
+      "id": "workspace_memory_delete",
+      "run": {},
+      "subject": "workspace",
+      "summary": "Deletes workspace memories for good, with their history, embeddings and search entries. There is no undo.",
+      "title": "Delete workspace memories"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "key": "revision",
+          "kind": "number",
+          "label": "Revision to undo"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "workspace_memory_undo",
+      "run": {},
+      "subject": "workspace",
+      "summary": "Restores a workspace memory as it was before one revision in its history.",
+      "title": "Undo a workspace memory change"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "default": "",
+          "key": "content",
+          "kind": "text",
+          "label": "New text (empty keeps it)"
+        },
+        {
+          "default": "keep",
+          "key": "category",
+          "kind": "choice",
+          "label": "Category",
+          "options": [
+            {
+              "label": "Keep current",
+              "value": "keep"
+            },
+            {
+              "label": "Project rules",
+              "value": "swe:project-rules"
+            },
+            {
+              "label": "Architecture",
+              "value": "swe:architecture"
+            },
+            {
+              "label": "Constraints",
+              "value": "swe:constraints"
+            },
+            {
+              "label": "Config values",
+              "value": "swe:config-values"
+            },
+            {
+              "label": "Naming",
+              "value": "swe:naming"
+            }
+          ]
+        },
+        {
+          "default": -1,
+          "key": "importance",
+          "kind": "number",
+          "label": "Importance 0-100 (-1 keeps it)"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "project_memory_edit",
+      "run": {},
+      "subject": "project",
+      "summary": "Changes a project memory's text, category or importance. History keeps the old row, and undo restores it.",
+      "title": "Edit project memory"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "project_memory_archive",
+      "run": {},
+      "subject": "project",
+      "summary": "Archives project memories, so agents no longer see them. Restore brings them back.",
+      "title": "Archive project memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "project_memory_restore",
+      "run": {},
+      "subject": "project",
+      "summary": "Brings archived project memories back, so agents see them again.",
+      "title": "Restore project memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "destroys"
+      ],
+      "id": "project_memory_delete",
+      "run": {},
+      "subject": "project",
+      "summary": "Deletes project memories for good, with their history, embeddings and search entries. There is no undo.",
+      "title": "Delete project memories"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "key": "revision",
+          "kind": "number",
+          "label": "Revision to undo"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "project_memory_undo",
+      "run": {},
+      "subject": "project",
+      "summary": "Restores a project memory as it was before one revision in its history.",
+      "title": "Undo a project memory change"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "default": "",
+          "key": "content",
+          "kind": "text",
+          "label": "New text (empty keeps it)"
+        },
+        {
+          "default": "keep",
+          "key": "category",
+          "kind": "choice",
+          "label": "Category",
+          "options": [
+            {
+              "label": "Keep current",
+              "value": "keep"
+            },
+            {
+              "label": "Communication",
+              "value": "base:communication"
+            },
+            {
+              "label": "Preferences",
+              "value": "base:preferences"
+            },
+            {
+              "label": "Boundaries",
+              "value": "base:boundaries"
+            },
+            {
+              "label": "Working style",
+              "value": "base:working-style"
+            },
+            {
+              "label": "Engineering practice",
+              "value": "swe:engineering-practice"
+            }
+          ]
+        },
+        {
+          "default": -1,
+          "key": "importance",
+          "kind": "number",
+          "label": "Importance 0-100 (-1 keeps it)"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "agent_memory_edit",
+      "run": {},
+      "subject": "agent",
+      "summary": "Changes a agent memory's text, category or importance. History keeps the old row, and undo restores it.",
+      "title": "Edit agent memory"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "agent_memory_archive",
+      "run": {},
+      "subject": "agent",
+      "summary": "Archives agent memories, so agents no longer see them. Restore brings them back.",
+      "title": "Archive agent memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "agent_memory_restore",
+      "run": {},
+      "subject": "agent",
+      "summary": "Brings archived agent memories back, so agents see them again.",
+      "title": "Restore agent memories"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Memory ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "destroys"
+      ],
+      "id": "agent_memory_delete",
+      "run": {},
+      "subject": "agent",
+      "summary": "Deletes agent memories for good, with their history, embeddings and search entries. There is no undo.",
+      "title": "Delete agent memories"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Memory id"
+        },
+        {
+          "key": "revision",
+          "kind": "number",
+          "label": "Revision to undo"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "agent_memory_undo",
+      "run": {},
+      "subject": "agent",
+      "summary": "Restores a agent memory as it was before one revision in its history.",
+      "title": "Undo a agent memory change"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Observation id"
+        },
+        {
+          "key": "category",
+          "kind": "choice",
+          "label": "Category",
+          "options": [
+            {
+              "label": "Communication",
+              "value": "base:communication"
+            },
+            {
+              "label": "Preferences",
+              "value": "base:preferences"
+            },
+            {
+              "label": "Boundaries",
+              "value": "base:boundaries"
+            },
+            {
+              "label": "Working style",
+              "value": "base:working-style"
+            },
+            {
+              "label": "Identity",
+              "value": "base:identity"
+            },
+            {
+              "label": "Engineering practice",
+              "value": "swe:engineering-practice"
+            },
+            {
+              "label": "Dev environment",
+              "value": "swe:dev-environment"
+            }
+          ]
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "observation_promote",
+      "run": {},
+      "subject": "computer",
+      "summary": "Saves an observation about you as a global memory in the category you pick. The review task skips it.",
+      "title": "Save observation as memory"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Observation ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "observation_dismiss",
+      "run": {},
+      "subject": "computer",
+      "summary": "Takes observations about you out of review without saving a memory. The review task never sees them.",
+      "title": "Dismiss observations"
+    },
+    {
+      "args": [
+        {
+          "key": "task",
+          "kind": "choice",
+          "label": "Task",
+          "options": [
+            {
+              "label": "Classify memories",
+              "value": "classify-memories"
+            },
+            {
+              "label": "Compress cues",
+              "value": "compress-cues"
+            }
+          ]
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "dreamer_run_now",
+      "run": {},
+      "subject": "project",
+      "summary": "Starts one of the project's dreamer tasks now, unless the project's lock is held. The run counts as the task's scheduled run.",
+      "title": "Run dreamer task now"
+    },
+    {
+      "args": [
+        {
+          "key": "run_id",
+          "kind": "number",
+          "label": "Dreamer run id"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "dreamer_undo_run",
+      "run": {},
+      "subject": "project",
+      "summary": "Reverts every memory change a dreamer run made, as one undo. A memory changed again since the run is left as it is.",
+      "title": "Undo dreamer run"
+    },
+    {
+      "args": [
+        {
+          "key": "id",
+          "kind": "number",
+          "label": "Note id"
+        },
+        {
+          "key": "content",
+          "kind": "text",
+          "label": "New text"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "note_edit",
+      "run": {},
+      "subject": "project",
+      "summary": "Replaces the text of one of the project's notes.",
+      "title": "Edit note"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Note ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "reversible"
+      ],
+      "id": "note_dismiss",
+      "run": {},
+      "subject": "project",
+      "summary": "Dismisses the project's notes, so agents stop seeing them.",
+      "title": "Dismiss notes"
+    },
+    {
+      "args": [
+        {
+          "key": "ids",
+          "kind": "text",
+          "label": "Note ids, comma-separated"
+        }
+      ],
+      "effects": [
+        "destroys"
+      ],
+      "id": "note_delete",
+      "run": {},
+      "subject": "project",
+      "summary": "Deletes the project's notes for good.",
+      "title": "Delete notes"
+    }
+  ],
+  "digest": "c469c3c02ababf2d38ea1632463dc55488b3489cd05415431bce2730fd5e7b03"
+}

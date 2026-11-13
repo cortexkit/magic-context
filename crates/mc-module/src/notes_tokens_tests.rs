@@ -70,7 +70,7 @@ async fn notes_tokens_refresh_on_notices_not_rides_and_survive_restart() {
     durable.as_object_mut().unwrap().remove("notes");
     restored.restore(serde_json::from_value(durable).unwrap());
     assert_eq!(restored.notes, Default::default());
-    assert_eq!(crate::store::SCHEMA_VERSION, 5);
+    assert_eq!(crate::store::SCHEMA_VERSION, 6);
 }
 
 #[tokio::test]

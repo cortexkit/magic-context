@@ -1,0 +1,62 @@
+{
+  "available": true,
+  "effect": "Changes this global memory's category. History keeps the old row; undo restores it.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Now",
+      "After"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 22.0
+          },
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 22.0
+          }
+        ],
+        "label": "Text length"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 50.0
+          },
+          {
+            "unit": "count",
+            "value": 50.0
+          }
+        ],
+        "label": "Importance"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 1.0
+          },
+          {
+            "unit": "count",
+            "value": 2.0
+          }
+        ],
+        "label": "Revision"
+      }
+    ]
+  },
+  "version": "1a780120d7a6b9d7b083c2d748712b11414718fe625e1a1e5e1c9d51e1fdf797"
+}

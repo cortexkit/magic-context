@@ -1,0 +1,62 @@
+{
+  "available": true,
+  "effect": "Changes this project memory's text and importance. History keeps the old row; undo restores it.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Now",
+      "After"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 33.0
+          },
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 45.0
+          }
+        ],
+        "label": "Text length"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 50.0
+          },
+          {
+            "unit": "count",
+            "value": 80.0
+          }
+        ],
+        "label": "Importance"
+      },
+      {
+        "cells": [
+          {
+            "unit": "count",
+            "value": 1.0
+          },
+          {
+            "unit": "count",
+            "value": 2.0
+          }
+        ],
+        "label": "Revision"
+      }
+    ]
+  },
+  "version": "4464752692a5e4be3e5170bfdcfa035a82f1c8e2875772d0a5ac545573a9aea6"
+}

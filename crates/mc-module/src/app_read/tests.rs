@@ -907,7 +907,7 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         conn.query_row(

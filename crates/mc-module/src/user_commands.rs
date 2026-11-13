@@ -7,7 +7,28 @@ use cortexkit_role_user_commands as wire;
 use serde_json::Value;
 use wire::{Command, ErrorBody, ModulePreviewRequest, ModuleRunRequest, RunReply, Subject};
 
+mod dreamer;
+mod memories;
+mod notes;
+pub(crate) mod owner;
+
+/// Every command this build declares: the session commands, then the
+/// person's commands on memories, observations, the dreamer and notes, whose
+/// subjects (computer, workspace, project, agent) user-commands 0.1.2 added.
+/// Built once: the category choices come from the bundled profile.
 pub(crate) fn describe() -> wire::DescribeReply {
+    static ALL: std::sync::OnceLock<wire::DescribeReply> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut commands = session_commands();
+        commands.extend(owner::declarations());
+        wire::DescribeReply::new(commands).expect("static command declarations")
+    })
+    .clone()
+}
+
+/// The session commands alone: what the 0.1.0 description declared, which
+/// the first sample set (`mc-user-commands-samples-v1`) records.
+pub(crate) fn session_commands() -> Vec<Command> {
     let flush = Command::new(
         "flush",
         "Flush context",
@@ -41,7 +62,7 @@ pub(crate) fn describe() -> wire::DescribeReply {
         vec!["reversible".into(), "context_change".into()],
         Some(wire::Run::new()),
     );
-    wire::DescribeReply::new(vec![flush, status, wrapup]).expect("static command declarations")
+    vec![flush, status, wrapup]
 }
 
 pub(crate) fn messages_to_keep(args: &serde_json::Map<String, Value>) -> Result<u64, ErrorBody> {
@@ -85,9 +106,13 @@ pub(crate) fn audit(body: &[u8], result: &Result<Value, ErrorBody>) {
     tracing::info!(
         op = label("/method"),
         command_id = label("/params/id"),
+        subject = label("/params/subject/kind"),
         runner = label("/params/subject/session/runner"),
         harness = label("/params/subject/session/harness"),
         session = label("/params/subject/session/session"),
+        project = label("/params/subject/project_id"),
+        workspace = label("/params/subject/workspace_id"),
+        agent = label("/params/subject/agent_id"),
         app = label("/params/caller/app"),
         admission = label("/params/caller/admission"),
         device = label("/params/caller/device"),
@@ -114,18 +139,23 @@ pub(crate) fn method(body: &[u8]) -> Option<String> {
 }
 
 impl Request {
-    pub(crate) fn key(&self) -> SessionRef {
-        let subject = match self {
+    fn subject(&self) -> &Subject {
+        match self {
             Self::Preview(r) => &r.subject,
             Self::Run(r) => &r.subject,
-        };
-        match subject {
-            Subject::Session { session } => SessionRef::new(
+        }
+    }
+
+    /// The session a session command names; `None` for a command on
+    /// memories, observations, the dreamer or notes.
+    pub(crate) fn key(&self) -> Option<SessionRef> {
+        match self.subject() {
+            Subject::Session { session } => Some(SessionRef::new(
                 session.runner.clone(),
                 session.harness.clone(),
                 session.session.clone(),
-            ),
-            _ => unreachable!("validated session command"),
+            )),
+            _ => None,
         }
     }
 }

@@ -1,0 +1,11 @@
+{
+  "facts": [
+    {
+      "label": "Memories archived",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "outcome": "applied"
+}

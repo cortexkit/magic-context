@@ -1,0 +1,11 @@
+{
+  "facts": [
+    {
+      "label": "Notes changed",
+      "noun": "notes",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "outcome": "applied"
+}

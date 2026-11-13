@@ -35,6 +35,24 @@ const KNOWN_CATEGORIES: [&str; 12] = [
     "KNOWN_ISSUES",
 ];
 
+/// Tags the bundled memory profile files memories about the person under,
+/// and the tag of the user memories the 0.50 migration moved to the global
+/// level. Rows under these tags are global, workspace or agent memories; the
+/// person edits them from the apps, so their history must record them too.
+const PROFILE_TAGS: [&str; 8] = [
+    "COMMUNICATION",
+    "PREFERENCES",
+    "BOUNDARIES",
+    "WORKING_STYLE",
+    "IDENTITY",
+    "ENGINEERING_PRACTICE",
+    "DEV_ENVIRONMENT",
+    crate::context_migrations::USER_MEMORY_TAG,
+];
+
+#[path = "memory_writes_person.rs"]
+pub(crate) mod person;
+
 /// Whether JavaScript's `\s` matches `ch`. It differs from
 /// `char::is_whitespace` in two code points: U+FEFF counts here and U+0085
 /// does not.
@@ -294,7 +312,10 @@ pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<O
     }
     let valid = snapshot["id"].as_i64() > Some(0)
         && snapshot["revision"].as_i64() > Some(0)
-        && KNOWN_CATEGORIES.contains(&snapshot["category"].as_str().unwrap_or(""))
+        && {
+            let tag = snapshot["category"].as_str().unwrap_or("");
+            KNOWN_CATEGORIES.contains(&tag) || PROFILE_TAGS.contains(&tag)
+        }
         && ["active", "permanent", "archived"].contains(&snapshot["status"].as_str().unwrap_or(""))
         && ["project", "ecosystem", "universe"].contains(&snapshot["scope"].as_str().unwrap_or(""))
         && [Some(0), Some(1)].contains(&snapshot["shareable"].as_i64());

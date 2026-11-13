@@ -1,0 +1,16 @@
+{
+  "facts": [
+    {
+      "label": "Memories saved",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Memory id",
+      "unit": "count",
+      "value": 11.0
+    }
+  ],
+  "outcome": "applied"
+}

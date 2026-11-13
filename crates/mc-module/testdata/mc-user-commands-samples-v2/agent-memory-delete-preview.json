@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Deletes 1 agent memory for good, with their history, embeddings and search entries.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "History entries",
+      "noun": "entries",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "710534775fc98238d71aad3dab1038c44327e760c9e900c0cba4fa91e60727b9"
+}

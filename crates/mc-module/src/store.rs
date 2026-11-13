@@ -198,8 +198,55 @@ pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<St
     Ok(result)
 }
 
-/// The newest mode3.db schema this build can read and write.
-pub const SCHEMA_VERSION: u32 = 5;
+/// The newest mode3.db schema this build can read and write. Version 6 adds
+/// `owner_command_answers`, the stored answers of commands a person runs on
+/// memories, notes and the dreamer rather than on one session.
+pub const SCHEMA_VERSION: u32 = 6;
+
+/// How long a person's command answer is kept, so a retried run with the same
+/// request id replays it instead of acting twice: at least the 24 hours the
+/// user-commands contract asks for.
+pub(crate) const OWNER_ANSWER_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// One stored answer of a command whose subject is not a session. Answers
+/// are keyed by the subject (its canonical JSON text) and the request id,
+/// because the contract scopes a request id to its subject.
+const OWNER_ANSWERS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_command_answers (
+    subject TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    stored_at INTEGER NOT NULL,
+    principal TEXT NOT NULL,
+    caller TEXT NOT NULL,
+    PRIMARY KEY (subject, request_id)
+);
+CREATE INDEX IF NOT EXISTS owner_command_answers_stored ON owner_command_answers(stored_at);";
+
+/// What [`Store::owner_command`] found or did for one request.
+#[derive(Debug)]
+pub(crate) enum OwnerAnswer<E> {
+    /// The request id was answered before; this is that answer, or
+    /// `request_conflict` when the earlier request had another body.
+    Replayed(cortexkit_role_user_commands::RunReply),
+    /// The command ran now and its answer is stored.
+    Ran(cortexkit_role_user_commands::RunReply),
+    /// The command ran, but its answer could not be stored. A retry finds the
+    /// rows it changed moved on and answers `preview_stale`; it never acts
+    /// twice.
+    RanUnrecorded(cortexkit_role_user_commands::RunReply),
+    /// Nothing ran: the command refused, or the store was busy.
+    NotRun(Option<E>),
+}
+
+/// The identity and audit facts of one owner-subject run.
+pub(crate) struct OwnerRequest<'a> {
+    pub subject: &'a str,
+    pub request_id: &'a str,
+    pub digest: &'a str,
+    pub principal: &'a str,
+    pub caller: &'a cortexkit_role_user_commands::Caller,
+}
 
 pub(crate) fn lock_store(path: &Path, exclusive: bool) -> Result<std::fs::File, String> {
     let canonical = if path.exists() {
@@ -314,6 +361,9 @@ impl Store {
             connection.execute_batch("CREATE TABLE IF NOT EXISTS app_read_snapshots (runner TEXT NOT NULL,harness TEXT NOT NULL,session TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(runner,harness,session));").map_err(|error|error.to_string())?;
             crate::app_read::persistence::migrate(&connection)?;
         }
+        connection
+            .execute_batch(OWNER_ANSWERS_SCHEMA)
+            .map_err(|error| error.to_string())?;
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .and_then(|()| connection.execute_batch("COMMIT;"))
@@ -805,6 +855,91 @@ impl Store {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Run a person's command whose subject is not a session at most once per
+    /// subject and request id. The store's write lock is taken before `act`
+    /// runs and held until its answer is stored, so a repeat of the same
+    /// request never runs alongside the first: it finds the stored answer, or
+    /// finds the store busy and is told nothing ran. `act` returns `Err` when
+    /// the command refused before changing anything; nothing is stored then.
+    /// Answers older than [`OWNER_ANSWER_RETENTION_MS`] are dropped here.
+    pub(crate) fn owner_command<E>(
+        &self,
+        request: &OwnerRequest<'_>,
+        now: i64,
+        act: impl FnOnce() -> Result<cortexkit_role_user_commands::RunReply, E>,
+    ) -> OwnerAnswer<E> {
+        let connection = self.lock();
+        if connection.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return OwnerAnswer::NotRun(None);
+        }
+        let found = connection
+            .execute(
+                "DELETE FROM owner_command_answers WHERE stored_at < ?1",
+                params![now.saturating_sub(OWNER_ANSWER_RETENTION_MS)],
+            )
+            .and_then(|_| {
+                connection
+                    .query_row(
+                        "SELECT request_digest, answer FROM owner_command_answers
+                          WHERE subject = ?1 AND request_id = ?2",
+                        params![request.subject, request.request_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+            });
+        let found = match found {
+            Ok(found) => found,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                tracing::warn!("ck-mc: reading a stored command answer failed: {error}");
+                return OwnerAnswer::NotRun(None);
+            }
+        };
+        if let Some((digest, answer)) = found {
+            let _ = connection.execute_batch("COMMIT");
+            if digest != request.digest {
+                return OwnerAnswer::Replayed(cortexkit_role_user_commands::RunReply::new(
+                    "request_conflict",
+                ));
+            }
+            return match serde_json::from_str(&answer) {
+                Ok(reply) => OwnerAnswer::Replayed(reply),
+                Err(_) => OwnerAnswer::NotRun(None),
+            };
+        }
+        let reply = match act() {
+            Ok(reply) => reply,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return OwnerAnswer::NotRun(Some(error));
+            }
+        };
+        let saved = connection
+            .execute(
+                "INSERT INTO owner_command_answers
+                    (subject, request_id, request_digest, answer, stored_at, principal, caller)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    request.subject,
+                    request.request_id,
+                    request.digest,
+                    serde_json::to_string(&reply).unwrap_or_default(),
+                    now,
+                    request.principal,
+                    serde_json::to_string(request.caller).unwrap_or_default(),
+                ],
+            )
+            .and_then(|_| connection.execute_batch("COMMIT"));
+        match saved {
+            Ok(()) => OwnerAnswer::Ran(reply),
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                tracing::warn!("ck-mc: a command ran but its answer was not stored: {error}");
+                OwnerAnswer::RanUnrecorded(reply)
+            }
+        }
+    }
+
     #[cfg(test)]
     fn record_write(&self, started: std::time::Instant) {
         self.write_max_ns.fetch_max(
@@ -963,7 +1098,18 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
+        let answers: u32 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'owner_command_answers'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            answers, 1,
+            "version 6 keeps the person's owner-command answers"
+        );
         let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 5);
     }
@@ -1003,7 +1149,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
     #[test]
     fn repeated_successful_save_does_not_write_again() {
@@ -1135,7 +1281,7 @@ mod tests {
                 .lock()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
         for key in &keys {
             assert_eq!(migrated.load(key), Some(state.clone()));

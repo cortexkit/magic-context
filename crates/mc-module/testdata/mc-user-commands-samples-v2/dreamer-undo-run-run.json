@@ -1,0 +1,21 @@
+{
+  "facts": [
+    {
+      "label": "Memories restored",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Left alone",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Memory 10 changed after the run",
+      "state": "stale"
+    }
+  ],
+  "outcome": "applied"
+}

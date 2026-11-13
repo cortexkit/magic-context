@@ -262,6 +262,47 @@ pub fn start_run(
     Ok(conn.last_insert_rowid())
 }
 
+/// The schedule row of `task` for `owner`, due or not.
+pub fn schedule_of(
+    conn: &Connection,
+    owner: &OwnerKey,
+    task: &str,
+) -> rusqlite::Result<Option<Due>> {
+    conn.query_row(
+        "SELECT schedule, next_due_at, failures, watermark_json FROM dream_schedules
+          WHERE level = ?1 AND owner_id = ?2 AND task = ?3",
+        params![owner.level, owner.owner_id, task],
+        |row| {
+            let watermark: Option<String> = row.get(3)?;
+            Ok(Due {
+                owner: owner.clone(),
+                task: task.to_owned(),
+                schedule: row.get(0)?,
+                next_due_at: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                failures: row.get(2)?,
+                watermark: watermark.and_then(|text| serde_json::from_str(&text).ok()),
+            })
+        },
+    )
+    .optional()
+}
+
+/// Who holds `owner`'s lock at `now`, and for which task. A lapsed lock is
+/// held by no one.
+pub fn lock_holder(
+    conn: &Connection,
+    owner: &OwnerKey,
+    now: i64,
+) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT holder, task FROM dream_locks
+          WHERE level = ?1 AND owner_id = ?2 AND expires_at > ?3",
+        params![owner.level, owner.owner_id, now],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
 /// How a run ended, for its record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunEnd {
